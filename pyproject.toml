@@ -1,0 +1,50 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agent-kit"
+version = "0.1.0"
+description = "AgentKit Python SDK with providers, tools, sessions, permissions, and streaming events."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = [
+  "openai>=1.0.0",
+  "PyYAML>=6.0",
+  "typing_extensions>=4.10",
+]
+
+[project.optional-dependencies]
+mcp = [
+  "mcp>=1.0.0",
+]
+anthropic = [
+  "anthropic>=0.30.0",
+]
+dev = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.23",
+  "ruff>=0.5",
+  "pyright>=1.1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_kit"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.10"
+typeCheckingMode = "basic"
