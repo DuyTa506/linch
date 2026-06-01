@@ -13,7 +13,14 @@ from agent_kit.events import ToolCallEndEvent
 from agent_kit.permissions import PermissionEngine
 from agent_kit.providers import BaseProvider
 from agent_kit.scheduler import execute_tool_calls
-from agent_kit.tools import ResourceAccess, ToolContext, ToolRegistry, ToolResult, ToolScope
+from agent_kit.tools import (
+    Citation,
+    ResourceAccess,
+    ToolContext,
+    ToolRegistry,
+    ToolResult,
+    ToolScope,
+)
 from agent_kit.types import ToolUseBlock
 
 
@@ -86,6 +93,61 @@ class TimedTool:
             self.recorder.end(self.name)
 
 
+class RichTool:
+    name = "Rich"
+    description = "Returns a rich ToolResult."
+    input_schema = {"type": "object", "properties": {}}
+    scope = "read"
+    parallel = True
+    parallel_safe = True
+
+    def validate(self, raw: dict[str, Any]) -> dict[str, Any]:
+        return raw
+
+    def summarize(self, input: dict[str, Any]) -> str:
+        return self.name
+
+    def resources(self, input: dict[str, Any]) -> list[ResourceAccess]:
+        return []
+
+    async def execute(self, input: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        return ToolResult(
+            content="rich content",
+            summary="rich summary",
+            metadata={"source": "unit", "rank": 1},
+            citations=[
+                Citation(
+                    id="c1",
+                    source="doc://1",
+                    label="Doc 1",
+                    chunk="chunk",
+                    score=0.75,
+                    metadata={"page": 4},
+                )
+            ],
+            attachments=[object()],
+            truncated=True,
+        )
+
+
+class InvalidTool:
+    name = "Invalid"
+    description = "Raises during validation."
+    input_schema = {"type": "object", "properties": {}}
+    scope = "read"
+    parallel = True
+    parallel_safe = True
+
+    def validate(self, raw: dict[str, Any]) -> dict[str, Any]:
+        raise ValueError("bad input")
+
+    def summarize(self, input: dict[str, Any]) -> str:
+        return self.name
+
+    async def execute(self, input: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        return ToolResult(content="should not run")
+
+
 class DummyProvider(BaseProvider):
     async def stream(self, request):  # pragma: no cover - not used by this test module
         if False:
@@ -95,11 +157,16 @@ class DummyProvider(BaseProvider):
         return 1000
 
 
-def make_agent(registry: ToolRegistry, *, max_tool_concurrency: int = 8) -> SimpleNamespace:
+def make_agent(
+    registry: ToolRegistry,
+    *,
+    max_tool_concurrency: int = 8,
+    permission_engine: PermissionEngine | None = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
         cwd=".",
         tools=registry,
-        permission_engine=PermissionEngine(mode="skip-dangerous"),
+        permission_engine=permission_engine or PermissionEngine(mode="skip-dangerous"),
         max_tool_concurrency=max_tool_concurrency,
         tool_concurrency=max_tool_concurrency,
     )
@@ -126,6 +193,22 @@ async def run_calls(registry: ToolRegistry, blocks: list[ToolUseBlock], *, limit
         )
     ]
     return events
+
+
+async def run_calls_with_permissions(
+    registry: ToolRegistry,
+    blocks: list[ToolUseBlock],
+    permission_engine: PermissionEngine,
+):
+    return [
+        event
+        async for event in execute_tool_calls(
+            blocks,
+            make_agent(registry, permission_engine=permission_engine),
+            make_session(),
+            AbortContext(),
+        )
+    ]
 
 
 @pytest.mark.asyncio
@@ -228,3 +311,58 @@ async def test_results_keep_original_tool_call_order() -> None:
     end_events = [e for e in events if isinstance(e, ToolCallEndEvent)]
     assert [e.tool_use_id for e in end_events] == ["slow", "fast"]
     assert [e.result for e in end_events] == ["slow", "fast"]
+
+
+@pytest.mark.asyncio
+async def test_tool_call_end_preserves_rich_tool_result() -> None:
+    registry = ToolRegistry()
+    registry.add(RichTool())
+
+    events = await run_calls(registry, [ToolUseBlock(id="rich", name="Rich", input={})])
+
+    end = next(e for e in events if isinstance(e, ToolCallEndEvent))
+    assert end.result == "rich content"
+    assert end.tool_result is not None
+    assert end.tool_result.content == "rich content"
+    assert end.tool_result.summary == "rich summary"
+    assert end.tool_result.metadata == {"source": "unit", "rank": 1}
+    assert end.tool_result.citations[0].source == "doc://1"
+    assert end.tool_result.attachments
+    assert end.tool_result.truncated is True
+
+
+@pytest.mark.asyncio
+async def test_immediate_validation_and_permission_errors_have_tool_result() -> None:
+    registry = ToolRegistry()
+    registry.add(InvalidTool())
+    recorder = Recorder()
+    registry.add(TimedTool("Denied", recorder, scope="write", parallel=False))
+
+    validation_events = await run_calls(
+        registry,
+        [ToolUseBlock(id="invalid", name="Invalid", input={})],
+    )
+    validation_end = next(e for e in validation_events if isinstance(e, ToolCallEndEvent))
+    assert validation_end.tool_result is not None
+    assert validation_end.tool_result.is_error is True
+    assert validation_end.tool_result.content == validation_end.result
+    assert "bad input" in validation_end.tool_result.content
+
+    unknown_events = await run_calls(
+        registry,
+        [ToolUseBlock(id="missing", name="Missing", input={})],
+    )
+    unknown_end = next(e for e in unknown_events if isinstance(e, ToolCallEndEvent))
+    assert unknown_end.tool_result is not None
+    assert unknown_end.tool_result.is_error is True
+    assert "not registered" in unknown_end.tool_result.content
+
+    denied_events = await run_calls_with_permissions(
+        registry,
+        [ToolUseBlock(id="denied", name="Denied", input={})],
+        PermissionEngine(mode="default"),
+    )
+    denied_end = next(e for e in denied_events if isinstance(e, ToolCallEndEvent))
+    assert denied_end.tool_result is not None
+    assert denied_end.tool_result.is_error is True
+    assert "Permission denied" in denied_end.tool_result.content

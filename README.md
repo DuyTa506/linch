@@ -4,8 +4,9 @@ AgentKit is a Python SDK for building agent loops you embed in your own applicat
 
 Core capabilities: streaming events, resource-aware parallel tool scheduling,
 per-tool timeout + opt-in retry, first-class context building (RAG), memory/RAG
-primitives, structured output, rich tool results with citations/metadata, runtime
-tool registries, permission engine, MCP/skills/subagents, and pluggable providers.
+primitives, **virtual filesystem with automatic large-result offloading**, structured
+output, rich tool results with citations/metadata, runtime tool registries,
+permission engine, MCP/skills/subagents, and pluggable providers.
 
 ## Install
 
@@ -68,6 +69,11 @@ python3 examples/memory/sqlite_memory_agent.py
 The scripts skip live agent calls when `OPENAI_API_KEY` is missing. When a key
 is present, only the examples with explicit live sections make provider calls.
 
+```sh
+# Filesystem offload demo — runs fully offline, no API key needed
+python3 examples/tools/filesystem_offload.py
+```
+
 ## Public API
 
 - `agent_kit`: `Agent`, `Session`, events, types, errors, `RetryOptions`, `ToolTimeoutError`, `empty_tools`, `tools_from_defaults`
@@ -78,6 +84,7 @@ is present, only the examples with explicit live sections make provider calls.
 - `agent_kit.providers`: `OpenAIResponsesProvider`, `OpenAIChatCompletionsProvider`, `AnthropicProvider`
 - `agent_kit.tools`: duck-typed tool protocol, `ResourceAccess`, `Citation`, `ToolResult`, `ToolRegistry`, built-in tools
 - `agent_kit.sessions`: `InMemorySessionStore`, `SqliteSessionStore`
+- `agent_kit.filesystem`: `FileBackend`, `StateFileBackend`, `DiskFileBackend`, `SqliteFileBackend`, `CompositeFileBackend`, `OffloadConfig`, `filesystem_tools`
 - `agent_kit.permissions`: `PermissionEngine`, `ToolRule`, `PathRule`, `BashRule`
 - `agent_kit.recipes`: scaffold factories (`rag_agent`, `sql_agent`, `doc_agent`, `build_agent`)
 

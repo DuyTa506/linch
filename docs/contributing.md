@@ -175,6 +175,20 @@ Tests should fail at the most specific possible assertion. Avoid mega-tests that
 
 ---
 
+## Adding a new filesystem backend
+
+The `FileBackend` protocol (`filesystem/backend.py`) is duck-typed — no base class.
+Implement six async methods: `read`, `write`, `ls`, `edit`, `exists`, `delete`.
+
+1. Create `src/agent_kit/filesystem/my_backend.py`.
+2. Use `asyncio.to_thread()` or an `asyncio`-native client for any I/O — never block the event loop. See `DiskFileBackend` (disk I/O) and `SqliteFileBackend` (thread executor) for reference patterns.
+3. Call `normalize_path(path)` at the entry of every method to canonicalize paths.
+4. `read` must raise `FileNotFoundError` for missing paths; `edit` must raise `ValueError` when `old_string` is absent or not unique (and `replace_all=False`); `delete` is a no-op for missing paths.
+5. Export from `filesystem/__init__.py` and `src/agent_kit/__init__.py`.
+6. Add tests by calling `_exercise(backend)` from `tests/filesystem/test_backends.py` — it is a shared async helper that verifies the full CRUD contract.
+
+---
+
 ## Versioning and breaking changes
 
 - This project follows semantic versioning. Patch = bug fix. Minor = new primitive (backward-compatible). Major = breaking change to public API.
@@ -193,6 +207,7 @@ Tests should fail at the most specific possible assertion. Avoid mega-tests that
 - [ ] New primitives have a unit test using a fake provider
 - [ ] No module-level `agent_kit` imports in test files (lazy import rule)
 - [ ] If system-block text changed, `test_system_blocks.py` parity assertion updated
+- [ ] If a new `FileBackend` was added, `tests/filesystem/test_backends.py` exercises it via `_exercise(backend)`
 - [ ] CHANGELOG entry if behavior changed for existing users
 
 ---
@@ -209,6 +224,8 @@ src/agent_kit/          core library
   config.py             FeatureFlags, SystemPromptConfig
   context/              ContextBuilder protocol + budget/result types
   memory/               MemoryStore protocol + reference RAG primitives
+  filesystem/           FileBackend protocol + State/Disk/SQLite/Composite backends
+                        + ls/read_file/write_file/edit_file tools + OffloadConfig
   scheduler.py          resource-aware parallel tool execution
   compaction.py         context-window management
   permissions/          PermissionEngine + rule types
@@ -220,7 +237,11 @@ src/agent_kit/          core library
   subagents/            agents.yaml loader + child agent runner
   recipes/              factory helpers (additive, not part of the loop)
 
-tests/                  all tests (pytest, asyncio_mode=auto)
-examples/               runnable scripts (require OPENAI_API_KEY)
+tests/
+  filesystem/           backends, tools, offload unit + end-to-end tests
+  loop/                 agent loop tests
+  tools/                tool registry, scheduler, reliability tests
+  ...                   (one directory per subsystem)
+examples/               runnable scripts (require OPENAI_API_KEY unless marked offline)
 docs/                   this documentation
 ```

@@ -655,6 +655,7 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
                                 is_error=event.is_error,
                                 duration_ms=event.duration_ms,
                                 result=event.result,
+                                tool_result=event.tool_result,
                             ),
                         )
                 if isinstance(event, ToolCallEndEvent):

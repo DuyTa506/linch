@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
+from ..tools import ToolResult
 from ..types import Usage
 
 
@@ -69,6 +70,7 @@ class ToolResultInfo:
     is_error: bool
     duration_ms: int
     result: str = ""
+    tool_result: ToolResult | None = None
 
 
 @dataclass(frozen=True, slots=True)

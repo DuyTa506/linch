@@ -19,7 +19,7 @@ from .events import (
 )
 from .permissions import PendingToolCall, PermissionDecision
 from .providers.retry import RetryOptions, _delay_for_error
-from .tools import ResourceAccess, ToolContext
+from .tools import ResourceAccess, ToolContext, ToolResult
 from .types import ToolResultBlock, ToolUseBlock
 
 
@@ -32,6 +32,29 @@ class ResolvedCall:
     summary: str
     is_immediate_error: bool
     immediate_error_reason: str | None = None
+
+
+@dataclass(slots=True)
+class ToolExecutionOutcome:
+    block: ToolResultBlock
+    tool_result: ToolResult
+    duration_ms: int
+
+
+def _tool_result_error(content: str, duration_ms: int = 0) -> ToolResult:
+    return ToolResult(content=content, is_error=True, duration_ms=duration_ms)
+
+
+def _execution_outcome(call_id: str, tool_result: ToolResult) -> ToolExecutionOutcome:
+    return ToolExecutionOutcome(
+        block=ToolResultBlock(
+            tool_use_id=call_id,
+            content=tool_result.content,
+            is_error=tool_result.is_error,
+        ),
+        tool_result=tool_result,
+        duration_ms=tool_result.duration_ms,
+    )
 
 
 def _resolve_call(block: ToolUseBlock, tools: Any, cwd: str) -> ResolvedCall:
@@ -114,27 +137,19 @@ async def _execute_one(
     agent: Any,
     session: Any,
     signal: AbortContext,
-) -> tuple[ToolResultBlock, int]:
+) -> ToolExecutionOutcome:
     throw_if_aborted(signal)
 
     if call.is_immediate_error:
-        return (
-            ToolResultBlock(
-                tool_use_id=call.id,
-                content=call.immediate_error_reason or "unknown error",
-                is_error=True,
-            ),
-            0,
+        return _execution_outcome(
+            call.id,
+            _tool_result_error(call.immediate_error_reason or "unknown error"),
         )
 
     if decision.decision == "deny":
-        return (
-            ToolResultBlock(
-                tool_use_id=call.id,
-                content=f"Tool call denied: {decision.reason or 'permission denied'}",
-                is_error=True,
-            ),
-            0,
+        return _execution_outcome(
+            call.id,
+            _tool_result_error(f"Tool call denied: {decision.reason or 'permission denied'}"),
         )
 
     tool = call.tool
@@ -152,6 +167,7 @@ async def _execute_one(
         signal=signal,
         file_read_tracker=getattr(session, "file_read_tracker", None),
         deps=getattr(session, "run_deps", None),
+        filesystem=getattr(session, "filesystem", None),
     )
 
     for attempt in range(max_attempts):
@@ -170,14 +186,22 @@ async def _execute_one(
             elapsed = int((time.perf_counter() - attempt_start) * 1000)
             if result.duration_ms <= 0:
                 result.duration_ms = elapsed
-            return (
-                ToolResultBlock(
-                    tool_use_id=call.id,
-                    content=result.content,
-                    is_error=result.is_error,
-                ),
-                result.duration_ms,
-            )
+            # ── Auto-offload oversized results ────────────────────────────────
+            _fs = getattr(session, "filesystem", None)
+            _offload_cfg = getattr(agent, "result_offload", None)
+            if _fs is not None and _offload_cfg is not None:
+                from .filesystem.offload import maybe_offload
+
+                result = await maybe_offload(
+                    result,
+                    tool_name=_tool_name(call),
+                    call_id=call.id,
+                    backend=_fs,
+                    config=_offload_cfg,
+                    token_estimator=getattr(agent, "token_estimator", None),
+                    model=agent.model,
+                )
+            return _execution_outcome(call.id, result)
         except AbortError:
             raise
         except asyncio.TimeoutError:
@@ -188,42 +212,39 @@ async def _execute_one(
             last_exc = te
             if _tool_retryable(call, te) and attempt < max_attempts - 1:
                 continue
-            return (
-                ToolResultBlock(
-                    tool_use_id=call.id,
-                    content=(
+            duration_ms = int((time.perf_counter() - started) * 1000)
+            return _execution_outcome(
+                call.id,
+                _tool_result_error(
+                    (
                         f"Tool '{_tool_name(call)}' timed out after {ms}ms"
                         " — retry with a larger timeout or narrower input."
                     ),
-                    is_error=True,
+                    duration_ms,
                 ),
-                int((time.perf_counter() - started) * 1000),
             )
         except Exception as exc:
             last_exc = exc
             if _tool_retryable(call, exc) and attempt < max_attempts - 1:
                 continue
-            return (
-                ToolResultBlock(
-                    tool_use_id=call.id,
-                    content=f"Tool failed: {exc}",
-                    is_error=True,
-                ),
-                int((time.perf_counter() - started) * 1000),
+            duration_ms = int((time.perf_counter() - started) * 1000)
+            return _execution_outcome(
+                call.id,
+                _tool_result_error(f"Tool failed: {exc}", duration_ms),
             )
 
     # Defensive fallback — all attempts exhausted (should be unreachable because
     # the loop always returns or continues, but satisfies the type-checker).
-    return (
-        ToolResultBlock(
-            tool_use_id=call.id,
-            content=(
+    duration_ms = int((time.perf_counter() - started) * 1000)
+    return _execution_outcome(
+        call.id,
+        _tool_result_error(
+            (
                 f"Tool '{_tool_name(call)}' failed after {max_attempts}"
                 f" attempt{'s' if max_attempts != 1 else ''}: {last_exc}"
             ),
-            is_error=True,
+            duration_ms,
         ),
-        int((time.perf_counter() - started) * 1000),
     )
 
 
@@ -499,26 +520,29 @@ async def execute_tool_calls(
                     summary=call.summary,
                 )
                 try:
-                    result, duration_ms = await _execute_one(call, decision, agent, session, signal)
+                    outcome = await _execute_one(call, decision, agent, session, signal)
                 except AbortError:
+                    tool_result = _tool_result_error("aborted")
                     yield ToolCallEndEvent(
                         tool_use_id=call.id,
                         tool_name=_tool_name(call),
-                        result="aborted",
-                        is_error=True,
-                        duration_ms=0,
+                        result=tool_result.content,
+                        is_error=tool_result.is_error,
+                        duration_ms=tool_result.duration_ms,
+                        tool_result=tool_result,
                     )
                     raise
                 yield ToolCallEndEvent(
                     tool_use_id=call.id,
                     tool_name=_tool_name(call),
-                    result=str(result.content),
-                    is_error=result.is_error,
-                    duration_ms=duration_ms,
+                    result=str(outcome.block.content),
+                    is_error=outcome.block.is_error,
+                    duration_ms=outcome.duration_ms,
+                    tool_result=outcome.tool_result,
                 )
                 if skill_name is not None:
-                    yield SkillCompletedEvent(name=skill_name, is_error=result.is_error)
-                result_pairs.append((idx, result))
+                    yield SkillCompletedEvent(name=skill_name, is_error=outcome.block.is_error)
+                result_pairs.append((idx, outcome.block))
         else:
             # Parallel lane — all starts first, then run concurrently, then all ends
             skill_names: dict[str, str | None] = {}
@@ -559,35 +583,37 @@ async def execute_tool_calls(
                 for t in tasks:
                     if t.done() and not t.cancelled():
                         try:
-                            r, _ = t.result()
-                            finished_ids.add(r.tool_use_id)
+                            outcome = t.result()
+                            finished_ids.add(outcome.block.tool_use_id)
                         except Exception:
                             pass
                 for tid in started_ids:
                     if tid not in finished_ids:
                         orphan_call = id_to_call.get(tid)
+                        tool_result = _tool_result_error("aborted")
                         yield ToolCallEndEvent(
                             tool_use_id=tid,
                             tool_name=(_tool_name(orphan_call) if orphan_call else "unknown"),
-                            result="aborted",
-                            is_error=True,
-                            duration_ms=0,
+                            result=tool_result.content,
+                            is_error=tool_result.is_error,
+                            duration_ms=tool_result.duration_ms,
+                            tool_result=tool_result,
                         )
                         sn = skill_names.get(tid)
                         if sn is not None:
                             yield SkillCompletedEvent(name=sn, is_error=True)
                 raise
 
-            for (call, idx, _), packed in zip(batch["calls"], results, strict=True):
-                result, duration_ms = packed
+            for (call, idx, _), outcome in zip(batch["calls"], results, strict=True):
                 yield ToolCallEndEvent(
                     tool_use_id=call.id,
                     tool_name=_tool_name(call),
-                    result=str(result.content),
-                    is_error=result.is_error,
-                    duration_ms=duration_ms,
+                    result=str(outcome.block.content),
+                    is_error=outcome.block.is_error,
+                    duration_ms=outcome.duration_ms,
+                    tool_result=outcome.tool_result,
                 )
                 sn = skill_names.get(call.id)
                 if sn is not None:
-                    yield SkillCompletedEvent(name=sn, is_error=result.is_error)
-                result_pairs.append((idx, result))
+                    yield SkillCompletedEvent(name=sn, is_error=outcome.block.is_error)
+                result_pairs.append((idx, outcome.block))

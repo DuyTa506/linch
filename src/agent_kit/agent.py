@@ -57,6 +57,8 @@ class AgentOptions:
     final_tool_name: str | None = None
     loop_guard: Any = None  # LoopGuard | None; None means "use default LoopGuard"
     observers: list[Any] | None = None  # list[RunObserver] | None
+    filesystem: Any = None  # FileBackend | None
+    result_offload: Any = None  # OffloadConfig | None
 
 
 class Agent:
@@ -106,6 +108,8 @@ class Agent:
         loop_guard: Any = _UNSET,
         loopGuard: Any = _UNSET,
         observers: Any = None,
+        filesystem: Any = None,
+        result_offload: Any = None,
     ) -> None:
         if systemPrompt is not None:
             system_prompt = systemPrompt
@@ -267,12 +271,41 @@ class Agent:
         # Store SystemPromptConfig for use in _build_system_blocks
         self._system_prompt_config: SystemPromptConfig | None = system_prompt_config
 
+        # ── Virtual filesystem subsystem ────────────────────────────────────
+        # ``filesystem`` is the per-agent default backend; a fresh clone (or
+        # the same persistent backend) is attached to each session in session().
+        # ``result_offload`` (OffloadConfig) enables automatic offloading of
+        # oversized tool results via the scheduler.
+        self._filesystem_default: Any = filesystem
+        self.result_offload: Any = result_offload
+
+        # Register filesystem tools when the subsystem is active — either an
+        # explicit backend, or offload (which needs read_file/ls to recover
+        # offloaded content).  Gated by FeatureFlags.filesystem so it can be
+        # disabled wholesale even when a backend is passed.
+        if self._filesystem_active():
+            from .filesystem.tools import filesystem_tools as _fs_tools
+
+            for t in _fs_tools():
+                try:
+                    self.tools.register(t)
+                except Exception:
+                    pass  # already registered (e.g. caller added them manually)
+            self._refresh_system_blocks()
+
         self._skills_connect: Any = None
         self._subagents_connect: Any = None
         self._mcp_connect: Any = None
         self._mcp_connection: Any = None
 
         self._cached_system_blocks: list[SystemBlock] | None = None
+
+    def _filesystem_active(self) -> bool:
+        """Return True when the virtual filesystem subsystem should be on."""
+        enabled = getattr(self.features, "filesystem", True)
+        return bool(enabled) and (
+            self._filesystem_default is not None or self.result_offload is not None
+        )
 
     @property
     def system_blocks(self) -> list[SystemBlock]:
@@ -431,6 +464,25 @@ class Agent:
                 # Non-SWE tools present: include the generic concurrency hint only
                 protocol = "Tool use protocol:\n\n" + protocol_lines[-1]
                 blocks.append(SystemBlock(text=protocol, cacheable=True))
+
+        # ── Virtual filesystem block ─────────────────────────────────────────
+        # Present whenever the filesystem tools are available, in both default
+        # and replace_defaults modes — offloaded RAG/search results are useless
+        # if the model doesn't know how to recover them.
+        if {"read_file", "ls", "write_file", "edit_file"} & present:
+            fs_lines = [
+                "Virtual filesystem:",
+                "",
+                "- You have a virtual filesystem, separate from the real workspace, "
+                "accessed via ls, read_file, write_file, and edit_file.",
+                "- Large tool results may be automatically offloaded here: instead of the "
+                "full output you will see a short preview plus a file path. Call "
+                "read_file(path, offset, limit) to read the parts you need — do not "
+                "assume the preview is the whole result.",
+                "- Use write_file as a scratchpad for notes, plans, or intermediate "
+                "results you want to keep across turns without bloating the conversation.",
+            ]
+            blocks.append(SystemBlock(text="\n".join(fs_lines), cacheable=True))
 
         # env_text is always present
         blocks.append(SystemBlock(text=env_text, cacheable=True))
@@ -598,6 +650,19 @@ class Agent:
             provider_view=[row.message for row in messages],
             full_history=[row.message for row in messages],
         )
+        # Attach a per-session filesystem backend when the subsystem is active.
+        if self._filesystem_active():
+            from .filesystem.backend import StateFileBackend
+
+            # If the caller passed a backend, use it as the session-level store.
+            # CompositeFileBackend and SqliteFileBackend are shared across sessions
+            # by design; StateFileBackend is session-local by default.
+            session.filesystem = (
+                self._filesystem_default
+                if self._filesystem_default is not None
+                else StateFileBackend()
+            )
+
         session.invoked_skills = []
         for rec in record.invoked_skills:
             if not isinstance(rec, dict):

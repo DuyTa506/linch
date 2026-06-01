@@ -67,7 +67,7 @@ The guard is **on by default** at `Agent()` construction. Disable with `Agent(lo
 
 Tools are **protocols** (duck-typed), not subclasses. Each tool has: `name`, `description`, `input_schema`, `scope`, `parallel_safe`, and methods `validate()`, `execute()`, `summarize()`. V2 tools may also expose `parallel`, `resources(input)`, `tags`, `capabilities`, and `cost_hint`. Built-ins: `Read`, `Write`, `Edit`, `Bash`, `Glob`, `Grep`. The `ToolRegistry` holds available tools; `default_tools()` returns the standard set.
 
-`ToolContext` is passed to every `execute()` call and provides: `cwd`, `session_id`, `run_id`, `session_store`, `signal` (abort), `file_read_tracker`.
+`ToolContext` is passed to every `execute()` call and provides: `cwd`, `session_id`, `run_id`, `session_store`, `signal` (abort), `file_read_tracker`, `filesystem` (virtual `FileBackend` when the filesystem subsystem is enabled).
 
 Read tools with `parallel=True` or legacy `parallel_safe=True` may run concurrently. Write and exec tools serialize by default. Optional `ResourceAccess` declarations prevent overlapping read/write conflicts on the same resource. Concurrency limit: `Agent(max_tool_concurrency=...)` or `AGENTKIT_MAX_TOOL_CONCURRENCY` env var (default: CPU count).
 
@@ -84,6 +84,16 @@ Use `ContextBuilder.build(turn) -> ContextBuildResult` for RAG, memory recall, e
 ### Memory (`memory/`)
 
 `MemoryStore` is a protocol for app-owned memory backends. Core includes `MemoryItem`, `MemorySearchResult`, `InMemoryKeywordMemoryStore`, `SqliteMemoryStore`, `MemoryContextBuilder`, `MemorySearchTool`, and `MemoryUpsertTool`. Do not add vector DB or embedding dependencies to core; adapters should implement the protocol or live in examples/recipes.
+
+### Virtual Filesystem (`filesystem/`)
+
+`FileBackend` is a duck-typed protocol for a virtual, session-scoped filesystem that is separate from the real `cwd` on disk. Four implementations ship: `StateFileBackend` (in-memory, per-session default), `DiskFileBackend` (real files sandboxed under a root, default `.agent_kit/offload`), `SqliteFileBackend` (persistent across sessions), and `CompositeFileBackend` (routes paths by prefix, e.g. `/memories/` → `SqliteFileBackend`).
+
+**Auto-offload**: `Agent(result_offload=OffloadConfig())` enables automatic offloading of tool results that exceed `threshold_tokens` (default 20,000). The scheduler calls `maybe_offload()` at the single result chokepoint in `_execute_one` (`scheduler.py`). The full payload is written to the backend; `ToolResult.content` is replaced with a preview + path hint before the `ToolResultBlock` enters `provider_view`. The full `ToolResult` still travels on `ToolCallEndEvent.tool_result` for observers. `maybe_offload` never raises — a backend write failure silently returns the original result.
+
+**Four tools** register automatically when a backend is configured (`Agent(filesystem=...)` or `Agent(result_offload=...)`): `ls`, `read_file` (supports `offset`/`limit` line windowing), `write_file`, `edit_file`. These are in `OffloadConfig.skip_tools` by default so reading back a large file cannot trigger a recursive re-offload. A filesystem-aware system-prompt block is also added automatically.
+
+`FeatureFlags(filesystem=False)` disables the subsystem even when a backend is passed.
 
 ### Permissions (`permissions/`)
 
@@ -126,3 +136,4 @@ Observers are attached via `Agent(observers=[...])` and accessed as `agent.obser
 - No vendor observability stack in core — observability backends (Langfuse, LangSmith, etc.) are reached via the OpenTelemetry seam, never as direct dependencies.
 - Tool timeouts default to `None` (off) and use `asyncio.wait_for` + `asyncio.TimeoutError` (not the 3.11+ unified builtin) to stay Python 3.10 compatible. Timeouts convert to `is_error=True` results; they never raise out of `_execute_one` so parallel-lane siblings are unaffected.
 - Tool retry is side-effect gated: read-scope tools only, or tools that explicitly set `retryable = True`. Write/exec tools are never retried by default.
+- Virtual filesystem is opt-in (`Agent(filesystem=...)` or `Agent(result_offload=...)`); zero overhead when unset. `DiskFileBackend` defaults to `.agent_kit/offload` (gitignored). `maybe_offload` is a no-op on error results and filesystem-tool results. A backend write failure silently returns the original result — storage errors never crash a run.

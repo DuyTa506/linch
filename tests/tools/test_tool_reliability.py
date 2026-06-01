@@ -201,6 +201,9 @@ async def test_timeout_produces_error_result_and_run_continues() -> None:
     assert slow_end.is_error is True
     assert "timed out after 20ms" in slow_end.result
     assert "retry with a larger timeout" in slow_end.result
+    assert slow_end.tool_result is not None
+    assert slow_end.tool_result.is_error is True
+    assert slow_end.tool_result.content == slow_end.result
 
     assert fast_end.is_error is False  # run continued, second tool succeeded
 
@@ -366,6 +369,9 @@ async def test_retry_exhausted_then_errors() -> None:
 
     ends = end_events(events)
     assert ends[0].is_error is True
+    assert ends[0].tool_result is not None
+    assert ends[0].tool_result.is_error is True
+    assert ends[0].tool_result.content == ends[0].result
     assert tool.call_count == 3
 
 

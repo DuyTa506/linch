@@ -45,6 +45,15 @@ from .events import (
     is_loop_guard_event,
     is_subagent_event,
 )
+from .filesystem import (
+    CompositeFileBackend,
+    DiskFileBackend,
+    FileBackend,
+    OffloadConfig,
+    SqliteFileBackend,
+    StateFileBackend,
+    filesystem_tools,
+)
 from .loop import apply_provider_capabilities
 from .loop_guard import (
     LoopGuard,
@@ -141,6 +150,13 @@ __all__ = [
     "ContextBuildResult",
     "ContextBuildTurn",
     "FeatureFlags",
+    "CompositeFileBackend",
+    "DiskFileBackend",
+    "FileBackend",
+    "OffloadConfig",
+    "SqliteFileBackend",
+    "StateFileBackend",
+    "filesystem_tools",
     "InMemoryKeywordMemoryStore",
     "SystemPromptConfig",
     "OutputSchema",

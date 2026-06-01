@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, Literal, TypeAlias
 
+from .tools.base import Citation, ToolResult
 from .types import Message, StopReason, Usage, message_from_dict, message_to_dict
 
 
@@ -53,6 +55,7 @@ class ToolCallEndEvent:
     result: str = ""
     is_error: bool = False
     duration_ms: int = 0
+    tool_result: ToolResult | None = None
     type: Literal["tool_call_end"] = "tool_call_end"
 
 
@@ -280,6 +283,81 @@ def usage_from_dict(raw: dict[str, Any]) -> Usage:
     )
 
 
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    if isinstance(value, list | tuple):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    return str(value)
+
+
+def _is_json_serializable(value: Any) -> bool:
+    try:
+        json.dumps(value)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def citation_to_dict(citation: Citation) -> dict[str, Any]:
+    return {
+        "id": citation.id,
+        "source": citation.source,
+        "label": citation.label,
+        "chunk": citation.chunk,
+        "score": citation.score,
+        "metadata": _json_safe(citation.metadata),
+    }
+
+
+def citation_from_dict(raw: dict[str, Any]) -> Citation:
+    return Citation(
+        id=str(raw.get("id", "")),
+        source=str(raw.get("source", "")),
+        label=raw.get("label") if isinstance(raw.get("label"), str) else None,
+        chunk=raw.get("chunk") if isinstance(raw.get("chunk"), str) else None,
+        score=float(raw["score"]) if isinstance(raw.get("score"), int | float) else None,
+        metadata=dict(raw.get("metadata", {})) if isinstance(raw.get("metadata"), dict) else {},
+    )
+
+
+def tool_result_to_dict(result: ToolResult) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "content": result.content,
+        "summary": result.summary,
+        "is_error": result.is_error,
+        "metadata": _json_safe(result.metadata),
+        "citations": [citation_to_dict(citation) for citation in result.citations],
+        "duration_ms": result.duration_ms,
+        "truncated": result.truncated,
+    }
+    if result.attachments and all(_is_json_serializable(item) for item in result.attachments):
+        out["attachments"] = result.attachments
+    return out
+
+
+def tool_result_from_dict(raw: dict[str, Any]) -> ToolResult:
+    citations = []
+    for item in raw.get("citations", []):
+        if isinstance(item, dict):
+            citations.append(citation_from_dict(item))
+    attachments = raw.get("attachments", [])
+    if not isinstance(attachments, list):
+        attachments = []
+    return ToolResult(
+        content=str(raw.get("content", "")),
+        summary=str(raw.get("summary", "")),
+        is_error=bool(raw.get("is_error", False)),
+        metadata=dict(raw.get("metadata", {})) if isinstance(raw.get("metadata"), dict) else {},
+        citations=citations,
+        attachments=attachments,
+        duration_ms=int(raw.get("duration_ms", 0) or 0),
+        truncated=bool(raw.get("truncated", False)),
+    )
+
+
 def event_to_dict(event: Event) -> dict[str, Any]:
     typ = event.type
     if typ == "system":
@@ -312,7 +390,7 @@ def event_to_dict(event: Event) -> dict[str, Any]:
             "summary": event.summary,
         }
     if typ == "tool_call_end":
-        return {
+        out = {
             "type": event.type,
             "tool_use_id": event.tool_use_id,
             "tool_name": event.tool_name,
@@ -320,6 +398,9 @@ def event_to_dict(event: Event) -> dict[str, Any]:
             "is_error": event.is_error,
             "duration_ms": event.duration_ms,
         }
+        if event.tool_result is not None:
+            out["tool_result"] = tool_result_to_dict(event.tool_result)
+        return out
     if typ == "permission_request":
         return {
             "type": event.type,
@@ -433,12 +514,16 @@ def event_from_dict(raw: dict[str, Any]) -> Event:
             summary=str(raw.get("summary", "")),
         )
     if typ == "tool_call_end":
+        raw_tool_result = raw.get("tool_result")
         return ToolCallEndEvent(
             tool_use_id=str(raw.get("tool_use_id", "")),
             tool_name=str(raw.get("tool_name", "")),
             result=str(raw.get("result", "")),
             is_error=bool(raw.get("is_error", False)),
             duration_ms=int(raw.get("duration_ms", 0) or 0),
+            tool_result=tool_result_from_dict(raw_tool_result)
+            if isinstance(raw_tool_result, dict)
+            else None,
         )
     if typ == "permission_request":
         requests = []

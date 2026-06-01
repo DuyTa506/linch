@@ -39,6 +39,13 @@ class ToolContext:
     database connection, or any other per-agent / per-run resource across
     all tool calls without requiring ``__init__``-closure injection."""
 
+    filesystem: Any = None
+    """Per-session virtual :class:`~agent_kit.filesystem.backend.FileBackend`,
+    when the filesystem subsystem is enabled (``Agent(filesystem=...)`` or
+    ``Agent(result_offload=...)``).  The ls / read_file / write_file / edit_file
+    tools read and write through this, and the scheduler offloads oversized
+    results here.  ``None`` when the subsystem is off."""
+
     @property
     def sessionId(self) -> str:
         return self.session_id

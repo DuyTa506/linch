@@ -17,7 +17,7 @@ from agent_kit.events import (
 )
 from agent_kit.permissions import PendingToolCall, PermissionEngine
 from agent_kit.scheduler import execute_tool_calls
-from agent_kit.tools import ToolContext, ToolRegistry, ToolResult
+from agent_kit.tools import Citation, ToolContext, ToolRegistry, ToolResult
 from agent_kit.tools.builtin import GlobTool, GrepTool, WriteTool
 from agent_kit.types import ToolUseBlock, Usage
 
@@ -149,6 +149,65 @@ def test_event_round_trip() -> None:
     assert rebuilt.duration_ms == 123
     assert rebuilt.final_text == "done"
     assert rebuilt.total_usage.input_tokens == 10
+
+
+def test_tool_call_end_event_round_trips_structured_tool_result() -> None:
+    event = ToolCallEndEvent(
+        tool_use_id="call-1",
+        tool_name="Search",
+        result="legacy text",
+        is_error=False,
+        duration_ms=12,
+        tool_result=ToolResult(
+            content="legacy text",
+            summary="Search result",
+            metadata={"rank": 1, "nested": {"ok": True}},
+            citations=[
+                Citation(
+                    id="c1",
+                    source="doc://1",
+                    label="Doc",
+                    chunk="chunk",
+                    score=0.5,
+                    metadata={"page": 2},
+                )
+            ],
+            attachments=[object()],
+            duration_ms=12,
+            truncated=True,
+        ),
+    )
+
+    raw = event_to_dict(event)
+    assert "tool_result" in raw
+    assert "attachments" not in raw["tool_result"]
+    rebuilt = event_from_dict(raw)
+
+    assert isinstance(rebuilt, ToolCallEndEvent)
+    assert rebuilt.result == "legacy text"
+    assert rebuilt.tool_result is not None
+    assert rebuilt.tool_result.summary == "Search result"
+    assert rebuilt.tool_result.metadata["nested"] == {"ok": True}
+    assert rebuilt.tool_result.citations[0].source == "doc://1"
+    assert rebuilt.tool_result.citations[0].metadata == {"page": 2}
+    assert rebuilt.tool_result.truncated is True
+
+
+def test_old_tool_call_end_event_dict_remains_supported() -> None:
+    rebuilt = event_from_dict(
+        {
+            "type": "tool_call_end",
+            "tool_use_id": "call-1",
+            "tool_name": "OldTool",
+            "result": "old result",
+            "is_error": False,
+            "duration_ms": 3,
+        }
+    )
+
+    assert isinstance(rebuilt, ToolCallEndEvent)
+    assert rebuilt.result == "old result"
+    assert rebuilt.tool_result is None
 
 
 def test_import_agent_kit_without_mcp_installed(monkeypatch: pytest.MonkeyPatch) -> None:

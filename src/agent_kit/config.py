@@ -30,6 +30,7 @@ class FeatureFlags:
     skills: bool = True
     subagents: bool = True
     mcp: bool = True
+    filesystem: bool = True
 
 
 @dataclass

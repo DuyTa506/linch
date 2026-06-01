@@ -60,6 +60,10 @@ class Session:
     file_read_tracker: FileReadTracker = field(default_factory=FileReadTracker)
     _abort_controller: AbortContext = field(default_factory=AbortContext)
     run_deps: Any = None
+    filesystem: Any = None
+    """Per-session virtual filesystem backend (:class:`~agent_kit.filesystem.backend.FileBackend`).
+    Threaded into :attr:`~agent_kit.tools.base.ToolContext.filesystem` on every
+    tool call.  ``None`` when the filesystem subsystem is disabled."""
     """Resolved dependency object for the current run.  Set by ``run_loop``
     from ``RunOptions.deps`` (falling back to ``Agent.deps``) and threaded
     into :attr:`~agent_kit.tools.ToolContext.deps` via the scheduler."""

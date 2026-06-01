@@ -91,7 +91,14 @@ def _make_error_provider():
     return ErrorProvider()
 
 
-def _make_agent(provider, *, observers=None, tool_name="Echo", context_builder=None):
+def _make_agent(
+    provider,
+    *,
+    observers=None,
+    tool_name="Echo",
+    context_builder=None,
+    tool_result=None,
+):
     from agent_kit import Agent
     from agent_kit.config import FeatureFlags
     from agent_kit.sessions import InMemorySessionStore
@@ -118,7 +125,7 @@ def _make_agent(provider, *, observers=None, tool_name="Echo", context_builder=N
             return []
 
         async def execute(self, inp, ctx):
-            return ToolResult(content="echo-ok")
+            return tool_result or ToolResult(content="echo-ok")
 
     return Agent(
         model="test-model",
@@ -408,6 +415,51 @@ async def test_tool_spans_present():
     assert "Echo" in ts.name
     assert ts.duration_ms >= 0
     assert ts.attributes.get("tool_name") == "Echo"
+
+
+@pytest.mark.asyncio
+async def test_on_tool_end_receives_structured_tool_result():
+    from agent_kit.observability import ToolResultInfo
+    from agent_kit.tools import ToolResult
+
+    tool_ends: list[ToolResultInfo] = []
+
+    class ToolObserver:
+        def on_tool_end(self, info):
+            tool_ends.append(info)
+
+    provider = _make_tool_provider(tool_name="Echo", tool_input={"x": 1})
+    agent = _make_agent(
+        provider,
+        observers=[ToolObserver()],
+        tool_name="Echo",
+        tool_result=ToolResult(
+            content="echo-ok",
+            summary="Echo summary",
+            metadata={"trace": "abc"},
+            truncated=True,
+        ),
+    )
+    session = await agent.session()
+    await _collect(session)
+
+    assert tool_ends
+    assert tool_ends[0].result == "echo-ok"
+    assert tool_ends[0].tool_result is not None
+    assert tool_ends[0].tool_result.summary == "Echo summary"
+    assert tool_ends[0].tool_result.metadata == {"trace": "abc"}
+    assert tool_ends[0].tool_result.truncated is True
+
+    tool_result_messages = [
+        message
+        for message in session.provider_view
+        if message.role == "user" and message.content and message.content[0].type == "tool_result"
+    ]
+    assert tool_result_messages
+    provider_block = tool_result_messages[0].content[0]
+    assert provider_block.content == "echo-ok"
+    assert provider_block.is_error is False
+    assert not hasattr(provider_block, "metadata")
 
 
 @pytest.mark.asyncio

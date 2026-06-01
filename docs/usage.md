@@ -134,6 +134,7 @@ from agent_kit.config import FeatureFlags
 agent = Agent(
     ...
     features=FeatureFlags(skills=False, subagents=False, mcp=False),
+    # also: filesystem=False to disable the virtual filesystem subsystem
 )
 ```
 
@@ -328,6 +329,74 @@ Core includes `MemoryStore` protocols, in-memory keyword memory, SQLite memory,
 and memory search/upsert tools. Vector databases and embedding models stay in
 the host app or a recipe.
 
+### Virtual filesystem and large-result offloading
+
+Variable-length tool results (RAG, web search, file dumps) are the #1 source of
+context-window blowup. The virtual filesystem subsystem handles this automatically:
+when a tool result exceeds `threshold_tokens`, the scheduler writes the full
+payload to a `FileBackend` and replaces what the model sees with a short preview
+plus a path reference. The model pulls back only what it needs via `read_file`.
+
+**Three minutes to wire it up:**
+
+```python
+from agent_kit.filesystem import OffloadConfig, StateFileBackend
+
+# Option A: ephemeral in-memory storage (default when offload is on)
+agent = Agent(
+    ...,
+    result_offload=OffloadConfig(),          # 20k-token threshold, 10 preview lines
+)
+
+# Option B: real files under .agent_kit/offload (inspectable, gitignored)
+from agent_kit.filesystem import DiskFileBackend
+agent = Agent(
+    ...,
+    filesystem=DiskFileBackend(root=".agent_kit/offload"),
+    result_offload=OffloadConfig(threshold_tokens=10_000, preview_lines=5),
+)
+
+# Option C: ephemeral scratch + persistent /memories/ across sessions
+from agent_kit.filesystem import CompositeFileBackend, SqliteFileBackend
+agent = Agent(
+    ...,
+    filesystem=CompositeFileBackend(
+        default=StateFileBackend(),
+        routes={"/memories/": SqliteFileBackend(".agent_kit/memories.db")},
+    ),
+    result_offload=OffloadConfig(),
+)
+```
+
+When the subsystem is active, four tools are registered automatically:
+
+| Tool | Description |
+|---|---|
+| `ls(prefix?)` | List files in the virtual filesystem |
+| `read_file(path, offset?, limit?)` | Read a file, optionally windowed by line range |
+| `write_file(path, content)` | Write a scratchpad note or intermediate result |
+| `edit_file(path, old_string, new_string, replace_all?)` | Edit an existing file |
+
+The model is informed about these tools and the offload convention via a system-prompt
+block added automatically. The full original content is always preserved in the backend
+and on `ToolCallEndEvent.tool_result` for observers — only what enters `provider_view`
+(conversation history) is replaced by the preview.
+
+**`OffloadConfig` options:**
+
+```python
+OffloadConfig(
+    enabled=True,             # master switch
+    threshold_tokens=20_000,  # Deep Agents default
+    preview_lines=10,
+    path_prefix="/offload",   # virtual directory for auto-offloaded files
+    skip_tools=frozenset({"read_file", "write_file", "edit_file", "ls"}),
+)
+```
+
+The filesystem tools are always excluded from offloading so reading a large file
+back does not recursively re-offload it.
+
 ---
 
 ## See `examples/` for runnable code
@@ -356,6 +425,8 @@ a live API key.
 | `tools/parallel_search_agent.py` | Scheduler V2: parallel search, resources, concurrency cap |
 | `tools/runtime_tools.py` | Runtime registry add/remove/replace/select and schema export |
 | `tools/tool_reliability_agent.py` | Timeout, per-tool opt-out (`execution_timeout_ms=0`), `RetryOptions` |
+| `tools/rag_tools.py` | RAG tool suite: hybrid_search, keyword_search, graph_search, web_search |
+| `tools/filesystem_offload.py` | Virtual filesystem backends, auto-offload of large results (*runs offline*) |
 
 **`context/`** — *local demos available*
 

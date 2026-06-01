@@ -42,6 +42,11 @@ graph TD
             MEM["MemoryStore\nkeyword · sqlite · custom"]
         end
 
+        subgraph Filesystem["Filesystem"]
+            FS["FileBackend\nState · Disk · SQLite · Composite"]
+            OFF["OffloadConfig\nthreshold · preview · prefix"]
+        end
+
         subgraph Extensions["Extensions"]
             MCP["MCP Servers"]
             SKILLS["Skills\n.agent_kit/skills/"]
@@ -63,6 +68,8 @@ graph TD
     Session <-->|"persist / load"| SS
     CB <-->|"recall / upsert"| MEM
     Agent <--> MCP & SKILLS & SUBA
+    SCHED <-->|"offload / read"| FS
+    OFF -.->|"config"| SCHED
 ```
 
 ---
@@ -107,8 +114,9 @@ sequenceDiagram
 
             RL->>SC: execute_tool_calls(approved_calls)
             SC-->>Caller: ToolCallStartEvent x N
-            SC-->>Caller: ToolCallEndEvent x N
-            SC-->>RL: result_blocks
+            Note over SC: maybe_offload() — if result > threshold_tokens<br/>write full payload to FileBackend<br/>replace content with preview + path
+            SC-->>Caller: ToolCallEndEvent x N (result=preview, tool_result=full)
+            SC-->>RL: result_blocks (previews only enter provider_view)
 
             RL->>LG: evaluate_loop_guard(state, tool_blocks, result_blocks)
 
@@ -393,6 +401,71 @@ Do not add vector database or embedding dependencies to core; adapters implement
 
 ---
 
+### 3.8 Virtual Filesystem and Large-Result Offloading
+
+Variable-length tool results (RAG, web search, large file reads) are the primary
+cause of context-window blowup. The filesystem subsystem mirrors the Deep Agents
+`FilesystemMiddleware` pattern: when a tool result exceeds a token threshold, the
+scheduler writes the full payload to a `FileBackend` and substitutes a short
+preview + path reference in `provider_view`. The model reads back only the slices
+it needs via the `read_file` tool.
+
+```mermaid
+flowchart TD
+    EXEC["tool.execute() → ToolResult\ncontent = full payload (potentially huge)"]
+
+    OFFLOAD{{"result_offload configured\nAND backend attached\nAND len(content) > threshold?"}}
+
+    WRITE["backend.write(path, content)\nwrite full payload to FileBackend"]
+    REPLACE["result.content = preview (N lines) + path hint\nresult.truncated = True\nresult.metadata[offloaded_to] = path"]
+    PASSTHROUGH["result unchanged"]
+
+    BLOCK["ToolResultBlock(content=preview)\nenters provider_view / full_history"]
+    EVENT["ToolCallEndEvent\nresult = preview string\ntool_result = full ToolResult (for observers)"]
+
+    EXEC --> OFFLOAD
+    OFFLOAD -->|"yes"| WRITE --> REPLACE --> BLOCK
+    OFFLOAD -->|"no"| PASSTHROUGH --> BLOCK
+    BLOCK --> EVENT
+```
+
+**Backends** — all implement the same `FileBackend` protocol:
+
+| Backend | Storage | Lifecycle | Use when |
+|---|---|---|---|
+| `StateFileBackend` | In-memory dict | Per-session (default) | Zero-overhead ephemeral scratch |
+| `DiskFileBackend` | Real files under a root dir | Until deleted | Want human-inspectable files; root defaults to `.agent_kit/offload` (gitignored) |
+| `SqliteFileBackend` | SQLite table | Persistent across sessions | Need cross-session recall (e.g. `/memories/`) |
+| `CompositeFileBackend` | Routes by path prefix | Mixed | Ephemeral scratch + persistent `/memories/` subtree |
+
+**`FileBackend` protocol** — five async methods:
+
+```python
+class FileBackend(Protocol):
+    async def read(self, path, *, offset=0, limit=None) -> str: ...
+    async def write(self, path, content) -> None: ...
+    async def ls(self, prefix="") -> list[str]: ...
+    async def edit(self, path, old, new, *, replace_all=False) -> int: ...
+    async def exists(self, path) -> bool: ...
+    async def delete(self, path) -> None: ...
+```
+
+**Four tools** are registered automatically when a backend is configured:
+
+| Tool | Scope | Description |
+|---|---|---|
+| `ls` | read | List virtual files, optionally filtered by prefix |
+| `read_file` | read | Read a file with optional offset/limit line window |
+| `write_file` | write | Write or overwrite a scratchpad file |
+| `edit_file` | write | Exact-string replace within a file |
+
+**Invariant:** offloading mutates only `ToolResult.content` before the
+`ToolResultBlock` is built. The full `ToolResult` still rides on
+`ToolCallEndEvent.tool_result` for observers. `full_history` contains the preview,
+not the raw payload — matching the session's context budget.
+
+---
+
 ## 4. Event Taxonomy
 
 All events are `@dataclass(slots=True)` with a `type: Literal[...]` discriminator. Every cross-cutting concern surfaces through events; callers never poll internal state.
@@ -532,7 +605,8 @@ classDiagram
 | `context/` | `ContextBuilder`, `ContextBuildResult`, `ContextBudget`, `ContextBuilderChain` |
 | `loop_guard/` | `LoopGuard`, `LoopGuardState`, `LoopGuardDecision`, `evaluate_loop_guard`, `normalize_loop_guard` |
 | `memory/` | `MemoryStore` protocol, reference stores, `MemoryContextBuilder`, memory tools |
-| `scheduler.py` | Resource-aware parallel tool execution with concurrency cap |
+| `filesystem/` | `FileBackend` protocol, `StateFileBackend`, `DiskFileBackend`, `SqliteFileBackend`, `CompositeFileBackend`, `OffloadConfig`, ls/read_file/write_file/edit_file tools |
+| `scheduler.py` | Resource-aware parallel tool execution with concurrency cap; applies `maybe_offload` at the result chokepoint |
 | `compaction.py` | Context-window management; calls `agent.provider` directly |
 | `permissions/` | `PermissionEngine`: rule evaluation, event emission, loop suspension |
 | `providers/` | `BaseProvider`, `ProviderCapabilities`, OpenAI Chat, OpenAI Responses, Anthropic |
@@ -600,7 +674,7 @@ class MyTool:
     def summarize(self, input: dict) -> str: ...   # one-line for logs
 ```
 
-`ToolContext` carries: `cwd`, `session_id`, `run_id`, `session_store`, `signal` (abort), `file_read_tracker`, `deps`.
+`ToolContext` carries: `cwd`, `session_id`, `run_id`, `session_store`, `signal` (abort), `file_read_tracker`, `deps`, `filesystem`.
 
 `deps` is threaded from `Agent(deps=...)` or overridden per-run with `RunOptions(deps=...)`. Use it to inject app state into tools without globals.
 
@@ -628,9 +702,10 @@ flowchart TD
     L1["Layer 1 — Custom blocks\nSystemPromptConfig.blocks\nprepended before identity"]
     L2["Layer 2 — Identity block\nYou are AgentKit…\nomitted when replace_defaults=True"]
     L3["Layer 3 — Protocol block\ntool-use instructions\nomitted when replace_defaults=True\nor no SWE tools present\nclauses conditional on registered tool families"]
+    LFS["Layer 3b — Filesystem block\nadded when ls/read_file/write_file/edit_file are registered\nexplains virtual filesystem and offload recovery\npresent in both default and replace_defaults modes"]
     L4["Layer 4 — Append block\nSystemPromptConfig.append\nor Agent(system_prompt=...)"]
 
-    L1 --> L2 --> L3 --> L4
+    L1 --> L2 --> L3 --> LFS --> L4
 ```
 
 **Invariant:** when the full default toolset is registered and `replace_defaults=False`, the protocol block is byte-identical to the pinned reference in `tests/test_system_blocks.py`. Change the wording only intentionally and update the parity test.
@@ -702,3 +777,5 @@ These must not break across refactors:
 | 8 | **`run_deps` is set once per `run_loop` call** — at the top, from `opts.deps ?? agent.deps`. |
 | 9 | **Loop guard is on by default** — `Agent()` without `loop_guard=` gets `LoopGuard()` with safe thresholds; disable explicitly with `Agent(loop_guard=None)`. |
 | 10 | **Provider capabilities apply per-request** — `_build_turn_request()` always calls `apply_provider_capabilities()` when the provider has `capabilities()`; no provider receives features it declared unsupported. |
+| 11 | **Offload only replaces `ToolResult.content` before block construction** — the full result is preserved on `ToolCallEndEvent.tool_result`; `full_history` and `provider_view` receive the preview only. `maybe_offload` never raises — a backend write failure silently returns the original result so a storage hiccup never breaks a run. |
+| 12 | **Filesystem tools are excluded from offloading** — `read_file`, `write_file`, `edit_file`, `ls` are in `OffloadConfig.skip_tools` by default; reading a large file back cannot trigger a recursive re-offload. |
