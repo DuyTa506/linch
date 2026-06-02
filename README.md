@@ -14,7 +14,7 @@ primitives, **virtual filesystem with automatic large-result offloading**, struc
 output, rich tool results with citations/metadata, runtime tool registries,
 permission engine, MCP/skills/subagents, and pluggable providers.
 
-## Tên gọi · Etymology
+## Etymology
 
 **linch** blends two ideas:
 
