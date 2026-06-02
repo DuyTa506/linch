@@ -20,7 +20,7 @@ permission engine, MCP/skills/subagents, and pluggable providers.
 
 | | |
 |---|---|
-| **靈** `linh` | In classical Sino-Vietnamese (*chữ Nho*), 靈 carries the meaning of *spirit*, *effortless intelligence*, and *vital agility* — attributed to things that work with invisible precision. The character unites **雨** (heaven, rain above) with **巫** (the shaman — connector between worlds): the unseen force that makes the mechanism live. |
+| **靈** `linh` | In classical Sino-Vietnamese, 靈 carries the meaning of *spirit*, *effortless intelligence*, and *vital agility* — attributed to things that work with invisible precision. The character unites **雨** (heaven, rain above) with **巫** (the shaman — connector between worlds): the unseen force that makes the mechanism live. |
 | **cinch** | A saddle *harness* piece; English slang for *easy, simple, sure*. |
 
 A *linch* is small — a single pin — but it holds the wheel on the axle.
