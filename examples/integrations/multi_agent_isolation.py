@@ -43,7 +43,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 # ── Agent definition files ────────────────────────────────────────────────────
 # Each definition is a Markdown file with YAML frontmatter.  The body becomes
-# the subagent's system prompt appended after the standard AgentKit blocks.
+# the subagent's system prompt appended after the standard Linch blocks.
 
 RESEARCHER_MD = """\
 ---
@@ -115,7 +115,7 @@ class ScriptedProvider:
         return 128_000
 
     async def stream(self, req):
-        from agent_kit.types import Usage
+        from linch.types import Usage
 
         text = self._responses[self._idx % len(self._responses)]
         self._idx += 1
@@ -126,21 +126,21 @@ class ScriptedProvider:
 
 async def demo_isolation_mechanics() -> None:
     """Show with concrete numbers that child work never enters parent context."""
-    from agent_kit import Agent
-    from agent_kit.config import FeatureFlags
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.subagents.runner import RunSubagentArgs, RunSubagentResult, run_subagent
-    from agent_kit.subagents.types import AgentDefinition, AgentFrontmatter
+    from linch import Agent
+    from linch.config import FeatureFlags
+    from linch.sessions import InMemorySessionStore
+    from linch.subagents.runner import RunSubagentArgs, RunSubagentResult, run_subagent
+    from linch.subagents.types import AgentDefinition, AgentFrontmatter
 
     # A provider that returns a realistic multi-paragraph research summary
     LONG_SUMMARY = (
         "Research complete.  Found 12 relevant Python source files.\n\n"
         "Key findings:\n"
-        "- src/agent_kit/scheduler.py (312 lines): parallel tool execution with\n"
+        "- src/linch/scheduler.py (312 lines): parallel tool execution with\n"
         "  ResourceAccess conflict detection.\n"
-        "- src/agent_kit/loop.py (418 lines): main agent loop; calls provider.stream()\n"
+        "- src/linch/loop.py (418 lines): main agent loop; calls provider.stream()\n"
         "  and emits events.\n"
-        "- src/agent_kit/session.py: provider_view vs full_history separation.\n\n"
+        "- src/linch/session.py: provider_view vs full_history separation.\n\n"
         "No blocking I/O found in the hot path.  All disk operations use\n"
         "asyncio.to_thread().  Recommend adding timeout guards to provider calls."
     )
@@ -181,7 +181,7 @@ async def demo_isolation_mechanics() -> None:
             parent_session=parent,
             parent_agent=agent,
             definition=definition,
-            prompt="Analyse the AgentKit scheduler for concurrency issues.",
+            prompt="Analyse the Linch scheduler for concurrency issues.",
             display_name="researcher",
             subagent_run_id="demo_001",
         )
@@ -213,11 +213,11 @@ async def demo_sequential_pipeline() -> None:
         print("── Sequential pipeline (skipped — OPENAI_API_KEY not set) ──────")
         return
 
-    from agent_kit import Agent
-    from agent_kit.config import FeatureFlags
-    from agent_kit.events import SubagentEvent
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools.registry import tools_from_defaults
+    from linch import Agent
+    from linch.config import FeatureFlags
+    from linch.events import SubagentEvent
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import tools_from_defaults
 
     with tempfile.TemporaryDirectory() as tmp:
         agents_dir = Path(tmp) / "agents"
@@ -250,7 +250,7 @@ async def demo_sequential_pipeline() -> None:
 
         print("── Sequential pipeline ──────────────────────────────────────────")
         async for event in session.run(
-            f"Analyse the Python files in {ROOT / 'src' / 'agent_kit' / 'tools'} "
+            f"Analyse the Python files in {ROOT / 'src' / 'linch' / 'tools'} "
             "for quality issues and produce an executive report."
         ):
             if isinstance(event, SubagentEvent):
@@ -290,11 +290,11 @@ async def demo_parallel_analysts() -> None:
         print("── Parallel analysts (skipped — OPENAI_API_KEY not set) ─────────")
         return
 
-    from agent_kit import Agent
-    from agent_kit.config import FeatureFlags
-    from agent_kit.events import SubagentEvent
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools.registry import tools_from_defaults
+    from linch import Agent
+    from linch.config import FeatureFlags
+    from linch.events import SubagentEvent
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import tools_from_defaults
 
     SUBSYSTEMS = [
         ("tools/", "tool implementations"),
@@ -302,7 +302,7 @@ async def demo_parallel_analysts() -> None:
         ("memory/", "memory subsystem"),
     ]
     task_list = "\n".join(
-        f"- Subsystem '{name}' at {ROOT / 'src' / 'agent_kit' / path}: {focus}"
+        f"- Subsystem '{name}' at {ROOT / 'src' / 'linch' / path}: {focus}"
         for path, focus in SUBSYSTEMS
     )
 
@@ -338,7 +338,7 @@ async def demo_parallel_analysts() -> None:
 
         print("── Parallel analysts ────────────────────────────────────────────")
         async for event in session.run(
-            f"Analyse these AgentKit subsystems in parallel:\n{task_list}\n\n"
+            f"Analyse these Linch subsystems in parallel:\n{task_list}\n\n"
             "Then synthesise the findings into one executive report."
         ):
             if isinstance(event, SubagentEvent):
@@ -381,12 +381,12 @@ async def demo_subagent_with_offload() -> None:
         print("── Subagent + filesystem offload (skipped — OPENAI_API_KEY not set) ──")
         return
 
-    from agent_kit import Agent
-    from agent_kit.config import FeatureFlags
-    from agent_kit.events import SubagentEvent
-    from agent_kit.filesystem import DiskFileBackend, OffloadConfig
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools.registry import tools_from_defaults
+    from linch import Agent
+    from linch.config import FeatureFlags
+    from linch.events import SubagentEvent
+    from linch.filesystem import DiskFileBackend, OffloadConfig
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import tools_from_defaults
 
     with tempfile.TemporaryDirectory() as tmp:
         agents_dir = Path(tmp) / "agents"
@@ -419,7 +419,7 @@ async def demo_subagent_with_offload() -> None:
         print("── Subagent + filesystem offload ────────────────────────────────")
         async for event in session.run(
             f"Use the researcher subagent to summarise the public API surface of "
-            f"the AgentKit tools module at {ROOT / 'src' / 'agent_kit' / 'tools'}."
+            f"the Linch tools module at {ROOT / 'src' / 'linch' / 'tools'}."
         ):
             if isinstance(event, SubagentEvent):
                 inner = event.event
@@ -437,7 +437,7 @@ async def demo_subagent_with_offload() -> None:
 
 
 async def main() -> None:
-    print("AgentKit — multi-agent context isolation\n")
+    print("Linch — multi-agent context isolation\n")
 
     await demo_isolation_mechanics()
     await demo_sequential_pipeline()

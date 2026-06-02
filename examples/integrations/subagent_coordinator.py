@@ -8,7 +8,7 @@ load and inspect agent definitions from disk without making a provider call.
 
 Demonstrates:
   1. Agent definition files (Markdown with YAML frontmatter) loaded from
-     `.agent_kit/agents/` inside a config directory.
+     `.linch/agents/` inside a config directory.
   2. tools filter — a subagent only receives a subset of the parent's tools.
   3. SubagentEvent bubbling — child events appear in the parent event stream.
   4. Agent(config_dir=...) — point to a custom config directory.
@@ -56,7 +56,7 @@ summarising the key points. Do not use any tools.
 VERIFY_AFTER_CHANGES_PROMPT = """\
 Use Subagent with subagent_type="verification" after these changes.
 Original task: Fix the session cleanup bug.
-Artifacts changed: src/agent_kit/session.py, tests/storage/test_sessions.py.
+Artifacts changed: src/linch/session.py, tests/storage/test_sessions.py.
 Approach taken: close child sessions before removing them from the in-memory registry.
 Verify with the relevant session tests plus one adversarial regression check.
 """
@@ -76,8 +76,8 @@ def load_project_env() -> None:
 
 async def demo_loader() -> None:
     """Show loading agent definitions from disk — no API call needed."""
-    from agent_kit.subagents.loader import load_agents_from_dir
-    from agent_kit.subagents.registry import AgentRegistry
+    from linch.subagents.loader import load_agents_from_dir
+    from linch.subagents.registry import AgentRegistry
 
     with tempfile.TemporaryDirectory() as tmp:
         agents_dir = Path(tmp) / "agents"
@@ -114,11 +114,11 @@ async def demo_live_subagents() -> None:
         print("\nOPENAI_API_KEY not set; skipping live subagent demo.")
         return
 
-    from agent_kit import Agent
-    from agent_kit.config import FeatureFlags
-    from agent_kit.events import SubagentEvent
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools.registry import tools_from_defaults
+    from linch import Agent
+    from linch.config import FeatureFlags
+    from linch.events import SubagentEvent
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import tools_from_defaults
 
     with tempfile.TemporaryDirectory() as tmp:
         agents_dir = Path(tmp) / "agents"

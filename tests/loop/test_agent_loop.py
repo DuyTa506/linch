@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
-from agent_kit import Agent
-from agent_kit.providers import BaseProvider
-from agent_kit.sessions import InMemorySessionStore
-from agent_kit.types import Usage
+from linch import Agent
+from linch.providers import BaseProvider
+from linch.sessions import InMemorySessionStore
+from linch.types import Usage
 
 
 class FakeProvider(BaseProvider):
@@ -61,5 +61,5 @@ async def test_agent_loop_runs_tool_and_finishes() -> None:
 
 
 async def test_public_api_has_provider_module() -> None:
-    module = __import__("agent_kit.providers")
+    module = __import__("linch.providers")
     assert module is not None

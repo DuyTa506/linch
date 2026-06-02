@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
-from agent_kit import Agent
-from agent_kit.filesystem import OffloadConfig, StateFileBackend
-from agent_kit.filesystem.offload import maybe_offload
-from agent_kit.sessions import InMemorySessionStore
-from agent_kit.tools.base import ToolContext, ToolResult
-from agent_kit.tools.registry import tools_from_defaults
-from agent_kit.types import Usage
+from linch import Agent
+from linch.filesystem import OffloadConfig, StateFileBackend
+from linch.filesystem.offload import maybe_offload
+from linch.sessions import InMemorySessionStore
+from linch.tools.base import ToolContext, ToolResult
+from linch.tools.registry import tools_from_defaults
+from linch.types import Usage
 
 BIG = "\n".join(f"result line {i} with some filler text" for i in range(200))
 

@@ -1,6 +1,6 @@
 """Tests for structured output (OutputSchema + tool_choice + final_tool_name).
 
-NOTE: agent_kit imports inside test functions (not module-level) so tests are
+NOTE: linch imports inside test functions (not module-level) so tests are
 robust to test_hardening.py's sys.modules reset.
 """
 
@@ -14,8 +14,8 @@ import pytest
 
 
 def _text_provider(text: str):
-    from agent_kit.providers.base import BaseProvider
-    from agent_kit.types import Usage
+    from linch.providers.base import BaseProvider
+    from linch.types import Usage
 
     class _Provider(BaseProvider):
         id = "fake"
@@ -39,8 +39,8 @@ def _text_provider(text: str):
 
 
 def _tool_use_provider(tool_name: str, tool_input: dict):
-    from agent_kit.providers.base import BaseProvider
-    from agent_kit.types import Usage
+    from linch.providers.base import BaseProvider
+    from linch.types import Usage
 
     class _Provider(BaseProvider):
         id = "fake"
@@ -81,7 +81,7 @@ def _tool_use_provider(tool_name: str, tool_input: dict):
 
 
 def _make_emit_tool():
-    from agent_kit.tools.base import ToolContext, ToolResult
+    from linch.tools.base import ToolContext, ToolResult
 
     class _EmitTool:
         name = "emit_answer"
@@ -111,10 +111,10 @@ def _make_emit_tool():
 
 @pytest.mark.asyncio
 async def test_structured_output_from_json_text():
-    from agent_kit import Agent
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools.registry import empty_tools
-    from agent_kit.types import OutputSchema
+    from linch import Agent
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import empty_tools
+    from linch.types import OutputSchema
 
     payload = {"answer": "42", "confidence": 0.9}
     provider = _text_provider(json.dumps(payload))
@@ -150,10 +150,10 @@ async def test_structured_output_from_json_text():
 
 @pytest.mark.asyncio
 async def test_structured_output_malformed_json():
-    from agent_kit import Agent
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools.registry import empty_tools
-    from agent_kit.types import OutputSchema
+    from linch import Agent
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import empty_tools
+    from linch.types import OutputSchema
 
     provider = _text_provider("not valid json {{")
 
@@ -180,9 +180,9 @@ async def test_structured_output_malformed_json():
 
 @pytest.mark.asyncio
 async def test_no_output_schema_structured_output_is_none():
-    from agent_kit import Agent
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools.registry import empty_tools
+    from linch import Agent
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import empty_tools
 
     provider = _text_provider('{"key": "value"}')
 
@@ -208,8 +208,8 @@ async def test_no_output_schema_structured_output_is_none():
 
 
 def test_chat_payload_response_format():
-    from agent_kit.providers.openai_chat import _build_chat_payload
-    from agent_kit.types import OutputSchema, ProviderRequest
+    from linch.providers.openai_chat import _build_chat_payload
+    from linch.types import OutputSchema, ProviderRequest
 
     schema = OutputSchema(name="my_schema", schema={"type": "object"})
     req = ProviderRequest(
@@ -226,8 +226,8 @@ def test_chat_payload_response_format():
 
 
 def test_chat_payload_no_schema_no_response_format():
-    from agent_kit.providers.openai_chat import _build_chat_payload
-    from agent_kit.types import ProviderRequest
+    from linch.providers.openai_chat import _build_chat_payload
+    from linch.types import ProviderRequest
 
     req = ProviderRequest(model="gpt-5", system=[], tools=[], messages=[])
     payload = _build_chat_payload(req)
@@ -238,8 +238,8 @@ def test_chat_payload_no_schema_no_response_format():
 
 
 def test_responses_payload_text_format():
-    from agent_kit.openai_responses import build_payload
-    from agent_kit.types import OutputSchema, ProviderRequest
+    from linch.openai_responses import build_payload
+    from linch.types import OutputSchema, ProviderRequest
 
     schema = OutputSchema(name="my_schema", schema={"type": "object"}, strict=True)
     req = ProviderRequest(
@@ -260,8 +260,8 @@ def test_responses_payload_text_format():
 
 
 def test_chat_payload_tool_choice_string():
-    from agent_kit.providers.openai_chat import _build_chat_payload
-    from agent_kit.types import ProviderRequest
+    from linch.providers.openai_chat import _build_chat_payload
+    from linch.types import ProviderRequest
 
     req = ProviderRequest(model="gpt-5", system=[], tools=[], messages=[], tool_choice="required")
     payload = _build_chat_payload(req)
@@ -269,8 +269,8 @@ def test_chat_payload_tool_choice_string():
 
 
 def test_chat_payload_tool_choice_dict():
-    from agent_kit.providers.openai_chat import _build_chat_payload
-    from agent_kit.types import ProviderRequest
+    from linch.providers.openai_chat import _build_chat_payload
+    from linch.types import ProviderRequest
 
     req = ProviderRequest(
         model="gpt-5",
@@ -285,8 +285,8 @@ def test_chat_payload_tool_choice_dict():
 
 
 def test_responses_payload_tool_choice():
-    from agent_kit.openai_responses import build_payload
-    from agent_kit.types import ProviderRequest
+    from linch.openai_responses import build_payload
+    from linch.types import ProviderRequest
 
     req = ProviderRequest(
         model="gpt-5",
@@ -305,9 +305,9 @@ def test_responses_payload_tool_choice():
 
 @pytest.mark.asyncio
 async def test_final_tool_terminates_loop_with_structured_output():
-    from agent_kit import Agent
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools.registry import empty_tools
+    from linch import Agent
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import empty_tools
 
     tool_input = {"sql": "SELECT 1"}
     provider = _tool_use_provider("emit_answer", tool_input)
@@ -336,9 +336,9 @@ async def test_final_tool_terminates_loop_with_structured_output():
 
 @pytest.mark.asyncio
 async def test_final_tool_via_run_options():
-    from agent_kit import Agent, RunOptions
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools.registry import empty_tools
+    from linch import Agent, RunOptions
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import empty_tools
 
     tool_input = {"sql": "SELECT 2"}
     provider = _tool_use_provider("emit_answer", tool_input)
@@ -364,8 +364,8 @@ async def test_final_tool_via_run_options():
 
 
 def test_responses_per_request_effort_overrides_constructor():
-    from agent_kit.openai_responses import OpenAIReasoning, build_payload
-    from agent_kit.types import ProviderRequest
+    from linch.openai_responses import OpenAIReasoning, build_payload
+    from linch.types import ProviderRequest
 
     constructor_reasoning = OpenAIReasoning(effort="low")
     req = ProviderRequest(
@@ -380,8 +380,8 @@ def test_responses_per_request_effort_overrides_constructor():
 
 
 def test_responses_effort_from_reasoning_when_no_req_effort():
-    from agent_kit.openai_responses import OpenAIReasoning, build_payload
-    from agent_kit.types import ProviderRequest
+    from linch.openai_responses import OpenAIReasoning, build_payload
+    from linch.types import ProviderRequest
 
     constructor_reasoning = OpenAIReasoning(effort="medium")
     req = ProviderRequest(model="gpt-5", system=[], tools=[], messages=[])

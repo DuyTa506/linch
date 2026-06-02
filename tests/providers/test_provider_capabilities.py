@@ -14,7 +14,7 @@ import pytest
 
 
 def test_capabilities_defaults():
-    from agent_kit.providers import ProviderCapabilities
+    from linch.providers import ProviderCapabilities
 
     caps = ProviderCapabilities()
     assert caps.context_window == 128_000
@@ -25,7 +25,7 @@ def test_capabilities_defaults():
 
 
 def test_capabilities_custom_values():
-    from agent_kit.providers import ProviderCapabilities
+    from linch.providers import ProviderCapabilities
 
     caps = ProviderCapabilities(
         context_window=200_000,
@@ -43,7 +43,7 @@ def test_capabilities_custom_values():
 
 
 def test_openai_chat_capabilities():
-    from agent_kit.providers import OpenAIChatCompletionsProvider
+    from linch.providers import OpenAIChatCompletionsProvider
 
     provider = OpenAIChatCompletionsProvider()
     caps = provider.capabilities("gpt-4o")
@@ -55,7 +55,7 @@ def test_openai_chat_capabilities():
 
 
 def test_openai_responses_capabilities():
-    from agent_kit.providers import OpenAIResponsesProvider
+    from linch.providers import OpenAIResponsesProvider
 
     provider = OpenAIResponsesProvider()
     caps = provider.capabilities("gpt-5")
@@ -67,7 +67,7 @@ def test_openai_responses_capabilities():
 
 
 def test_anthropic_capabilities():
-    from agent_kit.providers import AnthropicProvider
+    from linch.providers import AnthropicProvider
 
     provider = AnthropicProvider()
     caps = provider.capabilities("claude-opus-4-8")
@@ -80,7 +80,7 @@ def test_anthropic_capabilities():
 
 def test_base_provider_default_capabilities():
     """BaseProvider.capabilities() default derives context_window from context_window()."""
-    from agent_kit.providers import BaseProvider, ProviderCapabilities
+    from linch.providers import BaseProvider, ProviderCapabilities
 
     class _MinimalProvider(BaseProvider):
         id = "minimal"
@@ -108,7 +108,7 @@ def test_base_provider_default_capabilities():
 
 def _make_req(**overrides):
     """Build a minimal ProviderRequest with sensible defaults for testing."""
-    from agent_kit.types import OutputSchema, ProviderRequest
+    from linch.types import OutputSchema, ProviderRequest
 
     defaults = dict(
         model="test-model",
@@ -125,8 +125,8 @@ def _make_req(**overrides):
 
 
 def test_apply_clears_cache_when_not_supported():
-    from agent_kit.loop import apply_provider_capabilities
-    from agent_kit.providers import ProviderCapabilities
+    from linch.loop import apply_provider_capabilities
+    from linch.providers import ProviderCapabilities
 
     req = _make_req()
     assert req.cache_prompt is True
@@ -140,8 +140,8 @@ def test_apply_clears_cache_when_not_supported():
 
 
 def test_apply_preserves_cache_when_supported():
-    from agent_kit.loop import apply_provider_capabilities
-    from agent_kit.providers import ProviderCapabilities
+    from linch.loop import apply_provider_capabilities
+    from linch.providers import ProviderCapabilities
 
     req = _make_req()
     caps = ProviderCapabilities(prompt_cache=True)
@@ -152,8 +152,8 @@ def test_apply_preserves_cache_when_supported():
 
 
 def test_apply_clears_tool_choice_when_not_supported():
-    from agent_kit.loop import apply_provider_capabilities
-    from agent_kit.providers import ProviderCapabilities
+    from linch.loop import apply_provider_capabilities
+    from linch.providers import ProviderCapabilities
 
     req = _make_req()
     assert req.tool_choice == "auto"
@@ -165,8 +165,8 @@ def test_apply_clears_tool_choice_when_not_supported():
 
 
 def test_apply_clears_output_schema_when_not_supported():
-    from agent_kit.loop import apply_provider_capabilities
-    from agent_kit.providers import ProviderCapabilities
+    from linch.loop import apply_provider_capabilities
+    from linch.providers import ProviderCapabilities
 
     req = _make_req()
     assert req.output_schema is not None
@@ -179,8 +179,8 @@ def test_apply_clears_output_schema_when_not_supported():
 
 def test_apply_full_downgrade_for_openai_chat():
     """OpenAI Chat caps: cache cleared, others preserved."""
-    from agent_kit.loop import apply_provider_capabilities
-    from agent_kit.providers import OpenAIChatCompletionsProvider
+    from linch.loop import apply_provider_capabilities
+    from linch.providers import OpenAIChatCompletionsProvider
 
     provider = OpenAIChatCompletionsProvider()
     caps = provider.capabilities("gpt-4o")
@@ -199,8 +199,8 @@ def test_apply_full_downgrade_for_openai_chat():
 
 def test_apply_full_downgrade_for_anthropic():
     """Anthropic caps: cache preserved, structured_output cleared."""
-    from agent_kit.loop import apply_provider_capabilities
-    from agent_kit.providers import AnthropicProvider
+    from linch.loop import apply_provider_capabilities
+    from linch.providers import AnthropicProvider
 
     provider = AnthropicProvider()
     caps = provider.capabilities("claude-opus-4-8")
@@ -232,7 +232,7 @@ class CapRecordingProvider:
         return 128_000
 
     def capabilities(self, model: str):
-        from agent_kit.providers import ProviderCapabilities
+        from linch.providers import ProviderCapabilities
 
         # Declare: no prompt_cache, no structured_output
         return ProviderCapabilities(
@@ -243,7 +243,7 @@ class CapRecordingProvider:
         )
 
     async def stream(self, req):
-        from agent_kit.types import Usage
+        from linch.types import Usage
 
         CapRecordingProvider.received_req = req
         yield {"type": "message_start", "model": req.model}
@@ -259,11 +259,11 @@ class CapRecordingProvider:
 @pytest.mark.asyncio
 async def test_build_turn_request_applies_capability_downgrade():
     """Run a full session and verify the provider received a downgraded request."""
-    from agent_kit import Agent
-    from agent_kit.config import FeatureFlags
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools.registry import empty_tools
-    from agent_kit.types import OutputSchema
+    from linch import Agent
+    from linch.config import FeatureFlags
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import empty_tools
+    from linch.types import OutputSchema
 
     CapRecordingProvider.received_req = None
     provider = CapRecordingProvider()

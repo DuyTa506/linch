@@ -27,11 +27,11 @@ from __future__ import annotations
 import asyncio
 import os
 
-from agent_kit import Agent
-from agent_kit.config import FeatureFlags
-from agent_kit.permissions import BashRule, PathRule, ToolRule
-from agent_kit.sessions import InMemorySessionStore
-from agent_kit.tools.registry import default_tools, tools_from_defaults
+from linch import Agent
+from linch.config import FeatureFlags
+from linch.permissions import BashRule, PathRule, ToolRule
+from linch.sessions import InMemorySessionStore
+from linch.tools.registry import default_tools, tools_from_defaults
 
 API_KEY = os.environ.get("OPENAI_API_KEY", "")
 MODEL = "gpt-5-nano-2025-08-07"

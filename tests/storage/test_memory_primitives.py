@@ -17,7 +17,7 @@ class RecordingProvider:
         return 128_000
 
     async def stream(self, req):
-        from agent_kit.types import TextBlock, Usage
+        from linch.types import TextBlock, Usage
 
         self.calls.append(
             {
@@ -44,7 +44,7 @@ class RecordingProvider:
 
 
 async def _seed_store():
-    from agent_kit.memory import InMemoryKeywordMemoryStore, MemoryItem
+    from linch.memory import InMemoryKeywordMemoryStore, MemoryItem
 
     store = InMemoryKeywordMemoryStore()
     await store.upsert(
@@ -68,7 +68,7 @@ async def _seed_store():
 
 @pytest.mark.asyncio
 async def test_keyword_memory_search_and_replace() -> None:
-    from agent_kit.memory import MemoryItem
+    from linch.memory import MemoryItem
 
     store = await _seed_store()
 
@@ -94,8 +94,8 @@ async def test_keyword_memory_search_and_replace() -> None:
 
 @pytest.mark.asyncio
 async def test_keyword_memory_store_work_does_not_block_event_loop(monkeypatch) -> None:
-    from agent_kit.memory import InMemoryKeywordMemoryStore, MemoryItem
-    from agent_kit.memory import keyword as keyword_mod
+    from linch.memory import InMemoryKeywordMemoryStore, MemoryItem
+    from linch.memory import keyword as keyword_mod
 
     original_tokenize = keyword_mod._tokenize
 
@@ -129,7 +129,7 @@ async def test_keyword_memory_store_work_does_not_block_event_loop(monkeypatch) 
 
 @pytest.mark.asyncio
 async def test_sqlite_memory_search_and_namespace(tmp_path) -> None:
-    from agent_kit.memory import MemoryItem, SqliteMemoryStore
+    from linch.memory import MemoryItem, SqliteMemoryStore
 
     store = SqliteMemoryStore(tmp_path / "memory.sqlite")
     try:
@@ -152,15 +152,15 @@ async def test_sqlite_memory_search_and_namespace(tmp_path) -> None:
 def test_postgres_memory_store_is_public_optional_export(monkeypatch) -> None:
     import sys
 
-    from agent_kit import PostgresMemoryStore as RootPostgresMemoryStore
-    from agent_kit.memory import PostgresMemoryStore
+    from linch import PostgresMemoryStore as RootPostgresMemoryStore
+    from linch.memory import PostgresMemoryStore
 
     assert RootPostgresMemoryStore is PostgresMemoryStore
 
     real_asyncpg = sys.modules.get("asyncpg")
     sys.modules["asyncpg"] = None  # type: ignore[assignment]
     try:
-        with pytest.raises(ModuleNotFoundError, match="agent-kit\\[postgres\\]"):
+        with pytest.raises(ModuleNotFoundError, match="linch\\[postgres\\]"):
             PostgresMemoryStore("postgresql://user:pw@localhost/db")
     finally:
         if real_asyncpg is not None:
@@ -171,11 +171,11 @@ def test_postgres_memory_store_is_public_optional_export(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_memory_context_builder_injects_without_persisting() -> None:
-    from agent_kit import Agent
-    from agent_kit.config import FeatureFlags
-    from agent_kit.memory import MemoryContextBuilder
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools.registry import empty_tools
+    from linch import Agent
+    from linch.config import FeatureFlags
+    from linch.memory import MemoryContextBuilder
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import empty_tools
 
     store = await _seed_store()
     provider = RecordingProvider()
@@ -212,11 +212,11 @@ async def test_memory_context_builder_injects_without_persisting() -> None:
 
 @pytest.mark.asyncio
 async def test_memory_context_builder_reports_budget_trimming() -> None:
-    from agent_kit import Agent
-    from agent_kit.config import FeatureFlags
-    from agent_kit.memory import MemoryContextBuilder
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools.registry import empty_tools
+    from linch import Agent
+    from linch.config import FeatureFlags
+    from linch.memory import MemoryContextBuilder
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import empty_tools
 
     store = await _seed_store()
     provider = RecordingProvider()
@@ -242,8 +242,8 @@ async def test_memory_context_builder_reports_budget_trimming() -> None:
 
 @pytest.mark.asyncio
 async def test_memory_search_and_upsert_tools_return_metadata() -> None:
-    from agent_kit.memory import MemorySearchTool, MemoryUpsertTool
-    from agent_kit.tools import ToolContext
+    from linch.memory import MemorySearchTool, MemoryUpsertTool
+    from linch.tools import ToolContext
 
     store = await _seed_store()
     ctx = ToolContext(cwd=".", session_id="s1", run_id="r1", session_store=None, deps=store)

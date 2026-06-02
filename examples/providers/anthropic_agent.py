@@ -3,7 +3,7 @@
 Run:
     ANTHROPIC_API_KEY=sk-ant-... python3 examples/providers/anthropic_agent.py
 
-Requires `pip install 'agent-kit[anthropic]'` and ANTHROPIC_API_KEY.
+Requires `pip install 'linch[anthropic]'` and ANTHROPIC_API_KEY.
 
 Demonstrates:
   1. AnthropicProvider — drop-in replacement for the OpenAI provider.
@@ -36,11 +36,11 @@ def load_project_env() -> None:
 
 async def run_basic() -> None:
     """Simple turn with AnthropicProvider — no thinking, no caching."""
-    from agent_kit import Agent
-    from agent_kit.config import FeatureFlags
-    from agent_kit.providers.anthropic import AnthropicProvider, AnthropicProviderOptions
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools.registry import empty_tools
+    from linch import Agent
+    from linch.config import FeatureFlags
+    from linch.providers.anthropic import AnthropicProvider, AnthropicProviderOptions
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import empty_tools
 
     provider = AnthropicProvider(
         AnthropicProviderOptions(api_key=os.environ.get("ANTHROPIC_API_KEY"))
@@ -68,12 +68,12 @@ async def run_with_thinking() -> None:
     ThinkingBlock events are emitted while Claude reasons; only the final
     text response is surfaced in AssistantEvent.
     """
-    from agent_kit import Agent
-    from agent_kit.config import FeatureFlags
-    from agent_kit.events import AssistantEvent
-    from agent_kit.providers.anthropic import AnthropicProvider, AnthropicProviderOptions
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools.registry import empty_tools
+    from linch import Agent
+    from linch.config import FeatureFlags
+    from linch.events import AssistantEvent
+    from linch.providers.anthropic import AnthropicProvider, AnthropicProviderOptions
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import empty_tools
 
     provider = AnthropicProvider(
         AnthropicProviderOptions(
@@ -110,11 +110,11 @@ async def run_with_caching() -> None:
     subsequent turns pay cache_read_tokens instead of input_tokens for those
     blocks.  Pass `cache_prompt=True` in RunOptions to enable per-run.
     """
-    from agent_kit import Agent, RunOptions
-    from agent_kit.config import FeatureFlags
-    from agent_kit.providers.anthropic import AnthropicProvider, AnthropicProviderOptions
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools.registry import empty_tools
+    from linch import Agent, RunOptions
+    from linch.config import FeatureFlags
+    from linch.providers.anthropic import AnthropicProvider, AnthropicProviderOptions
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import empty_tools
 
     provider = AnthropicProvider(
         AnthropicProviderOptions(api_key=os.environ.get("ANTHROPIC_API_KEY"))
@@ -154,7 +154,7 @@ async def main() -> None:
     load_project_env()
     if not os.environ.get("ANTHROPIC_API_KEY"):
         print("ANTHROPIC_API_KEY not set — set it to run this example.")
-        print("Install Anthropic extra: pip install 'agent-kit[anthropic]'")
+        print("Install Anthropic extra: pip install 'linch[anthropic]'")
         return
 
     print("=== Basic ===")

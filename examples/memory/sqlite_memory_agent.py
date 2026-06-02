@@ -20,14 +20,14 @@ import asyncio
 import os
 from pathlib import Path
 
-from agent_kit.memory import (
+from linch.memory import (
     InMemoryKeywordMemoryStore,
     MemoryContextBuilder,
     MemoryItem,
     MemorySearchTool,
 )
-from agent_kit.memory.sqlite import SqliteMemoryStore
-from agent_kit.tools import ToolContext
+from linch.memory.sqlite import SqliteMemoryStore
+from linch.tools import ToolContext
 
 ROOT = Path(__file__).resolve().parents[2]
 DB_PATH = Path("/tmp/agentkit_demo_memory.db")
@@ -131,9 +131,9 @@ async def maybe_live_agent() -> None:
         print("\nOPENAI_API_KEY not set; skipping live agent call.")
         return
 
-    from agent_kit import Agent
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools import ToolRegistry
+    from linch import Agent
+    from linch.sessions import InMemorySessionStore
+    from linch.tools import ToolRegistry
 
     store = SqliteMemoryStore(DB_PATH)
     registry = ToolRegistry()

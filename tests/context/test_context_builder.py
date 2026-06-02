@@ -16,7 +16,7 @@ class RecordingProvider:
         return 128_000
 
     async def stream(self, req):
-        from agent_kit.types import TextBlock, Usage
+        from linch.types import TextBlock, Usage
 
         self.calls.append(
             {
@@ -59,7 +59,7 @@ def _fake_tool(name: str, tags: tuple[str, ...] = ()):
             return raw
 
         async def execute(self, input, ctx):
-            from agent_kit.tools import ToolResult
+            from linch.tools import ToolResult
 
             return ToolResult(content="ok", summary=self.name)
 
@@ -70,10 +70,10 @@ def _fake_tool(name: str, tags: tuple[str, ...] = ()):
 
 
 def _agent(provider: Any, *, context_builder: Any):
-    from agent_kit import Agent
-    from agent_kit.config import FeatureFlags
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools.registry import empty_tools
+    from linch import Agent
+    from linch.config import FeatureFlags
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import empty_tools
 
     return Agent(
         model="gpt-5",
@@ -96,8 +96,8 @@ async def _drain(session, prompt: str = "hello"):
 
 class StaticBuilder:
     async def build(self, turn):
-        from agent_kit import ContextBuildResult
-        from agent_kit.types import Message, SystemBlock, TextBlock
+        from linch import ContextBuildResult
+        from linch.types import Message, SystemBlock, TextBlock
 
         return ContextBuildResult(
             system_blocks=[SystemBlock(text=f"CTX_SYSTEM turn={turn.turn_index}")],
@@ -130,8 +130,8 @@ async def test_context_builder_reaches_provider_without_persisting():
 
 @pytest.mark.asyncio
 async def test_context_builders_run_in_stable_order():
-    from agent_kit import ContextBuildResult
-    from agent_kit.types import Message, TextBlock
+    from linch import ContextBuildResult
+    from linch.types import Message, TextBlock
 
     class Builder:
         def __init__(self, label: str) -> None:
@@ -156,8 +156,8 @@ async def test_context_builders_run_in_stable_order():
 
 @pytest.mark.asyncio
 async def test_context_budget_trims_ephemeral_messages():
-    from agent_kit import ContextBudget, ContextBuildResult
-    from agent_kit.types import Message, TextBlock
+    from linch import ContextBudget, ContextBuildResult
+    from linch.types import Message, TextBlock
 
     class BudgetBuilder:
         async def build(self, turn):
@@ -184,7 +184,7 @@ async def test_context_budget_trims_ephemeral_messages():
 
 @pytest.mark.asyncio
 async def test_context_selected_tools_are_request_scoped():
-    from agent_kit import ContextBuildResult
+    from linch import ContextBuildResult
 
     class SelectingBuilder:
         async def build(self, turn):
@@ -201,8 +201,8 @@ async def test_context_selected_tools_are_request_scoped():
 
 @pytest.mark.asyncio
 async def test_context_builder_reruns_after_compaction_retry():
-    from agent_kit import ContextBuildResult, ContextLengthError
-    from agent_kit.types import Message, TextBlock
+    from linch import ContextBuildResult, ContextLengthError
+    from linch.types import Message, TextBlock
 
     class RetryProvider(RecordingProvider):
         async def stream(self, req):

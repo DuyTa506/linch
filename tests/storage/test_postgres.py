@@ -1,7 +1,7 @@
 """Postgres backend tests — skipped unless asyncpg + a live DB are available.
 
 To run:
-    pip install 'agent-kit[postgres]'
+    pip install 'linch[postgres]'
     AGENT_KIT_TEST_PG_DSN=postgresql://user:pw@localhost/agentkit_test \
         pytest tests/storage/test_postgres.py -v
 """
@@ -23,8 +23,8 @@ needs_pg = pytest.mark.skipif(not DSN, reason="AGENT_KIT_TEST_PG_DSN not set")
 
 @needs_pg
 async def test_pg_session_store_round_trip() -> None:
-    from agent_kit.sessions.postgres import PostgresSessionStore
-    from agent_kit.types import Message, TextBlock
+    from linch.sessions.postgres import PostgresSessionStore
+    from linch.types import Message, TextBlock
 
     store = PostgresSessionStore(DSN)
     try:
@@ -52,8 +52,8 @@ async def test_pg_session_store_concurrent_appends() -> None:
     """50 concurrent appends to one session → contiguous seq values."""
     import asyncio
 
-    from agent_kit.sessions.postgres import PostgresSessionStore
-    from agent_kit.types import Message, TextBlock
+    from linch.sessions.postgres import PostgresSessionStore
+    from linch.types import Message, TextBlock
 
     store = PostgresSessionStore(DSN, min_size=5, max_size=20)
     try:
@@ -76,8 +76,8 @@ async def test_pg_session_store_concurrent_appends() -> None:
 @needs_pg
 async def test_pg_memory_store_round_trip() -> None:
 
-    from agent_kit.memory.postgres import PostgresMemoryStore
-    from agent_kit.memory.types import MemoryItem
+    from linch.memory.postgres import PostgresMemoryStore
+    from linch.memory.types import MemoryItem
 
     store = PostgresMemoryStore(DSN)
     try:
@@ -105,7 +105,7 @@ async def test_pg_memory_store_round_trip() -> None:
 
 @needs_pg
 async def test_pg_file_backend_round_trip() -> None:
-    from agent_kit.filesystem.postgres import PostgresFileBackend
+    from linch.filesystem.postgres import PostgresFileBackend
 
     fb = PostgresFileBackend(DSN)
     try:
@@ -131,7 +131,7 @@ async def test_pg_file_backend_round_trip() -> None:
 async def test_pg_file_backend_concurrent_writes() -> None:
     import asyncio
 
-    from agent_kit.filesystem.postgres import PostgresFileBackend
+    from linch.filesystem.postgres import PostgresFileBackend
 
     fb = PostgresFileBackend(DSN, min_size=5, max_size=20)
     try:
@@ -157,9 +157,9 @@ def test_pg_stores_fail_fast_without_asyncpg(monkeypatch) -> None:
     real_asyncpg = sys.modules.get("asyncpg")
     sys.modules["asyncpg"] = None  # type: ignore[assignment]
     try:
-        from agent_kit.storage._pg import _import_asyncpg
+        from linch.storage._pg import _import_asyncpg
 
-        with pytest.raises(ModuleNotFoundError, match="agent-kit\\[postgres\\]"):
+        with pytest.raises(ModuleNotFoundError, match="linch\\[postgres\\]"):
             _import_asyncpg()
     finally:
         if real_asyncpg is not None:

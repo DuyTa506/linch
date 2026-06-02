@@ -44,7 +44,7 @@ def _make_result_block(is_error: bool = False):
 
 
 def test_no_trip_on_distinct_calls():
-    from agent_kit.loop_guard import LoopGuard, LoopGuardState, evaluate_loop_guard
+    from linch.loop_guard import LoopGuard, LoopGuardState, evaluate_loop_guard
 
     guard = LoopGuard(max_identical_tool_calls=3, max_consecutive_failures=3)
     state = LoopGuardState()
@@ -58,7 +58,7 @@ def test_no_trip_on_distinct_calls():
 
 
 def test_trips_on_identical_calls_at_threshold():
-    from agent_kit.loop_guard import LoopGuard, LoopGuardState, evaluate_loop_guard
+    from linch.loop_guard import LoopGuard, LoopGuardState, evaluate_loop_guard
 
     guard = LoopGuard(max_identical_tool_calls=3)
     state = LoopGuardState()
@@ -78,7 +78,7 @@ def test_trips_on_identical_calls_at_threshold():
 
 
 def test_force_final_answer_flag():
-    from agent_kit.loop_guard import LoopGuard, LoopGuardState, evaluate_loop_guard
+    from linch.loop_guard import LoopGuard, LoopGuardState, evaluate_loop_guard
 
     guard = LoopGuard(max_identical_tool_calls=2, force_final_answer=True)
     state = LoopGuardState()
@@ -91,7 +91,7 @@ def test_force_final_answer_flag():
 
 
 def test_failure_streak_trips():
-    from agent_kit.loop_guard import LoopGuard, LoopGuardState, evaluate_loop_guard
+    from linch.loop_guard import LoopGuard, LoopGuardState, evaluate_loop_guard
 
     guard = LoopGuard(max_identical_tool_calls=0, max_consecutive_failures=3)
     state = LoopGuardState()
@@ -109,7 +109,7 @@ def test_failure_streak_trips():
 
 
 def test_success_resets_failure_streak():
-    from agent_kit.loop_guard import LoopGuard, LoopGuardState, evaluate_loop_guard
+    from linch.loop_guard import LoopGuard, LoopGuardState, evaluate_loop_guard
 
     guard = LoopGuard(max_identical_tool_calls=0, max_consecutive_failures=3)
     state = LoopGuardState()
@@ -131,7 +131,7 @@ def test_success_resets_failure_streak():
 
 
 def test_disable_identical_check_with_zero():
-    from agent_kit.loop_guard import LoopGuard, LoopGuardState, evaluate_loop_guard
+    from linch.loop_guard import LoopGuard, LoopGuardState, evaluate_loop_guard
 
     guard = LoopGuard(max_identical_tool_calls=0, max_consecutive_failures=0)
     state = LoopGuardState()
@@ -144,7 +144,7 @@ def test_disable_identical_check_with_zero():
 
 
 def test_normalize_loop_guard():
-    from agent_kit.loop_guard import LoopGuard, normalize_loop_guard
+    from linch.loop_guard import LoopGuard, normalize_loop_guard
 
     assert normalize_loop_guard(None) is None
     assert normalize_loop_guard(False) is None
@@ -160,7 +160,7 @@ def test_normalize_loop_guard():
 
 
 def test_normalize_loop_guard_type_error():
-    from agent_kit.loop_guard import normalize_loop_guard
+    from linch.loop_guard import normalize_loop_guard
 
     with pytest.raises(TypeError):
         normalize_loop_guard(42)
@@ -189,7 +189,7 @@ class LoopingProvider:
         return 128_000
 
     async def stream(self, req):
-        from agent_kit.types import Usage
+        from linch.types import Usage
 
         self.call_count += 1
         # If tools were stripped by force_final, return a plain text response.
@@ -225,11 +225,11 @@ class LoopingProvider:
 
 def _make_agent(provider: Any, *, loop_guard: Any = None, tool_name: str = "FakeTool"):
     """Build a minimal Agent suitable for loop guard integration tests."""
-    from agent_kit import Agent
-    from agent_kit.config import FeatureFlags
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools import ToolResult
-    from agent_kit.tools.registry import empty_tools
+    from linch import Agent
+    from linch.config import FeatureFlags
+    from linch.sessions import InMemorySessionStore
+    from linch.tools import ToolResult
+    from linch.tools.registry import empty_tools
 
     class _DummyTool:
         description = "Dummy tool"
@@ -274,8 +274,8 @@ async def _collect(session, prompt: str = "go"):
 @pytest.mark.asyncio
 async def test_guard_stops_repeating_tool_loop():
     """Guard (max_identical=3) should stop the loop after 3 identical calls."""
-    from agent_kit.events import LoopGuardEvent, ResultEvent
-    from agent_kit.loop_guard import LoopGuard
+    from linch.events import LoopGuardEvent, ResultEvent
+    from linch.loop_guard import LoopGuard
 
     provider = LoopingProvider(tool_name="FakeTool", tool_input={"path": "/a"})
     guard = LoopGuard(max_identical_tool_calls=3, max_consecutive_failures=0)
@@ -299,8 +299,8 @@ async def test_guard_stops_repeating_tool_loop():
 @pytest.mark.asyncio
 async def test_guard_force_final_answer():
     """force_final_answer=True should inject a reminder and allow one text turn."""
-    from agent_kit.events import LoopGuardEvent, ResultEvent
-    from agent_kit.loop_guard import LoopGuard
+    from linch.events import LoopGuardEvent, ResultEvent
+    from linch.loop_guard import LoopGuard
 
     provider = LoopingProvider(tool_name="FakeTool", tool_input={"x": 1})
     guard = LoopGuard(max_identical_tool_calls=2, force_final_answer=True)
@@ -323,15 +323,15 @@ async def test_guard_force_final_answer():
 @pytest.mark.asyncio
 async def test_guard_disabled_via_none():
     """loop_guard=None disables all guard checks; loop runs until max_turns."""
-    from agent_kit.events import LoopGuardEvent
+    from linch.events import LoopGuardEvent
 
     provider = LoopingProvider(tool_name="FakeTool", tool_input={"k": "v"})
     # Use max_turns=5 so the test terminates, but loop_guard=None
-    from agent_kit import Agent
-    from agent_kit.config import FeatureFlags
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools import ToolResult
-    from agent_kit.tools.registry import empty_tools
+    from linch import Agent
+    from linch.config import FeatureFlags
+    from linch.sessions import InMemorySessionStore
+    from linch.tools import ToolResult
+    from linch.tools.registry import empty_tools
 
     class _T:
         name = "FakeTool"
@@ -378,16 +378,16 @@ async def test_guard_disabled_via_none():
 @pytest.mark.asyncio
 async def test_guard_on_by_default():
     """Agent() without loop_guard argument should default to LoopGuard()."""
-    from agent_kit.loop_guard import LoopGuard
+    from linch.loop_guard import LoopGuard
 
     provider = LoopingProvider()
 
     # _make_agent passes loop_guard=None in the signature default which means
     # "disabled"; here we omit it to check the default Agent() behavior.
-    from agent_kit import Agent
-    from agent_kit.config import FeatureFlags
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools.registry import empty_tools
+    from linch import Agent
+    from linch.config import FeatureFlags
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import empty_tools
 
     class _T:
         name = "FakeTool"
@@ -407,7 +407,7 @@ async def test_guard_on_by_default():
             return []
 
         async def execute(self, i, c):
-            from agent_kit.tools import ToolResult
+            from linch.tools import ToolResult
 
             return ToolResult(content="ok")
 
@@ -428,14 +428,14 @@ async def test_guard_on_by_default():
 @pytest.mark.asyncio
 async def test_max_turns_emits_loop_guard_event():
     """Exhausting max_turns should emit a LoopGuardEvent(reason='max_turns')."""
-    from agent_kit.events import LoopGuardEvent, ResultEvent
+    from linch.events import LoopGuardEvent, ResultEvent
 
     provider = LoopingProvider()
-    from agent_kit import Agent
-    from agent_kit.config import FeatureFlags
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools import ToolResult
-    from agent_kit.tools.registry import empty_tools
+    from linch import Agent
+    from linch.config import FeatureFlags
+    from linch.sessions import InMemorySessionStore
+    from linch.tools import ToolResult
+    from linch.tools.registry import empty_tools
 
     class _T:
         name = "FakeTool"

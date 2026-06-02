@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from agent_kit.filesystem import StateFileBackend
-from agent_kit.filesystem.tools import EditFileTool, LsTool, ReadFileTool, WriteFileTool
-from agent_kit.tools.base import ToolContext
+from linch.filesystem import StateFileBackend
+from linch.filesystem.tools import EditFileTool, LsTool, ReadFileTool, WriteFileTool
+from linch.tools.base import ToolContext
 
 
 def _ctx(backend) -> ToolContext:  # type: ignore[no-untyped-def]

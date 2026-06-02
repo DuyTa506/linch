@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from agent_kit.tools import Citation, ToolResult
+from linch.tools import Citation, ToolResult
 
 
 def test_tool_result_v2_supports_citations_metadata_and_truncation() -> None:

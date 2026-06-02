@@ -26,8 +26,8 @@ import pytest
 
 async def test_session_store_concurrent_appends(tmp_path) -> None:
     """50 concurrent append_messages calls → unique, contiguous seq values."""
-    from agent_kit.sessions import SqliteSessionStore
-    from agent_kit.types import Message, TextBlock
+    from linch.sessions import SqliteSessionStore
+    from linch.types import Message, TextBlock
 
     store = SqliteSessionStore(tmp_path / "sessions.db")
     rec = await store.create()
@@ -44,8 +44,8 @@ async def test_session_store_concurrent_appends(tmp_path) -> None:
 
 async def test_memory_store_concurrent_upserts(tmp_path) -> None:
     """50 concurrent upserts to different IDs → all 50 items persisted."""
-    from agent_kit.memory.sqlite import SqliteMemoryStore
-    from agent_kit.memory.types import MemoryItem
+    from linch.memory.sqlite import SqliteMemoryStore
+    from linch.memory.types import MemoryItem
 
     async with SqliteMemoryStore(tmp_path / "mem.db") as store:
         items = [
@@ -62,7 +62,7 @@ async def test_memory_store_concurrent_upserts(tmp_path) -> None:
 
 async def test_filesystem_backend_concurrent_writes(tmp_path) -> None:
     """50 concurrent write() calls → all 50 paths exist."""
-    from agent_kit.filesystem.sqlite import SqliteFileBackend
+    from linch.filesystem.sqlite import SqliteFileBackend
 
     async with SqliteFileBackend(tmp_path / "fs.db") as fb:
         paths = [f"/file-{i}.txt" for i in range(50)]
@@ -80,8 +80,8 @@ async def test_filesystem_backend_concurrent_writes(tmp_path) -> None:
 
 async def test_multiple_sessions_concurrent_writes(tmp_path) -> None:
     """10 sessions writing messages concurrently share one store without loss."""
-    from agent_kit.sessions import SqliteSessionStore
-    from agent_kit.types import Message, TextBlock
+    from linch.sessions import SqliteSessionStore
+    from linch.types import Message, TextBlock
 
     store = SqliteSessionStore(tmp_path / "sessions.db")
     msg = Message(role="user", content=[TextBlock(text="tick")])
@@ -116,8 +116,8 @@ async def test_store_writes_do_not_block_event_loop(tmp_path) -> None:
 
     Threshold is deliberately generous (500 ms) to avoid CI flakiness.
     """
-    from agent_kit.sessions import SqliteSessionStore
-    from agent_kit.types import Message, TextBlock
+    from linch.sessions import SqliteSessionStore
+    from linch.types import Message, TextBlock
 
     store = SqliteSessionStore(tmp_path / "sessions.db")
     rec = await store.create()
@@ -156,7 +156,7 @@ async def test_store_writes_do_not_block_event_loop(tmp_path) -> None:
 
 async def test_session_store_async_close(tmp_path) -> None:
     """SqliteSessionStore.close() is awaitable and idempotent."""
-    from agent_kit.sessions import SqliteSessionStore
+    from linch.sessions import SqliteSessionStore
 
     store = SqliteSessionStore(tmp_path / "sessions.db")
     await store.create()
@@ -166,8 +166,8 @@ async def test_session_store_async_close(tmp_path) -> None:
 
 async def test_memory_store_sync_close(tmp_path) -> None:
     """SqliteMemoryStore supports both sync and async context managers."""
-    from agent_kit.memory.sqlite import SqliteMemoryStore
-    from agent_kit.memory.types import MemoryItem
+    from linch.memory.sqlite import SqliteMemoryStore
+    from linch.memory.types import MemoryItem
 
     # sync with
     with SqliteMemoryStore(tmp_path / "mem.db") as store:
@@ -184,7 +184,7 @@ async def test_memory_store_sync_close(tmp_path) -> None:
 
 async def test_filesystem_backend_sync_close(tmp_path) -> None:
     """SqliteFileBackend supports both sync and async context managers."""
-    from agent_kit.filesystem.sqlite import SqliteFileBackend
+    from linch.filesystem.sqlite import SqliteFileBackend
 
     # sync with
     with SqliteFileBackend(tmp_path / "fs.db") as fb:
@@ -202,7 +202,7 @@ async def test_filesystem_backend_sync_close(tmp_path) -> None:
 
 async def test_executor_surfaces_bad_path_error() -> None:
     """run() raises if the SQLite path is unwritable (e.g. a directory)."""
-    from agent_kit.storage._executor import SqliteExecutor
+    from linch.storage._executor import SqliteExecutor
 
     with pytest.raises((OSError, RuntimeError, Exception)):  # noqa: B017
         exec_ = SqliteExecutor("/", init=lambda _: None)  # root dir, not writable

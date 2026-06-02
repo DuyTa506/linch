@@ -28,10 +28,10 @@ needs_key = pytest.mark.skipif(not os.environ.get("OPENAI_API_KEY"), reason=SKIP
 @pytest.mark.asyncio
 async def test_live_basic_completion():
     """The agent returns a text response for a simple prompt."""
-    from agent_kit import Agent
-    from agent_kit.config import FeatureFlags, SystemPromptConfig
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools.registry import empty_tools
+    from linch import Agent
+    from linch.config import FeatureFlags, SystemPromptConfig
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import empty_tools
 
     agent = Agent(
         model=MODEL,
@@ -62,11 +62,11 @@ async def test_live_basic_completion():
 @pytest.mark.asyncio
 async def test_live_structured_output():
     """OutputSchema produces a parsed dict in ResultEvent.structured_output."""
-    from agent_kit import Agent
-    from agent_kit.config import FeatureFlags, SystemPromptConfig
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools.registry import empty_tools
-    from agent_kit.types import OutputSchema
+    from linch import Agent
+    from linch.config import FeatureFlags, SystemPromptConfig
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import empty_tools
+    from linch.types import OutputSchema
 
     schema = OutputSchema(
         name="capital_info",
@@ -125,12 +125,12 @@ async def test_live_structured_output():
 @pytest.mark.asyncio
 async def test_live_final_tool_sql():
     """final_tool_name returns structured output without executing the tool."""
-    from agent_kit import Agent
-    from agent_kit.config import FeatureFlags, SystemPromptConfig
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools.base import ToolContext, ToolResult
-    from agent_kit.tools.registry import empty_tools
-    from agent_kit.types import OutputSchema
+    from linch import Agent
+    from linch.config import FeatureFlags, SystemPromptConfig
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.base import ToolContext, ToolResult
+    from linch.tools.registry import empty_tools
+    from linch.types import OutputSchema
 
     sql_schema = OutputSchema(
         name="emit_sql",
@@ -219,11 +219,11 @@ async def test_live_final_tool_sql():
 @pytest.mark.asyncio
 async def test_live_tool_deps():
     """ctx.deps is available in tools and carries app-level state."""
-    from agent_kit import Agent
-    from agent_kit.config import FeatureFlags, SystemPromptConfig
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools.base import ToolContext, ToolResult
-    from agent_kit.tools.registry import empty_tools
+    from linch import Agent
+    from linch.config import FeatureFlags, SystemPromptConfig
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.base import ToolContext, ToolResult
+    from linch.tools.registry import empty_tools
 
     # In-memory knowledge base injected via deps
     kb = {
@@ -304,12 +304,12 @@ async def test_live_tool_deps():
 @pytest.mark.asyncio
 async def test_live_context_injection():
     """ContextBuilder injects retrieved docs into provider requests before each turn."""
-    from agent_kit import Agent
-    from agent_kit.config import FeatureFlags, SystemPromptConfig
-    from agent_kit.context import ContextBuildResult
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools.registry import empty_tools
-    from agent_kit.types import Message, TextBlock
+    from linch import Agent
+    from linch.config import FeatureFlags, SystemPromptConfig
+    from linch.context import ContextBuildResult
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import empty_tools
+    from linch.types import Message, TextBlock
 
     TAG = "[[docs]]"
     builder_called_with_deps = []
@@ -392,10 +392,10 @@ async def test_live_context_injection():
 @pytest.mark.asyncio
 async def test_live_custom_system_prompt():
     """replace_defaults=True fully replaces the SWE identity with a custom prompt."""
-    from agent_kit import Agent
-    from agent_kit.config import FeatureFlags, SystemPromptConfig
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools.registry import empty_tools
+    from linch import Agent
+    from linch.config import FeatureFlags, SystemPromptConfig
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import empty_tools
 
     agent = Agent(
         model=MODEL,
@@ -436,11 +436,11 @@ async def test_live_custom_system_prompt():
 @pytest.mark.asyncio
 async def test_live_run_options_deps_override():
     """RunOptions.deps overrides Agent.deps for a specific run."""
-    from agent_kit import Agent, RunOptions
-    from agent_kit.config import FeatureFlags, SystemPromptConfig
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools.base import ToolContext, ToolResult
-    from agent_kit.tools.registry import empty_tools
+    from linch import Agent, RunOptions
+    from linch.config import FeatureFlags, SystemPromptConfig
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.base import ToolContext, ToolResult
+    from linch.tools.registry import empty_tools
 
     # Two different "databases" we'll swap between runs
     db_a = {"name": "Database A", "record_count": 1000}

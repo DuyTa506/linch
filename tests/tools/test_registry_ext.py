@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from agent_kit.tools.base import ToolContext, ToolResult, ToolScope
-from agent_kit.tools.registry import ToolRegistry, default_tools, empty_tools, tools_from_defaults
+from linch.tools.base import ToolContext, ToolResult, ToolScope
+from linch.tools.registry import ToolRegistry, default_tools, empty_tools, tools_from_defaults
 
 # ── Minimal fake tool ───────────────────────────────────────────────────────
 

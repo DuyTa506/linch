@@ -51,8 +51,8 @@ source files or documentation.
 import asyncio
 import os
 
-from agent_kit import Agent
-from agent_kit.sessions import InMemorySessionStore
+from linch import Agent
+from linch.sessions import InMemorySessionStore
 
 agent = Agent(
     model="gpt-5",
@@ -99,17 +99,17 @@ python3 examples/tools/filesystem_offload.py
 ## Public API
 
 - `linch`: `Agent`, `Session`, events, types, errors, `DetailedCompaction`, `RetryOptions`, `ToolTimeoutError`, `empty_tools`, `tools_from_defaults`
-- `agent_kit.config`: `FeatureFlags`, `SystemPromptConfig`, `SystemPromptSection`
-- `agent_kit.context`: `ContextBuilder`, `ContextBuildResult`, `ContextBudget`
-- `agent_kit.skills`: built-in and project `SKILL.md` workflows, including `verify`
-- `agent_kit.memory`: `MemoryStore`, `MemoryItem`, `MemoryContextBuilder`, `MemorySearchTool`, `MemoryUpsertTool`, reference stores
-- `agent_kit.types`: `OutputSchema`, `ToolChoice`, `Message`, `ProviderRequest`
-- `agent_kit.providers`: `OpenAIResponsesProvider`, `OpenAIChatCompletionsProvider`, `AnthropicProvider`
-- `agent_kit.tools`: duck-typed tool protocol, `ResourceAccess`, `Citation`, `ToolResult`, `ToolRegistry`, built-in tools
-- `agent_kit.sessions`: `InMemorySessionStore`, `SqliteSessionStore`
-- `agent_kit.filesystem`: `FileBackend`, `StateFileBackend`, `DiskFileBackend`, `SqliteFileBackend`, `CompositeFileBackend`, `OffloadConfig`, `filesystem_tools`
-- `agent_kit.permissions`: `PermissionEngine`, `ToolRule`, `PathRule`, `BashRule`
-- `agent_kit.recipes`: scaffold factories (`rag_agent`, `sql_agent`, `doc_agent`, `build_agent`)
+- `linch.config`: `FeatureFlags`, `SystemPromptConfig`, `SystemPromptSection`
+- `linch.context`: `ContextBuilder`, `ContextBuildResult`, `ContextBudget`
+- `linch.skills`: built-in and project `SKILL.md` workflows, including `verify`
+- `linch.memory`: `MemoryStore`, `MemoryItem`, `MemoryContextBuilder`, `MemorySearchTool`, `MemoryUpsertTool`, reference stores
+- `linch.types`: `OutputSchema`, `ToolChoice`, `Message`, `ProviderRequest`
+- `linch.providers`: `OpenAIResponsesProvider`, `OpenAIChatCompletionsProvider`, `AnthropicProvider`
+- `linch.tools`: duck-typed tool protocol, `ResourceAccess`, `Citation`, `ToolResult`, `ToolRegistry`, built-in tools
+- `linch.sessions`: `InMemorySessionStore`, `SqliteSessionStore`
+- `linch.filesystem`: `FileBackend`, `StateFileBackend`, `DiskFileBackend`, `SqliteFileBackend`, `CompositeFileBackend`, `OffloadConfig`, `filesystem_tools`
+- `linch.permissions`: `PermissionEngine`, `ToolRule`, `PathRule`, `BashRule`
+- `linch.recipes`: scaffold factories (`rag_agent`, `sql_agent`, `doc_agent`, `build_agent`)
 
 ## Documentation
 

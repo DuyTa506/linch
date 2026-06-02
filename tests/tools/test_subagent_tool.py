@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from agent_kit.subagents.registry import AgentRegistry
-from agent_kit.tools.subagent import SubagentTool
+from linch.subagents.registry import AgentRegistry
+from linch.tools.subagent import SubagentTool
 
 
 def test_subagent_tool_description_lists_verification_and_delegation_rules() -> None:

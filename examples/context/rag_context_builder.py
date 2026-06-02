@@ -14,11 +14,11 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from agent_kit import Agent, ContextBudget, ContextBuildResult, ContextBuildTurn
-from agent_kit.context import apply_context_budget
-from agent_kit.sessions import InMemorySessionStore
-from agent_kit.tools.registry import empty_tools
-from agent_kit.types import Message, TextBlock
+from linch import Agent, ContextBudget, ContextBuildResult, ContextBuildTurn
+from linch.context import apply_context_budget
+from linch.sessions import InMemorySessionStore
+from linch.tools.registry import empty_tools
+from linch.types import Message, TextBlock
 
 ROOT = Path(__file__).resolve().parents[1]
 MODEL = "gpt-5-nano-2025-08-07"

@@ -32,7 +32,7 @@ pyright
 
 ## Architecture
 
-AgentKit is a Python SDK for embedding a software engineering agent loop in applications. It is async-first, event-driven, and provider-agnostic.
+Linch is a Python SDK for embedding a software engineering agent loop in applications. It is async-first, event-driven, and provider-agnostic.
 
 ### Core flow
 
@@ -87,7 +87,7 @@ Use `ContextBuilder.build(turn) -> ContextBuildResult` for RAG, memory recall, e
 
 ### Virtual Filesystem (`filesystem/`)
 
-`FileBackend` is a duck-typed protocol for a virtual, session-scoped filesystem that is separate from the real `cwd` on disk. Four implementations ship: `StateFileBackend` (in-memory, per-session default), `DiskFileBackend` (real files sandboxed under a root, default `.agent_kit/offload`), `SqliteFileBackend` (persistent across sessions), and `CompositeFileBackend` (routes paths by prefix, e.g. `/memories/` → `SqliteFileBackend`).
+`FileBackend` is a duck-typed protocol for a virtual, session-scoped filesystem that is separate from the real `cwd` on disk. Four implementations ship: `StateFileBackend` (in-memory, per-session default), `DiskFileBackend` (real files sandboxed under a root, default `.linch/offload`), `SqliteFileBackend` (persistent across sessions), and `CompositeFileBackend` (routes paths by prefix, e.g. `/memories/` → `SqliteFileBackend`).
 
 **Auto-offload**: `Agent(result_offload=OffloadConfig())` enables automatic offloading of tool results that exceed `threshold_tokens` (default 20,000). The scheduler calls `maybe_offload()` at the single result chokepoint in `_execute_one` (`scheduler.py`). The full payload is written to the backend; `ToolResult.content` is replaced with a preview + path hint before the `ToolResultBlock` enters `provider_view`. The full `ToolResult` still travels on `ToolCallEndEvent.tool_result` for observers. `maybe_offload` never raises — a backend write failure silently returns the original result.
 
@@ -105,13 +105,13 @@ Use `ContextBuilder.build(turn) -> ContextBuildResult` for RAG, memory recall, e
 
 ### MCP Integration (`mcp/`)
 
-`connect_mcp_servers()` connects to external MCP servers (stdio or HTTP) and returns an `McpConnection` that exposes MCP tools as AgentKit tools. MCP tool names are normalized via `mcp/naming.py`.
+`connect_mcp_servers()` connects to external MCP servers (stdio or HTTP) and returns an `McpConnection` that exposes MCP tools as Linch tools. MCP tool names are normalized via `mcp/naming.py`.
 
 ### Skills & Subagents (`skills/`, `subagents/`)
 
-**Skills** are slash-commands defined as `SKILL.md` files (YAML frontmatter + markdown body) loaded from `.agent_kit/skills/*/SKILL.md`. The skill system supports argument substitution and system-reminder injection.
+**Skills** are slash-commands defined as `SKILL.md` files (YAML frontmatter + markdown body) loaded from `.linch/skills/*/SKILL.md`. The skill system supports argument substitution and system-reminder injection.
 
-**Subagents** are specialized agent roles defined in `.agent_kit/agents.yaml`. The subagent registry resolves agent definitions; `runner.py` executes them with their own tool overlays and prompts.
+**Subagents** are specialized agent roles defined in `.linch/agents.yaml`. The subagent registry resolves agent definitions; `runner.py` executes them with their own tool overlays and prompts.
 
 ### Compaction (`compaction.py`)
 
@@ -123,7 +123,7 @@ When the provider's context window approaches its limit, the compaction strategy
 
 `ObserverDispatcher` fans out hook calls to a list of observers, awaits async results, and swallows exceptions — a faulty observer never crashes a run. Zero-overhead when no observers are attached.
 
-Stdlib reference observers: `LoggingObserver` (one log line per span) and `SpanCollector` (in-memory span list for tests). `OpenTelemetryObserver` is the production integration point, behind the optional `[otel]` extra (lazily imported, `pip install 'agent-kit[otel]'`). Langfuse, LangSmith, Honeycomb, and Datadog are all reached via the OTel adapter — no vendor-specific code in core.
+Stdlib reference observers: `LoggingObserver` (one log line per span) and `SpanCollector` (in-memory span list for tests). `OpenTelemetryObserver` is the production integration point, behind the optional `[otel]` extra (lazily imported, `pip install 'linch[otel]'`). Langfuse, LangSmith, Honeycomb, and Datadog are all reached via the OTel adapter — no vendor-specific code in core.
 
 Observers are attached via `Agent(observers=[...])` and accessed as `agent.observers`.
 
@@ -136,4 +136,4 @@ Observers are attached via `Agent(observers=[...])` and accessed as `agent.obser
 - No vendor observability stack in core — observability backends (Langfuse, LangSmith, etc.) are reached via the OpenTelemetry seam, never as direct dependencies.
 - Tool timeouts default to `None` (off) and use `asyncio.wait_for` + `asyncio.TimeoutError` (not the 3.11+ unified builtin) to stay Python 3.10 compatible. Timeouts convert to `is_error=True` results; they never raise out of `_execute_one` so parallel-lane siblings are unaffected.
 - Tool retry is side-effect gated: read-scope tools only, or tools that explicitly set `retryable = True`. Write/exec tools are never retried by default.
-- Virtual filesystem is opt-in (`Agent(filesystem=...)` or `Agent(result_offload=...)`); zero overhead when unset. `DiskFileBackend` defaults to `.agent_kit/offload` (gitignored). `maybe_offload` is a no-op on error results and filesystem-tool results. A backend write failure silently returns the original result — storage errors never crash a run.
+- Virtual filesystem is opt-in (`Agent(filesystem=...)` or `Agent(result_offload=...)`); zero overhead when unset. `DiskFileBackend` defaults to `.linch/offload` (gitignored). `maybe_offload` is a no-op on error results and filesystem-tool results. A backend write failure silently returns the original result — storage errors never crash a run.

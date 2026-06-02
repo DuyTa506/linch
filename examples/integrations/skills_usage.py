@@ -4,7 +4,7 @@ Run:
     python3 examples/integrations/skills_usage.py
 
 Demonstrates:
-  1. Creating a project skill at .agent_kit/skills/<name>/SKILL.md
+  1. Creating a project skill at .linch/skills/<name>/SKILL.md
   2. Loading skills through Agent(features=FeatureFlags(skills=True))
   3. Invoking the skill through the built-in Skill tool
   4. Observing skill lifecycle events
@@ -20,8 +20,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from agent_kit import Agent, BaseProvider, FeatureFlags, Usage
-from agent_kit.sessions import InMemorySessionStore
+from linch import Agent, BaseProvider, FeatureFlags, Usage
+from linch.sessions import InMemorySessionStore
 
 
 SKILL_MD = """---
@@ -79,7 +79,7 @@ class FakeProvider(BaseProvider):
 
 
 def write_project_skill(root: Path) -> None:
-    skill_dir = root / ".agent_kit" / "skills" / "stakeholder-update"
+    skill_dir = root / ".linch" / "skills" / "stakeholder-update"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(SKILL_MD, encoding="utf-8")
 

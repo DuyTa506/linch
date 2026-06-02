@@ -1,6 +1,6 @@
 """Integration tests for the recipes package — proves the primitives compose.
 
-NOTE: agent_kit imports inside test functions so tests are robust to
+NOTE: linch imports inside test functions so tests are robust to
 test_hardening.py's sys.modules reset.
 """
 
@@ -14,8 +14,8 @@ import pytest
 
 
 def _text_provider(text: str):
-    from agent_kit.providers.base import BaseProvider
-    from agent_kit.types import Usage
+    from linch.providers.base import BaseProvider
+    from linch.types import Usage
 
     class _P(BaseProvider):
         id = "fake"
@@ -39,8 +39,8 @@ def _text_provider(text: str):
 
 
 def _tool_use_provider(tool_name: str, tool_input: dict):
-    from agent_kit.providers.base import BaseProvider
-    from agent_kit.types import Usage
+    from linch.providers.base import BaseProvider
+    from linch.types import Usage
 
     class _P(BaseProvider):
         id = "fake"
@@ -84,7 +84,7 @@ def _tool_use_provider(tool_name: str, tool_input: dict):
 
 
 def test_rag_agent_has_no_swe_tools():
-    from agent_kit.recipes.rag import rag_agent
+    from linch.recipes.rag import rag_agent
 
     agent = rag_agent(model="gpt-5", provider=_text_provider("{}"))
     tool_names = {t.name for t in agent.tools.list()}
@@ -93,7 +93,7 @@ def test_rag_agent_has_no_swe_tools():
 
 
 def test_rag_agent_no_swe_protocol_in_system():
-    from agent_kit.recipes.rag import rag_agent
+    from linch.recipes.rag import rag_agent
 
     agent = rag_agent(model="gpt-5", provider=_text_provider("{}"))
     combined = "\n".join(b.text for b in agent.system_blocks)
@@ -103,8 +103,8 @@ def test_rag_agent_no_swe_protocol_in_system():
 
 @pytest.mark.asyncio
 async def test_rag_agent_structured_output():
-    from agent_kit.recipes.rag import rag_agent
-    from agent_kit.sessions import InMemorySessionStore
+    from linch.recipes.rag import rag_agent
+    from linch.sessions import InMemorySessionStore
 
     payload = {"answer": "42 days", "citations": ["doc1"]}
     provider = _text_provider(json.dumps(payload))
@@ -128,8 +128,8 @@ _SQL_OUTPUT = {"sql": "SELECT COUNT(*) FROM users WHERE age > 30", "rationale": 
 
 @pytest.mark.asyncio
 async def test_sql_agent_terminates_on_emit_sql():
-    from agent_kit.recipes.text_to_sql import sql_agent
-    from agent_kit.sessions import InMemorySessionStore
+    from linch.recipes.text_to_sql import sql_agent
+    from linch.sessions import InMemorySessionStore
 
     provider = _tool_use_provider("emit_sql", _SQL_OUTPUT)
     agent = sql_agent(
@@ -150,7 +150,7 @@ async def test_sql_agent_terminates_on_emit_sql():
 
 
 def test_sql_agent_system_contains_schema():
-    from agent_kit.recipes.text_to_sql import sql_agent
+    from linch.recipes.text_to_sql import sql_agent
 
     agent = sql_agent(model="gpt-5", schema=_SCHEMA, provider=_text_provider("{}"))
     combined = "\n".join(b.text for b in agent.system_blocks)
@@ -159,7 +159,7 @@ def test_sql_agent_system_contains_schema():
 
 
 def test_sql_agent_has_emit_sql_tool():
-    from agent_kit.recipes.text_to_sql import sql_agent
+    from linch.recipes.text_to_sql import sql_agent
 
     agent = sql_agent(model="gpt-5", schema=_SCHEMA, provider=_text_provider("{}"))
     assert agent.tools.get("emit_sql") is not None
@@ -170,9 +170,9 @@ def test_sql_agent_has_emit_sql_tool():
 
 @pytest.mark.asyncio
 async def test_doc_agent_structured_output():
-    from agent_kit import RunOptions
-    from agent_kit.recipes.doc_analysis import doc_agent
-    from agent_kit.sessions import InMemorySessionStore
+    from linch import RunOptions
+    from linch.recipes.doc_analysis import doc_agent
+    from linch.sessions import InMemorySessionStore
 
     payload = {"entities": [{"type": "date", "value": "2024-01-01"}], "summary": "An invoice."}
     provider = _text_provider(json.dumps(payload))
@@ -192,7 +192,7 @@ async def test_doc_agent_structured_output():
 
 
 def test_doc_agent_no_swe_protocol():
-    from agent_kit.recipes.doc_analysis import doc_agent
+    from linch.recipes.doc_analysis import doc_agent
 
     agent = doc_agent(model="gpt-5", provider=_text_provider("{}"))
     combined = "\n".join(b.text for b in agent.system_blocks)
@@ -204,9 +204,9 @@ def test_doc_agent_no_swe_protocol():
 
 
 def test_build_agent_custom_domain():
-    from agent_kit.recipes import build_agent
-    from agent_kit.tools.base import ToolContext, ToolResult
-    from agent_kit.tools.registry import empty_tools
+    from linch.recipes import build_agent
+    from linch.tools.base import ToolContext, ToolResult
+    from linch.tools.registry import empty_tools
 
     class MyTool:
         name = "Search"

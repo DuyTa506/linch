@@ -25,14 +25,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from agent_kit import Agent
-from agent_kit.abort import AbortContext
-from agent_kit.events import ToolCallEndEvent, ToolCallStartEvent
-from agent_kit.permissions import PermissionEngine
-from agent_kit.scheduler import execute_tool_calls
-from agent_kit.sessions import InMemorySessionStore
-from agent_kit.tools import ResourceAccess, ToolContext, ToolRegistry, ToolResult
-from agent_kit.types import ToolUseBlock
+from linch import Agent
+from linch.abort import AbortContext
+from linch.events import ToolCallEndEvent, ToolCallStartEvent
+from linch.permissions import PermissionEngine
+from linch.scheduler import execute_tool_calls
+from linch.sessions import InMemorySessionStore
+from linch.tools import ResourceAccess, ToolContext, ToolRegistry, ToolResult
+from linch.types import ToolUseBlock
 
 ROOT = Path(__file__).resolve().parents[1]
 MODEL = "gpt-5-nano-2025-08-07"

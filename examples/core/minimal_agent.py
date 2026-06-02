@@ -1,7 +1,7 @@
 import asyncio
 
-from agent_kit import Agent
-from agent_kit.sessions import InMemorySessionStore
+from linch import Agent
+from linch.sessions import InMemorySessionStore
 
 
 async def main() -> None:

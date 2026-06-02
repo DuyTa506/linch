@@ -13,8 +13,8 @@ Demonstrates:
   7. Persona pattern — deterministic character with no SWE bleed
   8. Multi-tenant — same Agent, different system per session
 
-AgentKit's default system blocks (in order):
-  [0] identity  — "You are AgentKit, an autonomous SWE assistant …"
+Linch's default system blocks (in order):
+  [0] identity  — "You are Linch, an autonomous SWE assistant …"
   [1] protocol  — "Tool use protocol: Read before Edit …" (only if SWE tools present)
   [2] env       — "Environment: cwd, OS, tools available …"
   [3] append    — your system_prompt / SystemPromptConfig.append (if set)
@@ -27,11 +27,11 @@ from __future__ import annotations
 import asyncio
 import os
 
-from agent_kit import Agent
-from agent_kit.config import FeatureFlags, SystemPromptConfig
-from agent_kit.sessions import InMemorySessionStore
-from agent_kit.tools.registry import empty_tools
-from agent_kit.types import SystemBlock
+from linch import Agent
+from linch.config import FeatureFlags, SystemPromptConfig
+from linch.sessions import InMemorySessionStore
+from linch.tools.registry import empty_tools
+from linch.types import SystemBlock
 
 API_KEY = os.environ.get("OPENAI_API_KEY", "")
 MODEL = "gpt-5-nano-2025-08-07"
@@ -74,7 +74,7 @@ def agent_append_typed() -> Agent:
 
 # ── 3. replace_defaults=True — full control ───────────────────────────────────
 #
-# Drops the "AgentKit SWE assistant" identity and tool protocol blocks.
+# Drops the "Linch SWE assistant" identity and tool protocol blocks.
 # Your append text IS the agent's personality. The env block (cwd, tools) stays.
 # Use this for any non-SWE domain: customer support, data analysis, coding tutor…
 
@@ -156,7 +156,7 @@ async def multi_tenant_example(api_key: str) -> None:
 
 
 def show_tool_aware_protocol() -> None:
-    from agent_kit.tools.registry import tools_from_defaults as _tfd
+    from linch.tools.registry import tools_from_defaults as _tfd
 
     # Use a base config without 'tools' so we can supply it per agent
     _base = {k: v for k, v in BASE.items() if k != "tools"}
@@ -190,7 +190,7 @@ def agent_persona(name: str, role: str, style: str) -> Agent:
     persona = (
         f"You are {name}, {role}.\n\n"
         f"Style: {style}\n\n"
-        f"Important: Never break character. Never mention AgentKit, OpenAI, or AI."
+        f"Important: Never break character. Never mention Linch, OpenAI, or AI."
     )
     return Agent(
         **BASE,

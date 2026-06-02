@@ -7,13 +7,13 @@ from typing import Any
 
 import pytest
 
-from agent_kit import Agent
-from agent_kit.abort import AbortContext
-from agent_kit.events import ToolCallEndEvent
-from agent_kit.permissions import PermissionEngine
-from agent_kit.providers import BaseProvider
-from agent_kit.scheduler import execute_tool_calls
-from agent_kit.tools import (
+from linch import Agent
+from linch.abort import AbortContext
+from linch.events import ToolCallEndEvent
+from linch.permissions import PermissionEngine
+from linch.providers import BaseProvider
+from linch.scheduler import execute_tool_calls
+from linch.tools import (
     Citation,
     ResourceAccess,
     ToolContext,
@@ -21,7 +21,7 @@ from agent_kit.tools import (
     ToolResult,
     ToolScope,
 )
-from agent_kit.types import ToolUseBlock
+from linch.types import ToolUseBlock
 
 
 class Recorder:

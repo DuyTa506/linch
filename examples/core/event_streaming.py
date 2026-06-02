@@ -20,12 +20,12 @@ import json
 import os
 import time
 
-from agent_kit import Agent
-from agent_kit.config import FeatureFlags, SystemPromptConfig
-from agent_kit.events import event_to_dict
-from agent_kit.sessions import InMemorySessionStore
-from agent_kit.tools.registry import empty_tools, tools_from_defaults
-from agent_kit.types import Usage
+from linch import Agent
+from linch.config import FeatureFlags, SystemPromptConfig
+from linch.events import event_to_dict
+from linch.sessions import InMemorySessionStore
+from linch.tools.registry import empty_tools, tools_from_defaults
+from linch.types import Usage
 
 API_KEY = os.environ.get("OPENAI_API_KEY", "")
 MODEL = "gpt-5-nano-2025-08-07"

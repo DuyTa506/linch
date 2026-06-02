@@ -20,13 +20,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from agent_kit import RetryOptions
-from agent_kit.abort import AbortContext
-from agent_kit.events import ToolCallEndEvent, ToolCallStartEvent
-from agent_kit.permissions import PermissionEngine
-from agent_kit.scheduler import execute_tool_calls
-from agent_kit.tools import ToolContext, ToolRegistry, ToolResult
-from agent_kit.types import ToolUseBlock
+from linch import RetryOptions
+from linch.abort import AbortContext
+from linch.events import ToolCallEndEvent, ToolCallStartEvent
+from linch.permissions import PermissionEngine
+from linch.scheduler import execute_tool_calls
+from linch.tools import ToolContext, ToolRegistry, ToolResult
+from linch.types import ToolUseBlock
 
 ROOT = Path(__file__).resolve().parents[2]
 

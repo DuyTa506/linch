@@ -20,7 +20,7 @@ import re
 from dataclasses import replace
 from typing import Any
 
-from agent_kit import (
+from linch import (
     Agent,
     BaseProvider,
     MiddlewareContext,
@@ -30,8 +30,8 @@ from agent_kit import (
     ToolResult,
     Usage,
 )
-from agent_kit.sessions import InMemorySessionStore
-from agent_kit.tools.registry import empty_tools
+from linch.sessions import InMemorySessionStore
+from linch.tools.registry import empty_tools
 
 
 class SearchDocsTool:

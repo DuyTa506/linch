@@ -20,7 +20,7 @@ def _make_fake_tool(name: str):
             return raw
 
         async def execute(self, input, ctx):
-            from agent_kit.tools.base import ToolResult
+            from linch.tools.base import ToolResult
 
             return ToolResult(content="ok", summary=self.name)
 
@@ -36,12 +36,12 @@ def FakeTool(name):  # type: ignore[misc]
 
 
 def _make_agent(tools=None, system_prompt_config=None, system_prompt=None, **kw):
-    # All agent_kit imports inside the function so tests survive test_hardening's sys.modules reset
-    from agent_kit import Agent
-    from agent_kit.providers.base import BaseProvider
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools.registry import empty_tools
-    from agent_kit.types import Usage
+    # All linch imports inside the function so tests survive test_hardening's sys.modules reset
+    from linch import Agent
+    from linch.providers.base import BaseProvider
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import empty_tools
+    from linch.types import Usage
 
     class FakeProvider(BaseProvider):
         id = "fake"
@@ -79,7 +79,7 @@ def _block_texts(agent):
 
 
 def test_retrieve_only_agent_no_swe_protocol():
-    from agent_kit.tools.registry import empty_tools
+    from linch.tools.registry import empty_tools
 
     agent = _make_agent(tools=empty_tools(FakeTool("RetrieveDocs")))
     combined = "\n".join(_block_texts(agent))
@@ -89,7 +89,7 @@ def test_retrieve_only_agent_no_swe_protocol():
 
 
 def test_retrieve_only_agent_has_generic_parallel_hint():
-    from agent_kit.tools.registry import empty_tools
+    from linch.tools.registry import empty_tools
 
     agent = _make_agent(tools=empty_tools(FakeTool("RetrieveDocs")))
     combined = "\n".join(_block_texts(agent))
@@ -97,7 +97,7 @@ def test_retrieve_only_agent_has_generic_parallel_hint():
 
 
 def test_default_swe_toolset_protocol_parity():
-    from agent_kit.tools.registry import tools_from_defaults
+    from linch.tools.registry import tools_from_defaults
 
     agent = _make_agent(tools=tools_from_defaults())
     combined = "\n".join(_block_texts(agent))
@@ -109,8 +109,8 @@ def test_default_swe_toolset_protocol_parity():
 
 
 def test_bash_only_no_edit_clause():
-    from agent_kit.tools.builtin import BashTool
-    from agent_kit.tools.registry import empty_tools
+    from linch.tools.builtin import BashTool
+    from linch.tools.registry import empty_tools
 
     r = empty_tools(BashTool())
     agent = _make_agent(tools=r)
@@ -123,7 +123,7 @@ def test_bash_only_no_edit_clause():
 
 
 def test_replace_defaults_omits_identity_and_protocol():
-    from agent_kit.config import SystemPromptConfig
+    from linch.config import SystemPromptConfig
 
     cfg = SystemPromptConfig(replace_defaults=True, append="You are a SQL assistant.")
     agent = _make_agent(system_prompt_config=cfg)
@@ -134,18 +134,18 @@ def test_replace_defaults_omits_identity_and_protocol():
 
 
 def test_replace_defaults_env_block_still_present():
-    from agent_kit.config import SystemPromptConfig
+    from linch.config import SystemPromptConfig
 
     cfg = SystemPromptConfig(replace_defaults=True)
     agent = _make_agent(system_prompt_config=cfg)
     combined = "\n".join(_block_texts(agent))
     assert "Working directory" in combined
-    assert "AgentKit version" in combined
+    assert "Linch version" in combined
 
 
 def test_custom_blocks_prepended_in_default_mode():
-    from agent_kit.config import SystemPromptConfig
-    from agent_kit.types import SystemBlock
+    from linch.config import SystemPromptConfig
+    from linch.types import SystemBlock
 
     custom = SystemBlock(text="CUSTOM BLOCK", cacheable=True)
     cfg = SystemPromptConfig(blocks=[custom], replace_defaults=False)
@@ -157,7 +157,7 @@ def test_custom_blocks_prepended_in_default_mode():
 
 
 def test_system_prompt_sections_render_by_placement():
-    from agent_kit.config import SystemPromptConfig, SystemPromptSection
+    from linch.config import SystemPromptConfig, SystemPromptSection
 
     cfg = SystemPromptConfig(
         sections=[
@@ -195,7 +195,7 @@ def test_system_prompt_sections_render_by_placement():
 
 
 def test_system_prompt_sections_replace_defaults_skip_identity():
-    from agent_kit.config import SystemPromptConfig, SystemPromptSection
+    from linch.config import SystemPromptConfig, SystemPromptSection
 
     cfg = SystemPromptConfig(
         replace_defaults=True,
@@ -216,8 +216,8 @@ def test_system_prompt_sections_replace_defaults_skip_identity():
 
 
 def test_system_prompt_sections_invalid_placement_raises():
-    from agent_kit.config import SystemPromptConfig, SystemPromptSection
-    from agent_kit.errors import ConfigError
+    from linch.config import SystemPromptConfig, SystemPromptSection
+    from linch.errors import ConfigError
 
     cfg = SystemPromptConfig(
         sections=[
@@ -241,7 +241,7 @@ def test_system_prompt_appended():
 
 
 def test_system_prompt_config_append_overrides_system_prompt():
-    from agent_kit.config import SystemPromptConfig
+    from linch.config import SystemPromptConfig
 
     cfg = SystemPromptConfig(append="From config.")
     agent = _make_agent(system_prompt_config=cfg, system_prompt="From kwarg.")
@@ -266,7 +266,7 @@ def test_refresh_invalidates_cache():
 
 @pytest.mark.asyncio
 async def test_feature_flags_disable_skills_connect():
-    from agent_kit.config import FeatureFlags
+    from linch.config import FeatureFlags
 
     agent = _make_agent()
     agent.features = FeatureFlags(skills=False, subagents=False, mcp=False)

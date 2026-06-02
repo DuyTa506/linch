@@ -21,7 +21,7 @@ import os
 from collections import defaultdict
 from pathlib import Path
 
-from agent_kit.observability import (
+from linch.observability import (
     BaseObserver,
     LoggingObserver,
     ProviderCallResult,
@@ -102,10 +102,10 @@ async def main() -> None:
         print("OPENAI_API_KEY not set — set it to run the live demo.")
         return
 
-    from agent_kit import Agent
-    from agent_kit.config import FeatureFlags
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools.registry import tools_from_defaults
+    from linch import Agent
+    from linch.config import FeatureFlags
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import tools_from_defaults
 
     metrics = MetricsObserver()
     logger = LoggingObserver()

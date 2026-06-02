@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from agent_kit import defaultTools
-from agent_kit.sessions import InMemorySessionStore, SqliteSessionStore
-from agent_kit.sessions.tasks import CreateTaskInput, TaskPatch
+from linch import defaultTools
+from linch.sessions import InMemorySessionStore, SqliteSessionStore
+from linch.sessions.tasks import CreateTaskInput, TaskPatch
 
 
 def test_default_tools_schema_names_match_typescript_contract() -> None:

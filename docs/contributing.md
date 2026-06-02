@@ -1,4 +1,4 @@
-# Contributing to AgentKit
+# Contributing to Linch
 
 Rules, conventions, and workflow for contributors. Read this before opening a PR.
 
@@ -8,7 +8,7 @@ Rules, conventions, and workflow for contributors. Read this before opening a PR
 
 ```bash
 git clone <repo>
-cd agent_kit
+cd linch
 pip install -e '.[dev,mcp,anthropic]'
 ```
 
@@ -68,7 +68,7 @@ class MyTool(BaseTool):  # ← don't do this
 
 ### No blocking I/O in the core loop
 
-Everything in `loop.py`, `scheduler.py`, `compaction.py`, and all providers must be async. Use `asyncio.to_thread()` for a one-off sync call, or use the dedicated `SqliteExecutor` helper (`agent_kit.storage._executor.SqliteExecutor`) for any store that needs a long-lived `sqlite3` connection — it pins the connection to a single worker thread so the loop is never blocked and no `asyncio.Lock` is needed.
+Everything in `loop.py`, `scheduler.py`, `compaction.py`, and all providers must be async. Use `asyncio.to_thread()` for a one-off sync call, or use the dedicated `SqliteExecutor` helper (`linch.storage._executor.SqliteExecutor`) for any store that needs a long-lived `sqlite3` connection — it pins the connection to a single worker thread so the loop is never blocked and no `asyncio.Lock` is needed.
 
 ### Provider stream contract
 
@@ -96,7 +96,7 @@ Follow the pattern used for every primitive in this codebase:
 2. **Thread it** — add a field to `ProviderRequest`, then `RunOptions`, then `Agent.__init__`. Precedence: `opts.x if opts.x is not None else agent.x`.
 3. **Emit it** — map the new field to the wire format inside each provider module (Chat and Responses may differ — that's expected).
 4. **Surface it** — add it to the relevant `Event` dataclass; update `event_to_dict`/`event_from_dict`.
-5. **Export it** — add the public symbol to `src/agent_kit/__init__.py`.
+5. **Export it** — add the public symbol to `src/linch/__init__.py`.
 6. **Test it** — write a test using a fake provider (see below). Do not require a live API key.
 
 ---
@@ -126,19 +126,19 @@ Use `InMemorySessionStore` in all tests. `SqliteSessionStore` writes to disk and
 
 ### Lazy imports in files that co-exist with test_hardening.py
 
-`tests/test_hardening.py::test_import_agent_kit_without_mcp_installed` clears all `agent_kit.*` from `sys.modules` and re-imports. Any test file that imports `agent_kit` at module level will get v1 classes while the loop runs v2 classes — causing `isinstance` failures.
+`tests/test_hardening.py::test_import_linch_without_mcp_installed` clears all `linch.*` from `sys.modules` and re-imports. Any test file that imports `linch` at module level will get v1 classes while the loop runs v2 classes — causing `isinstance` failures.
 
-**Rule:** in any test file that creates `Agent`, `Session`, or uses content block types, import `agent_kit` classes **inside the test function body**, not at module level.
+**Rule:** in any test file that creates `Agent`, `Session`, or uses content block types, import `linch` classes **inside the test function body**, not at module level.
 
 ```python
 # correct
 def test_something():
-    from agent_kit import Agent
-    from agent_kit.sessions import InMemorySessionStore
+    from linch import Agent
+    from linch.sessions import InMemorySessionStore
     ...
 
 # wrong — breaks when test_hardening.py runs in the same session
-from agent_kit import Agent  # ← module-level import
+from linch import Agent  # ← module-level import
 ```
 
 ### No `pytest.raises(SomeImportedError)` with module-level imports
@@ -153,10 +153,10 @@ Tests should fail at the most specific possible assertion. Avoid mega-tests that
 
 ## Adding a new provider
 
-1. Create `src/agent_kit/providers/my_provider.py`.
+1. Create `src/linch/providers/my_provider.py`.
 2. Implement `context_window(model) -> int` and `async def stream(req) -> AsyncIterator[dict]`.
 3. Map wire events to the normalized dict contract (see `providers/openai_chat.py` for reference).
-4. Export from `src/agent_kit/providers/__init__.py`.
+4. Export from `src/linch/providers/__init__.py`.
 5. Add a test with a mocked HTTP client — do not require a real API key in CI.
 6. If the provider uses a different structured-output API, handle it in `_build_turn_request` inside the provider, not in `loop.py`.
 
@@ -180,11 +180,11 @@ Tests should fail at the most specific possible assertion. Avoid mega-tests that
 The `FileBackend` protocol (`filesystem/backend.py`) is duck-typed — no base class.
 Implement six async methods: `read`, `write`, `ls`, `edit`, `exists`, `delete`.
 
-1. Create `src/agent_kit/filesystem/my_backend.py`.
-2. Use `asyncio.to_thread()` or an `asyncio`-native client for any I/O — never block the event loop. For a SQLite backend, use `SqliteExecutor` from `agent_kit.storage._executor` (one worker thread per store, no lock needed). See `DiskFileBackend` (disk I/O via `asyncio.to_thread`) and `SqliteFileBackend` (`SqliteExecutor`) for reference patterns.
+1. Create `src/linch/filesystem/my_backend.py`.
+2. Use `asyncio.to_thread()` or an `asyncio`-native client for any I/O — never block the event loop. For a SQLite backend, use `SqliteExecutor` from `linch.storage._executor` (one worker thread per store, no lock needed). See `DiskFileBackend` (disk I/O via `asyncio.to_thread`) and `SqliteFileBackend` (`SqliteExecutor`) for reference patterns.
 3. Call `normalize_path(path)` at the entry of every method to canonicalize paths.
 4. `read` must raise `FileNotFoundError` for missing paths; `edit` must raise `ValueError` when `old_string` is absent or not unique (and `replace_all=False`); `delete` is a no-op for missing paths.
-5. Export from `filesystem/__init__.py` and `src/agent_kit/__init__.py`.
+5. Export from `filesystem/__init__.py` and `src/linch/__init__.py`.
 6. Add tests by calling `_exercise(backend)` from `tests/filesystem/test_backends.py` — it is a shared async helper that verifies the full CRUD contract.
 
 ---
@@ -192,7 +192,7 @@ Implement six async methods: `read`, `write`, `ls`, `edit`, `exists`, `delete`.
 ## Versioning and breaking changes
 
 - This project follows semantic versioning. Patch = bug fix. Minor = new primitive (backward-compatible). Major = breaking change to public API.
-- The public API surface is defined by `src/agent_kit/__init__.py`. Anything not exported there is internal.
+- The public API surface is defined by `src/linch/__init__.py`. Anything not exported there is internal.
 - `dict`/`camelCase` kwargs on `Agent.__init__` are supported for backward compatibility. New parameters use snake_case keyword arguments only.
 - When a previously-silent `RunOptions` field becomes active (like `thinking`/`effort` did in 0.2), add a CHANGELOG note — it's a latent behavior change even though the signature doesn't change.
 
@@ -205,7 +205,7 @@ Implement six async methods: `read`, `write`, `ls`, `edit`, `exists`, `delete`.
 - [ ] `pyright` clean on changed modules
 - [ ] New public symbols exported from `__init__.py`
 - [ ] New primitives have a unit test using a fake provider
-- [ ] No module-level `agent_kit` imports in test files (lazy import rule)
+- [ ] No module-level `linch` imports in test files (lazy import rule)
 - [ ] If system-block text changed, `test_system_blocks.py` parity assertion updated
 - [ ] If a new `FileBackend` was added, `tests/filesystem/test_backends.py` exercises it via `_exercise(backend)`
 - [ ] CHANGELOG entry if behavior changed for existing users
@@ -215,7 +215,7 @@ Implement six async methods: `read`, `write`, `ls`, `edit`, `exists`, `delete`.
 ## Project layout
 
 ```
-src/agent_kit/          core library
+src/linch/          core library
   agent.py              config object + session factory
   loop.py               main agent loop
   session.py            per-conversation state + RunOptions

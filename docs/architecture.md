@@ -1,4 +1,4 @@
-# AgentKit Architecture
+# Linch Architecture
 
 Professional reference for the V2 harness. Covers every subsystem, its contract, the complete data flow, and the invariants that must not break.
 
@@ -14,7 +14,7 @@ graph TD
         Caller["Caller"]
     end
 
-    subgraph Core["AgentKit Core"]
+    subgraph Core["Linch Core"]
         Agent["Agent\nmodel · provider · tools\npermissions · loop_guard\ncontext_builder · deps"]
         Session["Session\nprovider_view · full_history\nrun_deps · active_run_id"]
         RunLoop["run_loop()"]
@@ -49,8 +49,8 @@ graph TD
 
         subgraph Extensions["Extensions"]
             MCP["MCP Servers"]
-            SKILLS["Skills\n.agent_kit/skills/"]
-            SUBA["Subagents\n.agent_kit/agents.yaml"]
+            SKILLS["Skills\n.linch/skills/"]
+            SUBA["Subagents\n.linch/agents.yaml"]
         end
     end
 
@@ -377,7 +377,7 @@ graph TD
     subgraph Ref["Reference Implementations"]
         IK["InMemoryKeywordMemoryStore\ncooperative keyword matching"]
         SQ["SqliteMemoryStore\nasync via single-worker executor\n(storage._executor.SqliteExecutor)"]
-        PG["PostgresMemoryStore\noptional asyncpg backend\nagent-kit[postgres]"]
+        PG["PostgresMemoryStore\noptional asyncpg backend\nlinch[postgres]"]
     end
 
     subgraph Host["Host-Owned Adapters"]
@@ -435,7 +435,7 @@ flowchart TD
 | Backend | Storage | Lifecycle | Use when |
 |---|---|---|---|
 | `StateFileBackend` | In-memory dict | Per-session (default) | Zero-overhead ephemeral scratch |
-| `DiskFileBackend` | Real files under a root dir | Until deleted | Want human-inspectable files; root defaults to `.agent_kit/offload` (gitignored) |
+| `DiskFileBackend` | Real files under a root dir | Until deleted | Want human-inspectable files; root defaults to `.linch/offload` (gitignored) |
 | `SqliteFileBackend` | SQLite table | Persistent across sessions | Need cross-session recall (e.g. `/memories/`) |
 | `CompositeFileBackend` | Routes by path prefix | Mixed | Ephemeral scratch + persistent `/memories/` subtree |
 
@@ -613,9 +613,9 @@ classDiagram
 | `providers/` | `BaseProvider`, `ProviderCapabilities`, OpenAI Chat, OpenAI Responses, Anthropic |
 | `tools/` | Tool protocol, `ToolContext`, `ToolRegistry`, `ToolResult`, `Citation`, built-in tools |
 | `sessions/` | `SessionStore` protocol, `InMemorySessionStore`, `SqliteSessionStore` |
-| `mcp/` | MCP server connection → AgentKit tool adapters |
+| `mcp/` | MCP server connection → Linch tool adapters |
 | `skills/` | `SKILL.md`-based slash-commands with argument substitution |
-| `subagents/` | Specialized agent roles from `.agent_kit/agents.yaml` |
+| `subagents/` | Specialized agent roles from `.linch/agents.yaml` |
 | `recipes/` | Factory helpers (`rag_agent`, `sql_agent`, etc.) — purely additive |
 
 ---
@@ -705,7 +705,7 @@ changing the built-in prompt text:
 flowchart TD
     L0["Layer 0 — before_defaults sections\nSystemPromptConfig.sections"]
     L1["Layer 1 — Custom blocks\nSystemPromptConfig.blocks\nprepended before identity"]
-    L2["Layer 2 — Identity block\nYou are AgentKit…\nomitted when replace_defaults=True"]
+    L2["Layer 2 — Identity block\nYou are Linch…\nomitted when replace_defaults=True"]
     L3["Layer 3 — Protocol block\ntool-use instructions\nomitted when replace_defaults=True\nor no SWE tools present\nclauses conditional on registered tool families"]
     LFS["Layer 3b — Filesystem block\nadded when ls/read_file/write_file/edit_file are registered\nexplains virtual filesystem and offload recovery\npresent in both default and replace_defaults modes"]
     L4["Layer 4 — after_defaults sections\nSystemPromptConfig.sections"]
@@ -766,20 +766,20 @@ current work, and the next step.
 
 ## 12. Skills and Subagents
 
-**Skills** are loaded from `.agent_kit/skills/*/SKILL.md`; built-in skills
+**Skills** are loaded from `.linch/skills/*/SKILL.md`; built-in skills
 such as `verify` are also registered unless a disk skill uses the same name.
 Each file has YAML frontmatter (`name`, `description`, `allowed_tools`,
 `model_override`) and a markdown body. When a skill is invoked, the body is
 injected as a `<system-reminder>` per-turn via `_re_inject_skill_context`.
 Gated by `FeatureFlags(skills=True)`.
 
-**Subagents** are defined in `.agent_kit/agents/*.md`; built-in named agents
+**Subagents** are defined in `.linch/agents/*.md`; built-in named agents
 such as `verification` are also registered unless a disk agent uses the same
 name. `subagents/runner.py` creates a child agent with its own tool overlay and
 system prompt. The child's system blocks are computed from its own tool names —
 not copied from the parent. Gated by `FeatureFlags(subagents=True)`.
 
-**MCP** — `connect_mcp_servers(configs)` wraps each MCP tool as a duck-typed AgentKit tool. Names are normalized via `mcp/naming.py`. The connection closes on `agent.close()`. Gated by `FeatureFlags(mcp=True)`.
+**MCP** — `connect_mcp_servers(configs)` wraps each MCP tool as a duck-typed Linch tool. Names are normalized via `mcp/naming.py`. The connection closes on `agent.close()`. Gated by `FeatureFlags(mcp=True)`.
 
 ---
 

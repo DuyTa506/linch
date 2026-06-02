@@ -1,6 +1,6 @@
-# Using AgentKit in Your Project
+# Using Linch in Your Project
 
-This guide shows how to install AgentKit, initialise an agent, and build
+This guide shows how to install Linch, initialise an agent, and build
 workflows for any domain — not just software engineering.
 
 ---
@@ -9,13 +9,13 @@ workflows for any domain — not just software engineering.
 
 ```bash
 # From the repo (development)
-pip install -e /path/to/agent_kit
+pip install -e /path/to/linch
 
 # With all optional extras
-pip install -e "/path/to/agent_kit[mcp,anthropic]"
+pip install -e "/path/to/linch[mcp,anthropic]"
 ```
 
-Once published, `pip install agent-kit` will work directly.
+Once published, `pip install linch` will work directly.
 
 ---
 
@@ -23,8 +23,8 @@ Once published, `pip install agent-kit` will work directly.
 
 ```python
 import asyncio
-from agent_kit import Agent
-from agent_kit.sessions import InMemorySessionStore
+from linch import Agent
+from linch.sessions import InMemorySessionStore
 
 agent = Agent(
     model="gpt-5",                    # or any supported model
@@ -91,8 +91,8 @@ async for event in session.run("hello"):
 ```python
 import os
 
-from agent_kit.providers import OpenAIResponsesProvider, OpenAIChatCompletionsProvider
-from agent_kit.openai_responses import OpenAIOptions
+from linch.providers import OpenAIResponsesProvider, OpenAIChatCompletionsProvider
+from linch.openai_responses import OpenAIOptions
 
 # Default: OpenAI Responses API (o-series, gpt-5, …)
 agent = Agent(model="gpt-5", openai_api_key=os.environ.get("OPENAI_API_KEY"))
@@ -116,7 +116,7 @@ agent = Agent(
 ### Session store
 
 ```python
-from agent_kit.sessions import InMemorySessionStore, SqliteSessionStore
+from linch.sessions import InMemorySessionStore, SqliteSessionStore
 from pathlib import Path
 
 # Ephemeral (tests, single-request workers)
@@ -129,7 +129,7 @@ store = SqliteSessionStore(Path("~/.myapp/sessions.db").expanduser())
 ### Feature flags (skip subsystems you don't use)
 
 ```python
-from agent_kit.config import FeatureFlags
+from linch.config import FeatureFlags
 
 agent = Agent(
     ...
@@ -143,7 +143,7 @@ agent = Agent(
 Skills are prompt workflows exposed through the `Skill` tool when
 `FeatureFlags(skills=True)`.
 
-AgentKit includes a built-in `verify` skill:
+Linch includes a built-in `verify` skill:
 
 ```text
 Skill({"skill": "verify", "args": "focus on billing workflow"})
@@ -154,13 +154,13 @@ work, then end with `VERDICT: PASS`, `VERDICT: FAIL`, or `VERDICT: PARTIAL`.
 It is domain-agnostic: use it for software changes, data workflows, documents,
 configuration, or other concrete deliverables.
 
-Project skills live at `.agent_kit/skills/<name>/SKILL.md`. A project skill
+Project skills live at `.linch/skills/<name>/SKILL.md`. A project skill
 named `verify` overrides the built-in.
 
 ### Compaction
 
 ```python
-from agent_kit import Agent, DetailedCompaction
+from linch import Agent, DetailedCompaction
 
 # DefaultCompaction remains the default. DetailedCompaction is opt-in and uses
 # a continuation-safe summary structure for long-running sessions.
@@ -173,9 +173,9 @@ agent = Agent(
 ### System prompt control
 
 ```python
-from agent_kit.config import SystemPromptConfig, SystemPromptSection
+from linch.config import SystemPromptConfig, SystemPromptSection
 
-# Append instructions to the built-in AgentKit prompt
+# Append instructions to the built-in Linch prompt
 agent = Agent(..., system_prompt="Always reply in formal English.")
 
 # Replace the entire SWE identity with your own
@@ -205,8 +205,8 @@ agent = Agent(
 ### Custom tools
 
 ```python
-from agent_kit.tools.base import ResourceAccess, ToolContext, ToolResult
-from agent_kit.tools.registry import empty_tools, tools_from_defaults
+from linch.tools.base import ResourceAccess, ToolContext, ToolResult
+from linch.tools.registry import empty_tools, tools_from_defaults
 
 class MyTool:
     name = "search_kb"
@@ -243,7 +243,7 @@ class MyTool:
 agent = Agent(..., tools=empty_tools(MyTool()))
 
 # SWE tools minus Bash, plus custom
-from agent_kit.tools.registry import tools_from_defaults
+from linch.tools.registry import tools_from_defaults
 registry = tools_from_defaults(exclude={"Bash"}, extra=[MyTool()])
 agent = Agent(..., tools=registry)
 ```
@@ -275,7 +275,7 @@ async def execute(self, input, ctx: ToolContext) -> ToolResult:
     ...
 
 # Override per-run (e.g. tenant-specific connection)
-from agent_kit import RunOptions
+from linch import RunOptions
 async for event in session.run("...", RunOptions(deps=tenant_db)):
     ...
 ```
@@ -283,7 +283,7 @@ async for event in session.run("...", RunOptions(deps=tenant_db)):
 ### Permissions
 
 ```python
-from agent_kit.permissions import ToolRule, PathRule, BashRule
+from linch.permissions import ToolRule, PathRule, BashRule
 
 agent = Agent(
     ...,
@@ -302,7 +302,7 @@ agent = Agent(
 ### Structured output
 
 ```python
-from agent_kit.types import OutputSchema
+from linch.types import OutputSchema
 
 schema = OutputSchema(
     name="invoice",
@@ -325,8 +325,8 @@ agent = Agent(..., output_schema=schema)
 ### Per-turn context building (RAG)
 
 ```python
-from agent_kit.context import ContextBudget, ContextBuildResult
-from agent_kit.types import Message, TextBlock
+from linch.context import ContextBudget, ContextBuildResult
+from linch.types import Message, TextBlock
 
 TAG = "[[ctx]]"
 
@@ -349,14 +349,14 @@ agent = Agent(..., context_builder=MyContextBuilder(), deps=my_store)
 ### Memory and RAG primitives
 
 ```python
-from agent_kit import Agent
-from agent_kit.memory import (
+from linch import Agent
+from linch.memory import (
     InMemoryKeywordMemoryStore,
     MemoryContextBuilder,
     MemoryItem,
     MemorySearchTool,
 )
-from agent_kit.tools.registry import empty_tools
+from linch.tools.registry import empty_tools
 
 store = InMemoryKeywordMemoryStore()
 await store.upsert([
@@ -372,7 +372,7 @@ agent = Agent(
 ```
 
 Core includes `MemoryStore` protocols, cooperative in-memory keyword memory,
-SQLite memory, optional Postgres memory via `pip install 'agent-kit[postgres]'`,
+SQLite memory, optional Postgres memory via `pip install 'linch[postgres]'`,
 and memory search/upsert tools. Vector databases and embedding models stay in
 the host app or a recipe.
 
@@ -394,11 +394,11 @@ configuration required unless you want to change the backend or tune the thresho
 # Default — ephemeral in-memory backend, threshold = 10 % of context window
 agent = Agent(...)   # offload is already on
 
-# Persist offloaded files under .agent_kit/offload (inspectable, gitignored)
-from agent_kit.filesystem import DiskFileBackend, OffloadConfig
+# Persist offloaded files under .linch/offload (inspectable, gitignored)
+from linch.filesystem import DiskFileBackend, OffloadConfig
 agent = Agent(
     ...,
-    filesystem=DiskFileBackend(root=".agent_kit/offload"),
+    filesystem=DiskFileBackend(root=".linch/offload"),
 )
 
 # Tune the threshold or fraction explicitly
@@ -410,12 +410,12 @@ agent = Agent(
 )
 
 # Ephemeral scratch + persistent /memories/ across sessions
-from agent_kit.filesystem import CompositeFileBackend, SqliteFileBackend, StateFileBackend
+from linch.filesystem import CompositeFileBackend, SqliteFileBackend, StateFileBackend
 agent = Agent(
     ...,
     filesystem=CompositeFileBackend(
         default=StateFileBackend(),
-        routes={"/memories/": SqliteFileBackend(".agent_kit/memories.db")},
+        routes={"/memories/": SqliteFileBackend(".linch/memories.db")},
     ),
 )
 

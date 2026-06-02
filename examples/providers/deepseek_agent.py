@@ -9,7 +9,7 @@ DeepSeek exposes two endpoints:
 
 Model notes (as of 2026-06):
   - deepseek-v4-flash / deepseek-v4-pro: reasoning models that return
-    `reasoning_content` on every turn.  AgentKit's OpenAI Chat provider does not
+    `reasoning_content` on every turn.  Linch's OpenAI Chat provider does not
     yet round-trip reasoning_content, so multi-turn tool-use loops will get a 400
     error.  Use these models with empty_tools() (no multi-turn tool calls), OR use
     the Anthropic-compatible endpoint where reasoning is handled as thinking blocks.
@@ -52,12 +52,12 @@ def load_project_env() -> None:
 
 
 async def run_openai_basic(api_key: str) -> None:
-    from agent_kit import Agent
-    from agent_kit.config import FeatureFlags
-    from agent_kit.providers import OpenAIChatCompletionsProvider
-    from agent_kit.providers.openai_chat import OpenAIChatProviderOptions
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools.registry import empty_tools
+    from linch import Agent
+    from linch.config import FeatureFlags
+    from linch.providers import OpenAIChatCompletionsProvider
+    from linch.providers.openai_chat import OpenAIChatProviderOptions
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import empty_tools
 
     provider = OpenAIChatCompletionsProvider(
         OpenAIChatProviderOptions(api_key=api_key, base_url=DEEPSEEK_BASE_OPENAI)
@@ -87,13 +87,13 @@ async def run_openai_basic(api_key: str) -> None:
 
 
 async def run_openai_tools(api_key: str) -> None:
-    from agent_kit import Agent
-    from agent_kit.config import FeatureFlags
-    from agent_kit.loop_guard import LoopGuard
-    from agent_kit.providers import OpenAIChatCompletionsProvider
-    from agent_kit.providers.openai_chat import OpenAIChatProviderOptions
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools.registry import tools_from_defaults
+    from linch import Agent
+    from linch.config import FeatureFlags
+    from linch.loop_guard import LoopGuard
+    from linch.providers import OpenAIChatCompletionsProvider
+    from linch.providers.openai_chat import OpenAIChatProviderOptions
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import tools_from_defaults
 
     provider = OpenAIChatCompletionsProvider(
         OpenAIChatProviderOptions(api_key=api_key, base_url=DEEPSEEK_BASE_OPENAI)
@@ -120,11 +120,11 @@ async def run_openai_tools(api_key: str) -> None:
 
 
 async def run_anthropic_path(api_key: str) -> None:
-    from agent_kit import Agent
-    from agent_kit.config import FeatureFlags
-    from agent_kit.providers.anthropic import AnthropicProvider, AnthropicProviderOptions
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools.registry import empty_tools
+    from linch import Agent
+    from linch.config import FeatureFlags
+    from linch.providers.anthropic import AnthropicProvider, AnthropicProviderOptions
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import empty_tools
 
     provider = AnthropicProvider(
         AnthropicProviderOptions(api_key=api_key, base_url=DEEPSEEK_BASE_ANTHROPIC)
@@ -151,12 +151,12 @@ async def run_anthropic_path(api_key: str) -> None:
 
 
 async def run_multi_turn(api_key: str) -> None:
-    from agent_kit import Agent
-    from agent_kit.config import FeatureFlags
-    from agent_kit.providers import OpenAIChatCompletionsProvider
-    from agent_kit.providers.openai_chat import OpenAIChatProviderOptions
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools.registry import empty_tools
+    from linch import Agent
+    from linch.config import FeatureFlags
+    from linch.providers import OpenAIChatCompletionsProvider
+    from linch.providers.openai_chat import OpenAIChatProviderOptions
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import empty_tools
 
     provider = OpenAIChatCompletionsProvider(
         OpenAIChatProviderOptions(api_key=api_key, base_url=DEEPSEEK_BASE_OPENAI)

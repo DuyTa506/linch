@@ -20,9 +20,9 @@ import os
 from pathlib import Path
 from typing import Any
 
-from agent_kit import Agent
-from agent_kit.sessions import InMemorySessionStore
-from agent_kit.tools import ResourceAccess, ToolContext, ToolRegistry, ToolResult
+from linch import Agent
+from linch.sessions import InMemorySessionStore
+from linch.tools import ResourceAccess, ToolContext, ToolRegistry, ToolResult
 
 ROOT = Path(__file__).resolve().parents[1]
 MODEL = "gpt-5-nano-2025-08-07"

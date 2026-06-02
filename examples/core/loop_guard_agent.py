@@ -38,7 +38,7 @@ class LoopingProvider:
         return 128_000
 
     async def stream(self, req):
-        from agent_kit.types import Usage
+        from linch.types import Usage
 
         # If tools were stripped (force_final turn), return a text response.
         if not req.tools:
@@ -94,7 +94,7 @@ class SearchDocsTool:
         return []
 
     async def execute(self, input, ctx):
-        from agent_kit.tools import ToolResult
+        from linch.tools import ToolResult
 
         return ToolResult(content="No results found.", summary="SearchDocs")
 
@@ -103,11 +103,11 @@ class SearchDocsTool:
 
 
 async def main() -> None:
-    from agent_kit import Agent, LoopGuard
-    from agent_kit.config import FeatureFlags
-    from agent_kit.events import ErrorEvent, LoopGuardEvent, ResultEvent
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools.registry import empty_tools
+    from linch import Agent, LoopGuard
+    from linch.config import FeatureFlags
+    from linch.events import ErrorEvent, LoopGuardEvent, ResultEvent
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import empty_tools
 
     print("=== Loop Guard Demo ===\n")
 

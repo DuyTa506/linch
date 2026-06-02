@@ -1,6 +1,6 @@
 """Tests for ToolContext.deps threading from Agent/RunOptions into tool execution.
 
-NOTE: All agent_kit imports inside test functions (not module-level) so tests
+NOTE: All linch imports inside test functions (not module-level) so tests
 are robust to test_hardening.py's sys.modules reset.
 """
 
@@ -22,7 +22,7 @@ def clear_received():
 
 
 def _make_deps_captor_tool():
-    from agent_kit.tools.base import ToolContext, ToolResult
+    from linch.tools.base import ToolContext, ToolResult
 
     class DepsCaptorTool:
         name = "CaptureDeps"
@@ -45,8 +45,8 @@ def _make_deps_captor_tool():
 
 
 def _fake_provider(tool_name: str = "CaptureDeps"):
-    from agent_kit.providers.base import BaseProvider
-    from agent_kit.types import Usage
+    from linch.providers.base import BaseProvider
+    from linch.types import Usage
 
     class FakeProvider(BaseProvider):
         id = "fake"
@@ -84,9 +84,9 @@ def _fake_provider(tool_name: str = "CaptureDeps"):
 @pytest.mark.asyncio
 async def test_agent_level_deps_threaded():
     """Agent.deps is available in ctx.deps."""
-    from agent_kit import Agent
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools.registry import empty_tools
+    from linch import Agent
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import empty_tools
 
     agent = Agent(
         model="gpt-5",
@@ -107,9 +107,9 @@ async def test_agent_level_deps_threaded():
 @pytest.mark.asyncio
 async def test_run_options_deps_overrides_agent():
     """RunOptions.deps overrides Agent.deps for the duration of that run."""
-    from agent_kit import Agent, RunOptions
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools.registry import empty_tools
+    from linch import Agent, RunOptions
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import empty_tools
 
     agent = Agent(
         model="gpt-5",
@@ -130,9 +130,9 @@ async def test_run_options_deps_overrides_agent():
 @pytest.mark.asyncio
 async def test_no_deps_is_none():
     """When no deps are set, ctx.deps is None."""
-    from agent_kit import Agent
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools.registry import empty_tools
+    from linch import Agent
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import empty_tools
 
     agent = Agent(
         model="gpt-5",

@@ -1,5 +1,5 @@
-from agent_kit.openai_responses import OpenAIReasoning, build_payload, map_wire_events
-from agent_kit.types import Message, ProviderRequest, SystemBlock, TextBlock, ToolResultBlock, Usage
+from linch.openai_responses import OpenAIReasoning, build_payload, map_wire_events
+from linch.types import Message, ProviderRequest, SystemBlock, TextBlock, ToolResultBlock, Usage
 
 
 def test_build_payload_translates_responses_shape() -> None:

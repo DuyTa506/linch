@@ -20,7 +20,7 @@ import pytest
 
 def _make_text_provider():
     """Minimal fake provider that returns a text response (no tool calls)."""
-    from agent_kit.types import Usage
+    from linch.types import Usage
 
     class TextProvider:
         id = "fake-text"
@@ -40,7 +40,7 @@ def _make_tool_provider(tool_name: str = "Echo", tool_input: dict | None = None)
     """Provider that returns one tool call then a text response on the next call."""
     import json
 
-    from agent_kit.types import Usage
+    from linch.types import Usage
 
     class ToolThenTextProvider:
         id = "fake-tool"
@@ -75,7 +75,7 @@ def _make_tool_provider(tool_name: str = "Echo", tool_input: dict | None = None)
 
 def _make_error_provider():
     """Provider that raises a generic exception during streaming."""
-    from agent_kit.errors import ProviderError
+    from linch.errors import ProviderError
 
     class ErrorProvider:
         id = "fake-error"
@@ -99,11 +99,11 @@ def _make_agent(
     context_builder=None,
     tool_result=None,
 ):
-    from agent_kit import Agent
-    from agent_kit.config import FeatureFlags
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools import ToolResult
-    from agent_kit.tools.registry import empty_tools
+    from linch import Agent
+    from linch.config import FeatureFlags
+    from linch.sessions import InMemorySessionStore
+    from linch.tools import ToolResult
+    from linch.tools.registry import empty_tools
 
     class _DummyTool:
         description = "Echo tool"
@@ -154,7 +154,7 @@ async def _collect(session, prompt="go"):
 
 @pytest.mark.asyncio
 async def test_dispatcher_sync_observer():
-    from agent_kit.observability import ObserverDispatcher, RunInfo
+    from linch.observability import ObserverDispatcher, RunInfo
 
     called_with = []
 
@@ -170,7 +170,7 @@ async def test_dispatcher_sync_observer():
 
 @pytest.mark.asyncio
 async def test_dispatcher_async_observer():
-    from agent_kit.observability import ObserverDispatcher, TurnInfo
+    from linch.observability import ObserverDispatcher, TurnInfo
 
     result = []
 
@@ -186,7 +186,7 @@ async def test_dispatcher_async_observer():
 
 @pytest.mark.asyncio
 async def test_dispatcher_exception_isolation(caplog):
-    from agent_kit.observability import ObserverDispatcher, RunInfo
+    from linch.observability import ObserverDispatcher, RunInfo
 
     second_called = []
 
@@ -200,7 +200,7 @@ async def test_dispatcher_exception_isolation(caplog):
 
     hub = ObserverDispatcher([RaisingObs(), GoodObs()])
     info = RunInfo(run_id="r", session_id="s", model="m", prompt="p")
-    with caplog.at_level(logging.ERROR, logger="agent_kit.observability"):
+    with caplog.at_level(logging.ERROR, logger="linch.observability"):
         await hub.dispatch("on_run_start", info)
 
     # Exception should NOT propagate
@@ -213,7 +213,7 @@ async def test_dispatcher_exception_isolation(caplog):
 @pytest.mark.asyncio
 async def test_dispatcher_partial_observer():
     """Observer that only implements on_event should not fail for other hooks."""
-    from agent_kit.observability import ObserverDispatcher, TurnInfo
+    from linch.observability import ObserverDispatcher, TurnInfo
 
     events_seen = []
 
@@ -231,7 +231,7 @@ async def test_dispatcher_partial_observer():
 
 
 def test_normalize_observers():
-    from agent_kit.observability import BaseObserver, normalize_observers
+    from linch.observability import BaseObserver, normalize_observers
 
     obs = BaseObserver()
     assert normalize_observers(None) == []
@@ -248,7 +248,7 @@ def test_normalize_observers():
 @pytest.mark.asyncio
 async def test_collector_full_span_tree():
     """Text-response run: collector captures run/turn/provider spans."""
-    from agent_kit.observability import SpanCollector
+    from linch.observability import SpanCollector
 
     collector = SpanCollector()
     agent = _make_agent(_make_text_provider(), observers=[collector])
@@ -264,7 +264,7 @@ async def test_collector_full_span_tree():
 
 @pytest.mark.asyncio
 async def test_run_end_once_on_success():
-    from agent_kit.observability import RunResultInfo
+    from linch.observability import RunResultInfo
 
     run_ends: list[RunResultInfo] = []
 
@@ -282,7 +282,7 @@ async def test_run_end_once_on_success():
 
 @pytest.mark.asyncio
 async def test_run_end_once_on_error():
-    from agent_kit.observability import RunResultInfo
+    from linch.observability import RunResultInfo
 
     run_ends: list[RunResultInfo] = []
     run_starts = []
@@ -371,7 +371,7 @@ async def test_turn_end_on_context_builder_error_before_provider_call():
 @pytest.mark.asyncio
 async def test_provider_span_timing():
     """Provider call span duration should be measurable and positive."""
-    from agent_kit.types import Usage
+    from linch.types import Usage
 
     class SlowProvider:
         id = "slow"
@@ -385,7 +385,7 @@ async def test_provider_span_timing():
             yield {"type": "text_delta", "text": "hi"}
             yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
 
-    from agent_kit.observability import SpanCollector
+    from linch.observability import SpanCollector
 
     collector = SpanCollector()
     agent = _make_agent(SlowProvider(), observers=[collector])
@@ -400,7 +400,7 @@ async def test_provider_span_timing():
 @pytest.mark.asyncio
 async def test_tool_spans_present():
     """Tool spans should be emitted with tool_use_id, tool_name, duration_ms."""
-    from agent_kit.observability import SpanCollector
+    from linch.observability import SpanCollector
 
     collector = SpanCollector()
     provider = _make_tool_provider(tool_name="Echo", tool_input={"x": 1})
@@ -419,8 +419,8 @@ async def test_tool_spans_present():
 
 @pytest.mark.asyncio
 async def test_on_tool_end_receives_structured_tool_result():
-    from agent_kit.observability import ToolResultInfo
-    from agent_kit.tools import ToolResult
+    from linch.observability import ToolResultInfo
+    from linch.tools import ToolResult
 
     tool_ends: list[ToolResultInfo] = []
 
@@ -465,7 +465,7 @@ async def test_on_tool_end_receives_structured_tool_result():
 @pytest.mark.asyncio
 async def test_observer_exception_does_not_break_run():
     """A faulty observer that raises on every hook must not crash the run."""
-    from agent_kit.events import ResultEvent
+    from linch.events import ResultEvent
 
     class AlwaysRaise:
         def on_run_start(self, info):
@@ -501,12 +501,12 @@ async def test_observer_exception_does_not_break_run():
 @pytest.mark.asyncio
 async def test_logging_observer_emits_lines(caplog):
     """LoggingObserver should emit at least one log line per key span."""
-    from agent_kit.observability import LoggingObserver
+    from linch.observability import LoggingObserver
 
     obs = LoggingObserver(level=logging.DEBUG)
     agent = _make_agent(_make_text_provider(), observers=[obs])
     session = await agent.session()
-    with caplog.at_level(logging.DEBUG, logger="agent_kit.observability"):
+    with caplog.at_level(logging.DEBUG, logger="linch.observability"):
         await _collect(session)
 
     messages = [r.message for r in caplog.records]
@@ -518,7 +518,7 @@ async def test_logging_observer_emits_lines(caplog):
 @pytest.mark.asyncio
 async def test_on_event_receives_all_events():
     """on_event should receive every Event yielded by the loop."""
-    from agent_kit.events import ResultEvent
+    from linch.events import ResultEvent
 
     all_events: list[Any] = []
 
@@ -568,7 +568,7 @@ def test_otel_observer_missing_dep(monkeypatch):
     """OpenTelemetryObserver raises ProviderError when opentelemetry not installed."""
     import sys
 
-    from agent_kit.errors import ProviderError
+    from linch.errors import ProviderError
 
     monkeypatch.setitem(sys.modules, "opentelemetry", None)  # type: ignore[arg-type]
     monkeypatch.setitem(sys.modules, "opentelemetry.trace", None)  # type: ignore[arg-type]
@@ -576,7 +576,7 @@ def test_otel_observer_missing_dep(monkeypatch):
     # Re-import with patched sys.modules
     import importlib
 
-    import agent_kit.observability.otel as otel_mod
+    import linch.observability.otel as otel_mod
 
     importlib.reload(otel_mod)
 
@@ -594,7 +594,7 @@ async def test_otel_span_tree():
         InMemorySpanExporter,
     )
 
-    from agent_kit.observability import OpenTelemetryObserver
+    from linch.observability import OpenTelemetryObserver
 
     exporter = InMemorySpanExporter()
     tp = TracerProvider()

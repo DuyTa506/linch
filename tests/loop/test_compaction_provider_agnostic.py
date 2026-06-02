@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import pytest
 
-from agent_kit.abort import AbortContext
-from agent_kit.compaction import (
+from linch.abort import AbortContext
+from linch.compaction import (
     CompactionContext,
     DefaultCompaction,
     DetailedCompaction,
     maybe_compact,
     summarize_with_provider,
 )
-from agent_kit.types import Message, TextBlock, Usage
+from linch.types import Message, TextBlock, Usage
 
 # ── Fake provider that is NOT the OpenAI Responses provider ──────────────────
 
@@ -185,7 +185,7 @@ def test_compaction_module_has_no_openai_responses_import():
     import ast
     import inspect
 
-    import agent_kit.compaction as mod
+    import linch.compaction as mod
 
     src = inspect.getsource(mod)
     tree = ast.parse(src)

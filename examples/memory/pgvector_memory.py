@@ -1,6 +1,6 @@
-"""pgvector memory store — recipe (NOT part of core AgentKit).
+"""pgvector memory store — recipe (NOT part of core Linch).
 
-This file lives in examples/ deliberately.  Per AgentKit's design constraint
+This file lives in examples/ deliberately.  Per Linch's design constraint
 ("No vector DB or embedding dependencies in core"), vector search adapters are
 provided as recipes the host application customises, not as core library code.
 
@@ -66,7 +66,7 @@ except ModuleNotFoundError as exc:
         "pgvector_memory requires pgvector.  Install with: pip install pgvector"
     ) from exc
 
-from agent_kit.memory.types import MemoryItem, MemorySearchResult
+from linch.memory.types import MemoryItem, MemorySearchResult
 
 # Embedding function type: accepts list[str], returns list[list[float]]
 EmbedFn = Callable[[list[str]], Coroutine[Any, Any, list[list[float]]]]
@@ -94,10 +94,10 @@ CREATE INDEX IF NOT EXISTS vector_memories_embedding_idx
 class PgVectorMemoryStore:
     """Semantic memory store using Postgres + pgvector.
 
-    Implements the AgentKit ``MemoryStore`` protocol (``search`` + ``upsert``),
-    so it works with :class:`~agent_kit.memory.MemorySearchTool`,
-    :class:`~agent_kit.memory.MemoryUpsertTool`, and
-    :class:`~agent_kit.memory.MemoryContextBuilder` without any core changes.
+    Implements the Linch ``MemoryStore`` protocol (``search`` + ``upsert``),
+    so it works with :class:`~linch.memory.MemorySearchTool`,
+    :class:`~linch.memory.MemoryUpsertTool`, and
+    :class:`~linch.memory.MemoryContextBuilder` without any core changes.
 
     :param dsn: PostgreSQL connection string.
     :param embed_fn: Async function ``(texts: list[str]) -> list[list[float]]``.
@@ -232,7 +232,7 @@ class PgVectorMemoryStore:
         for row in rows:
             meta = json.loads(row["metadata"] or "{}")
             if metadata_filter:
-                from agent_kit.memory.keyword import _metadata_matches
+                from linch.memory.keyword import _metadata_matches
 
                 if not _metadata_matches(meta, metadata_filter):
                     continue
@@ -287,7 +287,7 @@ async def _offline_demo() -> None:
     print("Postgres:     CREATE EXTENSION IF NOT EXISTS vector;")
     print()
     print("This recipe lives in examples/ (not core) by design — vector and")
-    print("embedding dependencies stay out of the AgentKit package surface.")
+    print("embedding dependencies stay out of the Linch package surface.")
     sys.exit(0)
 
 

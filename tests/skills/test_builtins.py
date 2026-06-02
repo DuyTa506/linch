@@ -14,10 +14,10 @@ class _FakeProvider:
 
 
 def _make_agent(*, config_dir: str | None = None):
-    from agent_kit import Agent
-    from agent_kit.config import FeatureFlags
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools.registry import default_tools
+    from linch import Agent
+    from linch.config import FeatureFlags
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import default_tools
 
     return Agent(
         model="model-x",
@@ -72,7 +72,7 @@ Run the project-specific checks.
 
 @pytest.mark.asyncio
 async def test_builtin_verify_skill_invocation_records_substituted_body() -> None:
-    from agent_kit.tools.base import ToolContext
+    from linch.tools.base import ToolContext
 
     agent = _make_agent()
     session = await agent.session()

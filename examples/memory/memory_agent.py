@@ -13,16 +13,16 @@ import asyncio
 import os
 from pathlib import Path
 
-from agent_kit import Agent
-from agent_kit.memory import (
+from linch import Agent
+from linch.memory import (
     InMemoryKeywordMemoryStore,
     MemoryContextBuilder,
     MemoryItem,
     MemorySearchTool,
     MemoryUpsertTool,
 )
-from agent_kit.sessions import InMemorySessionStore
-from agent_kit.tools import ToolContext, ToolRegistry
+from linch.sessions import InMemorySessionStore
+from linch.tools import ToolContext, ToolRegistry
 
 ROOT = Path(__file__).resolve().parents[1]
 MODEL = "gpt-5-nano-2025-08-07"
@@ -48,19 +48,19 @@ async def seed_store() -> InMemoryKeywordMemoryStore:
                 id="m1",
                 content="Agent Kit Scheduler V2 supports parallel read tools.",
                 metadata={"label": "Scheduler note"},
-                namespace="agent-kit",
+                namespace="linch",
             ),
             MemoryItem(
                 id="m2",
                 content="ToolResult can include citations and metadata for provenance.",
                 metadata={"label": "Tool result note"},
-                namespace="agent-kit",
+                namespace="linch",
             ),
             MemoryItem(
                 id="m3",
                 content="MemoryContextBuilder injects retrieved memory per turn only.",
                 metadata={"label": "Context note"},
-                namespace="agent-kit",
+                namespace="linch",
             ),
         ]
     )
@@ -69,7 +69,7 @@ async def seed_store() -> InMemoryKeywordMemoryStore:
 
 async def local_memory_demo() -> None:
     store = await seed_store()
-    search_tool = MemorySearchTool(store, namespace="agent-kit")
+    search_tool = MemorySearchTool(store, namespace="linch")
     ctx = ToolContext(
         cwd=str(ROOT),
         session_id="local",
@@ -77,17 +77,17 @@ async def local_memory_demo() -> None:
         session_store=None,
     )
     result = await search_tool.execute(
-        {"query": "parallel read citations", "limit": 5, "namespace": "agent-kit"},
+        {"query": "parallel read citations", "limit": 5, "namespace": "linch"},
         ctx,
     )
     print(result.summary)
     for citation in result.citations:
         print(f"  {citation.id} score={citation.score:.2f}: {citation.label}")
 
-    builder = MemoryContextBuilder(store, namespace="agent-kit", max_tokens=80)
-    hits = await store.search("How does memory context stay small?", namespace="agent-kit")
+    builder = MemoryContextBuilder(store, namespace="linch", max_tokens=80)
+    hits = await store.search("How does memory context stay small?", namespace="linch")
     print(f"Context builder source hits: {len(hits)}")
-    print(f"Search tool resources: {search_tool.resources({'namespace': 'agent-kit'})[0]}")
+    print(f"Search tool resources: {search_tool.resources({'namespace': 'linch'})[0]}")
     print(f"Builder type: {builder.__class__.__name__}")
 
 
@@ -99,14 +99,14 @@ async def maybe_live_agent() -> None:
 
     store = await seed_store()
     registry = ToolRegistry()
-    registry.add(MemorySearchTool(namespace="agent-kit"))
-    registry.add(MemoryUpsertTool(namespace="agent-kit"))
+    registry.add(MemorySearchTool(namespace="linch"))
+    registry.add(MemoryUpsertTool(namespace="linch"))
     agent = Agent(
         model=MODEL,
         openai_api_key=os.environ.get("OPENAI_API_KEY"),
         tools=registry,
         deps=store,
-        context_builder=MemoryContextBuilder(namespace="agent-kit", max_tokens=300),
+        context_builder=MemoryContextBuilder(namespace="linch", max_tokens=300),
         session_store=InMemorySessionStore(),
         permissions={"mode": "skip-dangerous"},
         system_prompt="Use memory context and memory tools when relevant.",

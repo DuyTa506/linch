@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from agent_kit.filesystem import (
+from linch.filesystem import (
     CompositeFileBackend,
     DiskFileBackend,
     SqliteFileBackend,
     StateFileBackend,
 )
-from agent_kit.filesystem.backend import normalize_path
+from linch.filesystem.backend import normalize_path
 
 
 def test_normalize_path() -> None:

@@ -6,9 +6,9 @@ Run without OTel::
 
     python examples/observability_agent.py
 
-Run with OTel console spans (requires pip install 'agent-kit[otel]')::
+Run with OTel console spans (requires pip install 'linch[otel]')::
 
-    pip install 'agent-kit[otel]'
+    pip install 'linch[otel]'
     python examples/observability_agent.py
 """
 
@@ -49,7 +49,7 @@ log = logging.getLogger("observability_demo")
 
 # ── Build observer list ────────────────────────────────────────────────────────
 
-from agent_kit.observability import LoggingObserver  # noqa: E402
+from linch.observability import LoggingObserver  # noqa: E402
 
 observers = [LoggingObserver(level=logging.INFO)]
 
@@ -61,7 +61,7 @@ try:
         SimpleSpanProcessor,
     )
 
-    from agent_kit.observability import OpenTelemetryObserver
+    from linch.observability import OpenTelemetryObserver
 
     tp = TracerProvider()
     tp.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
@@ -69,7 +69,7 @@ try:
     observers.append(otel_obs)
     log.info("OpenTelemetry console exporter attached — spans will print below")
 except ModuleNotFoundError:
-    log.info("opentelemetry not installed — run `pip install 'agent-kit[otel]'` for OTel spans")
+    log.info("opentelemetry not installed — run `pip install 'linch[otel]'` for OTel spans")
 
 # ── Create agent ───────────────────────────────────────────────────────────────
 
@@ -79,10 +79,10 @@ if not api_key:
 else:
 
     async def main() -> None:
-        from agent_kit import Agent
-        from agent_kit.config import FeatureFlags
-        from agent_kit.sessions import InMemorySessionStore
-        from agent_kit.tools.registry import empty_tools
+        from linch import Agent
+        from linch.config import FeatureFlags
+        from linch.sessions import InMemorySessionStore
+        from linch.tools.registry import empty_tools
 
         agent = Agent(
             model=MODEL,

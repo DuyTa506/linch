@@ -1,7 +1,7 @@
 """Filesystem offload — keep large tool results out of the context window.
 
 Variable-length tool results (web_search, RAG, big file dumps) are the #1 cause
-of context-window blowup.  AgentKit's virtual filesystem subsystem handles this
+of context-window blowup.  Linch's virtual filesystem subsystem handles this
 the way Deep Agents does: when a tool returns more than ``threshold_tokens``,
 the scheduler writes the full payload to a ``FileBackend`` and replaces what the
 model sees with a short preview + a path.  The model pulls back only what it
@@ -17,7 +17,7 @@ This example has two parts:
 
 Backends shown:
   - StateFileBackend     — ephemeral, in-memory, one per session (default).
-  - DiskFileBackend      — real files under .agent_kit/offload (inspectable,
+  - DiskFileBackend      — real files under .linch/offload (inspectable,
                            but kept OUT of your working dir / repo).
   - CompositeFileBackend — route /memories/ to a persistent SQLite store,
                            everything else to ephemeral state.
@@ -32,19 +32,19 @@ from __future__ import annotations
 import asyncio
 import os
 
-from agent_kit import Agent
-from agent_kit.config import SystemPromptConfig
-from agent_kit.filesystem import (
+from linch import Agent
+from linch.config import SystemPromptConfig
+from linch.filesystem import (
     CompositeFileBackend,
     DiskFileBackend,
     OffloadConfig,
     SqliteFileBackend,
     StateFileBackend,
 )
-from agent_kit.filesystem.offload import maybe_offload
-from agent_kit.sessions import InMemorySessionStore
-from agent_kit.tools.base import ToolContext, ToolResult
-from agent_kit.tools.registry import tools_from_defaults
+from linch.filesystem.offload import maybe_offload
+from linch.sessions import InMemorySessionStore
+from linch.tools.base import ToolContext, ToolResult
+from linch.tools.registry import tools_from_defaults
 
 # ── A tool that returns a large result (e.g. a verbose web/RAG search) ────────
 
@@ -88,7 +88,7 @@ async def demo_offline() -> None:
 
     # The three backend flavours, same protocol.
     state = StateFileBackend()
-    disk = DiskFileBackend(root=".agent_kit/offload")  # real files, but tucked away
+    disk = DiskFileBackend(root=".linch/offload")  # real files, but tucked away
     composite = CompositeFileBackend(
         default=StateFileBackend(),
         routes={"/memories/": SqliteFileBackend(":memory:")},
@@ -130,7 +130,7 @@ async def demo_live() -> None:
         return
 
     print("\n── Demo 2: live agent with auto-offload ──")
-    from agent_kit.providers.anthropic import AnthropicProvider, AnthropicProviderOptions
+    from linch.providers.anthropic import AnthropicProvider, AnthropicProviderOptions
 
     agent = Agent(
         model="claude-sonnet-4-6",
@@ -144,8 +144,8 @@ async def demo_live() -> None:
             ),
         ),
         tools=tools_from_defaults(extra=[BigSearchTool()]),
-        # Offload anything over ~200 tokens to real files under .agent_kit/offload.
-        filesystem=DiskFileBackend(root=".agent_kit/offload"),
+        # Offload anything over ~200 tokens to real files under .linch/offload.
+        filesystem=DiskFileBackend(root=".linch/offload"),
         result_offload=OffloadConfig(threshold_tokens=200, preview_lines=5),
         session_store=InMemorySessionStore(),
         permissions={"mode": "skip-dangerous"},

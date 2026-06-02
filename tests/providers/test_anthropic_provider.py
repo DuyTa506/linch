@@ -20,7 +20,7 @@ needs_key = pytest.mark.skipif(not os.environ.get("ANTHROPIC_API_KEY"), reason=S
 
 
 def _make_req(**overrides):
-    from agent_kit.types import Message, ProviderRequest, SystemBlock, TextBlock
+    from linch.types import Message, ProviderRequest, SystemBlock, TextBlock
 
     defaults = dict(
         model="claude-sonnet-4-6",
@@ -33,7 +33,7 @@ def _make_req(**overrides):
 
 
 def test_build_payload_basic():
-    from agent_kit.providers.anthropic import AnthropicProviderOptions, _build_payload
+    from linch.providers.anthropic import AnthropicProviderOptions, _build_payload
 
     req = _make_req()
     payload = _build_payload(req, AnthropicProviderOptions())
@@ -47,7 +47,7 @@ def test_build_payload_basic():
 
 
 def test_build_payload_respects_max_output_tokens():
-    from agent_kit.providers.anthropic import AnthropicProviderOptions, _build_payload
+    from linch.providers.anthropic import AnthropicProviderOptions, _build_payload
 
     req = _make_req(max_output_tokens=1024)
     payload = _build_payload(req, AnthropicProviderOptions())
@@ -55,8 +55,8 @@ def test_build_payload_respects_max_output_tokens():
 
 
 def test_build_payload_cache_marks_last_system_block():
-    from agent_kit.providers.anthropic import AnthropicProviderOptions, _build_payload
-    from agent_kit.types import SystemBlock
+    from linch.providers.anthropic import AnthropicProviderOptions, _build_payload
+    from linch.types import SystemBlock
 
     req = _make_req(
         system=[
@@ -73,8 +73,8 @@ def test_build_payload_cache_marks_last_system_block():
 
 
 def test_build_payload_no_cache_when_false():
-    from agent_kit.providers.anthropic import AnthropicProviderOptions, _build_payload
-    from agent_kit.types import SystemBlock
+    from linch.providers.anthropic import AnthropicProviderOptions, _build_payload
+    from linch.types import SystemBlock
 
     req = _make_req(
         system=[SystemBlock(text="Block A")],
@@ -85,7 +85,7 @@ def test_build_payload_no_cache_when_false():
 
 
 def test_build_payload_tool_schema_translated():
-    from agent_kit.providers.anthropic import AnthropicProviderOptions, _build_payload
+    from linch.providers.anthropic import AnthropicProviderOptions, _build_payload
 
     req = _make_req(
         tools=[
@@ -105,7 +105,7 @@ def test_build_payload_tool_schema_translated():
 
 
 def test_build_payload_cache_marks_last_tool():
-    from agent_kit.providers.anthropic import AnthropicProviderOptions, _build_payload
+    from linch.providers.anthropic import AnthropicProviderOptions, _build_payload
 
     req = _make_req(
         tools=[
@@ -129,7 +129,7 @@ def test_build_payload_cache_marks_last_tool():
 
 
 def test_tool_choice_mapping():
-    from agent_kit.providers.anthropic import _translate_tool_choice
+    from linch.providers.anthropic import _translate_tool_choice
 
     assert _translate_tool_choice("auto") == {"type": "auto"}
     assert _translate_tool_choice("none") == {"type": "none"}
@@ -138,7 +138,7 @@ def test_tool_choice_mapping():
 
 
 def test_stop_reason_mapping():
-    from agent_kit.providers.anthropic import _map_stop_reason
+    from linch.providers.anthropic import _map_stop_reason
 
     assert _map_stop_reason("end_turn") == "end_turn"
     assert _map_stop_reason("tool_use") == "tool_use"
@@ -150,8 +150,8 @@ def test_stop_reason_mapping():
 
 
 def test_translate_messages_user_text():
-    from agent_kit.providers.anthropic import _translate_messages
-    from agent_kit.types import Message, TextBlock
+    from linch.providers.anthropic import _translate_messages
+    from linch.types import Message, TextBlock
 
     msgs = [Message(role="user", content=[TextBlock(text="hello")])]
     out = _translate_messages(msgs)
@@ -161,8 +161,8 @@ def test_translate_messages_user_text():
 
 
 def test_translate_messages_assistant_tool_use():
-    from agent_kit.providers.anthropic import _translate_messages
-    from agent_kit.types import Message, TextBlock, ToolUseBlock
+    from linch.providers.anthropic import _translate_messages
+    from linch.types import Message, TextBlock, ToolUseBlock
 
     msgs = [
         Message(
@@ -186,8 +186,8 @@ def test_translate_messages_assistant_tool_use():
 
 
 def test_translate_messages_tool_result():
-    from agent_kit.providers.anthropic import _translate_messages
-    from agent_kit.types import Message, ToolResultBlock
+    from linch.providers.anthropic import _translate_messages
+    from linch.types import Message, ToolResultBlock
 
     msgs = [
         Message(
@@ -205,8 +205,8 @@ def test_translate_messages_tool_result():
 
 
 def test_translate_messages_tool_result_error():
-    from agent_kit.providers.anthropic import _translate_messages
-    from agent_kit.types import Message, ToolResultBlock
+    from linch.providers.anthropic import _translate_messages
+    from linch.types import Message, ToolResultBlock
 
     msgs = [
         Message(
@@ -221,8 +221,8 @@ def test_translate_messages_tool_result_error():
 
 def test_translate_messages_thinking_block_roundtrip():
     """Thinking blocks must carry signature on subsequent turns."""
-    from agent_kit.providers.anthropic import _translate_messages
-    from agent_kit.types import Message, ThinkingBlock
+    from linch.providers.anthropic import _translate_messages
+    from linch.types import Message, ThinkingBlock
 
     msgs = [
         Message(
@@ -238,8 +238,8 @@ def test_translate_messages_thinking_block_roundtrip():
 
 
 def test_translate_image_url():
-    from agent_kit.providers.anthropic import _translate_image
-    from agent_kit.types import ImageBlock
+    from linch.providers.anthropic import _translate_image
+    from linch.types import ImageBlock
 
     block = ImageBlock(source={"type": "url", "url": "https://example.com/img.png"})
     out = _translate_image(block)
@@ -250,8 +250,8 @@ def test_translate_image_url():
 
 
 def test_translate_image_base64():
-    from agent_kit.providers.anthropic import _translate_image
-    from agent_kit.types import ImageBlock
+    from linch.providers.anthropic import _translate_image
+    from linch.types import ImageBlock
 
     block = ImageBlock(source={"type": "base64", "media_type": "image/png", "data": "abc123"})
     out = _translate_image(block)
@@ -260,8 +260,8 @@ def test_translate_image_base64():
 
 
 def test_error_mapping_auth():
-    from agent_kit.errors import AuthError
-    from agent_kit.providers.anthropic import _map_anthropic_error
+    from linch.errors import AuthError
+    from linch.providers.anthropic import _map_anthropic_error
 
     class FakeAuthErr(Exception):
         __class__ = type("AuthenticationError", (Exception,), {})()  # type: ignore[assignment]
@@ -277,8 +277,8 @@ def test_error_mapping_auth():
 
 
 def test_error_mapping_context_length():
-    from agent_kit.errors import ContextLengthError
-    from agent_kit.providers.anthropic import _map_anthropic_error
+    from linch.errors import ContextLengthError
+    from linch.providers.anthropic import _map_anthropic_error
 
     class BadReq(Exception):
         status_code = 400
@@ -292,10 +292,10 @@ def test_provider_missing_package(monkeypatch):
     """Raises ProviderError when anthropic package is not installed."""
     import sys
 
-    from agent_kit.errors import ProviderError
+    from linch.errors import ProviderError
 
     monkeypatch.setitem(sys.modules, "anthropic", None)  # type: ignore[arg-type]
-    from agent_kit.providers.anthropic import AnthropicProvider
+    from linch.providers.anthropic import AnthropicProvider
 
     provider = AnthropicProvider()
     provider._client = None  # ensure fresh client attempt
@@ -303,7 +303,7 @@ def test_provider_missing_package(monkeypatch):
     import asyncio
 
     async def _run():
-        from agent_kit.types import Message, ProviderRequest, TextBlock
+        from linch.types import Message, ProviderRequest, TextBlock
 
         req = ProviderRequest(
             model="claude-sonnet-4-6",
@@ -328,12 +328,12 @@ def test_provider_missing_package(monkeypatch):
 @pytest.mark.asyncio
 async def test_live_basic_completion():
     """Provider streams a text response and yields a success ResultEvent."""
-    from agent_kit import Agent
-    from agent_kit.config import FeatureFlags
-    from agent_kit.events import ResultEvent
-    from agent_kit.providers import AnthropicProvider, AnthropicProviderOptions
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools.registry import empty_tools
+    from linch import Agent
+    from linch.config import FeatureFlags
+    from linch.events import ResultEvent
+    from linch.providers import AnthropicProvider, AnthropicProviderOptions
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import empty_tools
 
     provider = AnthropicProvider(AnthropicProviderOptions(api_key=os.environ["ANTHROPIC_API_KEY"]))
     agent = Agent(
@@ -361,13 +361,13 @@ async def test_live_basic_completion():
 @pytest.mark.asyncio
 async def test_live_tool_call():
     """Provider emits tool_use and the loop executes it."""
-    from agent_kit import Agent
-    from agent_kit.config import FeatureFlags
-    from agent_kit.events import ResultEvent, ToolCallEndEvent
-    from agent_kit.providers import AnthropicProvider, AnthropicProviderOptions
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools import ToolResult
-    from agent_kit.tools.registry import empty_tools
+    from linch import Agent
+    from linch.config import FeatureFlags
+    from linch.events import ResultEvent, ToolCallEndEvent
+    from linch.providers import AnthropicProvider, AnthropicProviderOptions
+    from linch.sessions import InMemorySessionStore
+    from linch.tools import ToolResult
+    from linch.tools.registry import empty_tools
 
     class AddTool:
         name = "Add"
@@ -424,12 +424,12 @@ async def test_live_tool_call():
 @pytest.mark.asyncio
 async def test_live_prompt_cache_tokens_reported():
     """Second identical call should report cache_read_tokens > 0."""
-    from agent_kit import Agent
-    from agent_kit.config import FeatureFlags
-    from agent_kit.events import UsageEvent
-    from agent_kit.providers import AnthropicProvider, AnthropicProviderOptions
-    from agent_kit.sessions import InMemorySessionStore
-    from agent_kit.tools.registry import empty_tools
+    from linch import Agent
+    from linch.config import FeatureFlags
+    from linch.events import UsageEvent
+    from linch.providers import AnthropicProvider, AnthropicProviderOptions
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import empty_tools
 
     long_system = "You are a helpful assistant. " * 200  # ~800 tokens to fill cache
 

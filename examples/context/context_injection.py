@@ -10,11 +10,11 @@ import asyncio
 import os
 from pathlib import Path
 
-from agent_kit import Agent, ContextBudget, ContextBuildResult, ContextBuildTurn
-from agent_kit.sessions import InMemorySessionStore
-from agent_kit.tools import ToolContext, ToolResult
-from agent_kit.tools.registry import empty_tools
-from agent_kit.types import Message, SystemBlock, TextBlock
+from linch import Agent, ContextBudget, ContextBuildResult, ContextBuildTurn
+from linch.sessions import InMemorySessionStore
+from linch.tools import ToolContext, ToolResult
+from linch.tools.registry import empty_tools
+from linch.types import Message, SystemBlock, TextBlock
 
 ROOT = Path(__file__).resolve().parents[1]
 MODEL = "gpt-5-nano-2025-08-07"

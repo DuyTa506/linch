@@ -13,14 +13,14 @@ from typing import Any
 
 import pytest
 
-from agent_kit import RetryOptions, ToolTimeoutError
-from agent_kit.abort import AbortContext
-from agent_kit.errors import AbortError
-from agent_kit.events import ToolCallEndEvent
-from agent_kit.permissions import PermissionEngine
-from agent_kit.scheduler import execute_tool_calls
-from agent_kit.tools import ToolContext, ToolRegistry, ToolResult
-from agent_kit.types import ToolUseBlock
+from linch import RetryOptions, ToolTimeoutError
+from linch.abort import AbortContext
+from linch.errors import AbortError
+from linch.events import ToolCallEndEvent
+from linch.permissions import PermissionEngine
+from linch.scheduler import execute_tool_calls
+from linch.tools import ToolContext, ToolRegistry, ToolResult
+from linch.types import ToolUseBlock
 
 # ---------------------------------------------------------------------------
 # Test tools

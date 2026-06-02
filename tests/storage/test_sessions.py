@@ -1,5 +1,5 @@
-from agent_kit.sessions import InMemorySessionStore, SqliteSessionStore
-from agent_kit.types import Message, TextBlock
+from linch.sessions import InMemorySessionStore, SqliteSessionStore
+from linch.types import Message, TextBlock
 
 
 async def test_memory_store_round_trip() -> None:

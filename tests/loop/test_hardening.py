@@ -8,18 +8,18 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_kit.abort import AbortContext
-from agent_kit.events import (
+from linch.abort import AbortContext
+from linch.events import (
     ResultEvent,
     ToolCallEndEvent,
     event_from_dict,
     event_to_dict,
 )
-from agent_kit.permissions import PendingToolCall, PermissionEngine
-from agent_kit.scheduler import execute_tool_calls
-from agent_kit.tools import Citation, ToolContext, ToolRegistry, ToolResult
-from agent_kit.tools.builtin import GlobTool, GrepTool, WriteTool
-from agent_kit.types import ToolUseBlock, Usage
+from linch.permissions import PendingToolCall, PermissionEngine
+from linch.scheduler import execute_tool_calls
+from linch.tools import Citation, ToolContext, ToolRegistry, ToolResult
+from linch.tools.builtin import GlobTool, GrepTool, WriteTool
+from linch.types import ToolUseBlock, Usage
 
 
 class SleepTool:
@@ -210,7 +210,7 @@ def test_old_tool_call_end_event_dict_remains_supported() -> None:
     assert rebuilt.tool_result is None
 
 
-def test_import_agent_kit_without_mcp_installed(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_import_linch_without_mcp_installed(monkeypatch: pytest.MonkeyPatch) -> None:
     original_import = builtins.__import__
 
     def blocked_import(
@@ -225,9 +225,9 @@ def test_import_agent_kit_without_mcp_installed(monkeypatch: pytest.MonkeyPatch)
         return original_import(name, globals, locals, fromlist, level)
 
     for key in list(sys.modules):
-        if key == "mcp" or key.startswith("mcp.") or key.startswith("agent_kit"):
+        if key == "mcp" or key.startswith("mcp.") or key.startswith("linch"):
             sys.modules.pop(key, None)
 
     monkeypatch.setattr(builtins, "__import__", blocked_import)
-    mod = importlib.import_module("agent_kit")
+    mod = importlib.import_module("linch")
     assert hasattr(mod, "connect_mcp_servers")

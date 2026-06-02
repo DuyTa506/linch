@@ -19,11 +19,11 @@ from __future__ import annotations
 import asyncio
 import os
 
-from agent_kit import Agent
-from agent_kit.config import FeatureFlags, SystemPromptConfig
-from agent_kit.sessions import InMemorySessionStore
-from agent_kit.tools.base import ToolContext, ToolResult
-from agent_kit.tools.registry import empty_tools
+from linch import Agent
+from linch.config import FeatureFlags, SystemPromptConfig
+from linch.sessions import InMemorySessionStore
+from linch.tools.base import ToolContext, ToolResult
+from linch.tools.registry import empty_tools
 
 API_KEY = os.environ.get("OPENAI_API_KEY", "")
 MODEL = "gpt-5-nano-2025-08-07"
@@ -32,7 +32,7 @@ MODEL = "gpt-5-nano-2025-08-07"
 # ── Pattern 1: Read-only, parallel-safe tool ─────────────────────────────────
 #
 # Good for: web search, KB lookup, database SELECT, API fetch.
-# parallel_safe=True means AgentKit will run this concurrently with other
+# parallel_safe=True means Linch will run this concurrently with other
 # parallel-safe tools in the same turn — no lock needed.
 
 

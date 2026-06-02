@@ -1,6 +1,6 @@
 import asyncio
 
-from agent_kit import Agent
+from linch import Agent
 
 
 async def main() -> None:

@@ -1,6 +1,6 @@
 """RAG tools — hybrid_search, keyword_search, graph_search, web_search.
 
-All four are read-only (scope="read", parallel_safe=True) so AgentKit will
+All four are read-only (scope="read", parallel_safe=True) so Linch will
 run them concurrently when the model calls multiple tools in one turn.
 
 Clients (vector store, graph DB, web search API) are injected via
@@ -17,12 +17,12 @@ import asyncio
 import os
 from dataclasses import dataclass
 
-from agent_kit import Agent
-from agent_kit.config import FeatureFlags, SystemPromptConfig
-from agent_kit.providers.anthropic import AnthropicProvider, AnthropicProviderOptions
-from agent_kit.sessions import InMemorySessionStore
-from agent_kit.tools.base import Citation, ToolContext, ToolResult
-from agent_kit.tools.registry import ToolRegistry
+from linch import Agent
+from linch.config import FeatureFlags, SystemPromptConfig
+from linch.providers.anthropic import AnthropicProvider, AnthropicProviderOptions
+from linch.sessions import InMemorySessionStore
+from linch.tools.base import Citation, ToolContext, ToolResult
+from linch.tools.registry import ToolRegistry
 
 # ── Deps container ────────────────────────────────────────────────────────────
 #
@@ -344,8 +344,8 @@ class StubVectorStore:
     _docs = [
         {
             "id": "doc-1",
-            "title": "AgentKit overview",
-            "text": "AgentKit is an async Python SDK for building agent loops.",
+            "title": "Linch overview",
+            "text": "Linch is an async Python SDK for building agent loops.",
             "score": 0.92,
             "source": "docs/overview.md",
         },
@@ -404,8 +404,8 @@ class StubWebClient:
     async def search(self, query: str, top_k: int = 5) -> list[dict]:
         return [
             {
-                "title": "AgentKit on PyPI",
-                "url": "https://pypi.org/project/agent-kit/",
+                "title": "Linch on PyPI",
+                "url": "https://pypi.org/project/linch/",
                 "snippet": "Async agent loop SDK for Python.",
             },
         ][:top_k]
@@ -456,7 +456,7 @@ async def main() -> None:
     )
 
     session = await agent.session()
-    async for event in session.run("What is AgentKit and how are tools structured?"):
+    async for event in session.run("What is Linch and how are tools structured?"):
         if event.type == "result":
             print("Answer:", event.final_text)
 

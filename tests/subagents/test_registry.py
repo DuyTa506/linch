@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from agent_kit.subagents.registry import AgentRegistry
-from agent_kit.subagents.types import AgentDefinition, AgentFrontmatter
+from linch.subagents.registry import AgentRegistry
+from linch.subagents.types import AgentDefinition, AgentFrontmatter
 
 
 def _disk_agent(name: str, *, description: str = "Disk agent.") -> AgentDefinition:
