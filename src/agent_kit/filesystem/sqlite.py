@@ -1,20 +1,41 @@
 """Persistent SQLite-backed :class:`~agent_kit.filesystem.backend.FileBackend`.
 
-Mirrors :class:`agent_kit.memory.sqlite.SqliteMemoryStore`: all DB I/O runs on a
-dedicated single-thread executor so async callers never block the event loop.
 Use under :class:`~agent_kit.filesystem.backend.CompositeFileBackend` to make a
 subtree (e.g. ``/memories/``) survive across sessions.
+
+All I/O runs on a single dedicated worker thread via
+:class:`~agent_kit.storage._executor.SqliteExecutor`, so the asyncio event loop
+is never blocked.  Safe for concurrent use from multiple coroutines.
+
+Supports both async and sync context-manager protocols::
+
+    async with SqliteFileBackend(path) as fb:
+        await fb.write("/note.txt", "hello")
+
+    with SqliteFileBackend(path) as fb:
+        ...   # close() called synchronously on __exit__
 """
 
 from __future__ import annotations
 
-import asyncio
 import sqlite3
 import time
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from ..storage._executor import SqliteExecutor
 from .backend import _slice_lines, normalize_path
+
+
+def _init_schema(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS files (
+            path TEXT PRIMARY KEY,
+            content TEXT NOT NULL,
+            updated_at REAL NOT NULL
+        )
+        """
+    )
 
 
 class SqliteFileBackend:
@@ -24,106 +45,117 @@ class SqliteFileBackend:
         self.path = str(path)
         if self.path not in (":memory:", ""):
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="agentkit_fs")
-        self._conn: sqlite3.Connection = self._executor.submit(self._create_db).result()
+        self._exec = SqliteExecutor(self.path, init=_init_schema, wal=True)
 
-    def _create_db(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path)
-        conn.row_factory = sqlite3.Row
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS files (
-                path TEXT PRIMARY KEY,
-                content TEXT NOT NULL,
-                updated_at REAL NOT NULL
-            )
-            """
-        )
-        conn.commit()
-        return conn
-
-    async def _run(self, fn, *args):  # type: ignore[no-untyped-def]
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self._executor, fn, *args)
+    # ── FileBackend protocol ─────────────────────────────────────────────────
 
     async def read(self, path: str, *, offset: int = 0, limit: int | None = None) -> str:
-        path = normalize_path(path)
-        row = await self._run(self._sync_get, path)
-        if row is None:
-            raise FileNotFoundError(path)
-        return _slice_lines(row, offset, limit)
-
-    def _sync_get(self, path: str) -> str | None:
-        cur = self._conn.execute("SELECT content FROM files WHERE path = ?", (path,))
-        row = cur.fetchone()
-        return row["content"] if row is not None else None
+        p = normalize_path(path)
+        content: str | None = await self._exec.run(lambda conn: _get(conn, p))
+        if content is None:
+            raise FileNotFoundError(p)
+        return _slice_lines(content, offset, limit)
 
     async def write(self, path: str, content: str) -> None:
-        await self._run(self._sync_write, normalize_path(path), content)
-
-    def _sync_write(self, path: str, content: str) -> None:
-        self._conn.execute(
-            """
-            INSERT INTO files(path, content, updated_at) VALUES (?, ?, ?)
-            ON CONFLICT(path) DO UPDATE SET content=excluded.content, updated_at=excluded.updated_at
-            """,
-            (path, content, time.time()),
-        )
-        self._conn.commit()
+        p = normalize_path(path)
+        await self._exec.run(lambda conn: _write(conn, p, content))
 
     async def ls(self, prefix: str = "") -> list[str]:
-        return await self._run(self._sync_ls, prefix)
+        return await self._exec.run(lambda conn: _ls(conn, prefix))
 
-    def _sync_ls(self, prefix: str) -> list[str]:
-        if not prefix:
-            cur = self._conn.execute("SELECT path FROM files ORDER BY path")
-            return [row["path"] for row in cur.fetchall()]
-        pfx = normalize_path(prefix)
-        cur = self._conn.execute(
-            "SELECT path FROM files WHERE path = ? OR path LIKE ? ORDER BY path",
-            (pfx, pfx.rstrip("/") + "/%"),
-        )
-        return [row["path"] for row in cur.fetchall()]
-
-    async def edit(self, path: str, old: str, new: str, *, replace_all: bool = False) -> int:
-        return await self._run(self._sync_edit, normalize_path(path), old, new, replace_all)
-
-    def _sync_edit(self, path: str, old: str, new: str, replace_all: bool) -> int:
-        text = self._sync_get(path)
-        if text is None:
-            raise FileNotFoundError(path)
-        count = text.count(old)
-        if count == 0:
-            raise ValueError(f"old string not found in {path}")
-        if count > 1 and not replace_all:
-            raise ValueError(
-                f"old string is not unique in {path} ({count} matches); "
-                "pass replace_all=true or include more context"
-            )
-        updated = text.replace(old, new) if replace_all else text.replace(old, new, 1)
-        self._conn.execute(
-            "UPDATE files SET content = ?, updated_at = ? WHERE path = ?",
-            (updated, time.time(), path),
-        )
-        self._conn.commit()
-        return count if replace_all else 1
+    async def edit(
+        self, path: str, old: str, new: str, *, replace_all: bool = False
+    ) -> int:
+        p = normalize_path(path)
+        return await self._exec.run(lambda conn: _edit(conn, p, old, new, replace_all))
 
     async def exists(self, path: str) -> bool:
-        return await self._run(self._sync_get, normalize_path(path)) is not None
+        p = normalize_path(path)
+        return await self._exec.run(lambda conn: _get(conn, p)) is not None
 
     async def delete(self, path: str) -> None:
-        await self._run(self._sync_delete, normalize_path(path))
+        p = normalize_path(path)
+        await self._exec.run(lambda conn: _delete(conn, p))
 
-    def _sync_delete(self, path: str) -> None:
-        self._conn.execute("DELETE FROM files WHERE path = ?", (path,))
-        self._conn.commit()
+    # ── lifecycle ────────────────────────────────────────────────────────────
+
+    async def aclose(self) -> None:
+        """Async close — preferred in async contexts."""
+        await self._exec.close()
 
     def close(self) -> None:
-        self._executor.submit(self._conn.close).result()
-        self._executor.shutdown(wait=False)
+        """Sync close — compatible with ``with`` context-manager."""
+        self._exec.close_sync()
 
     def __enter__(self) -> SqliteFileBackend:
         return self
 
-    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+    def __exit__(self, *_: object) -> None:
         self.close()
+
+    async def __aenter__(self) -> SqliteFileBackend:
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        await self.aclose()
+
+
+# ── Sync helpers (worker thread) ─────────────────────────────────────────────
+
+
+def _get(conn: sqlite3.Connection, path: str) -> str | None:
+    row = conn.execute("SELECT content FROM files WHERE path = ?", (path,)).fetchone()
+    return row["content"] if row is not None else None
+
+
+def _write(conn: sqlite3.Connection, path: str, content: str) -> None:
+    conn.execute(
+        """
+        INSERT INTO files(path, content, updated_at) VALUES (?, ?, ?)
+        ON CONFLICT(path) DO UPDATE SET
+            content=excluded.content,
+            updated_at=excluded.updated_at
+        """,
+        (path, content, time.time()),
+    )
+    conn.commit()
+
+
+def _ls(conn: sqlite3.Connection, prefix: str) -> list[str]:
+    if not prefix:
+        cur = conn.execute("SELECT path FROM files ORDER BY path")
+        return [row["path"] for row in cur.fetchall()]
+    pfx = normalize_path(prefix)
+    cur = conn.execute(
+        "SELECT path FROM files WHERE path = ? OR path LIKE ? ORDER BY path",
+        (pfx, pfx.rstrip("/") + "/%"),
+    )
+    return [row["path"] for row in cur.fetchall()]
+
+
+def _edit(
+    conn: sqlite3.Connection, path: str, old: str, new: str, replace_all: bool
+) -> int:
+    text = _get(conn, path)
+    if text is None:
+        raise FileNotFoundError(path)
+    count = text.count(old)
+    if count == 0:
+        raise ValueError(f"old string not found in {path}")
+    if count > 1 and not replace_all:
+        raise ValueError(
+            f"old string is not unique in {path} ({count} matches); "
+            "pass replace_all=true or include more context"
+        )
+    updated = text.replace(old, new) if replace_all else text.replace(old, new, 1)
+    conn.execute(
+        "UPDATE files SET content = ?, updated_at = ? WHERE path = ?",
+        (updated, time.time(), path),
+    )
+    conn.commit()
+    return count if replace_all else 1
+
+
+def _delete(conn: sqlite3.Connection, path: str) -> None:
+    conn.execute("DELETE FROM files WHERE path = ?", (path,))
+    conn.commit()

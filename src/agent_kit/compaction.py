@@ -58,12 +58,40 @@ _SUMMARY_PROMPT = (
     "Keep it factual and dense. Omit greetings, restated goals, and meta commentary."
 )
 
+_DETAILED_SUMMARY_PROMPT = (
+    "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\n"
+    "\n"
+    "Create a continuation-safe summary of the earlier conversation. Capture enough "
+    "technical detail for another agent to continue the work without access to the "
+    "compacted messages.\n"
+    "\n"
+    "Before the final summary, you may use an <analysis> block to organize details. "
+    "The final answer must include a <summary> block with these exact numbered "
+    "sections:\n"
+    "\n"
+    "1. Primary Request and Intent: the user's explicit requests and intent.\n"
+    "2. Files, Artifacts, and Code Sections: files, artifacts, data, or code read, "
+    "modified, created, or discussed; include paths and relevant identifiers when known.\n"
+    "3. Errors and Fixes: errors, failed commands, failed assumptions, and how they "
+    "were resolved.\n"
+    "4. Pending Tasks: outstanding tasks explicitly requested or discovered.\n"
+    "5. Current Work: what was being worked on immediately before compaction.\n"
+    "6. Next Step: the next concrete action aligned with the latest user request; "
+    "write 'None' if the prior task was complete.\n"
+    "\n"
+    "Be factual and dense. Preserve exact paths, commands, API names, public "
+    "interfaces, test results, and user corrections. Do not invent work that was "
+    "not done."
+)
+
 
 async def summarize_with_provider(
     provider: Any,
     model: str,
     older: list[Message],
     signal: AbortContext,
+    prompt: str = _SUMMARY_PROMPT,
+    max_output_tokens: int = 4096,
 ) -> str:
     """Summarise *older* messages using *provider* and return the summary text.
 
@@ -75,10 +103,10 @@ async def summarize_with_provider(
 
     req = ProviderRequest(
         model=model,
-        system=[SystemBlock(text=_SUMMARY_PROMPT, cacheable=False)],
+        system=[SystemBlock(text=prompt, cacheable=False)],
         tools=[],
         messages=older,
-        max_output_tokens=4096,
+        max_output_tokens=max_output_tokens,
         signal=signal,
     )
 
@@ -108,6 +136,47 @@ class DefaultCompaction:
         summary_msg = Message(
             role="user",
             content=[TextBlock(text=f"<summary of earlier conversation>\n\n{summary_text}")],
+        )
+
+        return [summary_msg, *recent]
+
+
+class DetailedCompaction:
+    """Continuation-safe compaction with detailed technical handoff sections."""
+
+    id = "detailed-continuation-keep-recent-10"
+
+    def __init__(self, *, keep_recent_turns: int = 10, max_output_tokens: int = 8192) -> None:
+        self.keep_recent_turns = keep_recent_turns
+        self.max_output_tokens = max_output_tokens
+
+    async def compact(self, ctx: CompactionContext, provider: Any) -> list[Message]:
+        recent = last_n_turn_boundaries(ctx.messages, self.keep_recent_turns)
+        boundary = len(ctx.messages) - len(recent)
+        older = ctx.messages[:boundary] if boundary > 0 else []
+
+        if not older:
+            return ctx.messages
+
+        summary_text = await summarize_with_provider(
+            provider,
+            ctx.model,
+            older,
+            ctx.signal,
+            prompt=_DETAILED_SUMMARY_PROMPT,
+            max_output_tokens=self.max_output_tokens,
+        )
+
+        summary_msg = Message(
+            role="user",
+            content=[
+                TextBlock(
+                    text=(
+                        "<detailed summary of earlier conversation>\n\n"
+                        f"{summary_text}"
+                    )
+                )
+            ],
         )
 
         return [summary_msg, *recent]

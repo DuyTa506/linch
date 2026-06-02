@@ -76,9 +76,10 @@ python3 examples/tools/filesystem_offload.py
 
 ## Public API
 
-- `agent_kit`: `Agent`, `Session`, events, types, errors, `RetryOptions`, `ToolTimeoutError`, `empty_tools`, `tools_from_defaults`
-- `agent_kit.config`: `FeatureFlags`, `SystemPromptConfig`
+- `agent_kit`: `Agent`, `Session`, events, types, errors, `DetailedCompaction`, `RetryOptions`, `ToolTimeoutError`, `empty_tools`, `tools_from_defaults`
+- `agent_kit.config`: `FeatureFlags`, `SystemPromptConfig`, `SystemPromptSection`
 - `agent_kit.context`: `ContextBuilder`, `ContextBuildResult`, `ContextBudget`
+- `agent_kit.skills`: built-in and project `SKILL.md` workflows, including `verify`
 - `agent_kit.memory`: `MemoryStore`, `MemoryItem`, `MemoryContextBuilder`, `MemorySearchTool`, `MemoryUpsertTool`, reference stores
 - `agent_kit.types`: `OutputSchema`, `ToolChoice`, `Message`, `ProviderRequest`
 - `agent_kit.providers`: `OpenAIResponsesProvider`, `OpenAIChatCompletionsProvider`, `AnthropicProvider`
@@ -155,6 +156,7 @@ Examples are organized by subsystem under `examples/`.
 | File | What it shows |
 |------|---------------|
 | `integrations/subagent_coordinator.py` | Agent definitions, tool-filtered subagents, SubagentEvent |
+| `integrations/multi_agent_isolation.py` | Context isolation: child work never enters parent context; sequential pipeline; parallel analysts; subagent + filesystem offload (*runs offline*) |
 
 Use the safe local demos above for README-friendly behavior. Other examples may
 make live provider calls when `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` is configured.

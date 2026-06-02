@@ -158,7 +158,7 @@ async def test_no_offload_when_disabled() -> None:
         permissions={"mode": "skip-dangerous"},
         cwd=".",
         tools=tools_from_defaults(extra=[BigTool()]),
-        # no result_offload → feature off
+        result_offload=None,  # explicitly disable
     )
     session = await agent.session()
     assert session.filesystem is None

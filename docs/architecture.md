@@ -114,7 +114,7 @@ sequenceDiagram
 
             RL->>SC: execute_tool_calls(approved_calls)
             SC-->>Caller: ToolCallStartEvent x N
-            Note over SC: maybe_offload() — if result > threshold_tokens<br/>write full payload to FileBackend<br/>replace content with preview + path
+            Note over SC: maybe_offload() — on by default<br/>threshold = context_window × 0.1 (resolved at Agent init)<br/>if tokens(result) > threshold: write to FileBackend, replace with preview + path
             SC-->>Caller: ToolCallEndEvent x N (result=preview, tool_result=full)
             SC-->>RL: result_blocks (previews only enter provider_view)
 
@@ -366,7 +366,7 @@ flowchart TD
 
 ### 3.7 Memory and RAG Layer
 
-Core ships a pluggable protocol with two reference implementations. Vector databases, embedding clients, and graph stores are host-owned and inject via the same protocol.
+Core ships a pluggable protocol with in-memory and durable reference implementations. Vector databases, embedding clients, and graph stores are host-owned and inject via the same protocol.
 
 ```mermaid
 graph TD
@@ -375,8 +375,9 @@ graph TD
     end
 
     subgraph Ref["Reference Implementations"]
-        IK["InMemoryKeywordMemoryStore\nBM25-style keyword matching"]
-        SQ["SqliteMemoryStore\nasync via asyncio.to_thread"]
+        IK["InMemoryKeywordMemoryStore\ncooperative keyword matching"]
+        SQ["SqliteMemoryStore\nasync via single-worker executor\n(storage._executor.SqliteExecutor)"]
+        PG["PostgresMemoryStore\noptional asyncpg backend\nagent-kit[postgres]"]
     end
 
     subgraph Host["Host-Owned Adapters"]
@@ -414,7 +415,7 @@ it needs via the `read_file` tool.
 flowchart TD
     EXEC["tool.execute() → ToolResult\ncontent = full payload (potentially huge)"]
 
-    OFFLOAD{{"result_offload configured\nAND backend attached\nAND len(content) > threshold?"}}
+    OFFLOAD{{"offload enabled (on by default)\nAND backend attached\nAND tokens(content) > threshold\n(threshold = context_window × 0.1)"}}
 
     WRITE["backend.write(path, content)\nwrite full payload to FileBackend"]
     REPLACE["result.content = preview (N lines) + path hint\nresult.truncated = True\nresult.metadata[offloaded_to] = path"]
@@ -695,17 +696,24 @@ tools_from_defaults(exclude, extra)       # standard set ± named tools
 
 ## 9. System Prompt Layers
 
-`Agent._build_system_blocks(tool_names)` assembles the system prompt from four ordered layers:
+`Agent._build_system_blocks(tool_names)` assembles the system prompt from
+ordered layers. `SystemPromptConfig.sections` can insert named reusable
+sections before defaults, after defaults, or after the environment block without
+changing the built-in prompt text:
 
 ```mermaid
 flowchart TD
+    L0["Layer 0 — before_defaults sections\nSystemPromptConfig.sections"]
     L1["Layer 1 — Custom blocks\nSystemPromptConfig.blocks\nprepended before identity"]
     L2["Layer 2 — Identity block\nYou are AgentKit…\nomitted when replace_defaults=True"]
     L3["Layer 3 — Protocol block\ntool-use instructions\nomitted when replace_defaults=True\nor no SWE tools present\nclauses conditional on registered tool families"]
     LFS["Layer 3b — Filesystem block\nadded when ls/read_file/write_file/edit_file are registered\nexplains virtual filesystem and offload recovery\npresent in both default and replace_defaults modes"]
-    L4["Layer 4 — Append block\nSystemPromptConfig.append\nor Agent(system_prompt=...)"]
+    L4["Layer 4 — after_defaults sections\nSystemPromptConfig.sections"]
+    L5["Layer 5 — Environment block\nalways present"]
+    L6["Layer 6 — after_env sections\nSystemPromptConfig.sections"]
+    L7["Layer 7 — Append block\nSystemPromptConfig.append\nor Agent(system_prompt=...)"]
 
-    L1 --> L2 --> L3 --> LFS --> L4
+    L0 --> L1 --> L2 --> L3 --> LFS --> L4 --> L5 --> L6 --> L7
 ```
 
 **Invariant:** when the full default toolset is registered and `replace_defaults=False`, the protocol block is byte-identical to the pinned reference in `tests/test_system_blocks.py`. Change the wording only intentionally and update the parity test.
@@ -749,13 +757,27 @@ Path B is more reliable for complex schemas and works across all providers witho
 
 **Invariant:** `full_history` is never modified. Only `provider_view` shrinks. Compaction uses the configured `agent.provider` — never a hardcoded OpenAI call.
 
+`DefaultCompaction` remains the default. `DetailedCompaction` is opt-in via
+`Agent(compaction=DetailedCompaction())` and uses a continuation-safe summary
+with user intent, artifacts/files/code touched, errors/fixes, pending tasks,
+current work, and the next step.
+
 ---
 
 ## 12. Skills and Subagents
 
-**Skills** are loaded from `.agent_kit/skills/*/SKILL.md`. Each file has YAML frontmatter (`name`, `description`, `allowed_tools`, `model_override`) and a markdown body. When a skill is invoked, the body is injected as a `<system-reminder>` per-turn via `_re_inject_skill_context`. Gated by `FeatureFlags(skills=True)`.
+**Skills** are loaded from `.agent_kit/skills/*/SKILL.md`; built-in skills
+such as `verify` are also registered unless a disk skill uses the same name.
+Each file has YAML frontmatter (`name`, `description`, `allowed_tools`,
+`model_override`) and a markdown body. When a skill is invoked, the body is
+injected as a `<system-reminder>` per-turn via `_re_inject_skill_context`.
+Gated by `FeatureFlags(skills=True)`.
 
-**Subagents** are defined in `.agent_kit/agents.yaml`. `subagents/runner.py` creates a child agent with its own tool overlay and system prompt. The child's system blocks are computed from its own tool names — not copied from the parent. Gated by `FeatureFlags(subagents=True)`.
+**Subagents** are defined in `.agent_kit/agents/*.md`; built-in named agents
+such as `verification` are also registered unless a disk agent uses the same
+name. `subagents/runner.py` creates a child agent with its own tool overlay and
+system prompt. The child's system blocks are computed from its own tool names —
+not copied from the parent. Gated by `FeatureFlags(subagents=True)`.
 
 **MCP** — `connect_mcp_servers(configs)` wraps each MCP tool as a duck-typed AgentKit tool. Names are normalized via `mcp/naming.py`. The connection closes on `agent.close()`. Gated by `FeatureFlags(mcp=True)`.
 

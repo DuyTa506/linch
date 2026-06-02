@@ -8,6 +8,7 @@ from agent_kit.abort import AbortContext
 from agent_kit.compaction import (
     CompactionContext,
     DefaultCompaction,
+    DetailedCompaction,
     maybe_compact,
     summarize_with_provider,
 )
@@ -31,6 +32,30 @@ class _FakeNonOpenAIProvider:
         self._stream_calls.append(req)
         yield {"type": "message_start", "model": req.model}
         yield {"type": "text_delta", "text": "Summary of conversation."}
+        yield {
+            "type": "message_end",
+            "stop_reason": "end_turn",
+            "usage": Usage(),
+            "provider_metadata": None,
+        }
+
+
+_DETAILED_SUMMARY = """\
+<summary>
+1. Primary Request and Intent: Implement the requested change.
+2. Files, Artifacts, and Code Sections: src/example.py was inspected.
+3. Errors and Fixes: None.
+4. Pending Tasks: Run tests.
+5. Current Work: Preparing verification.
+6. Next Step: Run pytest.
+</summary>"""
+
+
+class _FakeDetailedSummaryProvider(_FakeNonOpenAIProvider):
+    async def stream(self, req):
+        self._stream_calls.append(req)
+        yield {"type": "message_start", "model": req.model}
+        yield {"type": "text_delta", "text": _DETAILED_SUMMARY}
         yield {
             "type": "message_end",
             "stop_reason": "end_turn",
@@ -84,6 +109,36 @@ async def test_default_compaction_uses_non_openai_provider():
     )
     assert len(result) < len(messages)
     assert len(provider._stream_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_detailed_compaction_uses_no_tool_provider_request():
+    provider = _FakeDetailedSummaryProvider()
+    signal = AbortContext()
+    messages = _make_messages(30)
+
+    strategy = DetailedCompaction()
+    ctx = CompactionContext(messages=messages, model="model-x", signal=signal)
+    result = await strategy.compact(ctx, provider)
+
+    assert len(provider._stream_calls) == 1
+    request = provider._stream_calls[0]
+    assert request.model == "model-x"
+    assert request.tools == []
+    assert "CRITICAL: Respond with TEXT ONLY" in request.system[0].text
+
+    summary = result[0].content[0]
+    assert isinstance(summary, TextBlock)
+    assert "<detailed summary of earlier conversation>" in summary.text
+    for section in (
+        "Primary Request and Intent",
+        "Files, Artifacts, and Code Sections",
+        "Errors and Fixes",
+        "Pending Tasks",
+        "Current Work",
+        "Next Step",
+    ):
+        assert section in summary.text
 
 
 @pytest.mark.asyncio

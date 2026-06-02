@@ -138,10 +138,42 @@ agent = Agent(
 )
 ```
 
+### Skills
+
+Skills are prompt workflows exposed through the `Skill` tool when
+`FeatureFlags(skills=True)`.
+
+AgentKit includes a built-in `verify` skill:
+
+```text
+Skill({"skill": "verify", "args": "focus on billing workflow"})
+```
+
+`verify` asks the model to plan and run evidence-based checks for completed
+work, then end with `VERDICT: PASS`, `VERDICT: FAIL`, or `VERDICT: PARTIAL`.
+It is domain-agnostic: use it for software changes, data workflows, documents,
+configuration, or other concrete deliverables.
+
+Project skills live at `.agent_kit/skills/<name>/SKILL.md`. A project skill
+named `verify` overrides the built-in.
+
+### Compaction
+
+```python
+from agent_kit import Agent, DetailedCompaction
+
+# DefaultCompaction remains the default. DetailedCompaction is opt-in and uses
+# a continuation-safe summary structure for long-running sessions.
+agent = Agent(
+    model="gpt-5",
+    compaction=DetailedCompaction(),
+)
+```
+
 ### System prompt control
 
 ```python
-from agent_kit.config import SystemPromptConfig
+from agent_kit.config import SystemPromptConfig, SystemPromptSection
 
 # Append instructions to the built-in AgentKit prompt
 agent = Agent(..., system_prompt="Always reply in formal English.")
@@ -152,6 +184,20 @@ agent = Agent(
     system_prompt_config=SystemPromptConfig(
         replace_defaults=True,
         append="You are a financial analyst. Only discuss stocks and bonds.",
+    ),
+)
+
+# Add reusable prompt sections without replacing the defaults
+agent = Agent(
+    ...,
+    system_prompt_config=SystemPromptConfig(
+        sections=[
+            SystemPromptSection(
+                name="domain-policy",
+                text="When handling invoices, preserve source document IDs in every answer.",
+                placement="after_defaults",
+            )
+        ]
     ),
 )
 ```
@@ -325,7 +371,8 @@ agent = Agent(
 )
 ```
 
-Core includes `MemoryStore` protocols, in-memory keyword memory, SQLite memory,
+Core includes `MemoryStore` protocols, cooperative in-memory keyword memory,
+SQLite memory, optional Postgres memory via `pip install 'agent-kit[postgres]'`,
 and memory search/upsert tools. Vector databases and embedding models stay in
 the host app or a recipe.
 
@@ -333,39 +380,48 @@ the host app or a recipe.
 
 Variable-length tool results (RAG, web search, file dumps) are the #1 source of
 context-window blowup. The virtual filesystem subsystem handles this automatically:
-when a tool result exceeds `threshold_tokens`, the scheduler writes the full
+when a tool result exceeds a token threshold, the scheduler writes the full
 payload to a `FileBackend` and replaces what the model sees with a short preview
 plus a path reference. The model pulls back only what it needs via `read_file`.
 
-**Three minutes to wire it up:**
+**On by default.** Every `Agent()` enables offloading with an ephemeral
+`StateFileBackend`. The threshold is derived automatically from the model's context
+window (`threshold_fraction=0.1` → 10 % of the context window). A 128 k-token model
+offloads results above ~12 800 tokens; a 200 k model above ~20 000 tokens. No
+configuration required unless you want to change the backend or tune the threshold.
 
 ```python
-from agent_kit.filesystem import OffloadConfig, StateFileBackend
+# Default — ephemeral in-memory backend, threshold = 10 % of context window
+agent = Agent(...)   # offload is already on
 
-# Option A: ephemeral in-memory storage (default when offload is on)
-agent = Agent(
-    ...,
-    result_offload=OffloadConfig(),          # 20k-token threshold, 10 preview lines
-)
-
-# Option B: real files under .agent_kit/offload (inspectable, gitignored)
-from agent_kit.filesystem import DiskFileBackend
+# Persist offloaded files under .agent_kit/offload (inspectable, gitignored)
+from agent_kit.filesystem import DiskFileBackend, OffloadConfig
 agent = Agent(
     ...,
     filesystem=DiskFileBackend(root=".agent_kit/offload"),
-    result_offload=OffloadConfig(threshold_tokens=10_000, preview_lines=5),
 )
 
-# Option C: ephemeral scratch + persistent /memories/ across sessions
-from agent_kit.filesystem import CompositeFileBackend, SqliteFileBackend
+# Tune the threshold or fraction explicitly
+agent = Agent(
+    ...,
+    result_offload=OffloadConfig(threshold_tokens=5_000),   # hard override
+    # or:
+    result_offload=OffloadConfig(threshold_fraction=0.05),  # 5 % of context
+)
+
+# Ephemeral scratch + persistent /memories/ across sessions
+from agent_kit.filesystem import CompositeFileBackend, SqliteFileBackend, StateFileBackend
 agent = Agent(
     ...,
     filesystem=CompositeFileBackend(
         default=StateFileBackend(),
         routes={"/memories/": SqliteFileBackend(".agent_kit/memories.db")},
     ),
-    result_offload=OffloadConfig(),
 )
+
+# Disable entirely
+agent = Agent(..., result_offload=None)
+# or: features=FeatureFlags(filesystem=False)
 ```
 
 When the subsystem is active, four tools are registered automatically:
@@ -386,16 +442,19 @@ and on `ToolCallEndEvent.tool_result` for observers — only what enters `provid
 
 ```python
 OffloadConfig(
-    enabled=True,             # master switch
-    threshold_tokens=20_000,  # Deep Agents default
+    enabled=True,               # master switch
+    threshold_tokens=None,      # None = derive from context window (recommended)
+    threshold_fraction=0.1,     # fraction used when threshold_tokens is None (10 %)
     preview_lines=10,
-    path_prefix="/offload",   # virtual directory for auto-offloaded files
+    path_prefix="/offload",     # virtual directory for auto-offloaded files
     skip_tools=frozenset({"read_file", "write_file", "edit_file", "ls"}),
 )
 ```
 
-The filesystem tools are always excluded from offloading so reading a large file
-back does not recursively re-offload it.
+`threshold_tokens` is resolved once at `Agent.__init__` time from
+`int(context_window * threshold_fraction)`.  Pass an explicit integer to override
+(e.g. `threshold_tokens=5_000`).  The filesystem tools are always excluded from
+offloading so reading a large file back does not recursively re-offload it.
 
 ---
 
@@ -460,3 +519,11 @@ a live API key.
 | File | What it shows |
 |------|---------------|
 | `integrations/subagent_coordinator.py` | Agent definition files, tool-filtered subagents, SubagentEvent |
+| `integrations/multi_agent_isolation.py` | Context isolation: child work never enters parent context; sequential pipeline; parallel analysts; subagent + filesystem offload (*runs offline*) |
+
+Built-in subagents are available without disk definitions. After non-trivial
+implementation or workflow changes, ask the model to invoke `Subagent` with
+`subagent_type="verification"` and a prompt that includes the original task,
+artifacts or files changed, approach taken, and checks you expect it to run.
+The verification subagent is restricted to `Read`, `Glob`, `Grep`, and `Bash`
+and must end with `VERDICT: PASS`, `VERDICT: FAIL`, or `VERDICT: PARTIAL`.

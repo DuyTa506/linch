@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from .config import FeatureFlags, SystemPromptConfig
 from .errors import ConfigError
+from .middleware import normalize_middleware
 from .openai_responses import OpenAIOptions, OpenAIReasoning
 from .permissions import BashRule, PathRule, PermissionEngine, ToolRule
 from .providers import BaseProvider, OpenAIResponsesProvider, OpenAIResponsesProviderOptions
@@ -23,6 +24,40 @@ if TYPE_CHECKING:
 # Sentinel for "loop_guard not explicitly provided" — distinguishes the
 # default (LoopGuard on) from an explicit None/False (guard disabled).
 _UNSET: Any = object()
+
+# Sentinel for "result_offload not explicitly provided" — distinguishes the
+# default (offload on, threshold derived from context window) from an explicit
+# None (offload disabled).
+_DEFAULT_OFFLOAD: Any = object()
+
+_SECTION_PLACEMENTS = ("before_defaults", "after_defaults", "after_env")
+
+
+def _system_prompt_section_blocks(cfg: SystemPromptConfig | None) -> dict[str, list[SystemBlock]]:
+    grouped: dict[str, list[SystemBlock]] = {placement: [] for placement in _SECTION_PLACEMENTS}
+    if cfg is None or not cfg.sections:
+        return grouped
+
+    for section in cfg.sections:
+        placement = getattr(section, "placement", "before_defaults")
+        if placement not in grouped:
+            raise ConfigError(
+                "system_prompt_config.sections placement must be one of "
+                f"{', '.join(_SECTION_PLACEMENTS)}"
+            )
+        name = getattr(section, "name", "")
+        text = getattr(section, "text", "")
+        if not isinstance(name, str) or name.strip() == "":
+            raise ConfigError("system_prompt_config.sections name must be a non-empty string")
+        if not isinstance(text, str) or text == "":
+            raise ConfigError("system_prompt_config.sections text must be a non-empty string")
+        grouped[placement].append(
+            SystemBlock(
+                text=text,
+                cacheable=bool(getattr(section, "cacheable", True)),
+            )
+        )
+    return grouped
 
 
 @dataclass(slots=True)
@@ -58,7 +93,8 @@ class AgentOptions:
     loop_guard: Any = None  # LoopGuard | None; None means "use default LoopGuard"
     observers: list[Any] | None = None  # list[RunObserver] | None
     filesystem: Any = None  # FileBackend | None
-    result_offload: Any = None  # OffloadConfig | None
+    result_offload: Any = None  # OffloadConfig | None; None = use default OffloadConfig()
+    middleware: Any = None  # AgentMiddleware | list[AgentMiddleware] | None
 
 
 class Agent:
@@ -109,7 +145,8 @@ class Agent:
         loopGuard: Any = _UNSET,
         observers: Any = None,
         filesystem: Any = None,
-        result_offload: Any = None,
+        result_offload: Any = _DEFAULT_OFFLOAD,
+        middleware: Any = None,
     ) -> None:
         if systemPrompt is not None:
             system_prompt = systemPrompt
@@ -268,6 +305,9 @@ class Agent:
 
         self._observers: list[Any] = _normalize_observers(observers)
 
+        # Tool middleware: governance and result transformation hooks.
+        self.middleware: list[Any] = normalize_middleware(middleware)
+
         # Store SystemPromptConfig for use in _build_system_blocks
         self._system_prompt_config: SystemPromptConfig | None = system_prompt_config
 
@@ -275,7 +315,35 @@ class Agent:
         # ``filesystem`` is the per-agent default backend; a fresh clone (or
         # the same persistent backend) is attached to each session in session().
         # ``result_offload`` (OffloadConfig) enables automatic offloading of
-        # oversized tool results via the scheduler.
+        # oversized tool results via the scheduler.  On by default; disable
+        # with ``Agent(result_offload=None)`` or ``FeatureFlags(filesystem=False)``.
+        if result_offload is _DEFAULT_OFFLOAD:
+            from .filesystem.offload import OffloadConfig as _OffloadConfig
+
+            result_offload = _OffloadConfig()
+
+        # Resolve threshold_tokens from the model's context window when the
+        # caller left it as None (the default).  Done once here so maybe_offload
+        # always receives a concrete integer.
+        if result_offload is not None and getattr(result_offload, "threshold_tokens", None) is None:
+            try:
+                import dataclasses as _dc
+
+                fraction = getattr(result_offload, "threshold_fraction", 0.1)
+                ctx_window = provider.context_window(self.model)
+                resolved = max(1_000, int(ctx_window * fraction))
+                result_offload = _dc.replace(result_offload, threshold_tokens=resolved)
+            except Exception as _exc:
+                import logging as _logging
+
+                _logging.getLogger(__name__).warning(
+                    "Could not resolve threshold_tokens from provider.context_window(%r): %s. "
+                    "Result offloading will be skipped. Pass an explicit "
+                    "OffloadConfig(threshold_tokens=N) to suppress this warning.",
+                    self.model,
+                    _exc,
+                )
+
         self._filesystem_default: Any = filesystem
         self.result_offload: Any = result_offload
 
@@ -447,13 +515,17 @@ class Agent:
 
         # ── Assemble blocks ──────────────────────────────────────────────────
         blocks: list[SystemBlock] = []
+        section_blocks = _system_prompt_section_blocks(cfg)
 
         if cfg is not None and cfg.replace_defaults:
             # Custom-identity / non-SWE mode: skip built-in identity + protocol
+            blocks.extend(section_blocks["before_defaults"])
             if cfg.blocks:
                 blocks.extend(cfg.blocks)
+            blocks.extend(section_blocks["after_defaults"])
         else:
             # Default SWE mode: prepend any extra blocks, then identity + protocol
+            blocks.extend(section_blocks["before_defaults"])
             if cfg is not None and cfg.blocks:
                 blocks.extend(cfg.blocks)
             blocks.append(SystemBlock(text=_SWE_IDENTITY, cacheable=True))
@@ -464,6 +536,7 @@ class Agent:
                 # Non-SWE tools present: include the generic concurrency hint only
                 protocol = "Tool use protocol:\n\n" + protocol_lines[-1]
                 blocks.append(SystemBlock(text=protocol, cacheable=True))
+            blocks.extend(section_blocks["after_defaults"])
 
         # ── Virtual filesystem block ─────────────────────────────────────────
         # Present whenever the filesystem tools are available, in both default
@@ -486,6 +559,7 @@ class Agent:
 
         # env_text is always present
         blocks.append(SystemBlock(text=env_text, cacheable=True))
+        blocks.extend(section_blocks["after_env"])
 
         # User-provided instructions (from system_prompt or SystemPromptConfig.append)
         append_text = self.system_prompt
@@ -523,12 +597,14 @@ class Agent:
             return
 
         async def _load() -> None:
+            from .skills.builtins import merge_builtin_skills
             from .skills.listing import build_skill_listing
             from .skills.loader import load_skills_from_dir
             from .tools.skill import SkillTool
 
             builtin_names = {t.name for t in self.tools.list()}
-            loaded, _ = load_skills_from_dir(self._config_dir, builtin_names)
+            disk_skills, _ = load_skills_from_dir(self._config_dir, builtin_names)
+            loaded = merge_builtin_skills(disk_skills)
             for s in loaded:
                 self.skills[s.name] = s
 

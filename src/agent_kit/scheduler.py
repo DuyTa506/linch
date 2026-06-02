@@ -17,6 +17,12 @@ from .events import (
     ToolCallEndEvent,
     ToolCallStartEvent,
 )
+from .middleware import (
+    MiddlewareContext,
+    ToolCallMiddlewareInput,
+    dispatch_after_tool_result,
+    dispatch_before_tool_call,
+)
 from .permissions import PendingToolCall, PermissionDecision
 from .providers.retry import RetryOptions, _delay_for_error
 from .tools import ResourceAccess, ToolContext, ToolResult
@@ -126,14 +132,46 @@ def _effective_input(call: ResolvedCall, decision: PermissionDecision) -> dict[s
 
 
 def _skill_name_from_call(call: ResolvedCall) -> str | None:
+    return _skill_name_from_input(call, call.input)
+
+
+def _skill_name_from_input(call: ResolvedCall, input: dict[str, Any]) -> str | None:
     if call.is_immediate_error:
         return None
     if call.tool is None or call.tool.name != "Skill":
         return None
-    raw = call.input.get("skill")
+    raw = input.get("skill")
     if not isinstance(raw, str) or raw.strip() == "":
         return None
     return raw[1:] if raw.startswith("/") else raw
+
+
+def _middleware_context(
+    call: ResolvedCall,
+    session: Any,
+    *,
+    turn_index: int | None,
+) -> MiddlewareContext:
+    return MiddlewareContext(
+        session_id=session.id,
+        run_id=session.active_run_id or "unknown",
+        turn_index=turn_index,
+        tool_use_id=call.id,
+        tool_name=_tool_name(call),
+        deps=getattr(session, "run_deps", None),
+    )
+
+
+def _middleware_call_input(
+    call: ResolvedCall,
+    input: dict[str, Any],
+) -> ToolCallMiddlewareInput:
+    return ToolCallMiddlewareInput(
+        tool_use_id=call.id,
+        tool_name=_tool_name(call),
+        input=input,
+        summary=call.summary,
+    )
 
 
 async def _execute_one(
@@ -142,6 +180,9 @@ async def _execute_one(
     agent: Any,
     session: Any,
     signal: AbortContext,
+    *,
+    turn_index: int | None = None,
+    middleware_error: str | None = None,
 ) -> ToolExecutionOutcome:
     throw_if_aborted(signal)
 
@@ -156,6 +197,9 @@ async def _execute_one(
             call.id,
             _tool_result_error(f"Tool call denied: {decision.reason or 'permission denied'}"),
         )
+
+    if middleware_error is not None:
+        return _execution_outcome(call.id, _tool_result_error(middleware_error))
 
     tool = call.tool
     result_timeout_ms = _tool_timeout_ms(agent, tool)
@@ -183,7 +227,8 @@ async def _execute_one(
 
         attempt_start = time.perf_counter()
         try:
-            coro = tool.execute(_effective_input(call, decision), ctx)
+            effective_input = _effective_input(call, decision)
+            coro = tool.execute(effective_input, ctx)
             if result_timeout_ms is None:
                 result = await coro
             else:
@@ -191,6 +236,16 @@ async def _execute_one(
             elapsed = int((time.perf_counter() - attempt_start) * 1000)
             if result.duration_ms <= 0:
                 result.duration_ms = elapsed
+            middleware = getattr(agent, "middleware", [])
+            if middleware:
+                result = await dispatch_after_tool_result(
+                    middleware,
+                    _middleware_call_input(call, effective_input),
+                    result,
+                    _middleware_context(call, session, turn_index=turn_index),
+                )
+                if result.duration_ms <= 0:
+                    result.duration_ms = elapsed
             # ── Auto-offload oversized results ────────────────────────────────
             block_result = result
             _fs = getattr(session, "filesystem", None)
@@ -272,13 +327,17 @@ def _tool_parallel(call: ResolvedCall) -> bool:
     return bool(getattr(call.tool, "parallel", getattr(call.tool, "parallel_safe", False)))
 
 
-def _resource_accesses(call: ResolvedCall) -> list[ResourceAccess]:
+def _resource_accesses(
+    call: ResolvedCall,
+    input: dict[str, Any] | None = None,
+) -> list[ResourceAccess]:
     if call.is_immediate_error or call.tool is None:
         return []
+    effective_input = input if input is not None else call.input
     resources = getattr(call.tool, "resources", None)
     if callable(resources):
         try:
-            raw = resources(call.input)
+            raw = resources(effective_input)
         except Exception:
             if _tool_scope(call) == "read":
                 return []
@@ -384,7 +443,7 @@ def _partition_batches(
             "call": call,
             "idx": i,
             "decision": decisions[i],
-            "resources": _resource_accesses(call),
+            "resources": _resource_accesses(call, _effective_input(call, decisions[i])),
             "parallel": _tool_parallel(call),
         }
         for i, call in enumerate(resolved)
@@ -431,6 +490,8 @@ async def execute_tool_calls(
     agent: Any,
     session: Any,
     signal: AbortContext,
+    *,
+    turn_index: int | None = None,
 ) -> AsyncIterator[Event]:
     if not blocks:
         return
@@ -503,6 +564,31 @@ async def execute_tool_calls(
                 reason=f"Permission resolution failed for {_tool_name(call)}",
             )
 
+    # Tool middleware can transform or block the permission-resolved input.
+    middleware_errors: dict[str, str] = {}
+    middleware = getattr(agent, "middleware", [])
+    if middleware:
+        for i, call in enumerate(resolved):
+            if call.is_immediate_error or decisions[i].decision != "allow":
+                continue
+            effective_input = _effective_input(call, decisions[i])
+            outcome = await dispatch_before_tool_call(
+                middleware,
+                _middleware_call_input(call, effective_input),
+                _middleware_context(call, session, turn_index=turn_index),
+            )
+            decisions[i] = PermissionDecision(
+                decision="allow",
+                updated_input=outcome.call.input,
+            )
+            try:
+                if call.tool is not None:
+                    call.summary = call.tool.summarize(outcome.call.input)
+            except Exception:
+                pass
+            if outcome.error is not None:
+                middleware_errors[call.id] = outcome.error
+
     # Partition into bounded, resource-aware batches.
     batches = _partition_batches(
         resolved,
@@ -518,9 +604,10 @@ async def execute_tool_calls(
         if not batch["parallel"]:
             # Serial lane — one call at a time
             for call, idx, decision in batch["calls"]:
-                skill_name = _skill_name_from_call(call)
+                input = _effective_input(call, decision)
+                skill_name = _skill_name_from_input(call, input)
                 if skill_name is not None:
-                    args = call.input.get("args")
+                    args = input.get("args")
                     yield SkillInvokedEvent(
                         name=skill_name,
                         args=args if isinstance(args, str) else None,
@@ -528,11 +615,19 @@ async def execute_tool_calls(
                 yield ToolCallStartEvent(
                     tool_use_id=call.id,
                     tool_name=_tool_name(call),
-                    input=_effective_input(call, decision),
+                    input=input,
                     summary=call.summary,
                 )
                 try:
-                    outcome = await _execute_one(call, decision, agent, session, signal)
+                    outcome = await _execute_one(
+                        call,
+                        decision,
+                        agent,
+                        session,
+                        signal,
+                        turn_index=turn_index,
+                        middleware_error=middleware_errors.get(call.id),
+                    )
                 except AbortError:
                     tool_result = _tool_result_error("aborted")
                     yield ToolCallEndEvent(
@@ -559,10 +654,11 @@ async def execute_tool_calls(
             # Parallel lane — all starts first, then run concurrently, then all ends
             skill_names: dict[str, str | None] = {}
             for call, _idx, decision in batch["calls"]:
-                skill_name = _skill_name_from_call(call)
+                input = _effective_input(call, decision)
+                skill_name = _skill_name_from_input(call, input)
                 skill_names[call.id] = skill_name
                 if skill_name is not None:
-                    args = call.input.get("args")
+                    args = input.get("args")
                     yield SkillInvokedEvent(
                         name=skill_name,
                         args=args if isinstance(args, str) else None,
@@ -570,12 +666,22 @@ async def execute_tool_calls(
                 yield ToolCallStartEvent(
                     tool_use_id=call.id,
                     tool_name=_tool_name(call),
-                    input=_effective_input(call, decision),
+                    input=input,
                     summary=call.summary,
                 )
 
             tasks = [
-                asyncio.ensure_future(_execute_one(call, decision, agent, session, signal))
+                asyncio.ensure_future(
+                    _execute_one(
+                        call,
+                        decision,
+                        agent,
+                        session,
+                        signal,
+                        turn_index=turn_index,
+                        middleware_error=middleware_errors.get(call.id),
+                    )
+                )
                 for call, _idx, decision in batch["calls"]
             ]
 

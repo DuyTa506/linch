@@ -83,6 +83,7 @@ def _agent(provider: Any, *, context_builder: Any):
         session_store=InMemorySessionStore(),
         context_builder=context_builder,
         features=FeatureFlags(skills=False, subagents=False, mcp=False),
+        result_offload=None,
     )
 
 

@@ -35,7 +35,7 @@ class SkillTool:
         get_session_model: Any = None,
     ) -> None:
         self._skills = skills
-        self._session_registry = session_registry or {}
+        self._session_registry = session_registry if session_registry is not None else {}
         self._get_session_model = get_session_model
 
     def validate(self, raw: dict[str, Any]) -> dict[str, Any]:

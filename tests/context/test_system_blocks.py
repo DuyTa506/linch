@@ -156,6 +156,84 @@ def test_custom_blocks_prepended_in_default_mode():
     assert custom_idx < identity_idx
 
 
+def test_system_prompt_sections_render_by_placement():
+    from agent_kit.config import SystemPromptConfig, SystemPromptSection
+
+    cfg = SystemPromptConfig(
+        sections=[
+            SystemPromptSection(
+                name="before",
+                text="BEFORE DEFAULTS",
+                placement="before_defaults",
+            ),
+            SystemPromptSection(
+                name="after-defaults",
+                text="AFTER DEFAULTS",
+                placement="after_defaults",
+                cacheable=False,
+            ),
+            SystemPromptSection(
+                name="after-env",
+                text="AFTER ENV",
+                placement="after_env",
+            ),
+        ],
+        append="APPEND",
+    )
+    agent = _make_agent(system_prompt_config=cfg)
+    texts = _block_texts(agent)
+
+    before_idx = texts.index("BEFORE DEFAULTS")
+    identity_idx = next(i for i, t in enumerate(texts) if "software engineering" in t)
+    after_defaults_idx = texts.index("AFTER DEFAULTS")
+    env_idx = next(i for i, t in enumerate(texts) if t.startswith("Environment:"))
+    after_env_idx = texts.index("AFTER ENV")
+    append_idx = next(i for i, t in enumerate(texts) if "APPEND" in t)
+
+    assert before_idx < identity_idx < after_defaults_idx < env_idx < after_env_idx < append_idx
+    assert agent.system_blocks[after_defaults_idx].cacheable is False
+
+
+def test_system_prompt_sections_replace_defaults_skip_identity():
+    from agent_kit.config import SystemPromptConfig, SystemPromptSection
+
+    cfg = SystemPromptConfig(
+        replace_defaults=True,
+        sections=[
+            SystemPromptSection(
+                name="policy",
+                text="DOMAIN POLICY",
+                placement="after_defaults",
+            )
+        ],
+    )
+    agent = _make_agent(system_prompt_config=cfg)
+    combined = "\n".join(_block_texts(agent))
+
+    assert "DOMAIN POLICY" in combined
+    assert "autonomous software engineering assistant" not in combined
+    assert "Environment:" in combined
+
+
+def test_system_prompt_sections_invalid_placement_raises():
+    from agent_kit.config import SystemPromptConfig, SystemPromptSection
+    from agent_kit.errors import ConfigError
+
+    cfg = SystemPromptConfig(
+        sections=[
+            SystemPromptSection(
+                name="bad",
+                text="BAD",
+                placement="wrong",  # type: ignore[arg-type]
+            )
+        ]
+    )
+    agent = _make_agent(system_prompt_config=cfg)
+
+    with pytest.raises(ConfigError):
+        _ = agent.system_blocks
+
+
 def test_system_prompt_appended():
     agent = _make_agent(system_prompt="Always speak in haiku.")
     combined = "\n".join(_block_texts(agent))

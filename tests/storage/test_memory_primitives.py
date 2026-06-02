@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import time
 from typing import Any
 
 import pytest
@@ -91,6 +93,41 @@ async def test_keyword_memory_search_and_replace() -> None:
 
 
 @pytest.mark.asyncio
+async def test_keyword_memory_store_work_does_not_block_event_loop(monkeypatch) -> None:
+    from agent_kit.memory import InMemoryKeywordMemoryStore, MemoryItem
+    from agent_kit.memory import keyword as keyword_mod
+
+    original_tokenize = keyword_mod._tokenize
+
+    def slow_tokenize(text: str) -> set[str]:
+        time.sleep(0.02)
+        return original_tokenize(text)
+
+    monkeypatch.setattr(keyword_mod, "_tokenize", slow_tokenize)
+
+    store = InMemoryKeywordMemoryStore()
+
+    upsert_task = asyncio.create_task(
+        store.upsert(
+            [
+                MemoryItem(id=f"m{i}", content="alpha beta", namespace="docs")
+                for i in range(10)
+            ]
+        )
+    )
+    await asyncio.sleep(0.03)
+    assert not upsert_task.done()
+    await upsert_task
+
+    store._token_cache.clear()
+    search_task = asyncio.create_task(store.search("alpha", namespace="docs"))
+    await asyncio.sleep(0.03)
+    assert not search_task.done()
+    hits = await search_task
+    assert hits
+
+
+@pytest.mark.asyncio
 async def test_sqlite_memory_search_and_namespace(tmp_path) -> None:
     from agent_kit.memory import MemoryItem, SqliteMemoryStore
 
@@ -110,6 +147,26 @@ async def test_sqlite_memory_search_and_namespace(tmp_path) -> None:
         assert [hit.item.id for hit in right] == ["b"]
     finally:
         store.close()
+
+
+def test_postgres_memory_store_is_public_optional_export(monkeypatch) -> None:
+    import sys
+
+    from agent_kit import PostgresMemoryStore as RootPostgresMemoryStore
+    from agent_kit.memory import PostgresMemoryStore
+
+    assert RootPostgresMemoryStore is PostgresMemoryStore
+
+    real_asyncpg = sys.modules.get("asyncpg")
+    sys.modules["asyncpg"] = None  # type: ignore[assignment]
+    try:
+        with pytest.raises(ModuleNotFoundError, match="agent-kit\\[postgres\\]"):
+            PostgresMemoryStore("postgresql://user:pw@localhost/db")
+    finally:
+        if real_asyncpg is not None:
+            sys.modules["asyncpg"] = real_asyncpg
+        else:
+            sys.modules.pop("asyncpg", None)
 
 
 @pytest.mark.asyncio

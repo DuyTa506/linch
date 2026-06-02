@@ -30,7 +30,14 @@ class OffloadConfig:
         enabled: Master switch.  ``False`` disables offload even when a config
             object is present.
         threshold_tokens: Results estimated above this many tokens are
-            offloaded.  Defaults to 20,000 (the Deep Agents threshold).
+            offloaded.  ``None`` (the default) means *derive from the model's
+            context window*: ``Agent.__init__`` resolves it to
+            ``int(context_window * threshold_fraction)`` at construction time
+            so the threshold scales with the model.  Pass an explicit integer
+            to override (e.g. ``threshold_tokens=5_000``).
+        threshold_fraction: Fraction of the model's context window used as the
+            threshold when ``threshold_tokens`` is ``None``.  Defaults to
+            ``0.1`` (10 %).  A 200 k-token model → 20 k; a 32 k model → 3.2 k.
         preview_lines: Number of leading lines kept inline as a preview.
         path_prefix: Virtual directory offloaded results are written under.
         skip_tools: Tool names never offloaded.  The filesystem tools
@@ -39,7 +46,8 @@ class OffloadConfig:
     """
 
     enabled: bool = True
-    threshold_tokens: int = 20_000
+    threshold_tokens: int | None = None
+    threshold_fraction: float = 0.1
     preview_lines: int = 10
     path_prefix: str = "/offload"
     skip_tools: frozenset[str] = field(
@@ -94,12 +102,18 @@ async def maybe_offload(
     if not config.enabled or result.is_error or tool_name in config.skip_tools:
         return result
 
+    threshold = config.threshold_tokens
+    if threshold is None:
+        # threshold was not resolved at Agent init (e.g. a bare OffloadConfig
+        # used outside Agent) — skip offload rather than use an arbitrary value.
+        return result
+
     content = result.content
     if not isinstance(content, str):
         return result
 
     tokens = estimate_tokens(content, token_estimator, model)
-    if tokens <= config.threshold_tokens:
+    if tokens <= threshold:
         return result
 
     path = normalize_path(f"{config.path_prefix}/{tool_name}_{call_id}.txt")

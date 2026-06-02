@@ -12,6 +12,7 @@ Demonstrates:
   2. tools filter — a subagent only receives a subset of the parent's tools.
   3. SubagentEvent bubbling — child events appear in the parent event stream.
   4. Agent(config_dir=...) — point to a custom config directory.
+  5. Built-in `verification` subagent — available without a disk definition.
 """
 
 from __future__ import annotations
@@ -52,6 +53,14 @@ Read the text in the user message and return a single, polished paragraph
 summarising the key points. Do not use any tools.
 """
 
+VERIFY_AFTER_CHANGES_PROMPT = """\
+Use Subagent with subagent_type="verification" after these changes.
+Original task: Fix the session cleanup bug.
+Artifacts changed: src/agent_kit/session.py, tests/storage/test_sessions.py.
+Approach taken: close child sessions before removing them from the in-memory registry.
+Verify with the relevant session tests plus one adversarial regression check.
+"""
+
 
 def load_project_env() -> None:
     env_path = ROOT / ".env"
@@ -89,6 +98,13 @@ async def demo_loader() -> None:
         researcher = registry.get("researcher")
         assert researcher is not None
         print(f"\nResearcher body preview:\n  {researcher.body.splitlines()[0]!r}")
+        verification = registry.get("verification")
+        assert verification is not None
+        print(
+            "\nBuilt-in verifier:"
+            f"\n  [{verification.name}] {verification.frontmatter.description}"
+        )
+        print(f"\nExample parent prompt for verification:\n{VERIFY_AFTER_CHANGES_PROMPT}")
 
 
 async def demo_live_subagents() -> None:

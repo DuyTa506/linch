@@ -68,7 +68,7 @@ class MyTool(BaseTool):  # ← don't do this
 
 ### No blocking I/O in the core loop
 
-Everything in `loop.py`, `scheduler.py`, `compaction.py`, and all providers must be async. Use `asyncio.to_thread()` if you need to call a sync library (see `SqliteSessionStore` for the pattern).
+Everything in `loop.py`, `scheduler.py`, `compaction.py`, and all providers must be async. Use `asyncio.to_thread()` for a one-off sync call, or use the dedicated `SqliteExecutor` helper (`agent_kit.storage._executor.SqliteExecutor`) for any store that needs a long-lived `sqlite3` connection — it pins the connection to a single worker thread so the loop is never blocked and no `asyncio.Lock` is needed.
 
 ### Provider stream contract
 
@@ -181,7 +181,7 @@ The `FileBackend` protocol (`filesystem/backend.py`) is duck-typed — no base c
 Implement six async methods: `read`, `write`, `ls`, `edit`, `exists`, `delete`.
 
 1. Create `src/agent_kit/filesystem/my_backend.py`.
-2. Use `asyncio.to_thread()` or an `asyncio`-native client for any I/O — never block the event loop. See `DiskFileBackend` (disk I/O) and `SqliteFileBackend` (thread executor) for reference patterns.
+2. Use `asyncio.to_thread()` or an `asyncio`-native client for any I/O — never block the event loop. For a SQLite backend, use `SqliteExecutor` from `agent_kit.storage._executor` (one worker thread per store, no lock needed). See `DiskFileBackend` (disk I/O via `asyncio.to_thread`) and `SqliteFileBackend` (`SqliteExecutor`) for reference patterns.
 3. Call `normalize_path(path)` at the entry of every method to canonicalize paths.
 4. `read` must raise `FileNotFoundError` for missing paths; `edit` must raise `ValueError` when `old_string` is absent or not unique (and `replace_all=False`); `delete` is a no-op for missing paths.
 5. Export from `filesystem/__init__.py` and `src/agent_kit/__init__.py`.

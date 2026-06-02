@@ -1,5 +1,6 @@
 from .builder import MemoryContextBuilder, format_memory_context, latest_user_text
 from .keyword import InMemoryKeywordMemoryStore
+from .postgres import PostgresMemoryStore
 from .sqlite import SqliteMemoryStore
 from .store import MemoryStore, resolve_memory_store
 from .tools import MemorySearchTool, MemoryUpsertTool
@@ -13,6 +14,7 @@ __all__ = [
     "MemorySearchTool",
     "MemoryStore",
     "MemoryUpsertTool",
+    "PostgresMemoryStore",
     "SqliteMemoryStore",
     "format_memory_context",
     "latest_user_text",

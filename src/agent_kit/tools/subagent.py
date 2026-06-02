@@ -51,7 +51,20 @@ class SubagentTool:
     @property
     def description(self) -> str:
 
-        header = "Launch a subagent to handle a focused task."
+        header = "\n".join(
+            [
+                "Launch a subagent to handle a focused task.",
+                "",
+                "Delegation rules:",
+                "- Fresh subagents start with no parent history; include complete context,",
+                "  relevant files, constraints, prior findings, and the exact expected output.",
+                "- Use subagents for meaningful research, implementation, or verification work.",
+                "- Do not delegate synthesis with vague prompts like \"based on your findings\";",
+                "  synthesize yourself, then assign specific next actions.",
+                "- Launch independent research tasks in parallel when they do not depend",
+                "  on each other.",
+            ]
+        )
         trailer = "\n".join(
             [
                 "Omit `subagent_type` to spawn a general-purpose subagent with full tool access.",

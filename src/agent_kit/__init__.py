@@ -1,7 +1,8 @@
 """Public API for agent_kit."""
 
 from .agent import Agent, AgentOptions
-from .config import FeatureFlags, SystemPromptConfig
+from .compaction import DefaultCompaction, DetailedCompaction
+from .config import FeatureFlags, SystemPromptConfig, SystemPromptSection
 from .context import (
     ContextBudget,
     ContextBuilder,
@@ -76,7 +77,14 @@ from .memory import (
     MemorySearchTool,
     MemoryStore,
     MemoryUpsertTool,
+    PostgresMemoryStore,
     SqliteMemoryStore,
+)
+from .middleware import (
+    AgentMiddleware,
+    MiddlewareContext,
+    ToolCallMiddlewareInput,
+    ToolCallMiddlewareResult,
 )
 from .observability import (
     BaseObserver,
@@ -143,12 +151,15 @@ __all__ = [
     "Agent",
     "AgentKitError",
     "AgentOptions",
+    "AgentMiddleware",
     "ContextBudget",
     "ContextBuilder",
     "ContextBuilderChain",
     "ContextBuildEvent",
     "ContextBuildResult",
     "ContextBuildTurn",
+    "DefaultCompaction",
+    "DetailedCompaction",
     "FeatureFlags",
     "CompositeFileBackend",
     "DiskFileBackend",
@@ -159,6 +170,7 @@ __all__ = [
     "filesystem_tools",
     "InMemoryKeywordMemoryStore",
     "SystemPromptConfig",
+    "SystemPromptSection",
     "OutputSchema",
     "ToolChoice",
     "empty_tools",
@@ -183,6 +195,7 @@ __all__ = [
     "MemorySearchTool",
     "MemoryStore",
     "MemoryUpsertTool",
+    "MiddlewareContext",
     "Message",
     "ModelId",
     "OpenAIOptions",
@@ -192,6 +205,7 @@ __all__ = [
     "PermissionDeniedError",
     "PermissionRequestEvent",
     "ProviderError",
+    "PostgresMemoryStore",
     "RateLimitError",
     "ResultEvent",
     "RunOptions",
@@ -210,6 +224,8 @@ __all__ = [
     "TextBlock",
     "Tool",
     "ToolCallEndEvent",
+    "ToolCallMiddlewareInput",
+    "ToolCallMiddlewareResult",
     "ToolCallStartEvent",
     "ToolContext",
     "ToolExecutionError",

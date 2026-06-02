@@ -629,6 +629,7 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
                 agent,
                 session,
                 signal,
+                turn_index=turn_index,
             ):
                 yield event
                 if hub.active:
