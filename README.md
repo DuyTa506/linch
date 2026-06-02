@@ -1,6 +1,12 @@
-# agent_kit
+# linch
 
-AgentKit is a Python SDK for building agent loops you embed in your own application. It is async-first, event-driven, and provider-agnostic — designed as a **harnessing framework** you build domain workflows on top of.
+> **靈** (*linh*) · *cinch*
+>
+> *靈者，簡之道也。機動而萬事易。*
+> *Linh giả, giản chi đạo dã. Cơ động nhi vạn sự dị.*
+> *"Spirit is the way of simplicity. When the mechanism stirs, ten thousand things become easy."*
+
+**linch** is a Python SDK for embedding a software engineering agent loop in your application — async-first, event-driven, and provider-agnostic, designed as a **harnessing framework** you build domain workflows on top of.
 
 Core capabilities: streaming events, resource-aware parallel tool scheduling,
 per-tool timeout + opt-in retry, first-class context building (RAG), memory/RAG
@@ -8,10 +14,26 @@ primitives, **virtual filesystem with automatic large-result offloading**, struc
 output, rich tool results with citations/metadata, runtime tool registries,
 permission engine, MCP/skills/subagents, and pluggable providers.
 
+## Tên gọi · Etymology
+
+**linch** blends two ideas:
+
+| | |
+|---|---|
+| **靈** `linh` | In classical Sino-Vietnamese (*chữ Nho*), 靈 carries the meaning of *spirit*, *effortless intelligence*, and *vital agility* — attributed to things that work with invisible precision. The character unites **雨** (heaven, rain above) with **巫** (the shaman — connector between worlds): the unseen force that makes the mechanism live. |
+| **cinch** | A saddle *harness* piece; English slang for *easy, simple, sure*. |
+
+A *linch* is small — a single pin — but it holds the wheel on the axle.
+That is the SDK's ambition: the smallest harness that makes complex agent orchestration feel like a cinch.
+
+> 靈活簡便，以一馭萬。
+> *Linh hoạt giản tiện, dĩ nhất ngự vạn.*
+> *"Agile and simple — govern ten thousand things with one."*
+
 ## Install
 
 ```sh
-pip install agent-kit
+pip install linch
 ```
 
 For local development:
@@ -76,7 +98,7 @@ python3 examples/tools/filesystem_offload.py
 
 ## Public API
 
-- `agent_kit`: `Agent`, `Session`, events, types, errors, `DetailedCompaction`, `RetryOptions`, `ToolTimeoutError`, `empty_tools`, `tools_from_defaults`
+- `linch`: `Agent`, `Session`, events, types, errors, `DetailedCompaction`, `RetryOptions`, `ToolTimeoutError`, `empty_tools`, `tools_from_defaults`
 - `agent_kit.config`: `FeatureFlags`, `SystemPromptConfig`, `SystemPromptSection`
 - `agent_kit.context`: `ContextBuilder`, `ContextBuildResult`, `ContextBudget`
 - `agent_kit.skills`: built-in and project `SKILL.md` workflows, including `verify`
