@@ -65,12 +65,11 @@ async def run_basic() -> None:
 async def run_with_thinking() -> None:
     """Turn with extended thinking enabled.
 
-    ThinkingBlock events are emitted while Claude reasons; only the final
-    text response is surfaced in AssistantEvent.
+    ThinkingBlock events are streamed via PartialAssistantEvent while Claude
+    reasons; the final text surfaces in ResultEvent.
     """
     from linch import Agent
     from linch.config import FeatureFlags
-    from linch.events import AssistantEvent
     from linch.providers.anthropic import AnthropicProvider, AnthropicProviderOptions
     from linch.sessions import InMemorySessionStore
     from linch.tools.registry import empty_tools
@@ -90,15 +89,16 @@ async def run_with_thinking() -> None:
         permissions={"mode": "skip-dangerous"},
         features=FeatureFlags(skills=False, subagents=False, mcp=False),
         loop_guard=None,
+        include_partial_messages=True,
     )
     session = await agent.session()
 
     thinking_chars = 0
     async for event in session.run("What is 17 × 23? Show your reasoning."):
         if event.type == "partial_assistant":
-            if getattr(event, "thinking", None):
-                thinking_chars += len(event.thinking)
-        elif isinstance(event, AssistantEvent):
+            if event.delta.get("kind") == "thinking":
+                thinking_chars += len(event.delta.get("text", ""))
+        elif event.type == "result":
             print(f"[thinking] answer: {event.final_text}")
             print(f"[thinking] thinking chars streamed: {thinking_chars}")
 

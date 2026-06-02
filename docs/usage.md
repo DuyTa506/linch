@@ -88,29 +88,105 @@ async for event in session.run("hello"):
 
 ### Model & provider
 
+Linch ships three providers. Pick one based on the API you're targeting.
+
 ```python
 import os
+from linch import Agent
+from linch.sessions import InMemorySessionStore
 
-from linch.providers import OpenAIResponsesProvider, OpenAIChatCompletionsProvider
-from linch.openai_responses import OpenAIOptions
+# ── OpenAI Responses API (o1, o3, gpt-5 — reasoning-native models) ──────────
+# Stateful: sends previous_response_id so only new messages travel the wire.
+# Supports native reasoning effort/summary levels and encrypted reasoning tokens.
+from linch.providers.openai_responses import OpenAIResponsesProvider, OpenAIResponsesProviderOptions
+from linch.openai_responses import OpenAIReasoning
 
-# Default: OpenAI Responses API (o-series, gpt-5, …)
-agent = Agent(model="gpt-5", openai_api_key=os.environ.get("OPENAI_API_KEY"))
-
-# Chat Completions (gpt-4o, gpt-4-turbo, …)
 agent = Agent(
-    model="gpt-4o",
-    provider=OpenAIChatCompletionsProvider(options),
-)
-
-# Custom base URL (Azure, local proxy, …)
-agent = Agent(
-    model="my-model",
-    openai=OpenAIOptions(
-        api_key=os.environ.get("OPENAI_API_KEY"),
-        base_url=os.environ.get("OPENAI_BASE_URL"),
+    model="gpt-5",
+    provider=OpenAIResponsesProvider(
+        OpenAIResponsesProviderOptions(
+            api_key=os.environ["OPENAI_API_KEY"],
+            reasoning=OpenAIReasoning(effort="high"),
+        )
     ),
+    session_store=InMemorySessionStore(),
 )
+
+# ── OpenAI Chat Completions (gpt-4o, gpt-5-nano, any OpenAI-compatible) ─────
+# Stateless: full message array resent every turn.
+# Works with any OpenAI-compatible endpoint (Azure, Groq, Together, …).
+# Thinking events emitted when model streams reasoning_content (e.g. DeepSeek).
+# Set include_partial_messages=True to receive PartialAssistantEvent for streaming.
+from linch.providers import OpenAIChatCompletionsProvider
+from linch.providers.openai_chat import OpenAIChatProviderOptions
+
+agent = Agent(
+    model="gpt-5-nano-2025-08-07",
+    provider=OpenAIChatCompletionsProvider(
+        OpenAIChatProviderOptions(api_key=os.environ["OPENAI_API_KEY"])
+    ),
+    session_store=InMemorySessionStore(),
+    include_partial_messages=True,   # stream text + thinking deltas
+)
+
+# ── Anthropic Claude ─────────────────────────────────────────────────────────
+# Supports extended thinking (budget_tokens), prompt caching, and tool use.
+# Native structured output via the final_tool_name pattern (see §10 of architecture.md).
+# include_partial_messages=True streams ThinkingBlock deltas as kind="thinking" events.
+from linch.providers.anthropic import AnthropicProvider, AnthropicProviderOptions
+
+agent = Agent(
+    model="claude-sonnet-4-6",
+    provider=AnthropicProvider(
+        AnthropicProviderOptions(
+            api_key=os.environ["ANTHROPIC_API_KEY"],
+            thinking={"type": "enabled", "budget_tokens": 5000},
+        )
+    ),
+    session_store=InMemorySessionStore(),
+    include_partial_messages=True,
+)
+
+# ── DeepSeek (OpenAI-compatible endpoint) ────────────────────────────────────
+# deepseek-v4-flash / deepseek-v4-pro are reasoning models that emit
+# reasoning_content — Linch round-trips it automatically so multi-turn tool
+# loops work without 400 errors.
+agent = Agent(
+    model="deepseek-v4-flash",
+    provider=OpenAIChatCompletionsProvider(
+        OpenAIChatProviderOptions(
+            api_key=os.environ["DEEPSEEK_API_KEY"],
+            base_url="https://api.deepseek.com",
+        )
+    ),
+    session_store=InMemorySessionStore(),
+    include_partial_messages=True,
+)
+
+# ── DeepSeek via Anthropic-compatible endpoint ───────────────────────────────
+agent = Agent(
+    model="deepseek-v4-flash",
+    provider=AnthropicProvider(
+        AnthropicProviderOptions(
+            api_key=os.environ["DEEPSEEK_API_KEY"],
+            base_url="https://api.deepseek.com/anthropic",
+        )
+    ),
+    session_store=InMemorySessionStore(),
+)
+```
+
+**Reading thinking events** (any provider that emits `reasoning_content` or Anthropic thinking):
+
+```python
+async for event in session.run("What is 17 × 23?"):
+    if event.type == "partial_assistant":
+        if event.delta.get("kind") == "thinking":
+            print("thinking:", event.delta["text"], end="", flush=True)
+        elif event.delta.get("kind") == "text":
+            print(event.delta["text"], end="", flush=True)
+    elif event.type == "result":
+        print("\nanswer:", event.final_text)
 ```
 
 ### Session store
@@ -468,6 +544,9 @@ a live API key.
 | File | What it shows |
 |------|---------------|
 | `core/minimal_agent.py` | Smallest possible agent |
+| `core/coding_agent.py` | Full SWE agent — tools_from_defaults, BashRule/PathRule safety fence, LoopGuard, multi-turn |
+| `core/reading_agent.py` | Read-only codebase Q&A — exclude Write/Edit/Bash, PathRule, custom reviewer persona |
+| `core/chat_agent.py` | Pure conversation agent — no tools, custom domain, structured JSON output via ContextBuilder injection |
 | `core/custom_permissions.py` | All permission modes and rule types |
 | `core/system_prompts.py` | append, replace, per-session override, persona patterns |
 | `core/structured_output.py` | OutputSchema, final_tool_name, JSON extraction |
@@ -512,7 +591,9 @@ a live API key.
 
 | File | What it shows |
 |------|---------------|
-| `providers/anthropic_agent.py` | AnthropicProvider, extended thinking, prompt caching |
+| `providers/openai_agent.py` | OpenAIChatCompletionsProvider — basic Q&A, thinking events, tool use, thinking + tool use, structured output, multi-turn |
+| `providers/anthropic_agent.py` | AnthropicProvider — basic Q&A, extended thinking (with `PartialAssistantEvent`), prompt caching |
+| `providers/deepseek_agent.py` | DeepSeek via both OpenAI-compatible and Anthropic-compatible endpoints — thinking, tool use, thinking + tool use, multi-turn |
 
 **`integrations/`** — *local demo available*
 

@@ -323,6 +323,8 @@ async def stream_turn(
             if meta is not None:
                 try:
                     parsed = json.loads(raw) if raw else {}
+                    if not isinstance(parsed, dict):
+                        parsed = {}
                 except json.JSONDecodeError:
                     parsed = {"__invalid_json": True, "raw": raw}
                 content.append(ToolUseBlock(id=meta[0], name=meta[1], input=parsed))

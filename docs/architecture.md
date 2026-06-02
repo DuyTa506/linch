@@ -262,6 +262,21 @@ flowchart LR
 | `OpenAIChatCompletionsProvider` | ✗ | ✓ | ✓ |
 | `AnthropicProvider` | ✓ | ✗ | ✓ |
 
+> **`structured_output` means native JSON Schema enforcement via a request parameter** (Chat Completions: `response_format: {type: "json_schema", ...}`; Responses API: `text.format`). It does **not** mean the provider cannot produce structured JSON.
+>
+> `AnthropicProvider` is marked `✗` because Anthropic's API has no equivalent enforcement parameter — when `output_schema` is set the loop clears it and falls back to text-based JSON parsing of the model's response. Anthropic **does** support tool use (`tool_choice = ✓`) and produces reliable structured output via the `final_tool_name` pattern (Path B — see §10).
+
+**Choosing between the two OpenAI providers:**
+
+| | `OpenAIChatCompletionsProvider` | `OpenAIResponsesProvider` |
+|---|---|---|
+| **API** | `POST /chat/completions` | `POST /responses` |
+| **Compatible with** | Any OpenAI-compatible endpoint (DeepSeek, Azure, Groq, Together, …) | OpenAI only |
+| **History** | Full message array resent every turn | Stateful — sends `previous_response_id`; only new messages travel the wire |
+| **Reasoning/thinking** | `delta.reasoning_content` (DeepSeek-style extension) | Native `reasoning` object with `effort` + `summary` levels; encrypted reasoning tokens |
+| **Structured output param** | `response_format: json_schema` | `text.format: json_schema` |
+| **Use when** | Any OpenAI-compatible provider, or when `reasoning_content` round-trip is enough | OpenAI o1/o3/o4 and reasoning-native models where `effort` tuning matters |
+
 Duck-typed test fakes that omit `capabilities()` are safely skipped via a `hasattr` guard — no test changes required when adding new providers.
 
 ---
@@ -398,7 +413,7 @@ graph TD
     IK & SQ & VEC & GRF & REM --> MST & MUT
 ```
 
-Do not add vector database or embedding dependencies to core; adapters implement the protocol and live in examples or recipes.
+Do not add vector database or embedding dependencies to core; adapters implement the protocol and live in examples.
 
 ---
 
@@ -610,13 +625,13 @@ classDiagram
 | `scheduler.py` | Resource-aware parallel tool execution with concurrency cap; applies `maybe_offload` at the result chokepoint |
 | `compaction.py` | Context-window management; calls `agent.provider` directly |
 | `permissions/` | `PermissionEngine`: rule evaluation, event emission, loop suspension |
-| `providers/` | `BaseProvider`, `ProviderCapabilities`, OpenAI Chat, OpenAI Responses, Anthropic |
+| `providers/` | `BaseProvider`, `ProviderCapabilities`; three implementations: `OpenAIChatCompletionsProvider` (any OpenAI-compatible endpoint, `reasoning_content` round-trip for DeepSeek/o-series), `OpenAIResponsesProvider` (stateful, native reasoning effort/summary), `AnthropicProvider` (extended thinking with signature, prompt caching) |
 | `tools/` | Tool protocol, `ToolContext`, `ToolRegistry`, `ToolResult`, `Citation`, built-in tools |
 | `sessions/` | `SessionStore` protocol, `InMemorySessionStore`, `SqliteSessionStore` |
 | `mcp/` | MCP server connection → Linch tool adapters |
 | `skills/` | `SKILL.md`-based slash-commands with argument substitution |
 | `subagents/` | Specialized agent roles from `.linch/agents.yaml` |
-| `recipes/` | Factory helpers (`rag_agent`, `sql_agent`, etc.) — purely additive |
+| `recipes/` | *(removed)* — use `Agent(...)` directly; see `examples/` for domain patterns |
 
 ---
 

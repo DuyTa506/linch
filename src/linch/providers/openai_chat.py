@@ -14,6 +14,7 @@ from linch.types import (
     ProviderRequest,
     StopReason,
     TextBlock,
+    ThinkingBlock,
     ToolResultBlock,
     ToolUseBlock,
     Usage,
@@ -40,6 +41,11 @@ class OpenAIChatProviderOptions:
     api_key: str | None = None
     base_url: str | None = None
     default_headers: dict[str, str] | None = None
+    # Use response_format={type:"json_object"} instead of json_schema.
+    # Required for providers that support JSON mode but not schema enforcement
+    # (e.g. DeepSeek, older Azure deployments).  The loop still text-parses and
+    # validates against OutputSchema.schema after the response arrives.
+    json_mode: bool = False
 
 
 class OpenAIChatCompletionsProvider(BaseProvider):
@@ -82,10 +88,13 @@ class OpenAIChatCompletionsProvider(BaseProvider):
 
     async def stream(self, req: ProviderRequest) -> AsyncIterator[dict[str, object]]:
         client = await self._get_client()
-        payload = _build_chat_payload(req)
+        payload = _build_chat_payload(req, json_mode=self._options.json_mode)
         yield {"type": "message_start", "model": req.model}
         tool_input: dict[str, str] = {}
         tool_meta: dict[str, tuple[str, str]] = {}
+        # Maps tc.index → canonical tid so subsequent chunks (which have empty
+        # tc.id) can be routed to the correct tool call started in the first chunk.
+        tool_idx_to_id: dict[int, str] = {}
         usage = Usage()
         stop_reason: StopReason = "end_turn"
         try:
@@ -95,17 +104,22 @@ class OpenAIChatCompletionsProvider(BaseProvider):
                 if not choices:
                     continue
                 delta = choices[0].delta
+                if getattr(delta, "reasoning_content", None):
+                    yield {"type": "thinking_delta", "text": str(delta.reasoning_content)}
                 if getattr(delta, "content", None):
                     yield {"type": "text_delta", "text": str(delta.content)}
                 for tc in getattr(delta, "tool_calls", None) or []:
-                    tid = str(getattr(tc, "id", "") or f"tool_{tc.index}")
+                    idx = tc.index
                     fn = getattr(tc, "function", None)
-                    fallback_name = tool_meta.get(tid, (tid, ""))[1]
-                    fname = str(getattr(fn, "name", "") or fallback_name or "Tool")
-                    if tid not in tool_meta:
-                        tool_meta[tid] = (tid, fname)
-                        tool_input[tid] = ""
-                        yield {"type": "tool_use_start", "id": tid, "name": fname}
+                    if idx not in tool_idx_to_id:
+                        # First chunk for this tool call — tc.id is populated here.
+                        raw_id = str(getattr(tc, "id", "") or f"tool_{idx}")
+                        raw_name = str(getattr(fn, "name", "") or "")
+                        tool_idx_to_id[idx] = raw_id
+                        tool_meta[raw_id] = (raw_id, raw_name)
+                        tool_input[raw_id] = ""
+                        yield {"type": "tool_use_start", "id": raw_id, "name": raw_name}
+                    tid = tool_idx_to_id[idx]
                     args_delta = str(getattr(fn, "arguments", "") or "")
                     if args_delta:
                         tool_input[tid] += args_delta
@@ -132,7 +146,7 @@ class OpenAIChatCompletionsProvider(BaseProvider):
         yield {"type": "message_end", "stop_reason": stop_reason, "usage": usage}
 
 
-def _build_chat_payload(req: ProviderRequest) -> dict[str, Any]:
+def _build_chat_payload(req: ProviderRequest, *, json_mode: bool = False) -> dict[str, Any]:
     messages: list[dict[str, Any]] = []
     if req.system:
         messages.append(
@@ -141,6 +155,7 @@ def _build_chat_payload(req: ProviderRequest) -> dict[str, Any]:
     for message in req.messages:
         if message.role == "assistant":
             text_blocks = [b.text for b in message.content if isinstance(b, TextBlock)]
+            thinking_blocks = [b.thinking for b in message.content if isinstance(b, ThinkingBlock)]
             tool_calls = []
             for b in message.content:
                 if isinstance(b, ToolUseBlock):
@@ -155,6 +170,8 @@ def _build_chat_payload(req: ProviderRequest) -> dict[str, Any]:
                 "role": "assistant",
                 "content": "".join(text_blocks) if text_blocks else None,
             }
+            if thinking_blocks:
+                entry["reasoning_content"] = "".join(thinking_blocks)
             if tool_calls:
                 entry["tool_calls"] = tool_calls
             messages.append(entry)
@@ -213,16 +230,21 @@ def _build_chat_payload(req: ProviderRequest) -> dict[str, Any]:
         payload["temperature"] = req.temperature
     if req.stop_sequences:
         payload["stop"] = req.stop_sequences
-    # Structured output (JSON Schema)
+    # Structured output
     if req.output_schema is not None:
-        payload["response_format"] = {
-            "type": "json_schema",
-            "json_schema": {
-                "name": req.output_schema.name,
-                "strict": req.output_schema.strict,
-                "schema": req.output_schema.schema,
-            },
-        }
+        if json_mode:
+            # json_object: provider returns JSON but doesn't enforce the schema.
+            # The loop text-parses and validates against output_schema.schema.
+            payload["response_format"] = {"type": "json_object"}
+        else:
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": req.output_schema.name,
+                    "strict": req.output_schema.strict,
+                    "schema": req.output_schema.schema,
+                },
+            }
     # Tool choice
     if req.tool_choice is not None:
         if isinstance(req.tool_choice, dict):

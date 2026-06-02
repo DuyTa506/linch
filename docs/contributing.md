@@ -107,17 +107,35 @@ Follow the pattern used for every primitive in this codebase:
 
 Every unit test that exercises the loop should use a fake provider that yields pre-scripted events. Do not call a live API in unit tests. The live tests in `tests/test_live_api.py` are the exception — they are skipped without a key.
 
-Fake provider pattern:
+Fake provider pattern (use the normalized dict contract from `providers/base.py` — `"message_end"` carries `stop_reason` and `usage`):
 
 ```python
+from linch.types import Usage
+
 class FakeProvider:
     def context_window(self, model: str) -> int:
         return 200_000
 
     async def stream(self, req):
+        yield {"type": "message_start", "model": req.model}
         yield {"type": "text_delta", "text": "Hello"}
-        yield {"type": "stop", "stop_reason": "end_turn"}
-        yield {"type": "usage", "input_tokens": 10, "output_tokens": 5}
+        yield {
+            "type": "message_end",
+            "stop_reason": "end_turn",
+            "usage": Usage(input_tokens=10, output_tokens=5),
+        }
+```
+
+To fake a thinking + tool-use turn:
+
+```python
+async def stream(self, req):
+    yield {"type": "message_start", "model": req.model}
+    yield {"type": "thinking_delta", "text": "Let me think…"}
+    yield {"type": "tool_use_start", "id": "call_1", "name": "Bash"}
+    yield {"type": "tool_use_input_delta", "id": "call_1", "json_delta": '{"command":"echo hi"}'}
+    yield {"type": "tool_use_end", "id": "call_1"}
+    yield {"type": "message_end", "stop_reason": "tool_use", "usage": Usage()}
 ```
 
 ### Use InMemorySessionStore
@@ -154,11 +172,14 @@ Tests should fail at the most specific possible assertion. Avoid mega-tests that
 ## Adding a new provider
 
 1. Create `src/linch/providers/my_provider.py`.
-2. Implement `context_window(model) -> int` and `async def stream(req) -> AsyncIterator[dict]`.
-3. Map wire events to the normalized dict contract (see `providers/openai_chat.py` for reference).
-4. Export from `src/linch/providers/__init__.py`.
-5. Add a test with a mocked HTTP client — do not require a real API key in CI.
-6. If the provider uses a different structured-output API, handle it in `_build_turn_request` inside the provider, not in `loop.py`.
+2. Implement `context_window(model) -> int`, `capabilities(model) -> ProviderCapabilities`, and `async def stream(req) -> AsyncIterator[dict]`.
+3. Map wire events to the normalized dict contract — see `providers/openai_chat.py` for the Chat Completions pattern and `openai_responses.py` + `providers/openai_responses.py` for the Responses API / stateful pattern.
+4. The normalized dict events the loop consumes: `message_start`, `text_delta`, `thinking_delta` (optional, carry `signature` for Anthropic round-trips), `tool_use_start`, `tool_use_input_delta`, `tool_use_end`, `message_end` (carries `stop_reason: StopReason` and `usage: Usage`). Never yield raw SDK objects.
+5. For providers that emit `reasoning_content` (DeepSeek, o-series via Chat Completions): yield `{"type": "thinking_delta", "text": chunk}` — `stream_turn` in `loop.py` assembles it into a `ThinkingBlock` and round-trips it on subsequent turns automatically.
+6. Declare `capabilities()` accurately — `_build_turn_request` uses it to downgrade unsupported fields (clears `cache_prompt` when `prompt_cache=False`, clears `output_schema` when `structured_output=False`, etc.).
+7. Export from `src/linch/providers/__init__.py`.
+8. Add a test with a mocked HTTP client — do not require a real API key in CI.
+9. If the provider uses a different structured-output API, map it inside the provider module, not in `loop.py`.
 
 ---
 
@@ -235,7 +256,6 @@ src/linch/          core library
   mcp/                  MCP server adapters
   skills/               SKILL.md loader + skill context reminders
   subagents/            agents.yaml loader + child agent runner
-  recipes/              factory helpers (additive, not part of the loop)
 
 tests/
   filesystem/           backends, tools, offload unit + end-to-end tests
