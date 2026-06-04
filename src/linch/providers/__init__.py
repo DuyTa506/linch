@@ -8,6 +8,7 @@ from .base import (
     ThinkingDisabled,
     ThinkingEnabled,
 )
+from .llamacpp import LlamaCppProvider, LlamaCppProviderOptions
 from .openai_chat import OpenAIChatCompletionsProvider, OpenAIChatProviderOptions
 from .openai_responses import OpenAIResponsesProvider, OpenAIResponsesProviderOptions
 from .retry import RetryOptions, with_retry
@@ -17,6 +18,8 @@ __all__ = [
     "AnthropicProviderOptions",
     "BaseProvider",
     "EffortLevel",
+    "LlamaCppProvider",
+    "LlamaCppProviderOptions",
     "OpenAIChatCompletionsProvider",
     "OpenAIChatProviderOptions",
     "OpenAIResponsesProvider",

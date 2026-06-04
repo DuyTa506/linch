@@ -86,9 +86,12 @@ class OpenAIChatCompletionsProvider(BaseProvider):
         self._client = AsyncOpenAI(**kwargs)
         return self._client
 
+    def _build_payload(self, req: ProviderRequest) -> dict[str, Any]:
+        return _build_chat_payload(req, json_mode=self._options.json_mode)
+
     async def stream(self, req: ProviderRequest) -> AsyncIterator[dict[str, object]]:
         client = await self._get_client()
-        payload = _build_chat_payload(req, json_mode=self._options.json_mode)
+        payload = self._build_payload(req)
         yield {"type": "message_start", "model": req.model}
         tool_input: dict[str, str] = {}
         tool_meta: dict[str, tuple[str, str]] = {}

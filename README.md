@@ -56,7 +56,7 @@ linch is designed for application developers building agentic features such as:
 | Memory | Search/upsert tools, memory stores, persistent memory examples |
 | Filesystem | Virtual filesystem, automatic large-result offloading, disk/state/sqlite backends |
 | Safety | Permission engine, tool/path/bash rules, dangerous-action skipping |
-| Providers | OpenAI Responses, OpenAI Chat Completions, Anthropic, DeepSeek, pluggable providers |
+| Providers | OpenAI Responses, OpenAI Chat Completions, Anthropic, DeepSeek, llama.cpp, pluggable providers |
 | Extensibility | MCP, skills, subagents, observers |
 | Outputs | Structured output schemas, citations, metadata-rich tool results |
 
@@ -185,7 +185,7 @@ The permission engine controls dangerous actions at the runtime layer. You can d
 
 ### Providers
 
-linch separates the agent runtime from the model provider. Built-in providers include OpenAI Responses, OpenAI Chat Completions, and Anthropic — with full support for OpenAI-compatible endpoints like DeepSeek.
+linch separates the agent runtime from the model provider. Built-in providers include OpenAI Responses, OpenAI Chat Completions, Anthropic, and llama.cpp — with full support for OpenAI-compatible endpoints like DeepSeek.
 
 ---
 
@@ -289,7 +289,7 @@ Examples are organized by subsystem under `examples/`.
 - `linch.skills`: built-in and project `SKILL.md` workflows, including `verify`
 - `linch.memory`: `MemoryStore`, `MemoryItem`, `MemoryContextBuilder`, `MemorySearchTool`, `MemoryUpsertTool`, reference stores
 - `linch.types`: `OutputSchema`, `ToolChoice`, `Message`, `ProviderRequest`
-- `linch.providers`: `OpenAIResponsesProvider`, `OpenAIChatCompletionsProvider`, `AnthropicProvider`
+- `linch.providers`: `OpenAIResponsesProvider`, `OpenAIChatCompletionsProvider`, `AnthropicProvider`, `LlamaCppProvider`
 - `linch.tools`: duck-typed tool protocol, `ResourceAccess`, `Citation`, `ToolResult`, `ToolRegistry`, built-in tools
 - `linch.sessions`: `InMemorySessionStore`, `SqliteSessionStore`
 - `linch.filesystem`: `FileBackend`, `StateFileBackend`, `DiskFileBackend`, `SqliteFileBackend`, `CompositeFileBackend`, `OffloadConfig`, `filesystem_tools`

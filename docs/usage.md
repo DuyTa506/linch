@@ -88,7 +88,7 @@ async for event in session.run("hello"):
 
 ### Model & provider
 
-Linch ships three providers. Pick one based on the API you're targeting.
+Linch ships several providers. Pick one based on the API you're targeting.
 
 ```python
 import os
@@ -157,6 +157,25 @@ agent = Agent(
         OpenAIChatProviderOptions(
             api_key=os.environ["DEEPSEEK_API_KEY"],
             base_url="https://api.deepseek.com",
+        )
+    ),
+    session_store=InMemorySessionStore(),
+    include_partial_messages=True,
+)
+
+# ── llama.cpp server ─────────────────────────────────────────────────────────
+# Uses llama.cpp's OpenAI-compatible /v1/chat/completions route.
+# Streaming remains enabled via stream=True; the provider avoids OpenAI's
+# stream_options field and uses llama.cpp's response_format schema shape.
+from linch.providers import LlamaCppProvider, LlamaCppProviderOptions
+
+agent = Agent(
+    model=os.environ["LLAMACPP_MODEL"],
+    provider=LlamaCppProvider(
+        LlamaCppProviderOptions(
+            api_key=os.environ["LLAMACPP_API_KEY"],
+            base_url=os.environ["LLAMACPP_BASE_URL"],
+            chat_template_kwargs={"enable_thinking": False},
         )
     ),
     session_store=InMemorySessionStore(),

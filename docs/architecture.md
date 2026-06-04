@@ -260,6 +260,7 @@ flowchart LR
 |---|---|---|---|
 | `OpenAIResponsesProvider` | ✗ | ✓ | ✓ |
 | `OpenAIChatCompletionsProvider` | ✗ | ✓ | ✓ |
+| `LlamaCppProvider` | ✗ | ✓ | ✓ |
 | `AnthropicProvider` | ✓ | ✗ | ✓ |
 
 > **`structured_output` means native JSON Schema enforcement via a request parameter** (Chat Completions: `response_format: {type: "json_schema", ...}`; Responses API: `text.format`). It does **not** mean the provider cannot produce structured JSON.
@@ -278,6 +279,10 @@ flowchart LR
 | **Use when** | Any OpenAI-compatible provider, or when `reasoning_content` round-trip is enough | OpenAI o1/o3/o4 and reasoning-native models where `effort` tuning matters |
 
 Duck-typed test fakes that omit `capabilities()` are safely skipped via a `hasattr` guard — no test changes required when adding new providers.
+
+`LlamaCppProvider` is a Chat Completions variant for llama.cpp server. It keeps
+streaming enabled with `stream: true`, omits OpenAI's `stream_options` field,
+and maps structured output to llama.cpp's documented `response_format` shape.
 
 ---
 
