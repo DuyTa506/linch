@@ -3,7 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from linch.providers import LlamaCppProvider, LlamaCppProviderOptions
-from linch.providers.llamacpp import _build_llamacpp_payload
+from linch.providers.llamacpp import _build_llamacpp_payload, _extract_n_ctx, _props_urls
 from linch.types import Message, OutputSchema, ProviderRequest, TextBlock, ThinkingBlock, Usage
 
 
@@ -235,3 +235,52 @@ def test_llamacpp_capabilities_use_options() -> None:
     assert caps.structured_output is True
     assert caps.tool_choice is True
     assert caps.prompt_cache is False
+
+
+def test_llamacpp_props_urls_try_v1_and_root_props() -> None:
+    assert _props_urls("https://example.test/v1") == [
+        "https://example.test/v1/props",
+        "https://example.test/props",
+    ]
+    assert _props_urls("https://example.test") == [
+        "https://example.test/props",
+        "https://example.test/v1/props",
+    ]
+
+
+def test_extract_n_ctx_from_props() -> None:
+    assert _extract_n_ctx({"default_generation_settings": {"n_ctx": 65_536}}) == 65_536
+    assert _extract_n_ctx({"n_ctx": 32_768}) == 32_768
+    assert _extract_n_ctx({"default_generation_settings": {"n_ctx": 0}}) is None
+
+
+def test_context_window_detects_and_caches_props(monkeypatch) -> None:
+    import linch.providers.llamacpp as module
+
+    calls = []
+
+    def fake_fetch(opts):
+        calls.append(opts.base_url)
+        return 65_536
+
+    monkeypatch.setattr(module, "_fetch_llamacpp_context_window", fake_fetch)
+
+    provider = LlamaCppProvider(
+        LlamaCppProviderOptions(base_url="https://example.test/v1", context_window=32_768)
+    )
+
+    assert provider.context_window("local-tool-model") == 65_536
+    assert provider.capabilities("local-tool-model").context_window == 65_536
+    assert calls == ["https://example.test/v1"]
+
+
+def test_context_window_falls_back_when_props_unavailable(monkeypatch) -> None:
+    import linch.providers.llamacpp as module
+
+    monkeypatch.setattr(module, "_fetch_llamacpp_context_window", lambda opts: None)
+
+    provider = LlamaCppProvider(
+        LlamaCppProviderOptions(base_url="https://example.test/v1", context_window=32_768)
+    )
+
+    assert provider.context_window("local-tool-model") == 32_768

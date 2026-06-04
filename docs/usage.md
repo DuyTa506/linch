@@ -167,6 +167,7 @@ agent = Agent(
 # Uses llama.cpp's OpenAI-compatible /v1/chat/completions route.
 # Streaming remains enabled via stream=True; the provider avoids OpenAI's
 # stream_options field and uses llama.cpp's response_format schema shape.
+# Context window is auto-detected from /v1/props or /props when available.
 from linch.providers import LlamaCppProvider, LlamaCppProviderOptions
 
 agent = Agent(

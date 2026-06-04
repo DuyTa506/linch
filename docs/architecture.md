@@ -282,7 +282,9 @@ Duck-typed test fakes that omit `capabilities()` are safely skipped via a `hasat
 
 `LlamaCppProvider` is a Chat Completions variant for llama.cpp server. It keeps
 streaming enabled with `stream: true`, omits OpenAI's `stream_options` field,
-and maps structured output to llama.cpp's documented `response_format` shape.
+maps structured output to llama.cpp's documented `response_format` shape, and
+uses `/v1/props` or `/props` to cache the server's `n_ctx` context window when
+that endpoint is available.
 
 ---
 
