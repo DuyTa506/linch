@@ -22,6 +22,7 @@ from .events import (
     Event,
     LoopGuardEvent,
     PartialAssistantEvent,
+    PermissionRequestEvent,
     ResultEvent,
     SkillsLoadedEvent,
     SystemEvent,
@@ -30,6 +31,7 @@ from .events import (
     UsageEvent,
     UserEvent,
 )
+from .run_store import RunCheckpoint, RunRecord
 from .scheduler import execute_tool_calls
 from .session import RunOptions, Session
 from .types import (
@@ -42,6 +44,7 @@ from .types import (
     ToolResultBlock,
     ToolUseBlock,
     Usage,
+    message_to_dict,
 )
 
 
@@ -88,6 +91,36 @@ def _re_inject_skill_context(session: Session) -> None:
             f"named '{rec.name}'.\n\n{rec.substituted_body}"
         )
         session.provider_view.append(Message(role="user", content=[TextBlock(text=text)]))
+
+
+async def _drain_pending_notifications(
+    session: Session,
+    run_id: str,
+) -> AsyncIterator[Event]:
+    """Inject pending background-worker notifications into provider_view and yield UserEvents."""
+    notifications = getattr(session, "pending_notifications", None)
+    if not notifications:
+        return
+    to_drain = list(notifications)
+    notifications.clear()
+    for note in to_drain:
+        await session.append([note])
+        event: Event = UserEvent(message=note)
+        await _persist_event(session, run_id, event)
+        yield event
+
+
+async def _cancel_background_workers(session: Session) -> None:
+    """Cancel any running asyncio.Tasks in session.workers (abort cleanup)."""
+    import asyncio
+
+    workers = getattr(session, "workers", None)
+    if not workers:
+        return
+    for handle in workers.values():
+        task = getattr(handle, "task", None)
+        if task is not None and isinstance(task, asyncio.Task) and not task.done():
+            task.cancel()
 
 
 async def _build_context_result(session: Session, turn_index: int) -> ContextBuildResult | None:
@@ -262,6 +295,104 @@ def _parse_structured_output(text: str, schema: object) -> tuple[dict | None, st
     return parsed, None
 
 
+def _loop_guard_state_to_dict(state: Any) -> dict[str, object] | None:
+    if state is None:
+        return None
+    return {
+        "call_counts": dict(getattr(state, "call_counts", {})),
+        "consecutive_failures": int(getattr(state, "consecutive_failures", 0) or 0),
+    }
+
+
+def _loop_guard_state_from_dict(raw: dict[str, object] | None) -> Any:
+    if raw is None:
+        return None
+    from .loop_guard import LoopGuardState
+
+    call_counts_raw = raw.get("call_counts", {})
+    return LoopGuardState(
+        call_counts=(
+            {str(k): int(v) for k, v in call_counts_raw.items()}
+            if isinstance(call_counts_raw, dict)
+            else {}
+        ),
+        consecutive_failures=int(raw.get("consecutive_failures", 0) or 0),
+    )
+
+
+def _skill_overlay_to_dict(overlay: Any) -> dict[str, object] | None:
+    if overlay is None:
+        return None
+    out: dict[str, object] = {}
+    allowed = getattr(overlay, "allowed_tools", None)
+    model = getattr(overlay, "model_override", None)
+    if allowed is not None:
+        out["allowed_tools"] = list(allowed)
+    if model is not None:
+        out["model_override"] = str(model)
+    return out
+
+
+def _skill_overlay_from_dict(raw: dict[str, object] | None) -> Any:
+    if raw is None:
+        return None
+    from .types import SkillOverlay
+
+    allowed_raw = raw.get("allowed_tools")
+    return SkillOverlay(
+        allowed_tools=[str(t) for t in allowed_raw] if isinstance(allowed_raw, list) else None,
+        model_override=(
+            str(raw.get("model_override")) if isinstance(raw.get("model_override"), str) else None
+        ),
+    )
+
+
+async def _persist_event(session: Session, run_id: str, event: Event) -> None:
+    if session.agent.run_store is not None:
+        await session.agent.run_store.append_event(run_id, event)
+
+
+def _tool_result_block_from_end(event: ToolCallEndEvent) -> ToolResultBlock:
+    return ToolResultBlock(
+        tool_use_id=event.tool_use_id,
+        content=event.result,
+        is_error=event.is_error,
+    )
+
+
+def _message_matches(left: Message, right: Message) -> bool:
+    return message_to_dict(left) == message_to_dict(right)
+
+
+def _last_message_matches(session: Session, message: Message) -> bool:
+    return bool(session.provider_view) and _message_matches(session.provider_view[-1], message)
+
+
+def _last_message_has_tool_results(session: Session, tool_blocks: list[ToolUseBlock]) -> bool:
+    if not session.provider_view:
+        return False
+    message = session.provider_view[-1]
+    if message.role != "user":
+        return False
+    results = [block for block in message.content if isinstance(block, ToolResultBlock)]
+    return {block.tool_use_id for block in results} == {block.id for block in tool_blocks}
+
+
+async def _recover_completed_tool_results(
+    session: Session,
+    run_id: str,
+    completed: dict[str, ToolResultBlock],
+) -> dict[str, ToolResultBlock]:
+    store = session.agent.run_store
+    if store is None:
+        return dict(completed)
+    recovered = dict(completed)
+    for stored in await store.load_events(run_id):
+        if isinstance(stored.event, ToolCallEndEvent):
+            recovered[stored.event.tool_use_id] = _tool_result_block_from_end(stored.event)
+    return recovered
+
+
 async def stream_turn(
     session: Session, req: ProviderRequest
 ) -> AsyncIterator[PartialAssistantEvent | AssistantAssembly]:
@@ -340,8 +471,55 @@ async def stream_turn(
 
 
 async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIterator[Event]:
+    store = session.agent.run_store
+    run_record = await store.create_run(session.id) if store is not None else None
+    run_id = run_record.id if run_record is not None else str(uuid4())
+    async for event in _run_loop_impl(
+        session,
+        prompt,
+        opts,
+        run_id=run_id,
+        run_record=run_record,
+        resume_checkpoint=None,
+    ):
+        yield event
+
+
+async def resume_loop(session: Session, run_id: str, opts: RunOptions) -> AsyncIterator[Event]:
+    store = session.agent.run_store
+    if store is None:
+        raise RuntimeError("Agent has no run_store configured")
+    run_record = await store.load_run(run_id)
+    if run_record is None:
+        raise KeyError(f"run not found: {run_id}")
+    if run_record.session_id != session.id:
+        raise ValueError(f"run {run_id} belongs to session {run_record.session_id}")
+    if run_record.status in {"completed", "failed", "aborted"}:
+        return
+    checkpoint = run_record.checkpoint
+    if checkpoint is None:
+        return
+    async for event in _run_loop_impl(
+        session,
+        checkpoint.prompt,
+        opts,
+        run_id=run_record.id,
+        run_record=run_record,
+        resume_checkpoint=checkpoint,
+    ):
+        yield event
+
+
+async def _run_loop_impl(
+    session: Session,
+    prompt: str,
+    opts: RunOptions,
+    *,
+    run_id: str,
+    run_record: RunRecord | None,
+    resume_checkpoint: RunCheckpoint | None,
+) -> AsyncIterator[Event]:
     agent = session.agent
-    run_id = str(uuid4())
     session.active_run_id = run_id
     started = time.time()
     total = Usage()
@@ -372,6 +550,64 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
     _guard = getattr(agent, "loop_guard", None)
     _guard_state = LoopGuardState() if _guard is not None else None
     _force_final_pending = False
+    if resume_checkpoint is not None:
+        total = resume_checkpoint.total_usage
+        if _guard is not None:
+            _guard_state = _loop_guard_state_from_dict(resume_checkpoint.loop_guard_state)
+            if _guard_state is None:
+                _guard_state = LoopGuardState()
+        _force_final_pending = resume_checkpoint.force_final_pending
+        session.pending_skill_overlay = _skill_overlay_from_dict(
+            resume_checkpoint.pending_skill_overlay
+        )
+        session.current_turn_allowed_tools = resume_checkpoint.current_turn_allowed_tools
+
+    checkpoint = resume_checkpoint or RunCheckpoint(
+        phase="started",
+        prompt=prompt,
+        turn_index=0,
+        total_usage=total,
+    )
+
+    async def _save_checkpoint(
+        phase: str,
+        *,
+        status: str = "running",
+        turn_index: int | None = None,
+        assistant_message: Message | None | object = None,
+        assistant_stop_reason: str | None | object = None,
+        pending_tool_blocks: list[ToolUseBlock] | None | object = None,
+        completed_tool_results: dict[str, ToolResultBlock] | None | object = None,
+    ) -> None:
+        store = agent.run_store
+        if run_record is None or store is None:
+            return
+        nonlocal checkpoint
+        checkpoint.phase = phase  # type: ignore[assignment]
+        if turn_index is not None:
+            checkpoint.turn_index = turn_index
+        checkpoint.total_usage = total
+        if assistant_message is not None:
+            checkpoint.assistant_message = (
+                assistant_message if isinstance(assistant_message, Message) else None
+            )
+        if assistant_stop_reason is not None:
+            checkpoint.assistant_stop_reason = (
+                assistant_stop_reason if isinstance(assistant_stop_reason, str) else None
+            )
+        if pending_tool_blocks is not None:
+            checkpoint.pending_tool_blocks = (
+                list(pending_tool_blocks) if isinstance(pending_tool_blocks, list) else []
+            )
+        if completed_tool_results is not None:
+            checkpoint.completed_tool_results = (
+                dict(completed_tool_results) if isinstance(completed_tool_results, dict) else {}
+            )
+        checkpoint.force_final_pending = _force_final_pending
+        checkpoint.loop_guard_state = _loop_guard_state_to_dict(_guard_state)
+        checkpoint.pending_skill_overlay = _skill_overlay_to_dict(session.pending_skill_overlay)
+        checkpoint.current_turn_allowed_tools = session.current_turn_allowed_tools
+        await store.save_checkpoint(run_id, checkpoint, status=status)
 
     if hub.active:
         await hub.dispatch(
@@ -385,40 +621,66 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
             ),
         )
 
-    yield SystemEvent(
-        session_id=session.id,
-        run_id=run_id,
-        model=agent.model,
-        tools=sorted(tool.name for tool in agent.tools.list()),
-        permission_mode=agent.permission_engine.mode,
-        cwd=agent.cwd,
-    )
+    if resume_checkpoint is None:
+        await _save_checkpoint("started")
+        event = SystemEvent(
+            session_id=session.id,
+            run_id=run_id,
+            model=agent.model,
+            tools=sorted(tool.name for tool in agent.tools.list()),
+            permission_mode=agent.permission_engine.mode,
+            cwd=agent.cwd,
+        )
+        await _persist_event(session, run_id, event)
+        yield event
 
-    if not session.skills_loaded_emitted and agent.skills:
-        session.skills_loaded_emitted = True
-        skills_data = [
-            {
-                "name": s.name,
-                "description": s.frontmatter.description,
-                **({"when_to_use": s.frontmatter.when_to_use} if s.frontmatter.when_to_use else {}),
-                **(
-                    {"argument_hint": s.frontmatter.argument_hint}
-                    if s.frontmatter.argument_hint
-                    else {}
-                ),
-            }
-            for s in sorted(agent.skills.values(), key=lambda x: x.name)
-        ]
-        yield SkillsLoadedEvent(skills=skills_data)
+        if not session.skills_loaded_emitted and agent.skills:
+            session.skills_loaded_emitted = True
+            skills_data = [
+                {
+                    "name": s.name,
+                    "description": s.frontmatter.description,
+                    **(
+                        {"when_to_use": s.frontmatter.when_to_use}
+                        if s.frontmatter.when_to_use
+                        else {}
+                    ),
+                    **(
+                        {"argument_hint": s.frontmatter.argument_hint}
+                        if s.frontmatter.argument_hint
+                        else {}
+                    ),
+                }
+                for s in sorted(agent.skills.values(), key=lambda x: x.name)
+            ]
+            event = SkillsLoadedEvent(skills=skills_data)
+            await _persist_event(session, run_id, event)
+            yield event
 
-    user_message = build_user_message(prompt, opts.images)
-    if agent.skill_listing_text and not session.tools_override:
-        from .skills.system_reminder import wrap_in_system_reminder
+        user_message = build_user_message(prompt, opts.images)
+        if agent.skill_listing_text and not session.tools_override:
+            from .skills.system_reminder import wrap_in_system_reminder
 
-        reminder = wrap_in_system_reminder(agent.skill_listing_text)
-        user_message.content.insert(0, TextBlock(text=reminder))
-    await session.append([user_message])
-    yield UserEvent(message=user_message)
+            reminder = wrap_in_system_reminder(agent.skill_listing_text)
+            user_message.content.insert(0, TextBlock(text=reminder))
+        await session.append([user_message])
+        await _save_checkpoint("user_appended")
+        event = UserEvent(message=user_message)
+        await _persist_event(session, run_id, event)
+        yield event
+    elif checkpoint.phase == "started":
+        user_message = build_user_message(prompt, opts.images)
+        if agent.skill_listing_text and not session.tools_override:
+            from .skills.system_reminder import wrap_in_system_reminder
+
+            reminder = wrap_in_system_reminder(agent.skill_listing_text)
+            user_message.content.insert(0, TextBlock(text=reminder))
+        if not _last_message_matches(session, user_message):
+            await session.append([user_message])
+        await _save_checkpoint("user_appended")
+        event = UserEvent(message=user_message)
+        await _persist_event(session, run_id, event)
+        yield event
 
     from .abort import throw_if_aborted
 
@@ -474,9 +736,19 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
         await _end_active_provider_call(stop_reason=stop_reason)
         await _end_active_turn()
 
+    start_turn = checkpoint.turn_index
+    if resume_checkpoint is not None and checkpoint.phase in {
+        "tool_results_appended",
+        "turn_complete",
+    }:
+        start_turn = checkpoint.turn_index + 1
+
     try:
-        for turn_index in range(max_turns):
+        for turn_index in range(start_turn, max_turns):
             throw_if_aborted(signal)
+            # Drain background-worker notifications before this turn's provider call.
+            async for note_event in _drain_pending_notifications(session, run_id):
+                yield note_event
             await _start_turn(turn_index)
             session.compaction_retry_used_this_turn = False
 
@@ -489,81 +761,144 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
             else:
                 session.current_turn_allowed_tools = None
 
-            if await maybe_compact(session, agent, signal):
-                yield build_compaction_event(session)
+            resumed_assistant = (
+                resume_checkpoint is not None
+                and turn_index == checkpoint.turn_index
+                and checkpoint.phase
+                in {"assistant_appended", "permission_pending", "tool_batch_pending"}
+                and checkpoint.assistant_message is not None
+            )
+            if resumed_assistant:
+                session.current_turn_allowed_tools = checkpoint.current_turn_allowed_tools
+            if (
+                resume_checkpoint is not None
+                and not resumed_assistant
+                and turn_index == checkpoint.turn_index
+                and checkpoint.phase == "provider_pending"
+                and session.provider_view
+                and session.provider_view[-1].role == "assistant"
+            ):
+                last_assistant = session.provider_view[-1]
+                checkpoint.assistant_message = last_assistant
+                checkpoint.assistant_stop_reason = (
+                    "tool_use"
+                    if any(isinstance(block, ToolUseBlock) for block in last_assistant.content)
+                    else "end_turn"
+                )
+                resumed_assistant = True
+
+            if not resumed_assistant and await maybe_compact(session, agent, signal):
+                event = build_compaction_event(session)
+                await _persist_event(session, run_id, event)
+                yield event
                 _re_inject_skill_context(session)
 
             # ── Context building (RAG-per-turn, schema injection, …) ──────
-            context_result = await _build_context_result(session, turn_index)
+            context_result = (
+                None if resumed_assistant else await _build_context_result(session, turn_index)
+            )
             if context_result is not None:
-                yield ContextBuildEvent(
+                event = ContextBuildEvent(
                     system_blocks=len(context_result.system_blocks),
                     messages=len(context_result.messages),
                     selected_tools=_context_selected_tool_names(context_result),
                     budget=context_budget_to_dict(context_result.budget),
                     metadata=dict(context_result.metadata),
                 )
+                await _persist_event(session, run_id, event)
+                yield event
 
-            req = _build_turn_request(
-                session, opts, context=context_result, model_override=model_override
+            req = (
+                None
+                if resumed_assistant
+                else _build_turn_request(
+                    session, opts, context=context_result, model_override=model_override
+                )
             )
 
             # If the previous turn tripped the guard with force_final, strip
             # all tools so the model must produce a text response.
-            if _force_final_pending:
+            if req is not None and _force_final_pending:
                 req.tools = []
                 req.tool_choice = None
-                _force_final_pending = False
 
             assembly: AssistantAssembly | None = None
-            await _start_provider_call(turn_index, req.model)
-            try:
-                async for item in stream_turn(session, req):
-                    if isinstance(item, AssistantAssembly):
-                        assembly = item
-                    else:
-                        yield item
-            except ContextLengthError:
-                if not session.compaction_retry_used_this_turn:
-                    await _end_active_provider_call(stop_reason="context_length_error")
-                    session.mark_compaction_used()
-                    await run_forced_compaction(session, agent, signal)
-                    yield build_compaction_event(session)
-                    _re_inject_skill_context(session)
-                    # Re-run context builders after compaction so fresh context lands.
-                    context_result = await _build_context_result(session, turn_index)
-                    if context_result is not None:
-                        yield ContextBuildEvent(
-                            system_blocks=len(context_result.system_blocks),
-                            messages=len(context_result.messages),
-                            selected_tools=_context_selected_tool_names(context_result),
-                            budget=context_budget_to_dict(context_result.budget),
-                            metadata=dict(context_result.metadata),
-                        )
-                    req = _build_turn_request(session, opts, context=context_result)
-                    assembly = None
-                    await _start_provider_call(turn_index, req.model)
+            if resumed_assistant:
+                assembly = AssistantAssembly(
+                    message=checkpoint.assistant_message,
+                    stop_reason=checkpoint.assistant_stop_reason or "tool_use",
+                    usage=Usage(),
+                )
+            else:
+                assert req is not None
+                await _save_checkpoint("provider_pending", turn_index=turn_index)
+                await _start_provider_call(turn_index, req.model)
+                try:
                     async for item in stream_turn(session, req):
                         if isinstance(item, AssistantAssembly):
                             assembly = item
                         else:
+                            await _persist_event(session, run_id, item)
                             yield item
-                else:
-                    raise
+                except ContextLengthError:
+                    if not session.compaction_retry_used_this_turn:
+                        await _end_active_provider_call(stop_reason="context_length_error")
+                        session.mark_compaction_used()
+                        await run_forced_compaction(session, agent, signal)
+                        event = build_compaction_event(session)
+                        await _persist_event(session, run_id, event)
+                        yield event
+                        _re_inject_skill_context(session)
+                        # Re-run context builders after compaction so fresh context lands.
+                        context_result = await _build_context_result(session, turn_index)
+                        if context_result is not None:
+                            event = ContextBuildEvent(
+                                system_blocks=len(context_result.system_blocks),
+                                messages=len(context_result.messages),
+                                selected_tools=_context_selected_tool_names(context_result),
+                                budget=context_budget_to_dict(context_result.budget),
+                                metadata=dict(context_result.metadata),
+                            )
+                            await _persist_event(session, run_id, event)
+                            yield event
+                        req = _build_turn_request(session, opts, context=context_result)
+                        assembly = None
+                        await _save_checkpoint("provider_pending", turn_index=turn_index)
+                        await _start_provider_call(turn_index, req.model)
+                        async for item in stream_turn(session, req):
+                            if isinstance(item, AssistantAssembly):
+                                assembly = item
+                            else:
+                                await _persist_event(session, run_id, item)
+                                yield item
+                    else:
+                        raise
 
             if assembly is None:
                 raise RuntimeError("provider stream ended without assistant assembly")
 
-            await _end_active_provider_call(
-                stop_reason=assembly.stop_reason,
-                usage=assembly.usage,
-            )
+            if not resumed_assistant:
+                await _end_active_provider_call(
+                    stop_reason=assembly.stop_reason,
+                    usage=assembly.usage,
+                )
 
-            await session.append([assembly.message])
-            yield AssistantEvent(message=assembly.message, stop_reason=assembly.stop_reason)
-            total = total.add(assembly.usage)
-            session.last_usage = assembly.usage
-            yield UsageEvent(usage=assembly.usage, cumulative=total)
+                await session.append([assembly.message])
+                total = total.add(assembly.usage)
+                _force_final_pending = False
+                await _save_checkpoint(
+                    "assistant_appended",
+                    turn_index=turn_index,
+                    assistant_message=assembly.message,
+                    assistant_stop_reason=assembly.stop_reason,
+                )
+                event = AssistantEvent(message=assembly.message, stop_reason=assembly.stop_reason)
+                await _persist_event(session, run_id, event)
+                yield event
+                session.last_usage = assembly.usage
+                event = UsageEvent(usage=assembly.usage, cumulative=total)
+                await _persist_event(session, run_id, event)
+                yield event
 
             # ── Check for final_tool (terminal tool-use) ──────────────────
             if effective_final_tool and assembly.stop_reason == "tool_use":
@@ -582,7 +917,7 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
                         duration_ms=_dur,
                     )
                     await _end_active_turn()
-                    yield ResultEvent(
+                    event = ResultEvent(
                         subtype="success",
                         stop_reason="tool_use",
                         total_usage=total,
@@ -590,6 +925,12 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
                         final_text=None,
                         structured_output=final_block.input,
                     )
+                    await _persist_event(session, run_id, event)
+                    store = agent.run_store
+                    if run_record is not None and store is not None:
+                        checkpoint.total_usage = total
+                        await store.mark_completed(run_id, checkpoint)
+                    yield event
                     return
 
             # ── Normal text response (stop_reason != tool_use) ───────────
@@ -613,7 +954,7 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
                     duration_ms=_dur,
                 )
                 await _end_active_turn()
-                yield ResultEvent(
+                event = ResultEvent(
                     subtype="success",
                     stop_reason=assembly.stop_reason,
                     total_usage=total,
@@ -622,17 +963,56 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
                     structured_output=structured_output,
                     structured_error=structured_error,
                 )
+                await _persist_event(session, run_id, event)
+                store = agent.run_store
+                if run_record is not None and store is not None:
+                    checkpoint.total_usage = total
+                    await store.mark_completed(run_id, checkpoint)
+                yield event
                 return
 
             tool_blocks = [b for b in assembly.message.content if isinstance(b, ToolUseBlock)]
-            result_blocks: list[ToolResultBlock] = []
+            completed_tool_results = await _recover_completed_tool_results(
+                session,
+                run_id,
+                checkpoint.completed_tool_results
+                if resume_checkpoint is not None and turn_index == checkpoint.turn_index
+                else {},
+            )
+            missing_tool_blocks = [
+                block for block in tool_blocks if block.id not in completed_tool_results
+            ]
+            await _save_checkpoint(
+                "tool_batch_pending",
+                turn_index=turn_index,
+                assistant_message=assembly.message,
+                assistant_stop_reason=assembly.stop_reason,
+                pending_tool_blocks=tool_blocks,
+                completed_tool_results=completed_tool_results,
+            )
+            result_blocks: list[ToolResultBlock] = [
+                completed_tool_results[block.id]
+                for block in tool_blocks
+                if block.id in completed_tool_results
+            ]
             async for event in execute_tool_calls(
-                tool_blocks,
+                missing_tool_blocks,
                 agent,
                 session,
                 signal,
                 turn_index=turn_index,
             ):
+                await _persist_event(session, run_id, event)
+                if isinstance(event, PermissionRequestEvent):
+                    await _save_checkpoint(
+                        "permission_pending",
+                        turn_index=turn_index,
+                        assistant_message=assembly.message,
+                        assistant_stop_reason=assembly.stop_reason,
+                        pending_tool_blocks=tool_blocks,
+                        completed_tool_results=completed_tool_results,
+                        status="waiting_permission",
+                    )
                 yield event
                 if hub.active:
                     if isinstance(event, ToolCallStartEvent):
@@ -662,26 +1042,48 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
                             ),
                         )
                 if isinstance(event, ToolCallEndEvent):
-                    result_blocks.append(
-                        ToolResultBlock(
-                            tool_use_id=event.tool_use_id,
-                            content=event.result,
-                            is_error=event.is_error,
-                        )
+                    block = _tool_result_block_from_end(event)
+                    completed_tool_results[event.tool_use_id] = block
+                    await _save_checkpoint(
+                        "tool_batch_pending",
+                        turn_index=turn_index,
+                        assistant_message=assembly.message,
+                        assistant_stop_reason=assembly.stop_reason,
+                        pending_tool_blocks=tool_blocks,
+                        completed_tool_results=completed_tool_results,
                     )
+            result_blocks = [completed_tool_results[block.id] for block in tool_blocks]
             result_message = Message(role="user", content=result_blocks)
-            await session.append([result_message])
-            yield UserEvent(message=result_message)
+            already_appended = (
+                resume_checkpoint is not None
+                and turn_index == checkpoint.turn_index
+                and _last_message_has_tool_results(session, tool_blocks)
+            )
+            if not already_appended:
+                await session.append([result_message])
+            await _save_checkpoint(
+                "tool_results_appended",
+                turn_index=turn_index,
+                assistant_message=assembly.message,
+                assistant_stop_reason=assembly.stop_reason,
+                pending_tool_blocks=tool_blocks,
+                completed_tool_results=completed_tool_results,
+            )
+            event = UserEvent(message=result_message)
+            await _persist_event(session, run_id, event)
+            yield event
 
             # ── Loop guard evaluation ─────────────────────────────────────
             if _guard is not None and _guard_state is not None:
                 _decision = evaluate_loop_guard(_guard, _guard_state, tool_blocks, result_blocks)
                 if _decision.action != "continue":
-                    yield LoopGuardEvent(
+                    event = LoopGuardEvent(
                         reason=_decision.reason,
                         detail=_decision.detail,
                         action=_decision.action,
                     )
+                    await _persist_event(session, run_id, event)
+                    yield event
                     if _decision.action == "force_final":
                         # Inject a reminder so the model knows to summarise
                         # without further tool calls, then let the loop run
@@ -697,8 +1099,11 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
                             role="user", content=[TextBlock(text=_reminder_text)]
                         )
                         await session.append([_reminder_msg])
-                        yield UserEvent(message=_reminder_msg)
                         _force_final_pending = True
+                        await _save_checkpoint("turn_complete", turn_index=turn_index)
+                        event = UserEvent(message=_reminder_msg)
+                        await _persist_event(session, run_id, event)
+                        yield event
                     else:
                         # Hard stop — emit error result and exit.
                         _dur = int((time.time() - started) * 1000)
@@ -711,15 +1116,22 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
                             duration_ms=_dur,
                         )
                         await _end_active_turn()
-                        yield ResultEvent(
+                        event = ResultEvent(
                             subtype="error",
                             stop_reason="error",
                             total_usage=total,
                             duration_ms=_dur,
                         )
+                        await _persist_event(session, run_id, event)
+                        store = agent.run_store
+                        if run_record is not None and store is not None:
+                            checkpoint.total_usage = total
+                            await store.mark_failed(run_id, checkpoint)
+                        yield event
                         return
             # Natural end of turn body (guard said "continue" or "force_final").
             await _end_active_turn()
+            await _save_checkpoint("turn_complete", turn_index=turn_index)
 
         # ── Max-turns exhausted ───────────────────────────────────────────
         _dur = int((time.time() - started) * 1000)
@@ -731,25 +1143,44 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
             total_usage=total,
             duration_ms=_dur,
         )
-        yield LoopGuardEvent(
+        event = LoopGuardEvent(
             reason="max_turns",
             detail=f"Maximum turns ({max_turns}) reached.",
             action="stop",
         )
-        yield ErrorEvent(
+        await _persist_event(session, run_id, event)
+        yield event
+        event = ErrorEvent(
             error={
                 "name": "TurnLimitError",
                 "message": "max turns exceeded",
                 "retryable": False,
             }
         )
-        yield ResultEvent(
+        await _persist_event(session, run_id, event)
+        yield event
+        event = ResultEvent(
             subtype="error",
             stop_reason="error",
             total_usage=total,
             duration_ms=_dur,
         )
+        await _persist_event(session, run_id, event)
+        store = agent.run_store
+        if run_record is not None and store is not None:
+            checkpoint.total_usage = total
+            await store.mark_failed(
+                run_id,
+                checkpoint,
+                error={
+                    "name": "TurnLimitError",
+                    "message": "max turns exceeded",
+                    "retryable": False,
+                },
+            )
+        yield event
     except AbortError:
+        await _cancel_background_workers(session)
         _dur = int((time.time() - started) * 1000)
         _final_result = _RunResultInfo(
             run_id=run_id,
@@ -760,13 +1191,21 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
             duration_ms=_dur,
         )
         await _close_active_observer_spans(stop_reason="error")
-        yield ResultEvent(
+        event = ResultEvent(
             subtype="aborted",
             stop_reason="error",
             total_usage=total,
             duration_ms=_dur,
         )
+        await _persist_event(session, run_id, event)
+        store = agent.run_store
+        if run_record is not None and store is not None:
+            checkpoint.phase = "aborted"
+            checkpoint.total_usage = total
+            await store.save_checkpoint(run_id, checkpoint, status="aborted")
+        yield event
     except Exception as exc:
+        await _cancel_background_workers(session)
         retryable = getattr(exc, "retryable", False)
         status = getattr(exc, "status", None)
         _err_dict: dict[str, object] = {
@@ -786,13 +1225,21 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
             error=_err_dict,
         )
         await _close_active_observer_spans(stop_reason="error")
-        yield ErrorEvent(error=_err_dict)
-        yield ResultEvent(
+        event = ErrorEvent(error=_err_dict)
+        await _persist_event(session, run_id, event)
+        yield event
+        event = ResultEvent(
             subtype="error",
             stop_reason="error",
             total_usage=total,
             duration_ms=_dur,
         )
+        await _persist_event(session, run_id, event)
+        store = agent.run_store
+        if run_record is not None and store is not None:
+            checkpoint.total_usage = total
+            await store.mark_failed(run_id, checkpoint, error=_err_dict)
+        yield event
     finally:
         if hub.active:
             await _close_active_observer_spans(stop_reason="error")

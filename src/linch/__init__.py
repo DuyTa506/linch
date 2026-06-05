@@ -10,6 +10,7 @@ from .context import (
     ContextBuildResult,
     ContextBuildTurn,
 )
+from .deep_agent import DEEP_AGENT_SYSTEM_PROMPT, create_deep_agent
 from .errors import (
     AbortError,
     AuthError,
@@ -115,6 +116,14 @@ from .providers import (
     ProviderCapabilities,
 )
 from .providers.retry import RetryOptions
+from .run_store import (
+    InMemoryRunStore,
+    RunCheckpoint,
+    RunRecord,
+    RunStore,
+    SqliteRunStore,
+    StoredRunEvent,
+)
 from .session import RunOptions, Session
 from .tools import (
     Citation,
@@ -160,6 +169,7 @@ __all__ = [
     "ContextBuildTurn",
     "DefaultCompaction",
     "DetailedCompaction",
+    "DEEP_AGENT_SYSTEM_PROMPT",
     "FeatureFlags",
     "CompositeFileBackend",
     "DiskFileBackend",
@@ -169,6 +179,7 @@ __all__ = [
     "StateFileBackend",
     "filesystem_tools",
     "InMemoryKeywordMemoryStore",
+    "InMemoryRunStore",
     "SystemPromptConfig",
     "SystemPromptSection",
     "OutputSchema",
@@ -246,6 +257,11 @@ __all__ = [
     "OpenAIResponsesProviderOptions",
     "ProviderCapabilities",
     "RetryOptions",
+    "RunCheckpoint",
+    "RunRecord",
+    "RunStore",
+    "SqliteRunStore",
+    "StoredRunEvent",
     "apply_provider_capabilities",
     "LoopGuard",
     "LoopGuardDecision",
@@ -254,6 +270,7 @@ __all__ = [
     "evaluate_loop_guard",
     "normalize_loop_guard",
     "connect_mcp_servers",
+    "create_deep_agent",
     "defaultTools",
     "default_tools",
     "is_context_build_event",

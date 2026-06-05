@@ -18,7 +18,9 @@ from .types import InvokedSkillRecord, PermissionMode, SystemBlock
 
 if TYPE_CHECKING:
     from .context import ContextBuilder
+    from .run_store import RunStore
     from .session import Session
+    from .subagents.types import AgentDefinition
     from .types import OutputSchema, ToolChoice
 
 # Sentinel for "loop_guard not explicitly provided" — distinguishes the
@@ -69,6 +71,7 @@ class AgentOptions:
     tools: ToolRegistry | None = None
     permissions: dict[str, object] | None = None
     session_store: SessionStore | None = None
+    run_store: RunStore | None = None
     cwd: str | None = None
     system_prompt: str | None = None
     system_prompt_config: SystemPromptConfig | None = None
@@ -95,6 +98,7 @@ class AgentOptions:
     filesystem: Any = None  # FileBackend | None
     result_offload: Any = None  # OffloadConfig | None; None = use default OffloadConfig()
     middleware: Any = None  # AgentMiddleware | list[AgentMiddleware] | None
+    extra_subagents: list[AgentDefinition] | None = None
 
 
 class Agent:
@@ -110,6 +114,7 @@ class Agent:
         tools: ToolRegistry | None = None,
         permissions: Any | dict[str, object] | None = None,
         session_store: SessionStore | None = None,
+        run_store: RunStore | None = None,
         cwd: str | None = None,
         system_prompt: str | None = None,
         systemPrompt: str | None = None,
@@ -147,6 +152,7 @@ class Agent:
         filesystem: Any = None,
         result_offload: Any = _DEFAULT_OFFLOAD,
         middleware: Any = None,
+        extra_subagents: list[AgentDefinition] | None = None,
     ) -> None:
         if systemPrompt is not None:
             system_prompt = systemPrompt
@@ -219,6 +225,7 @@ class Agent:
             project_root=cwd_resolved,
         )
         self._store: SessionStore | None = session_store
+        self.run_store: RunStore | None = run_store
         self.system_prompt = system_prompt
         self.max_retries = max_retries
         self.max_output_tokens = max_output_tokens
@@ -270,6 +277,7 @@ class Agent:
         self._sessions: dict[str, Session] = {}
         self.subagent_registry: Any = None
         self.subagent_run_counters: dict[str, int] = {}
+        self.extra_subagents: list[AgentDefinition] = list(extra_subagents or [])
         self.compaction: Any = compaction
         self.token_estimator = token_estimator
 
@@ -651,17 +659,25 @@ class Agent:
             from .subagents.loader import load_agents_from_dir
             from .subagents.registry import AgentRegistry
             from .tools.subagent import SubagentTool
+            from .tools.subagent_continue import SubagentContinueTool
+            from .tools.subagent_stop import TaskStopTool
 
             result = await load_agents_from_dir(self._config_dir)
-            registry = AgentRegistry(result.agents)
+            registry = AgentRegistry(result.agents, extra_built_ins=self.extra_subagents)
             self.subagent_registry = registry
 
+            get_session = lambda sid: self._sessions.get(sid)  # noqa: E731
             subagent_tool = SubagentTool(
                 registry=registry,
-                get_session=lambda sid: self._sessions.get(sid),
+                get_session=get_session,
                 next_default_display_name=self._next_default_display_name,
             )
             self.tools.register(subagent_tool)
+            self.tools.register(SubagentContinueTool(get_session=get_session))
+            # Wire TaskStop with the real get_session if it was pre-registered by
+            # create_deep_agent(coordinator=True) with a stub.
+            if self.tools.get(TaskStopTool.name) is not None:
+                self.tools.replace(TaskStopTool(get_session=get_session))
             self._refresh_system_blocks()
 
         self._subagents_connect = _load()
@@ -756,12 +772,28 @@ class Agent:
         return session
 
     async def close(self) -> None:
+        import asyncio
+        import inspect as _inspect
+
+        # Cancel background worker tasks and release retained child sessions.
+        for sess in list(self._sessions.values()):
+            for handle in getattr(sess, "workers", {}).values():
+                task = getattr(handle, "task", None)
+                if task is not None and isinstance(task, asyncio.Task) and not task.done():
+                    task.cancel()
+        self._sessions.clear()
+
         if self._mcp_connection is not None:
             await self._mcp_connection.close()
             self._mcp_connection = None
         if self._store is not None:
             await self._store.close()
-        import inspect as _inspect
+        if self.run_store is not None:
+            closer = getattr(self.run_store, "close", None)
+            if closer is not None:
+                result = closer()
+                if _inspect.isawaitable(result):
+                    await result
 
         for obs in self._observers:
             closer = getattr(obs, "aclose", None) or getattr(obs, "close", None)

@@ -61,6 +61,13 @@ class Session:
     _abort_controller: AbortContext = field(default_factory=AbortContext)
     run_deps: Any = None
     filesystem: Any = None
+    workers: dict[str, Any] = field(default_factory=dict)
+    """Live worker handles keyed by worker_id (:class:`~linch.subagents.workers.WorkerHandle`).
+    Populated when a subagent is spawned with retain=True (deep/coordinator mode)."""
+    pending_child_events: list[Event] = field(default_factory=list)
+    """SubagentEvents accumulated by in-flight child sessions; available to host UIs."""
+    pending_notifications: list[Message] = field(default_factory=list)
+    """Background-worker <task-notification> Messages, drained at the top of each turn."""
     """Per-session virtual filesystem backend (:class:`~linch.filesystem.backend.FileBackend`).
     Threaded into :attr:`~linch.tools.base.ToolContext.filesystem` on every
     tool call.  ``None`` when the filesystem subsystem is disabled."""
@@ -96,8 +103,44 @@ class Session:
 
         return iterator()
 
+    def resume(self, run_id: str, opts: RunOptions | None = None) -> AsyncIterator[Event]:
+        if self._active:
+            from .errors import ConfigError
+
+            raise ConfigError("Session already has an active run")
+        if self.agent.run_store is None:
+            from .errors import ConfigError
+
+            raise ConfigError("Agent has no run_store configured")
+        self._active = True
+        self._abort_controller = AbortContext()
+
+        async def iterator() -> AsyncIterator[Event]:
+            from .loop import resume_loop
+            from .observability import ObserverDispatcher
+
+            _obs_hub = ObserverDispatcher(getattr(self.agent, "observers", None))
+            try:
+                async for event in resume_loop(self, run_id, opts or RunOptions()):
+                    yield event
+                    if _obs_hub.active:
+                        await _obs_hub.dispatch("on_event", event)
+            finally:
+                self._active = False
+                self.active_run_id = None
+
+        return iterator()
+
     def abort(self) -> None:
+        import asyncio
+
         self._abort_controller.abort()
+        # Cancel any running background worker tasks so they don't write into
+        # a dead session after the run ends.
+        for handle in self.workers.values():
+            task = getattr(handle, "task", None)
+            if task is not None and isinstance(task, asyncio.Task) and not task.done():
+                task.cancel()
 
     def mark_compaction_used(self) -> None:
         self.compaction_retry_used_this_turn = True

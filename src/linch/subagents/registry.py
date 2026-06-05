@@ -6,12 +6,19 @@ from .types import AgentDefinition
 
 
 class AgentRegistry:
-    def __init__(self, disk_agents: list[AgentDefinition]) -> None:
+    def __init__(
+        self,
+        disk_agents: list[AgentDefinition],
+        *,
+        extra_built_ins: list[AgentDefinition] | None = None,
+    ) -> None:
         self._map: dict[str, AgentDefinition] = {}
         disk_keys = {agent.name.lower() for agent in disk_agents}
 
         visible_built_ins = [
-            agent for agent in BUILT_IN_NAMED_AGENTS if agent.name.lower() not in disk_keys
+            agent
+            for agent in [*BUILT_IN_NAMED_AGENTS, *(extra_built_ins or [])]
+            if agent.name.lower() not in disk_keys
         ]
 
         for agent in visible_built_ins:

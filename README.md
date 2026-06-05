@@ -159,6 +159,10 @@ An `Agent` owns shared configuration: model, provider, tools, permissions, conte
 
 A `Session` represents one conversation or workflow run. One agent can serve many sessions.
 
+### Deep agent preset
+
+`create_deep_agent()` returns a normal `Agent` with long-horizon defaults: durable run/session storage, task planning tools, virtual filesystem guidance, specialized subagents, and optional memory wiring.
+
 ### Events
 
 linch streams the loop as events instead of hiding execution behind a blocking function call. This makes it easier to build CLIs, web UIs, background workers, and observability integrations.
@@ -230,6 +234,7 @@ Examples are organized by subsystem under `examples/`.
 | `core/structured_output.py` | OutputSchema, final_tool_name, JSON extraction |
 | `core/event_streaming.py` | Consuming events for SSE, WebSocket, CLI progress |
 | `core/multi_session.py` | One Agent, many users, shared deps |
+| `core/deep_agent_resume.py` | `create_deep_agent()` preset with durable run resume |
 | `core/loop_guard_agent.py` | LoopGuard — identical-call and failure-streak detection |
 | `core/interactive_cli.py` | Interactive REPL |
 
@@ -283,9 +288,10 @@ Examples are organized by subsystem under `examples/`.
 
 ## Public API
 
-- `linch`: `Agent`, `Session`, events, types, errors, `DetailedCompaction`, `RetryOptions`, `ToolTimeoutError`, `empty_tools`, `tools_from_defaults`
+- `linch`: `Agent`, `Session`, `create_deep_agent`, events, types, errors, `DetailedCompaction`, `RetryOptions`, `ToolTimeoutError`, `empty_tools`, `tools_from_defaults`
 - `linch.config`: `FeatureFlags`, `SystemPromptConfig`, `SystemPromptSection`
 - `linch.context`: `ContextBuilder`, `ContextBuildResult`, `ContextBudget`
+- `linch.deep_agent`: `create_deep_agent`, `DEEP_AGENT_SYSTEM_PROMPT`, `DEEP_AGENT_SUBAGENTS`
 - `linch.skills`: built-in and project `SKILL.md` workflows, including `verify`
 - `linch.memory`: `MemoryStore`, `MemoryItem`, `MemoryContextBuilder`, `MemorySearchTool`, `MemoryUpsertTool`, reference stores
 - `linch.types`: `OutputSchema`, `ToolChoice`, `Message`, `ProviderRequest`

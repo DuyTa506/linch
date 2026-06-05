@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from ..abort import AbortContext, any_signal, throw_if_aborted
 from ..events import (
@@ -12,6 +13,9 @@ from ..events import (
 from ..session import Session
 from ..types import SystemBlock, TextBlock
 from .types import AgentDefinition
+
+if TYPE_CHECKING:
+    from .workers import WorkerHandle
 
 SUBAGENT_TOOL_NAME = "Subagent"
 
@@ -25,6 +29,20 @@ class RunSubagentArgs:
     display_name: str
     subagent_run_id: str
     tools_filter: list[str] | None = None
+    signal: AbortContext | None = None
+    emit: object = None
+    retain: bool = False
+    """When True, the child session is kept in agent._sessions after completion
+    so it can be continued later via SubagentContinue."""
+
+
+@dataclass
+class ContinueSubagentArgs:
+    parent_session: Session
+    parent_agent: object
+    handle: WorkerHandle
+    message: str
+    subagent_run_id: str
     signal: AbortContext | None = None
     emit: object = None
 
@@ -60,6 +78,64 @@ def _last_assistant_text(message: object) -> str:
         ):
             parts.append(block.text)
     return "".join(parts)
+
+
+async def _drive_child(
+    child_session: Session,
+    prompt: str,
+    *,
+    emit: object = None,
+    subagent_run_id: str = "",
+    subagent_type: str = "",
+    display_name: str = "",
+    parent_session_id: str = "",
+) -> RunSubagentResult:
+    """Drive *child_session* with *prompt* and collect the final result.
+
+    Shared by :func:`run_subagent` and :func:`continue_subagent`.
+    """
+    aborted = False
+    errored = False
+    last_error: dict[str, str] | None = None
+    last_assistant_text = ""
+
+    try:
+        child_events = child_session.run(prompt)
+        async for event in child_events:
+            if emit is not None and callable(emit):
+                emit(
+                    SubagentEvent(
+                        parent_session_id=parent_session_id,
+                        subagent_run_id=subagent_run_id,
+                        subagent_type=subagent_type,
+                        display_name=display_name,
+                        event=event,
+                    )
+                )
+            if isinstance(event, AssistantEvent):
+                last_assistant_text = _last_assistant_text(event.message)
+            elif isinstance(event, ResultEvent) and event.subtype == "aborted":
+                aborted = True
+            elif isinstance(event, ErrorEvent):
+                errored = True
+                last_error = {
+                    "name": event.error.get("name", "Error"),
+                    "message": event.error.get("message", ""),
+                }
+    except Exception as exc:
+        errored = True
+        last_error = {
+            "name": exc.__class__.__name__,
+            "message": str(exc),
+        }
+
+    return RunSubagentResult(
+        child_session_id=child_session.id,
+        final_text=last_assistant_text,
+        aborted=aborted,
+        errored=errored,
+        error=last_error,
+    )
 
 
 async def run_subagent(args: RunSubagentArgs) -> RunSubagentResult:
@@ -115,47 +191,67 @@ async def run_subagent(args: RunSubagentArgs) -> RunSubagentResult:
 
     _ = any_signal(child_session._abort_controller, args.signal)
 
-    aborted = False
-    errored = False
-    last_error: dict[str, str] | None = None
-    last_assistant_text = ""
+    result = await _drive_child(
+        child_session,
+        args.prompt,
+        emit=args.emit,
+        subagent_run_id=args.subagent_run_id,
+        subagent_type=args.definition.frontmatter.name,
+        display_name=args.display_name,
+        parent_session_id=args.parent_session.id,
+    )
 
-    try:
-        child_events = child_session.run(args.prompt)
-        async for event in child_events:
-            if args.emit is not None and callable(args.emit):
-                args.emit(
-                    SubagentEvent(
-                        parent_session_id=args.parent_session.id,
-                        subagent_run_id=args.subagent_run_id,
-                        subagent_type=args.definition.frontmatter.name,
-                        display_name=args.display_name,
-                        event=event,
-                    )
-                )
-            if isinstance(event, AssistantEvent):
-                last_assistant_text = _last_assistant_text(event.message)
-            elif isinstance(event, ResultEvent) and event.subtype == "aborted":
-                aborted = True
-            elif isinstance(event, ErrorEvent):
-                errored = True
-                last_error = {
-                    "name": event.error.get("name", "Error"),
-                    "message": event.error.get("message", ""),
-                }
-    except Exception as exc:
-        errored = True
-        last_error = {
-            "name": exc.__class__.__name__,
-            "message": str(exc),
-        }
-    finally:
+    if not args.retain:
         agent._sessions.pop(child_record.id, None)
 
-    return RunSubagentResult(
-        child_session_id=child_record.id,
-        final_text=last_assistant_text,
-        aborted=aborted,
-        errored=errored,
-        error=last_error,
+    return result
+
+
+async def continue_subagent(args: ContinueSubagentArgs) -> RunSubagentResult:
+    """Continue a retained worker by driving its existing child session.
+
+    The child session already holds the full ``provider_view`` from prior runs,
+    so the model receives the complete conversation history on continuation.
+
+    If the child session is no longer live (process restart), returns an error
+    result instead of raising.
+    """
+    agent = args.parent_agent
+    handle = args.handle
+    child_session = agent._sessions.get(handle.child_session_id)
+
+    if child_session is None:
+        return RunSubagentResult(
+            child_session_id=handle.child_session_id,
+            final_text="",
+            aborted=False,
+            errored=True,
+            error={
+                "name": "WorkerNotLive",
+                "message": (
+                    f"Worker '{handle.worker_id}' is no longer live after a process restart."
+                    " Spawn a fresh subagent to continue this work."
+                ),
+            },
+        )
+
+    if args.signal is not None and args.signal.aborted:
+        throw_if_aborted(args.signal)
+
+    # Re-establish the abort link for this continuation.
+    _ = any_signal(child_session._abort_controller, args.signal)
+
+    subagent_run_id = f"sa_cont_{args.handle.worker_id}"
+    result = await _drive_child(
+        child_session,
+        args.message,
+        emit=args.emit,
+        subagent_run_id=subagent_run_id,
+        subagent_type=handle.definition.frontmatter.name,
+        display_name=handle.display_name,
+        parent_session_id=args.parent_session.id,
     )
+
+    handle.last_result_text = result.final_text
+    handle.status = "failed" if result.errored else "completed"
+    return result

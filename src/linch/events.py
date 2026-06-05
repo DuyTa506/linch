@@ -157,6 +157,16 @@ class SubagentEvent:
 
 
 @dataclass(slots=True)
+class BackgroundWorkerEvent:
+    """Emitted when a background subagent worker is spawned or completes."""
+
+    worker_id: str
+    status: str  # "started" | "completed" | "failed" | "aborted" | "killed"
+    display_name: str
+    type: Literal["background_worker"] = "background_worker"
+
+
+@dataclass(slots=True)
 class LoopGuardEvent:
     """Emitted when the loop guard trips or when ``max_turns`` is reached.
 
@@ -193,6 +203,7 @@ Event: TypeAlias = (
     | SkillInvokedEvent
     | SkillCompletedEvent
     | SubagentEvent
+    | BackgroundWorkerEvent
     | LoopGuardEvent
 )
 
@@ -475,6 +486,13 @@ def event_to_dict(event: Event) -> dict[str, Any]:
             "display_name": event.display_name,
             "event": event_to_dict(event.event),
         }
+    if typ == "background_worker":
+        return {
+            "type": event.type,
+            "worker_id": event.worker_id,
+            "status": event.status,
+            "display_name": event.display_name,
+        }
     if typ == "loop_guard":
         return {
             "type": event.type,
@@ -605,6 +623,12 @@ def event_from_dict(raw: dict[str, Any]) -> Event:
             subagent_type=str(raw.get("subagent_type", "")),
             display_name=str(raw.get("display_name", "")),
             event=event_from_dict(nested),
+        )
+    if typ == "background_worker":
+        return BackgroundWorkerEvent(
+            worker_id=str(raw.get("worker_id", "")),
+            status=str(raw.get("status", "")),
+            display_name=str(raw.get("display_name", "")),
         )
     if typ == "loop_guard":
         return LoopGuardEvent(
