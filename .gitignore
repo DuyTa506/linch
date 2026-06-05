@@ -9,3 +9,5 @@ build/
 *.egg-info/
 .agent_kit/
 .env
+.claude/
+.codex/
