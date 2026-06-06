@@ -11,7 +11,11 @@ WorkerStatus = Literal["running", "completed", "failed", "killed"]
 
 @dataclass
 class WorkerHandle:
-    """In-process handle to a retained subagent worker."""
+    """In-process handle to a retained subagent worker.
+
+    Worker tasks and child-session references are live runtime state only and
+    are not durable across process restart.
+    """
 
     worker_id: str
     child_session_id: str

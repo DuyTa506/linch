@@ -4,7 +4,7 @@ import os
 import platform
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from .config import FeatureFlags, SystemPromptConfig
 from .errors import ConfigError
@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from .run_store import RunStore
     from .session import Session
     from .subagents.types import AgentDefinition
+    from .tools import Tool
     from .types import OutputSchema, ToolChoice
 
 # Sentinel for "loop_guard not explicitly provided" — distinguishes the
@@ -99,6 +100,10 @@ class AgentOptions:
     result_offload: Any = None  # OffloadConfig | None; None = use default OffloadConfig()
     middleware: Any = None  # AgentMiddleware | list[AgentMiddleware] | None
     extra_subagents: list[AgentDefinition] | None = None
+    enable_worker_tools: bool = False
+    retain_subagents: bool = False
+    enable_background_subagents: bool = False
+    enable_task_stop: bool = False
 
 
 class Agent:
@@ -153,6 +158,10 @@ class Agent:
         result_offload: Any = _DEFAULT_OFFLOAD,
         middleware: Any = None,
         extra_subagents: list[AgentDefinition] | None = None,
+        enable_worker_tools: bool = False,
+        retain_subagents: bool = False,
+        enable_background_subagents: bool = False,
+        enable_task_stop: bool = False,
     ) -> None:
         if systemPrompt is not None:
             system_prompt = systemPrompt
@@ -278,6 +287,10 @@ class Agent:
         self.subagent_registry: Any = None
         self.subagent_run_counters: dict[str, int] = {}
         self.extra_subagents: list[AgentDefinition] = list(extra_subagents or [])
+        self.enable_worker_tools = bool(enable_worker_tools)
+        self.retain_subagents = bool(retain_subagents)
+        self.enable_background_subagents = bool(enable_background_subagents)
+        self.enable_task_stop = bool(enable_task_stop)
         self.compaction: Any = compaction
         self.token_estimator = token_estimator
 
@@ -622,7 +635,7 @@ class Agent:
                     session_registry=self._sessions,
                     get_session_model=lambda _sid: self.model,
                 )
-                self.tools.register(skill_tool)
+                self.tools.register(cast("Tool", skill_tool))
                 self._refresh_system_blocks()
 
                 for s in loaded:
@@ -671,13 +684,14 @@ class Agent:
                 registry=registry,
                 get_session=get_session,
                 next_default_display_name=self._next_default_display_name,
+                retain_subagents=self.retain_subagents,
+                enable_background_subagents=self.enable_background_subagents,
             )
-            self.tools.register(subagent_tool)
-            self.tools.register(SubagentContinueTool(get_session=get_session))
-            # Wire TaskStop with the real get_session if it was pre-registered by
-            # create_deep_agent(coordinator=True) with a stub.
-            if self.tools.get(TaskStopTool.name) is not None:
-                self.tools.replace(TaskStopTool(get_session=get_session))
+            self.tools.register(cast("Tool", subagent_tool))
+            if self.enable_worker_tools:
+                self.tools.register(cast("Tool", SubagentContinueTool(get_session=get_session)))
+            if self.enable_task_stop:
+                self.tools.register(cast("Tool", TaskStopTool(get_session=get_session)))
             self._refresh_system_blocks()
 
         self._subagents_connect = _load()
@@ -706,7 +720,7 @@ class Agent:
 
             mcp_conn = await connect_mcp_servers(self._mcp_servers)
             for tool in mcp_conn.tools:
-                self.tools.register(tool)
+                self.tools.register(cast("Tool", tool))
             self._mcp_connection = mcp_conn
             self._refresh_system_blocks()
 

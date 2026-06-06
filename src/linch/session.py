@@ -62,12 +62,15 @@ class Session:
     run_deps: Any = None
     filesystem: Any = None
     workers: dict[str, Any] = field(default_factory=dict)
-    """Live worker handles keyed by worker_id (:class:`~linch.subagents.workers.WorkerHandle`).
-    Populated when a subagent is spawned with retain=True (deep/coordinator mode)."""
+    """Live in-process worker handles keyed by worker_id.
+
+    Populated only for retained deep-agent subagents. These handles are not
+    restart-durable; after process restart, spawn a new worker.
+    """
     pending_child_events: list[Event] = field(default_factory=list)
     """SubagentEvents accumulated by in-flight child sessions; available to host UIs."""
     pending_notifications: list[Message] = field(default_factory=list)
-    """Background-worker <task-notification> Messages, drained at the top of each turn."""
+    """In-process background-worker <task-notification> messages, drained next turn."""
     """Per-session virtual filesystem backend (:class:`~linch.filesystem.backend.FileBackend`).
     Threaded into :attr:`~linch.tools.base.ToolContext.filesystem` on every
     tool call.  ``None`` when the filesystem subsystem is disabled."""

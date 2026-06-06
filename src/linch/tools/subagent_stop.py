@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from .base import ToolContext, ToolResult
+from typing import Any
+
+from .base import ToolContext, ToolResult, ToolScope
 
 TASK_STOP_TOOL_NAME = "TaskStop"
 
@@ -26,10 +28,10 @@ TASK_STOP_TOOL_SCHEMA = {
 class TaskStopTool:
     name = TASK_STOP_TOOL_NAME
     input_schema = TASK_STOP_TOOL_SCHEMA
-    scope = "exec"
+    scope: ToolScope = "exec"
     parallel_safe = True
 
-    def __init__(self, get_session: object) -> None:
+    def __init__(self, get_session: Any) -> None:
         self._get_session = get_session
 
     @property

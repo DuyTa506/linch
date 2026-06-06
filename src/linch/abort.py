@@ -35,7 +35,7 @@ def any_signal(*signals: AbortContext | None) -> AbortContext:
             return merged
 
     async def _watch() -> None:
-        watchers = [sig._event.wait() for sig in signals if sig is not None]
+        watchers = [asyncio.ensure_future(sig._event.wait()) for sig in signals if sig is not None]
         if watchers:
             done, _ = await asyncio.wait(watchers, return_when=asyncio.FIRST_COMPLETED)
             if done:

@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from ..agent import Agent
 from ..config import SystemPromptConfig, SystemPromptSection
+from ..errors import ConfigError
 from ..filesystem.backend import CompositeFileBackend, StateFileBackend
 from ..filesystem.sqlite import SqliteFileBackend
 from ..memory import MemoryContextBuilder, MemorySearchTool, MemoryUpsertTool
@@ -59,6 +60,9 @@ def create_deep_agent(
     A persistent ``/memories`` filesystem partition is set up for durable state.
     """
 
+    if coordinator and features is not None and not getattr(features, "subagents", True):
+        raise ConfigError("create_deep_agent(coordinator=True) requires features.subagents=True")
+
     root = Path(cwd or ".").resolve()
     registry = _deep_agent_tools(
         tools,
@@ -75,6 +79,10 @@ def create_deep_agent(
         memory_store=memory_store,
         namespace=memory_namespace,
     )
+    agent_kwargs.setdefault("enable_worker_tools", True)
+    agent_kwargs.setdefault("retain_subagents", True)
+    agent_kwargs.setdefault("enable_background_subagents", True)
+    agent_kwargs.setdefault("enable_task_stop", True)
 
     if durable:
         store_root = root / ".linch"
@@ -130,17 +138,6 @@ def _deep_agent_tools(
         for name in list(_COORDINATOR_EXCLUDED_TOOLS):
             if registry.get(name) is not None:
                 registry.unregister(name)
-        # TaskStop is a coordinator-only tool; register it if not already present.
-        # Only register when subagents are enabled — the stub is wired to a real
-        # get_session by connect_subagents (agent.py), which is gated on features.subagents.
-        # When features.subagents=False there is no get_session wiring pass, so the stub
-        # would remain permanently broken.
-        subagents_enabled = features is None or getattr(features, "subagents", True)
-        if subagents_enabled:
-            from ..tools.subagent_stop import TaskStopTool
-
-            if registry.get(TaskStopTool.name) is None:
-                registry.register(TaskStopTool(get_session=lambda _sid: None))
     return registry
 
 

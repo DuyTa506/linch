@@ -481,6 +481,24 @@ async def test_coordinator_mode_task_stop_registered(tmp_path: Path) -> None:
     assert agent.tools.get("TaskStop") is not None
 
 
+def test_coordinator_mode_requires_subagents(tmp_path: Path) -> None:
+    import pytest
+
+    from linch import create_deep_agent
+    from linch.config import FeatureFlags
+    from linch.errors import ConfigError
+
+    with pytest.raises(ConfigError, match="requires features.subagents=True"):
+        create_deep_agent(
+            model="gpt-5",
+            provider=FakeProvider(),
+            cwd=str(tmp_path),
+            coordinator=True,
+            durable=False,
+            features=FeatureFlags(subagents=False),
+        )
+
+
 async def test_task_stop_cancels_background_worker(tmp_path: Path) -> None:
     """TaskStop cancels a running background worker task."""
     import asyncio

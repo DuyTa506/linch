@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from typing import Any
 from uuid import uuid4
 
-from .base import ToolContext, ToolResult
+from .base import ToolContext, ToolResult, ToolScope
 
 SUBAGENT_CONTINUE_TOOL_NAME = "SubagentContinue"
 
@@ -28,10 +29,10 @@ SUBAGENT_CONTINUE_TOOL_SCHEMA = {
 class SubagentContinueTool:
     name = SUBAGENT_CONTINUE_TOOL_NAME
     input_schema = SUBAGENT_CONTINUE_TOOL_SCHEMA
-    scope = "exec"
+    scope: ToolScope = "exec"
     parallel_safe = True
 
-    def __init__(self, get_session: object) -> None:
+    def __init__(self, get_session: Any) -> None:
         self._get_session = get_session
 
     @property

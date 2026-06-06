@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from html import escape
+from typing import Any
 from uuid import uuid4
 
-from .base import ToolContext, ToolResult
+from .base import ToolContext, ToolResult, ToolScope
 
 SUBAGENT_TOOL_NAME = "Subagent"
 
@@ -43,18 +45,23 @@ SUBAGENT_TOOL_SCHEMA = {
 class SubagentTool:
     name = SUBAGENT_TOOL_NAME
     input_schema = SUBAGENT_TOOL_SCHEMA
-    scope = "exec"
+    scope: ToolScope = "exec"
     parallel_safe = True
 
     def __init__(
         self,
-        registry: object,
-        get_session: object,
-        next_default_display_name: object,
+        registry: Any,
+        get_session: Any,
+        next_default_display_name: Any,
+        *,
+        retain_subagents: bool = False,
+        enable_background_subagents: bool = False,
     ) -> None:
         self._registry = registry
         self._get_session = get_session
         self._next_default_display_name = next_default_display_name
+        self._retain_subagents = retain_subagents
+        self._enable_background_subagents = enable_background_subagents
 
     @property
     def description(self) -> str:
@@ -154,6 +161,16 @@ class SubagentTool:
         subagent_run_id = f"sa_{uuid4().hex[:8]}"
         worker_id = f"agent-{uuid4().hex[:4]}"
         run_in_background = bool(input.get("run_in_background", False))
+        if run_in_background and not self._enable_background_subagents:
+            return ToolResult(
+                content=(
+                    "Background subagents are not enabled for this agent. "
+                    "Use create_deep_agent() for in-process background workers, "
+                    "or run this Subagent without run_in_background."
+                ),
+                summary=self.summarize(input),
+                is_error=True,
+            )
 
         # Use the session emit channel so SubagentEvents reach pending_child_events.
         emit_list = getattr(session, "pending_child_events", None)
@@ -168,10 +185,11 @@ class SubagentTool:
             subagent_run_id=subagent_run_id,
             signal=ctx.signal,
             emit=emit_fn,
-            retain=True,
+            retain=self._retain_subagents,
         )
 
         if run_in_background:
+            runner_args.retain = True
             # Spawn detached; return immediately with an ack.
             handle = WorkerHandle(
                 worker_id=worker_id,
@@ -183,7 +201,12 @@ class SubagentTool:
             session.workers[worker_id] = handle
 
             async def _bg_run() -> None:
-                result = await run_subagent(runner_args)
+                try:
+                    result = await run_subagent(runner_args)
+                except asyncio.CancelledError:
+                    if handle.status != "killed":
+                        handle.status = "killed"
+                    raise
                 handle.child_session_id = result.child_session_id
                 handle.last_result_text = result.final_text
                 handle.status = "failed" if result.errored or result.aborted else "completed"
@@ -197,18 +220,19 @@ class SubagentTool:
                 )
                 error_line = ""
                 if result.errored and result.error:
-                    name = result.error["name"]
-                    msg = result.error["message"]
-                    error_line = f"\n<error>{name}: {msg}</error>"
+                    name = escape(result.error["name"])
+                    msg = escape(result.error["message"])
+                    error_line = f"<error>{name}: {msg}</error>"
                 from ..events import BackgroundWorkerEvent
                 from ..types import Message, TextBlock
 
                 notification_text = (
                     f"<task-notification>"
-                    f"<task-id>{worker_id}</task-id>"
-                    f"<status>{status_str}</status>"
-                    f"<summary>Worker '{display_name}' finished.</summary>"
-                    f"<result>{result.final_text}{error_line}</result>"
+                    f"<task-id>{escape(worker_id)}</task-id>"
+                    f"<status>{escape(status_str)}</status>"
+                    f"<summary>Worker '{escape(display_name)}' finished.</summary>"
+                    f"<result>{escape(result.final_text)}</result>"
+                    f"{error_line}"
                     f"</task-notification>"
                 )
                 session.pending_notifications.append(
@@ -237,16 +261,17 @@ class SubagentTool:
         # Foreground (blocking) execution
         result = await run_subagent(runner_args)
 
-        # Store worker handle so SubagentContinue can address it by id.
-        handle = WorkerHandle(
-            worker_id=worker_id,
-            child_session_id=result.child_session_id,
-            display_name=display_name,
-            definition=definition,
-            status="failed" if result.errored else "completed",
-            last_result_text=result.final_text,
-        )
-        session.workers[worker_id] = handle
+        if self._retain_subagents:
+            # Store worker handle so SubagentContinue can address it by id.
+            handle = WorkerHandle(
+                worker_id=worker_id,
+                child_session_id=result.child_session_id,
+                display_name=display_name,
+                definition=definition,
+                status="failed" if result.errored else "completed",
+                last_result_text=result.final_text,
+            )
+            session.workers[worker_id] = handle
 
         if result.aborted:
             return ToolResult(
@@ -278,8 +303,8 @@ class SubagentTool:
                 summary=self.summarize(input),
                 is_error=True,
             )
-        # Include worker_id in result so the model can address this worker later.
-        suffix = f"\n\n[Worker ID: {worker_id}]"
+        # Include worker_id in retained results so the model can address this worker later.
+        suffix = f"\n\n[Worker ID: {worker_id}]" if self._retain_subagents else ""
         return ToolResult(
             content=result.final_text + suffix,
             summary=self.summarize(input),

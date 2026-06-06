@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 from ..abort import AbortContext, any_signal, throw_if_aborted
 from ..events import (
@@ -10,7 +11,7 @@ from ..events import (
     ResultEvent,
     SubagentEvent,
 )
-from ..session import Session
+from ..session import RunOptions, Session
 from ..types import SystemBlock, TextBlock
 from .types import AgentDefinition
 
@@ -23,14 +24,14 @@ SUBAGENT_TOOL_NAME = "Subagent"
 @dataclass
 class RunSubagentArgs:
     parent_session: Session
-    parent_agent: object
+    parent_agent: Any
     definition: AgentDefinition
     prompt: str
     display_name: str
     subagent_run_id: str
     tools_filter: list[str] | None = None
     signal: AbortContext | None = None
-    emit: object = None
+    emit: Any = None
     retain: bool = False
     """When True, the child session is kept in agent._sessions after completion
     so it can be continued later via SubagentContinue."""
@@ -39,12 +40,12 @@ class RunSubagentArgs:
 @dataclass
 class ContinueSubagentArgs:
     parent_session: Session
-    parent_agent: object
+    parent_agent: Any
     handle: WorkerHandle
     message: str
     subagent_run_id: str
     signal: AbortContext | None = None
-    emit: object = None
+    emit: Any = None
 
 
 @dataclass
@@ -56,12 +57,14 @@ class RunSubagentResult:
     error: dict[str, str] | None = None
 
 
-def build_child_tools(parent_tools: object, filter: list[str] | None) -> object:
+def build_child_tools(parent_tools: Any, filter: list[str] | None) -> Any:
     from ..tools import ToolRegistry
 
     child = ToolRegistry()
-    wildcard = filter is None or "*" in filter
-    wanted = None if wildcard else set(filter)
+    if filter is None or "*" in filter:
+        wanted = None
+    else:
+        wanted = set(filter)
     for t in parent_tools.list():
         if t.name == SUBAGENT_TOOL_NAME:
             continue
@@ -70,7 +73,7 @@ def build_child_tools(parent_tools: object, filter: list[str] | None) -> object:
     return child
 
 
-def _last_assistant_text(message: object) -> str:
+def _last_assistant_text(message: Any) -> str:
     parts = []
     for block in message.content:
         if isinstance(block, TextBlock) and not (
@@ -84,11 +87,12 @@ async def _drive_child(
     child_session: Session,
     prompt: str,
     *,
-    emit: object = None,
+    emit: Any = None,
     subagent_run_id: str = "",
     subagent_type: str = "",
     display_name: str = "",
     parent_session_id: str = "",
+    signal: AbortContext | None = None,
 ) -> RunSubagentResult:
     """Drive *child_session* with *prompt* and collect the final result.
 
@@ -100,7 +104,7 @@ async def _drive_child(
     last_assistant_text = ""
 
     try:
-        child_events = child_session.run(prompt)
+        child_events = child_session.run(prompt, RunOptions(signal=signal))
         async for event in child_events:
             if emit is not None and callable(emit):
                 emit(
@@ -163,7 +167,7 @@ async def run_subagent(args: RunSubagentArgs) -> RunSubagentResult:
     child_tool_names = sorted(t.name for t in child_tools.list())
     builder = getattr(agent, "build_system_blocks_for_tool_names", None)
     if callable(builder):
-        child_system = list(builder(child_tool_names))
+        child_system = list(cast(Iterable[SystemBlock], builder(child_tool_names)))
     else:
         child_system = list(agent.system_blocks)
     child_system.append(
@@ -189,7 +193,7 @@ async def run_subagent(args: RunSubagentArgs) -> RunSubagentResult:
     if args.signal is not None and args.signal.aborted:
         throw_if_aborted(args.signal)
 
-    _ = any_signal(child_session._abort_controller, args.signal)
+    merged_signal = any_signal(child_session._abort_controller, args.signal)
 
     result = await _drive_child(
         child_session,
@@ -199,6 +203,7 @@ async def run_subagent(args: RunSubagentArgs) -> RunSubagentResult:
         subagent_type=args.definition.frontmatter.name,
         display_name=args.display_name,
         parent_session_id=args.parent_session.id,
+        signal=merged_signal,
     )
 
     if not args.retain:
@@ -239,7 +244,7 @@ async def continue_subagent(args: ContinueSubagentArgs) -> RunSubagentResult:
         throw_if_aborted(args.signal)
 
     # Re-establish the abort link for this continuation.
-    _ = any_signal(child_session._abort_controller, args.signal)
+    merged_signal = any_signal(child_session._abort_controller, args.signal)
 
     subagent_run_id = f"sa_cont_{args.handle.worker_id}"
     result = await _drive_child(
@@ -250,6 +255,7 @@ async def continue_subagent(args: ContinueSubagentArgs) -> RunSubagentResult:
         subagent_type=handle.definition.frontmatter.name,
         display_name=handle.display_name,
         parent_session_id=args.parent_session.id,
+        signal=merged_signal,
     )
 
     handle.last_result_text = result.final_text

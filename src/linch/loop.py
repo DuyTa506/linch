@@ -682,10 +682,14 @@ async def _run_loop_impl(
         await _persist_event(session, run_id, event)
         yield event
 
-    from .abort import throw_if_aborted
+    from .abort import any_signal, throw_if_aborted
 
     max_turns = int(agent.max_turns) if isinstance(agent.max_turns, int) else 10**9
-    signal = session._abort_controller
+    signal = (
+        any_signal(session._abort_controller, opts.signal)
+        if opts.signal is not None
+        else session._abort_controller
+    )
     _final_result: _RunResultInfo | None = None
     _active_turn_index: int | None = None
     _active_provider_call: tuple[int, str, float] | None = None

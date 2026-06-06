@@ -51,10 +51,6 @@ class RunCheckpoint:
     pending_skill_overlay: dict[str, object] | None = None
     current_turn_allowed_tools: list[str] | None = None
     assistant_stop_reason: str | None = None
-    background_workers: list[dict[str, object]] = field(default_factory=list)
-    """Snapshot of in-flight background workers at checkpoint time.
-    Each entry: {worker_id, child_session_id, display_name, status}.
-    Used by resume_loop to emit killed notifications for abandoned workers."""
 
 
 @dataclass(slots=True)
@@ -128,7 +124,6 @@ def checkpoint_to_dict(checkpoint: RunCheckpoint) -> dict[str, Any]:
         "pending_skill_overlay": checkpoint.pending_skill_overlay,
         "current_turn_allowed_tools": checkpoint.current_turn_allowed_tools,
         "assistant_stop_reason": checkpoint.assistant_stop_reason,
-        "background_workers": checkpoint.background_workers,
     }
 
 
@@ -177,9 +172,6 @@ def checkpoint_from_dict(raw: dict[str, Any]) -> RunCheckpoint:
             if isinstance(raw.get("assistant_stop_reason"), str)
             else None
         ),
-        background_workers=[
-            dict(w) for w in raw.get("background_workers", []) if isinstance(w, dict)
-        ],
     )
 
 
