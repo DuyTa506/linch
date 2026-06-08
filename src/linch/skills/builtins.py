@@ -10,9 +10,7 @@ VERIFY_SKILL = Skill(
         description=(
             "Plan and run evidence-based verification for completed work, ending with a verdict."
         ),
-        when_to_use=(
-            "Use after non-trivial changes or before claiming a task is complete."
-        ),
+        when_to_use=("Use after non-trivial changes or before claiming a task is complete."),
         argument_hint="optional task, artifact, or risk focus",
     ),
     body="\n".join(
@@ -62,4 +60,3 @@ def merge_builtin_skills(disk_skills: list[Skill]) -> list[Skill]:
     disk_names = {skill.name.lower() for skill in disk_skills}
     builtins = [skill for skill in BUILT_IN_SKILLS if skill.name.lower() not in disk_names]
     return sorted([*disk_skills, *builtins], key=lambda skill: skill.name.lower())
-

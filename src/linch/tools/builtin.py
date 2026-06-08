@@ -236,6 +236,11 @@ class BashTool:
     scope: ToolScope = "exec"
     parallel: bool = False
 
+    def __init__(self, *, backend: Any = None) -> None:
+        from .execution import LocalBackend
+
+        self._backend: Any = backend if backend is not None else LocalBackend()
+
     def validate(self, raw: dict[str, object]) -> dict[str, object]:
         timeout = raw.get("timeout_ms", 120000)
         return {
@@ -245,24 +250,19 @@ class BashTool:
 
     async def execute(self, input: dict[str, object], ctx: ToolContext) -> ToolResult:
         timeout_s = _to_float(input.get("timeout_ms"), 120000.0) / 1000.0
-        proc = await asyncio.create_subprocess_shell(
+        result = await self._backend.run(
             str(input["command"]),
             cwd=ctx.cwd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            timeout_s=timeout_s,
+            signal=ctx.signal,
         )
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout_s)
-        except TimeoutError as exc:
-            proc.kill()
-            raise ToolExecutionError("command timed out") from exc
-        text = stdout.decode(errors="replace")
-        err = stderr.decode(errors="replace")
-        content = text + (("\n[stderr]\n" + err) if err else "")
+        if result.timed_out:
+            raise ToolExecutionError("command timed out")
+        content = result.stdout + (("\n[stderr]\n" + result.stderr) if result.stderr else "")
         return ToolResult(
             content=content,
-            summary=f"Exited {proc.returncode}",
-            is_error=proc.returncode != 0,
+            summary=f"Exited {result.returncode}",
+            is_error=result.returncode != 0,
         )
 
     def summarize(self, input: dict[str, object]) -> str:

@@ -121,9 +121,7 @@ class FakeProvider(BaseProvider):
             yield {
                 "type": "tool_use_input_delta",
                 "id": "tool-1",
-                "json_delta": json.dumps(
-                    {"query": self.query, "max_results": self.max_results}
-                ),
+                "json_delta": json.dumps({"query": self.query, "max_results": self.max_results}),
             }
             yield {"type": "tool_use_end", "id": "tool-1"}
             yield {"type": "message_end", "stop_reason": "tool_use", "usage": Usage()}

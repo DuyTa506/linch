@@ -28,6 +28,7 @@ ROOT = Path(__file__).resolve().parents[2]
 # ── A trivial ContextBuilder that injects a static knowledge snippet ──────────
 # In production this would call your vector store / knowledge graph.
 
+
 class _PolicyContextBuilder:
     _POLICY = (
         "Refund policy: customers may return any item within 30 days. "
@@ -58,6 +59,7 @@ class _PolicyContextBuilder:
 
 def _last_user_text(messages) -> str:
     from linch.types import TextBlock
+
     for msg in reversed(messages):
         if msg.role == "user":
             for block in msg.content:
@@ -67,6 +69,7 @@ def _last_user_text(messages) -> str:
 
 
 # ── Agent factory ─────────────────────────────────────────────────────────────
+
 
 def _make_agent():
     from linch import Agent
@@ -96,9 +99,7 @@ def _make_agent():
         model = "deepseek-v4-flash"
     else:
         # Real OpenAI: json_schema enforcement is supported natively.
-        provider = OpenAIChatCompletionsProvider(
-            OpenAIChatProviderOptions(api_key=openai_key)
-        )
+        provider = OpenAIChatCompletionsProvider(OpenAIChatProviderOptions(api_key=openai_key))
         model = "gpt-5-nano-2025-08-07"
 
     return Agent(
@@ -142,6 +143,7 @@ def _make_agent():
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
+
 
 async def main() -> None:
     agent = _make_agent()

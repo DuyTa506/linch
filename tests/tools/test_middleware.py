@@ -75,9 +75,9 @@ def make_agent(registry: Any, middleware: Any = None) -> SimpleNamespace:
         max_tool_concurrency=1,
         tool_concurrency=1,
         middleware=(
-            [] if middleware is None else (
-                middleware if isinstance(middleware, list) else [middleware]
-            )
+            []
+            if middleware is None
+            else (middleware if isinstance(middleware, list) else [middleware])
         ),
     )
 

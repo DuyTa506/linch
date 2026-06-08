@@ -151,8 +151,7 @@ class PostgresMemoryStore:
                 )
             else:
                 rows = await conn.fetch(
-                    "SELECT * FROM memories WHERE namespace = $1 "
-                    "ORDER BY updated_at DESC LIMIT $2",
+                    "SELECT * FROM memories WHERE namespace = $1 ORDER BY updated_at DESC LIMIT $2",
                     namespace or "",
                     cap,
                 )

@@ -93,7 +93,7 @@ async def main() -> None:
     ]
 
     for question in questions:
-        print(f"\n{'─'*60}")
+        print(f"\n{'─' * 60}")
         print(f"Q: {question}")
         print("─" * 60)
         async for event in session.run(question):

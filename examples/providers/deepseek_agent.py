@@ -211,14 +211,12 @@ async def run_openai_thinking_with_tools(api_key: str) -> None:
     session = await agent.session()
 
     thinking_chars = 0
-    async for event in session.run("Run: python3 -c \"print(6*7)\" and tell me the result."):
+    async for event in session.run('Run: python3 -c "print(6*7)" and tell me the result.'):
         if event.type == "partial_assistant":
             if event.delta.get("kind") == "thinking":
                 thinking_chars += len(event.delta.get("text", ""))
         elif event.type == "tool_call_end":
-            print(
-                f"[openai/thinking+tools] tool: {event.tool_name} → {str(event.result)[:60]!r}"
-            )
+            print(f"[openai/thinking+tools] tool: {event.tool_name} → {str(event.result)[:60]!r}")
         elif event.type == "result":
             print(f"[openai/thinking+tools] answer: {event.final_text or '(no text)'}")
             print(f"[openai/thinking+tools] total thinking chars: {thinking_chars}")

@@ -114,9 +114,7 @@ def _normalize_permissions(permissions: Any | dict[str, object] | None) -> _Perm
     perm_mode = _normalize_permission_mode(getattr(permissions, "mode", "default"))
     raw_rules = getattr(permissions, "rules", None)
     perm_rules = list(raw_rules) if raw_rules else []
-    can_use = getattr(permissions, "canUseTool", None) or getattr(
-        permissions, "can_use_tool", None
-    )
+    can_use = getattr(permissions, "canUseTool", None) or getattr(permissions, "can_use_tool", None)
     return _PermissionConfig(
         mode=perm_mode,
         rules=cast(list[PermissionRule], perm_rules),
@@ -305,6 +303,7 @@ class Agent:
         retain_subagents: bool = False,
         enable_background_subagents: bool = False,
         enable_task_stop: bool = False,
+        execution_backend: Any = None,
     ) -> None:
         system_prompt = _resolve_system_prompt(system_prompt, systemPrompt, system_prompt_config)
         if maxRetries is not None:
@@ -344,6 +343,12 @@ class Agent:
         self.model = model
         self.cwd = cwd_resolved
         self.tools = tools or default_tools()
+        self.execution_backend = execution_backend
+        if execution_backend is not None:
+            from .tools.builtin import BashTool
+
+            if self.tools.get("Bash") is not None:
+                self.tools.replace(BashTool(backend=execution_backend))
         self.permission_engine = PermissionEngine(
             mode=permissions_config.mode,
             rules=permissions_config.rules,
@@ -419,7 +424,9 @@ class Agent:
         self.enable_background_subagents = bool(enable_background_subagents)
         self.enable_task_stop = bool(enable_task_stop)
         self._skills_connect: Any = None
+        self._skills_loaded: bool = False
         self._subagents_connect: Any = None
+        self._subagents_loaded: bool = False
         self._mcp_connect: Any = None
         self._mcp_connection: Any = None
 
@@ -572,11 +579,16 @@ class Agent:
                 "searching file contents. They are read-only."
             )
         if "Bash" in present:
-            protocol_lines.append(
-                "- Bash runs in the user's environment with full permissions. "
-                "There is no sandbox. Avoid commands that change global state "
-                "unless the user asked for them."
-            )
+            if self.execution_backend is None:
+                protocol_lines.append(
+                    "- Bash runs in the user's environment with full permissions. "
+                    "There is no sandbox. Avoid commands that change global state "
+                    "unless the user asked for them."
+                )
+            else:
+                protocol_lines.append(
+                    "- Bash runs inside a sandbox. Commands are isolated from the host environment."
+                )
         # Always include the generic parallel-tool hint when any tools exist.
         if present:
             if has_swe_tools:
@@ -682,6 +694,8 @@ class Agent:
         return result
 
     async def connect_skills(self) -> None:
+        if self._skills_loaded:
+            return
         if self._skills_connect is not None:
             await self._skills_connect
             return
@@ -728,11 +742,14 @@ class Agent:
         self._skills_connect = _load()
         try:
             await self._skills_connect
+            self._skills_loaded = True
         except Exception:
             self._skills_connect = None
             raise
 
     async def connect_subagents(self) -> None:
+        if self._subagents_loaded:
+            return
         if self._subagents_connect is not None:
             await self._subagents_connect
             return
@@ -766,6 +783,7 @@ class Agent:
         self._subagents_connect = _load()
         try:
             await self._subagents_connect
+            self._subagents_loaded = True
         except Exception:
             self._subagents_connect = None
             raise

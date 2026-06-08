@@ -91,9 +91,7 @@ async def test_pg_memory_store_round_trip() -> None:
         assert len(results) == 10
 
         # Upsert update
-        await store.upsert([
-            MemoryItem(id="pg-0", content="updated content", namespace="pg-test")
-        ])
+        await store.upsert([MemoryItem(id="pg-0", content="updated content", namespace="pg-test")])
         results2 = await store.search("updated", namespace="pg-test", limit=5)
         assert any(r.item.id == "pg-0" for r in results2)
     finally:
@@ -136,9 +134,7 @@ async def test_pg_file_backend_concurrent_writes() -> None:
     fb = PostgresFileBackend(DSN, min_size=5, max_size=20)
     try:
         paths = [f"/pg-concurrent/{i}.txt" for i in range(50)]
-        await asyncio.gather(
-            *[fb.write(p, f"content {i}") for i, p in enumerate(paths)]
-        )
+        await asyncio.gather(*[fb.write(p, f"content {i}") for i, p in enumerate(paths)])
         all_paths = await fb.ls("/pg-concurrent")
         assert len(all_paths) == 50
     finally:

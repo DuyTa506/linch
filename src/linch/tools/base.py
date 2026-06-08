@@ -73,6 +73,7 @@ class ToolResult:
     attachments: list[Any] = field(default_factory=list)
     duration_ms: int = 0
     truncated: bool = False
+    recovery_hint: str = ""
 
 
 class Tool(Protocol):

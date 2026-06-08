@@ -55,7 +55,7 @@ def _make_agent():
         tools=tools_from_defaults(),
         session_store=InMemorySessionStore(),
         permissions={
-            "mode": "acceptEdits",           # auto-approve file reads/writes; ask for Bash
+            "mode": "acceptEdits",  # auto-approve file reads/writes; ask for Bash
             "rules": [
                 # Block destructive shell commands before the permission prompt.
                 BashRule(pattern="rm -rf", decision="deny"),
@@ -67,7 +67,7 @@ def _make_agent():
         },
         loop_guard=LoopGuard(
             max_identical_tool_calls=3,
-            force_final_answer=True,     # always produce a text summary at the end
+            force_final_answer=True,  # always produce a text summary at the end
         ),
         system_prompt=(
             "You are a precise software-engineering assistant. "
@@ -91,7 +91,7 @@ async def main() -> None:
     ]
 
     for task in tasks:
-        print(f"\n{'─'*60}")
+        print(f"\n{'─' * 60}")
         print(f"Task: {task}")
         print("─" * 60)
         async for event in session.run(task):

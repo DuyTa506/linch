@@ -32,14 +32,17 @@ graph TD
             OAR["OpenAIResponsesProvider"]
             OAC["OpenAIChatCompletionsProvider"]
             ANT["AnthropicProvider"]
+            GEM["GeminiProvider"]
+            LLM["LlamaCppProvider"]
         end
 
         subgraph Storage["Storage"]
             SS["SessionStore\nInMemory · SQLite"]
+            RS["RunStore\nInMemory · SQLite"]
         end
 
         subgraph Knowledge["Knowledge"]
-            MEM["MemoryStore\nkeyword · sqlite · custom"]
+            MEM["MemoryStore\nkeyword · sqlite · postgres · tiered · custom"]
         end
 
         subgraph Filesystem["Filesystem"]
@@ -60,12 +63,13 @@ graph TD
     RunLoop --> SK
     SK --> CB
     CB --> BTR
-    BTR --> OAR & OAC & ANT
+    BTR --> OAR & OAC & ANT & GEM & LLM
     RunLoop --> PERM
     PERM --> SCHED
     SCHED --> LG
     RunLoop -.->|"AsyncIterator[Event]"| Caller
     Session <-->|"persist / load"| SS
+    RunLoop <-->|"checkpoint / resume"| RS
     CB <-->|"recall / upsert"| MEM
     Agent <--> MCP & SKILLS & SUBA
     SCHED <-->|"offload / read"| FS
@@ -261,11 +265,15 @@ flowchart LR
 | `OpenAIResponsesProvider` | ✗ | ✓ | ✓ |
 | `OpenAIChatCompletionsProvider` | ✗ | ✓ | ✓ |
 | `LlamaCppProvider` | ✗ | ✓ | ✓ |
-| `AnthropicProvider` | ✓ | ✗ | ✓ |
+| `AnthropicProvider` | ✓ | ✓ | ✓ |
+| `GeminiProvider` | ✗ | ✓ | ✓ |
 
-> **`structured_output` means native JSON Schema enforcement via a request parameter** (Chat Completions: `response_format: {type: "json_schema", ...}`; Responses API: `text.format`). It does **not** mean the provider cannot produce structured JSON.
->
-> `AnthropicProvider` is marked `✗` because Anthropic's API has no equivalent enforcement parameter — when `output_schema` is set the loop clears it and falls back to text-based JSON parsing of the model's response. Anthropic **does** support tool use (`tool_choice = ✓`) and produces reliable structured output via the `final_tool_name` pattern (Path B — see §10).
+`structured_output=True` means the provider/loop pair can enforce or route
+structured output without falling back to untyped free text. OpenAI Chat,
+OpenAI Responses, llama.cpp, and Gemini map `output_schema` to provider-native
+schema parameters. Anthropic maps `output_schema` to a generated final schema
+tool; the loop treats that schema tool as terminal structured output rather
+than dispatching it as a real tool.
 
 **Choosing between the two OpenAI providers:**
 
@@ -285,6 +293,10 @@ streaming enabled with `stream: true`, omits OpenAI's `stream_options` field,
 maps structured output to llama.cpp's documented `response_format` shape, and
 uses `/v1/props` or `/props` to cache the server's `n_ctx` context window when
 that endpoint is available.
+
+`GeminiProvider` uses the optional `linch[gemini]` dependency and translates
+Gemini content parts/function calls into the same normalized stream events used
+by the rest of the loop.
 
 ---
 
@@ -355,6 +367,11 @@ graph TD
 ### 3.6 Permission Evaluation
 
 Every tool call passes through the permission engine before reaching the scheduler.
+For durable resume, allow/deny decisions made during a turn are snapshotted in
+`RunCheckpoint.permission_decisions`. On resume of the same checkpointed turn,
+the scheduler replays those decisions before invoking `canUseTool`; on the next
+fresh turn, `session.current_turn_permission_decisions` is cleared so approvals
+cannot leak across turns.
 
 ```mermaid
 flowchart TD
@@ -400,6 +417,7 @@ graph TD
         IK["InMemoryKeywordMemoryStore\ncooperative keyword matching"]
         SQ["SqliteMemoryStore\nasync via single-worker executor\n(storage._executor.SqliteExecutor)"]
         PG["PostgresMemoryStore\noptional asyncpg backend\nlinch[postgres]"]
+        TM["TieredMemoryStore\nworking · episodic · semantic\nweighted merge"]
     end
 
     subgraph Host["Host-Owned Adapters"]
@@ -414,11 +432,16 @@ graph TD
         MUT["MemoryUpsertTool\nscope=write\nResourceAccess(memory:ns, write)"]
     end
 
-    MS --> IK & SQ
+    MS --> IK & SQ & PG & TM
     MS --> VEC & GRF & REM
-    IK & SQ & VEC & GRF & REM --> MCB
-    IK & SQ & VEC & GRF & REM --> MST & MUT
+    IK & SQ & PG & TM & VEC & GRF & REM --> MCB
+    IK & SQ & PG & TM & VEC & GRF & REM --> MST & MUT
 ```
+
+`TieredMemoryStore` is still a `MemoryStore`: it routes writes by
+`MemoryItem.metadata["tier"]` (`working`, `episodic`, or `semantic`) and merges
+search results with per-tier weights. Unknown or malformed tier metadata falls
+back to `working`.
 
 Do not add vector database or embedding dependencies to core; adapters implement the protocol and live in examples.
 
@@ -630,18 +653,20 @@ classDiagram
 | `config.py` | `FeatureFlags`, `SystemPromptConfig` |
 | `context/` | `ContextBuilder`, `ContextBuildResult`, `ContextBudget`, `ContextBuilderChain` |
 | `loop_guard/` | `LoopGuard`, `LoopGuardState`, `LoopGuardDecision`, `evaluate_loop_guard`, `normalize_loop_guard` |
-| `memory/` | `MemoryStore` protocol, reference stores, `MemoryContextBuilder`, memory tools |
+| `memory/` | `MemoryStore` protocol, reference stores including `TieredMemoryStore`, `MemoryContextBuilder`, memory tools |
 | `filesystem/` | `FileBackend` protocol, `StateFileBackend`, `DiskFileBackend`, `SqliteFileBackend`, `CompositeFileBackend`, `OffloadConfig`, ls/read_file/write_file/edit_file tools |
 | `scheduler.py` | Resource-aware parallel tool execution with concurrency cap; applies `maybe_offload` at the result chokepoint |
 | `compaction.py` | Context-window management; calls `agent.provider` directly |
-| `permissions/` | `PermissionEngine`: rule evaluation, event emission, loop suspension |
-| `providers/` | `BaseProvider`, `ProviderCapabilities`; three implementations: `OpenAIChatCompletionsProvider` (any OpenAI-compatible endpoint, `reasoning_content` round-trip for DeepSeek/o-series), `OpenAIResponsesProvider` (stateful, native reasoning effort/summary), `AnthropicProvider` (extended thinking with signature, prompt caching) |
-| `tools/` | Tool protocol, `ToolContext`, `ToolRegistry`, `ToolResult`, `Citation`, built-in tools |
+| `permissions/` | `PermissionEngine`: rule evaluation, event emission, loop suspension, durable permission decision keys |
+| `pricing.py` | `ModelPricing`, `_DEFAULT_PRICING`, `cost_usd()` for per-turn and cumulative cost events |
+| `evals/` | Scripted provider, eval case/result dataclasses, built-in scorers, `run_eval()` |
+| `providers/` | `BaseProvider`, `ProviderCapabilities`; implementations: `OpenAIChatCompletionsProvider` (any OpenAI-compatible endpoint, `reasoning_content` round-trip for DeepSeek/o-series), `OpenAIResponsesProvider` (stateful, native reasoning effort/summary), `AnthropicProvider` (extended thinking with signature, prompt caching), `GeminiProvider`, `LlamaCppProvider` |
+| `tools/` | Tool protocol, `ToolContext`, `ToolRegistry`, `ToolResult`, `Citation`, built-in tools, execution backends |
 | `sessions/` | `SessionStore` protocol, `InMemorySessionStore`, `SqliteSessionStore` |
 | `mcp/` | MCP server connection → Linch tool adapters |
 | `skills/` | `SKILL.md`-based slash-commands with argument substitution |
 | `subagents/` | Specialized agent roles from `.linch/agents.yaml`; `workers.py` — `WorkerHandle` dataclass for per-worker state tracking; wiring for `SubagentContinueTool` |
-| `run_store.py` | `SqliteRunStore`, `RunCheckpoint` — durable run-level checkpoint/resume storage; `RunCheckpoint` stores `background_workers` list |
+| `run_store.py` | `SqliteRunStore`, `RunCheckpoint` — durable run-level checkpoint/resume storage; `RunCheckpoint` stores background workers and current-turn permission decisions |
 | `deep_agent/` | `create_deep_agent` factory (`factory.py`); deep prompt layers (`prompts.py`); specialist subagent roster — researcher, planner, implementer (`subagents.py`) |
 | `tools/subagent_continue.py` | `SubagentContinueTool` — continues a retained child session by worker id or display name |
 | `tools/subagent_stop.py` | `TaskStopTool` — cancels a background worker; handle remains in `session.workers` and is still continuable |
@@ -708,6 +733,12 @@ class MyTool:
 `ToolContext` carries: `cwd`, `session_id`, `run_id`, `session_store`, `signal` (abort), `file_read_tracker`, `deps`, `filesystem`.
 
 `deps` is threaded from `Agent(deps=...)` or overridden per-run with `RunOptions(deps=...)`. Use it to inject app state into tools without globals.
+
+`BashTool` delegates command execution to a backend. `LocalBackend` preserves
+the default local subprocess behavior with timeout cleanup; `DockerBackend`
+uses `docker run --rm` when the Docker daemon is available. Passing
+`Agent(execution_backend=...)` replaces an existing `Bash` tool only, so a
+restricted registry that omits `Bash` does not gain shell access.
 
 ### ToolRegistry
 

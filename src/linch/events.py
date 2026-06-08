@@ -78,6 +78,11 @@ class UsageEvent:
     usage: Usage
     cumulative: Usage
     type: Literal["usage"] = "usage"
+    cost_usd: float | None = None
+    """USD cost for the current turn, or ``None`` for unknown models."""
+    cumulative_cost_usd: float | None = None
+    """Accumulated USD cost across all turns so far, or ``None`` if no priced
+    turn has run yet."""
 
 
 @dataclass(slots=True)
@@ -95,6 +100,10 @@ class ResultEvent:
     """Error message from JSON parsing / schema validation.  Set when
     ``output_schema`` was configured but the model's response was not valid
     JSON or did not match the schema."""
+    total_cost_usd: float | None = None
+    """Total USD cost across all turns, or ``None`` if the model is not in the
+    pricing table.  Partial sums are possible for multi-model runs where only
+    some turns have known pricing."""
     type: Literal["result"] = "result"
 
 
@@ -425,11 +434,16 @@ def event_to_dict(event: Event) -> dict[str, Any]:
             ],
         }
     if isinstance(event, UsageEvent):
-        return {
+        d_usage: dict[str, Any] = {
             "type": event.type,
             "usage": usage_to_dict(event.usage),
             "cumulative": usage_to_dict(event.cumulative),
         }
+        if event.cost_usd is not None:
+            d_usage["cost_usd"] = event.cost_usd
+        if event.cumulative_cost_usd is not None:
+            d_usage["cumulative_cost_usd"] = event.cumulative_cost_usd
+        return d_usage
     if isinstance(event, CompactionEvent):
         return {
             "type": event.type,
@@ -461,6 +475,8 @@ def event_to_dict(event: Event) -> dict[str, Any]:
             d["structured_output"] = event.structured_output
         if event.structured_error is not None:
             d["structured_error"] = event.structured_error
+        if event.total_cost_usd is not None:
+            d["total_cost_usd"] = event.total_cost_usd
         return d
     if isinstance(event, ErrorEvent):
         return {"type": event.type, "error": event.error}
@@ -557,9 +573,13 @@ def event_from_dict(raw: dict[str, Any]) -> Event:
             )
         return PermissionRequestEvent(requests=requests)
     if typ == "usage":
+        _cost = raw.get("cost_usd")
+        _cum_cost = raw.get("cumulative_cost_usd")
         return UsageEvent(
             usage=usage_from_dict(dict(raw.get("usage", {}))),
             cumulative=usage_from_dict(dict(raw.get("cumulative", {}))),
+            cost_usd=float(_cost) if isinstance(_cost, (int, float)) else None,
+            cumulative_cost_usd=float(_cum_cost) if isinstance(_cum_cost, (int, float)) else None,
         )
     if typ == "compaction":
         return CompactionEvent(
@@ -583,6 +603,7 @@ def event_from_dict(raw: dict[str, Any]) -> Event:
     if typ == "result":
         so_raw = raw.get("structured_output")
         se_raw = raw.get("structured_error")
+        _total_cost = raw.get("total_cost_usd")
         return ResultEvent(
             subtype=raw.get("subtype", "error"),
             stop_reason=raw.get("stop_reason", "error"),
@@ -591,6 +612,7 @@ def event_from_dict(raw: dict[str, Any]) -> Event:
             final_text=raw.get("final_text") if isinstance(raw.get("final_text"), str) else None,
             structured_output=dict(so_raw) if isinstance(so_raw, dict) else None,
             structured_error=str(se_raw) if isinstance(se_raw, str) else None,
+            total_cost_usd=float(_total_cost) if isinstance(_total_cost, (int, float)) else None,
         )
     if typ == "error":
         return ErrorEvent(error=dict(raw.get("error", {})))

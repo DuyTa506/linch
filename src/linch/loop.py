@@ -31,6 +31,7 @@ from .events import (
     UsageEvent,
     UserEvent,
 )
+from .pricing import cost_usd as _cost_usd
 from .run_store import RunCheckpoint, RunRecord
 from .scheduler import execute_tool_calls
 from .session import RunOptions, Session
@@ -549,6 +550,7 @@ async def _run_loop_impl(
     session.active_run_id = run_id
     started = time.time()
     total = Usage()
+    running_cost: float | None = None  # accumulated USD cost; None until first priced turn
 
     # ── Observability hub ─────────────────────────────────────────────────
     from .observability import ObserverDispatcher
@@ -567,6 +569,18 @@ async def _run_loop_impl(
 
     # Resolve final_tool_name: RunOptions wins over Agent
     effective_final_tool = opts.final_tool_name or getattr(agent, "final_tool_name", None)
+
+    # Feature A — when the provider supports native structured output via the
+    # forced-tool method (e.g. AnthropicProvider), wire the output schema name
+    # as the terminal tool so the loop captures final_block.input as
+    # structured_output without executing a real tool.  Explicit final_tool_name
+    # wins if already set.
+    if effective_final_tool is None:
+        _schema = opts.output_schema or getattr(agent, "output_schema", None)
+        if _schema is not None and hasattr(agent.provider, "capabilities"):
+            _provider_caps = agent.provider.capabilities(agent.model)
+            if getattr(_provider_caps, "structured_output", False):
+                effective_final_tool = _schema.name
 
     # Loop guard — detects repeated identical tool calls and consecutive
     # failure streaks.  On by default (Agent sets self.loop_guard = LoopGuard()
@@ -587,6 +601,7 @@ async def _run_loop_impl(
             resume_checkpoint.pending_skill_overlay
         )
         session.current_turn_allowed_tools = resume_checkpoint.current_turn_allowed_tools
+        session.current_turn_permission_decisions = dict(resume_checkpoint.permission_decisions)
 
     checkpoint = resume_checkpoint or RunCheckpoint(
         phase="started",
@@ -633,6 +648,7 @@ async def _run_loop_impl(
         checkpoint.loop_guard_state = _loop_guard_state_to_dict(_guard_state)
         checkpoint.pending_skill_overlay = _skill_overlay_to_dict(session.pending_skill_overlay)
         checkpoint.current_turn_allowed_tools = session.current_turn_allowed_tools
+        checkpoint.permission_decisions = dict(session.current_turn_permission_decisions)
         await store.save_checkpoint(run_id, checkpoint, status=status)
 
     if hub.active:
@@ -790,12 +806,22 @@ async def _run_loop_impl(
                 model_override = pending.model_override
             else:
                 session.current_turn_allowed_tools = None
+            # Clear per-turn permission decisions on every fresh turn.
+            # Preserve them only when resuming the exact checkpointed turn so
+            # Seam A can replay stored allow/deny without re-prompting.
+            if resume_checkpoint is None or turn_index != checkpoint.turn_index:
+                session.current_turn_permission_decisions = {}
 
             resumed_assistant = (
                 resume_checkpoint is not None
                 and turn_index == checkpoint.turn_index
                 and checkpoint.phase
-                in {"assistant_appended", "permission_pending", "tool_batch_pending"}
+                in {
+                    "assistant_appended",
+                    "permission_pending",
+                    "tool_batch_pending",
+                    "tool_executing",
+                }
                 and checkpoint.assistant_message is not None
             )
             if resumed_assistant:
@@ -916,6 +942,12 @@ async def _run_loop_impl(
 
                 await session.append([assembly.message])
                 total = total.add(assembly.usage)
+                # req is guaranteed non-None here (not resumed_assistant branch);
+                # fall back to agent.model to satisfy the type checker.
+                _turn_model = req.model if req is not None else agent.model
+                _turn_cost = _cost_usd(assembly.usage, _turn_model)
+                if _turn_cost is not None:
+                    running_cost = (running_cost or 0.0) + _turn_cost
                 _force_final_pending = False
                 await _save_checkpoint(
                     "assistant_appended",
@@ -927,7 +959,12 @@ async def _run_loop_impl(
                 await _persist_event(session, run_id, event)
                 yield event
                 session.last_usage = assembly.usage
-                event = UsageEvent(usage=assembly.usage, cumulative=total)
+                event = UsageEvent(
+                    usage=assembly.usage,
+                    cumulative=total,
+                    cost_usd=_turn_cost,
+                    cumulative_cost_usd=running_cost,
+                )
                 await _persist_event(session, run_id, event)
                 yield event
 
@@ -955,6 +992,7 @@ async def _run_loop_impl(
                         duration_ms=_dur,
                         final_text=None,
                         structured_output=final_block.input,
+                        total_cost_usd=running_cost,
                     )
                     await _persist_event(session, run_id, event)
                     store = agent.run_store
@@ -993,6 +1031,7 @@ async def _run_loop_impl(
                     final_text=ft,
                     structured_output=structured_output,
                     structured_error=structured_error,
+                    total_cost_usd=running_cost,
                 )
                 await _persist_event(session, run_id, event)
                 store = agent.run_store
@@ -1010,6 +1049,7 @@ async def _run_loop_impl(
                 if resume_checkpoint is not None and turn_index == checkpoint.turn_index
                 else {},
             )
+            _recovery_hints: dict[str, str] = {}
             missing_tool_blocks = [
                 block for block in tool_blocks if block.id not in completed_tool_results
             ]
@@ -1021,6 +1061,7 @@ async def _run_loop_impl(
                 pending_tool_blocks=tool_blocks,
                 completed_tool_results=completed_tool_results,
             )
+            _tool_exec_ckpt_saved = False
             async for event in execute_tool_calls(
                 missing_tool_blocks,
                 agent,
@@ -1038,6 +1079,18 @@ async def _run_loop_impl(
                         pending_tool_blocks=tool_blocks,
                         completed_tool_results=completed_tool_results,
                         status="waiting_permission",
+                    )
+                elif isinstance(event, ToolCallStartEvent) and not _tool_exec_ckpt_saved:
+                    # Save after resolve() has fired (Seam B) but before tool completes,
+                    # so the permission_decisions survive a crash in this window.
+                    _tool_exec_ckpt_saved = True
+                    await _save_checkpoint(
+                        "tool_executing",
+                        turn_index=turn_index,
+                        assistant_message=assembly.message,
+                        assistant_stop_reason=assembly.stop_reason,
+                        pending_tool_blocks=tool_blocks,
+                        completed_tool_results=completed_tool_results,
                     )
                 yield event
                 if hub.active:
@@ -1070,9 +1123,33 @@ async def _run_loop_impl(
                 if isinstance(event, ToolCallEndEvent):
                     block = _tool_result_block_from_end(event)
                     completed_tool_results[event.tool_use_id] = block
+                    if (
+                        event.is_error
+                        and event.tool_result is not None
+                        and event.tool_result.recovery_hint
+                    ):
+                        _recovery_hints[event.tool_use_id] = event.tool_result.recovery_hint
             result_blocks: list[ContentBlock] = [
                 completed_tool_results[block.id] for block in tool_blocks
             ]
+            # Feature E — inject recovery hint when ALL tools in the batch failed.
+            # Partial failures are left to the model to resolve on its own.
+            if (
+                result_blocks
+                and all(
+                    getattr(b, "type", None) == "tool_result" and getattr(b, "is_error", False)
+                    for b in result_blocks
+                )
+                and _recovery_hints
+            ):
+                _hint_text = "All tool calls failed. Recovery hints:\n" + "\n".join(
+                    f"- {hint}" for hint in _recovery_hints.values()
+                )
+                _hint_msg = Message(role="user", content=[TextBlock(text=_hint_text)])
+                await session.append([_hint_msg])
+                _hint_event: Event = UserEvent(message=_hint_msg)
+                await _persist_event(session, run_id, _hint_event)
+                yield _hint_event
             result_message = Message(role="user", content=result_blocks)
             already_appended = (
                 resume_checkpoint is not None
@@ -1141,6 +1218,7 @@ async def _run_loop_impl(
                             stop_reason="error",
                             total_usage=total,
                             duration_ms=_dur,
+                            total_cost_usd=running_cost,
                         )
                         await _persist_event(session, run_id, event)
                         store = agent.run_store
@@ -1184,6 +1262,7 @@ async def _run_loop_impl(
             stop_reason="error",
             total_usage=total,
             duration_ms=_dur,
+            total_cost_usd=running_cost,
         )
         await _persist_event(session, run_id, event)
         store = agent.run_store
@@ -1216,6 +1295,7 @@ async def _run_loop_impl(
             stop_reason="error",
             total_usage=total,
             duration_ms=_dur,
+            total_cost_usd=running_cost,
         )
         await _persist_event(session, run_id, event)
         store = agent.run_store
@@ -1253,6 +1333,7 @@ async def _run_loop_impl(
             stop_reason="error",
             total_usage=total,
             duration_ms=_dur,
+            total_cost_usd=running_cost,
         )
         await _persist_event(session, run_id, event)
         store = agent.run_store

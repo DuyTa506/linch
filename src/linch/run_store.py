@@ -51,6 +51,7 @@ class RunCheckpoint:
     pending_skill_overlay: dict[str, object] | None = None
     current_turn_allowed_tools: list[str] | None = None
     assistant_stop_reason: str | None = None
+    permission_decisions: dict[str, dict] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -124,6 +125,7 @@ def checkpoint_to_dict(checkpoint: RunCheckpoint) -> dict[str, Any]:
         "pending_skill_overlay": checkpoint.pending_skill_overlay,
         "current_turn_allowed_tools": checkpoint.current_turn_allowed_tools,
         "assistant_stop_reason": checkpoint.assistant_stop_reason,
+        "permission_decisions": checkpoint.permission_decisions,
     }
 
 
@@ -171,6 +173,11 @@ def checkpoint_from_dict(raw: dict[str, Any]) -> RunCheckpoint:
             str(raw.get("assistant_stop_reason"))
             if isinstance(raw.get("assistant_stop_reason"), str)
             else None
+        ),
+        permission_decisions=(
+            {str(k): dict(v) for k, v in raw.get("permission_decisions", {}).items()}
+            if isinstance(raw.get("permission_decisions"), dict)
+            else {}
         ),
     )
 

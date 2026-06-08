@@ -52,9 +52,7 @@ class SystemPromptSection:
     name: str
     text: str
     cacheable: bool = True
-    placement: Literal["before_defaults", "after_defaults", "after_env"] = (
-        "before_defaults"
-    )
+    placement: Literal["before_defaults", "after_defaults", "after_env"] = "before_defaults"
 
 
 @dataclass

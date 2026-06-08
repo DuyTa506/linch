@@ -97,9 +97,7 @@ class PostgresFileBackend:
         p = normalize_path(path)
         pool = await self._ensure()
         async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT content FROM agentkit_files WHERE path = $1", p
-            )
+            row = await conn.fetchrow("SELECT content FROM agentkit_files WHERE path = $1", p)
         if row is None:
             raise FileNotFoundError(p)
         return _slice_lines(row["content"], offset, limit)
@@ -116,35 +114,31 @@ class PostgresFileBackend:
                     content    = EXCLUDED.content,
                     updated_at = EXCLUDED.updated_at
                 """,
-                p, content, time.time(),
+                p,
+                content,
+                time.time(),
             )
 
     async def ls(self, prefix: str = "") -> list[str]:
         pool = await self._ensure()
         async with pool.acquire() as conn:
             if not prefix:
-                rows = await conn.fetch(
-                    "SELECT path FROM agentkit_files ORDER BY path"
-                )
+                rows = await conn.fetch("SELECT path FROM agentkit_files ORDER BY path")
                 return [r["path"] for r in rows]
             pfx = normalize_path(prefix).rstrip("/")
             rows = await conn.fetch(
-                "SELECT path FROM agentkit_files "
-                "WHERE path = $1 OR path LIKE $2 ORDER BY path",
-                pfx, pfx + "/%",
+                "SELECT path FROM agentkit_files WHERE path = $1 OR path LIKE $2 ORDER BY path",
+                pfx,
+                pfx + "/%",
             )
             return [r["path"] for r in rows]
 
-    async def edit(
-        self, path: str, old: str, new: str, *, replace_all: bool = False
-    ) -> int:
+    async def edit(self, path: str, old: str, new: str, *, replace_all: bool = False) -> int:
         p = normalize_path(path)
         pool = await self._ensure()
         async with pool.acquire() as conn:
             async with conn.transaction():
-                row = await conn.fetchrow(
-                    "SELECT content FROM agentkit_files WHERE path = $1", p
-                )
+                row = await conn.fetchrow("SELECT content FROM agentkit_files WHERE path = $1", p)
                 if row is None:
                     raise FileNotFoundError(p)
                 text: str = row["content"]
@@ -159,7 +153,9 @@ class PostgresFileBackend:
                 updated = text.replace(old, new) if replace_all else text.replace(old, new, 1)
                 await conn.execute(
                     "UPDATE agentkit_files SET content=$1, updated_at=$2 WHERE path=$3",
-                    updated, time.time(), p,
+                    updated,
+                    time.time(),
+                    p,
                 )
         return count if replace_all else 1
 
@@ -167,18 +163,14 @@ class PostgresFileBackend:
         p = normalize_path(path)
         pool = await self._ensure()
         async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT 1 FROM agentkit_files WHERE path = $1", p
-            )
+            row = await conn.fetchrow("SELECT 1 FROM agentkit_files WHERE path = $1", p)
         return row is not None
 
     async def delete(self, path: str) -> None:
         p = normalize_path(path)
         pool = await self._ensure()
         async with pool.acquire() as conn:
-            await conn.execute(
-                "DELETE FROM agentkit_files WHERE path = $1", p
-            )
+            await conn.execute("DELETE FROM agentkit_files WHERE path = $1", p)
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 

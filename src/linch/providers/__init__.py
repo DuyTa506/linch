@@ -8,6 +8,7 @@ from .base import (
     ThinkingDisabled,
     ThinkingEnabled,
 )
+from .gemini import GeminiProvider, GeminiProviderOptions
 from .llamacpp import LlamaCppProvider, LlamaCppProviderOptions
 from .openai_chat import OpenAIChatCompletionsProvider, OpenAIChatProviderOptions
 from .openai_responses import OpenAIResponsesProvider, OpenAIResponsesProviderOptions
@@ -18,6 +19,8 @@ __all__ = [
     "AnthropicProviderOptions",
     "BaseProvider",
     "EffortLevel",
+    "GeminiProvider",
+    "GeminiProviderOptions",
     "LlamaCppProvider",
     "LlamaCppProviderOptions",
     "OpenAIChatCompletionsProvider",

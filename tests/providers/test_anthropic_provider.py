@@ -128,6 +128,97 @@ def test_build_payload_cache_marks_last_tool():
     assert tools[1]["cache_control"]["type"] == "ephemeral"
 
 
+# ---------------------------------------------------------------------------
+# Feature A — output_schema synthesises a forced tool (RED until impl)
+# ---------------------------------------------------------------------------
+
+
+def test_build_payload_output_schema_synthesizes_forced_tool():
+    """_build_payload must append a forced tool and set tool_choice when output_schema is set."""
+    from linch.providers.anthropic import AnthropicProviderOptions, _build_payload
+    from linch.types import OutputSchema
+
+    schema = OutputSchema(
+        name="get_weather",
+        schema={
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"],
+        },
+        description="Get weather for a city.",
+    )
+    req = _make_req(output_schema=schema)
+    payload = _build_payload(req, AnthropicProviderOptions())
+
+    # Must synthesise the output schema as a forced tool
+    assert "tools" in payload
+    tool = next((t for t in payload["tools"] if t["name"] == "get_weather"), None)
+    assert tool is not None, "expected 'get_weather' tool in payload"
+    assert tool["description"] == "Get weather for a city."
+    assert tool["input_schema"]["properties"]["city"]["type"] == "string"
+
+    # Must force tool_choice to that exact tool
+    assert payload["tool_choice"] == {"type": "tool", "name": "get_weather"}
+
+
+def test_build_payload_output_schema_appends_to_existing_tools():
+    """Schema tool appended after real tools; tool_choice not forced when other tools present."""
+    from linch.providers.anthropic import AnthropicProviderOptions, _build_payload
+    from linch.types import OutputSchema
+
+    real_tool = {
+        "name": "search",
+        "description": "Search the web.",
+        "input_schema": {"type": "object", "properties": {"q": {"type": "string"}}},
+    }
+    schema = OutputSchema(name="final_answer", schema={"type": "object", "properties": {}})
+    req = _make_req(tools=[real_tool], output_schema=schema)
+    payload = _build_payload(req, AnthropicProviderOptions())
+
+    names = [t["name"] for t in payload["tools"]]
+    assert "search" in names
+    assert "final_answer" in names
+    # When real tools are present the model must be free to call them first;
+    # tool_choice must NOT be forced to the schema tool.
+    assert payload.get("tool_choice") != {"type": "tool", "name": "final_answer"}
+
+
+def test_build_payload_output_schema_sole_tool_forces_choice():
+    """When schema tool is the only tool, tool_choice is forced so the model must call it."""
+    from linch.providers.anthropic import AnthropicProviderOptions, _build_payload
+    from linch.types import OutputSchema
+
+    schema = OutputSchema(name="get_answer", schema={"type": "object", "properties": {}})
+    req = _make_req(tools=[], output_schema=schema)
+    payload = _build_payload(req, AnthropicProviderOptions())
+
+    assert payload["tool_choice"] == {"type": "tool", "name": "get_answer"}
+
+
+def test_build_payload_no_output_schema_no_extra_tool():
+    """Absent output_schema → no synthesised tool, no tool_choice."""
+    from linch.providers.anthropic import AnthropicProviderOptions, _build_payload
+
+    req = _make_req(tools=[])
+    payload = _build_payload(req, AnthropicProviderOptions())
+
+    assert "tools" not in payload
+    assert "tool_choice" not in payload
+
+
+def test_build_payload_output_schema_no_description():
+    """OutputSchema with description=None → empty string in synthesised tool."""
+    from linch.providers.anthropic import AnthropicProviderOptions, _build_payload
+    from linch.types import OutputSchema
+
+    schema = OutputSchema(name="bare_schema", schema={"type": "object"}, description=None)
+    req = _make_req(output_schema=schema)
+    payload = _build_payload(req, AnthropicProviderOptions())
+
+    tool = next(t for t in payload["tools"] if t["name"] == "bare_schema")
+    assert tool["description"] == ""
+
+
 def test_tool_choice_mapping():
     from linch.providers.anthropic import _translate_tool_choice
 

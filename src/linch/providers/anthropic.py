@@ -60,7 +60,7 @@ class AnthropicProvider(BaseProvider):
         return ProviderCapabilities(
             context_window=self.context_window(model),
             parallel_tool_calls=True,
-            structured_output=False,
+            structured_output=True,  # forced-tool method (Feature A)
             tool_choice=True,
             prompt_cache=True,
         )
@@ -72,8 +72,7 @@ class AnthropicProvider(BaseProvider):
             from anthropic import AsyncAnthropic
         except ModuleNotFoundError as exc:
             raise ProviderError(
-                "The 'anthropic' package is required. "
-                "Install with: pip install 'linch[anthropic]'"
+                "The 'anthropic' package is required. Install with: pip install 'linch[anthropic]'"
             ) from exc
         kwargs: dict[str, Any] = {}
         if self._options.api_key is not None:
@@ -209,6 +208,25 @@ def _build_payload(req: ProviderRequest, opts: AnthropicProviderOptions) -> dict
     # ── Tool choice ───────────────────────────────────────────────────────
     if req.tool_choice is not None:
         payload["tool_choice"] = _translate_tool_choice(req.tool_choice)
+
+    # ── Output schema (Anthropic forced-tool method) ──────────────────────
+    # Anthropic has no response_format; structured output is achieved by
+    # synthesising a tool whose input_schema matches the caller's schema and
+    # forcing the model to call it.  The loop terminal-tool path then captures
+    # final_block.input as structured_output without executing a real tool.
+    if req.output_schema is not None:
+        schema_tool: dict[str, Any] = {
+            "name": req.output_schema.name,
+            "description": req.output_schema.description or "",
+            "input_schema": req.output_schema.schema,
+        }
+        existing_tools = list(payload.get("tools", []))
+        payload["tools"] = existing_tools + [schema_tool]
+        # Force the schema tool only when it is the sole tool available so the
+        # model cannot bypass it.  When real tools are also present use "auto"
+        # so the model can call them first and invoke the schema tool when ready.
+        if not existing_tools:
+            payload["tool_choice"] = {"type": "tool", "name": req.output_schema.name}
 
     # ── Thinking ──────────────────────────────────────────────────────────
     # req.thinking wins over constructor-level options.thinking.

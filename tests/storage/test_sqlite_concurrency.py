@@ -49,14 +49,11 @@ async def test_memory_store_concurrent_upserts(tmp_path) -> None:
 
     async with SqliteMemoryStore(tmp_path / "mem.db") as store:
         items = [
-            MemoryItem(id=f"item-{i}", content=f"content {i}", namespace="test")
-            for i in range(50)
+            MemoryItem(id=f"item-{i}", content=f"content {i}", namespace="test") for i in range(50)
         ]
         await asyncio.gather(*[store.upsert([item]) for item in items])
 
-        results = await store.search(
-            "content", namespace="test", limit=100
-        )
+        results = await store.search("content", namespace="test", limit=100)
         assert len(results) == 50
 
 
@@ -66,9 +63,7 @@ async def test_filesystem_backend_concurrent_writes(tmp_path) -> None:
 
     async with SqliteFileBackend(tmp_path / "fs.db") as fb:
         paths = [f"/file-{i}.txt" for i in range(50)]
-        await asyncio.gather(
-            *[fb.write(path, f"content {i}") for i, path in enumerate(paths)]
-        )
+        await asyncio.gather(*[fb.write(path, f"content {i}") for i, path in enumerate(paths)])
 
         all_paths = await fb.ls()
         assert len(all_paths) == 50
@@ -171,15 +166,11 @@ async def test_memory_store_sync_close(tmp_path) -> None:
 
     # sync with
     with SqliteMemoryStore(tmp_path / "mem.db") as store:
-        await store.upsert(
-            [MemoryItem(id="x", content="hello", namespace="test")]
-        )
+        await store.upsert([MemoryItem(id="x", content="hello", namespace="test")])
 
     # async with
     async with SqliteMemoryStore(tmp_path / "mem2.db") as store:
-        await store.upsert(
-            [MemoryItem(id="y", content="world", namespace="test")]
-        )
+        await store.upsert([MemoryItem(id="y", content="world", namespace="test")])
 
 
 async def test_filesystem_backend_sync_close(tmp_path) -> None:

@@ -172,7 +172,7 @@ Tests should fail at the most specific possible assertion. Avoid mega-tests that
 
 1. Create `src/linch/providers/my_provider.py`.
 2. Implement `context_window(model) -> int`, `capabilities(model) -> ProviderCapabilities`, and `async def stream(req) -> AsyncIterator[dict]`.
-3. Map wire events to the normalized dict contract — see `providers/openai_chat.py` for the Chat Completions pattern and `openai_responses.py` + `providers/openai_responses.py` for the Responses API / stateful pattern.
+3. Map wire events to the normalized dict contract — see `providers/openai_chat.py` for the Chat Completions pattern, `openai_responses.py` + `providers/openai_responses.py` for the Responses API / stateful pattern, and `providers/gemini.py` for providers whose streamed tool-use format is part-based rather than delta-based.
 4. The normalized dict events the loop consumes: `message_start`, `text_delta`, `thinking_delta` (optional, carry `signature` for Anthropic round-trips), `tool_use_start`, `tool_use_input_delta`, `tool_use_end`, `message_end` (carries `stop_reason: StopReason` and `usage: Usage`). Never yield raw SDK objects.
 5. For providers that emit `reasoning_content` (DeepSeek, o-series via Chat Completions): yield `{"type": "thinking_delta", "text": chunk}` — `stream_turn` in `loop.py` assembles it into a `ThinkingBlock` and round-trips it on subsequent turns automatically.
 6. Declare `capabilities()` accurately — `_build_turn_request` uses it to downgrade unsupported fields (clears `cache_prompt` when `prompt_cache=False`, clears `output_schema` when `structured_output=False`, etc.).
@@ -192,6 +192,7 @@ Tests should fail at the most specific possible assertion. Avoid mega-tests that
 6. Return `ToolResult` with `metadata`, `citations`, and `truncated` when the host app needs provenance or rich rendering.
 7. `validate()` should raise `ValueError` with a clear message. It runs before permission checks.
 8. `summarize()` should return a single line — it appears in logs and compaction summaries.
+9. For process execution, prefer injecting a backend into `BashTool` or `Agent(execution_backend=...)` instead of adding subprocess calls to unrelated tools. `Agent(execution_backend=...)` must not add `Bash` to registries that intentionally exclude it.
 
 ---
 

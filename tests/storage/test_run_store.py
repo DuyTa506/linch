@@ -53,6 +53,34 @@ async def _exercise_store(store) -> None:
     assert events[0].event.tool_result is not None
     assert events[0].event.tool_result.citations[0].id == "c1"
 
+    # permission_decisions round-trip
+    checkpoint2 = RunCheckpoint(
+        phase="permission_pending",
+        prompt="hello",
+        turn_index=2,
+        total_usage=Usage(input_tokens=3, output_tokens=4),
+        permission_decisions={
+            'WriteThing:{"value":"WriteThing"}': {
+                "decision": "allow",
+                "reason": None,
+                "updated_input": None,
+            },
+            'DeleteFile:{"path":"/x"}': {
+                "decision": "deny",
+                "reason": "user denied",
+                "updated_input": None,
+            },
+        },
+    )
+    await store.save_checkpoint("run-1", checkpoint2)
+    loaded2 = await store.load_run("run-1")
+    assert loaded2 is not None
+    assert loaded2.checkpoint is not None
+    pd = loaded2.checkpoint.permission_decisions
+    assert pd['WriteThing:{"value":"WriteThing"}']["decision"] == "allow"
+    assert pd['DeleteFile:{"path":"/x"}']["decision"] == "deny"
+    assert pd['DeleteFile:{"path":"/x"}']["reason"] == "user denied"
+
     done = await store.mark_completed("run-1", checkpoint)
     assert done.status == "completed"
     assert done.checkpoint is not None
