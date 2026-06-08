@@ -95,4 +95,3 @@ async def test_builtin_verify_skill_invocation_records_substituted_body() -> Non
     assert "VERDICT: PASS" in result.content
     assert session.invoked_skills[-1].name == "verify"
     assert "focus on billing workflow" in session.invoked_skills[-1].substituted_body
-

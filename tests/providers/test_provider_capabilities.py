@@ -74,7 +74,7 @@ def test_anthropic_capabilities():
 
     assert caps.context_window == 200_000
     assert caps.prompt_cache is True
-    assert caps.structured_output is False  # no native json_schema yet
+    assert caps.structured_output is True  # forced-tool method (Feature A)
     assert caps.tool_choice is True
 
 
@@ -197,8 +197,8 @@ def test_apply_full_downgrade_for_openai_chat():
     assert req.tool_choice == "auto"
 
 
-def test_apply_full_downgrade_for_anthropic():
-    """Anthropic caps: cache preserved, structured_output cleared."""
+def test_apply_no_downgrade_for_anthropic():
+    """Anthropic caps: cache preserved, structured_output preserved (Feature A)."""
     from linch.loop import apply_provider_capabilities
     from linch.providers import AnthropicProvider
 
@@ -211,8 +211,8 @@ def test_apply_full_downgrade_for_anthropic():
     # Prompt cache supported → preserved
     assert req.cache_prompt is True
     assert req.cache_ttl == "5m"
-    # Structured output not supported → cleared
-    assert req.output_schema is None
+    # Structured output now supported (forced-tool method) → preserved
+    assert req.output_schema is not None
     # Tool choice supported → preserved
     assert req.tool_choice == "auto"
 

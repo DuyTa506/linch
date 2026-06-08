@@ -128,9 +128,7 @@ def _row_to_task(
     )
 
 
-def _get_task_sync(
-    conn: sqlite3.Connection, session_id: str, task_id: str
-) -> Task | None:
+def _get_task_sync(conn: sqlite3.Connection, session_id: str, task_id: str) -> Task | None:
     row = conn.execute(
         """
         select id, subject, description, active_form, status, owner,
@@ -208,9 +206,7 @@ class SqliteSessionStore:
     async def set_invoked_skills(self, id: str, skills: list[dict[str, object]]) -> None:
         return await self._exec.run(lambda c: _set_invoked_skills(c, id, skills))
 
-    async def list(
-        self, *, limit: int | None = None, offset: int = 0
-    ) -> list[SessionRecord]:
+    async def list(self, *, limit: int | None = None, offset: int = 0) -> list[SessionRecord]:
         return await self._exec.run(lambda c: _list(c, limit, offset))
 
     async def delete(self, id: str) -> None:
@@ -220,24 +216,16 @@ class SqliteSessionStore:
         return await self._exec.run(lambda c: _create_task(c, session_id, input))
 
     async def get_task(self, session_id: str, task_id: str) -> Task | None:
-        return await self._exec.run(
-            lambda c: _get_task_sync(c, session_id, task_id)
-        )
+        return await self._exec.run(lambda c: _get_task_sync(c, session_id, task_id))
 
     async def list_tasks(self, session_id: str) -> list[Task]:
         return await self._exec.run(lambda c: _list_tasks(c, session_id))
 
-    async def update_task(
-        self, session_id: str, task_id: str, patch: TaskPatch
-    ) -> Task | None:
-        return await self._exec.run(
-            lambda c: _update_task(c, session_id, task_id, patch)
-        )
+    async def update_task(self, session_id: str, task_id: str, patch: TaskPatch) -> Task | None:
+        return await self._exec.run(lambda c: _update_task(c, session_id, task_id, patch))
 
     async def delete_task(self, session_id: str, task_id: str) -> bool:
-        return await self._exec.run(
-            lambda c: _delete_task_sync(c, session_id, task_id)
-        )
+        return await self._exec.run(lambda c: _delete_task_sync(c, session_id, task_id))
 
     async def close(self) -> None:
         await self._exec.close()
@@ -258,9 +246,7 @@ class SqliteSessionStore:
 # ── Sync implementations (run on the worker thread) ──────────────────────────
 
 
-def _create(
-    conn: sqlite3.Connection, id: str | None, meta: dict[str, object]
-) -> SessionRecord:
+def _create(conn: sqlite3.Connection, id: str | None, meta: dict[str, object]) -> SessionRecord:
     sid = id or str(uuid4())
     row = conn.execute(
         "select id, created_at, updated_at, meta, invoked_skills from sessions where id = ?",
@@ -325,9 +311,7 @@ def _append_messages(
     return stored
 
 
-def _update_meta(
-    conn: sqlite3.Connection, id: str, meta: dict[str, object]
-) -> SessionRecord:
+def _update_meta(conn: sqlite3.Connection, id: str, meta: dict[str, object]) -> SessionRecord:
     row = conn.execute(
         "select id, created_at, updated_at, meta, invoked_skills from sessions where id = ?",
         (id,),
@@ -351,9 +335,7 @@ def _update_meta(
     )
 
 
-def _set_invoked_skills(
-    conn: sqlite3.Connection, id: str, skills: list[dict[str, object]]
-) -> None:
+def _set_invoked_skills(conn: sqlite3.Connection, id: str, skills: list[dict[str, object]]) -> None:
     now = now_iso()
     conn.execute(
         "update sessions set invoked_skills = ?, updated_at = ? where id = ?",
@@ -362,9 +344,7 @@ def _set_invoked_skills(
     conn.commit()
 
 
-def _list(
-    conn: sqlite3.Connection, limit: int | None, offset: int
-) -> list[SessionRecord]:
+def _list(conn: sqlite3.Connection, limit: int | None, offset: int) -> list[SessionRecord]:
     sql = (
         "select id, created_at, updated_at, meta, invoked_skills "
         "from sessions order by updated_at desc"
@@ -386,9 +366,7 @@ def _delete(conn: sqlite3.Connection, id: str) -> None:
     conn.commit()
 
 
-def _create_task(
-    conn: sqlite3.Connection, session_id: str, input: CreateTaskInput
-) -> Task:
+def _create_task(conn: sqlite3.Connection, session_id: str, input: CreateTaskInput) -> Task:
     row = conn.execute(
         "select next_id from task_counters where session_id = ?", (session_id,)
     ).fetchone()
@@ -492,8 +470,7 @@ def _update_task(
         )
 
     _delete_edge = (
-        "delete from task_edges "
-        "where session_id = ? and from_task_id = ? and to_task_id = ?"
+        "delete from task_edges where session_id = ? and from_task_id = ? and to_task_id = ?"
     )
     _insert_edge = (
         "insert or ignore into task_edges (session_id, from_task_id, to_task_id, kind) "

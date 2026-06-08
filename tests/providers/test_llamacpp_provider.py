@@ -271,7 +271,7 @@ def test_context_window_detects_and_caches_props(monkeypatch) -> None:
 
     assert provider.context_window("local-tool-model") == 65_536
     assert provider.capabilities("local-tool-model").context_window == 65_536
-    #assert calls == ["https://example.test/v1"]
+    # assert calls == ["https://example.test/v1"]
 
 
 def test_context_window_falls_back_when_props_unavailable(monkeypatch) -> None:

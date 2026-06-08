@@ -403,7 +403,6 @@ async def test_notification_lands_in_provider_view_before_provider_call() -> Non
             yield {"type": "text_delta", "text": "done"}
             yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
 
-
     session_store = _memory_session_store()
     agent = _agent(
         model="gpt-5",
@@ -426,8 +425,7 @@ async def test_notification_lands_in_provider_view_before_provider_call() -> Non
     # Find the notification in any provider call's messages
     all_messages = [m for batch in seen_messages for m in batch]
     assert any(
-        any(getattr(block, "text", "") == note_text for block in m.content)
-        for m in all_messages
+        any(getattr(block, "text", "") == note_text for block in m.content) for m in all_messages
     ), "Notification should be in the provider's message list"
 
 
@@ -453,7 +451,6 @@ async def test_loop_abort_cancels_background_worker_tasks() -> None:
             yield {"type": "message_start", "model": req.model}
             yield {"type": "text_delta", "text": "done"}
             yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
-
 
     child_provider = BlockingProvider()
     # Parent uses a ScriptProvider that calls Subagent with run_in_background=True,
@@ -590,3 +587,176 @@ async def test_sqlite_session_and_run_store_resume_after_restart(tmp_path) -> No
 
     assert counts == {"A": 1}
     assert [event.type for event in events] == ["tool_call_start", "tool_call_end"]
+
+
+# ── Phase 3c: durable HITL approval ─────────────────────────────────────────
+
+
+async def test_permission_decision_persists_and_resume_skips_callback() -> None:
+    """Allow decision persists; resume replays it without re-invoking the callback.
+
+    Scenario:
+      1. Run until ToolCallStartEvent — resolve() fired (callback_calls=1) and
+         the "tool_executing" checkpoint was saved with the allow decision.
+      2. Restart (fresh Agent, same stores). Resume.
+      3. Seam A finds stored allow → no PermissionRequestEvent, callback NOT called
+         again. Tool executes once on resume (counts["WriteThing"]=1).
+    """
+    session_store = _memory_session_store()
+    run_store = _memory_run_store()
+    counts: dict[str, int] = {}
+    callback_calls: list[Any] = []
+
+    def allow_callback(request: Any) -> dict[str, str]:
+        callback_calls.append(request)
+        return {"behavior": "allow"}
+
+    agent = _agent(
+        model="gpt-5",
+        provider=ScriptProvider(tool_names=["WriteThing"]),
+        tools=_registry(counts, "WriteThing", scope="write"),
+        permissions={"mode": "default", "canUseTool": allow_callback},
+        session_store=session_store,
+        run_store=run_store,
+        cwd=".",
+    )
+    session = await agent.session(id="s1")
+    # Stop just after ToolCallStartEvent: resolve() has fired and
+    # the "tool_executing" checkpoint (with allow decision) is saved.
+    run_id, first_events = await _run_until(session, "write", lambda e: e.type == "tool_call_start")
+    assert len(callback_calls) == 1
+
+    # Simulate restart: fresh Agent + same stores.
+    restarted = _agent(
+        model="gpt-5",
+        provider=ScriptProvider(tool_names=["WriteThing"]),
+        tools=_registry(counts, "WriteThing", scope="write"),
+        permissions={"mode": "default", "canUseTool": allow_callback},
+        session_store=session_store,
+        run_store=run_store,
+        cwd=".",
+    )
+    resumed = await restarted.session(id="s1")
+    resume_events = await _collect(resumed.resume(run_id))
+    # No permission_request should be re-emitted — decision was replayed from checkpoint.
+    assert not any(e.type == "permission_request" for e in resume_events)
+    # Callback was NOT called again — still 1.
+    assert len(callback_calls) == 1
+    # Tool executed once on resume (not on first run — we stopped before completion).
+    assert counts == {"WriteThing": 1}
+
+
+async def test_persisted_deny_decision_replays_on_resume() -> None:
+    """Explicit user-deny persists; resume re-denies the same tool without prompting.
+
+    Scenario:
+      1. Run until ToolCallStartEvent — resolve() fired → deny callback called
+         and "tool_executing" checkpoint saved with deny decision.
+      2. Restart. Resume.
+      3. Seam A finds stored deny → no PermissionRequestEvent, callback NOT called
+         again. Tool stays denied (never executes).
+    """
+    session_store = _memory_session_store()
+    run_store = _memory_run_store()
+    counts: dict[str, int] = {}
+    deny_calls: list[Any] = []
+
+    def deny_callback(request: Any) -> dict[str, str]:
+        deny_calls.append(request)
+        return {"behavior": "deny", "message": "not allowed"}
+
+    agent = _agent(
+        model="gpt-5",
+        provider=ScriptProvider(tool_names=["WriteThing"]),
+        tools=_registry(counts, "WriteThing", scope="write"),
+        permissions={"mode": "default", "canUseTool": deny_callback},
+        session_store=session_store,
+        run_store=run_store,
+        cwd=".",
+    )
+    session = await agent.session(id="s1")
+    # Stop just after ToolCallStartEvent: resolve() fired → deny stored in checkpoint.
+    run_id, _ = await _run_until(session, "write", lambda e: e.type == "tool_call_start")
+    assert len(deny_calls) == 1
+    assert counts == {}  # tool was denied in first run
+
+    restarted = _agent(
+        model="gpt-5",
+        provider=ScriptProvider(tool_names=["WriteThing"]),
+        tools=_registry(counts, "WriteThing", scope="write"),
+        permissions={"mode": "default", "canUseTool": deny_callback},
+        session_store=session_store,
+        run_store=run_store,
+        cwd=".",
+    )
+    resumed = await restarted.session(id="s1")
+    resume_events = await _collect(resumed.resume(run_id))
+    # No new permission_request on resume — deny was replayed from checkpoint.
+    assert not any(e.type == "permission_request" for e in resume_events)
+    # Callback was NOT called again — still 1.
+    assert len(deny_calls) == 1
+    # Tool still never executed.
+    assert counts == {}
+
+
+async def test_permission_decision_cleared_each_turn() -> None:
+    """Allow decision from turn N must NOT replay in turn N+1 (stale-decision guard).
+
+    Scenario:
+      Turn 0: model calls WriteThing(value='WriteThing'), callback allows → 1 call.
+      Turn 1: model calls WriteThing(value='WriteThing') again (same input).
+              The per-turn clear must cause Seam A to fall through; callback invoked → 2 calls.
+    """
+
+    class TwoTurnProvider:
+        """Returns WriteThing tool calls on turns 0 and 1; returns text on turn 2+."""
+
+        id = "two-turn"
+        _calls = 0
+
+        def context_window(self, model: str) -> int:
+            return 100_000
+
+        async def stream(self, req):
+            from linch.types import Usage
+
+            self._calls += 1
+            yield {"type": "message_start", "model": req.model}
+            if self._calls <= 2:
+                yield {"type": "tool_use_start", "id": f"c{self._calls}", "name": "WriteThing"}
+                import json
+
+                yield {
+                    "type": "tool_use_input_delta",
+                    "id": f"c{self._calls}",
+                    "json_delta": json.dumps({"value": "WriteThing"}),
+                }
+                yield {"type": "tool_use_end", "id": f"c{self._calls}"}
+                yield {"type": "message_end", "stop_reason": "tool_use", "usage": Usage()}
+            else:
+                yield {"type": "text_delta", "text": "done"}
+                yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
+
+    counts: dict[str, int] = {}
+    callback_calls: list[Any] = []
+
+    def allow_callback(request: Any) -> dict[str, str]:
+        callback_calls.append(request)
+        return {"behavior": "allow"}
+
+    agent = _agent(
+        model="gpt-5",
+        provider=TwoTurnProvider(),
+        tools=_registry(counts, "WriteThing", scope="write"),
+        permissions={"mode": "default", "canUseTool": allow_callback},
+        session_store=_memory_session_store(),
+        cwd=".",
+    )
+    session = await agent.session(id="s1")
+    await _collect(session.run("go"))
+
+    # Callback must have been invoked once per turn — NOT once total due to stale replay.
+    assert len(callback_calls) == 2, (
+        f"expected callback_calls==2 (once per turn), got {len(callback_calls)}"
+    )
+    assert counts == {"WriteThing": 2}

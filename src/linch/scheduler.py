@@ -24,6 +24,7 @@ from .middleware import (
     dispatch_before_tool_call,
 )
 from .permissions import PendingToolCall, PermissionDecision
+from .permissions.keys import permission_decision_key as _permission_key
 from .providers.retry import RetryOptions, _delay_for_error
 from .tools import ResourceAccess, ToolContext, ToolResult
 from .types import ToolResultBlock, ToolUseBlock
@@ -373,7 +374,7 @@ def _max_concurrency(agent: Any) -> int:
     if raw is None:
         raw = getattr(agent, "tool_concurrency", None)
     try:
-            value = int(cast(Any, raw))
+        value = int(cast(Any, raw))
     except (TypeError, ValueError):
         value = 1
     return max(1, value)
@@ -524,12 +525,20 @@ async def execute_tool_calls(
         )
 
         if initial.decision == "ask":
-            allowed_tools = getattr(session, "current_turn_allowed_tools", None)
-            if allowed_tools and tool_obj is not None and tool_obj.name in allowed_tools:
-                decisions.append(PermissionDecision(decision="allow"))
+            # Seam A: replay a stored decision before falling through to the callback.
+            _stored_decisions = getattr(session, "current_turn_permission_decisions", None)
+            _key = _permission_key(_tool_name(call), call.input)
+            if _stored_decisions is not None and _key in _stored_decisions:
+                from .permissions.keys import permission_decision_from_dict as _pd_from_dict
+
+                decisions.append(_pd_from_dict(_stored_decisions[_key]))
             else:
-                ask_indices.append(i)
-                decisions.append(initial)
+                allowed_tools = getattr(session, "current_turn_allowed_tools", None)
+                if allowed_tools and tool_obj is not None and tool_obj.name in allowed_tools:
+                    decisions.append(PermissionDecision(decision="allow"))
+                else:
+                    ask_indices.append(i)
+                    decisions.append(initial)
         else:
             decisions.append(initial)
 
@@ -561,6 +570,14 @@ async def execute_tool_calls(
                 ),
                 signal,
             )
+            # Seam B: persist allow + explicit user-deny so resume can replay.
+            # Exception-path denials (network failure, abort) are NOT persisted.
+            if decisions[idx].decision in ("allow", "deny"):
+                _pd = getattr(session, "current_turn_permission_decisions", None)
+                if _pd is not None:
+                    from .permissions.keys import permission_decision_to_dict as _pd_to_dict
+
+                    _pd[_permission_key(_tool_name(call), call.input)] = _pd_to_dict(decisions[idx])
         except Exception:
             decisions[idx] = PermissionDecision(
                 decision="deny",

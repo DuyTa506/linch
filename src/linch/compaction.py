@@ -170,12 +170,7 @@ class DetailedCompaction:
         summary_msg = Message(
             role="user",
             content=[
-                TextBlock(
-                    text=(
-                        "<detailed summary of earlier conversation>\n\n"
-                        f"{summary_text}"
-                    )
-                )
+                TextBlock(text=(f"<detailed summary of earlier conversation>\n\n{summary_text}"))
             ],
         )
 

@@ -4,7 +4,7 @@
 
 **linch** is an async-first, event-driven Python SDK for building agent loops inside your own application.
 
-It gives you the runtime pieces that production agents usually need but simple tool-calling wrappers leave to you: streamed events, tool scheduling, context/RAG, memory, virtual filesystem offloading, structured outputs, permissions, retries, provider adapters, MCP, skills, and subagents.
+It gives you the runtime pieces that production agents usually need but simple tool-calling wrappers leave to you: streamed events, tool scheduling, context/RAG, tiered memory, virtual filesystem offloading, structured outputs, permissions, retries, provider adapters, cost tracking, evals, MCP, skills, and subagents.
 
 Use linch when you want to build your own domain workflow — not force it into a hosted assistant, a rigid graph DSL, or a black-box multi-agent abstraction.
 
@@ -50,15 +50,15 @@ linch is designed for application developers building agentic features such as:
 | Area | What linch provides |
 |---|---|
 | Agent loop | `Agent`, `Session`, async event streaming, loop guards |
-| Tools | Duck-typed tools, runtime registries, parallel scheduling, resource locks |
-| Reliability | Per-tool timeout, opt-in retry, structured tool errors |
+| Tools | Duck-typed tools, runtime registries, parallel scheduling, resource locks, local or Docker-backed Bash execution |
+| Reliability | Per-tool timeout, opt-in retry, structured tool errors, recovery hints |
 | Context | `ContextBuilder`, RAG context injection, context budgets |
-| Memory | Search/upsert tools, memory stores, persistent memory examples |
+| Memory | Search/upsert tools, flat and tiered memory stores, persistent memory examples |
 | Filesystem | Virtual filesystem, automatic large-result offloading, disk/state/sqlite backends |
 | Safety | Permission engine, tool/path/bash rules, dangerous-action skipping |
-| Providers | OpenAI Responses, OpenAI Chat Completions, Anthropic, DeepSeek, llama.cpp, pluggable providers |
+| Providers | OpenAI Responses, OpenAI Chat Completions, Anthropic, Gemini, DeepSeek, llama.cpp, pluggable providers |
 | Extensibility | MCP, skills, subagents (fork/continue, background workers, coordinator mode), observers |
-| Outputs | Structured output schemas, citations, metadata-rich tool results |
+| Outputs | Structured output schemas, citations, usage/cost events, metadata-rich tool results |
 
 ---
 
@@ -98,7 +98,7 @@ pip install linch
 For local development:
 
 ```sh
-pip install -e '.[dev,mcp,anthropic]'
+pip install -e '.[dev,mcp,anthropic,gemini]'
 ```
 
 ---
@@ -179,7 +179,7 @@ Tools are duck-typed Python objects. They can declare schemas, scopes, resources
 
 ### Memory
 
-linch includes memory primitives and tools for searching and upserting reusable facts. Memory can be in-memory, sqlite-backed, or replaced with your own store.
+linch includes memory primitives and tools for searching and upserting reusable facts. Memory can be in-memory, sqlite-backed, tiered by working/episodic/semantic buckets, or replaced with your own store.
 
 ### Virtual filesystem
 
@@ -191,7 +191,7 @@ The permission engine controls dangerous actions at the runtime layer. You can d
 
 ### Providers
 
-linch separates the agent runtime from the model provider. Built-in providers include OpenAI Responses, OpenAI Chat Completions, Anthropic, and llama.cpp — with full support for OpenAI-compatible endpoints like DeepSeek.
+linch separates the agent runtime from the model provider. Built-in providers include OpenAI Responses, OpenAI Chat Completions, Anthropic, Gemini, and llama.cpp — with full support for OpenAI-compatible endpoints like DeepSeek.
 
 ---
 
@@ -263,6 +263,7 @@ Examples are organized by subsystem under `examples/`.
 |---|---|
 | `memory/memory_agent.py` | Core memory primitives with search/upsert tools and citations |
 | `memory/sqlite_memory_agent.py` | SqliteMemoryStore — persistent memory, round-trip, upsert update |
+| `memory/pgvector_memory.py` | Postgres memory example with optional vector-style retrieval |
 
 **`examples/observability/`** — observers and tracing
 
@@ -276,7 +277,7 @@ Examples are organized by subsystem under `examples/`.
 | File | What it shows |
 |---|---|
 | `providers/openai_agent.py` | OpenAI Chat Completions — basic, thinking, tool use, structured output, multi-turn |
-| `providers/anthropic_agent.py` | Anthropic — extended thinking, prompt caching |
+| `providers/anthropic_agent.py` | Anthropic — extended thinking, prompt caching, tool-backed structured output |
 | `providers/deepseek_agent.py` | DeepSeek via OpenAI-compatible and Anthropic-compatible endpoints |
 
 **`examples/integrations/`** — subagents, skills, MCP
@@ -295,9 +296,11 @@ Examples are organized by subsystem under `examples/`.
 - `linch.context`: `ContextBuilder`, `ContextBuildResult`, `ContextBudget`
 - `linch.deep_agent`: `create_deep_agent`, `DEEP_AGENT_SYSTEM_PROMPT`, `COORDINATOR_SYSTEM_PROMPT`, `DEEP_AGENT_SUBAGENTS`
 - `linch.skills`: built-in and project `SKILL.md` workflows, including `verify`
-- `linch.memory`: `MemoryStore`, `MemoryItem`, `MemoryContextBuilder`, `MemorySearchTool`, `MemoryUpsertTool`, reference stores
+- `linch.memory`: `MemoryStore`, `MemoryItem`, `MemoryContextBuilder`, `MemorySearchTool`, `MemoryUpsertTool`, `TieredMemoryStore`, reference stores
+- `linch.evals`: `ScriptedProvider`, `EvalCase`, `run_eval`, built-in scorers
+- `linch.pricing`: `ModelPricing`, `cost_usd`
 - `linch.types`: `OutputSchema`, `ToolChoice`, `Message`, `ProviderRequest`
-- `linch.providers`: `OpenAIResponsesProvider`, `OpenAIChatCompletionsProvider`, `AnthropicProvider`, `LlamaCppProvider`
+- `linch.providers`: `OpenAIResponsesProvider`, `OpenAIChatCompletionsProvider`, `AnthropicProvider`, `GeminiProvider`, `LlamaCppProvider`
 - `linch.tools`: duck-typed tool protocol, `ResourceAccess`, `Citation`, `ToolResult`, `ToolRegistry`, built-in tools, `SubagentContinueTool`, `TaskStopTool`
 - `linch.subagents`: `WorkerHandle`, `RunSubagentArgs`, `ContinueSubagentArgs`, `RunSubagentResult`
 - `linch.sessions`: `InMemorySessionStore`, `SqliteSessionStore`

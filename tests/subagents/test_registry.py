@@ -55,4 +55,3 @@ def test_list_all_includes_default_without_showing_it_in_list() -> None:
 
     assert "_default" not in [agent.name for agent in registry.list()]
     assert "_default" in [agent.name for agent in registry.list_all()]
-

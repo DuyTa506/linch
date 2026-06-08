@@ -387,3 +387,92 @@ def test_responses_effort_from_reasoning_when_no_req_effort():
     req = ProviderRequest(model="gpt-5", system=[], tools=[], messages=[])
     payload = build_payload(req, reasoning=constructor_reasoning)
     assert payload["reasoning"]["effort"] == "medium"
+
+
+# ── Feature A — Anthropic-native structured output (forced-tool loop path) ────
+
+
+@pytest.mark.asyncio
+async def test_anthropic_native_structured_output_via_forced_tool():
+    """Loop captures forced-tool response as structured_output without executing the tool.
+
+    This provider mimics what AnthropicProvider will do after Feature A: it
+    declares structured_output=True and returns a tool_use block named after
+    the output schema.  The loop must route final_block.input into
+    structured_output via the terminal-tool path, NOT attempt to execute the
+    tool and NOT emit a tool_call_end event.
+    """
+    from linch import Agent
+    from linch.providers.base import BaseProvider, ProviderCapabilities
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import empty_tools
+    from linch.types import OutputSchema, Usage
+
+    payload = {"answer": "Paris", "confidence": 0.95}
+    schema_name = "structured_response"
+
+    class _AnthropicLikeProvider(BaseProvider):
+        id = "fake-anthropic-so"
+        captured_reqs: list = []
+
+        def context_window(self, model: str) -> int:
+            return 200_000
+
+        def capabilities(self, model: str) -> ProviderCapabilities:
+            return ProviderCapabilities(
+                context_window=200_000,
+                structured_output=True,
+                tool_choice=True,
+                prompt_cache=True,
+            )
+
+        async def stream(self, req):
+            self.captured_reqs.append(req)
+            yield {"type": "message_start", "model": req.model}
+            yield {"type": "tool_use_start", "id": "t1", "name": schema_name}
+            yield {
+                "type": "tool_use_input_delta",
+                "id": "t1",
+                "json_delta": json.dumps(payload),
+            }
+            yield {"type": "tool_use_end", "id": "t1"}
+            yield {
+                "type": "message_end",
+                "stop_reason": "tool_use",
+                "usage": Usage(),
+                "provider_metadata": None,
+            }
+
+    provider = _AnthropicLikeProvider()
+    schema = OutputSchema(
+        name=schema_name,
+        schema={
+            "type": "object",
+            "properties": {
+                "answer": {"type": "string"},
+                "confidence": {"type": "number"},
+            },
+        },
+    )
+    agent = Agent(
+        model="claude-sonnet-4-6",
+        provider=provider,
+        tools=empty_tools(),
+        permissions={"mode": "skip-dangerous"},
+        session_store=InMemorySessionStore(),
+        output_schema=schema,
+    )
+    session = await agent.session()
+
+    events = []
+    async for event in session.run("What is the capital of France?"):
+        events.append(event)
+
+    result = next((e for e in events if e.type == "result"), None)
+    assert result is not None
+    assert result.structured_output == payload
+    assert result.structured_error is None
+
+    # The schema tool MUST NOT have been executed as a real tool
+    tool_call_end_events = [e for e in events if e.type == "tool_call_end"]
+    assert tool_call_end_events == [], "schema tool must not be executed as a real tool"

@@ -11,8 +11,8 @@ workflows for any domain — not just software engineering.
 # From the repo (development)
 pip install -e /path/to/linch
 
-# With all optional extras
-pip install -e "/path/to/linch[mcp,anthropic]"
+# With common optional extras
+pip install -e "/path/to/linch[mcp,anthropic,gemini,postgres]"
 ```
 
 Once published, `pip install linch` will work directly.
@@ -82,6 +82,21 @@ async for event in session.run("hello"):
 `event.final_text` (or `event.structured_output` when using an
 `OutputSchema`).
 
+Usage and result events include optional USD cost fields when the model exists
+in `linch.pricing`'s table:
+
+```python
+async for event in session.run("Summarize this thread."):
+    if event.type == "usage":
+        print(event.cost_usd, event.cumulative_cost_usd)
+    elif event.type == "result":
+        print(event.total_cost_usd)
+```
+
+Unknown model IDs report `None` for cost rather than pretending the call is
+free. Use `linch.pricing.cost_usd(usage, model, table=...)` with a custom table
+for private or self-hosted models.
+
 ---
 
 ## Key configuration knobs
@@ -130,8 +145,8 @@ agent = Agent(
 )
 
 # ── Anthropic Claude ─────────────────────────────────────────────────────────
-# Supports extended thinking (budget_tokens), prompt caching, and tool use.
-# Native structured output via the final_tool_name pattern (see §10 of architecture.md).
+# Supports extended thinking (budget_tokens), prompt caching, tool use, and
+# structured output through a generated final schema tool.
 # include_partial_messages=True streams ThinkingBlock deltas as kind="thinking" events.
 from linch.providers.anthropic import AnthropicProvider, AnthropicProviderOptions
 
@@ -145,6 +160,19 @@ agent = Agent(
     ),
     session_store=InMemorySessionStore(),
     include_partial_messages=True,
+)
+
+# ── Google Gemini ────────────────────────────────────────────────────────────
+# Requires: pip install "linch[gemini]"
+# Supports text, tool use, structured output, and large context windows.
+from linch.providers import GeminiProvider, GeminiProviderOptions
+
+agent = Agent(
+    model="gemini-2.5-pro",
+    provider=GeminiProvider(
+        GeminiProviderOptions(api_key=os.environ["GOOGLE_API_KEY"])
+    ),
+    session_store=InMemorySessionStore(),
 )
 
 # ── DeepSeek (OpenAI-compatible endpoint) ────────────────────────────────────
@@ -358,6 +386,20 @@ to retry on transient failures. Read-scope tools retry any exception (they are
 idempotent); write/exec tools only retry when the tool declares `retryable = True`.
 `AbortError` is never retried.
 
+**Bash execution backend** — `Bash` uses `LocalBackend` by default. To run Bash
+through an injected backend, pass `execution_backend=...` to `Agent`. The agent
+only replaces an existing `Bash` tool; it does not add shell access to a custom
+registry that deliberately omits `Bash`.
+
+```python
+from linch.tools.execution import DockerBackend
+
+agent = Agent(
+    ...,
+    execution_backend=DockerBackend(image="python:3.12-slim"),
+)
+```
+
 ### Dependencies (shared app state)
 
 ```python
@@ -450,6 +492,7 @@ from linch.memory import (
     MemoryContextBuilder,
     MemoryItem,
     MemorySearchTool,
+    TieredMemoryStore,
 )
 from linch.tools.registry import empty_tools
 
@@ -466,10 +509,26 @@ agent = Agent(
 )
 ```
 
+For long-running, multi-session, user-oriented agents, wrap stores with
+`TieredMemoryStore` so working, episodic, and semantic memories are routed and
+ranked separately:
+
+```python
+store = TieredMemoryStore()
+await store.upsert([
+    MemoryItem(
+        id="pref-1",
+        content="The user prefers concise status updates.",
+        namespace="user:42",
+        metadata={"tier": "semantic"},
+    )
+])
+```
+
 Core includes `MemoryStore` protocols, cooperative in-memory keyword memory,
 SQLite memory, optional Postgres memory via `pip install 'linch[postgres]'`,
-and memory search/upsert tools. Vector databases and embedding models stay in
-the host app or a recipe.
+tiered memory, and memory search/upsert tools. Vector databases and embedding
+models stay in the host app or an adapter.
 
 ### Virtual filesystem and large-result offloading
 

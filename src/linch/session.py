@@ -53,6 +53,7 @@ class Session:
     compaction_retry_used_this_turn: bool = False
     pending_skill_overlay: SkillOverlay | None = None
     current_turn_allowed_tools: list[str] | None = None
+    current_turn_permission_decisions: dict[str, dict] = field(default_factory=dict)
     invoked_skills: list[InvokedSkillRecord] = field(default_factory=list)
     skills_loaded_emitted: bool = False
     tools_override: ToolRegistry | None = None

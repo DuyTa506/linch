@@ -170,7 +170,11 @@ class PostgresSessionStore:
             await conn.execute(
                 "INSERT INTO sessions (id, created_at, updated_at, meta, invoked_skills) "
                 "VALUES ($1, $2, $3, $4, $5)",
-                sid, ts, ts, json.dumps(_meta), "[]",
+                sid,
+                ts,
+                ts,
+                json.dumps(_meta),
+                "[]",
             )
             await conn.execute(
                 "INSERT INTO task_counters (session_id, next_id) VALUES ($1, 1) "
@@ -193,8 +197,7 @@ class PostgresSessionStore:
         pool = await self._ensure()
         async with pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT seq, appended_at, message FROM messages "
-                "WHERE session_id = $1 ORDER BY seq",
+                "SELECT seq, appended_at, message FROM messages WHERE session_id = $1 ORDER BY seq",
                 id,
             )
         return [
@@ -222,12 +225,13 @@ class PostgresSessionStore:
                     await conn.execute(
                         "INSERT INTO messages (session_id, seq, appended_at, message) "
                         "VALUES ($1, $2, $3, $4)",
-                        id, cur_seq, ts, json.dumps(message_to_dict(msg)),
+                        id,
+                        cur_seq,
+                        ts,
+                        json.dumps(message_to_dict(msg)),
                     )
                     stored.append(StoredMessage(seq=cur_seq, appended_at=ts, message=msg))
-                await conn.execute(
-                    "UPDATE sessions SET updated_at = $1 WHERE id = $2", ts, id
-                )
+                await conn.execute("UPDATE sessions SET updated_at = $1 WHERE id = $2", ts, id)
         return stored
 
     async def update_meta(self, id: str, meta: dict[str, object]) -> SessionRecord:
@@ -246,7 +250,9 @@ class PostgresSessionStore:
                 ts = now_iso()
                 await conn.execute(
                     "UPDATE sessions SET updated_at = $1, meta = $2 WHERE id = $3",
-                    ts, json.dumps(existing), id,
+                    ts,
+                    json.dumps(existing),
+                    id,
                 )
         return SessionRecord(
             id=row["id"],
@@ -256,26 +262,25 @@ class PostgresSessionStore:
             invoked_skills=list(json.loads(row["invoked_skills"] or "[]")),
         )
 
-    async def set_invoked_skills(
-        self, id: str, skills: list[dict[str, object]]
-    ) -> None:
+    async def set_invoked_skills(self, id: str, skills: list[dict[str, object]]) -> None:
         pool = await self._ensure()
         async with pool.acquire() as conn:
             await conn.execute(
                 "UPDATE sessions SET invoked_skills = $1, updated_at = $2 WHERE id = $3",
-                json.dumps(skills), now_iso(), id,
+                json.dumps(skills),
+                now_iso(),
+                id,
             )
 
-    async def list(
-        self, *, limit: int | None = None, offset: int = 0
-    ) -> list[SessionRecord]:
+    async def list(self, *, limit: int | None = None, offset: int = 0) -> list[SessionRecord]:
         pool = await self._ensure()
         async with pool.acquire() as conn:
             if limit is not None:
                 rows = await conn.fetch(
                     "SELECT id, created_at, updated_at, meta, invoked_skills "
                     "FROM sessions ORDER BY updated_at DESC LIMIT $1 OFFSET $2",
-                    limit, offset,
+                    limit,
+                    offset,
                 )
             else:
                 rows = await conn.fetch(
@@ -288,16 +293,10 @@ class PostgresSessionStore:
         pool = await self._ensure()
         async with pool.acquire() as conn:
             async with conn.transaction():
-                await conn.execute(
-                    "DELETE FROM task_edges WHERE session_id = $1", id
-                )
+                await conn.execute("DELETE FROM task_edges WHERE session_id = $1", id)
                 await conn.execute("DELETE FROM tasks WHERE session_id = $1", id)
-                await conn.execute(
-                    "DELETE FROM task_counters WHERE session_id = $1", id
-                )
-                await conn.execute(
-                    "DELETE FROM messages WHERE session_id = $1", id
-                )
+                await conn.execute("DELETE FROM task_counters WHERE session_id = $1", id)
+                await conn.execute("DELETE FROM messages WHERE session_id = $1", id)
                 await conn.execute("DELETE FROM sessions WHERE id = $1", id)
 
     async def create_task(self, session_id: str, input: CreateTaskInput) -> Task:
@@ -318,17 +317,25 @@ class PostgresSessionStore:
                         status, owner, metadata_json, created_at, updated_at
                     ) VALUES ($1,$2,$3,$4,$5,'pending',null,$6,$7,$8)
                     """,
-                    session_id, task_id, input.subject, input.description,
-                    input.active_form, json.dumps(input.metadata or {}), now, now,
+                    session_id,
+                    task_id,
+                    input.subject,
+                    input.description,
+                    input.active_form,
+                    json.dumps(input.metadata or {}),
+                    now,
+                    now,
                 )
                 await conn.execute(
                     "INSERT INTO task_counters (session_id, next_id) VALUES ($1, $2) "
                     "ON CONFLICT (session_id) DO UPDATE SET next_id = $2",
-                    session_id, next_id + 1,
+                    session_id,
+                    next_id + 1,
                 )
                 await conn.execute(
                     "UPDATE sessions SET updated_at = $1 WHERE id = $2",
-                    now, session_id,
+                    now,
+                    session_id,
                 )
                 result = await _get_task_pg(conn, session_id, task_id)
         if result is None:
@@ -359,9 +366,7 @@ class PostgresSessionStore:
                 out.append(_row_to_task(session_id, row, blocks, blocked_by))
         return out
 
-    async def update_task(
-        self, session_id: str, task_id: str, patch: TaskPatch
-    ) -> Task | None:
+    async def update_task(self, session_id: str, task_id: str, patch: TaskPatch) -> Task | None:
         pool = await self._ensure()
         async with pool.acquire() as conn:
             async with conn.transaction():
@@ -375,27 +380,37 @@ class PostgresSessionStore:
                 if patch.subject is not None:
                     await conn.execute(
                         "UPDATE tasks SET subject=$1 WHERE session_id=$2 AND id=$3",
-                        patch.subject, session_id, task_id,
+                        patch.subject,
+                        session_id,
+                        task_id,
                     )
                 if patch.description is not None:
                     await conn.execute(
                         "UPDATE tasks SET description=$1 WHERE session_id=$2 AND id=$3",
-                        patch.description, session_id, task_id,
+                        patch.description,
+                        session_id,
+                        task_id,
                     )
                 if patch.active_form is not None:
                     await conn.execute(
                         "UPDATE tasks SET active_form=$1 WHERE session_id=$2 AND id=$3",
-                        patch.active_form, session_id, task_id,
+                        patch.active_form,
+                        session_id,
+                        task_id,
                     )
                 if patch.status is not None:
                     await conn.execute(
                         "UPDATE tasks SET status=$1 WHERE session_id=$2 AND id=$3",
-                        patch.status, session_id, task_id,
+                        patch.status,
+                        session_id,
+                        task_id,
                     )
                 if patch.owner is not None:
                     await conn.execute(
                         "UPDATE tasks SET owner=$1 WHERE session_id=$2 AND id=$3",
-                        patch.owner, session_id, task_id,
+                        patch.owner,
+                        session_id,
+                        task_id,
                     )
                 if patch.metadata is not None:
                     md = dict(existing.metadata)
@@ -406,41 +421,54 @@ class PostgresSessionStore:
                             md[k] = v
                     await conn.execute(
                         "UPDATE tasks SET metadata_json=$1 WHERE session_id=$2 AND id=$3",
-                        json.dumps(md), session_id, task_id,
+                        json.dumps(md),
+                        session_id,
+                        task_id,
                     )
                 for to_id in patch.remove_blocks or []:
                     await conn.execute(
                         "DELETE FROM task_edges WHERE session_id=$1 "
                         "AND from_task_id=$2 AND to_task_id=$3",
-                        session_id, task_id, to_id,
+                        session_id,
+                        task_id,
+                        to_id,
                     )
                 for from_id in patch.remove_blocked_by or []:
                     await conn.execute(
                         "DELETE FROM task_edges WHERE session_id=$1 "
                         "AND from_task_id=$2 AND to_task_id=$3",
-                        session_id, from_id, task_id,
+                        session_id,
+                        from_id,
+                        task_id,
                     )
                 for to_id in patch.add_blocks or []:
                     await conn.execute(
                         "INSERT INTO task_edges "
                         "(session_id, from_task_id, to_task_id, kind) "
                         "VALUES ($1,$2,$3,'blocks') ON CONFLICT DO NOTHING",
-                        session_id, task_id, to_id,
+                        session_id,
+                        task_id,
+                        to_id,
                     )
                 for from_id in patch.add_blocked_by or []:
                     await conn.execute(
                         "INSERT INTO task_edges "
                         "(session_id, from_task_id, to_task_id, kind) "
                         "VALUES ($1,$2,$3,'blocks') ON CONFLICT DO NOTHING",
-                        session_id, from_id, task_id,
+                        session_id,
+                        from_id,
+                        task_id,
                     )
                 await conn.execute(
                     "UPDATE tasks SET updated_at=$1 WHERE session_id=$2 AND id=$3",
-                    now, session_id, task_id,
+                    now,
+                    session_id,
+                    task_id,
                 )
                 await conn.execute(
                     "UPDATE sessions SET updated_at=$1 WHERE id=$2",
-                    now, session_id,
+                    now,
+                    session_id,
                 )
                 return await _get_task_pg(conn, session_id, task_id)
 
@@ -491,23 +519,21 @@ def _row_to_task(
     )
 
 
-async def _load_edges_pg(
-    conn: Any, session_id: str, task_id: str
-) -> tuple[list[str], list[str]]:
+async def _load_edges_pg(conn: Any, session_id: str, task_id: str) -> tuple[list[str], list[str]]:
     blocks = [
         str(r["to_task_id"])
         for r in await conn.fetch(
-            "SELECT to_task_id FROM task_edges "
-            "WHERE session_id=$1 AND from_task_id=$2",
-            session_id, task_id,
+            "SELECT to_task_id FROM task_edges WHERE session_id=$1 AND from_task_id=$2",
+            session_id,
+            task_id,
         )
     ]
     blocked_by = [
         str(r["from_task_id"])
         for r in await conn.fetch(
-            "SELECT from_task_id FROM task_edges "
-            "WHERE session_id=$1 AND to_task_id=$2",
-            session_id, task_id,
+            "SELECT from_task_id FROM task_edges WHERE session_id=$1 AND to_task_id=$2",
+            session_id,
+            task_id,
         )
     ]
     return blocks, blocked_by
@@ -520,7 +546,8 @@ async def _get_task_pg(conn: Any, session_id: str, task_id: str) -> Task | None:
                metadata_json, created_at, updated_at
         FROM tasks WHERE session_id = $1 AND id = $2
         """,
-        session_id, task_id,
+        session_id,
+        task_id,
     )
     if row is None:
         return None
@@ -530,17 +557,19 @@ async def _get_task_pg(conn: Any, session_id: str, task_id: str) -> Task | None:
 
 async def _delete_task_pg(conn: Any, session_id: str, task_id: str) -> bool:
     await conn.execute(
-        "DELETE FROM task_edges WHERE session_id=$1 "
-        "AND (from_task_id=$2 OR to_task_id=$2)",
-        session_id, task_id,
+        "DELETE FROM task_edges WHERE session_id=$1 AND (from_task_id=$2 OR to_task_id=$2)",
+        session_id,
+        task_id,
     )
     result = await conn.execute(
         "DELETE FROM tasks WHERE session_id=$1 AND id=$2",
-        session_id, task_id,
+        session_id,
+        task_id,
     )
     await conn.execute(
         "UPDATE sessions SET updated_at=$1 WHERE id=$2",
-        now_iso(), session_id,
+        now_iso(),
+        session_id,
     )
     # asyncpg DELETE returns "DELETE N" — extract count
     try:

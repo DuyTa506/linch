@@ -49,8 +49,7 @@ class InMemoryKeywordMemoryStore:
         results: list[MemorySearchResult] = []
         with self._lock:
             snapshot = [
-                (key, item, self._token_cache.get(key))
-                for key, item in self._items.items()
+                (key, item, self._token_cache.get(key)) for key, item in self._items.items()
             ]
 
         for index, (_key, item, cached_terms) in enumerate(snapshot):

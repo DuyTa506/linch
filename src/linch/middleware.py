@@ -121,8 +121,7 @@ async def dispatch_before_tool_call(
             return BeforeToolCallOutcome(
                 call=current,
                 error=(
-                    "Middleware before_tool_call failed: expected "
-                    "ToolCallMiddlewareResult or None"
+                    "Middleware before_tool_call failed: expected ToolCallMiddlewareResult or None"
                 ),
             )
         if raw.input is not None:

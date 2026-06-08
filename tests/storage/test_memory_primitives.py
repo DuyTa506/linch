@@ -109,10 +109,7 @@ async def test_keyword_memory_store_work_does_not_block_event_loop(monkeypatch) 
 
     upsert_task = asyncio.create_task(
         store.upsert(
-            [
-                MemoryItem(id=f"m{i}", content="alpha beta", namespace="docs")
-                for i in range(10)
-            ]
+            [MemoryItem(id=f"m{i}", content="alpha beta", namespace="docs") for i in range(10)]
         )
     )
     await asyncio.sleep(0.03)

@@ -101,8 +101,7 @@ async def demo_loader() -> None:
         verification = registry.get("verification")
         assert verification is not None
         print(
-            "\nBuilt-in verifier:"
-            f"\n  [{verification.name}] {verification.frontmatter.description}"
+            f"\nBuilt-in verifier:\n  [{verification.name}] {verification.frontmatter.description}"
         )
         print(f"\nExample parent prompt for verification:\n{VERIFY_AFTER_CHANGES_PROMPT}")
 

@@ -63,9 +63,7 @@ class SqliteFileBackend:
     async def ls(self, prefix: str = "") -> list[str]:
         return await self._exec.run(lambda conn: _ls(conn, prefix))
 
-    async def edit(
-        self, path: str, old: str, new: str, *, replace_all: bool = False
-    ) -> int:
+    async def edit(self, path: str, old: str, new: str, *, replace_all: bool = False) -> int:
         p = normalize_path(path)
         return await self._exec.run(lambda conn: _edit(conn, p, old, new, replace_all))
 
@@ -133,9 +131,7 @@ def _ls(conn: sqlite3.Connection, prefix: str) -> list[str]:
     return [row["path"] for row in cur.fetchall()]
 
 
-def _edit(
-    conn: sqlite3.Connection, path: str, old: str, new: str, replace_all: bool
-) -> int:
+def _edit(conn: sqlite3.Connection, path: str, old: str, new: str, replace_all: bool) -> int:
     text = _get(conn, path)
     if text is None:
         raise FileNotFoundError(path)

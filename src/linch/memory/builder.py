@@ -20,6 +20,7 @@ class MemoryContextBuilder:
         query_builder: Callable[[ContextBuildTurn], str] | None = None,
         selected_tools: Any = None,
         title: str = "Retrieved memory",
+        group_by_tier: bool = False,
     ) -> None:
         self.store = store
         self.limit = limit
@@ -28,6 +29,7 @@ class MemoryContextBuilder:
         self.query_builder = query_builder
         self.selected_tools = selected_tools
         self.title = title
+        self.group_by_tier = group_by_tier
 
     async def build(self, turn: ContextBuildTurn) -> ContextBuildResult:
         store = self.store or resolve_memory_store(turn.deps)
@@ -58,7 +60,10 @@ class MemoryContextBuilder:
                 metadata=metadata,
             )
 
-        content = format_memory_context(results, title=self.title)
+        if self.group_by_tier:
+            content = format_memory_context_grouped(results, title=self.title)
+        else:
+            content = format_memory_context(results, title=self.title)
         return ContextBuildResult(
             messages=[Message(role="user", content=[TextBlock(text=content)])],
             selected_tools=self.selected_tools,
@@ -93,3 +98,38 @@ def format_memory_context(
         score = f" score={result.score:.2f}" if result.score is not None else ""
         lines.append(f"[{index}] {label}{score}\n{item.content}")
     return "\n\n".join(lines)
+
+
+def format_memory_context_grouped(
+    results: list[MemorySearchResult],
+    *,
+    title: str = "Retrieved memory",
+) -> str:
+    """Format memory results grouped by tier.
+
+    Produces one labelled section per tier that has at least one result.
+    Tier order is: working → episodic → semantic.  Uses the ``"tier"`` key
+    from ``result.metadata`` (stamped by ``TieredMemoryStore``); results
+    without a tier key are placed in the working section.
+    """
+    _TIER_ORDER = ("working", "episodic", "semantic")
+    by_tier: dict[str, list[MemorySearchResult]] = {}
+    for result in results:
+        tier = result.metadata.get("tier", "working")
+        if not isinstance(tier, str) or tier not in _TIER_ORDER:
+            tier = "working"
+        by_tier.setdefault(tier, []).append(result)
+
+    sections: list[str] = []
+    for tier in _TIER_ORDER:
+        group = by_tier.get(tier)
+        if not group:
+            continue
+        lines = [f"{title} ({tier}):"]
+        for index, result in enumerate(group, start=1):
+            item = result.item
+            label = item.metadata.get("label") or item.id
+            score = f" score={result.score:.2f}" if result.score is not None else ""
+            lines.append(f"[{index}] {label}{score}\n{item.content}")
+        sections.append("\n\n".join(lines))
+    return "\n\n".join(sections)

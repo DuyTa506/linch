@@ -140,9 +140,7 @@ class PgVectorMemoryStore:
                     init=register_vector,  # register vector type codec for each connection
                 )
             async with self._pool.acquire() as conn:
-                await conn.execute(
-                    _SCHEMA.format(dims=self._dimensions)
-                )
+                await conn.execute(_SCHEMA.format(dims=self._dimensions))
             self._initialized = True
         return self._pool
 

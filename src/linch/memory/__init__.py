@@ -3,6 +3,7 @@ from .keyword import InMemoryKeywordMemoryStore
 from .postgres import PostgresMemoryStore
 from .sqlite import SqliteMemoryStore
 from .store import MemoryStore, resolve_memory_store
+from .tiered import TieredMemoryStore
 from .tools import MemorySearchTool, MemoryUpsertTool
 from .types import MemoryItem, MemorySearchResult
 
@@ -16,6 +17,7 @@ __all__ = [
     "MemoryUpsertTool",
     "PostgresMemoryStore",
     "SqliteMemoryStore",
+    "TieredMemoryStore",
     "format_memory_context",
     "latest_user_text",
     "resolve_memory_store",
