@@ -39,7 +39,7 @@ async def with_retry(
         raise ConfigError("max_attempts must be >= 1")
     last_error: Exception | None = None
     for attempt in range(opts.max_attempts):
-        if getattr(signal, "is_set", False):
+        if signal is not None and getattr(signal, "aborted", False):
             raise AbortError("aborted")
         try:
             return await fn(attempt)

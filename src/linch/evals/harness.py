@@ -15,6 +15,13 @@ class EvalCase:
     expected: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "prompt": self.prompt,
+            "expected": self.expected,
+            "metadata": dict(self.metadata),
+        }
+
 
 @dataclass
 class CaseResult:
@@ -26,6 +33,23 @@ class CaseResult:
     scores: dict[str, bool | None]
     events: list = field(default_factory=list)
     error: str | None = None
+
+    def to_dict(self, *, include_events: bool = False) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "case": self.case.to_dict(),
+            "output": self.output,
+            "passed": self.passed,
+            "scores": dict(self.scores),
+            "error": self.error,
+            "event_count": len(self.events),
+            "tool_calls": _tool_calls(self.events),
+            "total_cost_usd": _total_cost_usd(self.events),
+        }
+        if include_events:
+            from ..events import event_to_dict
+
+            out["events"] = [event_to_dict(event) for event in self.events]
+        return out
 
 
 @dataclass
@@ -45,6 +69,61 @@ class EvalResult:
     @property
     def pass_rate(self) -> float:
         return self.passed / self.total if self.total else 0.0
+
+    def to_dict(self, *, include_events: bool = False) -> dict[str, Any]:
+        return {
+            "total": self.total,
+            "passed": self.passed,
+            "pass_rate": self.pass_rate,
+            "cases": [case.to_dict(include_events=include_events) for case in self.cases],
+        }
+
+    def to_markdown(self) -> str:
+        lines = [
+            "# Linch Eval Report",
+            "",
+            f"- total: {self.total}",
+            f"- passed: {self.passed}",
+            f"- pass_rate: {self.pass_rate:.2%}",
+            "",
+            "| # | Passed | Scores | Cost USD | Tool Calls | Output | Error |",
+            "|---:|---|---|---:|---|---|---|",
+        ]
+        for idx, case in enumerate(self.cases, start=1):
+            scores = ", ".join(f"{name}={value}" for name, value in case.scores.items())
+            tools = ", ".join(_tool_calls(case.events))
+            cost = _total_cost_usd(case.events)
+            output = _table_text(case.output)
+            error = _table_text(case.error or "")
+            lines.append(
+                f"| {idx} | {case.passed} | {scores} | {cost if cost is not None else ''} | "
+                f"{tools} | {output} | {error} |"
+            )
+        return "\n".join(lines)
+
+
+def _tool_calls(events: list) -> list[str]:
+    return [
+        event.tool_name
+        for event in events
+        if getattr(event, "type", None) == "tool_call_start"
+        and isinstance(getattr(event, "tool_name", None), str)
+    ]
+
+
+def _total_cost_usd(events: list) -> float | None:
+    for event in reversed(events):
+        if getattr(event, "type", None) == "result":
+            value = getattr(event, "total_cost_usd", None)
+            return float(value) if isinstance(value, int | float) else None
+    return None
+
+
+def _table_text(value: str) -> str:
+    text = " ".join(value.split())
+    if len(text) > 120:
+        text = text[:117] + "..."
+    return text.replace("|", "\\|")
 
 
 async def run_eval(
@@ -92,10 +171,26 @@ async def run_eval(
                     error = str(event.error)
         except Exception as exc:
             error = str(exc)
+        finally:
+            # Release this case's session so _sessions (and any spawned
+            # background workers) don't accumulate across the suite. There is no
+            # per-session close; pop from the registry and abort to cancel any
+            # background worker tasks. Never let teardown mask a case error.
+            agent._sessions.pop(session.id, None)
+            session.abort()
 
         scores: dict[str, bool | None] = {}
         for scorer in scorers:
             name = getattr(scorer, "__name__", repr(scorer))
+            # Disambiguate name collisions so every scorer's verdict is retained.
+            # Several scorer factories hardcode a constant __name__ (e.g.
+            # "schema_valid"); two of the same would otherwise overwrite each
+            # other and drop a failing verdict.
+            if name in scores:
+                suffix = 2
+                while f"{name}#{suffix}" in scores:
+                    suffix += 1
+                name = f"{name}#{suffix}"
             # Substitute {expected} in text_contains scorers
             actual_scorer = scorer
             template = getattr(scorer, "_template", None)

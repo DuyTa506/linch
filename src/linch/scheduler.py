@@ -326,7 +326,9 @@ def _tool_parallel(call: ResolvedCall) -> bool:
         return False
     if _tool_scope(call) != "read":
         return False
-    return bool(getattr(call.tool, "parallel", False))
+    if hasattr(call.tool, "parallel"):
+        return bool(getattr(call.tool, "parallel", False))
+    return bool(getattr(call.tool, "parallel_safe", False))
 
 
 def _resource_accesses(
@@ -346,9 +348,11 @@ def _resource_accesses(
             return [ResourceAccess(resource=f"tool:{_tool_name(call)}", mode="write")]
         if raw is None:
             return []
+        if isinstance(raw, ResourceAccess):
+            return [raw]
         result: list[ResourceAccess] = []
         if not isinstance(raw, list | tuple):
-            return []
+            return [ResourceAccess(resource=f"tool:{_tool_name(call)}", mode="write")]
         for item in raw:
             if isinstance(item, ResourceAccess):
                 result.append(item)
@@ -531,7 +535,11 @@ async def execute_tool_calls(
             if _stored_decisions is not None and _key in _stored_decisions:
                 from .permissions.keys import permission_decision_from_dict as _pd_from_dict
 
-                decisions.append(_pd_from_dict(_stored_decisions[_key]))
+                try:
+                    decisions.append(_pd_from_dict(_stored_decisions[_key]))
+                except (AttributeError, TypeError, ValueError):
+                    ask_indices.append(i)
+                    decisions.append(initial)
             else:
                 allowed_tools = getattr(session, "current_turn_allowed_tools", None)
                 if allowed_tools and tool_obj is not None and tool_obj.name in allowed_tools:
@@ -578,6 +586,8 @@ async def execute_tool_calls(
                     from .permissions.keys import permission_decision_to_dict as _pd_to_dict
 
                     _pd[_permission_key(_tool_name(call), call.input)] = _pd_to_dict(decisions[idx])
+        except AbortError:
+            raise
         except Exception:
             decisions[idx] = PermissionDecision(
                 decision="deny",

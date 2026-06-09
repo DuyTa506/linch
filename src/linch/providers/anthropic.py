@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
@@ -69,11 +70,12 @@ class AnthropicProvider(BaseProvider):
         if self._client is not None:
             return self._client
         try:
-            from anthropic import AsyncAnthropic
+            anthropic_mod = importlib.import_module("anthropic")
         except ModuleNotFoundError as exc:
             raise ProviderError(
                 "The 'anthropic' package is required. Install with: pip install 'linch[anthropic]'"
             ) from exc
+        AsyncAnthropic = anthropic_mod.__dict__["AsyncAnthropic"]
         kwargs: dict[str, Any] = {}
         if self._options.api_key is not None:
             kwargs["api_key"] = self._options.api_key
@@ -147,13 +149,16 @@ class AnthropicProvider(BaseProvider):
 
                 elif etype == "message_delta":
                     output_tokens = int(event.usage.output_tokens or 0)
-                    # Some billing models report additional cache tokens here.
-                    cache_read_tokens += int(
-                        getattr(event.usage, "cache_read_input_tokens", 0) or 0
-                    )
-                    cache_creation_tokens += int(
-                        getattr(event.usage, "cache_creation_input_tokens", 0) or 0
-                    )
+                    # Cache figures are cumulative/authoritative (set at
+                    # message_start); if a delta restates them, overwrite —
+                    # don't add — and only when the field is actually present
+                    # so an omitted field doesn't clobber the start value to 0.
+                    cr = getattr(event.usage, "cache_read_input_tokens", None)
+                    if cr is not None:
+                        cache_read_tokens = int(cr or 0)
+                    cc = getattr(event.usage, "cache_creation_input_tokens", None)
+                    if cc is not None:
+                        cache_creation_tokens = int(cc or 0)
                     stop_reason = _map_stop_reason(getattr(event.delta, "stop_reason", None))
 
                 # message_stop signals end of stream; handled after the loop.

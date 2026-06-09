@@ -97,6 +97,75 @@ Unknown model IDs report `None` for cost rather than pretending the call is
 free. Use `linch.pricing.cost_usd(usage, model, table=...)` with a custom table
 for private or self-hosted models.
 
+### Run reports
+
+Use run reports when you need a compact debugging export for a finished or
+in-progress run. Reports are built from typed events and, when available,
+`RunStore` checkpoints.
+
+```python
+from linch import load_run_report
+
+report = await load_run_report(agent.run_store, run_id)
+print(report.to_markdown())
+
+payload = report.to_dict()
+print(payload["context_builds"])
+print(payload["permission_requests"])
+print(payload["tool_calls"])
+print(payload["loop_guards"])
+print(payload["long_run"])
+```
+
+For transient runs where you already collected events, build a report directly:
+
+```python
+from linch import build_run_report
+
+events = []
+async for event in session.run("Summarize the policy change."):
+    events.append(event)
+
+report = build_run_report(events)
+```
+
+`payload["long_run"]` summarizes signals that matter in long-horizon sessions:
+context build counts, trimmed context builds, max used context tokens, selected
+tool counts, memory searches/upserts, recalled memory ids, tier counts, failed
+tool calls, recovery hints, completion status, total cost, and checkpoint phase.
+
+### Long-run eval scorers
+
+The eval harness includes scorers for context and memory behavior in addition
+to text, schema, tool, and cost checks:
+
+```python
+from linch.evals import (
+    context_metadata_contains,
+    context_not_trimmed,
+    context_selected_tool,
+    cost_under,
+    memory_recalled,
+    recovery_succeeded,
+    run_completed,
+    run_eval,
+)
+
+result = await run_eval(
+    agent,
+    cases,
+    scorers=[
+        context_selected_tool("SearchMemory"),
+        context_metadata_contains("memory_namespace", "user:42"),
+        context_not_trimmed(),
+        memory_recalled("pref-1"),
+        recovery_succeeded(),
+        cost_under(0.05),
+        run_completed(),
+    ],
+)
+```
+
 ---
 
 ## Key configuration knobs
@@ -224,6 +293,55 @@ agent = Agent(
 )
 ```
 
+### Choosing a provider path
+
+Use a direct provider when Linch has native semantics for that API: OpenAI
+Responses for stateful reasoning controls, Anthropic for prompt caching and
+Claude thinking signatures, Gemini for Google model/tool semantics, and
+llama.cpp for self-hosted local servers.
+
+Use `OpenAIChatCompletionsProvider(base_url=...)` when a service implements the
+OpenAI Chat Completions protocol. This is the recommended path for DeepSeek,
+Azure, Groq, Together, and similar OpenAI-compatible endpoints. DeepSeek is not
+a separate runtime provider in Linch; configure it with `base_url` and the
+DeepSeek model id.
+
+llama.cpp model names and context windows are server configuration, so they are
+resolved dynamically by `LlamaCppProvider` rather than listed in the static
+catalog.
+
+Known direct-provider models can be inspected without constructing a live
+client:
+
+```python
+from linch import get_provider_model_info, list_provider_models
+
+for model in list_provider_models("anthropic"):
+    print(model.model, model.context_window, model.pricing)
+
+info = get_provider_model_info("gemini-2.5-pro", provider_id="gemini")
+print(info.capabilities.structured_output if info else None)
+```
+
+| Provider id | Path | Static catalog | Pricing |
+|---|---|---:|---|
+| `openai-responses` | `OpenAIResponsesProvider` | Yes | `None` unless you pass custom pricing |
+| `openai-chat` | `OpenAIChatCompletionsProvider` | Yes | `None` unless you pass custom pricing |
+| `anthropic` | `AnthropicProvider` | Yes | Known Claude entries from `linch.pricing` |
+| `gemini` | `GeminiProvider` | Yes | `None` unless you pass custom pricing |
+| `llamacpp` | `LlamaCppProvider` | No, dynamic/self-hosted | `None` unless you pass custom pricing |
+| DeepSeek | OpenAI-compatible `base_url` | No separate provider | `None` unless you pass custom pricing |
+
+Capability flags are exposed as `ProviderCapabilities` on each catalog record:
+
+| Provider id | Structured output | Tool choice | Prompt cache |
+|---|---:|---:|---:|
+| `openai-responses` | Yes | Yes | No |
+| `openai-chat` | Yes | Yes | No |
+| `anthropic` | Yes | Yes | Yes |
+| `gemini` | Yes | Yes | No |
+| `llamacpp` | Yes | Yes | No |
+
 **Reading thinking events** (any provider that emits `reasoning_content` or Anthropic thinking):
 
 ```python
@@ -328,9 +446,49 @@ agent = Agent(
 
 ### Custom tools
 
+Use `@tool` for the common case. It wraps a sync or async function in a normal
+Linch tool object, infers a minimal JSON schema from the function signature,
+and injects `ToolContext` when the function asks for `ctx`.
+
+```python
+from linch import Agent, ToolContext, tool
+from linch.tools.registry import empty_tools, tools_from_defaults
+
+@tool(description="Search the internal knowledge base.", tags=("rag",))
+async def search_kb(query: str, ctx: ToolContext) -> str:
+    results = await ctx.deps.kb.search(query)
+    return "\n".join(results)
+
+# No built-in tools (pure domain agent)
+agent = Agent(..., tools=empty_tools(search_kb), deps=my_app_state)
+
+# SWE tools minus Bash, plus custom
+registry = tools_from_defaults(exclude={"Bash"}, extra=[search_kb])
+agent = Agent(..., tools=registry, deps=my_app_state)
+```
+
+For explicit construction or dynamic registration, use `FunctionTool` directly:
+
+```python
+from linch import FunctionTool, ToolContext
+
+def lookup_customer(customer_id: str, ctx: ToolContext) -> dict:
+    return ctx.deps.crm.lookup(customer_id)
+
+customer_tool = FunctionTool(
+    lookup_customer,
+    name="LookupCustomer",
+    description="Look up a customer profile.",
+    scope="read",
+    parallel=True,
+)
+```
+
+Class-based duck-typed tools remain supported and are the right fit when you
+need custom validation, resource declarations, or richer execution behavior.
+
 ```python
 from linch.tools.base import ResourceAccess, ToolContext, ToolResult
-from linch.tools.registry import empty_tools, tools_from_defaults
 
 class MyTool:
     name = "search_kb"
@@ -391,14 +549,31 @@ through an injected backend, pass `execution_backend=...` to `Agent`. The agent
 only replaces an existing `Bash` tool; it does not add shell access to a custom
 registry that deliberately omits `Bash`.
 
+`ToolRule`, `PathRule`, and `BashRule` still decide whether a Bash command is
+allowed to run. An execution backend only changes where and how an approved
+command runs. `DockerBackend` keeps the historical behavior by default: writable
+workspace mount, Docker's default network, no environment forwarding, and a
+normal container root filesystem. Its hardening controls are opt-in.
+
 ```python
 from linch.tools.execution import DockerBackend
 
 agent = Agent(
     ...,
-    execution_backend=DockerBackend(image="python:3.12-slim"),
+    execution_backend=DockerBackend(
+        image="python:3.12-slim",
+        network="none",
+        read_only_root=True,
+        workspace_mount="rw",
+        tmpfs=("/tmp:rw,noexec,nosuid,nodev,size=64m",),
+        forward_env=(),
+    ),
 )
 ```
+
+Use `workspace_mount="ro"` for read-only workspace inspection, `env={...}` for
+explicit container environment variables, `forward_env=(...)` to allowlist host
+environment variables, and `user="1000:1000"` for non-root container execution.
 
 ### Dependencies (shared app state)
 
@@ -406,10 +581,17 @@ agent = Agent(
 # Anything: a DB connection, vector store, API client, config dict
 agent = Agent(..., deps={"db": my_db, "vector_store": vs})
 
-# Access inside any tool:
+# Access inside a class-based tool:
 async def execute(self, input, ctx: ToolContext) -> ToolResult:
     results = await ctx.deps["vector_store"].search(input["query"])
     ...
+
+# Or inside a function tool:
+from linch import tool
+
+@tool
+async def search_docs(query: str, ctx: ToolContext) -> str:
+    return await ctx.deps["vector_store"].search(query)
 
 # Override per-run (e.g. tenant-specific connection)
 from linch import RunOptions
@@ -483,6 +665,20 @@ class MyContextBuilder:
 agent = Agent(..., context_builder=MyContextBuilder(), deps=my_store)
 ```
 
+The context builder and tools receive the same dependency object for the run,
+so one tenant-specific store or request-scoped service bundle can drive both
+context selection and tool execution.
+
+```python
+async for event in session.run("Find policy citations for PTO rollover."):
+    if event.type == "context_build":
+        print("context metadata:", event.metadata)
+    elif event.type == "tool_call_start":
+        print("tool:", event.summary)
+    elif event.type == "result":
+        print(event.final_text)
+```
+
 ### Memory and RAG primitives
 
 ```python
@@ -514,7 +710,11 @@ For long-running, multi-session, user-oriented agents, wrap stores with
 ranked separately:
 
 ```python
-store = TieredMemoryStore()
+working = InMemoryKeywordMemoryStore()
+episodic = InMemoryKeywordMemoryStore()
+semantic = InMemoryKeywordMemoryStore()
+store = TieredMemoryStore(working=working, episodic=episodic, semantic=semantic)
+
 await store.upsert([
     MemoryItem(
         id="pref-1",
@@ -529,6 +729,17 @@ Core includes `MemoryStore` protocols, cooperative in-memory keyword memory,
 SQLite memory, optional Postgres memory via `pip install 'linch[postgres]'`,
 tiered memory, and memory search/upsert tools. Vector databases and embedding
 models stay in the host app or an adapter.
+
+For production long-running agents, keep the layers separate:
+
+- Use a `ContextBuilder` for ephemeral RAG and memory snippets that should not
+  be persisted into conversation history.
+- Use `TieredMemoryStore` metadata to separate working task notes, episodic
+  events, and distilled semantic facts.
+- Let virtual filesystem offloading replace large tool payloads with durable
+  references the model can read back on demand.
+- Keep `RunStore` enabled for checkpoints, durable approvals, resume, and
+  `load_run_report()` diagnostics.
 
 ### Virtual filesystem and large-result offloading
 
@@ -720,6 +931,7 @@ a live API key.
 |------|---------------|
 | `core/minimal_agent.py` | Smallest possible agent |
 | `core/coding_agent.py` | Full SWE agent — tools_from_defaults, BashRule/PathRule safety fence, LoopGuard, multi-turn |
+| `core/policy_aware_execution.py` | Docker-backed Bash execution with permission rules and opt-in runtime restrictions |
 | `core/reading_agent.py` | Read-only codebase Q&A — exclude Write/Edit/Bash, PathRule, custom reviewer persona |
 | `core/chat_agent.py` | Pure conversation agent — no tools, custom domain, structured JSON output via ContextBuilder injection |
 | `core/custom_permissions.py` | All permission modes and rule types |

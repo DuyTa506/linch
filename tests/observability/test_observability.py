@@ -617,3 +617,58 @@ async def test_otel_span_tree():
 
     run_span = next(s for s in spans if s.name == "agent.run")
     assert run_span.attributes.get("gen_ai.request.model") == "test-model"
+
+
+def test_otel_run_end_detaches_leftover_turn_tokens():
+    """on_run_end must clean up turn context tokens for turns that never ended.
+
+    Regression: when a turn is aborted, on_turn_end never fires, so the entry in
+    `_turn_ctx_tokens` and its attached OTel context token leaked across runs.
+    """
+    pytest.importorskip("opentelemetry")
+    from opentelemetry.sdk.trace import TracerProvider  # type: ignore[import]
+
+    from linch.observability import OpenTelemetryObserver
+    from linch.observability.protocol import RunInfo, RunResultInfo, TurnInfo
+    from linch.types import Usage
+
+    tracer = TracerProvider().get_tracer("test")
+    obs = OpenTelemetryObserver(tracer=tracer)
+
+    # Spy on detach to confirm leftover tokens are actually detached.
+    import opentelemetry.context as _ctx
+
+    detached: list[Any] = []
+    orig_detach = _ctx.detach
+
+    def _spy_detach(token):
+        detached.append(token)
+        return orig_detach(token)
+
+    _ctx.detach = _spy_detach  # type: ignore[assignment]
+    try:
+        run_id = "run-abort"
+        obs.on_run_start(RunInfo(run_id=run_id, session_id="s1", model="test-model", prompt="p"))
+        obs.on_turn_start(TurnInfo(run_id=run_id, turn_index=0))
+
+        # Turn token is stored; on_turn_end is NEVER called (aborted turn).
+        leftover_token = obs._turn_ctx_tokens[(run_id, 0)]
+        assert leftover_token is not None
+
+        obs.on_run_end(
+            RunResultInfo(
+                run_id=run_id,
+                session_id="s1",
+                subtype="aborted",
+                stop_reason="aborted",
+                total_usage=Usage(),
+                duration_ms=1,
+            )
+        )
+
+        # No leftover turn token entry for this run.
+        assert not [k for k in obs._turn_ctx_tokens if k[0] == run_id]
+        # The leftover turn token was detached.
+        assert leftover_token in detached
+    finally:
+        _ctx.detach = orig_detach  # type: ignore[assignment]

@@ -10,6 +10,7 @@ import pytest
 
 import linch.tools.builtin as builtin_tools
 from linch.abort import AbortContext
+from linch.errors import AbortError
 from linch.events import (
     ResultEvent,
     ToolCallEndEvent,
@@ -39,6 +40,34 @@ class SleepTool:
     async def execute(self, input: dict[str, object], ctx: ToolContext) -> ToolResult:
         await asyncio.sleep(0.01)
         return ToolResult(content="ok", summary="ok")
+
+
+class ReadSleepTool:
+    description = "Read sleep tool."
+    input_schema = {"type": "object", "properties": {}}
+    scope = "read"
+    parallel_safe = True
+
+    def __init__(self, name: str, *, resource_mode: str | None = None) -> None:
+        self.name = name
+        self.resource_mode = resource_mode
+
+    def validate(self, raw: dict[str, object]) -> dict[str, object]:
+        return {}
+
+    def summarize(self, input: dict[str, object]) -> str:
+        return self.name
+
+    def resources(self, input: dict[str, object]):
+        if self.resource_mode is None:
+            return []
+        from linch.tools import ResourceAccess
+
+        return ResourceAccess(resource="shared:file", mode=self.resource_mode)
+
+    async def execute(self, input: dict[str, object], ctx: ToolContext) -> ToolResult:
+        await asyncio.sleep(0.01)
+        return ToolResult(content=self.name, summary=self.name)
 
 
 @pytest.mark.asyncio
@@ -102,6 +131,187 @@ async def test_scheduler_emits_non_zero_duration() -> None:
     end_events = [e for e in events if isinstance(e, ToolCallEndEvent)]
     assert len(end_events) == 1
     assert end_events[0].duration_ms > 0
+
+
+@pytest.mark.asyncio
+async def test_scheduler_propagates_abort_from_permission_resolve() -> None:
+    class DummyTool:
+        name = "WriteDummy"
+        description = "dummy"
+        input_schema = {"type": "object", "properties": {}}
+        scope = "write"
+        parallel = False
+
+        def validate(self, raw: dict[str, object]) -> dict[str, object]:
+            return {}
+
+        def summarize(self, input: dict[str, object]) -> str:
+            return "dummy"
+
+        async def execute(self, input: dict[str, object], ctx: ToolContext) -> ToolResult:
+            return ToolResult(content="should not run")
+
+    async def aborting_callback(_req: object) -> dict[str, str]:
+        raise AbortError("user cancelled")
+
+    registry = ToolRegistry()
+    registry.register(DummyTool())
+    agent = SimpleNamespace(
+        cwd=".",
+        tools=registry,
+        permission_engine=PermissionEngine(mode="default", can_use_tool=aborting_callback),
+        tool_concurrency=2,
+    )
+    session = SimpleNamespace(
+        id="s1",
+        store=None,
+        active_run_id="run-1",
+        tools_override=None,
+        current_turn_allowed_tools=None,
+        current_turn_permission_decisions={},
+    )
+
+    with pytest.raises(AbortError):
+        async for _ in execute_tool_calls(
+            [ToolUseBlock(id="call-1", name="WriteDummy", input={})],
+            agent,
+            session,
+            AbortContext(),
+        ):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_malformed_stored_permission_decision_reprompts() -> None:
+    from linch.permissions.keys import permission_decision_key
+
+    class DummyTool:
+        name = "WriteDummy"
+        description = "dummy"
+        input_schema = {"type": "object", "properties": {}}
+        scope = "write"
+        parallel = False
+
+        def validate(self, raw: dict[str, object]) -> dict[str, object]:
+            return {}
+
+        def summarize(self, input: dict[str, object]) -> str:
+            return "dummy"
+
+        async def execute(self, input: dict[str, object], ctx: ToolContext) -> ToolResult:
+            return ToolResult(content="ok")
+
+    registry = ToolRegistry()
+    registry.register(DummyTool())
+    agent = SimpleNamespace(
+        cwd=".",
+        tools=registry,
+        permission_engine=PermissionEngine(
+            mode="default",
+            can_use_tool=lambda _req: {"behavior": "allow"},
+        ),
+        tool_concurrency=2,
+    )
+    session = SimpleNamespace(
+        id="s1",
+        store=None,
+        active_run_id="run-1",
+        tools_override=None,
+        current_turn_allowed_tools=None,
+        current_turn_permission_decisions={
+            permission_decision_key("WriteDummy", {}): {"reason": "corrupt"}
+        },
+    )
+
+    events = [
+        event
+        async for event in execute_tool_calls(
+            [ToolUseBlock(id="call-1", name="WriteDummy", input={})],
+            agent,
+            session,
+            AbortContext(),
+        )
+    ]
+
+    assert any(getattr(event, "type", None) == "permission_request" for event in events)
+    assert any(isinstance(event, ToolCallEndEvent) and event.is_error is False for event in events)
+
+
+@pytest.mark.asyncio
+async def test_parallel_safe_legacy_read_tools_still_run_in_parallel() -> None:
+    registry = ToolRegistry()
+    registry.register(ReadSleepTool("A"))
+    registry.register(ReadSleepTool("B"))
+    agent = SimpleNamespace(
+        cwd=".",
+        tools=registry,
+        permission_engine=PermissionEngine(mode="skip-dangerous"),
+        tool_concurrency=2,
+    )
+    session = SimpleNamespace(
+        id="s1",
+        store=None,
+        active_run_id="run-1",
+        tools_override=None,
+        current_turn_allowed_tools=None,
+    )
+
+    events = [
+        event
+        async for event in execute_tool_calls(
+            [
+                ToolUseBlock(id="call-1", name="A", input={}),
+                ToolUseBlock(id="call-2", name="B", input={}),
+            ],
+            agent,
+            session,
+            AbortContext(),
+        )
+    ]
+
+    event_types = [event.type for event in events if event.type.startswith("tool_call")]
+    assert event_types[:2] == ["tool_call_start", "tool_call_start"]
+
+
+@pytest.mark.asyncio
+async def test_direct_resource_access_return_is_respected_for_conflicts() -> None:
+    registry = ToolRegistry()
+    registry.register(ReadSleepTool("Writer", resource_mode="write"))
+    registry.register(ReadSleepTool("Reader", resource_mode="read"))
+    agent = SimpleNamespace(
+        cwd=".",
+        tools=registry,
+        permission_engine=PermissionEngine(mode="skip-dangerous"),
+        tool_concurrency=2,
+    )
+    session = SimpleNamespace(
+        id="s1",
+        store=None,
+        active_run_id="run-1",
+        tools_override=None,
+        current_turn_allowed_tools=None,
+    )
+
+    events = [
+        event
+        async for event in execute_tool_calls(
+            [
+                ToolUseBlock(id="call-1", name="Writer", input={}),
+                ToolUseBlock(id="call-2", name="Reader", input={}),
+            ],
+            agent,
+            session,
+            AbortContext(),
+        )
+    ]
+
+    event_types = [event.type for event in events if event.type.startswith("tool_call")]
+    assert event_types[:4] == [
+        "tool_call_start",
+        "tool_call_end",
+        "tool_call_start",
+        "tool_call_end",
+    ]
 
 
 @pytest.mark.asyncio
@@ -197,6 +407,13 @@ def test_bash_rule_accepts_pattern_and_patterns() -> None:
     assert denied.decision == "deny"
 
 
+def test_permission_decision_from_dict_rejects_missing_decision() -> None:
+    from linch.permissions.keys import permission_decision_from_dict
+
+    with pytest.raises(ValueError, match="stored permission decision"):
+        permission_decision_from_dict({"reason": "corrupt"})
+
+
 def test_event_round_trip() -> None:
     event = ResultEvent(
         subtype="success",
@@ -238,6 +455,7 @@ def test_tool_call_end_event_round_trips_structured_tool_result() -> None:
             attachments=[object()],
             duration_ms=12,
             truncated=True,
+            recovery_hint="Try a narrower query.",
         ),
     )
 
@@ -254,6 +472,7 @@ def test_tool_call_end_event_round_trips_structured_tool_result() -> None:
     assert rebuilt.tool_result.citations[0].source == "doc://1"
     assert rebuilt.tool_result.citations[0].metadata == {"page": 2}
     assert rebuilt.tool_result.truncated is True
+    assert rebuilt.tool_result.recovery_hint == "Try a narrower query."
 
 
 def test_old_tool_call_end_event_dict_remains_supported() -> None:

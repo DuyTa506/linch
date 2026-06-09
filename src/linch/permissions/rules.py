@@ -116,7 +116,7 @@ def match_bash_rule(rule: BashRule, command_segment: str) -> bool:
 
 def _match_bash_pattern(pattern: str | dict[str, str], segment: str) -> bool:
     if isinstance(pattern, str):
-        if fnmatch.fnmatch(segment, pattern) or pattern in segment:
+        if fnmatch.fnmatch(segment, pattern):
             return True
         return _tokens_start_with(
             tokenize_shell_prefix(segment),
@@ -249,8 +249,39 @@ def _matches_path_pattern(pattern: str, target: str, project_root: str) -> bool:
         return False
     absolute_pattern = body if Path(body).is_absolute() else str(Path(project_root) / body)
     glob_pattern = _normalize_for_glob(absolute_pattern)
-    matched = fnmatch.fnmatch(target, glob_pattern)
+    matched = re.fullmatch(_glob_to_regex(glob_pattern), target) is not None
     return not matched if inverted else matched
+
+
+def _glob_to_regex(pattern: str) -> str:
+    """Translate a glob pattern to a regex where ``*``/``?`` do not cross ``/``
+    but ``**`` does, matching standard gitignore/glob semantics."""
+    out: list[str] = []
+    i = 0
+    n = len(pattern)
+    while i < n:
+        char = pattern[i]
+        if char == "*":
+            if i + 1 < n and pattern[i + 1] == "*":
+                # ``**/`` is an optional path prefix: it matches zero or more
+                # directory segments, so ``a/**/b`` matches both ``a/b`` and
+                # ``a/x/b``.  A standalone ``**`` stays ``.*``.
+                if i + 2 < n and pattern[i + 2] == "/":
+                    out.append("(?:.*/)?")
+                    i += 3
+                else:
+                    out.append(".*")
+                    i += 2
+            else:
+                out.append("[^/]*")
+                i += 1
+        elif char == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(char))
+            i += 1
+    return "".join(out)
 
 
 def _normalize_for_glob(value: str) -> str:

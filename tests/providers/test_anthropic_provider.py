@@ -410,6 +410,82 @@ def test_provider_missing_package(monkeypatch):
         asyncio.run(_run())
 
 
+def test_stream_cache_tokens_not_double_counted():
+    """Cache figures are cumulative at message_start; a message_delta that
+    echoes the same cache fields must NOT be added on top (regression)."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from linch.providers.anthropic import AnthropicProvider
+    from linch.types import Message, ProviderRequest, TextBlock
+
+    cache_read = 4096
+    cache_creation = 1024
+
+    class _FakeStream:
+        def __init__(self, events):
+            self._events = events
+
+        def __aiter__(self):
+            self._it = iter(self._events)
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self._it)
+            except StopIteration:
+                raise StopAsyncIteration from None
+
+    events = [
+        SimpleNamespace(
+            type="message_start",
+            message=SimpleNamespace(
+                usage=SimpleNamespace(
+                    input_tokens=100,
+                    cache_read_input_tokens=cache_read,
+                    cache_creation_input_tokens=cache_creation,
+                )
+            ),
+        ),
+        # The delta echoes the SAME cumulative cache figures.  Accumulating
+        # them would double-count; the provider must overwrite instead.
+        SimpleNamespace(
+            type="message_delta",
+            delta=SimpleNamespace(stop_reason="end_turn"),
+            usage=SimpleNamespace(
+                output_tokens=42,
+                cache_read_input_tokens=cache_read,
+                cache_creation_input_tokens=cache_creation,
+            ),
+        ),
+    ]
+
+    class _FakeMessages:
+        async def create(self, **payload):
+            return _FakeStream(events)
+
+    provider = AnthropicProvider()
+    provider._client = SimpleNamespace(messages=_FakeMessages())
+
+    req = ProviderRequest(
+        model="claude-sonnet-4-6",
+        system=[],
+        tools=[],
+        messages=[Message(role="user", content=[TextBlock(text="hi")])],
+    )
+
+    async def _run():
+        return [e async for e in provider.stream(req)]
+
+    out = asyncio.run(_run())
+    end = next(e for e in out if e["type"] == "message_end")
+    usage = end["usage"]
+    assert usage.cache_read_tokens == cache_read
+    assert usage.cache_creation_tokens == cache_creation
+    assert usage.input_tokens == 100
+    assert usage.output_tokens == 42
+
+
 # ---------------------------------------------------------------------------
 # Live tests — require ANTHROPIC_API_KEY
 # ---------------------------------------------------------------------------
