@@ -8,8 +8,9 @@ Vertex AI is supported via ``GeminiProviderOptions(project=..., location=...)``.
 
 Streaming tool-use uses a different delta format than OpenAI or Anthropic:
 each candidate part is either a ``text`` string or a ``function_call`` object.
-We collect all parts from the final streamed chunk and emit Linch-canonical
-stream events so the loop processes Gemini identically to other providers.
+We emit Linch-canonical stream events for each part across all streamed
+chunks (deduplicating repeated function calls) so the loop processes Gemini
+identically to other providers.
 """
 
 from __future__ import annotations
@@ -161,7 +162,7 @@ class GeminiProvider(BaseProvider):
                 "Install with: pip install 'linch[gemini]'"
             ) from exc
         if self._options.api_key is not None:
-            genai.configure(api_key=self._options.api_key)
+            genai.configure(api_key=self._options.api_key)  # type: ignore[reportPrivateImportUsage]
         return genai
 
     def _build_generation_config(self, req: ProviderRequest) -> dict[str, Any]:
@@ -207,6 +208,12 @@ class GeminiProvider(BaseProvider):
         input_tokens = 0
         output_tokens = 0
         stop_reason: StopReason = "end_turn"
+        # Cross-chunk dedup: Gemini sends complete function calls (name + full
+        # args), not incremental arg deltas. If the SDK re-surfaces the same
+        # accumulated call in a later chunk, emitting it twice would make the
+        # loop assemble two ToolUseBlocks and the tool execute twice. Key by
+        # (name, canonical-json args) and emit each distinct call at most once.
+        seen_tool_calls: set[str] = set()
 
         try:
             async for chunk in model.generate_content_async(contents, stream=True):
@@ -241,9 +248,14 @@ class GeminiProvider(BaseProvider):
 
                     if fc is not None and getattr(fc, "name", None):
                         # Tool call part
-                        tool_id = f"gemini_{uuid.uuid4().hex[:8]}"
                         tool_name = fc.name
                         tool_input = dict(fc.args) if fc.args else {}
+                        dedup_key = json.dumps([tool_name, tool_input], sort_keys=True, default=str)
+                        if dedup_key in seen_tool_calls:
+                            stop_reason = "tool_use"
+                            continue
+                        seen_tool_calls.add(dedup_key)
+                        tool_id = f"gemini_{uuid.uuid4().hex[:8]}"
                         yield {
                             "type": "tool_use_start",
                             "id": tool_id,

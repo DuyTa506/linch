@@ -268,9 +268,11 @@ class OpenAIResponsesClient:
                     "Install linch with its runtime dependencies."
                 ) from exc
             self.client = AsyncOpenAI(**self._kwargs)
+        assert self.client is not None
+        client = self.client
         payload = build_payload(req, self.reasoning)
         try:
-            stream = await self.client.responses.create(**payload)
+            stream = await client.responses.create(**payload)
             async for event in stream:
                 yield event.model_dump() if hasattr(event, "model_dump") else dict(event)
         except Exception as exc:

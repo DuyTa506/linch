@@ -30,13 +30,6 @@ from ..storage._pg import _import_asyncpg
 from .keyword import _metadata_matches, _tokenize
 from .types import MemoryItem, MemorySearchResult
 
-# Rows fetched from DB before Python-side scoring.  Keyword search requires
-# in-process filtering, so we over-fetch then trim to `limit`.  Keep the cap
-# generous enough to find the best matches but bounded to avoid full-table
-# scans over the network.  Add a GIN/tsvector index and push the WHERE clause
-# to Postgres when the store grows beyond a few thousand items.
-_SEARCH_PREFETCH = 1000
-
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS memories (
     namespace   TEXT NOT NULL,
@@ -142,18 +135,20 @@ class PostgresMemoryStore:
             return []
 
         pool = await self._ensure()
-        cap = max(_SEARCH_PREFETCH, limit * 20)
+        # Fetch ALL candidate rows for the namespace and keyword-score in Python,
+        # mirroring SqliteMemoryStore.search / _fetch_all.  A recency-capped
+        # prefetch (ORDER BY updated_at DESC LIMIT cap) would silently exclude an
+        # old-but-best-matching row once a namespace exceeds the cap, diverging
+        # from the SQLite backend.  For large namespaces, add a GIN/tsvector
+        # index and push a relevance WHERE clause to Postgres — but never cap by
+        # recency before scoring.
         async with pool.acquire() as conn:
             if namespace is None:
-                rows = await conn.fetch(
-                    "SELECT * FROM memories ORDER BY updated_at DESC LIMIT $1",
-                    cap,
-                )
+                rows = await conn.fetch("SELECT * FROM memories")
             else:
                 rows = await conn.fetch(
-                    "SELECT * FROM memories WHERE namespace = $1 ORDER BY updated_at DESC LIMIT $2",
+                    "SELECT * FROM memories WHERE namespace = $1",
                     namespace or "",
-                    cap,
                 )
 
         results: list[MemorySearchResult] = []

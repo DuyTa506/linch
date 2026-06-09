@@ -19,6 +19,7 @@ The tier marker lives in ``MemoryItem.metadata`` because ``MemoryItem`` is
 from __future__ import annotations
 
 import asyncio
+import inspect
 from typing import Any
 
 from .store import MemoryStore
@@ -39,8 +40,14 @@ class TieredMemoryStore:
         working:     Sub-store for the working (current-task) tier.
         episodic:    Sub-store for the episodic (event-log) tier.
         semantic:    Sub-store for the semantic (long-term facts) tier.
-        tier_limits: Optional per-tier search-limit overrides.  When absent the
-            global ``limit`` passed to ``search()`` is used for every tier.
+        tier_limits: Optional per-tier search-limit overrides.  This is a HARD
+            per-tier cap applied *before* the global merge: each tier is asked
+            for at most ``tier_limits[tier]`` results, so a small per-tier limit
+            can exclude globally higher-scoring items in that tier from the
+            final ranking.  Leave it unset (the default) for a pure global
+            top-N — when absent, every tier is queried with the full global
+            ``limit`` passed to ``search()``, so the global merge sees all
+            candidates and no item is dropped pre-merge.
     """
 
     def __init__(
@@ -57,6 +64,9 @@ class TieredMemoryStore:
             "semantic": semantic,
         }
         self._tier_limits: dict[str, int] = tier_limits or {}
+        # Cache of each sub-store's accepted search kwargs, computed once per tier.
+        # ``None`` names means "forward everything" (var-kwargs or unintrospectable).
+        self._search_plans: dict[str, set[str] | None] = {}
 
     # ------------------------------------------------------------------
     # MemoryStore protocol
@@ -95,12 +105,13 @@ class TieredMemoryStore:
 
         tier_results: list[list[MemorySearchResult]] = await asyncio.gather(
             *[
-                self._stores[tier].search(
+                self._search_tier(
+                    tier,
                     query,
                     limit=self._tier_limits.get(tier, limit),
                     namespace=namespace,
                     metadata_filter=metadata_filter,
-                    **kwargs,
+                    extra_kwargs=kwargs,
                 )
                 for tier in _TIERS
             ]
@@ -124,3 +135,49 @@ class TieredMemoryStore:
         merged = list(seen.values())
         merged.sort(key=lambda r: (r.score or 0.0, r.item.id), reverse=True)
         return merged[:limit]
+
+    async def _search_tier(
+        self,
+        tier: str,
+        query: str,
+        *,
+        limit: int,
+        namespace: str | None,
+        metadata_filter: dict[str, Any] | None,
+        extra_kwargs: dict[str, Any],
+    ) -> list[MemorySearchResult]:
+        search = self._stores[tier].search
+        kwargs: dict[str, Any] = {
+            "limit": limit,
+            "namespace": namespace,
+            "metadata_filter": metadata_filter,
+            **extra_kwargs,
+        }
+        accepted = self._search_param_names(tier, search)
+        if accepted is None:
+            # Sub-store accepts **kwargs (or its signature is unintrospectable):
+            # forward everything.
+            return await search(query, **kwargs)
+        filtered = {key: value for key, value in kwargs.items() if key in accepted}
+        return await search(query, **filtered)
+
+    def _search_param_names(self, tier: str, search: Any) -> set[str] | None:
+        """Return the set of keyword params *search* accepts, or ``None`` to forward all.
+
+        The result is memoised per tier so ``inspect.signature`` runs at most once
+        per sub-store rather than on every search call.
+        """
+        if tier in self._search_plans:
+            return self._search_plans[tier]
+        accepted: set[str] | None
+        try:
+            params = inspect.signature(search).parameters
+        except (TypeError, ValueError):
+            accepted = None
+        else:
+            if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+                accepted = None
+            else:
+                accepted = set(params)
+        self._search_plans[tier] = accepted
+        return accepted

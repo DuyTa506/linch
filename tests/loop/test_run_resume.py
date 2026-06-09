@@ -50,6 +50,47 @@ class ScriptProvider:
         yield {"type": "message_end", "stop_reason": "tool_use", "usage": Usage()}
 
 
+class PricedScriptProvider:
+    """Like ScriptProvider but emits non-zero usage so cost accumulates.
+
+    First call (tool-use turn) and the final text turn each report usage, so a
+    priced model accrues a non-zero running cost across the whole run.
+    """
+
+    id = "priced-script"
+
+    def __init__(self, *, fail_on_call: bool = False) -> None:
+        self.fail_on_call = fail_on_call
+        self.calls = 0
+
+    def context_window(self, model: str) -> int:
+        return 100_000
+
+    async def stream(self, req) -> AsyncIterator[dict[str, object]]:
+        from linch.types import Usage
+
+        if self.fail_on_call:
+            raise AssertionError("provider should not be called")
+        self.calls += 1
+        usage = Usage(input_tokens=1000, output_tokens=500)
+        yield {"type": "message_start", "model": req.model}
+
+        if _last_message_is_tool_result(req.messages):
+            yield {"type": "text_delta", "text": "done"}
+            yield {"type": "message_end", "stop_reason": "end_turn", "usage": usage}
+            return
+
+        tool_id = "call-1"
+        yield {"type": "tool_use_start", "id": tool_id, "name": "A"}
+        yield {
+            "type": "tool_use_input_delta",
+            "id": tool_id,
+            "json_delta": json.dumps({"value": "A"}),
+        }
+        yield {"type": "tool_use_end", "id": tool_id}
+        yield {"type": "message_end", "stop_reason": "tool_use", "usage": usage}
+
+
 class CountingTool:
     description = "Counts executions."
     input_schema = {"type": "object", "properties": {"value": {"type": "string"}}}
@@ -506,6 +547,172 @@ async def test_loop_abort_cancels_background_worker_tasks() -> None:
     assert task.cancelled() or task.done(), "Background task should be cancelled on abort"
 
 
+async def test_tool_start_checkpoint_records_interrupted_placeholder() -> None:
+    session_store = _memory_session_store()
+    run_store = _memory_run_store()
+    counts: dict[str, int] = {}
+    agent = _agent(
+        model="gpt-5",
+        provider=ScriptProvider(tool_names=["A"]),
+        tools=_registry(counts, "A"),
+        permissions={"mode": "skip-dangerous"},
+        session_store=session_store,
+        run_store=run_store,
+        cwd=".",
+    )
+    session = await agent.session(id="s1")
+    run_id, _events = await _run_until(
+        session,
+        "use tool",
+        lambda event: event.type == "tool_call_start",
+    )
+
+    run = await run_store.load_run(run_id)
+    assert run is not None
+    assert run.checkpoint is not None
+    assert run.checkpoint.phase == "tool_executing"
+    placeholder = run.checkpoint.completed_tool_results["call-1"]
+    assert placeholder.is_error is True
+    assert "interrupted before a result" in str(placeholder.content)
+
+    restarted = _agent(
+        model="gpt-5",
+        provider=ScriptProvider(),
+        tools=_registry(counts, "A"),
+        permissions={"mode": "skip-dangerous"},
+        session_store=session_store,
+        run_store=run_store,
+        cwd=".",
+    )
+    resumed = await restarted.session(id="s1")
+    resume_events = await _collect(resumed.resume(run_id))
+
+    assert counts == {}
+    assert any(event.type == "user" for event in resume_events)
+    assert resume_events[-1].type == "result"
+
+
+async def test_resume_marks_checkpointed_running_background_workers_killed() -> None:
+    from linch.run_store import RunCheckpoint
+    from linch.types import Usage
+
+    session_store = _memory_session_store()
+    run_store = _memory_run_store()
+    run = await run_store.create_run("s1", id="run-bg")
+    await run_store.save_checkpoint(
+        run.id,
+        RunCheckpoint(
+            phase="turn_complete",
+            prompt="continue",
+            turn_index=0,
+            total_usage=Usage(),
+            background_workers={
+                "worker-1": {
+                    "worker_id": "worker-1",
+                    "display_name": "Researcher",
+                    "status": "running",
+                }
+            },
+        ),
+    )
+    agent = _agent(
+        model="gpt-5",
+        provider=ScriptProvider(),
+        session_store=session_store,
+        run_store=run_store,
+        cwd=".",
+    )
+    session = await agent.session(id="s1")
+
+    events = await _collect(session.resume(run.id))
+
+    bg_events = [event for event in events if event.type == "background_worker"]
+    user_events = [event for event in events if event.type == "user"]
+    assert bg_events[0].status == "killed"
+    assert "worker-1" in user_events[0].message.content[0].text
+    loaded = await run_store.load_run(run.id)
+    assert loaded is not None
+    assert loaded.checkpoint is not None
+    assert loaded.checkpoint.background_workers["worker-1"]["status"] == "killed"
+
+
+async def test_run_loop_aclose_at_worker_yield_runs_observer_finally() -> None:
+    """Closing _run_loop_impl at the early crashed-worker yield must still run the
+    finally block (observer on_run_end). Regression for the yield-outside-try bug:
+    if the yield sits before `try:`, GeneratorExit skips finally and spans leak.
+    """
+    from linch.loop import _run_loop_impl
+    from linch.observability.protocol import BaseObserver
+    from linch.run_store import RunCheckpoint
+    from linch.session import RunOptions
+    from linch.types import Usage
+
+    class _RunSpanObserver(BaseObserver):
+        def __init__(self) -> None:
+            self.started = False
+            self.ended = False
+
+        def on_run_start(self, info: Any) -> None:
+            self.started = True
+
+        def on_run_end(self, info: Any) -> None:
+            self.ended = True
+
+    observer = _RunSpanObserver()
+    session_store = _memory_session_store()
+    run_store = _memory_run_store()
+    run = await run_store.create_run("s1", id="run-bg-close")
+    await run_store.save_checkpoint(
+        run.id,
+        RunCheckpoint(
+            phase="turn_complete",
+            prompt="continue",
+            turn_index=0,
+            total_usage=Usage(),
+            background_workers={
+                "worker-1": {
+                    "worker_id": "worker-1",
+                    "display_name": "Researcher",
+                    "status": "running",
+                }
+            },
+        ),
+    )
+    agent = _agent(
+        model="gpt-5",
+        provider=ScriptProvider(),
+        session_store=session_store,
+        run_store=run_store,
+        cwd=".",
+        observers=[observer],
+    )
+    session = await agent.session(id="s1")
+    run_record = await run_store.load_run(run.id)
+    assert run_record is not None and run_record.checkpoint is not None
+
+    # Drive _run_loop_impl directly so aclose() hits its own yield (a direct
+    # aclose runs the generator's finally synchronously; nested async-for
+    # wrappers defer it to the async-gen finalizer instead).
+    agen = _run_loop_impl(
+        session,
+        run_record.checkpoint.prompt,
+        RunOptions(),
+        run_id=run_record.id,
+        run_record=run_record,
+        resume_checkpoint=run_record.checkpoint,
+    )
+    saw_worker = False
+    async for event in agen:
+        if event.type == "background_worker":
+            saw_worker = True
+            break
+    await agen.aclose()
+
+    assert saw_worker
+    assert observer.started, "on_run_start should have fired"
+    assert observer.ended, "on_run_end must fire from finally even when closed at the early yield"
+
+
 # ── End Phase 2 tests ────────────────────────────────────────────────────────
 
 
@@ -597,10 +804,12 @@ async def test_permission_decision_persists_and_resume_skips_callback() -> None:
 
     Scenario:
       1. Run until ToolCallStartEvent — resolve() fired (callback_calls=1) and
-         the "tool_executing" checkpoint was saved with the allow decision.
+         the "tool_executing" checkpoint was saved with the allow decision AND an
+         interrupted-before-result placeholder in completed_tool_results.
       2. Restart (fresh Agent, same stores). Resume.
-      3. Seam A finds stored allow → no PermissionRequestEvent, callback NOT called
-         again. Tool executes once on resume (counts["WriteThing"]=1).
+      3. WriteThing is already in completed_tool_results (interrupted placeholder),
+         so it is NOT in missing_tool_blocks — no re-execution, no PermissionRequestEvent,
+         callback NOT called again. counts stays empty.
     """
     session_store = _memory_session_store()
     run_store = _memory_run_store()
@@ -638,12 +847,13 @@ async def test_permission_decision_persists_and_resume_skips_callback() -> None:
     )
     resumed = await restarted.session(id="s1")
     resume_events = await _collect(resumed.resume(run_id))
-    # No permission_request should be re-emitted — decision was replayed from checkpoint.
+    # No permission_request should be re-emitted — tool was already in completed_tool_results.
     assert not any(e.type == "permission_request" for e in resume_events)
     # Callback was NOT called again — still 1.
     assert len(callback_calls) == 1
-    # Tool executed once on resume (not on first run — we stopped before completion).
-    assert counts == {"WriteThing": 1}
+    # Tool did NOT re-run: the interrupted-before-result placeholder was used instead.
+    # This is the correct behavior — non-idempotent tools must not re-execute on resume.
+    assert counts == {}
 
 
 async def test_persisted_deny_decision_replays_on_resume() -> None:
@@ -760,3 +970,57 @@ async def test_permission_decision_cleared_each_turn() -> None:
         f"expected callback_calls==2 (once per turn), got {len(callback_calls)}"
     )
     assert counts == {"WriteThing": 2}
+
+
+# ── Cost-telemetry resume: running_cost must cover the WHOLE run ─────────────
+
+
+async def test_resume_total_cost_reflects_whole_run_not_just_post_resume() -> None:
+    """After crash+resume the final ResultEvent.total_cost_usd must cover the
+    pre-crash turn too, consistent with the whole-run total_usage.
+
+    RED before the fix: running_cost is reset to None on resume and never
+    restored, so the final figure reflects only the post-resume turn(s) and is
+    strictly less than cost_usd(total_usage, model).
+    """
+    from linch.pricing import cost_usd
+
+    model = "claude-opus-4-8"  # priced model
+
+    session_store = _memory_session_store()
+    run_store = _memory_run_store()
+    counts: dict[str, int] = {}
+
+    agent = _agent(
+        model=model,
+        provider=PricedScriptProvider(),
+        tools=_registry(counts, "A"),
+        permissions={"mode": "skip-dangerous"},
+        session_store=session_store,
+        run_store=run_store,
+        cwd=".",
+    )
+    session = await agent.session(id="s1")
+    # Stop after the first (priced) assistant tool-use turn — cost has accrued
+    # and a checkpoint is saved, then we "crash".
+    run_id, _ = await _run_until(session, "use tool", lambda event: event.type == "assistant")
+
+    restarted = _agent(
+        model=model,
+        provider=PricedScriptProvider(),
+        tools=_registry(counts, "A"),
+        permissions={"mode": "skip-dangerous"},
+        session_store=session_store,
+        run_store=run_store,
+        cwd=".",
+    )
+    resumed = await restarted.session(id="s1")
+    events = await _collect(resumed.resume(run_id))
+
+    result = events[-1]
+    assert result.type == "result"
+    expected = cost_usd(result.total_usage, model)
+    assert expected is not None and expected > 0
+    assert result.total_cost_usd is not None
+    # Whole-run cost must match the whole-run usage — not just post-resume turns.
+    assert result.total_cost_usd == expected

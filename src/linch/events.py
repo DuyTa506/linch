@@ -353,6 +353,8 @@ def tool_result_to_dict(result: ToolResult) -> dict[str, Any]:
         "duration_ms": result.duration_ms,
         "truncated": result.truncated,
     }
+    if result.recovery_hint:
+        out["recovery_hint"] = result.recovery_hint
     if result.attachments and all(_is_json_serializable(item) for item in result.attachments):
         out["attachments"] = result.attachments
     return out
@@ -375,6 +377,7 @@ def tool_result_from_dict(raw: dict[str, Any]) -> ToolResult:
         attachments=attachments,
         duration_ms=int(raw.get("duration_ms", 0) or 0),
         truncated=bool(raw.get("truncated", False)),
+        recovery_hint=str(raw.get("recovery_hint", "")),
     )
 
 

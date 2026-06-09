@@ -11,6 +11,7 @@ so this single adapter reaches any of them — no vendor-specific code in core.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from ..errors import ProviderError
@@ -24,6 +25,8 @@ from .protocol import (
     ToolResultInfo,
     TurnInfo,
 )
+
+_log = logging.getLogger(__name__)
 
 
 class OpenTelemetryObserver(BaseObserver):
@@ -117,6 +120,19 @@ class OpenTelemetryObserver(BaseObserver):
             child = self._turn_spans.pop(key, None)
             if child:
                 child.end()
+            # An aborted turn never fires on_turn_end, so its context token would
+            # leak.  Detach it here; swallow errors so one failure doesn't block
+            # cleanup of the remaining leftover turns.
+            turn_token = self._turn_ctx_tokens.pop(key, None)
+            if turn_token is not None:
+                try:
+                    _ctx.detach(turn_token)
+                except Exception as exc:
+                    _log.debug(
+                        "otel: failed to detach leftover turn context token %r: %s",
+                        turn_token,
+                        exc,
+                    )
         for key in [k for k in list(self._provider_spans) if k[0] == info.run_id]:
             child = self._provider_spans.pop(key, None)
             if child:

@@ -195,6 +195,46 @@ async def test_tiered_search_respects_global_limit() -> None:
 
 
 @pytest.mark.asyncio
+async def test_tiered_limits_hard_cap_can_exclude_global_top_n() -> None:
+    """A small tier_limit is a HARD per-tier cap applied before the global merge.
+
+    Pins the documented semantics: with tier_limits set small for one tier, a
+    globally higher-scoring item in that tier is dropped pre-merge; the default
+    (no tier_limits) returns the global top-N including that item.
+    """
+    from linch.memory import InMemoryKeywordMemoryStore, MemoryItem
+    from linch.memory.tiered import TieredMemoryStore
+
+    def _stores() -> dict[str, InMemoryKeywordMemoryStore]:
+        return {tier: InMemoryKeywordMemoryStore() for tier in ("working", "episodic", "semantic")}
+
+    # The working tier holds the two best matches (score 1.0 and 0.66). With a
+    # working-tier cap of 1, only the single best survives the tier query, so the
+    # second-best (still globally higher than other tiers' hits) is dropped.
+    async def _seed(store: TieredMemoryStore) -> None:
+        await store.upsert(
+            [
+                MemoryItem(id="w_best", content="alpha beta gamma", metadata={"tier": "working"}),
+                MemoryItem(id="w_second", content="alpha beta", metadata={"tier": "working"}),
+                MemoryItem(id="e1", content="alpha", metadata={"tier": "episodic"}),
+            ]
+        )
+
+    # Hard cap path: working tier limited to 1 → w_second excluded pre-merge.
+    capped = TieredMemoryStore(**_stores(), tier_limits={"working": 1})
+    await _seed(capped)
+    capped_ids = [hit.item.id for hit in await capped.search("alpha beta gamma", limit=10)]
+    assert "w_best" in capped_ids
+    assert "w_second" not in capped_ids, "hard per-tier cap should drop the second working hit"
+
+    # Default path: no tier_limits → global top-N includes w_second.
+    default = TieredMemoryStore(**_stores())
+    await _seed(default)
+    default_ids = [hit.item.id for hit in await default.search("alpha beta gamma", limit=10)]
+    assert {"w_best", "w_second"} <= set(default_ids)
+
+
+@pytest.mark.asyncio
 async def test_tiered_search_limit_zero_returns_empty() -> None:
     """limit=0 returns empty list (matches InMemoryKeywordMemoryStore behaviour)."""
     from linch.memory import InMemoryKeywordMemoryStore, MemoryItem
@@ -234,6 +274,40 @@ async def test_tiered_search_stamps_source_tier() -> None:
     tier_by_id = {hit.item.id: hit.metadata.get("tier") for hit in hits}
     assert tier_by_id["w1"] == "working"
     assert tier_by_id["s1"] == "semantic"
+
+
+@pytest.mark.asyncio
+async def test_memory_search_tool_preserves_tier_metadata() -> None:
+    """SearchMemory exposes tier counts and citation tier metadata for reports."""
+    from linch.memory import InMemoryKeywordMemoryStore, MemoryItem, MemorySearchTool
+    from linch.memory.tiered import TieredMemoryStore
+    from linch.tools import ToolContext
+
+    store = TieredMemoryStore(
+        working=InMemoryKeywordMemoryStore(),
+        episodic=InMemoryKeywordMemoryStore(),
+        semantic=InMemoryKeywordMemoryStore(),
+    )
+    await store.upsert(
+        [
+            MemoryItem(
+                id="s1",
+                content="pto rollover policy",
+                metadata={"tier": "semantic"},
+                namespace="tenant-a",
+            )
+        ]
+    )
+
+    tool = MemorySearchTool(store)
+    result = await tool.execute(
+        {"query": "pto rollover", "limit": 5, "namespace": "tenant-a"},
+        ToolContext(cwd=".", session_id="s", run_id="r", session_store=None),
+    )
+
+    assert result.metadata["result_ids"] == ["s1"]
+    assert result.metadata["tier_counts"] == {"semantic": 1}
+    assert result.citations[0].metadata["tier"] == "semantic"
 
 
 @pytest.mark.asyncio
@@ -354,6 +428,54 @@ async def test_tiered_search_does_not_deduplicate_across_namespaces() -> None:
     keys = {(hit.item.namespace, hit.item.id) for hit in hits}
 
     assert keys == {("tenant-a", "same"), ("tenant-b", "same")}
+
+
+@pytest.mark.asyncio
+async def test_tiered_search_filters_extra_kwargs_per_store_signature() -> None:
+    """Extra search kwargs are only sent to stores that declare support for them."""
+    from linch.memory import InMemoryKeywordMemoryStore, MemoryItem, MemorySearchResult
+    from linch.memory.tiered import TieredMemoryStore
+
+    class ExtraKwStore:
+        def __init__(self) -> None:
+            self.include_score_seen = False
+
+        async def upsert(self, items, **kwargs) -> None:
+            pass
+
+        async def search(self, query: str, *, limit: int = 5, include_score: bool = False):
+            self.include_score_seen = include_score
+            return [
+                MemorySearchResult(
+                    item=MemoryItem(id="extra", content=query),
+                    score=1.0,
+                )
+            ]
+
+    class StrictStore:
+        async def upsert(self, items) -> None:
+            pass
+
+        async def search(self, query: str, *, limit: int = 5):
+            return [
+                MemorySearchResult(
+                    item=MemoryItem(id="strict", content=query),
+                    score=0.5,
+                )
+            ]
+
+    strict = StrictStore()
+    extra = ExtraKwStore()
+    store = TieredMemoryStore(
+        working=extra,
+        episodic=strict,
+        semantic=InMemoryKeywordMemoryStore(),
+    )
+
+    hits = await store.search("alpha", limit=10, include_score=True)
+
+    assert extra.include_score_seen is True
+    assert {hit.item.id for hit in hits} >= {"extra", "strict"}
 
 
 # ---------------------------------------------------------------------------
@@ -501,3 +623,73 @@ def test_grouped_memory_context_unknown_tier_renders_under_working() -> None:
 
     assert "Retrieved memory (working):" in content
     assert "important memory" in content
+
+
+# ---------------------------------------------------------------------------
+# Postgres keyword-search recency-cap regression (Issue 1)
+#
+# Requires a live Postgres DB; skipped without one — same guard as
+# tests/storage/test_postgres.py.  This test exercises the REAL query path
+# (no faked DB).  Locally it SKIPS unless AGENT_KIT_TEST_PG_DSN is set:
+#     pip install 'linch[postgres]'
+#     AGENT_KIT_TEST_PG_DSN=postgresql://user:pw@localhost/agentkit_test \
+#         pytest tests/storage/test_tiered_memory.py -v
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pg_search_returns_old_best_match_beyond_recency_cap() -> None:
+    """An old-but-best-matching row is returned even past the former recency cap.
+
+    Regression for Issue 1: the prior implementation pre-fetched only the most
+    recently-updated ``max(1000, limit*20)`` rows before Python keyword scoring,
+    so an old best match was excluded once the namespace exceeded the cap.  The
+    fix scans all candidate rows (like SqliteMemoryStore), so the old match is
+    found regardless of recency.
+
+    Skipped unless asyncpg + a live DB (``AGENT_KIT_TEST_PG_DSN``) are
+    available — same guard as tests/storage/test_postgres.py.  Exercises the
+    REAL query path (no faked DB).
+    """
+    import os
+
+    pytest.importorskip("asyncpg", reason="asyncpg not installed")
+    dsn = os.environ.get("AGENT_KIT_TEST_PG_DSN", "")
+    if not dsn:
+        pytest.skip("AGENT_KIT_TEST_PG_DSN not set")
+
+    from linch.memory.postgres import PostgresMemoryStore
+    from linch.memory.types import MemoryItem
+
+    ns = "pg-recency-cap-test"
+    store = PostgresMemoryStore(dsn)
+    try:
+        # Seed one OLD best-matching row first (its updated_at is earliest),
+        # then flood the namespace with > cap (max(1000, limit*20)) filler rows
+        # that do NOT match the query, so the best match sorts to the bottom by
+        # recency and would be excluded by any recency-capped prefetch.
+        await store.upsert(
+            [
+                MemoryItem(
+                    id="old-best",
+                    content="quokka xylophone zephyr",
+                    namespace=ns,
+                )
+            ]
+        )
+        filler = [
+            MemoryItem(id=f"filler-{i}", content="unrelated filler text", namespace=ns)
+            for i in range(1100)
+        ]
+        await store.upsert(filler)
+
+        results = await store.search("quokka xylophone zephyr", namespace=ns, limit=5)
+        ids = [r.item.id for r in results]
+        assert "old-best" in ids, "old best-matching row must survive past the recency cap"
+        assert ids[0] == "old-best"
+    finally:
+        # Clean up the namespace so reruns stay deterministic.
+        pool = await store._ensure()
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM memories WHERE namespace = $1", ns)
+        await store.close()

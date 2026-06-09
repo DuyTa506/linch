@@ -4,11 +4,11 @@ Run:
     OPENAI_API_KEY=sk-... python examples/01_custom_tools.py
 
 Demonstrates:
-  1. Read-only tool           — parallel=True, no side effects
-  2. Write tool               — parallel=False, mutates state
-  3. Exec tool                — scope="exec", runs external processes
-  4. Tool with validation     — raises ValueError on bad input
-  5. Tool using ctx.deps      — shares a Python object across all calls
+  1. Read-only function tool  — @tool, parallel=True, no side effects
+  2. Write function tool      — @tool, parallel=False, mutates state
+  3. Exec function tool       — @tool, scope="exec", runs external processes
+  4. Tool using ctx.deps      — shares a Python object across all calls
+  5. Validation-heavy class   — explicit duck-typed Tool protocol
 
 Each pattern is wired into a standalone agent so you can pick the snippet
 you need and paste it into your own project.
@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import os
 
-from linch import Agent
+from linch import Agent, tool
 from linch.config import FeatureFlags, SystemPromptConfig
 from linch.sessions import InMemorySessionStore
 from linch.tools.base import ToolContext, ToolResult
@@ -29,92 +29,60 @@ API_KEY = os.environ.get("OPENAI_API_KEY", "")
 MODEL = "gpt-5-nano-2025-08-07"
 
 
-# ── Pattern 1: Read-only, parallel-safe tool ─────────────────────────────────
+# ── Pattern 1: Read-only, parallel-safe function tool ────────────────────────
 #
 # Good for: web search, KB lookup, database SELECT, API fetch.
 # parallel=True means Linch will run this concurrently with other
 # parallel-safe tools in the same turn — no lock needed.
 
 
-class WeatherTool:
-    name = "get_weather"
-    description = "Return the current weather for a city."
-    input_schema = {
+@tool(
+    description="Return the current weather for a city.",
+    input_schema={
         "type": "object",
         "properties": {"city": {"type": "string", "description": "City name, e.g. 'Tokyo'"}},
         "required": ["city"],
-    }
-    scope = "read"
-    parallel = True  # safe to run concurrently
-
-    def validate(self, raw: dict) -> dict:
-        if not raw.get("city"):
-            raise ValueError("city is required")
-        return {"city": str(raw["city"])}
-
-    async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
-        # In production, call a real weather API here.
-        # ctx.signal is an AbortContext — check it for cancellation in long calls.
-        city = input["city"]
-        fake_data = {"Tokyo": "22°C, partly cloudy", "Paris": "18°C, sunny"}
-        result = fake_data.get(city, f"No data for {city}")
-        return ToolResult(content=result, summary=f"weather({city})")
-
-    def summarize(self, input: dict) -> str:
-        return f"get_weather({input.get('city', '?')})"
+    },
+    scope="read",
+    parallel=True,
+    summary=lambda input: f"get_weather({input.get('city', '?')})",
+)
+async def get_weather(city: str, ctx: ToolContext) -> str:
+    # In production, call a real weather API here.
+    # ctx.signal is an AbortContext — check it for cancellation in long calls.
+    fake_data = {"Tokyo": "22°C, partly cloudy", "Paris": "18°C, sunny"}
+    return fake_data.get(city, f"No data for {city}")
 
 
-# ── Pattern 2: Write tool (mutates state) ────────────────────────────────────
+# ── Pattern 2: Write function tool (mutates state) ───────────────────────────
 #
 # Good for: saving to DB, updating a file, posting to an API.
 # parallel=False ensures this runs serially — never concurrently.
 
 
-class SaveNoteTool:
-    name = "save_note"
-    description = "Save a note to the in-memory notebook."
-    input_schema = {
-        "type": "object",
-        "properties": {
-            "title": {"type": "string"},
-            "content": {"type": "string"},
-        },
-        "required": ["title", "content"],
-    }
-    scope = "write"
-    parallel = False  # writes must be serial
-
-    def __init__(self, notebook: dict[str, str]) -> None:
-        # State lives in the passed-in dict — shared across all calls.
-        self._notebook = notebook
-
-    def validate(self, raw: dict) -> dict:
-        if not raw.get("title"):
-            raise ValueError("title is required")
-        return raw
-
-    async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
-        self._notebook[input["title"]] = input["content"]
-        return ToolResult(
-            content=f"Saved '{input['title']}'.",
-            summary=f"save_note({input['title']})",
-        )
-
-    def summarize(self, input: dict) -> str:
-        return f"save_note({input.get('title', '?')})"
+@tool(
+    description="Save a note to the in-memory notebook.",
+    scope="write",
+    parallel=False,
+    summary=lambda input: f"save_note({input.get('title', '?')})",
+)
+async def save_note(title: str, content: str, ctx: ToolContext) -> str:
+    # State lives in ctx.deps["notebook"] so it can be swapped per agent/run.
+    notebook = ctx.deps["notebook"]
+    notebook[title] = content
+    return f"Saved '{title}'."
 
 
-# ── Pattern 3: Exec tool ────────────────────────────────────────────────────
+# ── Pattern 3: Exec function tool ────────────────────────────────────────────
 #
 # Good for: running CLI commands, spawning sub-processes.
 # scope="exec" signals to the permission engine that this is dangerous.
 # Pair with a permission rule or canUseTool callback in production.
 
 
-class RunCommandTool:
-    name = "run_command"
-    description = "Run a whitelisted shell command and return its output."
-    input_schema = {
+@tool(
+    description="Run a whitelisted shell command and return its output.",
+    input_schema={
         "type": "object",
         "properties": {
             "command": {
@@ -124,71 +92,54 @@ class RunCommandTool:
             }
         },
         "required": ["command"],
-    }
-    scope = "exec"
-    parallel = False
+    },
+    scope="exec",
+    parallel=False,
+    summary=lambda input: f"run_command({input.get('command', '?')})",
+)
+async def run_command(command: str) -> ToolResult:
+    import subprocess
 
-    def validate(self, raw: dict) -> dict:
-        allowed = {"date", "hostname", "uptime"}
-        if raw.get("command") not in allowed:
-            raise ValueError(f"command must be one of {allowed}")
-        return raw
-
-    async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
-        import subprocess
-
-        result = subprocess.run(
-            input["command"], shell=True, capture_output=True, text=True, timeout=5
-        )
-        output = result.stdout.strip() or result.stderr.strip() or "(no output)"
-        return ToolResult(content=output, summary=f"run({input['command']})")
-
-    def summarize(self, input: dict) -> str:
-        return f"run_command({input.get('command', '?')})"
+    allowed = {"date", "hostname", "uptime"}
+    if command not in allowed:
+        raise ValueError(f"command must be one of {allowed}")
+    # Run the blocking subprocess off the event loop so the agent loop is not stalled.
+    result = await asyncio.to_thread(
+        subprocess.run, [command], shell=False, capture_output=True, text=True, timeout=5
+    )
+    output = result.stdout.strip() or result.stderr.strip() or "(no output)"
+    return ToolResult(content=output, summary=f"run({command})")
 
 
-# ── Pattern 4: Tool with ctx.deps ───────────────────────────────────────────
+# ── Pattern 4: Function tool with ctx.deps ───────────────────────────────────
 #
 # Good for: when many tools need the same client (DB connection, vector store).
-# Pass deps=... to Agent, access via ctx.deps in execute().
+# Pass deps=... to Agent, access via ctx.deps in the function.
 # This avoids __init__ closures and makes per-run swapping easy.
 
 
-class SearchKbTool:
-    name = "search_kb"
-    description = "Search the knowledge base using the provided query."
-    input_schema = {
+@tool(
+    description="Search the knowledge base using the provided query.",
+    input_schema={
         "type": "object",
         "properties": {
             "query": {"type": "string"},
             "top_k": {"type": "integer", "default": 3, "minimum": 1, "maximum": 10},
         },
         "required": ["query"],
-    }
-    scope = "read"
-    parallel = True
-
-    def validate(self, raw: dict) -> dict:
-        if not raw.get("query"):
-            raise ValueError("query is required")
-        return {"query": str(raw["query"]), "top_k": int(raw.get("top_k", 3))}
-
-    async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
-        # ctx.deps is whatever was passed as Agent(deps=...) or RunOptions(deps=...)
-        kb = ctx.deps  # expected to be a dict or object with .search()
-        if isinstance(kb, dict):
-            # Simple dict KB: check if any key word appears in the query
-            hits = [v for k, v in kb.items() if k.lower() in input["query"].lower()]
-            content = "\n".join(hits[: input["top_k"]]) or "No results."
-        else:
-            content = await kb.search(input["query"], top_k=input["top_k"])
-        return ToolResult(
-            content=content,
-            summary=f"search_kb({input['query'][:40]})",
-        )
-
-    def summarize(self, input: dict) -> str:
-        return f"search_kb({input.get('query', '?')[:40]})"
+    },
+    scope="read",
+    parallel=True,
+    summary=lambda input: f"search_kb({input.get('query', '?')[:40]})",
+)
+async def search_kb(query: str, ctx: ToolContext, top_k: int = 3) -> str:
+    # ctx.deps is whatever was passed as Agent(deps=...) or RunOptions(deps=...)
+    kb = ctx.deps  # expected to be a dict or object with .search()
+    if isinstance(kb, dict):
+        # Simple dict KB: check if any key word appears in the query
+        hits = [v for k, v in kb.items() if k.lower() in query.lower()]
+        return "\n".join(hits[:top_k]) or "No results."
+    return await kb.search(query, top_k=top_k)
 
 
 # ── Pattern 5: Validation-heavy tool ────────────────────────────────────────
@@ -254,7 +205,7 @@ async def demo_read_tool() -> None:
             replace_defaults=True,
             append="You are a weather assistant. Always call get_weather before answering.",
         ),
-        tools=empty_tools(WeatherTool()),
+        tools=empty_tools(get_weather),
         features=FeatureFlags(skills=False, subagents=False, mcp=False),
         session_store=InMemorySessionStore(),
         permissions={"mode": "skip-dangerous"},
@@ -275,7 +226,8 @@ async def demo_write_tool() -> None:
             replace_defaults=True,
             append="You are a note-taking assistant. Use save_note to persist information.",
         ),
-        tools=empty_tools(SaveNoteTool(notebook)),
+        tools=empty_tools(save_note),
+        deps={"notebook": notebook},
         features=FeatureFlags(skills=False, subagents=False, mcp=False),
         session_store=InMemorySessionStore(),
         permissions={"mode": "skip-dangerous"},
@@ -288,8 +240,28 @@ async def demo_write_tool() -> None:
     print("Notebook contents:", notebook)
 
 
+async def demo_exec_tool() -> None:
+    print("\n── Demo 3: Exec tool (whitelisted command) ──")
+    agent = Agent(
+        model=MODEL,
+        openai_api_key=API_KEY,
+        system_prompt_config=SystemPromptConfig(
+            replace_defaults=True,
+            append="You are a shell assistant. Use run_command only with allowed commands.",
+        ),
+        tools=empty_tools(run_command),
+        features=FeatureFlags(skills=False, subagents=False, mcp=False),
+        session_store=InMemorySessionStore(),
+        permissions={"mode": "skip-dangerous"},
+    )
+    session = await agent.session()
+    async for event in session.run("What is today's date?"):
+        if event.type == "result":
+            print("Answer:", event.final_text)
+
+
 async def demo_deps_tool() -> None:
-    print("\n── Demo 3: Tool using ctx.deps ──")
+    print("\n── Demo 4: Tool using ctx.deps ──")
     # Fake knowledge base — in production this would be a vector store client
     kb = {
         "pricing": "Basic plan: $10/mo. Pro plan: $50/mo. Enterprise: contact sales.",
@@ -303,8 +275,8 @@ async def demo_deps_tool() -> None:
             replace_defaults=True,
             append="You are a product assistant. Use search_kb to look up info.",
         ),
-        tools=empty_tools(SearchKbTool()),
-        deps=kb,  # available as ctx.deps inside SearchKbTool.execute
+        tools=empty_tools(search_kb),
+        deps=kb,  # available as ctx.deps inside search_kb
         features=FeatureFlags(skills=False, subagents=False, mcp=False),
         session_store=InMemorySessionStore(),
         permissions={"mode": "skip-dangerous"},
@@ -316,7 +288,7 @@ async def demo_deps_tool() -> None:
 
 
 async def demo_calculator() -> None:
-    print("\n── Demo 4: Validation-heavy calculator tool ──")
+    print("\n── Demo 5: Validation-heavy calculator tool ──")
     agent = Agent(
         model=MODEL,
         openai_api_key=API_KEY,
@@ -341,6 +313,7 @@ async def main() -> None:
         return
     await demo_read_tool()
     await demo_write_tool()
+    await demo_exec_tool()
     await demo_deps_tool()
     await demo_calculator()
 

@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-import yaml
+import yaml  # type: ignore[reportMissingModuleSource]
 
 from .types import AgentDefinition, AgentFrontmatter, LoadAgentsResult, SkippedAgent
 

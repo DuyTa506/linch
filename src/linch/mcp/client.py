@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, cast
 
-from mcp import ClientSession
+from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamablehttp_client
 
@@ -66,9 +66,12 @@ async def connect_mcp_servers(
     for name, config in entries:
         try:
             transport, session = await _connect_one(name, config)
+            # Track the open transport/session BEFORE list_tools() so the
+            # except-cleanup loop below closes them even if list_tools() or
+            # tool-building raises (otherwise the subprocess/session leak).
+            opened.append(_OpenSession(transport, session))
             result = await session.list_tools()
             mcp_tools = [make_mcp_tool(name, t, _make_call_tool(session)) for t in result.tools]
-            opened.append(_OpenSession(transport, session))
             tools.extend(mcp_tools)
         except Exception as exc:
             for s in reversed(opened):
@@ -101,13 +104,25 @@ async def _connect_stdio(name: str, config: object) -> tuple[Any, ClientSession]
         )
     )
     read, write = await transport.__aenter__()
+    session_ctx: Any = None
     try:
         session_ctx = ClientSession(read, write)
         session = await session_ctx.__aenter__()
         await session.initialize()
         return (transport, session)
     except Exception:
-        await transport.__aexit__(None, None, None)
+        # Close the session first (if it was entered), then the transport,
+        # matching the close()/cleanup ordering. Swallow secondary cleanup
+        # errors so the original exception propagates.
+        if session_ctx is not None:
+            try:
+                await session_ctx.__aexit__(None, None, None)
+            except Exception:
+                pass
+        try:
+            await transport.__aexit__(None, None, None)
+        except Exception:
+            pass
         raise
 
 
@@ -116,13 +131,25 @@ async def _connect_http(name: str, config: object) -> tuple[Any, ClientSession]:
     headers = dict(getattr(config, "headers", None) or {})
     transport = streamablehttp_client(url, headers=headers)
     read, write, _ = await transport.__aenter__()
+    session_ctx: Any = None
     try:
         session_ctx = ClientSession(read, write)
         session = await session_ctx.__aenter__()
         await session.initialize()
         return (transport, session)
     except Exception:
-        await transport.__aexit__(None, None, None)
+        # Close the session first (if it was entered), then the transport,
+        # matching the close()/cleanup ordering. Swallow secondary cleanup
+        # errors so the original exception propagates.
+        if session_ctx is not None:
+            try:
+                await session_ctx.__aexit__(None, None, None)
+            except Exception:
+                pass
+        try:
+            await transport.__aexit__(None, None, None)
+        except Exception:
+            pass
         raise
 
 

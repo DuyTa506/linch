@@ -245,7 +245,7 @@ class BashTool:
         timeout = raw.get("timeout_ms", 120000)
         return {
             "command": require_str(raw, "command"),
-            "timeout_ms": min(_to_int(timeout, 120000), 1800000),
+            "timeout_ms": max(min(_to_int(timeout, 120000), 1800000), 1),
         }
 
     async def execute(self, input: dict[str, object], ctx: ToolContext) -> ToolResult:
@@ -352,7 +352,7 @@ def _matches_gitignore(rel_path: str, entries: list[str]) -> bool:
                 return True
             if rel_path == pattern[:-1]:
                 return True
-        elif rel_path == pattern or rel_path.startswith(pattern):
+        elif rel_path == pattern or rel_path.startswith(pattern + "/"):
             return True
         elif pattern.startswith("/") and rel_path == pattern[1:]:
             return True
@@ -391,7 +391,7 @@ async def _run_grep_via_rg_async(
     args: list[str],
     search_root: str,
     timeout: float = 120.0,
-) -> tuple[str, int]:
+) -> tuple[str, int, str]:
     rg_path = _RG_PATH
     if rg_path is None:
         raise ToolExecutionError("ripgrep is not available")
@@ -400,10 +400,14 @@ async def _run_grep_via_rg_async(
         *args,
         cwd=search_root,
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
     )
-    stdout, _ = await asyncio.wait_for(proc.communicate(), timeout)
-    return stdout.decode(errors="replace"), proc.returncode or 0
+    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout)
+    return (
+        stdout.decode(errors="replace"),
+        proc.returncode or 0,
+        stderr.decode(errors="replace"),
+    )
 
 
 def _grep_fallback(
@@ -655,10 +659,19 @@ class GrepTool:
                 args.extend(["--type", type_filter])
             args.extend([pattern, search_root])
             try:
-                raw_out, _ = await _run_grep_via_rg_async(args, search_root)
+                raw_out, rg_code, rg_err = await _run_grep_via_rg_async(args, search_root)
             except Exception as exc:
                 return ToolResult(
                     content=f"Grep error: {exc}",
+                    summary="grep error",
+                    is_error=True,
+                )
+            # rg exit codes: 0=matches, 1=no matches, 2=error (e.g. bad regex).
+            # Surface code 2 as an error instead of a silent "No matches found.".
+            if rg_code >= 2:
+                detail = rg_err.strip() or "ripgrep reported an error"
+                return ToolResult(
+                    content=f"Invalid regex / grep error: {detail}",
                     summary="grep error",
                     is_error=True,
                 )
@@ -696,6 +709,16 @@ class GrepTool:
 # ---------------------------------------------------------------------------
 
 _GLOB_CAP = 1000
+
+
+def _pattern_targets_dotfiles(pattern: str) -> bool:
+    """True when the glob pattern explicitly targets a dotfile/dotdir.
+
+    A pattern targets dotfiles when any of its path segments begins with a
+    literal ``.`` (e.g. ``.env*`` or ``.github/**/*.yml``). In that case the
+    default "hide dotfiles" behaviour must be suppressed.
+    """
+    return any(seg.startswith(".") for seg in pattern.split("/") if seg)
 
 
 class GlobTool:
@@ -757,17 +780,16 @@ class GlobTool:
                 is_error=True,
             )
 
+        # Only hide dotfiles when the user's pattern doesn't itself target them.
+        include_dotfiles = _pattern_targets_dotfiles(pattern)
+
         if _RG_PATH:
-            args = [
-                "--files",
-                "--glob",
-                pattern,
-                "--glob",
-                "!.*",
-                root,
-            ]
+            args = ["--files", "--glob", pattern]
+            if not include_dotfiles:
+                args.extend(["--glob", "!.*"])
+            args.append(root)
             try:
-                raw_out, _ = await _run_grep_via_rg_async(args, root)
+                raw_out, _, _ = await _run_grep_via_rg_async(args, root)
             except Exception as exc:
                 return ToolResult(
                     content=f"Glob error: {exc}",
@@ -780,7 +802,10 @@ class GlobTool:
                 entries = glob.glob(pattern, root_dir=root, recursive=True)
             except TypeError:
                 entries = glob.glob(pattern, root_dir=root)
-            files = sorted(p for p in entries if not p.startswith("."))
+            if include_dotfiles:
+                files = sorted(entries)
+            else:
+                files = sorted(p for p in entries if not p.startswith("."))
 
         if not files:
             return ToolResult(content="No matches found.", summary="no matches")

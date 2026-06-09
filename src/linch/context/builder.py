@@ -143,17 +143,24 @@ def _apply_context_budget_with_estimator(
     model: str,
     max_tokens: int,
 ) -> ContextBuildResult:
-    used = _estimate_context_tokens(system_blocks, messages, estimator, model)
+    system_used = _estimate_text("\n".join(block.text for block in system_blocks))
+    # Precompute each message's cost once (n estimator calls up front) so the
+    # trim loops can subtract incrementally instead of re-estimating the entire
+    # remaining list on every pop (which is O(n*k), quadratic in the worst case).
+    message_costs = [_estimate_one_message(message, estimator, model) for message in messages]
+    used = system_used + sum(message_costs)
 
     trimmed = result.budget.trimmed
     while messages and used > max_tokens:
         messages.pop(0)
-        used = _estimate_context_tokens(system_blocks, messages, estimator, model)
+        used -= message_costs.pop(0)
         trimmed = True
 
     while system_blocks and used > max_tokens:
+        used -= system_used
         system_blocks.pop(0)
-        used = _estimate_context_tokens(system_blocks, messages, estimator, model)
+        system_used = _estimate_text("\n".join(block.text for block in system_blocks))
+        used += system_used
         trimmed = True
 
     result.system_blocks = system_blocks
@@ -186,6 +193,15 @@ def _estimate_context_tokens(
         except Exception:
             pass
     return system_tokens + sum(_estimate_message(message) for message in messages)
+
+
+def _estimate_one_message(message: Message, estimator: Any, model: str) -> int:
+    if callable(estimator):
+        try:
+            return max(0, int(cast(Any, estimator([message], model))))
+        except Exception:
+            pass
+    return _estimate_message(message)
 
 
 def _estimate_message(message: Message) -> int:

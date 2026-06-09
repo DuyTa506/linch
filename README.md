@@ -56,9 +56,9 @@ linch is designed for application developers building agentic features such as:
 | Memory | Search/upsert tools, flat and tiered memory stores, persistent memory examples |
 | Filesystem | Virtual filesystem, automatic large-result offloading, disk/state/sqlite backends |
 | Safety | Permission engine, tool/path/bash rules, dangerous-action skipping |
-| Providers | OpenAI Responses, OpenAI Chat Completions, Anthropic, Gemini, DeepSeek, llama.cpp, pluggable providers |
+| Providers | OpenAI Responses, OpenAI Chat Completions, Anthropic, Gemini, llama.cpp, OpenAI-compatible endpoints, pluggable providers |
 | Extensibility | MCP, skills, subagents (fork/continue, background workers, coordinator mode), observers |
-| Outputs | Structured output schemas, citations, usage/cost events, metadata-rich tool results |
+| Outputs | Structured output schemas, citations, usage/cost events, metadata-rich tool results, run reports |
 
 ---
 
@@ -173,6 +173,26 @@ linch streams the loop as events instead of hiding execution behind a blocking f
 
 Tools are duck-typed Python objects. They can declare schemas, scopes, resources, timeouts, summaries, and execution behavior. The scheduler runs compatible tool calls in parallel while respecting resource constraints and permission rules.
 
+For simple tools, use `@tool`; it creates the same Tool-compatible object that
+the registry and scheduler already understand:
+
+```python
+from linch import Agent, ToolContext, tool
+from linch.sessions import InMemorySessionStore
+from linch.tools.registry import empty_tools
+
+@tool(description="Look up an internal document.")
+async def search_docs(query: str, ctx: ToolContext) -> str:
+    return await ctx.deps.search(query)
+
+agent = Agent(
+    model="gpt-5",
+    tools=empty_tools(search_docs),
+    deps=my_vector_store,
+    session_store=InMemorySessionStore(),
+)
+```
+
 ### ContextBuilder
 
 `ContextBuilder` lets you construct turn-specific context before the model runs. This is where RAG, document selection, budget control, and metadata-aware context assembly belong.
@@ -191,7 +211,7 @@ The permission engine controls dangerous actions at the runtime layer. You can d
 
 ### Providers
 
-linch separates the agent runtime from the model provider. Built-in providers include OpenAI Responses, OpenAI Chat Completions, Anthropic, Gemini, and llama.cpp — with full support for OpenAI-compatible endpoints like DeepSeek.
+linch separates the agent runtime from the model provider. Built-in providers include OpenAI Responses, OpenAI Chat Completions, Anthropic, Gemini, and llama.cpp. Use OpenAI Chat Completions with `base_url` for OpenAI-compatible endpoints like DeepSeek, and inspect known direct-provider models with `list_provider_models()`.
 
 ---
 
@@ -229,6 +249,7 @@ Examples are organized by subsystem under `examples/`.
 |---|---|
 | `core/tiny_agent.py` | Smallest possible agent |
 | `core/coding_agent.py` | SWE agent — full tool set, BashRule/PathRule safety fence, LoopGuard, multi-turn |
+| `core/policy_aware_execution.py` | Docker-backed Bash execution — permission rules plus opt-in runtime restrictions |
 | `core/reading_agent.py` | Read-only codebase Q&A — no write/edit/bash, custom reviewer persona |
 | `core/chat_agent.py` | Pure conversation agent — no tools, custom domain, structured output, ContextBuilder injection |
 | `core/custom_permissions.py` | All permission modes and rule types |
@@ -291,17 +312,17 @@ Examples are organized by subsystem under `examples/`.
 
 ## Public API
 
-- `linch`: `Agent`, `Session`, `create_deep_agent`, events (including `BackgroundWorkerEvent`), types, errors, `DetailedCompaction`, `RetryOptions`, `ToolTimeoutError`, `empty_tools`, `tools_from_defaults`
+- `linch`: `Agent`, `Session`, `create_deep_agent`, events (including `BackgroundWorkerEvent`), types, errors, `DetailedCompaction`, `RetryOptions`, `ToolTimeoutError`, `tool`, `FunctionTool`, `empty_tools`, `tools_from_defaults`, run reports, provider catalog helpers
 - `linch.config`: `FeatureFlags`, `SystemPromptConfig`, `SystemPromptSection`
 - `linch.context`: `ContextBuilder`, `ContextBuildResult`, `ContextBudget`
 - `linch.deep_agent`: `create_deep_agent`, `DEEP_AGENT_SYSTEM_PROMPT`, `COORDINATOR_SYSTEM_PROMPT`, `DEEP_AGENT_SUBAGENTS`
 - `linch.skills`: built-in and project `SKILL.md` workflows, including `verify`
 - `linch.memory`: `MemoryStore`, `MemoryItem`, `MemoryContextBuilder`, `MemorySearchTool`, `MemoryUpsertTool`, `TieredMemoryStore`, reference stores
-- `linch.evals`: `ScriptedProvider`, `EvalCase`, `run_eval`, built-in scorers
+- `linch.evals`: `ScriptedProvider`, `EvalCase`, `run_eval`, built-in scorers for text, tools, schema, cost, context, memory, and recovery
 - `linch.pricing`: `ModelPricing`, `cost_usd`
 - `linch.types`: `OutputSchema`, `ToolChoice`, `Message`, `ProviderRequest`
-- `linch.providers`: `OpenAIResponsesProvider`, `OpenAIChatCompletionsProvider`, `AnthropicProvider`, `GeminiProvider`, `LlamaCppProvider`
-- `linch.tools`: duck-typed tool protocol, `ResourceAccess`, `Citation`, `ToolResult`, `ToolRegistry`, built-in tools, `SubagentContinueTool`, `TaskStopTool`
+- `linch.providers`: `OpenAIResponsesProvider`, `OpenAIChatCompletionsProvider`, `AnthropicProvider`, `GeminiProvider`, `LlamaCppProvider`, `ProviderModelInfo`, `list_provider_models`, `get_provider_model_info`
+- `linch.tools`: `@tool`, `FunctionTool`, duck-typed tool protocol, `ResourceAccess`, `Citation`, `ToolResult`, `ToolRegistry`, built-in tools, `SubagentContinueTool`, `TaskStopTool`
 - `linch.subagents`: `WorkerHandle`, `RunSubagentArgs`, `ContinueSubagentArgs`, `RunSubagentResult`
 - `linch.sessions`: `InMemorySessionStore`, `SqliteSessionStore`
 - `linch.filesystem`: `FileBackend`, `StateFileBackend`, `DiskFileBackend`, `SqliteFileBackend`, `CompositeFileBackend`, `OffloadConfig`, `filesystem_tools`

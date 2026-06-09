@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import yaml
+import yaml  # type: ignore[reportMissingModuleSource]
 
 from .types import Skill, SkillFrontmatter, SkippedSkill
 
