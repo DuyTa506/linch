@@ -82,7 +82,7 @@ _install_fake_mcp()
 
 try:
     from linch.mcp import client as mcp_client
-except (ImportError, ModuleNotFoundError):  # pragma: no cover - optional dep absent
+except ModuleNotFoundError:  # pragma: no cover - optional dep absent
     pytest.skip("linch.mcp.client not importable", allow_module_level=True)
 
 

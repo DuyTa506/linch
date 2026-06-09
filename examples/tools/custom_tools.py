@@ -103,7 +103,10 @@ async def run_command(command: str) -> ToolResult:
     allowed = {"date", "hostname", "uptime"}
     if command not in allowed:
         raise ValueError(f"command must be one of {allowed}")
-    result = subprocess.run([command], shell=False, capture_output=True, text=True, timeout=5)
+    # Run the blocking subprocess off the event loop so the agent loop is not stalled.
+    result = await asyncio.to_thread(
+        subprocess.run, [command], shell=False, capture_output=True, text=True, timeout=5
+    )
     output = result.stdout.strip() or result.stderr.strip() or "(no output)"
     return ToolResult(content=output, summary=f"run({command})")
 
