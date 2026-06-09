@@ -117,6 +117,15 @@ class OpenTelemetryObserver(BaseObserver):
             child = self._turn_spans.pop(key, None)
             if child:
                 child.end()
+            # An aborted turn never fires on_turn_end, so its context token would
+            # leak.  Detach it here; swallow errors so one failure doesn't block
+            # cleanup of the remaining leftover turns.
+            turn_token = self._turn_ctx_tokens.pop(key, None)
+            if turn_token is not None:
+                try:
+                    _ctx.detach(turn_token)
+                except Exception:
+                    pass
         for key in [k for k in list(self._provider_spans) if k[0] == info.run_id]:
             child = self._provider_spans.pop(key, None)
             if child:

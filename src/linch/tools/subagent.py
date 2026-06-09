@@ -200,6 +200,14 @@ class SubagentTool:
             )
             session.workers[worker_id] = handle
 
+            # Record the real child session id as soon as it is registered, so a
+            # worker stopped mid-run (CancelledError before run_subagent returns)
+            # stays addressable by TaskStop / SubagentContinue and is not leaked.
+            def _record_child_id(child_session_id: str) -> None:
+                handle.child_session_id = child_session_id
+
+            runner_args.on_child_registered = _record_child_id
+
             async def _bg_run() -> None:
                 try:
                     result = await run_subagent(runner_args)

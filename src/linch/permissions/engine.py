@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from ..errors import AbortError
 from .rules import (
     BashRule,
     PathRule,
@@ -116,6 +117,8 @@ class PermissionEngine:
 
         try:
             response = await _run_with_abort(cb(req), signal)
+        except (AbortError, asyncio.CancelledError):
+            raise
         except Exception:
             return PermissionDecision(
                 decision="deny",

@@ -27,8 +27,13 @@ def permission_decision_to_dict(decision: Any) -> dict[str, Any]:
 def permission_decision_from_dict(raw: dict[str, Any]) -> Any:
     from .engine import PermissionDecision
 
+    if not isinstance(raw, dict):
+        raise ValueError("stored permission decision must be an object")
+    decision = raw.get("decision")
+    if decision not in {"allow", "deny"}:
+        raise ValueError("stored permission decision must be 'allow' or 'deny'")
     return PermissionDecision(
-        decision=raw.get("decision", "deny"),
+        decision=decision,
         reason=raw.get("reason"),
         updated_input=raw.get("updated_input"),
     )

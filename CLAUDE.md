@@ -48,10 +48,14 @@ Agent (config) → Session (state) → run_loop() → Events → caller
 ### Providers (`providers/`)
 
 Abstract interface (`BaseProvider`) with three methods: `context_window(model)`, `stream(req) → AsyncIterator[StreamEvent]`, and `capabilities(model) → ProviderCapabilities`. Implementations:
-- `OpenAIChatCompletionsProvider` — standard OpenAI Chat API
+- `OpenAIChatCompletionsProvider` — standard OpenAI Chat API; also drives OpenAI-compatible endpoints (e.g. DeepSeek) via `base_url`
 - `OpenAIResponsesProvider` — OpenAI o1/o3 Responses API (with reasoning tokens)
 - `AnthropicProvider` — Anthropic Claude; full streaming with tool use, thinking blocks, and prompt caching (`prompt_cache=True`, `structured_output=False`)
+- `GeminiProvider` — Google Gemini (optional `[gemini]` extra); cross-chunk tool-call dedup
+- `LlamaCppProvider` — local llama.cpp server; inherits the Chat-Completions streaming path
 - `with_retry` — wraps any provider callable with exponential-backoff retry
+
+`providers/catalog.py` exposes static model metadata for the built-in direct providers: `list_provider_models(provider_id=None)`, `get_provider_model_info(model, provider_id=None)`, and the `ProviderModelInfo` record (`context_window`, `capabilities`, `pricing`). It intentionally excludes OpenAI-compatible/local models whose model lists depend on external config.
 
 `ProviderCapabilities` declares per-provider feature support (`parallel_tool_calls`, `structured_output`, `tool_choice`, `prompt_cache`, `context_window`). `apply_provider_capabilities(req, caps)` in `loop.py` downgrades a `ProviderRequest` before each call — clears `cache_prompt`/`cache_ttl` for non-caching providers, strips `output_schema` when native structured output is unsupported. Duck-typed test providers that don't implement `capabilities()` are safely skipped via `hasattr` guard.
 
@@ -66,6 +70,10 @@ The guard is **on by default** at `Agent()` construction. Disable with `Agent(lo
 ### Tools (`tools/`)
 
 Tools are **protocols** (duck-typed), not subclasses. Each tool has: `name`, `description`, `input_schema`, `scope`, `parallel_safe`, and methods `validate()`, `execute()`, `summarize()`. V2 tools may also expose `parallel`, `resources(input)`, `tags`, `capabilities`, and `cost_hint`. Built-ins: `Read`, `Write`, `Edit`, `Bash`, `Glob`, `Grep`. The `ToolRegistry` holds available tools; `default_tools()` returns the standard set.
+
+**Function tools (`tools/function.py`)**: the `@tool` decorator wraps a plain (sync or async) Python function into a protocol-compatible `FunctionTool` — it infers a minimal JSON schema from the signature/annotations, injects `ToolContext` when the function declares a `ctx` parameter, and accepts `scope`, `parallel`, `tags`, `summary`, `resources`, `retryable`, and `execution_timeout_ms` overrides. No base-class inheritance; the result drops straight into a `ToolRegistry`.
+
+**Execution backends (`tools/execution.py`)**: `ExecutionBackend` is a duck-typed protocol (`run(command, *, cwd, timeout_s, signal) → ExecResult`). `LocalBackend` (default) runs a subprocess shell with process-group kill and abort-aware communicate; `DockerBackend` runs inside `docker run --rm` (guarded by `shutil.which`, no Docker SDK), with configurable network/mount/read-only/user. Inject via `Agent(execution_backend=...)`, which replaces only the `Bash` tool (never adds one to a registry that excludes it). Both backends route timeout/abort through `_communicate_with_timeout_and_abort` so `session.abort()` interrupts in-flight commands.
 
 `ToolContext` is passed to every `execute()` call and provides: `cwd`, `session_id`, `run_id`, `session_store`, `signal` (abort), `file_read_tracker`, `filesystem` (virtual `FileBackend` when the filesystem subsystem is enabled).
 
@@ -85,6 +93,8 @@ Use `ContextBuilder.build(turn) -> ContextBuildResult` for RAG, memory recall, e
 
 `MemoryStore` is a protocol for app-owned memory backends. Core includes `MemoryItem`, `MemorySearchResult`, `InMemoryKeywordMemoryStore`, `SqliteMemoryStore`, `MemoryContextBuilder`, `MemorySearchTool`, and `MemoryUpsertTool`. Do not add vector DB or embedding dependencies to core; adapters should implement the protocol or live in examples/recipes.
 
+`TieredMemoryStore` is itself a `MemoryStore` — a deterministic router/merge over three sub-stores (`working`/`episodic`/`semantic`), routing writes by `item.metadata["tier"]` (default `working`) and fanning `search()` across all tiers, then merging by the canonical `(score, item.id)` key and slicing to the global `limit`. Optional `tier_limits` is a **hard per-tier cap** applied before the merge; leave it unset for a pure global top-N. `MemoryContextBuilder(group_by_tier=True)` renders results under tier subheadings (default output is byte-identical). An optional `PostgresMemoryStore` adapter (`[postgres]` extra) mirrors `SqliteMemoryStore`'s full-scan keyword search.
+
 ### Virtual Filesystem (`filesystem/`)
 
 `FileBackend` is a duck-typed protocol for a virtual, session-scoped filesystem that is separate from the real `cwd` on disk. Four implementations ship: `StateFileBackend` (in-memory, per-session default), `DiskFileBackend` (real files sandboxed under a root, default `.linch/offload`), `SqliteFileBackend` (persistent across sessions), and `CompositeFileBackend` (routes paths by prefix, e.g. `/memories/` → `SqliteFileBackend`).
@@ -97,7 +107,9 @@ Use `ContextBuilder.build(turn) -> ContextBuildResult` for RAG, memory recall, e
 
 ### Permissions (`permissions/`)
 
-`PermissionEngine` evaluates each tool call against configured rules before execution. Modes: `"default"` (prompt user), `"acceptEdits"` (auto-allow file edits), `"skip-dangerous"` (allow all). Rules: `ToolRule`, `BashRule`, `PathRule`. When a tool call is not auto-approved, a `PermissionRequestEvent` is emitted and the loop pauses until the caller responds.
+`PermissionEngine` evaluates each tool call against configured rules before execution. Modes: `"default"` (prompt user), `"acceptEdits"` (auto-allow file edits), `"skip-dangerous"` (allow all). Rules: `ToolRule`, `BashRule`, `PathRule`. `BashRule` matches via fnmatch-glob and token-prefix (no substring matching); `PathRule` translates globs to anchored regexes where `*`/`?` do **not** cross `/` and `**` does (`permissions/rules.py`). When a tool call is not auto-approved, a `PermissionRequestEvent` is emitted and the loop pauses until the caller responds.
+
+**Durable HITL**: resolved decisions are persisted into the run checkpoint (`RunCheckpoint.permission_decisions`, keyed by `permission_decision_key(tool_name, input)` in `permissions/keys.py` — stable across provider calls, unlike `tool_use_id`). On resume the scheduler replays a stored allow/deny instead of re-invoking the callback (Seam A); only explicit allow/deny are persisted (Seam B) — abort/callback-failure denials are not. A corrupt stored decision falls through to a fresh prompt.
 
 ### Sessions & Storage (`sessions/`)
 
@@ -141,6 +153,14 @@ When the provider's context window approaches its limit, the compaction strategy
 Stdlib reference observers: `LoggingObserver` (one log line per span) and `SpanCollector` (in-memory span list for tests). `OpenTelemetryObserver` is the production integration point, behind the optional `[otel]` extra (lazily imported, `pip install 'linch[otel]'`). Langfuse, LangSmith, Honeycomb, and Datadog are all reached via the OTel adapter — no vendor-specific code in core.
 
 Observers are attached via `Agent(observers=[...])` and accessed as `agent.observers`.
+
+### Evals (`evals/`)
+
+A lightweight, deterministic harness for grading agent behavior offline. `ScriptedProvider` (with `TextTurn`/`ToolUseTurn`) replays a fixed turn sequence without a live model. `run_eval(agent_factory, cases, scorers)` runs an agent over a list of `EvalCase`s and returns `EvalResult`/`CaseResult` with per-scorer pass/fail/None. Built-in scorers (`evals/scorers.py`) each return `True`/`False`/`None`: `text_contains`, `tool_called`, `schema_valid`, `cost_under`, plus long-run scorers `context_selected_tool`, `context_not_trimmed`, `context_metadata_contains`, `memory_recalled`, `recovery_succeeded`, and `run_completed`. Each case session is popped from `agent._sessions` and aborted in a `finally`, so a long eval run does not leak sessions.
+
+### Run reports (`reports.py`)
+
+`build_run_report(events, run=None)` folds an event stream (live `Event`s or persisted `StoredRunEvent`s) into a `RunReport` dataclass: tool calls, permission requests, context builds, loop guards, errors, usage, final result, checkpoint, and a `long_run` summary (selected-tool counts, peak context tokens, memory tier/namespace/citation rollups) plus a flat `timeline`. `load_run_report(store, run_id)` reconstructs one from a `RunStore`. Pure read model — it never mutates session state.
 
 ## Key design constraints
 

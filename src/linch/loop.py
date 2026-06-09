@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import AsyncIterator
+from html import escape
 from typing import Any, Literal, cast
 from uuid import uuid4
 
@@ -17,6 +18,7 @@ from .context import (
 from .errors import AbortError, ContextLengthError
 from .events import (
     AssistantEvent,
+    BackgroundWorkerEvent,
     ContextBuildEvent,
     ErrorEvent,
     Event,
@@ -139,6 +141,70 @@ async def _cancel_background_workers(session: Session) -> None:
         task = getattr(handle, "task", None)
         if task is not None and isinstance(task, asyncio.Task) and not task.done():
             task.cancel()
+
+
+def _background_workers_to_dict(
+    session: Session,
+    existing: dict[str, dict[str, object]] | None = None,
+) -> dict[str, dict[str, object]]:
+    out: dict[str, dict[str, object]] = {
+        str(worker_id): dict(metadata) for worker_id, metadata in (existing or {}).items()
+    }
+    workers = getattr(session, "workers", None)
+    if not workers:
+        return out
+    for worker_id, handle in workers.items():
+        out[str(worker_id)] = {
+            "worker_id": str(getattr(handle, "worker_id", worker_id)),
+            "display_name": str(getattr(handle, "display_name", worker_id)),
+            "status": str(getattr(handle, "status", "running")),
+            "child_session_id": str(getattr(handle, "child_session_id", "")),
+            "last_result_text": str(getattr(handle, "last_result_text", "")),
+        }
+    return out
+
+
+def _crashed_worker_notification(worker_id: str, display_name: str) -> Message:
+    text = (
+        "<task-notification>"
+        f"<task-id>{escape(worker_id)}</task-id>"
+        "<status>killed</status>"
+        f"<summary>Worker '{escape(display_name)}' was interrupted before it finished.</summary>"
+        "<error>Worker process was not live when the run resumed.</error>"
+        "</task-notification>"
+    )
+    return Message(role="user", content=[TextBlock(text=text)])
+
+
+async def _queue_crashed_worker_notifications(
+    session: Session,
+    checkpoint: RunCheckpoint,
+    run_id: str,
+) -> list[BackgroundWorkerEvent]:
+    if not checkpoint.background_workers:
+        return []
+    live_workers = getattr(session, "workers", {})
+    notifications = getattr(session, "pending_notifications", None)
+    if notifications is None:
+        return []
+
+    events: list[BackgroundWorkerEvent] = []
+    for worker_id, raw in checkpoint.background_workers.items():
+        if raw.get("status") != "running" or worker_id in live_workers:
+            continue
+        display_name = str(raw.get("display_name") or worker_id)
+        event = BackgroundWorkerEvent(
+            worker_id=worker_id,
+            status="killed",
+            display_name=display_name,
+        )
+        # Persist first: if this raises, we have not yet queued a stale
+        # notification nor mutated the in-memory checkpoint status.
+        await _persist_event(session, run_id, event)
+        notifications.append(_crashed_worker_notification(worker_id, display_name))
+        raw["status"] = "killed"
+        events.append(event)
+    return events
 
 
 async def _build_context_result(session: Session, turn_index: int) -> ContextBuildResult | None:
@@ -378,6 +444,17 @@ def _tool_result_block_from_end(event: ToolCallEndEvent) -> ToolResultBlock:
     )
 
 
+def _interrupted_tool_result_block(event: ToolCallStartEvent) -> ToolResultBlock:
+    return ToolResultBlock(
+        tool_use_id=event.tool_use_id,
+        content=(
+            "Tool execution was interrupted before a result was recorded; "
+            "not re-running automatically on resume."
+        ),
+        is_error=True,
+    )
+
+
 def _message_matches(left: Message, right: Message) -> bool:
     return message_to_dict(left) == message_to_dict(right)
 
@@ -592,6 +669,10 @@ async def _run_loop_impl(
     _force_final_pending = False
     if resume_checkpoint is not None:
         total = resume_checkpoint.total_usage
+        # Restore running_cost from the restored usage so the resumed run's cost
+        # covers the whole run, not just post-resume turns. cost_usd returns None
+        # for unknown models, preserving "None until first priced turn" semantics.
+        running_cost = _cost_usd(total, agent.model)
         if _guard is not None:
             _guard_state = _loop_guard_state_from_dict(resume_checkpoint.loop_guard_state)
             if _guard_state is None:
@@ -649,6 +730,9 @@ async def _run_loop_impl(
         checkpoint.pending_skill_overlay = _skill_overlay_to_dict(session.pending_skill_overlay)
         checkpoint.current_turn_allowed_tools = session.current_turn_allowed_tools
         checkpoint.permission_decisions = dict(session.current_turn_permission_decisions)
+        checkpoint.background_workers = _background_workers_to_dict(
+            session, checkpoint.background_workers
+        )
         await store.save_checkpoint(run_id, checkpoint, status=status)
 
     if hub.active:
@@ -790,6 +874,17 @@ async def _run_loop_impl(
         start_turn = checkpoint.turn_index + 1
 
     try:
+        # Crashed-worker notifications must yield from INSIDE the try so that a
+        # caller closing the generator here (aclose -> GeneratorExit at the yield)
+        # still runs the finally block that closes observer spans.
+        if resume_checkpoint is not None:
+            for worker_event in await _queue_crashed_worker_notifications(
+                session, checkpoint, run_id
+            ):
+                yield worker_event
+            if checkpoint.background_workers:
+                await _save_checkpoint(checkpoint.phase, turn_index=checkpoint.turn_index)
+
         for turn_index in range(start_turn, max_turns):
             throw_if_aborted(signal)
             # Drain background-worker notifications before this turn's provider call.
@@ -1061,7 +1156,6 @@ async def _run_loop_impl(
                 pending_tool_blocks=tool_blocks,
                 completed_tool_results=completed_tool_results,
             )
-            _tool_exec_ckpt_saved = False
             async for event in execute_tool_calls(
                 missing_tool_blocks,
                 agent,
@@ -1080,10 +1174,32 @@ async def _run_loop_impl(
                         completed_tool_results=completed_tool_results,
                         status="waiting_permission",
                     )
-                elif isinstance(event, ToolCallStartEvent) and not _tool_exec_ckpt_saved:
-                    # Save after resolve() has fired (Seam B) but before tool completes,
-                    # so the permission_decisions survive a crash in this window.
-                    _tool_exec_ckpt_saved = True
+                elif isinstance(event, ToolCallStartEvent):
+                    # Persist a placeholder result the moment a tool starts (after
+                    # resolve() has fired, Seam B) so a started-but-unfinished tool
+                    # is not blindly re-run on resume and the permission_decisions
+                    # survive a crash in this window.
+                    completed_tool_results.setdefault(
+                        event.tool_use_id,
+                        _interrupted_tool_result_block(event),
+                    )
+                    await _save_checkpoint(
+                        "tool_executing",
+                        turn_index=turn_index,
+                        assistant_message=assembly.message,
+                        assistant_stop_reason=assembly.stop_reason,
+                        pending_tool_blocks=tool_blocks,
+                        completed_tool_results=completed_tool_results,
+                    )
+                elif isinstance(event, ToolCallEndEvent):
+                    block = _tool_result_block_from_end(event)
+                    completed_tool_results[event.tool_use_id] = block
+                    if (
+                        event.is_error
+                        and event.tool_result is not None
+                        and event.tool_result.recovery_hint
+                    ):
+                        _recovery_hints[event.tool_use_id] = event.tool_result.recovery_hint
                     await _save_checkpoint(
                         "tool_executing",
                         turn_index=turn_index,
@@ -1120,15 +1236,6 @@ async def _run_loop_impl(
                                 tool_result=event.tool_result,
                             ),
                         )
-                if isinstance(event, ToolCallEndEvent):
-                    block = _tool_result_block_from_end(event)
-                    completed_tool_results[event.tool_use_id] = block
-                    if (
-                        event.is_error
-                        and event.tool_result is not None
-                        and event.tool_result.recovery_hint
-                    ):
-                        _recovery_hints[event.tool_use_id] = event.tool_result.recovery_hint
             result_blocks: list[ContentBlock] = [
                 completed_tool_results[block.id] for block in tool_blocks
             ]

@@ -29,6 +29,7 @@ RunPhase = Literal[
     "assistant_appended",
     "permission_pending",
     "tool_batch_pending",
+    "tool_executing",
     "tool_results_appended",
     "turn_complete",
     "completed",
@@ -52,6 +53,7 @@ class RunCheckpoint:
     current_turn_allowed_tools: list[str] | None = None
     assistant_stop_reason: str | None = None
     permission_decisions: dict[str, dict] = field(default_factory=dict)
+    background_workers: dict[str, dict[str, object]] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -126,6 +128,7 @@ def checkpoint_to_dict(checkpoint: RunCheckpoint) -> dict[str, Any]:
         "current_turn_allowed_tools": checkpoint.current_turn_allowed_tools,
         "assistant_stop_reason": checkpoint.assistant_stop_reason,
         "permission_decisions": checkpoint.permission_decisions,
+        "background_workers": checkpoint.background_workers,
     }
 
 
@@ -177,6 +180,11 @@ def checkpoint_from_dict(raw: dict[str, Any]) -> RunCheckpoint:
         permission_decisions=(
             {str(k): dict(v) for k, v in raw.get("permission_decisions", {}).items()}
             if isinstance(raw.get("permission_decisions"), dict)
+            else {}
+        ),
+        background_workers=(
+            {str(k): dict(v) for k, v in raw.get("background_workers", {}).items()}
+            if isinstance(raw.get("background_workers"), dict)
             else {}
         ),
     )

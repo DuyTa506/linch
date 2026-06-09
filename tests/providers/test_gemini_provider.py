@@ -291,3 +291,121 @@ async def test_stream_tool_use():
 
     tool_start = next(e for e in events if e["type"] == "tool_use_start")
     assert tool_start["name"] == "Read"
+
+
+@pytest.mark.asyncio
+async def test_stream_tool_use_deduplicated_across_chunks():
+    """The same function_call surfaced in two chunks is emitted only once.
+
+    Gemini sends complete function calls (name + full args). If the SDK
+    re-surfaces the same accumulated call in a later chunk, the provider
+    must not emit a second tool_use triplet — otherwise the loop assembles
+    two ToolUseBlocks and the tool executes twice.
+    """
+    import sys
+    from unittest.mock import MagicMock, patch
+
+    from linch.providers.gemini import GeminiProvider
+    from linch.types import Message, ProviderRequest, TextBlock
+
+    def _make_chunk():
+        fc = MagicMock()
+        fc.name = "Read"
+        fc.args = {"file_path": "README.md"}
+
+        part = MagicMock()
+        part.text = ""
+        part.function_call = fc
+
+        candidate = MagicMock()
+        candidate.content.parts = [part]
+        candidate.finish_reason = 2
+
+        chunk = MagicMock()
+        chunk.candidates = [candidate]
+        chunk.usage_metadata.prompt_token_count = 8
+        chunk.usage_metadata.candidates_token_count = 3
+        return chunk
+
+    async def _fake_stream(*args, **kwargs):
+        # Same accumulated function_call surfaced in two consecutive chunks.
+        yield _make_chunk()
+        yield _make_chunk()
+
+    fake_model = MagicMock()
+    fake_model.generate_content_async = MagicMock(return_value=_fake_stream())
+
+    fake_genai = MagicMock()
+    fake_genai.GenerativeModel.return_value = fake_model
+
+    with patch.dict(sys.modules, {"google.generativeai": fake_genai}):
+        provider = GeminiProvider()
+        req = ProviderRequest(
+            model="gemini-2.0-flash",
+            messages=[Message(role="user", content=[TextBlock(text="read readme")])],
+            system=[],
+            tools=[],
+            max_output_tokens=512,
+        )
+        events = [e async for e in provider.stream(req)]
+
+    starts = [e for e in events if e["type"] == "tool_use_start"]
+    ends = [e for e in events if e["type"] == "tool_use_end"]
+    assert len(starts) == 1
+    assert len(ends) == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_two_distinct_tool_calls_both_emit():
+    """Two different function calls each emit their own tool_use triplet."""
+    import sys
+    from unittest.mock import MagicMock, patch
+
+    from linch.providers.gemini import GeminiProvider
+    from linch.types import Message, ProviderRequest, TextBlock
+
+    def _make_part(name, args):
+        fc = MagicMock()
+        fc.name = name
+        fc.args = args
+        part = MagicMock()
+        part.text = ""
+        part.function_call = fc
+        return part
+
+    candidate = MagicMock()
+    candidate.content.parts = [
+        _make_part("Read", {"file_path": "a.txt"}),
+        _make_part("Read", {"file_path": "b.txt"}),
+    ]
+    candidate.finish_reason = 2
+
+    chunk = MagicMock()
+    chunk.candidates = [candidate]
+    chunk.usage_metadata.prompt_token_count = 8
+    chunk.usage_metadata.candidates_token_count = 3
+
+    async def _fake_stream(*args, **kwargs):
+        yield chunk
+
+    fake_model = MagicMock()
+    fake_model.generate_content_async = MagicMock(return_value=_fake_stream())
+
+    fake_genai = MagicMock()
+    fake_genai.GenerativeModel.return_value = fake_model
+
+    with patch.dict(sys.modules, {"google.generativeai": fake_genai}):
+        provider = GeminiProvider()
+        req = ProviderRequest(
+            model="gemini-2.0-flash",
+            messages=[Message(role="user", content=[TextBlock(text="read both")])],
+            system=[],
+            tools=[],
+            max_output_tokens=512,
+        )
+        events = [e async for e in provider.stream(req)]
+
+    starts = [e for e in events if e["type"] == "tool_use_start"]
+    assert len(starts) == 2
+    names = {e["name"] for e in starts}
+    assert names == {"Read"}

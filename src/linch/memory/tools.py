@@ -70,6 +70,7 @@ class MemorySearchTool:
             limit=input["limit"],
             namespace=input.get("namespace"),
         )
+        tier_counts: dict[str, int] = {}
         citations = [
             Citation(
                 id=result.item.id,
@@ -77,10 +78,14 @@ class MemorySearchTool:
                 label=str(result.item.metadata.get("label", result.item.id)),
                 chunk=result.item.content,
                 score=result.score,
-                metadata=result.item.metadata,
+                metadata={**result.item.metadata, **result.metadata},
             )
             for result in results
         ]
+        for citation in citations:
+            tier = citation.metadata.get("tier")
+            if isinstance(tier, str):
+                tier_counts[tier] = tier_counts.get(tier, 0) + 1
         content = "\n".join(f"[{citation.id}] {citation.chunk}" for citation in citations)
         return ToolResult(
             content=content or "No memories found.",
@@ -89,6 +94,7 @@ class MemorySearchTool:
                 "query": input["query"],
                 "namespace": input.get("namespace"),
                 "result_ids": [citation.id for citation in citations],
+                "tier_counts": tier_counts,
             },
             citations=citations,
             truncated=len(citations) >= input["limit"],

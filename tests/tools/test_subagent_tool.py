@@ -342,3 +342,87 @@ async def test_background_worker_notification_escapes_worker_output(tmp_path: An
     root = ET.fromstring(text)
 
     assert root.findtext("result") == "<bad>&result</bad>"
+
+
+# ── Regression: stopping a mid-run background worker must not leak/orphan it ──
+
+
+async def test_stopped_background_worker_remains_addressable(tmp_path: Any) -> None:
+    """A background worker stopped mid-run keeps its real child_session_id.
+
+    Reproduces the resource-leak bug: child_session_id was only set on the
+    post-run return path, so cancelling the task mid-run left the handle with
+    an empty id — TaskStop could not abort the child, SubagentContinue returned
+    'WorkerNotLive', and the child session leaked in agent._sessions.
+    """
+    import asyncio
+
+    from linch import create_deep_agent
+    from linch.sessions import InMemorySessionStore
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class _BlockingProvider:
+        id = "blocking"
+
+        def context_window(self, model: str) -> int:
+            return 100_000
+
+        async def stream(self, req: Any) -> AsyncIterator[dict[str, object]]:
+            from linch.types import Usage
+
+            yield {"type": "message_start", "model": req.model}
+            # Signal that the child run is in progress, then block until released.
+            started.set()
+            await release.wait()
+            yield {"type": "text_delta", "text": "done"}
+            yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
+
+    agent = create_deep_agent(
+        model="gpt-5",
+        provider=_BlockingProvider(),
+        session_store=InMemorySessionStore(),
+        permissions={"mode": "skip-dangerous"},
+        cwd=str(tmp_path),
+        durable=False,
+    )
+    session = await agent.session(id="s1")
+    subagent_tool = agent.tools.get("Subagent")
+    continue_tool = agent.tools.get("SubagentContinue")
+    ctx = _make_ctx(session)
+
+    try:
+        await subagent_tool.execute(
+            {"description": "blocker", "prompt": "hello", "run_in_background": True}, ctx
+        )
+        worker_id = next(iter(session.workers))
+        handle = session.workers[worker_id]
+
+        # Wait until the child run is actually in progress (mid-run).
+        await asyncio.wait_for(started.wait(), timeout=5.0)
+
+        # The child session id must be known as soon as the child is registered,
+        # before the background run returns.
+        assert handle.child_session_id != "", "child_session_id not recorded mid-run"
+        child_id = handle.child_session_id
+        assert agent._sessions.get(child_id) is not None, (
+            "child session must be reachable for abort/continue"
+        )
+
+        # Stop the worker mid-run (cancels the task + aborts the child session).
+        handle.task.cancel()
+        try:
+            await handle.task
+        except asyncio.CancelledError:
+            pass
+
+        # The handle still carries the real child id and is addressable.
+        assert handle.child_session_id == child_id
+
+        # SubagentContinue must not report the worker as not-live.
+        release.set()  # let any resumed child run complete cleanly
+        r = await continue_tool.execute({"to": worker_id, "message": "follow up"}, ctx)
+        assert "WorkerNotLive" not in (r.content or "")
+    finally:
+        release.set()

@@ -417,7 +417,7 @@ graph TD
         IK["InMemoryKeywordMemoryStore\ncooperative keyword matching"]
         SQ["SqliteMemoryStore\nasync via single-worker executor\n(storage._executor.SqliteExecutor)"]
         PG["PostgresMemoryStore\noptional asyncpg backend\nlinch[postgres]"]
-        TM["TieredMemoryStore\nworking · episodic · semantic\nweighted merge"]
+        TM["TieredMemoryStore\nworking · episodic · semantic\nmerged search"]
     end
 
     subgraph Host["Host-Owned Adapters"]
@@ -440,8 +440,17 @@ graph TD
 
 `TieredMemoryStore` is still a `MemoryStore`: it routes writes by
 `MemoryItem.metadata["tier"]` (`working`, `episodic`, or `semantic`) and merges
-search results with per-tier weights. Unknown or malformed tier metadata falls
-back to `working`.
+search results across tiers with optional per-tier limits. Unknown or malformed
+tier metadata falls back to `working`. `MemorySearchTool` preserves result ids,
+tier counts, and citation tier metadata so run reports and eval scorers can
+measure recall behavior in long-running sessions.
+
+`RunReport.long_run` synthesizes long-horizon signals from the event stream and
+checkpoint: context trimming and selected tools, memory searches/upserts,
+recalled ids, tier counts, failed tool calls, recovery hints, completion, cost,
+and resume phase. The eval package includes companion scorers for context
+selection, context trimming, context metadata, memory recall, recovery after
+tool failures, and successful completion.
 
 Do not add vector database or embedding dependencies to core; adapters implement the protocol and live in examples.
 
@@ -710,7 +719,22 @@ The loop assembles these — it never imports any provider's raw types. Adding a
 
 ## 8. Tool Protocol
 
-Tools are **duck-typed** — no base class, no `isinstance` check anywhere in the core:
+For normal application tools, prefer the `@tool` helper. It wraps a sync or
+async Python function in a regular Tool-compatible object, infers a minimal JSON
+schema, injects `ToolContext` when the function asks for `ctx`, and converts
+plain return values into `ToolResult`.
+
+```python
+from linch import ToolContext, tool
+
+@tool(description="Search the product knowledge base.", tags=("rag",))
+async def search_kb(query: str, ctx: ToolContext) -> str:
+    return await ctx.deps.kb.search(query)
+```
+
+The runtime still consumes the same **duck-typed** protocol — no base class, no
+`isinstance` check anywhere in the core. `FunctionTool` implements this shape,
+and advanced tools can implement it directly:
 
 ```python
 class MyTool:
@@ -739,6 +763,15 @@ the default local subprocess behavior with timeout cleanup; `DockerBackend`
 uses `docker run --rm` when the Docker daemon is available. Passing
 `Agent(execution_backend=...)` replaces an existing `Bash` tool only, so a
 restricted registry that omits `Bash` does not gain shell access.
+
+Permissions and execution backends are separate layers. `ToolRule`, `PathRule`,
+and `BashRule` determine whether a tool call may run. If a Bash call is
+approved, the configured backend determines the runtime boundary. `DockerBackend`
+defaults remain compatibility-first: writable workspace mount, Docker default
+network, no environment forwarding, and no read-only root filesystem. Opt-in
+controls such as `network="none"`, `workspace_mount="ro"`,
+`read_only_root=True`, `tmpfs=(...)`, `env={...}`, `forward_env=(...)`, and
+`user="1000:1000"` restrict approved Bash commands inside the container.
 
 ### ToolRegistry
 

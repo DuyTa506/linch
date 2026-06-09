@@ -48,19 +48,33 @@ OPENAI_API_KEY="$OPENAI_API_KEY" pytest tests/test_live_api.py
 
 ## Code rules
 
-### No base classes for tools
+### Tool authoring
 
-Tools are **duck-typed protocols** — do not subclass anything. Implement the five attributes and three methods directly on your class. The scheduler checks for the protocol shape, not `isinstance`.
+Use `@tool` for ordinary function-backed tools. It produces the same
+Tool-compatible object consumed by `ToolRegistry`, the scheduler, permissions,
+middleware, and providers.
 
 ```python
-# correct
+from linch import ToolContext, tool
+
+@tool(description="Search project docs.", tags=("rag",))
+async def search_docs(query: str, ctx: ToolContext) -> str:
+    return await ctx.deps.docs.search(query)
+```
+
+For advanced tools that need custom validation, resource declarations, or richer
+execution behavior, implement the duck-typed protocol directly. Do not subclass
+anything; the scheduler checks for the protocol shape, not `isinstance`.
+
+```python
+# correct for advanced tools
 class MyTool:
     name = "my_tool"
     scope = "read"
     parallel = True
     ...
 
-# wrong — no base class
+# wrong -- no base class
 class MyTool(BaseTool):  # ← don't do this
     ...
 ```
@@ -184,12 +198,12 @@ Tests should fail at the most specific possible assertion. Avoid mega-tests that
 
 ## Adding a new tool
 
-1. Implement the duck-typed protocol (no base class).
+1. Prefer `@tool` for simple sync or async functions; use `FunctionTool` for explicit/dynamic construction.
 2. Choose `scope`: `"read"` (no side effects), `"write"` (creates/modifies files or state), `"exec"` (runs commands or external processes).
 3. Set `parallel = True` for read/search tools that can run concurrently.
-4. Add `resources(input) -> list[ResourceAccess]` when the tool touches files, indexes, databases, tenant state, or other shared resources. Read/read can overlap; write conflicts serialize.
-5. Use `ctx.deps` for shared application state — do not use global variables.
-6. Return `ToolResult` with `metadata`, `citations`, and `truncated` when the host app needs provenance or rich rendering.
+4. Use `ctx.deps` for shared application state — do not use global variables.
+5. Return `ToolResult` when the host app needs `metadata`, `citations`, `truncated`, or `recovery_hint`; plain strings and JSON-like values are fine for simple tools.
+6. Use class-based duck-typed tools when you need custom `validate()`, `resources(input) -> list[ResourceAccess]`, or non-trivial `summarize()` behavior.
 7. `validate()` should raise `ValueError` with a clear message. It runs before permission checks.
 8. `summarize()` should return a single line — it appears in logs and compaction summaries.
 9. For process execution, prefer injecting a backend into `BashTool` or `Agent(execution_backend=...)` instead of adding subprocess calls to unrelated tools. `Agent(execution_backend=...)` must not add `Bash` to registries that intentionally exclude it.

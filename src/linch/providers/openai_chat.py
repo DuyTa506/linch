@@ -100,6 +100,9 @@ class OpenAIChatCompletionsProvider(BaseProvider):
         tool_idx_to_id: dict[int, str] = {}
         usage = Usage()
         stop_reason: StopReason = "end_turn"
+        # Tool ids that already had a tool_use_end emitted, so the post-loop
+        # flush does not double-emit when finish_reason was "tool_calls".
+        tool_ended: set[str] = set()
         try:
             stream = await client.chat.completions.create(**payload)
             async for chunk in stream:
@@ -131,7 +134,9 @@ class OpenAIChatCompletionsProvider(BaseProvider):
                 if finish_reason == "tool_calls":
                     stop_reason = "tool_use"
                     for tid in list(tool_meta):
-                        yield {"type": "tool_use_end", "id": tid}
+                        if tid not in tool_ended:
+                            tool_ended.add(tid)
+                            yield {"type": "tool_use_end", "id": tid}
                 elif finish_reason == "length":
                     stop_reason = "max_tokens"
                 elif finish_reason == "content_filter":
@@ -146,6 +151,17 @@ class OpenAIChatCompletionsProvider(BaseProvider):
                     )
         except Exception as exc:
             raise map_openai_error(exc) from exc
+        # Some OpenAI-compatible servers (e.g. llama.cpp) stream a complete
+        # tool_calls payload and then close the choice with finish_reason="stop"
+        # instead of "tool_calls". Flush a tool_use_end for any tracked tool call
+        # that hasn't ended yet so the agent loop appends the ToolUseBlock and the
+        # turn is not wrongly treated as text-only.
+        for tid in list(tool_meta):
+            if tid not in tool_ended:
+                tool_ended.add(tid)
+                yield {"type": "tool_use_end", "id": tid}
+        if tool_meta:
+            stop_reason = "tool_use"
         yield {"type": "message_end", "stop_reason": stop_reason, "usage": usage}
 
 

@@ -8,6 +8,7 @@ from .base import (
     ThinkingDisabled,
     ThinkingEnabled,
 )
+from .catalog import ProviderModelInfo, get_provider_model_info, list_provider_models
 from .gemini import GeminiProvider, GeminiProviderOptions
 from .llamacpp import LlamaCppProvider, LlamaCppProviderOptions
 from .openai_chat import OpenAIChatCompletionsProvider, OpenAIChatProviderOptions
@@ -28,10 +29,13 @@ __all__ = [
     "OpenAIResponsesProvider",
     "OpenAIResponsesProviderOptions",
     "ProviderCapabilities",
+    "ProviderModelInfo",
     "RetryOptions",
     "ThinkingAdaptive",
     "ThinkingConfig",
     "ThinkingDisabled",
     "ThinkingEnabled",
+    "get_provider_model_info",
+    "list_provider_models",
     "with_retry",
 ]

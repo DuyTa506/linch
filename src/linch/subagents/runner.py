@@ -35,6 +35,11 @@ class RunSubagentArgs:
     retain: bool = False
     """When True, the child session is kept in agent._sessions after completion
     so it can be continued later via SubagentContinue."""
+    on_child_registered: Any = None
+    """Optional callback ``(child_session_id: str) -> None`` invoked as soon as the
+    child session is registered in ``agent._sessions``, before the run is driven.
+    Lets the caller record the real child id immediately, so a worker cancelled
+    mid-run (``CancelledError`` before this function returns) is still addressable."""
 
 
 @dataclass
@@ -189,6 +194,9 @@ async def run_subagent(args: RunSubagentArgs) -> RunSubagentResult:
     child_session.system_blocks_override = child_system
 
     agent._sessions[child_record.id] = child_session
+
+    if callable(args.on_child_registered):
+        args.on_child_registered(child_record.id)
 
     if args.signal is not None and args.signal.aborted:
         throw_if_aborted(args.signal)

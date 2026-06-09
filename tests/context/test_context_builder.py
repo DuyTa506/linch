@@ -245,3 +245,57 @@ async def test_context_builder_reruns_after_compaction_retry():
     assert [event.type for event in events].count("context_build") == 2
     texts = [text for msg in provider.calls[-1]["messages"] for text in msg["content"]]
     assert "fresh-context-2" in texts
+
+
+def _msg(text: str):
+    from linch.types import Message, TextBlock
+
+    return Message(role="user", content=[TextBlock(text=text)])
+
+
+def test_estimator_budget_trims_oldest_first_under_budget():
+    """Estimator-based trim drops oldest messages first and lands under budget."""
+    from linch import ContextBudget, ContextBuildResult
+    from linch.context.builder import apply_context_budget
+
+    # Each message costs 1 token under this estimator (one per message).
+    def estimator(messages, model):
+        return len(messages)
+
+    messages = [_msg(f"m{i}") for i in range(10)]
+    result = ContextBuildResult(messages=messages, budget=ContextBudget(max_tokens=3))
+
+    out = apply_context_budget(result, estimator=estimator, model="gpt-5")
+
+    kept = [block.text for msg in out.messages for block in msg.content]
+    # Under budget, oldest dropped first, newest retained.
+    assert out.budget.used_tokens <= 3
+    assert out.budget.trimmed is True
+    assert kept == ["m7", "m8", "m9"]
+
+
+def test_estimator_budget_invocations_are_linear():
+    """Pins the O(n) fix: the estimator must not be re-run over the whole list per pop."""
+    from linch import ContextBudget, ContextBuildResult
+    from linch.context.builder import apply_context_budget
+
+    work = {"messages_seen": 0}
+
+    def estimator(messages, model):
+        # Real estimators (e.g. tiktoken-backed) do work proportional to the
+        # number of messages they are handed. Count total messages processed
+        # across all invocations to detect O(n*k) re-estimation of the whole
+        # remaining list on every pop.
+        work["messages_seen"] += len(messages)
+        return len(messages)
+
+    n = 50
+    messages = [_msg(f"m{i}") for i in range(n)]
+    result = ContextBuildResult(messages=messages, budget=ContextBudget(max_tokens=1))
+
+    apply_context_budget(result, estimator=estimator, model="gpt-5")
+
+    # Incremental cost model touches each message a constant number of times
+    # (O(n) total work), not O(n*k) where the whole remaining list is
+    # re-estimated on every pop.
+    assert work["messages_seen"] <= 3 * n
