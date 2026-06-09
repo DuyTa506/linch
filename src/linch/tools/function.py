@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 from collections.abc import Callable
@@ -176,9 +177,14 @@ class FunctionTool:
         kwargs = dict(input)
         if self._ctx_param is not None:
             kwargs[self._ctx_param] = ctx
-        value = self.fn(**kwargs)
-        if inspect.isawaitable(value):
-            value = await value
+        if inspect.iscoroutinefunction(self.fn):
+            value = await self.fn(**kwargs)
+        else:
+            # Run sync user functions off the event loop so blocking I/O or
+            # CPU work doesn't stall the agent loop.
+            value = await asyncio.to_thread(self.fn, **kwargs)
+            if inspect.isawaitable(value):
+                value = await value
         return _result_from_value(value, self.summarize(input))
 
     def summarize(self, input: dict[str, Any]) -> str:

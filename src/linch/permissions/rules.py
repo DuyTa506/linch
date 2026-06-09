@@ -263,8 +263,15 @@ def _glob_to_regex(pattern: str) -> str:
         char = pattern[i]
         if char == "*":
             if i + 1 < n and pattern[i + 1] == "*":
-                out.append(".*")
-                i += 2
+                # ``**/`` is an optional path prefix: it matches zero or more
+                # directory segments, so ``a/**/b`` matches both ``a/b`` and
+                # ``a/x/b``.  A standalone ``**`` stays ``.*``.
+                if i + 2 < n and pattern[i + 2] == "/":
+                    out.append("(?:.*/)?")
+                    i += 3
+                else:
+                    out.append(".*")
+                    i += 2
             else:
                 out.append("[^/]*")
                 i += 1

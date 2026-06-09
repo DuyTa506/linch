@@ -107,6 +107,25 @@ async def test_execute_supports_sync_async_and_return_conversion():
     assert rich_result == ToolResult(content="rich", summary="custom")
 
 
+async def test_execute_runs_sync_function_off_the_event_loop_thread():
+    """Sync function tools must not block the event loop — they run in a thread."""
+    import threading
+
+    from linch.tools import tool
+
+    loop_thread = threading.get_ident()
+    seen: dict[str, int] = {}
+
+    @tool
+    def blocking(value: str) -> str:
+        seen["thread"] = threading.get_ident()
+        return value
+
+    await blocking.execute({"value": "ok"}, _ctx())
+
+    assert seen["thread"] != loop_thread
+
+
 @pytest.mark.asyncio
 async def test_execute_injects_tool_context_when_requested():
     from linch.tools import ToolContext, tool

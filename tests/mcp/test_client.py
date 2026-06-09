@@ -82,7 +82,7 @@ _install_fake_mcp()
 
 try:
     from linch.mcp import client as mcp_client
-except Exception:  # pragma: no cover - module itself unimportable
+except (ImportError, ModuleNotFoundError):  # pragma: no cover - optional dep absent
     pytest.skip("linch.mcp.client not importable", allow_module_level=True)
 
 
@@ -170,3 +170,44 @@ async def test_initialize_failure_cleans_up_transport_and_session(monkeypatch):
 
     assert session.aexit_calls == 1, "session __aexit__ not awaited (ClientSession leaked)"
     assert transport.aexit_calls == 1, "transport __aexit__ not awaited (subprocess leaked)"
+
+
+# The HTTP transport yields a 3-tuple (read, write, _) instead of stdio's 2-tuple,
+# and is selected by ``config.type == "http"``.  These mirror the stdio tests for
+# the ``_connect_http`` cleanup path.
+
+
+@pytest.mark.asyncio
+async def test_http_list_tools_failure_cleans_up_transport_and_session(monkeypatch):
+    """list_tools() failure over HTTP must still close transport and session."""
+    transport = FakeTransport(n_yield=3)
+    session = FakeSession(list_tools_error=True)
+
+    monkeypatch.setattr(mcp_client, "streamablehttp_client", lambda *a, **k: transport)
+    monkeypatch.setattr(mcp_client, "ClientSession", lambda *a, **k: session)
+
+    cfg = types.SimpleNamespace(type="http", url="https://example.test/mcp", headers=None)
+
+    with pytest.raises(mcp_client.ConfigError):
+        await mcp_client.connect_mcp_servers({"srv": cfg})
+
+    assert session.aexit_calls == 1, "session __aexit__ not awaited (ClientSession leaked)"
+    assert transport.aexit_calls == 1, "transport __aexit__ not awaited (HTTP transport leaked)"
+
+
+@pytest.mark.asyncio
+async def test_http_initialize_failure_cleans_up_transport_and_session(monkeypatch):
+    """initialize() failure over HTTP must still close transport and session."""
+    transport = FakeTransport(n_yield=3)
+    session = FakeSession(initialize_error=True)
+
+    monkeypatch.setattr(mcp_client, "streamablehttp_client", lambda *a, **k: transport)
+    monkeypatch.setattr(mcp_client, "ClientSession", lambda *a, **k: session)
+
+    cfg = types.SimpleNamespace(type="http", url="https://example.test/mcp", headers=None)
+
+    with pytest.raises(mcp_client.ConfigError):
+        await mcp_client.connect_mcp_servers({"srv": cfg})
+
+    assert session.aexit_calls == 1, "session __aexit__ not awaited (ClientSession leaked)"
+    assert transport.aexit_calls == 1, "transport __aexit__ not awaited (HTTP transport leaked)"

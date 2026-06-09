@@ -103,7 +103,7 @@ async def run_command(command: str) -> ToolResult:
     allowed = {"date", "hostname", "uptime"}
     if command not in allowed:
         raise ValueError(f"command must be one of {allowed}")
-    result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=5)
+    result = subprocess.run([command], shell=False, capture_output=True, text=True, timeout=5)
     output = result.stdout.strip() or result.stderr.strip() or "(no output)"
     return ToolResult(content=output, summary=f"run({command})")
 

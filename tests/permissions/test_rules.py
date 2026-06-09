@@ -64,3 +64,12 @@ def test_path_double_star_crosses_slash() -> None:
         project_root,
         cwd,
     )
+    # ``**/`` matches zero directories too — ``config/**/*.json`` must match a
+    # file directly under ``config/`` (gitignore/glob semantics).
+    assert match_path_rule(
+        rule,
+        "Write",
+        {"file_path": "config/app.json"},
+        project_root,
+        cwd,
+    )
