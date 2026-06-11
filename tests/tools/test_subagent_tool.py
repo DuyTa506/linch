@@ -3,11 +3,11 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Any
 
-from linch.subagents.registry import AgentRegistry
-from linch.tools.subagent import SubagentTool
-
 
 def test_subagent_tool_description_lists_verification_and_delegation_rules() -> None:
+    from linch.subagents.registry import AgentRegistry
+    from linch.tools.subagent import SubagentTool
+
     tool = SubagentTool(
         registry=AgentRegistry([]),
         get_session=lambda _sid: None,

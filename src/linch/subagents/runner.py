@@ -192,6 +192,9 @@ async def run_subagent(args: RunSubagentArgs) -> RunSubagentResult:
     )
     child_session.tools_override = child_tools
     child_session.system_blocks_override = child_system
+    # Child joins the parent's spending cap: same RunBudget object, so child
+    # turns are visible to the parent's next pre-call budget check.
+    child_session.inherited_budget = getattr(args.parent_session, "active_budget", None)
 
     agent._sessions[child_record.id] = child_session
 
@@ -203,16 +206,21 @@ async def run_subagent(args: RunSubagentArgs) -> RunSubagentResult:
 
     merged_signal = any_signal(child_session._abort_controller, args.signal)
 
-    result = await _drive_child(
-        child_session,
-        args.prompt,
-        emit=args.emit,
-        subagent_run_id=args.subagent_run_id,
-        subagent_type=args.definition.frontmatter.name,
-        display_name=args.display_name,
-        parent_session_id=args.parent_session.id,
-        signal=merged_signal,
-    )
+    try:
+        result = await _drive_child(
+            child_session,
+            args.prompt,
+            emit=args.emit,
+            subagent_run_id=args.subagent_run_id,
+            subagent_type=args.definition.frontmatter.name,
+            display_name=args.display_name,
+            parent_session_id=args.parent_session.id,
+            signal=merged_signal,
+        )
+    finally:
+        # Release the merged-signal watcher task so completed child runs do
+        # not leave pending tasks behind.
+        merged_signal.close()
 
     if not args.retain:
         agent._sessions.pop(child_record.id, None)
@@ -255,16 +263,19 @@ async def continue_subagent(args: ContinueSubagentArgs) -> RunSubagentResult:
     merged_signal = any_signal(child_session._abort_controller, args.signal)
 
     subagent_run_id = f"sa_cont_{args.handle.worker_id}"
-    result = await _drive_child(
-        child_session,
-        args.message,
-        emit=args.emit,
-        subagent_run_id=subagent_run_id,
-        subagent_type=handle.definition.frontmatter.name,
-        display_name=handle.display_name,
-        parent_session_id=args.parent_session.id,
-        signal=merged_signal,
-    )
+    try:
+        result = await _drive_child(
+            child_session,
+            args.message,
+            emit=args.emit,
+            subagent_run_id=subagent_run_id,
+            subagent_type=handle.definition.frontmatter.name,
+            display_name=handle.display_name,
+            parent_session_id=args.parent_session.id,
+            signal=merged_signal,
+        )
+    finally:
+        merged_signal.close()
 
     handle.last_result_text = result.final_text
     handle.status = "failed" if result.errored else "completed"

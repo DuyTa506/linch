@@ -2,7 +2,8 @@
 
 from ._version import get_version
 from .agent import Agent, AgentOptions
-from .compaction import DefaultCompaction, DetailedCompaction
+from .budget import RunBudget
+from .compaction import CompactionLadder, DefaultCompaction, DetailedCompaction
 from .config import FeatureFlags, SystemPromptConfig, SystemPromptSection
 from .context import (
     ContextBudget,
@@ -27,6 +28,7 @@ from .errors import (
 )
 from .events import (
     AssistantEvent,
+    BudgetEvent,
     CompactionEvent,
     ContextBuildEvent,
     ErrorEvent,
@@ -44,9 +46,12 @@ from .events import (
     ToolCallStartEvent,
     UsageEvent,
     UserEvent,
+    WorkflowEvent,
+    is_budget_event,
     is_context_build_event,
     is_loop_guard_event,
     is_subagent_event,
+    is_workflow_event,
 )
 from .filesystem import (
     CompositeFileBackend,
@@ -135,6 +140,14 @@ from .run_store import (
     StoredRunEvent,
 )
 from .session import RunOptions, Session
+from .subagents import (
+    CreatedSubagentDefinition,
+    GeneratedSubagentDefinition,
+    create_subagent_definition,
+    generate_subagent_definition,
+    render_subagent_markdown,
+    write_subagent_definition,
+)
 from .tools import (
     Citation,
     FileReadTracker,
@@ -164,6 +177,7 @@ from .types import (
     ToolUseBlock,
     Usage,
 )
+from .workflow import WorkflowContext, WorkflowError, WorkflowJournal
 
 defaultTools = default_tools
 __version__ = get_version()
@@ -173,6 +187,14 @@ __all__ = [
     "Agent",
     "LinchError",
     "AgentOptions",
+    "RunBudget",
+    "BudgetEvent",
+    "is_budget_event",
+    "WorkflowContext",
+    "WorkflowError",
+    "WorkflowEvent",
+    "WorkflowJournal",
+    "is_workflow_event",
     "AgentMiddleware",
     "ContextBudget",
     "ContextBuilder",
@@ -180,6 +202,7 @@ __all__ = [
     "ContextBuildEvent",
     "ContextBuildResult",
     "ContextBuildTurn",
+    "CompactionLadder",
     "DefaultCompaction",
     "DetailedCompaction",
     "DEEP_AGENT_SYSTEM_PROMPT",
@@ -208,9 +231,11 @@ __all__ = [
     "AuthError",
     "ConfigError",
     "ContextLengthError",
+    "CreatedSubagentDefinition",
     "Citation",
     "FileReadTracker",
     "FunctionTool",
+    "GeneratedSubagentDefinition",
     "McpHttpServerConfig",
     "McpServerConfig",
     "McpStdioServerConfig",
@@ -286,6 +311,7 @@ __all__ = [
     "StoredRunEvent",
     "apply_provider_capabilities",
     "build_run_report",
+    "create_subagent_definition",
     "LoopGuard",
     "LoopGuardDecision",
     "LoopGuardEvent",
@@ -299,6 +325,7 @@ __all__ = [
     "__version__",
     "is_context_build_event",
     "get_provider_model_info",
+    "generate_subagent_definition",
     "is_loop_guard_event",
     "is_subagent_event",
     "list_provider_models",
@@ -318,4 +345,6 @@ __all__ = [
     "ToolResultInfo",
     "TurnInfo",
     "normalize_observers",
+    "render_subagent_markdown",
+    "write_subagent_definition",
 ]

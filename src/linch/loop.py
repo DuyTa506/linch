@@ -7,7 +7,12 @@ from html import escape
 from typing import Any, Literal, cast
 from uuid import uuid4
 
-from .compaction import build_compaction_event, maybe_compact, run_forced_compaction
+from .compaction import (
+    apply_micro_compaction,
+    build_compaction_event,
+    maybe_compact,
+    run_forced_compaction,
+)
 from .context import (
     ContextBuildResult,
     ContextBuildTurn,
@@ -19,6 +24,7 @@ from .errors import AbortError, ContextLengthError
 from .events import (
     AssistantEvent,
     BackgroundWorkerEvent,
+    BudgetEvent,
     ContextBuildEvent,
     ErrorEvent,
     Event,
@@ -436,6 +442,163 @@ async def _persist_event(session: Session, run_id: str, event: Event) -> None:
         await session.agent.run_store.append_event(run_id, event)
 
 
+async def _budget_exhausted_tail(
+    session: Session,
+    agent: Any,
+    *,
+    run_id: str,
+    run_record: Any,
+    checkpoint: Any,
+    budget: Any,
+    total: Usage,
+    duration_ms: int,
+    running_cost: float | None,
+) -> AsyncIterator[Event]:
+    """Emit the graceful-stop event sequence for an exhausted RunBudget."""
+    event: Event = BudgetEvent(
+        kind="exceeded",
+        spent_tokens=budget.spent_tokens,
+        spent_usd=budget.spent_usd,
+        max_tokens=budget.max_tokens,
+        max_cost_usd=budget.max_cost_usd,
+    )
+    await _persist_event(session, run_id, event)
+    yield event
+    budget_error = {
+        "name": "BudgetExceededError",
+        "message": (
+            f"run budget exhausted ({budget.spent_tokens} tokens, ${budget.spent_usd:.4f} spent)"
+        ),
+        "retryable": False,
+    }
+    event = ErrorEvent(error=budget_error)
+    await _persist_event(session, run_id, event)
+    yield event
+    event = ResultEvent(
+        subtype="error",
+        stop_reason="error",
+        total_usage=total,
+        duration_ms=duration_ms,
+        total_cost_usd=running_cost,
+    )
+    await _persist_event(session, run_id, event)
+    store = agent.run_store
+    if run_record is not None and store is not None:
+        checkpoint.total_usage = total
+        await store.mark_failed(run_id, checkpoint, error=budget_error)
+    yield event
+
+
+async def _stream_turn_with_ladder(
+    session: Session,
+    agent: Any,
+    opts: RunOptions,
+    req: Any,
+    *,
+    turn_index: int,
+    signal: Any,
+    ladder: Any,
+    forced_used: list[int],
+    save_checkpoint: Any,
+    start_provider_call: Any,
+    end_provider_call: Any,
+) -> AsyncIterator[Any]:
+    """Provider-call attempt loop with compaction-ladder recovery.
+
+    Yields the same items as :func:`stream_turn` (events + the final
+    ``AssistantAssembly``) plus recovery ``CompactionEvent``/
+    ``ContextBuildEvent`` items.  Nothing is persisted here — the caller
+    persists every non-assembly item it receives.
+
+    Rung 1: micro-compact (LLM-free, once per turn).  Rung 2: forced
+    compaction, capped per run by ``ladder.max_forced_compactions`` via the
+    *forced_used* one-element counter cell; once exhausted the
+    ``ContextLengthError`` surfaces.
+    """
+    micro_tried_this_turn = False
+    while True:
+        await save_checkpoint("provider_pending", turn_index=turn_index)
+        await start_provider_call(turn_index, req.model)
+        try:
+            async for item in stream_turn(session, req):
+                yield item
+            return
+        except ContextLengthError:
+            await end_provider_call(stop_reason="context_length_error")
+            recovered = False
+            if ladder.micro and not micro_tried_this_turn:
+                micro_tried_this_turn = True
+                recovered = apply_micro_compaction(
+                    session, agent, keep_recent_turns=ladder.keep_recent_turns
+                )
+            if not recovered:
+                if forced_used[0] >= ladder.max_forced_compactions:
+                    raise
+                forced_used[0] += 1
+                await run_forced_compaction(session, agent, signal)
+            yield build_compaction_event(session)
+            _re_inject_skill_context(session)
+            # Re-run context builders after compaction so fresh context lands.
+            context_result = await _build_context_result(session, turn_index)
+            if context_result is not None:
+                yield ContextBuildEvent(
+                    system_blocks=len(context_result.system_blocks),
+                    messages=len(context_result.messages),
+                    selected_tools=_context_selected_tool_names(context_result),
+                    budget=context_budget_to_dict(context_result.budget),
+                    metadata=dict(context_result.metadata),
+                )
+            req = _build_turn_request(session, opts, context=context_result)
+
+
+async def _stream_turn_with_compaction_retry(
+    session: Session,
+    agent: Any,
+    opts: RunOptions,
+    req: Any,
+    *,
+    turn_index: int,
+    signal: Any,
+    save_checkpoint: Any,
+    start_provider_call: Any,
+    end_provider_call: Any,
+) -> AsyncIterator[Any]:
+    """Legacy provider-call path: a single forced-compaction retry per turn.
+
+    Yields the same items as :func:`stream_turn` plus recovery events; the
+    caller persists every non-assembly item.  Behavior is identical to the
+    pre-ladder inline code (pinned by tests/loop/test_compaction_ladder.py).
+    """
+    await save_checkpoint("provider_pending", turn_index=turn_index)
+    await start_provider_call(turn_index, req.model)
+    try:
+        async for item in stream_turn(session, req):
+            yield item
+    except ContextLengthError:
+        if session.compaction_retry_used_this_turn:
+            raise
+        await end_provider_call(stop_reason="context_length_error")
+        session.mark_compaction_used()
+        await run_forced_compaction(session, agent, signal)
+        yield build_compaction_event(session)
+        _re_inject_skill_context(session)
+        # Re-run context builders after compaction so fresh context lands.
+        context_result = await _build_context_result(session, turn_index)
+        if context_result is not None:
+            yield ContextBuildEvent(
+                system_blocks=len(context_result.system_blocks),
+                messages=len(context_result.messages),
+                selected_tools=_context_selected_tool_names(context_result),
+                budget=context_budget_to_dict(context_result.budget),
+                metadata=dict(context_result.metadata),
+            )
+        req = _build_turn_request(session, opts, context=context_result)
+        await save_checkpoint("provider_pending", turn_index=turn_index)
+        await start_provider_call(turn_index, req.model)
+        async for item in stream_turn(session, req):
+            yield item
+
+
 def _tool_result_block_from_end(event: ToolCallEndEvent) -> ToolResultBlock:
     return ToolResultBlock(
         tool_use_id=event.tool_use_id,
@@ -628,6 +791,10 @@ async def _run_loop_impl(
     started = time.time()
     total = Usage()
     running_cost: float | None = None  # accumulated USD cost; None until first priced turn
+    # Per-run circuit breaker for ladder-driven forced compactions (Agent(
+    # compaction_ladder=...)); one-element cell shared with the recovery
+    # generator.  Unused when no ladder is configured.
+    _forced_compactions_used = [0]
 
     # ── Observability hub ─────────────────────────────────────────────────
     from .observability import ObserverDispatcher
@@ -643,6 +810,14 @@ async def _run_loop_impl(
 
     # Resolve per-run deps: RunOptions.deps wins over Agent.deps
     session.run_deps = opts.deps if opts.deps is not None else getattr(agent, "deps", None)
+
+    # Resolve the run budget: RunOptions.budget > inherited-from-parent
+    # (subagent child sessions) > Agent.budget.  All runs in an agent tree
+    # share one RunBudget object, so child spending is visible here.
+    _budget = (
+        opts.budget or getattr(session, "inherited_budget", None) or getattr(agent, "budget", None)
+    )
+    session.active_budget = _budget
 
     # Resolve final_tool_name: RunOptions wins over Agent
     effective_final_tool = opts.final_tool_name or getattr(agent, "final_tool_name", None)
@@ -887,6 +1062,33 @@ async def _run_loop_impl(
 
         for turn_index in range(start_turn, max_turns):
             throw_if_aborted(signal)
+            # ── Budget pre-call check ─────────────────────────────────────
+            # Before any turn span opens: an exhausted budget stops the run
+            # gracefully (history intact, session reusable), mirroring the
+            # max-turns tail below.
+            if _budget is not None and _budget.exceeded:
+                _dur = int((time.time() - started) * 1000)
+                _final_result = _RunResultInfo(
+                    run_id=run_id,
+                    session_id=session.id,
+                    subtype="error",
+                    stop_reason="error",
+                    total_usage=total,
+                    duration_ms=_dur,
+                )
+                async for event in _budget_exhausted_tail(
+                    session,
+                    agent,
+                    run_id=run_id,
+                    run_record=run_record,
+                    checkpoint=checkpoint,
+                    budget=_budget,
+                    total=total,
+                    duration_ms=_dur,
+                    running_cost=running_cost,
+                ):
+                    yield event
+                return
             # Drain background-worker notifications before this turn's provider call.
             async for note_event in _drain_pending_notifications(session, run_id):
                 yield note_event
@@ -983,48 +1185,41 @@ async def _run_loop_impl(
                 )
             else:
                 assert req is not None
-                await _save_checkpoint("provider_pending", turn_index=turn_index)
-                await _start_provider_call(turn_index, req.model)
-                try:
-                    async for item in stream_turn(session, req):
-                        if isinstance(item, AssistantAssembly):
-                            assembly = item
-                        else:
-                            await _persist_event(session, run_id, item)
-                            yield item
-                except ContextLengthError:
-                    if not session.compaction_retry_used_this_turn:
-                        await _end_active_provider_call(stop_reason="context_length_error")
-                        session.mark_compaction_used()
-                        await run_forced_compaction(session, agent, signal)
-                        event = build_compaction_event(session)
-                        await _persist_event(session, run_id, event)
-                        yield event
-                        _re_inject_skill_context(session)
-                        # Re-run context builders after compaction so fresh context lands.
-                        context_result = await _build_context_result(session, turn_index)
-                        if context_result is not None:
-                            event = ContextBuildEvent(
-                                system_blocks=len(context_result.system_blocks),
-                                messages=len(context_result.messages),
-                                selected_tools=_context_selected_tool_names(context_result),
-                                budget=context_budget_to_dict(context_result.budget),
-                                metadata=dict(context_result.metadata),
-                            )
-                            await _persist_event(session, run_id, event)
-                            yield event
-                        req = _build_turn_request(session, opts, context=context_result)
-                        assembly = None
-                        await _save_checkpoint("provider_pending", turn_index=turn_index)
-                        await _start_provider_call(turn_index, req.model)
-                        async for item in stream_turn(session, req):
-                            if isinstance(item, AssistantAssembly):
-                                assembly = item
-                            else:
-                                await _persist_event(session, run_id, item)
-                                yield item
+                _ladder = getattr(agent, "compaction_ladder", None)
+                if _ladder is None:
+                    # Legacy path: one forced-compaction retry per turn.
+                    _provider_stream = _stream_turn_with_compaction_retry(
+                        session,
+                        agent,
+                        opts,
+                        req,
+                        turn_index=turn_index,
+                        signal=signal,
+                        save_checkpoint=_save_checkpoint,
+                        start_provider_call=_start_provider_call,
+                        end_provider_call=_end_active_provider_call,
+                    )
+                else:
+                    # Ladder recovery: micro-compact, then capped forced compactions.
+                    _provider_stream = _stream_turn_with_ladder(
+                        session,
+                        agent,
+                        opts,
+                        req,
+                        turn_index=turn_index,
+                        signal=signal,
+                        ladder=_ladder,
+                        forced_used=_forced_compactions_used,
+                        save_checkpoint=_save_checkpoint,
+                        start_provider_call=_start_provider_call,
+                        end_provider_call=_end_active_provider_call,
+                    )
+                async for item in _provider_stream:
+                    if isinstance(item, AssistantAssembly):
+                        assembly = item
                     else:
-                        raise
+                        await _persist_event(session, run_id, item)
+                        yield item
 
             if assembly is None:
                 raise RuntimeError("provider stream ended without assistant assembly")
@@ -1043,6 +1238,8 @@ async def _run_loop_impl(
                 _turn_cost = _cost_usd(assembly.usage, _turn_model)
                 if _turn_cost is not None:
                     running_cost = (running_cost or 0.0) + _turn_cost
+                if _budget is not None:
+                    _budget.charge(assembly.usage, _turn_cost)
                 _force_final_pending = False
                 await _save_checkpoint(
                     "assistant_appended",
@@ -1062,6 +1259,16 @@ async def _run_loop_impl(
                 )
                 await _persist_event(session, run_id, event)
                 yield event
+                if _budget is not None and _budget.take_warning():
+                    event = BudgetEvent(
+                        kind="warning",
+                        spent_tokens=_budget.spent_tokens,
+                        spent_usd=_budget.spent_usd,
+                        max_tokens=_budget.max_tokens,
+                        max_cost_usd=_budget.max_cost_usd,
+                    )
+                    await _persist_event(session, run_id, event)
+                    yield event
 
             # ── Check for final_tool (terminal tool-use) ──────────────────
             if effective_final_tool and assembly.stop_reason == "tool_use":
@@ -1449,6 +1656,11 @@ async def _run_loop_impl(
             await store.mark_failed(run_id, checkpoint, error=_err_dict)
         yield event
     finally:
+        # Release the merged-signal watcher when this run created one
+        # (opts.signal merged with the session controller); a plain session
+        # controller has no watcher and close() is a no-op.
+        if signal is not session._abort_controller:
+            signal.close()
         if hub.active:
             await _close_active_observer_spans(stop_reason="error")
             _run_result = _final_result or _RunResultInfo(

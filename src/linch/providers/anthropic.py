@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import importlib
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from linch.errors import (
     AbortError,
@@ -70,12 +69,12 @@ class AnthropicProvider(BaseProvider):
         if self._client is not None:
             return self._client
         try:
-            anthropic_mod = importlib.import_module("anthropic")
+            import anthropic
         except ModuleNotFoundError as exc:
             raise ProviderError(
                 "The 'anthropic' package is required. Install with: pip install 'linch[anthropic]'"
             ) from exc
-        AsyncAnthropic = anthropic_mod.__dict__["AsyncAnthropic"]
+        AsyncAnthropic = cast(Any, anthropic).AsyncAnthropic
         kwargs: dict[str, Any] = {}
         if self._options.api_key is not None:
             kwargs["api_key"] = self._options.api_key

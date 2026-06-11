@@ -73,9 +73,11 @@ async for event in session.run("hello"):
         case "tool_call_end":     # tool finished, has .result
         case "permission_request": # user approval needed (mode="default")
         case "usage":     # token counts for this turn
+        case "budget":    # RunBudget warning (90%) or exhaustion
         case "result":    # run finished — .subtype in ("success","error","aborted")
         case "error":     # provider/tool error details
-        case "compaction": # context was summarised
+        case "compaction": # context was summarised (or micro-compacted)
+        case "workflow":  # workflow engine progress / journal records
 ```
 
 `ResultEvent` is always the last event. Check `event.subtype` and
@@ -93,8 +95,8 @@ async for event in session.run("Summarize this thread."):
         print(event.total_cost_usd)
 ```
 
-Unknown model IDs report `None` for cost rather than pretending the call is
-free. Use `linch.pricing.cost_usd(usage, model, table=...)` with a custom table
+Unknown model IDs report `None` for cost rather than charging synthetic cost.
+Use `linch.pricing.cost_usd(usage, model, table=...)` with a custom table
 for private or self-hosted models.
 
 ### Run reports
@@ -411,6 +413,74 @@ agent = Agent(
     compaction=DetailedCompaction(),
 )
 ```
+
+#### Compaction ladder
+
+`CompactionLadder` adds cheap recovery rungs before (and around) LLM
+summarization. Opt-in — when unset, compaction behaves exactly as before.
+
+```python
+from linch import Agent, CompactionLadder
+
+agent = Agent(
+    model="gpt-5",
+    compaction_ladder=CompactionLadder(
+        micro=True,                 # rung 1: LLM-free tool-result elision
+        keep_recent_turns=10,       # never elide results in the last N turns
+        max_forced_compactions=3,   # per-run circuit breaker on LLM compaction
+    ),
+)
+```
+
+- **Micro-compact (rung 1)**: old `ToolResultBlock` contents are replaced with
+  a short placeholder — no LLM call, `tool_use_id` pairing preserved,
+  `full_history` untouched. Runs proactively when the context projection
+  crosses the 80% threshold, and reactively (once per turn) when the provider
+  raises `ContextLengthError`. Emits `CompactionEvent(strategy="micro")`.
+- **Forced compaction (rung 2)**: the configured strategy summarizes, as
+  today, but capped at `max_forced_compactions` per run — after that the
+  `ContextLengthError` surfaces instead of looping.
+- The proactive rung's "did we free enough" check uses the agent's
+  `token_estimator`; the default heuristic only counts text blocks, so pass an
+  estimator that counts tool-result content to get the most out of it. The
+  reactive rung shrinks the actual payload, so it helps regardless.
+
+### Run budgets
+
+`RunBudget` caps total spending — tokens, USD, or both — for a run **and every
+subagent it spawns**: child sessions inherit the parent's budget object, so one
+cap covers the whole agent tree.
+
+```python
+from linch import Agent, RunBudget
+from linch.session import RunOptions
+
+budget = RunBudget(max_tokens=500_000)          # and/or max_cost_usd=2.0
+
+session = await agent.session()
+async for event in session.run("do the task", RunOptions(budget=budget)):
+    if event.type == "budget" and event.kind == "warning":
+        print(f"90% spent: {event.spent_tokens} tokens")
+    elif event.type == "budget" and event.kind == "exceeded":
+        print("budget exhausted — run stops with an error result")
+
+print(budget.spent_tokens, budget.remaining_tokens, budget.exceeded)
+```
+
+Behaviour:
+
+- The loop charges the budget after every provider turn and checks it before
+  the next one. When exceeded, it emits `BudgetEvent(kind="exceeded")`, an
+  `ErrorEvent` named `BudgetExceededError`, and a `ResultEvent(subtype="error")`
+  — the session history stays intact and the session remains usable.
+- A `BudgetEvent(kind="warning")` fires once per budget object when spending
+  first reaches `warn_ratio` (default 0.9) of any limit. Shared budgets warn
+  once across the whole tree, not once per run.
+- Precedence: `RunOptions(budget=...)` > budget inherited from a parent
+  session (subagents) > `Agent(budget=...)`.
+- Token counts sum all four `Usage` buckets. USD costs come from
+  `linch.pricing`; unknown models charge `$0`, so for unpriced models only the
+  token limit binds.
 
 ### System prompt control
 
@@ -823,6 +893,63 @@ offloading so reading a large file back does not recursively re-offload it.
 
 ---
 
+## Workflows (deterministic fleet loops)
+
+`agent.run_workflow(fn)` runs a plain async Python function that orchestrates
+subagents deterministically — your script owns the control flow, subagents do
+the work. This is the "closed loop" counterpart to the LLM-driven coordinator
+mode: cheap, repeatable, and resumable.
+
+```python
+from linch import Agent, RunBudget, SqliteRunStore
+
+async def review(wf):
+    await wf.phase("Find")
+    findings = await wf.parallel([
+        lambda: wf.agent("review the diff for bugs", label="bugs"),
+        lambda: wf.agent("review the diff for performance", label="perf"),
+    ])
+    await wf.phase("Verify")
+    verdicts = await wf.pipeline(
+        findings,
+        lambda f: wf.agent(f"adversarially verify: {f}"),
+    )
+    return verdicts
+
+agent = Agent(model="gpt-5", run_store=SqliteRunStore("runs.db"))
+result = await agent.run_workflow(
+    review,
+    budget=RunBudget(max_tokens=500_000),   # shared across every wf.agent child
+    run_id="review-pr-42",                  # enables journaling + resume
+    on_event=lambda e: print(e.type),       # WorkflowEvents + child SubagentEvents
+)
+```
+
+The `wf` context (`linch.workflow.WorkflowContext`) provides:
+
+- `await wf.agent(prompt, *, name=None, label=None, tools=None) -> str` — run a
+  subagent (a named definition from the subagent registry, or the built-in
+  general-purpose one) and return its final text. A failed child raises
+  `WorkflowError`.
+- `await wf.parallel(thunks) -> list` — run thunks concurrently, capped by
+  `max_concurrency` (default 4); results keep input order.
+- `await wf.pipeline(items, *stages) -> list` — run each item through all
+  stages independently, with no barrier between stages.
+- `await wf.phase(title)` — emit a progress phase marker.
+- `wf.budget` — the shared `RunBudget` (see Run budgets above).
+
+**Journal and resume.** With `run_id` and a `run_store`, each `wf.agent` call's
+result is persisted as a `WorkflowEvent(kind="agent_end")` in the run's event
+log. Re-invoking `run_workflow` with the same `run_id` replays the unchanged
+call prefix from that journal — `kind="agent_replayed"` events fire instead of
+provider calls. Calls are keyed by a content hash of `(subagent_type, prompt)`
+plus an occurrence counter, so identical parallel calls replay safely and an
+edited prompt invalidates only that call.
+
+**Determinism rule.** The workflow function must be deterministic — no
+`random`, wall-clock, or environment-dependent branching — for resume to
+replay the unchanged prefix correctly.
+
 ## Deep agent preset
 
 `create_deep_agent()` is a convenience factory that wires up a multi-agent
@@ -900,6 +1027,36 @@ async for event in session.run(
 
 `session.workers` is a `dict[str, WorkerHandle]`. Each handle exposes
 `handle.child_session_id`, `handle.status`, and `handle.last_result_text`.
+
+### Generate a project subagent
+
+Use `create_subagent_definition()` to turn a natural-language request into a
+normal disk-backed project subagent. The SDK writes
+`.linch/agents/<name>.md`, validates it with the same loader used at runtime,
+and reloads the `Agent` by default so the new subagent appears in the
+`Subagent` tool catalog immediately.
+
+```python
+from linch import Agent, create_subagent_definition
+
+agent = Agent(
+    model="gpt-5",
+    permissions={"mode": "skip-dangerous"},
+    cwd=".",
+)
+
+created = await create_subagent_definition(
+    agent,
+    "Create a test-runner subagent that runs focused tests after code changes.",
+    tools=["Read", "Grep", "Bash"],
+)
+
+print(created.file_path)              # .linch/agents/test-runner.md
+print(agent.subagent_registry.get("test-runner"))
+```
+
+For host applications that want more control, call
+`generate_subagent_definition()` and `write_subagent_definition()` separately.
 
 ### Coordinator mode
 

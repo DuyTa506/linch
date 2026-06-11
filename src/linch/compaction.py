@@ -5,7 +5,7 @@ from typing import Any, Protocol, cast, runtime_checkable
 
 from .abort import AbortContext
 from .events import CompactionEvent
-from .types import Message, SystemBlock, TextBlock
+from .types import Message, SystemBlock, TextBlock, ToolResultBlock
 
 
 @dataclass
@@ -13,6 +13,112 @@ class CompactionContext:
     messages: list[Message]
     model: str
     signal: AbortContext
+
+
+@dataclass(slots=True)
+class CompactionLadder:
+    """Opt-in LLM-free recovery rungs that run before full summarization.
+
+    Pass via ``Agent(compaction_ladder=CompactionLadder())``.  When unset
+    (default ``None``) the loop behaves exactly as before.
+
+    Attributes:
+        micro: Enable micro-compact — elide old tool-result contents (no LLM
+            call) both proactively (in :func:`maybe_compact`) and reactively
+            (on ``ContextLengthError``, once per turn).
+        keep_recent_turns: Tool results within the last N assistant turns are
+            never elided.
+        max_forced_compactions: Per-run circuit breaker on forced (LLM)
+            compactions triggered by ``ContextLengthError``; once exhausted
+            the error surfaces.
+    """
+
+    micro: bool = True
+    keep_recent_turns: int = 10
+    max_forced_compactions: int = 3
+
+
+_ELIDED = "[tool result elided to save context]"
+
+
+def micro_compact(
+    messages: list[Message], *, keep_recent_turns: int = 10
+) -> tuple[list[Message], int]:
+    """Return ``(new_messages, n_elided)`` with old tool-result contents elided.
+
+    Pure and copy-on-write: never mutates *messages* or their blocks (they are
+    shared with ``session.full_history``); untouched messages are reused by
+    identity.  Only ``ToolResultBlock`` contents older than the last
+    *keep_recent_turns* assistant turns are replaced, so every ``tool_use_id``
+    stays paired and the message structure remains provider-valid.  No LLM call.
+    """
+    recent = last_n_turn_boundaries(messages, keep_recent_turns)
+    boundary = len(messages) - len(recent)
+    if boundary <= 0:
+        return messages, 0
+
+    n_elided = 0
+    out: list[Message] = []
+    for i, message in enumerate(messages):
+        if i >= boundary:
+            out.append(message)
+            continue
+        new_blocks: list[Any] | None = None
+        for j, block in enumerate(message.content):
+            if not isinstance(block, ToolResultBlock):
+                continue
+            content = block.content
+            worthwhile = (isinstance(content, str) and len(content) > len(_ELIDED)) or (
+                isinstance(content, list) and len(content) > 0
+            )
+            if not worthwhile or content == _ELIDED:
+                continue
+            if new_blocks is None:
+                new_blocks = list(message.content)
+            new_blocks[j] = ToolResultBlock(
+                tool_use_id=block.tool_use_id,
+                content=_ELIDED,
+                is_error=block.is_error,
+            )
+            n_elided += 1
+        if new_blocks is None:
+            out.append(message)
+        else:
+            out.append(
+                Message(
+                    role=message.role,
+                    content=new_blocks,
+                    provider_metadata=message.provider_metadata,
+                )
+            )
+
+    if n_elided == 0:
+        return messages, 0
+    return out, n_elided
+
+
+def apply_micro_compaction(session: Any, agent: Any, *, keep_recent_turns: int) -> bool:
+    """Elide old tool results in ``session.provider_view`` in place.
+
+    Returns ``True`` and sets ``session.last_compaction_info`` (strategy
+    ``"micro"``) when anything was elided; ``False`` leaves the session
+    untouched.
+    """
+    tokens_before = _estimate_tokens(agent, session.provider_view)
+    new_view, n_elided = micro_compact(session.provider_view, keep_recent_turns=keep_recent_turns)
+    if n_elided == 0:
+        return False
+    messages_count = len(session.provider_view)
+    session.provider_view[:] = new_view
+    session.last_compaction_info = {
+        "type": "compaction",
+        "messages_before": messages_count,
+        "messages_after": messages_count,
+        "tokens_before": tokens_before,
+        "tokens_after": _estimate_tokens(agent, session.provider_view),
+        "strategy": "micro",
+    }
+    return True
 
 
 @runtime_checkable
@@ -226,6 +332,18 @@ async def maybe_compact(
     if projected < 0.8 * limit:
         return False
 
+    # Ladder rung 1 — micro-compact (no LLM call).  If eliding old tool
+    # results brings the projection back under threshold, skip summarization
+    # entirely; otherwise keep the savings and fall through.
+    micro_info: dict[str, Any] | None = None
+    ladder = getattr(agent, "compaction_ladder", None)
+    if ladder is not None and ladder.micro:
+        if apply_micro_compaction(session, agent, keep_recent_turns=ladder.keep_recent_turns):
+            projected = _estimate_tokens(agent, session.provider_view) + reserve
+            if projected < 0.8 * limit:
+                return True
+            micro_info = session.last_compaction_info
+
     length_before = len(session.provider_view)
     head_before = session.provider_view[0] if session.provider_view else None
 
@@ -233,6 +351,11 @@ async def maybe_compact(
 
     if len(session.provider_view) == length_before:
         if session.provider_view and head_before is session.provider_view[0]:
+            # Full strategy was a no-op; if micro elided something, that is
+            # still a reportable compaction.
+            if micro_info is not None:
+                session.last_compaction_info = micro_info
+                return True
             session.last_compaction_info = None
             return False
 

@@ -228,7 +228,9 @@ class AgentOptions:
     config_dir: str | None = None
     mcp_servers: dict[str, Any] | None = None
     compaction: Any = None
+    compaction_ladder: Any = None  # CompactionLadder | None
     token_estimator: Any = None
+    budget: Any = None  # RunBudget | None
     features: FeatureFlags | None = None
     context_builder: Any = None
     deps: Any = None
@@ -285,7 +287,9 @@ class Agent:
         mcp_servers: dict[str, Any] | None = None,
         mcpServers: dict[str, Any] | None = None,
         compaction: Any = None,
+        compaction_ladder: Any = None,
         token_estimator: Any = None,
+        budget: Any = None,
         features: FeatureFlags | None = None,
         context_builder: ContextBuilder | list[ContextBuilder] | None = None,
         deps: Any = None,
@@ -381,7 +385,13 @@ class Agent:
             enable_task_stop=enable_task_stop,
         )
         self.compaction: Any = compaction
+        # Opt-in micro/reactive compaction rungs (CompactionLadder | None).
+        # None keeps the legacy single-retry behavior byte-identical.
+        self.compaction_ladder: Any = compaction_ladder
         self.token_estimator = token_estimator
+        # Default spending cap shared by every session/run of this agent.
+        # Prefer RunOptions(budget=...) for per-run caps.
+        self.budget: Any = budget
 
         # Feature flags (controls which subsystems connect in session())
         self.features: FeatureFlags = features or FeatureFlags()
@@ -788,6 +798,20 @@ class Agent:
             self._subagents_connect = None
             raise
 
+    async def reload_subagents(self) -> None:
+        """Reload disk-backed subagents and refresh subagent orchestration tools."""
+
+        self.tools.unregister("Subagent")
+        self.tools.unregister("SubagentContinue")
+        self.tools.unregister("TaskStop")
+        self.subagent_registry = None
+        self._subagents_connect = None
+        self._subagents_loaded = False
+        if self.features.subagents:
+            await self.connect_subagents()
+        else:
+            self._refresh_system_blocks()
+
     def _next_default_display_name(self, session_id: str) -> str:
         cur = self.subagent_run_counters.get(session_id, 0)
         self.subagent_run_counters[session_id] = cur + 1
@@ -874,6 +898,33 @@ class Agent:
             )
         self._sessions[record.id] = session
         return session
+
+    async def run_workflow(
+        self,
+        fn: Any,
+        *,
+        budget: Any = None,
+        run_id: str | None = None,
+        max_concurrency: int = 4,
+        on_event: Any = None,
+    ) -> Any:
+        """Run a deterministic workflow function and return its value.
+
+        *fn* is ``async def flow(wf: WorkflowContext) -> Any``.  See
+        :mod:`linch.workflow` for the ``wf`` primitives (``agent``,
+        ``parallel``, ``pipeline``, ``phase``, ``budget``) and the
+        journal/resume semantics behind *run_id*.
+        """
+        from .workflow.engine import run_workflow as _run_workflow
+
+        return await _run_workflow(
+            self,
+            fn,
+            budget=budget,
+            run_id=run_id,
+            max_concurrency=max_concurrency,
+            on_event=on_event,
+        )
 
     async def close(self) -> None:
         import asyncio
