@@ -35,6 +35,9 @@ class RunOptions:
     deps: Any = None
     """Per-run dependency object passed into :attr:`ToolContext.deps`.
     Overrides ``Agent.deps`` when set to a non-``None`` value."""
+    budget: Any = None  # RunBudget | None
+    """Spending cap for this run (and its subagent tree).  Overrides
+    ``Agent.budget`` when set.  See :class:`~linch.budget.RunBudget`."""
 
 
 @dataclass(slots=True)
@@ -50,6 +53,13 @@ class Session:
     active_run_id: str | None = None
     last_usage: Usage | None = None
     last_compaction_info: dict[str, Any] | None = None
+    active_budget: Any = None  # RunBudget | None
+    """The resolved budget for the in-flight run.  Set by ``run_loop`` from
+    ``RunOptions.budget`` → ``inherited_budget`` → ``Agent.budget``; read by
+    ``run_subagent`` so child sessions join the parent's budget."""
+    inherited_budget: Any = None  # RunBudget | None
+    """Budget inherited from a parent session (set on subagent child sessions
+    by ``run_subagent``).  Same object as the parent's ``active_budget``."""
     compaction_retry_used_this_turn: bool = False
     pending_skill_overlay: SkillOverlay | None = None
     current_turn_allowed_tools: list[str] | None = None

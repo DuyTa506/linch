@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Literal, TypeAlias
+from typing import Any, Literal, TypeAlias, cast
 
 from .tools.base import Citation, ToolResult
 from .types import Message, StopReason, Usage, message_from_dict, message_to_dict
@@ -83,6 +83,20 @@ class UsageEvent:
     cumulative_cost_usd: float | None = None
     """Accumulated USD cost across all turns so far, or ``None`` if no priced
     turn has run yet."""
+
+
+@dataclass(slots=True)
+class BudgetEvent:
+    """Emitted when a :class:`~linch.budget.RunBudget` crosses its warning
+    ratio (``kind="warning"``, once per budget object) or is exhausted
+    (``kind="exceeded"``, after which the run stops with an error result)."""
+
+    kind: Literal["warning", "exceeded"]
+    spent_tokens: int
+    spent_usd: float
+    max_tokens: int | None
+    max_cost_usd: float | None
+    type: Literal["budget"] = "budget"
 
 
 @dataclass(slots=True)
@@ -195,6 +209,24 @@ class LoopGuardEvent:
     type: Literal["loop_guard"] = "loop_guard"
 
 
+@dataclass(slots=True)
+class WorkflowEvent:
+    """Progress/journal event emitted by the workflow engine.
+
+    ``kind="agent_end"`` and ``kind="agent_replayed"`` records double as the
+    resume journal: persisted to the run store, they let an unchanged
+    ``wf.agent`` call prefix replay cached results on resume.
+    """
+
+    kind: Literal["phase", "agent_start", "agent_end", "agent_replayed"]
+    title: str = ""
+    call_key: str = ""
+    occurrence: int = 0
+    subagent_type: str = ""
+    result_text: str | None = None
+    type: Literal["workflow"] = "workflow"
+
+
 Event: TypeAlias = (
     SystemEvent
     | UserEvent
@@ -204,6 +236,7 @@ Event: TypeAlias = (
     | ToolCallEndEvent
     | PermissionRequestEvent
     | UsageEvent
+    | BudgetEvent
     | CompactionEvent
     | ContextBuildEvent
     | ResultEvent
@@ -214,6 +247,7 @@ Event: TypeAlias = (
     | SubagentEvent
     | BackgroundWorkerEvent
     | LoopGuardEvent
+    | WorkflowEvent
 )
 
 
@@ -247,6 +281,10 @@ def is_permission_request_event(e: Event) -> bool:
 
 def is_usage_event(e: Event) -> bool:
     return e.type == "usage"  # type: ignore[comparison-overlap]
+
+
+def is_budget_event(e: Event) -> bool:
+    return e.type == "budget"  # type: ignore[comparison-overlap]
 
 
 def is_compaction_event(e: Event) -> bool:
@@ -283,6 +321,10 @@ def is_subagent_event(e: Event) -> bool:
 
 def is_loop_guard_event(e: Event) -> bool:
     return e.type == "loop_guard"  # type: ignore[comparison-overlap]
+
+
+def is_workflow_event(e: Event) -> bool:
+    return e.type == "workflow"  # type: ignore[comparison-overlap]
 
 
 def usage_to_dict(usage: Usage) -> dict[str, int]:
@@ -447,6 +489,15 @@ def event_to_dict(event: Event) -> dict[str, Any]:
         if event.cumulative_cost_usd is not None:
             d_usage["cumulative_cost_usd"] = event.cumulative_cost_usd
         return d_usage
+    if isinstance(event, BudgetEvent):
+        return {
+            "type": event.type,
+            "kind": event.kind,
+            "spent_tokens": event.spent_tokens,
+            "spent_usd": event.spent_usd,
+            "max_tokens": event.max_tokens,
+            "max_cost_usd": event.max_cost_usd,
+        }
     if isinstance(event, CompactionEvent):
         return {
             "type": event.type,
@@ -518,6 +569,16 @@ def event_to_dict(event: Event) -> dict[str, Any]:
             "detail": event.detail,
             "action": event.action,
         }
+    if isinstance(event, WorkflowEvent):
+        return {
+            "type": event.type,
+            "kind": event.kind,
+            "title": event.title,
+            "call_key": event.call_key,
+            "occurrence": event.occurrence,
+            "subagent_type": event.subagent_type,
+            "result_text": event.result_text,
+        }
     raise ValueError(f"unknown event type: {getattr(event, 'type', '<missing>')}")
 
 
@@ -583,6 +644,16 @@ def event_from_dict(raw: dict[str, Any]) -> Event:
             cumulative=usage_from_dict(dict(raw.get("cumulative", {}))),
             cost_usd=float(_cost) if isinstance(_cost, (int, float)) else None,
             cumulative_cost_usd=float(_cum_cost) if isinstance(_cum_cost, (int, float)) else None,
+        )
+    if typ == "budget":
+        _max_tokens = raw.get("max_tokens")
+        _max_cost = raw.get("max_cost_usd")
+        return BudgetEvent(
+            kind="exceeded" if raw.get("kind") == "exceeded" else "warning",
+            spent_tokens=int(raw.get("spent_tokens", 0) or 0),
+            spent_usd=float(raw.get("spent_usd", 0.0) or 0.0),
+            max_tokens=int(_max_tokens) if isinstance(_max_tokens, int) else None,
+            max_cost_usd=float(_max_cost) if isinstance(_max_cost, (int, float)) else None,
         )
     if typ == "compaction":
         return CompactionEvent(
@@ -659,5 +730,19 @@ def event_from_dict(raw: dict[str, Any]) -> Event:
             reason=str(raw.get("reason", "")),
             detail=str(raw.get("detail", "")),
             action=str(raw.get("action", "stop")),
+        )
+    if typ == "workflow":
+        _kind = raw.get("kind")
+        if _kind not in ("phase", "agent_start", "agent_end", "agent_replayed"):
+            _kind = "phase"
+        return WorkflowEvent(
+            kind=cast(Any, _kind),
+            title=str(raw.get("title", "")),
+            call_key=str(raw.get("call_key", "")),
+            occurrence=int(raw.get("occurrence", 0) or 0),
+            subagent_type=str(raw.get("subagent_type", "")),
+            result_text=(
+                raw.get("result_text") if isinstance(raw.get("result_text"), str) else None
+            ),
         )
     raise ValueError(f"unknown event type: {typ!r}")

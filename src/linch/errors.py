@@ -52,3 +52,13 @@ class ProviderError(LinchError):
 
 class SkillError(LinchError):
     kind = "skill"
+
+
+class WorkflowError(LinchError):
+    """A subagent run inside a workflow ended in an error."""
+
+    kind = "workflow"
+
+    def __init__(self, message: str, *, error: dict[str, str] | None = None):
+        super().__init__(message)
+        self.error = error

@@ -144,6 +144,16 @@ Use `ContextBuilder.build(turn) -> ContextBuildResult` for RAG, memory recall, e
 
 When the provider's context window approaches its limit, the compaction strategy summarizes old messages to free space. This is transparent to the caller; a `CompactionEvent` is emitted.
 
+**Compaction ladder (opt-in)**: `Agent(compaction_ladder=CompactionLadder())` adds LLM-free recovery rungs. Rung 1 — `micro_compact`: copy-on-write elision of `ToolResultBlock` contents older than `keep_recent_turns` (blocks are shared with `full_history`, so changed messages are rebuilt, never mutated; `tool_use_id` pairing preserved). Runs proactively in `maybe_compact` and reactively on `ContextLengthError` (once per turn). Rung 2 — forced compaction capped at `max_forced_compactions` per run (circuit breaker), then the error surfaces. With the default `compaction_ladder=None`, behavior is byte-identical to the legacy single-retry path (`_stream_turn_with_compaction_retry` vs `_stream_turn_with_ladder` in `loop.py`).
+
+### Budgets (`budget.py`)
+
+`RunBudget(max_tokens=..., max_cost_usd=...)` caps spending for a run **and its whole subagent tree** — children inherit the parent's budget object by reference (`run_subagent` copies `parent_session.active_budget` into `child_session.inherited_budget`). Resolution in `run_loop`: `RunOptions.budget` > `inherited_budget` > `Agent(budget=...)`. The loop charges after every provider turn and checks before each one; exhaustion emits `BudgetEvent(kind="exceeded")` → `ErrorEvent(BudgetExceededError)` → `ResultEvent(subtype="error")` and stops gracefully. `BudgetEvent(kind="warning")` fires once per budget object at `warn_ratio` (default 0.9). Unknown-model turns charge $0 — only the token limit binds for unpriced models.
+
+### Workflows (`workflow/`)
+
+`agent.run_workflow(fn, *, budget=None, run_id=None, max_concurrency=4, on_event=None)` runs a deterministic "fleet loop": *fn* is a plain async function receiving a `WorkflowContext` (`wf`) with `await wf.agent(prompt, name=..., label=..., tools=...) -> str` (runs a subagent via `run_subagent`; failure raises `WorkflowError`), `await wf.parallel(thunks)` (semaphore-capped, order-preserving), `await wf.pipeline(items, *stages)` (per-item chaining, no barrier), `await wf.phase(title)`, and `wf.budget` (the shared `RunBudget`). With `Agent(run_store=...)` + `run_id`, each `wf.agent` result is journaled as a persisted `WorkflowEvent(kind="agent_end")`; re-running the same `run_id` replays the unchanged prefix from `WorkflowJournal.from_stored_events` (`kind="agent_replayed"`, no provider call). Calls are keyed by `sha256(subagent_type, prompt)` + occurrence counter (`workflow/journal.py`). Workflow functions must be deterministic for resume to be correct.
+
 ### Observability (`observability/`)
 
 `RunObserver` is a vendor-neutral protocol with nine span-hook methods (`on_run_start/end`, `on_turn_start/end`, `on_provider_call_start/end`, `on_tool_start/end`) plus an `on_event` catch-all. Methods may be sync or async.

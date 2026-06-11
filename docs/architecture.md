@@ -550,6 +550,7 @@ graph LR
         CE["CompactionEvent\ntype=compaction\nmessages before/after · tokens before/after"]
         LGE["LoopGuardEvent\ntype=loop_guard\nreason · detail · action"]
         UGE["UsageEvent\ntype=usage · usage · cumulative"]
+        BE["BudgetEvent\ntype=budget · kind = warning | exceeded\nspent/max tokens · spent/max USD"]
     end
 
     subgraph Skill["Skills & Subagents"]
@@ -559,6 +560,7 @@ graph LR
         SCE["SkillCompletedEvent"]
         SAE["SubagentEvent\nwraps a nested Event"]
         BWE["BackgroundWorkerEvent\nworker_id · status · display_name"]
+        WFE["WorkflowEvent\ntype=workflow\nkind = phase | agent_start | agent_end | agent_replayed"]
     end
 ```
 
@@ -665,7 +667,9 @@ classDiagram
 | `memory/` | `MemoryStore` protocol, reference stores including `TieredMemoryStore`, `MemoryContextBuilder`, memory tools |
 | `filesystem/` | `FileBackend` protocol, `StateFileBackend`, `DiskFileBackend`, `SqliteFileBackend`, `CompositeFileBackend`, `OffloadConfig`, ls/read_file/write_file/edit_file tools |
 | `scheduler.py` | Resource-aware parallel tool execution with concurrency cap; applies `maybe_offload` at the result chokepoint |
-| `compaction.py` | Context-window management; calls `agent.provider` directly |
+| `compaction.py` | Context-window management; calls `agent.provider` directly; `CompactionLadder` + `micro_compact` recovery rungs |
+| `budget.py` | `RunBudget` — token/USD spending caps shared across the agent tree; charged per turn in `loop.py` |
+| `workflow/` | Deterministic workflow engine: `WorkflowContext` (`context.py`), content-addressed journal (`journal.py`), `run_workflow` driver (`engine.py`) |
 | `permissions/` | `PermissionEngine`: rule evaluation, event emission, loop suspension, durable permission decision keys |
 | `pricing.py` | `ModelPricing`, `_DEFAULT_PRICING`, `cost_usd()` for per-turn and cumulative cost events |
 | `evals/` | Scripted provider, eval case/result dataclasses, built-in scorers, `run_eval()` |
@@ -856,6 +860,25 @@ Path B is more reliable for complex schemas and works across all providers witho
 with user intent, artifacts/files/code touched, errors/fixes, pending tasks,
 current work, and the next step.
 
+### Compaction ladder (opt-in)
+
+`Agent(compaction_ladder=CompactionLadder())` adds recovery rungs around the
+strategy; with the default `compaction_ladder=None` the behavior above is
+byte-identical.
+
+- **Rung 1 — micro-compact** (`micro_compact` in `compaction.py`): elide
+  `ToolResultBlock` contents older than `keep_recent_turns` with a short
+  placeholder. No LLM call; copy-on-write (blocks are shared with
+  `full_history`, so changed messages are rebuilt, never mutated); every
+  `tool_use_id` stays paired. Runs proactively inside `maybe_compact` (skips
+  summarization when elision frees enough) and reactively, once per turn, when
+  the provider raises `ContextLengthError`.
+- **Rung 2 — forced compaction with a circuit breaker**: the reactive path
+  (`_stream_turn_with_ladder` in `loop.py`) retries with forced compactions up
+  to `max_forced_compactions` per run, then lets the error surface. The legacy
+  path (no ladder) keeps its original single-retry-per-turn semantics in
+  `_stream_turn_with_compaction_retry`.
+
 ---
 
 ## 12. Skills and Subagents
@@ -892,6 +915,40 @@ not copied from the parent. Gated by `FeatureFlags(subagents=True)`.
 - `TaskStopTool` cancels the background `asyncio.Task` and signals abort on the child session; the `WorkerHandle` remains in `session.workers` so the worker can be continued later.
 - `session.abort()` and `agent.close()` both cancel all running background worker tasks. `agent.close()` additionally clears `agent._sessions`.
 
+### Run budgets (`budget.py`)
+
+`RunBudget` is a plain mutable accumulator capping tokens and/or USD for a run
+**and its whole subagent tree**. Resolution order in `run_loop`:
+`RunOptions.budget` → `session.inherited_budget` (set on child sessions by
+`run_subagent` from the parent's `active_budget`) → `Agent(budget=...)`. The
+loop charges the budget after every provider turn (next to the `UsageEvent`)
+and checks `exceeded` before each turn; exhaustion emits
+`BudgetEvent(kind="exceeded")` → `ErrorEvent(BudgetExceededError)` →
+`ResultEvent(subtype="error")` and stops gracefully — history intact, session
+reusable. A `BudgetEvent(kind="warning")` fires once per budget object at
+`warn_ratio` (default 0.9). Because parent and children charge the *same
+object*, child spending is visible to the parent's next pre-call check.
+
+### Workflow engine (`workflow/`)
+
+`agent.run_workflow(fn)` drives a deterministic "closed fleet loop": *fn* is a
+plain async function receiving a `WorkflowContext` (`wf`) and orchestrating
+subagents via `wf.agent` / `wf.parallel` / `wf.pipeline` / `wf.phase`, with
+`wf.budget` exposing the shared `RunBudget`.
+
+- A host session parents every `wf.agent` run (each is a normal
+  `run_subagent` child); child `SubagentEvent`s and `WorkflowEvent`s reach the
+  host via the `on_event` callback.
+- **Journal = the run event log.** With `Agent(run_store=...)` and a
+  `run_id`, each `wf.agent` result persists as
+  `WorkflowEvent(kind="agent_end")`. Re-invoking with the same `run_id` folds
+  the stored events back into a `WorkflowJournal` and replays the unchanged
+  call prefix (`kind="agent_replayed"`, no provider call). Calls are keyed by
+  `sha256(subagent_type, prompt)` + per-key occurrence counter, so parallel
+  fan-out replays safely and an edited prompt invalidates only that call.
+- The workflow function must be deterministic (no random/time-based
+  branching) for resume replay to be correct.
+
 ---
 
 ## 13. Key Invariants
@@ -915,3 +972,6 @@ These must not break across refactors:
 | 13 | **Background workers are cancelled at both exit paths** — `_cancel_background_workers(session)` is called in both the `except AbortError` and `except Exception` handlers in `run_loop`. Worker tasks must never write into a session whose run has already ended. |
 | 14 | **`SubagentTool` always uses `retain=True`** — child sessions remain in `agent._sessions` until `agent.close()` clears them. `continue_subagent` relies on the child session being live; removing it would silently break fork/continue. |
 | 15 | **`session.pending_notifications` is drained before `ContextBuilder.build()`** — `_drain_pending_notifications` converts each queued `<task-notification>` Message into a `UserEvent` at the top of every new turn, so the model sees background task results before the next provider call. |
+| 16 | **One `RunBudget` object per agent tree** — children inherit the parent's `active_budget` by reference in `run_subagent`; charging happens only in `run_loop` next to the `UsageEvent`. Never copy a budget into a child. |
+| 17 | **`micro_compact` is copy-on-write** — provider-view messages/blocks are shared with `full_history`; elision must build new `Message`/`ToolResultBlock` objects, never mutate in place. With `compaction_ladder=None` the compaction/retry event sequence is byte-identical to the pre-ladder code (pinned by `test_ladder_disabled_is_byte_identical`). |
+| 18 | **Workflow journal records are append-only `WorkflowEvent`s in the run store** — replay correctness depends on `agent_end`/`agent_replayed` events being persisted for every completed `wf.agent` call; do not emit them for failed calls. |
