@@ -61,6 +61,12 @@ class Session:
     """Budget inherited from a parent session (set on subagent child sessions
     by ``run_subagent``).  Same object as the parent's ``active_budget``."""
     compaction_retry_used_this_turn: bool = False
+    active_model: str | None = None
+    """Run-level model override set by the model-fallback recovery path when the
+    primary model overloads. ``None`` means use ``agent.model``. Reset at the
+    start of each run."""
+    fallback_index: int = 0
+    """How many entries of ``agent.fallback_models`` have been consumed this run."""
     pending_skill_overlay: SkillOverlay | None = None
     current_turn_allowed_tools: list[str] | None = None
     current_turn_permission_decisions: dict[str, dict] = field(default_factory=dict)
