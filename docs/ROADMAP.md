@@ -386,6 +386,26 @@ team protocols, coding fleets). No domain policy in core.
   volatile facts to a prepended `<system-reminder>` user message.
 - **Verify:** changing a dynamic section leaves the cached static prefix intact
   (cache-read tokens unchanged on a stub caching provider).
+- **Status (done):** the section-assembly half already shipped — `SystemPromptConfig`
+  carries ordered named `SystemPromptSection`s (`placement` ∈ before_defaults / after_defaults
+  / after_env) each with a `cacheable` flag, and every block is a `SystemBlock(cacheable=...)`.
+  The real gap was the **cache boundary**: `_translate_system` ignored `cacheable` and always
+  marked the *literal last* system block, so a volatile trailing section thrashed the whole
+  cached prefix. Fixed by placing the Anthropic cache breakpoint at the end of the leading
+  contiguous static (`cacheable=True`) run (`_cache_breakpoint_index`); a `cacheable=False`
+  block ends the cached prefix and is re-sent uncached each turn. Because the agent's built-in
+  prompt blocks are all `cacheable=True`, the breakpoint stays on the last block — byte-identical
+  for real prompts; the change only takes effect once a caller introduces a dynamic block (a
+  `SystemPromptSection(cacheable=False)` or a `ContextBuilder` system block, which already
+  defaults to `cacheable=False`). Volatile per-turn facts are already a *user* message:
+  `build_user_message` prepends `<env>` (today's date) and `MemoryContextBuilder` injects recall
+  as a user message, both outside the system prefix. **YAGNI deferrals:** no separate
+  `SystemPromptBuilder` registry was added — `SystemPromptConfig.sections` (static, with
+  `cacheable`) plus the existing per-turn `ContextBuilder` system-block seam already cover ordered
+  static-prefix + dynamic-suffix assembly, so a parallel builder with `condition(state)`
+  predicates would duplicate that seam without unlocking a new capability. Multi-breakpoint
+  caching (Anthropic allows up to 4) is left unused; one breakpoint at the static/dynamic boundary
+  is sufficient.
 
 #### 3.3 Scheduling primitive — *mechanism*
 - **Why:** no time-trigger exists. A neutral scheduler is a mechanism; *what* gets
