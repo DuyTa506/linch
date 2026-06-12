@@ -14,8 +14,8 @@ from ..compaction import (
     run_forced_compaction,
 )
 from ..context import context_budget_to_dict
-from ..errors import ContextLengthError
-from ..events import ContextBuildEvent, PartialAssistantEvent
+from ..errors import ContextLengthError, ProviderError
+from ..events import ContextBuildEvent, ModelFallbackEvent, PartialAssistantEvent
 from ..session import RunOptions, Session
 from ..types import (
     AssistantAssembly,
@@ -33,7 +33,35 @@ from .request import (
     _build_turn_request,
     _context_selected_tool_names,
     _re_inject_skill_context,
+    apply_provider_capabilities,
 )
+
+
+def _apply_model_fallback(
+    session: Any, agent: Any, req: Any, exc: Exception
+) -> ModelFallbackEvent | None:
+    """Swap *req* to the next fallback model after an overload; ``None`` if none left.
+
+    Run-level: records the swap on ``session.active_model`` so every later turn
+    uses the new model, and re-applies provider capability downgrades for it. The
+    request body (messages/system/tools) is untouched — only the model changes.
+    A no-op (returns ``None``) when ``agent.fallback_models`` is empty/exhausted,
+    which keeps the default path byte-identical.
+    """
+    fallbacks = getattr(agent, "fallback_models", None)
+    if not fallbacks:
+        return None
+    index = getattr(session, "fallback_index", 0)
+    if index >= len(fallbacks):
+        return None
+    next_model = fallbacks[index]
+    from_model = req.model
+    session.fallback_index = index + 1
+    session.active_model = next_model
+    req.model = next_model
+    if hasattr(agent.provider, "capabilities"):
+        apply_provider_capabilities(req, agent.provider.capabilities(next_model))
+    return ModelFallbackEvent(from_model=from_model, to_model=next_model, reason=str(exc))
 
 
 async def _stream_turn_with_ladder(
@@ -70,6 +98,17 @@ async def _stream_turn_with_ladder(
             async for item in stream_turn(session, req):
                 yield item
             return
+        except ProviderError as exc:
+            # Provider overload (retryable): swap to the next fallback model for
+            # the rest of the run and retry; surface the error if none remain.
+            if not getattr(exc, "retryable", False):
+                raise
+            await end_provider_call(stop_reason="error")
+            fallback_event = _apply_model_fallback(session, agent, req, exc)
+            if fallback_event is None:
+                raise
+            yield fallback_event
+            continue
         except ContextLengthError:
             await end_provider_call(stop_reason="context_length_error")
             recovered = False
@@ -117,34 +156,49 @@ async def _stream_turn_with_compaction_retry(
     caller persists every non-assembly item.  Behavior is identical to the
     pre-ladder inline code (pinned by tests/loop/test_compaction_ladder.py).
     """
-    await save_checkpoint("provider_pending", turn_index=turn_index)
-    await start_provider_call(turn_index, req.model)
-    try:
-        async for item in stream_turn(session, req):
-            yield item
-    except ContextLengthError:
-        if session.compaction_retry_used_this_turn:
-            raise
-        await end_provider_call(stop_reason="context_length_error")
-        session.mark_compaction_used()
-        await run_forced_compaction(session, agent, signal)
-        yield build_compaction_event(session)
-        _re_inject_skill_context(session)
-        # Re-run context builders after compaction so fresh context lands.
-        context_result = await _build_context_result(session, turn_index)
-        if context_result is not None:
-            yield ContextBuildEvent(
-                system_blocks=len(context_result.system_blocks),
-                messages=len(context_result.messages),
-                selected_tools=_context_selected_tool_names(context_result),
-                budget=context_budget_to_dict(context_result.budget),
-                metadata=dict(context_result.metadata),
-            )
-        req = _build_turn_request(session, opts, context=context_result)
+    # The outer loop only re-iterates on a successful model-fallback swap
+    # (overload recovery); with no fallback_models configured it runs exactly
+    # once, keeping the legacy single-compaction-retry behavior byte-identical.
+    while True:
         await save_checkpoint("provider_pending", turn_index=turn_index)
         await start_provider_call(turn_index, req.model)
-        async for item in stream_turn(session, req):
-            yield item
+        try:
+            try:
+                async for item in stream_turn(session, req):
+                    yield item
+            except ContextLengthError:
+                if session.compaction_retry_used_this_turn:
+                    raise
+                await end_provider_call(stop_reason="context_length_error")
+                session.mark_compaction_used()
+                await run_forced_compaction(session, agent, signal)
+                yield build_compaction_event(session)
+                _re_inject_skill_context(session)
+                # Re-run context builders after compaction so fresh context lands.
+                context_result = await _build_context_result(session, turn_index)
+                if context_result is not None:
+                    yield ContextBuildEvent(
+                        system_blocks=len(context_result.system_blocks),
+                        messages=len(context_result.messages),
+                        selected_tools=_context_selected_tool_names(context_result),
+                        budget=context_budget_to_dict(context_result.budget),
+                        metadata=dict(context_result.metadata),
+                    )
+                req = _build_turn_request(session, opts, context=context_result)
+                await save_checkpoint("provider_pending", turn_index=turn_index)
+                await start_provider_call(turn_index, req.model)
+                async for item in stream_turn(session, req):
+                    yield item
+        except ProviderError as exc:
+            if not getattr(exc, "retryable", False):
+                raise
+            await end_provider_call(stop_reason="error")
+            fallback_event = _apply_model_fallback(session, agent, req, exc)
+            if fallback_event is None:
+                raise
+            yield fallback_event
+            continue
+        return
 
 
 async def stream_turn(

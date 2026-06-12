@@ -218,6 +218,27 @@ Pure runtime mechanisms; no new subsystems. Highest leverage, fully self-contain
   consecutive overload errors, swap the active model for the run and emit an event.
 - **Verify:** a provider that truncates once then completes drives exactly one escalated
   retry with no duplicated output; K overloads trigger one model swap + event.
+- **Status: model fallback done; truncation escalation deferred.**
+  - **Model fallback (new, shipped).** `Agent(fallback_models=[...])` — there was *no*
+    overload resilience in the loop (`with_retry` exists but is unwired, so a `ProviderError`
+    killed the run). On a retryable `ProviderError` (overload, e.g. 529) the recovery path
+    swaps the active model to the next fallback **for the rest of the run** and retries,
+    emitting a `ModelFallbackEvent`. The swap is run-level: persisted on
+    `session.active_model` (read in `loop/request.py`) and reset at run start, with
+    `session.fallback_index` tracking consumption (robust to duplicate model names). Wired
+    into both streaming attempt-loops (`_stream_turn_with_ladder` + the legacy retry path,
+    now a fallback while-loop); with `fallback_models` unset both stay byte-identical.
+    Overload raises *before* any token streams, so there is no duplicated output. Simplified
+    from the roadmap's "after K consecutive overloads" to "swap on overload" (KISS — backoff
+    is `with_retry`'s job, not the fallback's). (4 tests: fallback, no-fallback byte-identical,
+    run-level persistence across turns, exhaustion → error.)
+  - **Truncation `max_tokens` escalation/continuation — deferred (YAGNI/policy).** Auto-raising
+    the output cap past the embedder's configured `max_output_tokens` is policy a
+    pure-mechanism SDK should expose as an explicit opt-in, and the continuation half
+    (append-truncated + diminishing-returns `<500`-token stop) entangles with
+    partial-event duplication for streaming UIs. Lower real-world frequency than overload
+    (a misconfigured cap is embedder-fixable). Revisit as a focused opt-in
+    (`Agent(truncation_recovery=...)`) when a concrete need surfaces.
 
 #### 1.4 Task coordination primitives: claim / ready / release — *mechanism*
 - **Why:** the DAG **model** already exists; the *coordination verbs* don't. These are

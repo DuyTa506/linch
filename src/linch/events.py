@@ -138,6 +138,20 @@ class CompactionEvent:
 
 
 @dataclass(slots=True)
+class ModelFallbackEvent:
+    """Emitted when the active model is swapped after a provider overload.
+
+    The swap is run-level: every subsequent turn uses ``to_model`` until the
+    run ends or another overload escalates to the next fallback.
+    """
+
+    from_model: str
+    to_model: str
+    reason: str = ""
+    type: Literal["model_fallback"] = "model_fallback"
+
+
+@dataclass(slots=True)
 class ContextBuildEvent:
     system_blocks: int
     messages: int
@@ -269,6 +283,7 @@ Event: TypeAlias = (
     | UsageEvent
     | BudgetEvent
     | CompactionEvent
+    | ModelFallbackEvent
     | ContextBuildEvent
     | ResultEvent
     | ErrorEvent

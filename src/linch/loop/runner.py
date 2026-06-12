@@ -269,6 +269,9 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
 ) -> AsyncIterator[Event]:
     agent = session.agent
     session.active_run_id = run_id
+    # Reset run-level model-fallback state so each run starts on the primary model.
+    session.active_model = None
+    session.fallback_index = 0
     started = time.time()
     total = Usage()
     running_cost: float | None = None  # accumulated USD cost; None until first priced turn

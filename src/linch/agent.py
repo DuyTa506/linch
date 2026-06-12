@@ -285,6 +285,7 @@ class Agent:
         compaction: Any = None,
         compaction_ladder: Any = None,
         token_estimator: Any = None,
+        fallback_models: list[str] | None = None,
         budget: Any = None,
         features: FeatureFlags | None = None,
         deps: Any = None,
@@ -384,6 +385,10 @@ class Agent:
         # None keeps the legacy single-retry behavior byte-identical.
         self.compaction_ladder: Any = compaction_ladder
         self.token_estimator = token_estimator
+        # Ordered alternate models tried, in turn, when the active model
+        # overloads mid-run (ProviderError(retryable=True)). None/[] = disabled
+        # (default byte-identical).
+        self.fallback_models: list[str] | None = fallback_models
         # Default spending cap shared by every session/run of this agent.
         # Prefer RunOptions(budget=...) for per-run caps.
         self.budget: Any = budget
