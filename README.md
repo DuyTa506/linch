@@ -59,7 +59,7 @@ linch is designed for application developers building agentic features such as:
 | Budgets | `RunBudget` token/USD caps shared across the subagent tree, warning + exceeded events, graceful stop |
 | Workflows | Deterministic fleet loops: `wf.agent`/`parallel`/`pipeline`/`phase`, journaled resume, shared budgets |
 | Providers | OpenAI Responses, OpenAI Chat Completions, Anthropic, Gemini, llama.cpp, OpenAI-compatible endpoints, pluggable providers |
-| Extensibility | MCP, skills, subagents (fork/continue, background workers, coordinator mode), observers |
+| Extensibility | Python hooks, MCP, skills, subagents (fork/continue, background workers, coordinator mode), observer compatibility |
 | Outputs | Structured output schemas, citations, usage/cost events, metadata-rich tool results, run reports |
 
 ---
@@ -157,7 +157,7 @@ python3 examples/tools/filesystem_offload.py
 
 ### Agent and Session
 
-An `Agent` owns shared configuration: model, provider, tools, permissions, context builders, memory, and session store.
+An `Agent` owns shared configuration: model, provider, tools, permissions, hooks, memory, and session store.
 
 A `Session` represents one conversation or workflow run. One agent can serve many sessions.
 
@@ -170,6 +170,30 @@ A `Session` represents one conversation or workflow run. One agent can serve man
 ### Events
 
 linch streams the loop as events instead of hiding execution behind a blocking function call. This makes it easier to build CLIs, web UIs, background workers, and observability integrations.
+
+### Hooks
+
+Hooks are the canonical extension mechanism for the agent loop. Register Python hook objects with `Agent(hooks=[...])` to inspect or control the run at typed chokepoints: agent start/stop, prompt submit, turn start/stop, provider calls, pre/post tool use, final answer, stop, subagent start/stop, and event emission.
+
+Built-in adapters are available when you want a standard extension as a hook:
+`ContextInjectionHook`, `ToolMiddlewareHook`, `RunTelemetryHook`,
+`FinalAnswerVerifierHook`, and `StopPredicateHook`.
+
+```python
+from linch import Agent, HookResult
+
+class GuardTools:
+    def on_pre_tool_use(self, ctx):
+        if ctx.tool_name == "Bash" and "rm -rf" in str(ctx.input.get("command", "")):
+            return HookResult.block("blocked dangerous command")
+        return None
+
+agent = Agent(
+    model="gpt-5",
+    hooks=[GuardTools()],
+    permissions={"mode": "skip-dangerous"},
+)
+```
 
 ### Tools and scheduler
 
@@ -197,7 +221,7 @@ agent = Agent(
 
 ### ContextBuilder
 
-`ContextBuilder` lets you construct turn-specific context before the model runs. This is where RAG, document selection, budget control, and metadata-aware context assembly belong.
+`ContextBuilder` lets you construct turn-specific context before the model runs. It is implemented as a built-in hook adapter; for new cross-cutting extension work, prefer `Agent(hooks=[...])`.
 
 ### Memory
 
@@ -276,12 +300,12 @@ Examples are organized by subsystem under `examples/`.
 | `tools/tool_reliability_agent.py` | Timeout, per-tool opt-out, `RetryOptions` |
 | `tools/filesystem_offload.py` | Virtual filesystem backends, auto-offload of large results (*offline*) |
 
-**`examples/context/`** — RAG and context building
+**`examples/context/`** — RAG and context hooks
 
 | File | What it shows |
 |---|---|
-| `context/context_injection.py` | ContextBuilder patterns: RAG per-turn, budget, selected tools |
-| `context/rag_context_builder.py` | First-class ContextBuilder RAG with metadata and budget reporting |
+| `context/context_injection.py` | ContextInjectionHook patterns: RAG per-turn, budget, selected tools |
+| `context/rag_context_builder.py` | ContextInjectionHook RAG with metadata and budget reporting |
 
 **`examples/memory/`** — memory primitives
 
@@ -291,11 +315,11 @@ Examples are organized by subsystem under `examples/`.
 | `memory/sqlite_memory_agent.py` | SqliteMemoryStore — persistent memory, round-trip, upsert update |
 | `memory/pgvector_memory.py` | Postgres memory example with optional vector-style retrieval |
 
-**`examples/observability/`** — observers and tracing
+**`examples/observability/`** — telemetry hooks and tracing
 
 | File | What it shows |
 |---|---|
-| `observability/observability_agent.py` | LoggingObserver + optional OpenTelemetryObserver |
+| `observability/observability_agent.py` | RunTelemetryHook with LoggingObserver + optional OpenTelemetryObserver |
 | `observability/custom_observer.py` | Custom observer: latency tracking, error counts per tool |
 
 **`examples/providers/`** — provider-specific features
@@ -339,7 +363,7 @@ Examples are organized by subsystem under `examples/`.
 
 | File | What it covers |
 |---|---|
-| [`docs/usage.md`](docs/usage.md) | Getting started, install, config, providers, tools, dependencies, structured output, RAG |
+| [`docs/usage/`](docs/usage/README.md) | Getting started, install, config, providers, tools, hooks, structured output, RAG, workflows, deep agent |
 | [`docs/architecture.md`](docs/architecture.md) | Internal data flow, module contracts, design invariants |
 | [`docs/contributing.md`](docs/contributing.md) | Dev setup, code rules, test conventions, PR checklist |
 | [`examples/`](examples/) | Runnable examples by subsystem |
