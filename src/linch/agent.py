@@ -1016,6 +1016,11 @@ class Agent:
                 task = getattr(handle, "task", None)
                 if task is not None and isinstance(task, asyncio.Task) and not task.done():
                     task.cancel()
+            # Cancel detached background-tool tasks too (mirrors session.abort),
+            # so closing the agent never orphans an in-flight background tool.
+            for task in getattr(sess, "background_tasks", []):
+                if isinstance(task, asyncio.Task) and not task.done():
+                    task.cancel()
         self._sessions.clear()
 
         if self._mcp_connection is not None:
