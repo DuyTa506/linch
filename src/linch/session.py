@@ -88,6 +88,10 @@ class Session:
     """SubagentEvents accumulated by in-flight child sessions; available to host UIs."""
     pending_notifications: list[Message] = field(default_factory=list)
     """In-process background-worker <task-notification> messages, drained next turn."""
+    mailbox_address: str | None = None
+    """This session's inbox address on ``agent.mailbox``; drained into provider_view
+    each turn when set. Workers default to their display_name; the root is set by
+    the embedder. ``None`` means this session does not receive peer messages."""
     """Per-session virtual filesystem backend (:class:`~linch.filesystem.backend.FileBackend`).
     Threaded into :attr:`~linch.tools.base.ToolContext.filesystem` on every
     tool call.  ``None`` when the filesystem subsystem is disabled."""

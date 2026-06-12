@@ -297,6 +297,7 @@ class Agent:
         loopGuard: Any = _UNSET,
         filesystem: Any = None,
         result_offload: Any = _DEFAULT_OFFLOAD,
+        mailbox: Any = None,
         hooks: Any = None,
         extra_subagents: list[AgentDefinition] | None = None,
         enable_worker_tools: bool = False,
@@ -411,6 +412,7 @@ class Agent:
         self._configure_loop_guard(loop_guard, loopGuard)
         self._configure_hooks(hooks=hooks)
         self._configure_filesystem(filesystem, result_offload)
+        self._configure_mailbox(mailbox)
 
     def _initialize_extension_state(
         self,
@@ -473,6 +475,28 @@ class Agent:
                 self.tools.register(t)
             except Exception:
                 pass  # already registered (e.g. caller added them manually)
+        self._refresh_system_blocks()
+
+    def _configure_mailbox(self, mailbox: Any) -> None:
+        """Register the peer-messaging tool when a mailbox is provided.
+
+        Opt-in: with ``mailbox=None`` no tool is added and no drain runs, so the
+        loop stays byte-identical. Workers share this same ``Agent`` object, so
+        ``self.mailbox`` is reachable from every session in the agent tree.
+        """
+        self.mailbox: Any = mailbox
+        if mailbox is None:
+            return
+
+        from .tools.send_message import SendMessageTool
+
+        get_session = lambda sid: self._sessions.get(sid)  # noqa: E731
+        try:
+            self.tools.register(
+                cast("Tool", SendMessageTool(mailbox=mailbox, get_session=get_session))
+            )
+        except Exception:
+            pass  # already registered (e.g. caller added it manually)
         self._refresh_system_blocks()
 
     def _filesystem_active(self) -> bool:

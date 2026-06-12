@@ -222,6 +222,10 @@ async def run_subagent(args: RunSubagentArgs) -> RunSubagentResult:
             child_session.file_read_tracker.add(path)
     child_session.tools_override = child_tools
     child_session.system_blocks_override = child_system
+    # Give the worker a peer-mailbox address (its display_name) so siblings can
+    # message it; no-op when the agent has no mailbox configured.
+    if getattr(agent, "mailbox", None) is not None:
+        child_session.mailbox_address = args.display_name
     # Child joins the parent's spending cap: same RunBudget object, so child
     # turns are visible to the parent's next pre-call budget check.
     child_session.inherited_budget = getattr(args.parent_session, "active_budget", None)

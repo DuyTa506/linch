@@ -117,6 +117,43 @@ async def _drain_pending_notifications(
         yield event
 
 
+def _render_peer_message(message: Any) -> Message:
+    """Wrap a drained :class:`MailboxMessage` as a ``<peer-message>`` user message."""
+    from xml.sax.saxutils import escape
+
+    parts = [
+        "<peer-message>",
+        f"<from>{escape(message.sender)}</from>",
+        f"<type>{escape(message.type)}</type>",
+    ]
+    if message.request_id:
+        parts.append(f"<request-id>{escape(message.request_id)}</request-id>")
+    if message.in_reply_to:
+        parts.append(f"<in-reply-to>{escape(message.in_reply_to)}</in-reply-to>")
+    parts.append(f"<content>{escape(message.content)}</content>")
+    parts.append("</peer-message>")
+    return Message(role="user", content=[TextBlock(text="".join(parts))])
+
+
+async def _drain_mailbox(session: Session, run_id: str) -> AsyncIterator[Event]:
+    """Drain peer messages for this session's address into provider_view.
+
+    No-op (byte-identical) unless the agent has a ``mailbox`` and the session has
+    a ``mailbox_address``. Mirrors :func:`_drain_pending_notifications`.
+    """
+    mailbox = getattr(session.agent, "mailbox", None)
+    address = getattr(session, "mailbox_address", None)
+    if mailbox is None or not address:
+        return
+    messages = await mailbox.drain(address)
+    for message in messages:
+        note = _render_peer_message(message)
+        await session.append([note])
+        event: Event = UserEvent(message=note)
+        await _persist_event(session, run_id, event)
+        yield event
+
+
 async def _cancel_background_workers(session: Session) -> None:
     """Cancel any running asyncio.Tasks in session.workers (abort cleanup)."""
     import asyncio
@@ -773,6 +810,9 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             # Drain background-worker notifications before this turn's provider call.
             async for note_event in _drain_pending_notifications(session, run_id):
                 yield note_event
+            # Drain peer mailbox messages addressed to this session, same chokepoint.
+            async for mail_event in _drain_mailbox(session, run_id):
+                yield mail_event
             await _start_turn(turn_index)
             # Captured before _force_final_pending is reset below: a guard-
             # forced final answer must bypass the verification gates.
