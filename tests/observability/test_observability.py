@@ -94,9 +94,8 @@ def _make_error_provider():
 def _make_agent(
     provider,
     *,
-    observers=None,
     tool_name="Echo",
-    context_builder=None,
+    hooks=None,
     tool_result=None,
 ):
     from linch import Agent
@@ -135,9 +134,14 @@ def _make_agent(
         session_store=InMemorySessionStore(),
         features=FeatureFlags(skills=False, subagents=False, mcp=False),
         loop_guard=None,
-        observers=observers,
-        context_builder=context_builder,
+        hooks=hooks,
     )
+
+
+def _observe(observers):
+    from linch.hooks import RunTelemetryHook
+
+    return [RunTelemetryHook(observers)]
 
 
 async def _collect(session, prompt="go"):
@@ -251,7 +255,7 @@ async def test_collector_full_span_tree():
     from linch.observability import SpanCollector
 
     collector = SpanCollector()
-    agent = _make_agent(_make_text_provider(), observers=[collector])
+    agent = _make_agent(_make_text_provider(), hooks=_observe([collector]))
     session = await agent.session()
     await _collect(session)
 
@@ -272,7 +276,7 @@ async def test_run_end_once_on_success():
         def on_run_end(self, info):
             run_ends.append(info)
 
-    agent = _make_agent(_make_text_provider(), observers=[CountObserver()])
+    agent = _make_agent(_make_text_provider(), hooks=_observe([CountObserver()]))
     session = await agent.session()
     await _collect(session)
 
@@ -294,7 +298,7 @@ async def test_run_end_once_on_error():
         def on_run_end(self, info):
             run_ends.append(info)
 
-    agent = _make_agent(_make_error_provider(), observers=[CountObserver()])
+    agent = _make_agent(_make_error_provider(), hooks=_observe([CountObserver()]))
     session = await agent.session()
     await _collect(session)
 
@@ -321,7 +325,7 @@ async def test_provider_and_turn_end_on_provider_error():
         def on_provider_call_end(self, info):
             calls.append(("provider_end", info.turn_index, info.stop_reason))
 
-    agent = _make_agent(_make_error_provider(), observers=[CountObserver()])
+    agent = _make_agent(_make_error_provider(), hooks=_observe([CountObserver()]))
     session = await agent.session()
     await _collect(session)
 
@@ -335,6 +339,8 @@ async def test_provider_and_turn_end_on_provider_error():
 
 @pytest.mark.asyncio
 async def test_turn_end_on_context_builder_error_before_provider_call():
+    from linch.hooks import ContextInjectionHook
+
     calls = []
 
     class FailingContextBuilder:
@@ -356,8 +362,10 @@ async def test_turn_end_on_context_builder_error_before_provider_call():
 
     agent = _make_agent(
         _make_text_provider(),
-        observers=[CountObserver()],
-        context_builder=FailingContextBuilder(),
+        hooks=[
+            *_observe([CountObserver()]),
+            ContextInjectionHook(FailingContextBuilder()),
+        ],
     )
     session = await agent.session()
     await _collect(session)
@@ -388,7 +396,7 @@ async def test_provider_span_timing():
     from linch.observability import SpanCollector
 
     collector = SpanCollector()
-    agent = _make_agent(SlowProvider(), observers=[collector])
+    agent = _make_agent(SlowProvider(), hooks=_observe([collector]))
     session = await agent.session()
     await _collect(session)
 
@@ -404,7 +412,7 @@ async def test_tool_spans_present():
 
     collector = SpanCollector()
     provider = _make_tool_provider(tool_name="Echo", tool_input={"x": 1})
-    agent = _make_agent(provider, observers=[collector], tool_name="Echo")
+    agent = _make_agent(provider, hooks=_observe([collector]), tool_name="Echo")
     session = await agent.session()
     await _collect(session)
 
@@ -431,7 +439,7 @@ async def test_on_tool_end_receives_structured_tool_result():
     provider = _make_tool_provider(tool_name="Echo", tool_input={"x": 1})
     agent = _make_agent(
         provider,
-        observers=[ToolObserver()],
+        hooks=_observe([ToolObserver()]),
         tool_name="Echo",
         tool_result=ToolResult(
             content="echo-ok",
@@ -489,7 +497,7 @@ async def test_observer_exception_does_not_break_run():
         def on_event(self, event):
             raise RuntimeError("always fail")
 
-    agent = _make_agent(_make_text_provider(), observers=[AlwaysRaise()])
+    agent = _make_agent(_make_text_provider(), hooks=_observe([AlwaysRaise()]))
     session = await agent.session()
     events = await _collect(session)
 
@@ -504,7 +512,7 @@ async def test_logging_observer_emits_lines(caplog):
     from linch.observability import LoggingObserver
 
     obs = LoggingObserver(level=logging.DEBUG)
-    agent = _make_agent(_make_text_provider(), observers=[obs])
+    agent = _make_agent(_make_text_provider(), hooks=_observe([obs]))
     session = await agent.session()
     with caplog.at_level(logging.DEBUG, logger="linch.observability"):
         await _collect(session)
@@ -526,7 +534,7 @@ async def test_on_event_receives_all_events():
         def on_event(self, event):
             all_events.append(event)
 
-    agent = _make_agent(_make_text_provider(), observers=[EventCollector()])
+    agent = _make_agent(_make_text_provider(), hooks=_observe([EventCollector()]))
     session = await agent.session()
     emitted_events = await _collect(session)
 
@@ -552,7 +560,7 @@ async def test_multiple_observers_all_called():
         def on_run_end(self, info):
             ends.append("obs2")
 
-    agent = _make_agent(_make_text_provider(), observers=[Obs1(), Obs2()])
+    agent = _make_agent(_make_text_provider(), hooks=_observe([Obs1(), Obs2()]))
     session = await agent.session()
     await _collect(session)
     assert "obs1" in ends
@@ -603,7 +611,7 @@ async def test_otel_span_tree():
 
     obs = OpenTelemetryObserver(tracer=tracer)
     provider = _make_tool_provider(tool_name="Echo")
-    agent = _make_agent(provider, observers=[obs], tool_name="Echo")
+    agent = _make_agent(provider, hooks=_observe([obs]), tool_name="Echo")
     session = await agent.session()
     await _collect(session)
 

@@ -326,6 +326,7 @@ async def test_live_context_injection():
             return " | ".join(hits) if hits else ""
 
     store = FakeVectorStore()
+    from linch.hooks import ContextInjectionHook
 
     class RagContextBuilder:
         async def build(self, turn) -> ContextBuildResult:
@@ -363,7 +364,7 @@ async def test_live_context_injection():
             ),
         ),
         tools=empty_tools(),
-        context_builder=RagContextBuilder(),
+        hooks=[ContextInjectionHook(RagContextBuilder())],
         deps=store,
         features=FeatureFlags(skills=False, subagents=False, mcp=False),
         session_store=InMemorySessionStore(),

@@ -262,7 +262,86 @@ async def test_structured_output_retries_exhausted_surfaces_error():
     assert result.subtype == "success"
     assert result.structured_output is None
     assert result.structured_error is not None
-    assert len(_verification_events(events)) == 1
+    vevents = _verification_events(events)
+    assert [event.action for event in vevents] == ["retry", "exhausted"]
+    assert vevents[-1].verifier == "output_schema"
+
+
+@pytest.mark.asyncio
+async def test_final_tool_structured_output_retry_repairs_schema_error():
+    from linch.evals import ScriptedProvider, ToolUseTurn
+    from linch.types import OutputSchema
+
+    provider = ScriptedProvider(
+        turns=[
+            ToolUseTurn(tool_name="ans", tool_input={"answer": "wrong"}),
+            ToolUseTurn(tool_name="ans", tool_input={"answer": 42}),
+        ]
+    )
+    agent = _make_agent(
+        provider,
+        output_schema=OutputSchema(name="ans", schema=_SCHEMA),
+        structured_output_retries=1,
+    )
+    session = await agent.session()
+    events = await _collect(session)
+
+    result = _result(events)
+    assert result.subtype == "success"
+    assert result.structured_output == {"answer": 42}
+
+    retries = _verification_events(events)
+    assert len(retries) == 1
+    assert retries[0].verifier == "output_schema"
+    assert retries[0].action == "retry"
+
+
+@pytest.mark.asyncio
+async def test_final_tool_retry_pairs_tool_use_with_tool_result():
+    """Regression: a final-tool schema-repair retry must answer the pending
+    terminal tool_use with a tool_result.  Otherwise the next provider request
+    carries a tool_use with no matching tool_result and real providers reject
+    it.  This provider asserts pairing on every call."""
+    from linch.evals import ScriptedProvider, ToolUseTurn
+    from linch.types import OutputSchema, ToolResultBlock, ToolUseBlock
+
+    class PairingProvider(ScriptedProvider):
+        async def stream(self, req):
+            tool_use_ids = {
+                b.id
+                for m in req.messages
+                for b in (m.content if isinstance(m.content, list) else [])
+                if isinstance(b, ToolUseBlock)
+            }
+            answered = {
+                b.tool_use_id
+                for m in req.messages
+                for b in (m.content if isinstance(m.content, list) else [])
+                if isinstance(b, ToolResultBlock)
+            }
+            unmatched = tool_use_ids - answered
+            assert not unmatched, f"unmatched tool_use in request: {unmatched}"
+            async for ev in super().stream(req):
+                yield ev
+
+    provider = PairingProvider(
+        turns=[
+            ToolUseTurn(tool_name="ans", tool_input={"answer": "wrong"}, tool_id="t1"),
+            ToolUseTurn(tool_name="ans", tool_input={"answer": 42}, tool_id="t2"),
+        ]
+    )
+    agent = _make_agent(
+        provider,
+        output_schema=OutputSchema(name="ans", schema=_SCHEMA),
+        structured_output_retries=1,
+    )
+    session = await agent.session()
+    events = await _collect(session)
+
+    result = _result(events)
+    assert result.subtype == "success"
+    assert result.structured_output == {"answer": 42}
+    assert provider._index == 2  # both turns consumed; retry did not crash
 
 
 # ---------------------------------------------------------------------------
@@ -286,9 +365,10 @@ class _RequireFinal:
 @pytest.mark.asyncio
 async def test_verifier_retry_then_pass():
     from linch.evals import ScriptedProvider, TextTurn
+    from linch.hooks import FinalAnswerVerifierHook
 
     provider = ScriptedProvider(turns=[TextTurn(text="draft"), TextTurn(text="FINAL answer")])
-    agent = _make_agent(provider, verifiers=_RequireFinal())
+    agent = _make_agent(provider, hooks=[FinalAnswerVerifierHook(_RequireFinal())])
     session = await agent.session()
     events = await _collect(session)
 
@@ -317,6 +397,7 @@ async def test_verifier_retry_then_pass():
 @pytest.mark.asyncio
 async def test_verifier_stop_fails_run():
     from linch.evals import ScriptedProvider, TextTurn
+    from linch.hooks import FinalAnswerVerifierHook
     from linch.verification import Verdict
 
     class _Reject:
@@ -326,7 +407,7 @@ async def test_verifier_stop_fails_run():
             return Verdict(action="stop", reason="unacceptable")
 
     provider = ScriptedProvider(turns=[TextTurn(text="anything")])
-    agent = _make_agent(provider, verifiers=_Reject())
+    agent = _make_agent(provider, hooks=[FinalAnswerVerifierHook(_Reject())])
     session = await agent.session()
     events = await _collect(session)
 
@@ -341,6 +422,7 @@ async def test_verifier_stop_fails_run():
 @pytest.mark.asyncio
 async def test_verifier_retries_exhausted_falls_through():
     from linch.evals import ScriptedProvider, TextTurn
+    from linch.hooks import FinalAnswerVerifierHook
     from linch.verification import Verdict
 
     class _AlwaysRetry:
@@ -350,7 +432,7 @@ async def test_verifier_retries_exhausted_falls_through():
             return Verdict(action="retry", feedback="more")
 
     provider = ScriptedProvider(turns=[TextTurn(text="one"), TextTurn(text="two")])
-    agent = _make_agent(provider, verifiers=_AlwaysRetry(), max_verification_retries=1)
+    agent = _make_agent(provider, hooks=[FinalAnswerVerifierHook(_AlwaysRetry(), max_retries=1)])
     session = await agent.session()
     events = await _collect(session)
 
@@ -366,12 +448,17 @@ async def test_verifier_retries_exhausted_falls_through():
 async def test_scorer_verifier_in_live_run():
     from linch.evals import ScriptedProvider, TextTurn
     from linch.evals.scorers import text_contains
+    from linch.hooks import FinalAnswerVerifierHook
     from linch.verification import ScorerVerifier
 
     provider = ScriptedProvider(turns=[TextTurn(text="working on it"), TextTurn(text="done!")])
     agent = _make_agent(
         provider,
-        verifiers=ScorerVerifier(text_contains("done"), feedback="Finish and say done."),
+        hooks=[
+            FinalAnswerVerifierHook(
+                ScorerVerifier(text_contains("done"), feedback="Finish and say done.")
+            )
+        ],
     )
     session = await agent.session()
     events = await _collect(session)
@@ -388,6 +475,7 @@ async def test_forced_final_turn_bypasses_verifiers():
     otherwise a stuck run could never produce its forced final answer."""
     import json as _json
 
+    from linch.hooks import FinalAnswerVerifierHook
     from linch.loop_guard import LoopGuard
     from linch.types import Usage
     from linch.verification import Verdict
@@ -434,7 +522,7 @@ async def test_forced_final_turn_bypasses_verifiers():
     agent = _make_agent(
         provider,
         loop_guard=LoopGuard(max_identical_tool_calls=2, force_final_answer=True),
-        verifiers=_AlwaysRetry(),
+        hooks=[FinalAnswerVerifierHook(_AlwaysRetry())],
     )
     session = await agent.session()
     events = await _collect(session)
@@ -454,7 +542,7 @@ async def test_forced_final_turn_bypasses_verifiers():
 @pytest.mark.asyncio
 async def test_stop_when_predicate_stops_run_early():
     from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
-    from linch.session import RunOptions
+    from linch.hooks import StopPredicateHook
 
     provider = ScriptedProvider(
         turns=[
@@ -462,8 +550,6 @@ async def test_stop_when_predicate_stops_run_early():
             TextTurn(text="never reached"),
         ]
     )
-    agent = _make_agent(provider)
-    session = await agent.session()
 
     def _saw_tool_result(sess) -> bool:
         return any(
@@ -472,7 +558,10 @@ async def test_stop_when_predicate_stops_run_early():
             for block in message.content
         )
 
-    events = await _collect(session, opts=RunOptions(stop_when=_saw_tool_result))
+    agent = _make_agent(provider, hooks=[StopPredicateHook(_saw_tool_result)])
+    session = await agent.session()
+
+    events = await _collect(session)
 
     result = _result(events)
     assert result.subtype == "success"
@@ -484,15 +573,15 @@ async def test_stop_when_predicate_stops_run_early():
 @pytest.mark.asyncio
 async def test_stop_when_faulty_predicate_does_not_crash():
     from linch.evals import ScriptedProvider, TextTurn
-    from linch.session import RunOptions
+    from linch.hooks import StopPredicateHook
 
     def _boom(sess) -> bool:
         raise RuntimeError("predicate exploded")
 
     provider = ScriptedProvider(turns=[TextTurn(text="fine")])
-    agent = _make_agent(provider)
+    agent = _make_agent(provider, hooks=[StopPredicateHook(_boom)])
     session = await agent.session()
-    events = await _collect(session, opts=RunOptions(stop_when=_boom))
+    events = await _collect(session)
 
     result = _result(events)
     assert result.subtype == "success"

@@ -66,19 +66,17 @@ class AppendMiddleware:
 
 
 def make_agent(registry: Any, middleware: Any = None) -> SimpleNamespace:
+    from linch.hooks import ToolMiddlewareHook
     from linch.permissions import PermissionEngine
 
+    hooks = [] if middleware is None else [ToolMiddlewareHook(middleware)]
     return SimpleNamespace(
         cwd=".",
         tools=registry,
         permission_engine=PermissionEngine(mode="skip-dangerous"),
         max_tool_concurrency=1,
         tool_concurrency=1,
-        middleware=(
-            []
-            if middleware is None
-            else (middleware if isinstance(middleware, list) else [middleware])
-        ),
+        hooks=hooks,
     )
 
 
@@ -197,6 +195,7 @@ async def test_no_middleware_preserves_existing_behavior() -> None:
 @pytest.mark.asyncio
 async def test_rewritten_result_enters_provider_history() -> None:
     from linch import Agent, ToolResult, ToolResultBlock, Usage
+    from linch.hooks import ToolMiddlewareHook
     from linch.providers import BaseProvider
     from linch.sessions import InMemorySessionStore
     from linch.tools.registry import empty_tools
@@ -243,7 +242,7 @@ async def test_rewritten_result_enters_provider_history() -> None:
         tools=empty_tools(SecretTool()),
         permissions={"mode": "skip-dangerous"},
         session_store=InMemorySessionStore(),
-        middleware=RedactResultMiddleware(),
+        hooks=[ToolMiddlewareHook(RedactResultMiddleware())],
     )
     session = await agent.session()
 

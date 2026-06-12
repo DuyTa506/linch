@@ -176,6 +176,7 @@ async def _collect_until(iterator, predicate) -> list[Any]:
 async def test_resume_after_user_append_does_not_duplicate_user_message() -> None:
     session_store = _memory_session_store()
     run_store = _memory_run_store()
+
     provider = ScriptProvider()
     agent = _agent(
         model="gpt-5",
@@ -641,6 +642,7 @@ async def test_run_loop_aclose_at_worker_yield_runs_observer_finally() -> None:
     finally block (observer on_run_end). Regression for the yield-outside-try bug:
     if the yield sits before `try:`, GeneratorExit skips finally and spans leak.
     """
+    from linch.hooks import RunTelemetryHook
     from linch.loop import _run_loop_impl
     from linch.observability.protocol import BaseObserver
     from linch.run_store import RunCheckpoint
@@ -684,7 +686,7 @@ async def test_run_loop_aclose_at_worker_yield_runs_observer_finally() -> None:
         session_store=session_store,
         run_store=run_store,
         cwd=".",
-        observers=[observer],
+        hooks=[RunTelemetryHook([observer])],
     )
     session = await agent.session(id="s1")
     run_record = await run_store.load_run(run.id)
