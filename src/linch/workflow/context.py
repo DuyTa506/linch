@@ -67,6 +67,8 @@ class WorkflowContext:
         label: str | None = None,
         tools: list[str] | None = None,
         fork: bool = False,
+        isolation: Any = None,
+        isolation_keep: bool = False,
     ) -> str:
         """Run a subagent and return its final text.
 
@@ -80,6 +82,11 @@ class WorkflowContext:
         read-file tracker) so a caching provider reuses the cached prefix — a
         cost win for fans over a large shared context. Default ``False`` keeps
         each subagent isolated.
+
+        ``isolation`` (an :class:`~linch.tools.isolation.IsolationBackend`) runs
+        the subagent in its own acquired working directory, so parallel branches
+        editing the same relative path don't collide; ``isolation_keep=True``
+        preserves that directory after the branch finishes (e.g. to merge it).
         """
         from ..subagents.default_agent import DEFAULT_AGENT
         from ..subagents.runner import RunSubagentArgs, run_subagent
@@ -134,6 +141,8 @@ class WorkflowContext:
                 tools_filter=tools,
                 emit=self._emit_sync,
                 fork=fork,
+                isolation=isolation,
+                isolation_keep=isolation_keep,
             )
         )
         if result.errored:
