@@ -478,6 +478,62 @@ class PostgresSessionStore:
             async with conn.transaction():
                 return await _delete_task_pg(conn, session_id, task_id)
 
+    async def claim_task(self, session_id: str, task_id: str, owner: str) -> Task | None:
+        pool = await self._ensure()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                # Row-level conditional update: only one concurrent claimer wins.
+                claimed = await conn.fetchrow(
+                    """
+                    UPDATE tasks SET owner=$1, updated_at=$2
+                    WHERE session_id=$3 AND id=$4 AND owner IS NULL AND status='pending'
+                    RETURNING id
+                    """,
+                    owner,
+                    now_iso(),
+                    session_id,
+                    task_id,
+                )
+                if claimed is None:
+                    return None
+                await conn.execute(
+                    "UPDATE sessions SET updated_at=$1 WHERE id=$2", now_iso(), session_id
+                )
+                return await _get_task_pg(conn, session_id, task_id)
+
+    async def ready_tasks(self, session_id: str) -> list[Task]:
+        tasks = await self.list_tasks(session_id)
+        by_id = {t.id: t for t in tasks}
+        return [
+            t
+            for t in tasks
+            if t.status == "pending"
+            and t.owner is None
+            and all(
+                by_id.get(b) is not None and by_id[b].status == "completed" for b in t.blocked_by
+            )
+        ]
+
+    async def release_task(self, session_id: str, task_id: str) -> Task | None:
+        pool = await self._ensure()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                task = await _get_task_pg(conn, session_id, task_id)
+                if task is None:
+                    return None
+                if task.status == "completed":
+                    return task  # don't resurrect a finished task
+                now = now_iso()
+                await conn.execute(
+                    "UPDATE tasks SET owner=null, status='pending', updated_at=$1 "
+                    "WHERE session_id=$2 AND id=$3",
+                    now,
+                    session_id,
+                    task_id,
+                )
+                await conn.execute("UPDATE sessions SET updated_at=$1 WHERE id=$2", now, session_id)
+                return await _get_task_pg(conn, session_id, task_id)
+
     async def close(self) -> None:
         if self._pool is not None:
             await self._pool.close()
