@@ -379,13 +379,21 @@ def _tool_scope(call: ResolvedCall) -> str:
     return str(getattr(call.tool, "scope", "exec")) if call.tool is not None else "exec"
 
 
-def _tool_parallel(call: ResolvedCall) -> bool:
+def _tool_parallel(call: ResolvedCall, input: dict[str, Any] | None = None) -> bool:
     if call.is_immediate_error or call.tool is None:
         return False
+    parallel = getattr(call.tool, "parallel", None)
+    if callable(parallel):
+        # Input-aware seam: the tool decides concurrency-safety per call, for any
+        # scope (not just read). Fail closed — a misbehaving predicate serializes.
+        try:
+            return bool(parallel(input if input is not None else call.input))
+        except Exception:
+            return False
     if _tool_scope(call) != "read":
         return False
-    if hasattr(call.tool, "parallel"):
-        return bool(getattr(call.tool, "parallel", False))
+    if parallel is not None:
+        return bool(parallel)
     return bool(getattr(call.tool, "parallel_safe", False))
 
 
@@ -623,7 +631,7 @@ def _partition_batches(
             "idx": i,
             "decision": decisions[i],
             "resources": _resource_accesses(call, _effective_input(call, decisions[i])),
-            "parallel": _tool_parallel(call),
+            "parallel": _tool_parallel(call, _effective_input(call, decisions[i])),
         }
         for i, call in enumerate(resolved)
     ]
