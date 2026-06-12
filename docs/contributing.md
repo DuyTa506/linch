@@ -7,7 +7,7 @@ Rules, conventions, and workflow for contributors. Read this before opening a PR
 ## Setup
 
 ```bash
-git clone <repo>
+git clone https://github.com/DuyTa506/linch.git
 cd linch
 pip install -e '.[dev,mcp,anthropic]'
 ```
@@ -31,17 +31,17 @@ ruff check --fix . && ruff format .
 ## Running tests
 
 ```bash
-pytest                                      # full suite
-pytest tests/test_agent_loop.py            # single file
-pytest tests/test_agent_loop.py::test_name # single test
-pytest -x                                   # stop on first failure
-pytest -k "context"                         # filter by name
+pytest                                       # full suite
+pytest tests/loop/test_agent_loop.py         # single file
+pytest tests/loop/test_agent_loop.py::test_name  # single test
+pytest -x                                    # stop on first failure
+pytest -k "context"                          # filter by name
 ```
 
 Live API tests are skipped unless `OPENAI_API_KEY` is set:
 
 ```bash
-OPENAI_API_KEY="$OPENAI_API_KEY" pytest tests/test_live_api.py
+OPENAI_API_KEY="$OPENAI_API_KEY" pytest tests/integration/test_live_api.py
 ```
 
 ---
@@ -52,7 +52,7 @@ OPENAI_API_KEY="$OPENAI_API_KEY" pytest tests/test_live_api.py
 
 Use `@tool` for ordinary function-backed tools. It produces the same
 Tool-compatible object consumed by `ToolRegistry`, the scheduler, permissions,
-middleware, and providers.
+hooks, and providers.
 
 ```python
 from linch import ToolContext, tool
@@ -81,7 +81,11 @@ class MyTool(BaseTool):  # ← don't do this
 
 ### No blocking I/O in the core loop
 
-Everything in `loop.py`, `scheduler.py`, `compaction.py`, and all providers must be async. Use `asyncio.to_thread()` for a one-off sync call, or use the dedicated `SqliteExecutor` helper (`linch.storage._executor.SqliteExecutor`) for any store that needs a long-lived `sqlite3` connection — it pins the connection to a single worker thread so the loop is never blocked and no `asyncio.Lock` is needed.
+Everything in the `loop/` package, `scheduler.py`, `compaction.py`, and all providers must be async. For a blocking sync call (disk, CPU, a long-lived `sqlite3` connection) use `run_blocking` from `linch._blocking` — it offloads onto a **bounded daemon thread** (per-loop concurrency cap, reliable `call_soon_threadsafe` wakeup) so the event loop is never blocked and a hung call never blocks interpreter/test teardown. For a long-lived `sqlite3` connection use the `SqliteExecutor` helper (`linch.storage._executor.SqliteExecutor`): it serializes all access behind a lock and runs the work through `run_blocking`, so only one operation touches the connection at a time. Prefer these over `asyncio.to_thread` (whose default-executor threads are unbounded and non-daemon).
+
+### Extension points go through hooks
+
+Cross-cutting behavior — telemetry, tool-call governance, RAG/context injection, final-answer verification, stop conditions — is wired through the single `Agent(hooks=[...])` layer (`linch.hooks`), not separate Agent parameters. When adding a new extension, define a hook (or a built-in adapter such as `RunTelemetryHook`/`ToolMiddlewareHook`/`ContextInjectionHook`/`FinalAnswerVerifierHook`/`StopPredicateHook`) rather than threading a new bespoke callback through the loop. A hook method returns `None` or a `HookResult`; it must never assume it can crash the run — the dispatcher swallows exceptions and records a `hook` telemetry event.
 
 ### Provider stream contract
 
@@ -89,15 +93,15 @@ Everything in `loop.py`, `scheduler.py`, `compaction.py`, and all providers must
 
 ### `full_history` is append-only
 
-Never modify `session.full_history` outside `loop.py`. It is the audit log. Only `session.provider_view` may be pruned or summarized.
+Never modify `session.full_history` outside the `loop/` package. It is the audit log. Only `session.provider_view` may be pruned or summarized.
 
 ### No importing provider-specific types outside providers/
 
-`loop.py` and `scheduler.py` must not import from `openai_responses.py`, `openai_chat.py`, or `anthropic.py`. Cross-cutting concerns go through `ProviderRequest` and the normalized event dicts.
+The `loop/` package and `scheduler.py` must not import from `openai_responses.py`, `openai_chat.py`, or `anthropic.py`. Cross-cutting concerns go through `ProviderRequest` and the normalized event dicts.
 
 ### system_blocks parity test
 
-`tests/test_system_blocks.py` has a byte-identical assertion on the default SWE system-block text. If you intentionally change the wording, update that assertion too. If a test starts failing there, you've accidentally changed the prompt.
+`tests/context/test_system_blocks.py` has a byte-identical assertion on the default SWE system-block text. If you intentionally change the wording, update that assertion too. If a test starts failing there, you've accidentally changed the prompt.
 
 ---
 
@@ -118,7 +122,7 @@ Follow the pattern used for every primitive in this codebase:
 
 ### Use a fake provider
 
-Every unit test that exercises the loop should use a fake provider that yields pre-scripted events. Do not call a live API in unit tests. The live tests in `tests/test_live_api.py` are the exception — they are skipped without a key.
+Every unit test that exercises the loop should use a fake provider that yields pre-scripted events. Do not call a live API in unit tests. The live tests in `tests/integration/test_live_api.py` are the exception — they are skipped without a key.
 
 Fake provider pattern (use the normalized dict contract from `providers/base.py` — `"message_end"` carries `stop_reason` and `usage`):
 
@@ -157,7 +161,7 @@ Use `InMemorySessionStore` in all tests. `SqliteSessionStore` writes to disk and
 
 ### Lazy imports in files that co-exist with test_hardening.py
 
-`tests/test_hardening.py::test_import_linch_without_mcp_installed` clears all `linch.*` from `sys.modules` and re-imports. Any test file that imports `linch` at module level will get v1 classes while the loop runs v2 classes — causing `isinstance` failures.
+`tests/loop/test_hardening.py::test_import_linch_without_mcp_installed` clears all `linch.*` from `sys.modules` and re-imports. Any test file that imports `linch` at module level will get v1 classes while the loop runs v2 classes — causing `isinstance` failures.
 
 **Rule:** in any test file that creates `Agent`, `Session`, or uses content block types, import `linch` classes **inside the test function body**, not at module level.
 
@@ -168,13 +172,13 @@ def test_something():
     from linch.sessions import InMemorySessionStore
     ...
 
-# wrong — breaks when test_hardening.py runs in the same session
+# wrong — breaks when tests/loop/test_hardening.py runs in the same session
 from linch import Agent  # ← module-level import
 ```
 
 ### No `pytest.raises(SomeImportedError)` with module-level imports
 
-For the same reason: if the exception class was imported at module level, it may be a different identity than the one raised after the `sys.modules` reset. Use `pytest.raises(Exception, match="message")` instead when testing exceptions in files that co-exist with `test_hardening.py`.
+For the same reason: if the exception class was imported at module level, it may be a different identity than the one raised after the `sys.modules` reset. Use `pytest.raises(Exception, match="message")` instead when testing exceptions in files that co-exist with `tests/loop/test_hardening.py`.
 
 ### One assertion per concept
 
@@ -188,11 +192,11 @@ Tests should fail at the most specific possible assertion. Avoid mega-tests that
 2. Implement `context_window(model) -> int`, `capabilities(model) -> ProviderCapabilities`, and `async def stream(req) -> AsyncIterator[dict]`.
 3. Map wire events to the normalized dict contract — see `providers/openai_chat.py` for the Chat Completions pattern, `openai_responses.py` + `providers/openai_responses.py` for the Responses API / stateful pattern, and `providers/gemini.py` for providers whose streamed tool-use format is part-based rather than delta-based.
 4. The normalized dict events the loop consumes: `message_start`, `text_delta`, `thinking_delta` (optional, carry `signature` for Anthropic round-trips), `tool_use_start`, `tool_use_input_delta`, `tool_use_end`, `message_end` (carries `stop_reason: StopReason` and `usage: Usage`). Never yield raw SDK objects.
-5. For providers that emit `reasoning_content` (DeepSeek, o-series via Chat Completions): yield `{"type": "thinking_delta", "text": chunk}` — `stream_turn` in `loop.py` assembles it into a `ThinkingBlock` and round-trips it on subsequent turns automatically.
+5. For providers that emit `reasoning_content` (DeepSeek, o-series via Chat Completions): yield `{"type": "thinking_delta", "text": chunk}` — `stream_turn` in `loop/streaming.py` assembles it into a `ThinkingBlock` and round-trips it on subsequent turns automatically.
 6. Declare `capabilities()` accurately — `_build_turn_request` uses it to downgrade unsupported fields (clears `cache_prompt` when `prompt_cache=False`, clears `output_schema` when `structured_output=False`, etc.).
 7. Export from `src/linch/providers/__init__.py`.
 8. Add a test with a mocked HTTP client — do not require a real API key in CI.
-9. If the provider uses a different structured-output API, map it inside the provider module, not in `loop.py`.
+9. If the provider uses a different structured-output API, map it inside the provider module, not in the `loop/` package.
 
 ---
 
@@ -216,7 +220,7 @@ The `FileBackend` protocol (`filesystem/backend.py`) is duck-typed — no base c
 Implement six async methods: `read`, `write`, `ls`, `edit`, `exists`, `delete`.
 
 1. Create `src/linch/filesystem/my_backend.py`.
-2. Use `asyncio.to_thread()` or an `asyncio`-native client for any I/O — never block the event loop. For a SQLite backend, use `SqliteExecutor` from `linch.storage._executor` (one worker thread per store, no lock needed). See `DiskFileBackend` (disk I/O via `asyncio.to_thread`) and `SqliteFileBackend` (`SqliteExecutor`) for reference patterns.
+2. Use `run_blocking` from `linch._blocking` (or an `asyncio`-native client) for any I/O — never block the event loop. For a SQLite backend, use `SqliteExecutor` from `linch.storage._executor` (lock-serialized, work offloaded via `run_blocking`). See `DiskFileBackend` (disk I/O via `run_blocking`) and `SqliteFileBackend` (`SqliteExecutor`) for reference patterns.
 3. Call `normalize_path(path)` at the entry of every method to canonicalize paths.
 4. `read` must raise `FileNotFoundError` for missing paths; `edit` must raise `ValueError` when `old_string` is absent or not unique (and `replace_all=False`); `delete` is a no-op for missing paths.
 5. Export from `filesystem/__init__.py` and `src/linch/__init__.py`.
@@ -244,7 +248,7 @@ Implement six async methods: `read`, `write`, `ls`, `edit`, `exists`, `delete`.
 - [ ] If system-block text changed, `test_system_blocks.py` parity assertion updated
 - [ ] If a new `FileBackend` was added, `tests/filesystem/test_backends.py` exercises it via `_exercise(backend)`
 - [ ] CHANGELOG entry if behavior changed for existing users
-- [ ] Background worker tasks are cancelled in both `except AbortError` and `except Exception` handlers if the change touches loop.py or worker spawning
+- [ ] Background worker tasks are cancelled in both `except AbortError` and `except Exception` handlers if the change touches the `loop/` package or worker spawning
 - [ ] New subagent tools (SubagentContinueTool, TaskStopTool) are tested with a fake provider and InMemorySessionStore
 
 ---
@@ -254,36 +258,53 @@ Implement six async methods: `read`, `write`, `ls`, `edit`, `exists`, `delete`.
 ```
 src/linch/          core library
   agent.py              config object + session factory
-  loop.py               main agent loop
+  loop/                 main agent loop package — runner, streaming, request
+                        assembly, terminal tails/gates, checkpointing
   session.py            per-conversation state + RunOptions
   types.py              all shared dataclasses
   events.py             event dataclasses + serialization
   config.py             FeatureFlags, SystemPromptConfig
+  hooks/                unified extension layer — HookEvent chokepoints,
+                        HookResult/HookDispatcher, built-in adapters
+  _blocking.py          run_blocking: bounded daemon-thread offload for sync I/O
   context/              ContextBuilder protocol + budget/result types
   memory/               MemoryStore protocol + reference RAG primitives
   filesystem/           FileBackend protocol + State/Disk/SQLite/Composite backends
                         + ls/read_file/write_file/edit_file tools + OffloadConfig
   scheduler.py          resource-aware parallel tool execution
   compaction.py         context-window management
+  loop_guard/           agentic-loop detection (identical-call / failure streaks)
+  verification.py       Verifier protocol + ScorerVerifier (wired via hooks)
+  budget.py             RunBudget token/USD caps shared across the agent tree
   permissions/          PermissionEngine + rule types
-  providers/            BaseProvider + OpenAI Chat/Responses/Anthropic/Retry
+  providers/            BaseProvider + OpenAI Chat/Responses/Anthropic/Gemini/llama.cpp/Retry
   tools/                tool protocol, ToolContext, ToolRegistry, built-ins
+                        + SubagentContinueTool, TaskStopTool, function tools
   sessions/             SessionStore + InMemory + SQLite
+  storage/              SqliteExecutor (lock-serialized sqlite, off-loop)
   mcp/                  MCP server adapters
   skills/               SKILL.md loader + skill context reminders
   subagents/            agents.yaml loader + child agent runner + WorkerHandle (workers.py)
+  workflow/             run_workflow engine — WorkflowContext, content-addressed journal
+  observability/        RunObserver protocol + Logging/SpanCollector/OpenTelemetry (via RunTelemetryHook)
+  evals/                offline harness — ScriptedProvider, run_eval, scorers
+  reports.py            build_run_report / load_run_report read models
+  pricing.py            USD cost table + cost_usd()
   run_store.py          SqliteRunStore + RunCheckpoint; durable run checkpoint/resume
   deep_agent/           create_deep_agent factory; DEEP_AGENT_SYSTEM_PROMPT, COORDINATOR_SYSTEM_PROMPT; subagent roster
-  tools/                tool protocol, ToolContext, ToolRegistry, built-ins
-                        + SubagentContinueTool, TaskStopTool, _worker_utils
 
 tests/
+  context/              context builders + system-block parity (test_system_blocks.py)
   filesystem/           backends, tools, offload unit + end-to-end tests
-  loop/                 agent loop tests
-  tools/                tool registry, scheduler, reliability tests
-  storage/              SqliteRunStore tests (test_run_store.py)
+  loop/                 agent loop, hardening, verification tests
+  tools/                tool registry, scheduler, reliability, middleware tests
+  storage/              memory + SqliteRunStore tests
+  workflow/             workflow engine/context/journal tests
+  observability/        observer/hook telemetry tests
+  integration/          live-API tests (skipped without a key)
+  test_hooks.py         hooks dispatcher/adapters/chokepoints
   test_deep_agent.py    deep agent preset tests
   ...                   (one directory per subsystem)
 examples/               runnable scripts (require OPENAI_API_KEY unless marked offline)
-docs/                   this documentation
+docs/                   this documentation (usage/ topic folder, architecture, roadmap)
 ```
