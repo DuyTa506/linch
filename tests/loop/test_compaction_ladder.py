@@ -286,6 +286,60 @@ async def test_maybe_compact_falls_through_to_full_strategy_when_micro_insuffici
     assert events[-1].subtype == "success"
 
 
+async def test_forced_compaction_resets_read_tracker() -> None:
+    from linch import DetailedCompaction
+    from linch.compaction import CompactionLadder
+
+    provider = LadderProvider(
+        [("tool", 500), ("tool", 9_000), ("text", 0)],
+        window=10_000,
+    )
+    agent = _make_agent(
+        provider,
+        compaction_ladder=CompactionLadder(keep_recent_turns=1),
+        compaction=DetailedCompaction(keep_recent_turns=1),
+        token_estimator=_char_estimator,
+        max_output_tokens=10,
+    )
+    session = await agent.session()
+    session.file_read_tracker.add("/seen.py")
+
+    events = [event async for event in session.run("go")]
+
+    # A forced compaction fired, and the read tracker was cleared so the agent
+    # must re-read a file whose contents may have left the context.
+    assert [e.strategy for e in events if e.type == "compaction"] == [
+        "detailed-continuation-keep-recent-10"
+    ]
+    assert "/seen.py" not in session.file_read_tracker
+
+
+async def test_compaction_without_ladder_keeps_read_tracker() -> None:
+    from linch import DetailedCompaction
+
+    # Same forcing setup, but no ladder configured → default byte-identical:
+    # the read tracker survives the compaction untouched.
+    provider = LadderProvider(
+        [("tool", 500), ("tool", 9_000), ("text", 0)],
+        window=10_000,
+    )
+    agent = _make_agent(
+        provider,
+        compaction=DetailedCompaction(keep_recent_turns=1),
+        token_estimator=_char_estimator,
+        max_output_tokens=10,
+    )
+    session = await agent.session()
+    session.file_read_tracker.add("/seen.py")
+
+    events = [event async for event in session.run("go")]
+
+    assert [e.strategy for e in events if e.type == "compaction"] == [
+        "detailed-continuation-keep-recent-10"
+    ]
+    assert "/seen.py" in session.file_read_tracker
+
+
 # ── integration: reactive rungs on ContextLengthError ────────────────────────
 
 
@@ -313,6 +367,31 @@ async def test_reactive_micro_then_forced_on_context_length_error() -> None:
     assert provider.summarize_calls == 1
     assert events[-1].type == "result"
     assert events[-1].subtype == "success"
+
+
+async def test_reactive_compaction_resets_read_tracker() -> None:
+    from linch import DetailedCompaction
+    from linch.compaction import CompactionLadder
+
+    provider = LadderProvider(
+        [("tool", 100), ("tool", 100), ("raise_cle", 0), ("raise_cle", 0), ("text", 0)]
+    )
+    agent = _make_agent(
+        provider,
+        compaction_ladder=CompactionLadder(keep_recent_turns=1),
+        compaction=DetailedCompaction(keep_recent_turns=1),
+    )
+    session = await agent.session()
+    session.file_read_tracker.add("/seen.py")
+
+    events = [event async for event in session.run("go")]
+
+    # Reactive recovery ran (micro then forced); the tracker reset on the way out.
+    assert [e.strategy for e in events if e.type == "compaction"] == [
+        "micro",
+        "detailed-continuation-keep-recent-10",
+    ]
+    assert "/seen.py" not in session.file_read_tracker
 
 
 async def test_circuit_breaker_surfaces_error_after_max_forced() -> None:

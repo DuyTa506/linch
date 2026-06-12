@@ -14,6 +14,9 @@ class FileReadTracker:
     def files(self) -> list[str]:
         return sorted(self._files)
 
+    def clear(self) -> None:
+        self._files.clear()
+
     def has_read(self, path: str) -> bool:
         return path in self._files
 

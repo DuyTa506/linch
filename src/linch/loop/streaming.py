@@ -10,6 +10,7 @@ from typing import Any, cast
 from ..compaction import (
     apply_micro_compaction,
     build_compaction_event,
+    reset_read_tracker_after_compaction,
     run_forced_compaction,
 )
 from ..context import context_budget_to_dict
@@ -82,6 +83,7 @@ async def _stream_turn_with_ladder(
                     raise
                 forced_used[0] += 1
                 await run_forced_compaction(session, agent, signal)
+            reset_read_tracker_after_compaction(session, agent)
             yield build_compaction_event(session)
             _re_inject_skill_context(session)
             # Re-run context builders after compaction so fresh context lands.

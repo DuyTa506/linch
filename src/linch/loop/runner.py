@@ -9,7 +9,11 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any, cast
 from uuid import uuid4
 
-from ..compaction import build_compaction_event, maybe_compact
+from ..compaction import (
+    build_compaction_event,
+    maybe_compact,
+    reset_read_tracker_after_compaction,
+)
 from ..context import context_budget_to_dict
 from ..errors import AbortError
 from ..events import (
@@ -818,6 +822,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 resumed_assistant = True
 
             if not resumed_assistant and await maybe_compact(session, agent, signal):
+                reset_read_tracker_after_compaction(session, agent)
                 event = build_compaction_event(session)
                 await _persist_event(session, run_id, event)
                 yield event

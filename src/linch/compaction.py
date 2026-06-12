@@ -31,11 +31,18 @@ class CompactionLadder:
         max_forced_compactions: Per-run circuit breaker on forced (LLM)
             compactions triggered by ``ContextLengthError``; once exhausted
             the error surfaces.
+        reset_read_tracker: After any compaction (micro or forced) elides or
+            summarizes away earlier messages, clear ``session.file_read_tracker``
+            so a file whose contents left the context is re-read before it can
+            be edited (the ``Edit`` tool gates on ``has_read``). Cheap insurance
+            against blind edits on stale content; worst case is a redundant
+            re-read of a file still present in the kept recent tail.
     """
 
     micro: bool = True
     keep_recent_turns: int = 10
     max_forced_compactions: int = 3
+    reset_read_tracker: bool = True
 
 
 _ELIDED = "[tool result elided to save context]"
@@ -119,6 +126,26 @@ def apply_micro_compaction(session: Any, agent: Any, *, keep_recent_turns: int) 
         "strategy": "micro",
     }
     return True
+
+
+def reset_read_tracker_after_compaction(session: Any, agent: Any) -> None:
+    """Clear ``session.file_read_tracker`` after a compaction, if opted in.
+
+    A compaction (micro elision or forced summary) can remove a file's contents
+    from the provider view while the read tracker still records it as read. The
+    ``Edit`` tool gates on ``has_read``, so a stale entry would permit a blind
+    edit on content the model can no longer see. Resetting the tracker forces a
+    fresh ``Read`` before the next edit.
+
+    Opt-in via ``CompactionLadder(reset_read_tracker=True)`` (the ladder default);
+    a no-op when no ladder is configured, so default behavior is byte-identical.
+    """
+    ladder = getattr(agent, "compaction_ladder", None)
+    if ladder is None or not getattr(ladder, "reset_read_tracker", True):
+        return
+    tracker = getattr(session, "file_read_tracker", None)
+    if tracker is not None:
+        tracker.clear()
 
 
 @runtime_checkable
