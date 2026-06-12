@@ -255,6 +255,21 @@ class HookEventRecord:
 
 
 @dataclass(slots=True)
+class ScheduleEvent:
+    """Emitted when a :class:`~linch.scheduling.Schedule` fires.
+
+    The fired payload is also enqueued into ``session.pending_notifications`` and
+    surfaces as a ``UserEvent`` on the next turn (the same drain background
+    workers use). This event is the observability signal for the firing itself.
+    """
+
+    schedule_id: str
+    status: str  # "fired"
+    payload: str = ""
+    type: Literal["schedule"] = "schedule"
+
+
+@dataclass(slots=True)
 class WorkflowEvent:
     """Progress/journal event emitted by the workflow engine.
 
@@ -295,6 +310,7 @@ Event: TypeAlias = (
     | LoopGuardEvent
     | VerificationEvent
     | HookEventRecord
+    | ScheduleEvent
     | WorkflowEvent
 )
 
