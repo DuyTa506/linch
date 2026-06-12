@@ -304,6 +304,7 @@ class Agent:
         retain_subagents: bool = False,
         enable_background_subagents: bool = False,
         enable_task_stop: bool = False,
+        enable_background_tools: bool = False,
         execution_backend: Any = None,
     ) -> None:
         system_prompt = _resolve_system_prompt(system_prompt, systemPrompt, system_prompt_config)
@@ -381,6 +382,7 @@ class Agent:
             enable_background_subagents=enable_background_subagents,
             enable_task_stop=enable_task_stop,
         )
+        self.enable_background_tools = bool(enable_background_tools)
         self.compaction: Any = compaction
         # Opt-in micro/reactive compaction rungs (CompactionLadder | None).
         # None keeps the legacy single-retry behavior byte-identical.

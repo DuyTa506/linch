@@ -88,6 +88,9 @@ class Session:
     """SubagentEvents accumulated by in-flight child sessions; available to host UIs."""
     pending_notifications: list[Message] = field(default_factory=list)
     """In-process background-worker <task-notification> messages, drained next turn."""
+    background_tasks: list[Any] = field(default_factory=list)
+    """Detached asyncio.Tasks for backgrounded tool calls (run_in_background hint).
+    Cancelled on abort so they never write into a dead session."""
     mailbox_address: str | None = None
     """This session's inbox address on ``agent.mailbox``; drained into provider_view
     each turn when set. Workers default to their display_name; the root is set by
@@ -186,6 +189,10 @@ class Session:
         for handle in self.workers.values():
             task = getattr(handle, "task", None)
             if task is not None and isinstance(task, asyncio.Task) and not task.done():
+                task.cancel()
+        # Cancel detached background-tool tasks too.
+        for task in self.background_tasks:
+            if isinstance(task, asyncio.Task) and not task.done():
                 task.cancel()
 
     def mark_compaction_used(self) -> None:

@@ -5,6 +5,8 @@ import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
 from typing import Any, cast
+from uuid import uuid4
+from xml.sax.saxutils import escape
 
 from .abort import AbortContext, throw_if_aborted
 from .errors import AbortError, ToolTimeoutError
@@ -160,6 +162,77 @@ def _resolve_call(block: ToolUseBlock, tools: Any, cwd: str) -> ResolvedCall:
 def _effective_cwd(session: Any, agent: Any) -> str:
     """Session cwd override (set by an isolation backend) or the agent's cwd."""
     return getattr(session, "cwd_override", None) or agent.cwd
+
+
+def _background_ack(tool_name: str, bg_id: str) -> ToolResult:
+    return ToolResult(
+        content=(
+            f"Tool '{tool_name}' started in background as '{bg_id}'."
+            " You will receive a <task-notification> when it finishes."
+        )
+    )
+
+
+async def _run_background_tool(
+    call: ResolvedCall,
+    decision: PermissionDecision,
+    agent: Any,
+    session: Any,
+    signal: AbortContext,
+    *,
+    bg_id: str,
+    turn_index: int | None,
+    middleware_error: str | None,
+) -> None:
+    """Run a detached tool call and post its completion as a <task-notification>.
+
+    Mirrors the background-subagent path: the result lands in
+    ``session.pending_notifications`` (drained next turn) rather than the current
+    turn's tool-result block. Cancellation (``session.abort()``) propagates as
+    ``CancelledError`` and writes nothing into the dead session.
+    """
+    tool_name = _tool_name(call)
+    try:
+        outcome = await _execute_one(
+            call,
+            decision,
+            agent,
+            session,
+            signal,
+            turn_index=turn_index,
+            middleware_error=middleware_error,
+        )
+    except (AbortError, asyncio.CancelledError):
+        raise
+    except Exception as exc:  # defensive: _execute_one normally returns error results
+        result_text = f"{type(exc).__name__}: {exc}"
+        is_error = True
+    else:
+        result_text = str(outcome.block.content)
+        is_error = outcome.block.is_error
+
+    notifications = getattr(session, "pending_notifications", None)
+    if notifications is None:
+        return
+    status_str = "failed" if is_error else "completed"
+    notification = (
+        "<task-notification>"
+        f"<task-id>{escape(bg_id)}</task-id>"
+        f"<status>{status_str}</status>"
+        f"<summary>Background tool '{escape(tool_name)}' finished.</summary>"
+        f"<result>{escape(result_text)}</result>"
+        "</task-notification>"
+    )
+    from .types import Message, TextBlock
+
+    notifications.append(Message(role="user", content=[TextBlock(text=notification)]))
+    emit_list = getattr(session, "pending_child_events", None)
+    if emit_list is not None:
+        from .events import BackgroundWorkerEvent
+
+        emit_list.append(
+            BackgroundWorkerEvent(worker_id=bg_id, status=status_str, display_name=tool_name)
+        )
 
 
 def _tool_name(call: ResolvedCall) -> str:
@@ -562,6 +635,23 @@ async def execute_tool_calls(
     if not blocks:
         return
 
+    # Background-any-tool: strip the run_in_background hint before validation so
+    # any tool can be backgrounded without declaring the key in its schema. Opt-in;
+    # when disabled the hint is left untouched and passed through to the tool.
+    bg_ids: dict[str, str] = {}
+    if getattr(agent, "enable_background_tools", False):
+        stripped: list[ToolUseBlock] = []
+        for b in blocks:
+            inp = b.input
+            if isinstance(inp, dict) and inp.get("run_in_background"):
+                bg_ids[b.id] = f"bgtool_{uuid4().hex[:8]}"
+                stripped.append(
+                    replace(b, input={k: v for k, v in inp.items() if k != "run_in_background"})
+                )
+            else:
+                stripped.append(b)
+        blocks = stripped
+
     effective_tools = getattr(session, "tools_override", None) or agent.tools
     resolved = [_resolve_call(b, effective_tools, agent.cwd) for b in blocks]
     hook_dispatcher = HookDispatcher(_scheduler_hooks(agent))
@@ -681,10 +771,65 @@ async def execute_tool_calls(
             if blocked_reason is not None:
                 middleware_errors[call.id] = blocked_reason
 
-    # Partition into bounded, resource-aware batches.
+    # Dispatch backgrounded tool calls: detach them, return an immediate ack as
+    # their tool result, and exclude them from the foreground batches. Denied /
+    # errored / hook-blocked calls fall through to normal foreground handling so
+    # their error result still surfaces.
+    background_indices: set[int] = set()
+    if bg_ids:
+        for i, call in enumerate(resolved):
+            if (
+                call.is_immediate_error
+                or decisions[i].decision != "allow"
+                or call.id not in bg_ids
+                or call.id in middleware_errors
+            ):
+                continue
+            background_indices.add(i)
+            bg_id = bg_ids[call.id]
+            tool_name = _tool_name(call)
+            input = _effective_input(call, decisions[i])
+            yield ToolCallStartEvent(
+                tool_use_id=call.id,
+                tool_name=tool_name,
+                input=input,
+                summary=call.summary,
+            )
+            task = asyncio.ensure_future(
+                _run_background_tool(
+                    call,
+                    decisions[i],
+                    agent,
+                    session,
+                    signal,
+                    bg_id=bg_id,
+                    turn_index=turn_index,
+                    middleware_error=middleware_errors.get(call.id),
+                )
+            )
+            session.background_tasks.append(task)
+            ack = _background_ack(tool_name, bg_id)
+            yield ToolCallEndEvent(
+                tool_use_id=call.id,
+                tool_name=tool_name,
+                result=ack.content,
+                is_error=False,
+                duration_ms=0,
+                tool_result=ack,
+            )
+
+    # Partition into bounded, resource-aware batches (foreground calls only).
+    if background_indices:
+        fg = [
+            (resolved[i], decisions[i]) for i in range(len(resolved)) if i not in background_indices
+        ]
+        fg_resolved = [c for c, _ in fg]
+        fg_decisions = [d for _, d in fg]
+    else:
+        fg_resolved, fg_decisions = resolved, decisions
     batches = _partition_batches(
-        resolved,
-        decisions,
+        fg_resolved,
+        fg_decisions,
         max_concurrency=_max_concurrency(agent),
     )
 

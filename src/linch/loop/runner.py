@@ -159,11 +159,12 @@ async def _cancel_background_workers(session: Session) -> None:
     import asyncio
 
     workers = getattr(session, "workers", None)
-    if not workers:
-        return
-    for handle in workers.values():
+    for handle in (workers or {}).values():
         task = getattr(handle, "task", None)
         if task is not None and isinstance(task, asyncio.Task) and not task.done():
+            task.cancel()
+    for task in getattr(session, "background_tasks", None) or []:
+        if isinstance(task, asyncio.Task) and not task.done():
             task.cancel()
 
 

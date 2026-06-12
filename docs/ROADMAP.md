@@ -331,6 +331,18 @@ team protocols, coding fleets). No domain policy in core.
   nothing special — it's just one tool that may set the hint.
 - **Verify:** a backgrounded long-running tool returns an immediate ack, its completion
   notification arrives on a later turn, and `session.abort()` cancels it.
+- **Status:** done (core mechanism). `Agent(enable_background_tools=True)` lets the scheduler
+  background **any** allowed tool call carrying a `run_in_background` hint: the hint is
+  stripped before validation (so no tool needs to declare it), the call is detached as an
+  `asyncio` task tracked in `session.background_tasks`, an immediate ack becomes its
+  tool-result block, and completion is posted as a `<task-notification>` through the existing
+  `pending_notifications` chokepoint (drained next turn). `session.abort()` (and the loop's
+  abort cleanup) cancel the detached tasks. Denied / errored / hook-blocked calls fall
+  through to normal foreground handling. Opt-in: with the flag off the hint is passed through
+  untouched and the tool runs inline (byte-identical). Bash gets no special path — it's just
+  one tool that may set the hint. **Deferred (YAGNI):** streaming live tool output to the
+  virtual `FileBackend` via `result_offload` — the completion notification already carries the
+  result; live-tail streaming is an enhancement to add when a concrete long-output need appears.
 
 ---
 
