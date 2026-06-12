@@ -242,10 +242,12 @@ class BashTool:
         self._backend: Any = backend if backend is not None else LocalBackend()
 
     def validate(self, raw: dict[str, object]) -> dict[str, object]:
-        timeout = raw.get("timeout_ms", 120000)
+        timeout = _to_int(raw.get("timeout_ms", 120000), 120000)
+        if timeout <= 0:
+            timeout = 120000
         return {
             "command": require_str(raw, "command"),
-            "timeout_ms": max(min(_to_int(timeout, 120000), 1800000), 1),
+            "timeout_ms": min(timeout, 1800000),
         }
 
     async def execute(self, input: dict[str, object], ctx: ToolContext) -> ToolResult:

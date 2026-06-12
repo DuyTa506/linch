@@ -16,6 +16,7 @@ protocol, so they compose freely under :class:`CompositeFileBackend`.
 
 from __future__ import annotations
 
+import inspect
 from typing import Any, Protocol, runtime_checkable
 
 
@@ -208,6 +209,30 @@ class CompositeFileBackend:
                 # not break listing of the others.
                 continue
         return sorted(seen)
+
+    async def aclose(self) -> None:
+        seen: set[int] = set()
+        for backend in [self._default, *self._routes.values()]:
+            if id(backend) in seen:
+                continue
+            seen.add(id(backend))
+            closer = getattr(backend, "aclose", None) or getattr(backend, "close", None)
+            if closer is None:
+                continue
+            result = closer()
+            if inspect.isawaitable(result):
+                await result
+
+    def close(self) -> None:
+        seen: set[int] = set()
+        for backend in [self._default, *self._routes.values()]:
+            if id(backend) in seen:
+                continue
+            seen.add(id(backend))
+            closer = getattr(backend, "close", None)
+            if closer is None:
+                continue
+            closer()
 
 
 def resolve_filesystem_backend(value: Any) -> FileBackend | None:

@@ -1,0 +1,1741 @@
+"""The agent run loop: ``run_loop`` / ``resume_loop`` entry points and the
+turn-by-turn ``_run_loop_impl`` generator that drives provider calls, tool
+execution, guards, gates, budgets, and durable checkpoints."""
+
+from __future__ import annotations
+
+import time
+from collections.abc import AsyncIterator
+from typing import Any, cast
+from uuid import uuid4
+
+from ..compaction import build_compaction_event, maybe_compact
+from ..context import context_budget_to_dict
+from ..errors import AbortError
+from ..events import (
+    AssistantEvent,
+    BudgetEvent,
+    ContextBuildEvent,
+    ErrorEvent,
+    Event,
+    LoopGuardEvent,
+    PermissionRequestEvent,
+    ResultEvent,
+    SkillsLoadedEvent,
+    SystemEvent,
+    ToolCallEndEvent,
+    ToolCallStartEvent,
+    UsageEvent,
+    UserEvent,
+)
+from ..hooks import (
+    AfterProviderCallContext,
+    AgentStartContext,
+    AgentStopContext,
+    BeforeFinalAnswerContext,
+    BeforeProviderCallContext,
+    HookDispatcher,
+    HookEvent,
+    ProviderCallStartContext,
+    ProviderCallStopContext,
+    StopContext,
+    ToolUseStartContext,
+    ToolUseStopContext,
+    TurnStartContext,
+    TurnStopContext,
+    UserPromptSubmitContext,
+)
+from ..pricing import cost_usd as _cost_usd
+from ..run_store import RunCheckpoint, RunRecord
+from ..scheduler import execute_tool_calls
+from ..session import RunOptions, Session
+from ..types import (
+    AssistantAssembly,
+    ContentBlock,
+    Message,
+    StopReason,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    Usage,
+)
+from .checkpoint import (
+    _background_workers_to_dict,
+    _interrupted_tool_result_block,
+    _last_message_has_tool_results,
+    _last_message_matches,
+    _loop_guard_state_from_dict,
+    _loop_guard_state_to_dict,
+    _persist_event,
+    _queue_crashed_worker_notifications,
+    _recover_completed_tool_results,
+    _skill_overlay_from_dict,
+    _skill_overlay_to_dict,
+    _tool_result_block_from_end,
+)
+from .request import (
+    _build_context_result,
+    _build_turn_request,
+    _context_selected_tool_names,
+    _re_inject_skill_context,
+    build_user_message,
+    final_text,
+)
+from .streaming import _stream_turn_with_compaction_retry, _stream_turn_with_ladder
+from .terminals import (
+    _budget_exhausted_tail,
+    _error_result_tail,
+    _evaluate_terminal_gates,
+    _final_tool_retry_tail,
+    _gate_retry_tail,
+    _max_turns_tail,
+    _parse_structured_output,
+    _stop_when_tail,
+    _success_result_tail,
+    _validate_structured_output,
+)
+
+
+async def _drain_pending_notifications(
+    session: Session,
+    run_id: str,
+) -> AsyncIterator[Event]:
+    """Inject pending background-worker notifications into provider_view and yield UserEvents."""
+    notifications = getattr(session, "pending_notifications", None)
+    if not notifications:
+        return
+    to_drain = list(notifications)
+    notifications.clear()
+    for note in to_drain:
+        await session.append([note])
+        event: Event = UserEvent(message=note)
+        await _persist_event(session, run_id, event)
+        yield event
+
+
+async def _cancel_background_workers(session: Session) -> None:
+    """Cancel any running asyncio.Tasks in session.workers (abort cleanup)."""
+    import asyncio
+
+    workers = getattr(session, "workers", None)
+    if not workers:
+        return
+    for handle in workers.values():
+        task = getattr(handle, "task", None)
+        if task is not None and isinstance(task, asyncio.Task) and not task.done():
+            task.cancel()
+
+
+async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIterator[Event]:
+    store = session.agent.run_store
+    run_record = await store.create_run(session.id) if store is not None else None
+    run_id = run_record.id if run_record is not None else str(uuid4())
+    async for event in _run_loop_impl(
+        session,
+        prompt,
+        opts,
+        run_id=run_id,
+        run_record=run_record,
+        resume_checkpoint=None,
+    ):
+        yield event
+
+
+async def resume_loop(session: Session, run_id: str, opts: RunOptions) -> AsyncIterator[Event]:
+    store = session.agent.run_store
+    if store is None:
+        raise RuntimeError("Agent has no run_store configured")
+    run_record = await store.load_run(run_id)
+    if run_record is None:
+        raise KeyError(f"run not found: {run_id}")
+    if run_record.session_id != session.id:
+        raise ValueError(f"run {run_id} belongs to session {run_record.session_id}")
+    if run_record.status in {"completed", "failed", "aborted"}:
+        return
+    checkpoint = run_record.checkpoint
+    if checkpoint is None:
+        return
+    async for event in _run_loop_impl(
+        session,
+        checkpoint.prompt,
+        opts,
+        run_id=run_record.id,
+        run_record=run_record,
+        resume_checkpoint=checkpoint,
+    ):
+        yield event
+
+
+async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
+    session: Session,
+    prompt: str,
+    opts: RunOptions,
+    *,
+    run_id: str,
+    run_record: RunRecord | None,
+    resume_checkpoint: RunCheckpoint | None,
+) -> AsyncIterator[Event]:
+    agent = session.agent
+    session.active_run_id = run_id
+    started = time.time()
+    total = Usage()
+    running_cost: float | None = None  # accumulated USD cost; None until first priced turn
+    # Per-run circuit breaker for ladder-driven forced compactions (Agent(
+    # compaction_ladder=...)); one-element cell shared with the recovery
+    # generator.  Unused when no ladder is configured.
+    _forced_compactions_used = [0]
+
+    from ..observability import RunResultInfo as _RunResultInfo
+
+    _hooks = list(getattr(agent, "hooks", None) or [])
+    hook_dispatcher = HookDispatcher(_hooks)
+
+    # Resolve per-run deps: RunOptions.deps wins over Agent.deps
+    session.run_deps = opts.deps if opts.deps is not None else getattr(agent, "deps", None)
+
+    # Resolve the run budget: RunOptions.budget > inherited-from-parent
+    # (subagent child sessions) > Agent.budget.  All runs in an agent tree
+    # share one RunBudget object, so child spending is visible here.
+    _budget = (
+        opts.budget or getattr(session, "inherited_budget", None) or getattr(agent, "budget", None)
+    )
+    session.active_budget = _budget
+
+    # Resolve final_tool_name: RunOptions wins over Agent
+    effective_final_tool = opts.final_tool_name or getattr(agent, "final_tool_name", None)
+
+    # Feature A — when the provider supports native structured output via the
+    # forced-tool method (e.g. AnthropicProvider), wire the output schema name
+    # as the terminal tool so the loop captures final_block.input as
+    # structured_output without executing a real tool.  Explicit final_tool_name
+    # wins if already set.
+    if effective_final_tool is None:
+        _schema = opts.output_schema or getattr(agent, "output_schema", None)
+        if _schema is not None and hasattr(agent.provider, "capabilities"):
+            _provider_caps = agent.provider.capabilities(agent.model)
+            if getattr(_provider_caps, "structured_output", False):
+                effective_final_tool = _schema.name
+
+    # Loop guard — detects repeated identical tool calls and consecutive
+    # failure streaks.  On by default (Agent sets self.loop_guard = LoopGuard()
+    # unless the caller passes loop_guard=None).
+    from ..loop_guard import LoopGuardState, evaluate_loop_guard
+
+    _guard = getattr(agent, "loop_guard", None)
+    _guard_state = LoopGuardState() if _guard is not None else None
+    _force_final_pending = False
+    if resume_checkpoint is not None:
+        total = resume_checkpoint.total_usage
+        # Restore running_cost from the restored usage so the resumed run's cost
+        # covers the whole run, not just post-resume turns. cost_usd returns None
+        # for unknown models, preserving "None until first priced turn" semantics.
+        running_cost = _cost_usd(total, agent.model)
+        if _guard is not None:
+            _guard_state = _loop_guard_state_from_dict(resume_checkpoint.loop_guard_state)
+            if _guard_state is None:
+                _guard_state = LoopGuardState()
+        _force_final_pending = resume_checkpoint.force_final_pending
+        session.pending_skill_overlay = _skill_overlay_from_dict(
+            resume_checkpoint.pending_skill_overlay
+        )
+        session.current_turn_allowed_tools = resume_checkpoint.current_turn_allowed_tools
+        session.current_turn_permission_decisions = dict(resume_checkpoint.permission_decisions)
+
+    checkpoint = resume_checkpoint or RunCheckpoint(
+        phase="started",
+        prompt=prompt,
+        turn_index=0,
+        total_usage=total,
+    )
+
+    async def _dispatch_user_prompt(
+        prompt_value: str,
+        images_value: list[dict[str, str]] | None,
+    ) -> tuple[str, list[dict[str, str]] | None, list[Event], str | None]:
+        if not hook_dispatcher.active:
+            return prompt_value, images_value, [], None
+        dispatched = await hook_dispatcher.dispatch(
+            HookEvent.USER_PROMPT_SUBMIT,
+            UserPromptSubmitContext(
+                session=session,
+                run_id=run_id,
+                turn_index=None,
+                deps=getattr(session, "run_deps", None),
+                prompt=prompt_value,
+                images=images_value,
+            ),
+        )
+        result = dispatched.result
+        if result.action == "mutate":
+            return (
+                result.prompt if result.prompt is not None else prompt_value,
+                result.images if result.images is not None else images_value,
+                dispatched.events,
+                None,
+            )
+        if result.action in {"block", "stop"}:
+            return prompt_value, images_value, dispatched.events, result.reason or result.feedback
+        return prompt_value, images_value, dispatched.events, None
+
+    async def _save_checkpoint(
+        phase: str,
+        *,
+        status: str = "running",
+        turn_index: int | None = None,
+        assistant_message: Message | None | object = None,
+        assistant_stop_reason: str | None | object = None,
+        pending_tool_blocks: list[ToolUseBlock] | None | object = None,
+        completed_tool_results: dict[str, ToolResultBlock] | None | object = None,
+    ) -> None:
+        store = agent.run_store
+        if run_record is None or store is None:
+            return
+        nonlocal checkpoint
+        checkpoint.phase = phase  # type: ignore[assignment]
+        if turn_index is not None:
+            checkpoint.turn_index = turn_index
+        checkpoint.total_usage = total
+        if assistant_message is not None:
+            checkpoint.assistant_message = (
+                assistant_message if isinstance(assistant_message, Message) else None
+            )
+        if assistant_stop_reason is not None:
+            checkpoint.assistant_stop_reason = (
+                assistant_stop_reason if isinstance(assistant_stop_reason, str) else None
+            )
+        if pending_tool_blocks is not None:
+            checkpoint.pending_tool_blocks = (
+                list(pending_tool_blocks) if isinstance(pending_tool_blocks, list) else []
+            )
+        if completed_tool_results is not None:
+            checkpoint.completed_tool_results = (
+                dict(completed_tool_results) if isinstance(completed_tool_results, dict) else {}
+            )
+        checkpoint.force_final_pending = _force_final_pending
+        checkpoint.loop_guard_state = _loop_guard_state_to_dict(_guard_state)
+        checkpoint.pending_skill_overlay = _skill_overlay_to_dict(session.pending_skill_overlay)
+        checkpoint.current_turn_allowed_tools = session.current_turn_allowed_tools
+        checkpoint.permission_decisions = dict(session.current_turn_permission_decisions)
+        checkpoint.background_workers = _background_workers_to_dict(
+            session, checkpoint.background_workers
+        )
+        await store.save_checkpoint(run_id, checkpoint, status=status)
+
+    async def _dispatch_lifecycle(event: HookEvent, ctx: Any) -> None:
+        if hook_dispatcher.active:
+            await hook_dispatcher.dispatch(event, ctx)
+
+    async def _handle_prompt_block(block_reason: str) -> AsyncIterator[Event]:
+        # Terminal path for a UserPromptSubmit hook that blocked the prompt.
+        # It returns before the main try/finally, so the AgentStop lifecycle is
+        # dispatched here — otherwise observers/telemetry never see on_run_end.
+        _dur = int((time.time() - started) * 1000)
+        blocked_result = _RunResultInfo(
+            run_id=run_id,
+            session_id=session.id,
+            subtype="error",
+            stop_reason="error",
+            total_usage=total,
+            duration_ms=_dur,
+        )
+        event: Event = ErrorEvent(
+            error={"name": "HookBlockedPrompt", "message": block_reason, "retryable": False}
+        )
+        await _persist_event(session, run_id, event)
+        yield event
+        async for event in _error_result_tail(
+            session,
+            agent,
+            run_id=run_id,
+            run_record=run_record,
+            checkpoint=checkpoint,
+            total=total,
+            duration_ms=_dur,
+            running_cost=running_cost,
+        ):
+            yield event
+        await _dispatch_lifecycle(
+            HookEvent.AGENT_STOP,
+            AgentStopContext(
+                session=session,
+                run_id=run_id,
+                turn_index=None,
+                deps=getattr(session, "run_deps", None),
+                result=blocked_result,
+            ),
+        )
+
+    await _dispatch_lifecycle(
+        HookEvent.AGENT_START,
+        AgentStartContext(
+            session=session,
+            run_id=run_id,
+            turn_index=None,
+            deps=getattr(session, "run_deps", None),
+            model=agent.model,
+            prompt=prompt,
+            tools=tuple(sorted(tool.name for tool in agent.tools.list())),
+        ),
+    )
+
+    if resume_checkpoint is None:
+        await _save_checkpoint("started")
+        event = SystemEvent(
+            session_id=session.id,
+            run_id=run_id,
+            model=agent.model,
+            tools=sorted(tool.name for tool in agent.tools.list()),
+            permission_mode=agent.permission_engine.mode,
+            cwd=agent.cwd,
+        )
+        await _persist_event(session, run_id, event)
+        yield event
+
+        if not session.skills_loaded_emitted and agent.skills:
+            session.skills_loaded_emitted = True
+            skills_data = [
+                {
+                    "name": s.name,
+                    "description": s.frontmatter.description,
+                    **(
+                        {"when_to_use": s.frontmatter.when_to_use}
+                        if s.frontmatter.when_to_use
+                        else {}
+                    ),
+                    **(
+                        {"argument_hint": s.frontmatter.argument_hint}
+                        if s.frontmatter.argument_hint
+                        else {}
+                    ),
+                }
+                for s in sorted(agent.skills.values(), key=lambda x: x.name)
+            ]
+            event = SkillsLoadedEvent(skills=skills_data)
+            await _persist_event(session, run_id, event)
+            yield event
+
+        prompt, images, hook_events, block_reason = await _dispatch_user_prompt(prompt, opts.images)
+        for hook_event in hook_events:
+            await _persist_event(session, run_id, hook_event)
+            yield hook_event
+        if block_reason is not None:
+            async for event in _handle_prompt_block(block_reason):
+                yield event
+            return
+        user_message = build_user_message(prompt, images)
+        if agent.skill_listing_text and not session.tools_override:
+            from ..skills.system_reminder import wrap_in_system_reminder
+
+            reminder = wrap_in_system_reminder(agent.skill_listing_text)
+            user_message.content.insert(0, TextBlock(text=reminder))
+        await session.append([user_message])
+        await _save_checkpoint("user_appended")
+        event = UserEvent(message=user_message)
+        await _persist_event(session, run_id, event)
+        yield event
+    elif checkpoint.phase == "started":
+        prompt, images, hook_events, block_reason = await _dispatch_user_prompt(prompt, opts.images)
+        for hook_event in hook_events:
+            await _persist_event(session, run_id, hook_event)
+            yield hook_event
+        if block_reason is not None:
+            async for event in _handle_prompt_block(block_reason):
+                yield event
+            return
+        user_message = build_user_message(prompt, images)
+        if agent.skill_listing_text and not session.tools_override:
+            from ..skills.system_reminder import wrap_in_system_reminder
+
+            reminder = wrap_in_system_reminder(agent.skill_listing_text)
+            user_message.content.insert(0, TextBlock(text=reminder))
+        if not _last_message_matches(session, user_message):
+            await session.append([user_message])
+        await _save_checkpoint("user_appended")
+        event = UserEvent(message=user_message)
+        await _persist_event(session, run_id, event)
+        yield event
+
+    from ..abort import any_signal, throw_if_aborted
+
+    max_turns = int(agent.max_turns) if isinstance(agent.max_turns, int) else 10**9
+    signal = (
+        any_signal(session._abort_controller, opts.signal)
+        if opts.signal is not None
+        else session._abort_controller
+    )
+    _final_result: _RunResultInfo | None = None
+    _active_turn_index: int | None = None
+    _active_provider_call: tuple[int, str, float] | None = None
+    # Closed-loop schema-repair state (per-run; not checkpointed — a resumed
+    # run starts with fresh retry counters).
+    _max_schema_retries = int(getattr(agent, "structured_output_retries", 0) or 0)
+    _gate_attempts = [0]  # [schema_attempts]
+
+    async def _start_turn(turn_index: int) -> None:
+        nonlocal _active_turn_index
+        await _dispatch_lifecycle(
+            HookEvent.TURN_START,
+            TurnStartContext(
+                session=session,
+                run_id=run_id,
+                turn_index=turn_index,
+                deps=getattr(session, "run_deps", None),
+            ),
+        )
+        _active_turn_index = turn_index
+
+    async def _end_active_turn() -> None:
+        nonlocal _active_turn_index
+        if _active_turn_index is None:
+            return
+        turn_index = _active_turn_index
+        _active_turn_index = None
+        await _dispatch_lifecycle(
+            HookEvent.TURN_STOP,
+            TurnStopContext(
+                session=session,
+                run_id=run_id,
+                turn_index=turn_index,
+                deps=getattr(session, "run_deps", None),
+            ),
+        )
+
+    async def _start_provider_call(turn_index: int, model: str) -> None:
+        nonlocal _active_provider_call
+        started_at = time.perf_counter()
+        await _dispatch_lifecycle(
+            HookEvent.PROVIDER_CALL_START,
+            ProviderCallStartContext(
+                session=session,
+                run_id=run_id,
+                turn_index=turn_index,
+                deps=getattr(session, "run_deps", None),
+                model=model,
+            ),
+        )
+        _active_provider_call = (turn_index, model, started_at)
+
+    async def _end_active_provider_call(*, stop_reason: str, usage: Usage | None = None) -> None:
+        nonlocal _active_provider_call
+        if _active_provider_call is None:
+            return
+        turn_index, model, started_at = _active_provider_call
+        _active_provider_call = None
+        await _dispatch_lifecycle(
+            HookEvent.PROVIDER_CALL_STOP,
+            ProviderCallStopContext(
+                session=session,
+                run_id=run_id,
+                turn_index=turn_index,
+                deps=getattr(session, "run_deps", None),
+                model=model,
+                stop_reason=stop_reason,
+                usage=usage or Usage(),
+                duration_ms=int((time.perf_counter() - started_at) * 1000),
+            ),
+        )
+
+    async def _close_active_observer_spans(*, stop_reason: str = "error") -> None:
+        await _end_active_provider_call(stop_reason=stop_reason)
+        await _end_active_turn()
+
+    async def _dispatch_before_provider_call(
+        request: Any,
+        turn_index: int,
+        context_result: Any,
+    ) -> tuple[Any, list[Event], str | None, str | None]:
+        if not hook_dispatcher.active:
+            return request, [], None, None
+        dispatched = await hook_dispatcher.dispatch(
+            HookEvent.BEFORE_PROVIDER_CALL,
+            BeforeProviderCallContext(
+                session=session,
+                run_id=run_id,
+                turn_index=turn_index,
+                deps=getattr(session, "run_deps", None),
+                request=request,
+                context_result=context_result,
+            ),
+        )
+        result = dispatched.result
+        if result.action == "mutate" and result.request is not None:
+            return result.request, dispatched.events, None, None
+        if result.action in {"stop", "block"}:
+            if result.metadata.get("subtype") == "success":
+                return request, dispatched.events, "stop_success", result.reason or result.feedback
+            return request, dispatched.events, "stop", result.reason or result.feedback
+        if result.action == "force_continue":
+            return request, dispatched.events, "continue", result.feedback
+        return request, dispatched.events, None, None
+
+    async def _dispatch_after_provider_call(
+        assembly: AssistantAssembly,
+        turn_index: int,
+    ) -> tuple[AssistantAssembly, list[Event], str | None, str | None]:
+        if not hook_dispatcher.active:
+            return assembly, [], None, None
+        dispatched = await hook_dispatcher.dispatch(
+            HookEvent.AFTER_PROVIDER_CALL,
+            AfterProviderCallContext(
+                session=session,
+                run_id=run_id,
+                turn_index=turn_index,
+                deps=getattr(session, "run_deps", None),
+                assembly=assembly,
+            ),
+        )
+        result = dispatched.result
+        if result.action == "mutate" and result.assembly is not None:
+            return result.assembly, dispatched.events, None, None
+        if result.action in {"stop", "block"}:
+            return assembly, dispatched.events, "stop", result.reason or result.feedback
+        if result.action in {"retry", "force_continue"}:
+            return assembly, dispatched.events, "continue", result.feedback
+        return assembly, dispatched.events, None, None
+
+    async def _dispatch_before_final_answer(
+        *,
+        turn_index: int,
+        final_text_value: str | None,
+        structured_output: dict[str, object] | None,
+        structured_error: str | None,
+        stop_reason: StopReason,
+        final_tool_name: str | None = None,
+        tool_use: ToolUseBlock | None = None,
+        skip: bool = False,
+    ) -> tuple[
+        str | None,
+        dict[str, object] | None,
+        str | None,
+        list[Event],
+        str | None,
+        str | None,
+    ]:
+        if skip or not hook_dispatcher.active:
+            return final_text_value, structured_output, structured_error, [], None, None
+        dispatched = await hook_dispatcher.dispatch(
+            HookEvent.BEFORE_FINAL_ANSWER,
+            BeforeFinalAnswerContext(
+                session=session,
+                run_id=run_id,
+                turn_index=turn_index,
+                deps=getattr(session, "run_deps", None),
+                final_text=final_text_value,
+                structured_output=structured_output,
+                structured_error=structured_error,
+                stop_reason=stop_reason,
+                final_tool_name=final_tool_name,
+                tool_use=tool_use,
+            ),
+        )
+        result = dispatched.result
+        if result.action == "mutate":
+            return (
+                result.final_text if result.final_text is not None else final_text_value,
+                result.structured_output
+                if result.structured_output is not None
+                else structured_output,
+                result.structured_error
+                if result.structured_error is not None
+                else structured_error,
+                dispatched.events,
+                None,
+                None,
+            )
+        if result.action in {"retry", "force_continue"}:
+            return (
+                final_text_value,
+                structured_output,
+                structured_error,
+                dispatched.events,
+                "retry",
+                result.feedback,
+            )
+        if result.action in {"stop", "block"}:
+            return (
+                final_text_value,
+                structured_output,
+                structured_error,
+                dispatched.events,
+                "stop",
+                result.reason or result.feedback,
+            )
+        return final_text_value, structured_output, structured_error, dispatched.events, None, None
+
+    async def _dispatch_stop(
+        result_event: ResultEvent,
+        turn_index: int | None,
+    ) -> tuple[ResultEvent, list[Event], str | None, str | None]:
+        if not hook_dispatcher.active:
+            return result_event, [], None, None
+        dispatched = await hook_dispatcher.dispatch(
+            HookEvent.STOP,
+            StopContext(
+                session=session,
+                run_id=run_id,
+                turn_index=turn_index,
+                deps=getattr(session, "run_deps", None),
+                result_event=result_event,
+            ),
+        )
+        result = dispatched.result
+        if result.action == "mutate" and result.result_event is not None:
+            return cast(ResultEvent, result.result_event), dispatched.events, None, None
+        if result.action == "force_continue":
+            return result_event, dispatched.events, "continue", result.feedback
+        if result.action in {"stop", "block"}:
+            return result_event, dispatched.events, "stop", result.reason or result.feedback
+        return result_event, dispatched.events, None, None
+
+    start_turn = checkpoint.turn_index
+    if resume_checkpoint is not None and checkpoint.phase in {
+        "tool_results_appended",
+        "turn_complete",
+    }:
+        start_turn = checkpoint.turn_index + 1
+
+    try:
+        # Crashed-worker notifications must yield from INSIDE the try so that a
+        # caller closing the generator here (aclose -> GeneratorExit at the yield)
+        # still runs the finally block that closes observer spans.
+        if resume_checkpoint is not None:
+            for worker_event in await _queue_crashed_worker_notifications(
+                session, checkpoint, run_id
+            ):
+                yield worker_event
+            if checkpoint.background_workers:
+                await _save_checkpoint(checkpoint.phase, turn_index=checkpoint.turn_index)
+
+        for turn_index in range(start_turn, max_turns):
+            throw_if_aborted(signal)
+            # ── Budget pre-call check ─────────────────────────────────────
+            # Before any turn span opens: an exhausted budget stops the run
+            # gracefully (history intact, session reusable), mirroring the
+            # max-turns tail below.
+            if _budget is not None and _budget.exceeded:
+                _dur = int((time.time() - started) * 1000)
+                _final_result = _RunResultInfo(
+                    run_id=run_id,
+                    session_id=session.id,
+                    subtype="error",
+                    stop_reason="error",
+                    total_usage=total,
+                    duration_ms=_dur,
+                )
+                async for event in _budget_exhausted_tail(
+                    session,
+                    agent,
+                    run_id=run_id,
+                    run_record=run_record,
+                    checkpoint=checkpoint,
+                    budget=_budget,
+                    total=total,
+                    duration_ms=_dur,
+                    running_cost=running_cost,
+                ):
+                    yield event
+                return
+            # Drain background-worker notifications before this turn's provider call.
+            async for note_event in _drain_pending_notifications(session, run_id):
+                yield note_event
+            await _start_turn(turn_index)
+            # Captured before _force_final_pending is reset below: a guard-
+            # forced final answer must bypass the verification gates.
+            _forced_final_turn = _force_final_pending
+            session.compaction_retry_used_this_turn = False
+
+            pending = session.pending_skill_overlay
+            session.pending_skill_overlay = None
+            model_override = None
+            if pending is not None:
+                session.current_turn_allowed_tools = pending.allowed_tools
+                model_override = pending.model_override
+            else:
+                session.current_turn_allowed_tools = None
+            # Clear per-turn permission decisions on every fresh turn.
+            # Preserve them only when resuming the exact checkpointed turn so
+            # Seam A can replay stored allow/deny without re-prompting.
+            if resume_checkpoint is None or turn_index != checkpoint.turn_index:
+                session.current_turn_permission_decisions = {}
+
+            resumed_assistant = (
+                resume_checkpoint is not None
+                and turn_index == checkpoint.turn_index
+                and checkpoint.phase
+                in {
+                    "assistant_appended",
+                    "permission_pending",
+                    "tool_batch_pending",
+                    "tool_executing",
+                }
+                and checkpoint.assistant_message is not None
+            )
+            if resumed_assistant:
+                session.current_turn_allowed_tools = checkpoint.current_turn_allowed_tools
+            if (
+                resume_checkpoint is not None
+                and not resumed_assistant
+                and turn_index == checkpoint.turn_index
+                and checkpoint.phase == "provider_pending"
+                and session.provider_view
+                and session.provider_view[-1].role == "assistant"
+            ):
+                last_assistant = session.provider_view[-1]
+                checkpoint.assistant_message = last_assistant
+                checkpoint.assistant_stop_reason = (
+                    "tool_use"
+                    if any(isinstance(block, ToolUseBlock) for block in last_assistant.content)
+                    else "end_turn"
+                )
+                resumed_assistant = True
+
+            if not resumed_assistant and await maybe_compact(session, agent, signal):
+                event = build_compaction_event(session)
+                await _persist_event(session, run_id, event)
+                yield event
+                _re_inject_skill_context(session)
+
+            # ── Context building (RAG-per-turn, schema injection, …) ──────
+            context_result = (
+                None if resumed_assistant else await _build_context_result(session, turn_index)
+            )
+            if context_result is not None:
+                event = ContextBuildEvent(
+                    system_blocks=len(context_result.system_blocks),
+                    messages=len(context_result.messages),
+                    selected_tools=_context_selected_tool_names(context_result),
+                    budget=context_budget_to_dict(context_result.budget),
+                    metadata=dict(context_result.metadata),
+                )
+                await _persist_event(session, run_id, event)
+                yield event
+
+            req = (
+                None
+                if resumed_assistant
+                else _build_turn_request(
+                    session, opts, context=context_result, model_override=model_override
+                )
+            )
+
+            # If the previous turn tripped the guard with force_final, strip
+            # all tools so the model must produce a text response.
+            if req is not None and _force_final_pending:
+                req.tools = []
+                req.tool_choice = None
+
+            # Runs even when req is None (resumed-assistant turn) so stop-style
+            # BeforeProviderCall hooks (e.g. StopPredicateHook) still fire on
+            # resume; request mutation is simply ignored when there is no req.
+            if hook_dispatcher.active:
+                (
+                    req,
+                    hook_events,
+                    provider_action,
+                    provider_feedback,
+                ) = await _dispatch_before_provider_call(req, turn_index, context_result)
+                for hook_event in hook_events:
+                    await _persist_event(session, run_id, hook_event)
+                    yield hook_event
+                if provider_action == "continue":
+                    async for event in _gate_retry_tail(
+                        session,
+                        run_id=run_id,
+                        feedback=provider_feedback or "",
+                    ):
+                        yield event
+                    await _end_active_turn()
+                    await _save_checkpoint("turn_complete", turn_index=turn_index)
+                    continue
+                if provider_action == "stop_success":
+                    _dur = int((time.time() - started) * 1000)
+                    _final_result = _RunResultInfo(
+                        run_id=run_id,
+                        session_id=session.id,
+                        subtype="success",
+                        stop_reason="end_turn",
+                        total_usage=total,
+                        duration_ms=_dur,
+                    )
+                    await _end_active_turn()
+                    async for event in _stop_when_tail(
+                        session,
+                        agent,
+                        run_id=run_id,
+                        run_record=run_record,
+                        checkpoint=checkpoint,
+                        total=total,
+                        duration_ms=_dur,
+                        running_cost=running_cost,
+                    ):
+                        yield event
+                    return
+                if provider_action == "stop":
+                    _dur = int((time.time() - started) * 1000)
+                    _final_result = _RunResultInfo(
+                        run_id=run_id,
+                        session_id=session.id,
+                        subtype="error",
+                        stop_reason="error",
+                        total_usage=total,
+                        duration_ms=_dur,
+                    )
+                    await _end_active_turn()
+                    async for event in _error_result_tail(
+                        session,
+                        agent,
+                        run_id=run_id,
+                        run_record=run_record,
+                        checkpoint=checkpoint,
+                        total=total,
+                        duration_ms=_dur,
+                        running_cost=running_cost,
+                        final_text_value=provider_feedback,
+                    ):
+                        yield event
+                    return
+
+            assembly: AssistantAssembly | None = None
+            if resumed_assistant:
+                assert checkpoint.assistant_message is not None
+                assembly = AssistantAssembly(
+                    message=checkpoint.assistant_message,
+                    stop_reason=cast(StopReason, checkpoint.assistant_stop_reason or "tool_use"),
+                    usage=Usage(),
+                )
+            else:
+                assert req is not None
+                _ladder = getattr(agent, "compaction_ladder", None)
+                if _ladder is None:
+                    # Legacy path: one forced-compaction retry per turn.
+                    _provider_stream = _stream_turn_with_compaction_retry(
+                        session,
+                        agent,
+                        opts,
+                        req,
+                        turn_index=turn_index,
+                        signal=signal,
+                        save_checkpoint=_save_checkpoint,
+                        start_provider_call=_start_provider_call,
+                        end_provider_call=_end_active_provider_call,
+                    )
+                else:
+                    # Ladder recovery: micro-compact, then capped forced compactions.
+                    _provider_stream = _stream_turn_with_ladder(
+                        session,
+                        agent,
+                        opts,
+                        req,
+                        turn_index=turn_index,
+                        signal=signal,
+                        ladder=_ladder,
+                        forced_used=_forced_compactions_used,
+                        save_checkpoint=_save_checkpoint,
+                        start_provider_call=_start_provider_call,
+                        end_provider_call=_end_active_provider_call,
+                    )
+                async for item in _provider_stream:
+                    if isinstance(item, AssistantAssembly):
+                        assembly = item
+                    else:
+                        await _persist_event(session, run_id, item)
+                        yield item
+
+            if assembly is None:
+                raise RuntimeError("provider stream ended without assistant assembly")
+
+            if not resumed_assistant:
+                # Charge accounting from the provider's actual usage, captured
+                # before any AfterProviderCall hook can mutate the assembly.
+                _provider_usage = assembly.usage
+                (
+                    assembly,
+                    hook_events,
+                    after_action,
+                    after_feedback,
+                ) = await _dispatch_after_provider_call(
+                    assembly,
+                    turn_index,
+                )
+                for hook_event in hook_events:
+                    await _persist_event(session, run_id, hook_event)
+                    yield hook_event
+                if after_action == "stop":
+                    _dur = int((time.time() - started) * 1000)
+                    _final_result = _RunResultInfo(
+                        run_id=run_id,
+                        session_id=session.id,
+                        subtype="error",
+                        stop_reason="error",
+                        total_usage=total,
+                        duration_ms=_dur,
+                    )
+                    await _end_active_provider_call(stop_reason="error", usage=_provider_usage)
+                    await _end_active_turn()
+                    async for event in _error_result_tail(
+                        session,
+                        agent,
+                        run_id=run_id,
+                        run_record=run_record,
+                        checkpoint=checkpoint,
+                        total=total,
+                        duration_ms=_dur,
+                        running_cost=running_cost,
+                        final_text_value=after_feedback,
+                    ):
+                        yield event
+                    return
+                await _end_active_provider_call(
+                    stop_reason=assembly.stop_reason,
+                    usage=_provider_usage,
+                )
+
+                await session.append([assembly.message])
+                total = total.add(_provider_usage)
+                # req is guaranteed non-None here (not resumed_assistant branch);
+                # fall back to agent.model to satisfy the type checker.
+                _turn_model = req.model if req is not None else agent.model
+                _turn_cost = _cost_usd(_provider_usage, _turn_model)
+                if _turn_cost is not None:
+                    running_cost = (running_cost or 0.0) + _turn_cost
+                if _budget is not None:
+                    _budget.charge(_provider_usage, _turn_cost)
+                _force_final_pending = False
+                await _save_checkpoint(
+                    "assistant_appended",
+                    turn_index=turn_index,
+                    assistant_message=assembly.message,
+                    assistant_stop_reason=assembly.stop_reason,
+                )
+                event = AssistantEvent(message=assembly.message, stop_reason=assembly.stop_reason)
+                await _persist_event(session, run_id, event)
+                yield event
+                session.last_usage = _provider_usage
+                event = UsageEvent(
+                    usage=_provider_usage,
+                    cumulative=total,
+                    cost_usd=_turn_cost,
+                    cumulative_cost_usd=running_cost,
+                )
+                await _persist_event(session, run_id, event)
+                yield event
+                if _budget is not None and _budget.take_warning():
+                    event = BudgetEvent(
+                        kind="warning",
+                        spent_tokens=_budget.spent_tokens,
+                        spent_usd=_budget.spent_usd,
+                        max_tokens=_budget.max_tokens,
+                        max_cost_usd=_budget.max_cost_usd,
+                    )
+                    await _persist_event(session, run_id, event)
+                    yield event
+
+                # AfterProviderCall hook requested another turn: the assistant
+                # message + usage are already committed (consistent with the
+                # text-path retry), so inject feedback and loop.
+                if after_action == "continue":
+                    async for event in _gate_retry_tail(
+                        session, run_id=run_id, feedback=after_feedback or ""
+                    ):
+                        yield event
+                    await _end_active_turn()
+                    await _save_checkpoint("turn_complete", turn_index=turn_index)
+                    continue
+
+            # ── Check for final_tool (terminal tool-use) ──────────────────
+            if effective_final_tool and assembly.stop_reason == "tool_use":
+                tool_blocks = [b for b in assembly.message.content if isinstance(b, ToolUseBlock)]
+                final_block = next((b for b in tool_blocks if b.name == effective_final_tool), None)
+                if final_block is not None:
+                    # Terminal: treat the tool input as structured output,
+                    # do NOT execute it as a normal tool call.
+                    raw_structured_output = dict(final_block.input)
+                    structured_output: dict[str, Any] | None = raw_structured_output
+                    structured_error = None
+                    effective_schema = opts.output_schema or getattr(agent, "output_schema", None)
+                    if effective_schema is not None:
+                        structured_error = _validate_structured_output(
+                            raw_structured_output,
+                            effective_schema,
+                        )
+                        if structured_error is not None:
+                            structured_output = None
+                    if not _forced_final_turn and _max_schema_retries:
+                        _gate = await _evaluate_terminal_gates(
+                            session,
+                            run_id=run_id,
+                            max_schema_retries=_max_schema_retries,
+                            attempts=_gate_attempts,
+                            structured_output=structured_output,
+                            structured_error=structured_error,
+                        )
+                        for event in _gate.events:
+                            yield event
+                        if _gate.decision == "stop":
+                            _dur = int((time.time() - started) * 1000)
+                            _final_result = _RunResultInfo(
+                                run_id=run_id,
+                                session_id=session.id,
+                                subtype="error",
+                                stop_reason="error",
+                                total_usage=total,
+                                duration_ms=_dur,
+                            )
+                            await _end_active_turn()
+                            async for event in _error_result_tail(
+                                session,
+                                agent,
+                                run_id=run_id,
+                                run_record=run_record,
+                                checkpoint=checkpoint,
+                                total=total,
+                                duration_ms=_dur,
+                                running_cost=running_cost,
+                            ):
+                                yield event
+                            return
+                        if _gate.decision == "retry":
+                            async for event in _final_tool_retry_tail(
+                                session,
+                                run_id=run_id,
+                                tool_blocks=tool_blocks,
+                                final_id=final_block.id,
+                                feedback=_gate.feedback or "",
+                            ):
+                                yield event
+                            await _end_active_turn()
+                            await _save_checkpoint("turn_complete", turn_index=turn_index)
+                            continue
+
+                    (
+                        ft,
+                        structured_output,
+                        structured_error,
+                        hook_events,
+                        hook_action,
+                        feedback,
+                    ) = await _dispatch_before_final_answer(
+                        turn_index=turn_index,
+                        final_text_value=None,
+                        structured_output=structured_output,
+                        structured_error=structured_error,
+                        stop_reason="tool_use",
+                        final_tool_name=effective_final_tool,
+                        tool_use=final_block,
+                        skip=_forced_final_turn,
+                    )
+                    for hook_event in hook_events:
+                        await _persist_event(session, run_id, hook_event)
+                        yield hook_event
+                    if hook_action == "retry":
+                        async for event in _final_tool_retry_tail(
+                            session,
+                            run_id=run_id,
+                            tool_blocks=tool_blocks,
+                            final_id=final_block.id,
+                            feedback=feedback or "",
+                        ):
+                            yield event
+                        await _end_active_turn()
+                        await _save_checkpoint("turn_complete", turn_index=turn_index)
+                        continue
+                    if hook_action == "stop":
+                        _dur = int((time.time() - started) * 1000)
+                        _final_result = _RunResultInfo(
+                            run_id=run_id,
+                            session_id=session.id,
+                            subtype="error",
+                            stop_reason="error",
+                            total_usage=total,
+                            duration_ms=_dur,
+                        )
+                        await _end_active_turn()
+                        async for event in _error_result_tail(
+                            session,
+                            agent,
+                            run_id=run_id,
+                            run_record=run_record,
+                            checkpoint=checkpoint,
+                            total=total,
+                            duration_ms=_dur,
+                            running_cost=running_cost,
+                            final_text_value=feedback,
+                        ):
+                            yield event
+                        return
+                    _dur = int((time.time() - started) * 1000)
+                    proposed = ResultEvent(
+                        subtype="success",
+                        stop_reason="tool_use",
+                        total_usage=total,
+                        duration_ms=_dur,
+                        final_text=ft,
+                        structured_output=structured_output,
+                        structured_error=structured_error,
+                        total_cost_usd=running_cost,
+                    )
+                    proposed, hook_events, stop_action, feedback = await _dispatch_stop(
+                        proposed,
+                        turn_index,
+                    )
+                    for hook_event in hook_events:
+                        await _persist_event(session, run_id, hook_event)
+                        yield hook_event
+                    if stop_action == "continue":
+                        async for event in _final_tool_retry_tail(
+                            session,
+                            run_id=run_id,
+                            tool_blocks=tool_blocks,
+                            final_id=final_block.id,
+                            feedback=feedback or "",
+                        ):
+                            yield event
+                        await _end_active_turn()
+                        await _save_checkpoint("turn_complete", turn_index=turn_index)
+                        continue
+                    if stop_action == "stop":
+                        _final_result = _RunResultInfo(
+                            run_id=run_id,
+                            session_id=session.id,
+                            subtype="error",
+                            stop_reason="error",
+                            total_usage=total,
+                            duration_ms=_dur,
+                        )
+                        await _end_active_turn()
+                        async for event in _error_result_tail(
+                            session,
+                            agent,
+                            run_id=run_id,
+                            run_record=run_record,
+                            checkpoint=checkpoint,
+                            total=total,
+                            duration_ms=_dur,
+                            running_cost=running_cost,
+                            final_text_value=feedback,
+                        ):
+                            yield event
+                        return
+                    _final_result = _RunResultInfo(
+                        run_id=run_id,
+                        session_id=session.id,
+                        subtype=proposed.subtype,
+                        stop_reason=proposed.stop_reason,
+                        total_usage=total,
+                        duration_ms=_dur,
+                    )
+                    await _end_active_turn()
+                    async for event in _success_result_tail(
+                        session,
+                        agent,
+                        run_id=run_id,
+                        run_record=run_record,
+                        checkpoint=checkpoint,
+                        total=total,
+                        duration_ms=_dur,
+                        running_cost=running_cost,
+                        stop_reason=proposed.stop_reason,
+                        final_text_value=proposed.final_text,
+                        structured_output=proposed.structured_output,
+                        structured_error=proposed.structured_error,
+                    ):
+                        yield event
+                    return
+
+            # ── Normal text response (stop_reason != tool_use) ───────────
+            if assembly.stop_reason != "tool_use":
+                ft = final_text(assembly.message)
+                structured_output = None
+                structured_error = None
+                effective_schema = opts.output_schema or getattr(agent, "output_schema", None)
+                if effective_schema is not None and ft is not None:
+                    structured_output, structured_error = _parse_structured_output(
+                        ft, effective_schema
+                    )
+
+                # ── Closed-loop gates: schema repair, then verifiers ──────
+                # Skipped on a loop-guard force_final turn: a guard-tripped
+                # run must not be bounced back into the loop.
+                if not _forced_final_turn and _max_schema_retries:
+                    _gate = await _evaluate_terminal_gates(
+                        session,
+                        run_id=run_id,
+                        max_schema_retries=_max_schema_retries,
+                        attempts=_gate_attempts,
+                        structured_output=structured_output,
+                        structured_error=structured_error,
+                    )
+                    for event in _gate.events:
+                        yield event
+                    if _gate.decision == "stop":
+                        _dur = int((time.time() - started) * 1000)
+                        _final_result = _RunResultInfo(
+                            run_id=run_id,
+                            session_id=session.id,
+                            subtype="error",
+                            stop_reason="error",
+                            total_usage=total,
+                            duration_ms=_dur,
+                        )
+                        await _end_active_turn()
+                        async for event in _error_result_tail(
+                            session,
+                            agent,
+                            run_id=run_id,
+                            run_record=run_record,
+                            checkpoint=checkpoint,
+                            total=total,
+                            duration_ms=_dur,
+                            running_cost=running_cost,
+                            final_text_value=ft,
+                        ):
+                            yield event
+                        return
+                    if _gate.decision == "retry":
+                        async for event in _gate_retry_tail(
+                            session, run_id=run_id, feedback=_gate.feedback or ""
+                        ):
+                            yield event
+                        await _end_active_turn()
+                        await _save_checkpoint("turn_complete", turn_index=turn_index)
+                        continue
+
+                (
+                    ft,
+                    structured_output,
+                    structured_error,
+                    hook_events,
+                    hook_action,
+                    feedback,
+                ) = await _dispatch_before_final_answer(
+                    turn_index=turn_index,
+                    final_text_value=ft,
+                    structured_output=structured_output,
+                    structured_error=structured_error,
+                    stop_reason=assembly.stop_reason,
+                    skip=_forced_final_turn,
+                )
+                for hook_event in hook_events:
+                    await _persist_event(session, run_id, hook_event)
+                    yield hook_event
+                if hook_action == "retry":
+                    async for event in _gate_retry_tail(
+                        session, run_id=run_id, feedback=feedback or ""
+                    ):
+                        yield event
+                    await _end_active_turn()
+                    await _save_checkpoint("turn_complete", turn_index=turn_index)
+                    continue
+                if hook_action == "stop":
+                    _dur = int((time.time() - started) * 1000)
+                    _final_result = _RunResultInfo(
+                        run_id=run_id,
+                        session_id=session.id,
+                        subtype="error",
+                        stop_reason="error",
+                        total_usage=total,
+                        duration_ms=_dur,
+                    )
+                    await _end_active_turn()
+                    async for event in _error_result_tail(
+                        session,
+                        agent,
+                        run_id=run_id,
+                        run_record=run_record,
+                        checkpoint=checkpoint,
+                        total=total,
+                        duration_ms=_dur,
+                        running_cost=running_cost,
+                        final_text_value=feedback,
+                    ):
+                        yield event
+                    return
+
+                _dur = int((time.time() - started) * 1000)
+                proposed = ResultEvent(
+                    subtype="success",
+                    stop_reason=assembly.stop_reason,
+                    total_usage=total,
+                    duration_ms=_dur,
+                    final_text=ft,
+                    structured_output=structured_output,
+                    structured_error=structured_error,
+                    total_cost_usd=running_cost,
+                )
+                proposed, hook_events, stop_action, feedback = await _dispatch_stop(
+                    proposed,
+                    turn_index,
+                )
+                for hook_event in hook_events:
+                    await _persist_event(session, run_id, hook_event)
+                    yield hook_event
+                if stop_action == "continue":
+                    async for event in _gate_retry_tail(
+                        session, run_id=run_id, feedback=feedback or ""
+                    ):
+                        yield event
+                    await _end_active_turn()
+                    await _save_checkpoint("turn_complete", turn_index=turn_index)
+                    continue
+                if stop_action == "stop":
+                    _final_result = _RunResultInfo(
+                        run_id=run_id,
+                        session_id=session.id,
+                        subtype="error",
+                        stop_reason="error",
+                        total_usage=total,
+                        duration_ms=_dur,
+                    )
+                    await _end_active_turn()
+                    async for event in _error_result_tail(
+                        session,
+                        agent,
+                        run_id=run_id,
+                        run_record=run_record,
+                        checkpoint=checkpoint,
+                        total=total,
+                        duration_ms=_dur,
+                        running_cost=running_cost,
+                        final_text_value=feedback,
+                    ):
+                        yield event
+                    return
+                _final_result = _RunResultInfo(
+                    run_id=run_id,
+                    session_id=session.id,
+                    subtype=proposed.subtype,
+                    stop_reason=proposed.stop_reason,
+                    total_usage=total,
+                    duration_ms=_dur,
+                )
+                await _end_active_turn()
+                async for event in _success_result_tail(
+                    session,
+                    agent,
+                    run_id=run_id,
+                    run_record=run_record,
+                    checkpoint=checkpoint,
+                    total=total,
+                    duration_ms=_dur,
+                    running_cost=running_cost,
+                    stop_reason=proposed.stop_reason,
+                    final_text_value=proposed.final_text,
+                    structured_output=proposed.structured_output,
+                    structured_error=proposed.structured_error,
+                ):
+                    yield event
+                return
+
+            tool_blocks = [b for b in assembly.message.content if isinstance(b, ToolUseBlock)]
+            completed_tool_results = await _recover_completed_tool_results(
+                session,
+                run_id,
+                checkpoint.completed_tool_results
+                if resume_checkpoint is not None and turn_index == checkpoint.turn_index
+                else {},
+            )
+            _recovery_hints: dict[str, str] = {}
+            missing_tool_blocks = [
+                block for block in tool_blocks if block.id not in completed_tool_results
+            ]
+            await _save_checkpoint(
+                "tool_batch_pending",
+                turn_index=turn_index,
+                assistant_message=assembly.message,
+                assistant_stop_reason=assembly.stop_reason,
+                pending_tool_blocks=tool_blocks,
+                completed_tool_results=completed_tool_results,
+            )
+            async for event in execute_tool_calls(
+                missing_tool_blocks,
+                agent,
+                session,
+                signal,
+                turn_index=turn_index,
+            ):
+                await _persist_event(session, run_id, event)
+                if isinstance(event, PermissionRequestEvent):
+                    await _save_checkpoint(
+                        "permission_pending",
+                        turn_index=turn_index,
+                        assistant_message=assembly.message,
+                        assistant_stop_reason=assembly.stop_reason,
+                        pending_tool_blocks=tool_blocks,
+                        completed_tool_results=completed_tool_results,
+                        status="waiting_permission",
+                    )
+                elif isinstance(event, ToolCallStartEvent):
+                    # Persist a placeholder result the moment a tool starts (after
+                    # resolve() has fired, Seam B) so a started-but-unfinished tool
+                    # is not blindly re-run on resume and the permission_decisions
+                    # survive a crash in this window.
+                    completed_tool_results.setdefault(
+                        event.tool_use_id,
+                        _interrupted_tool_result_block(event),
+                    )
+                    await _save_checkpoint(
+                        "tool_executing",
+                        turn_index=turn_index,
+                        assistant_message=assembly.message,
+                        assistant_stop_reason=assembly.stop_reason,
+                        pending_tool_blocks=tool_blocks,
+                        completed_tool_results=completed_tool_results,
+                    )
+                elif isinstance(event, ToolCallEndEvent):
+                    block = _tool_result_block_from_end(event)
+                    completed_tool_results[event.tool_use_id] = block
+                    if (
+                        event.is_error
+                        and event.tool_result is not None
+                        and event.tool_result.recovery_hint
+                    ):
+                        _recovery_hints[event.tool_use_id] = event.tool_result.recovery_hint
+                    await _save_checkpoint(
+                        "tool_executing",
+                        turn_index=turn_index,
+                        assistant_message=assembly.message,
+                        assistant_stop_reason=assembly.stop_reason,
+                        pending_tool_blocks=tool_blocks,
+                        completed_tool_results=completed_tool_results,
+                    )
+                yield event
+                if isinstance(event, ToolCallStartEvent):
+                    await _dispatch_lifecycle(
+                        HookEvent.TOOL_USE_START,
+                        ToolUseStartContext(
+                            session=session,
+                            run_id=run_id,
+                            turn_index=turn_index,
+                            deps=getattr(session, "run_deps", None),
+                            tool_use_id=event.tool_use_id,
+                            tool_name=event.tool_name,
+                            input=event.input,
+                            summary=event.summary,
+                        ),
+                    )
+                elif isinstance(event, ToolCallEndEvent):
+                    await _dispatch_lifecycle(
+                        HookEvent.TOOL_USE_STOP,
+                        ToolUseStopContext(
+                            session=session,
+                            run_id=run_id,
+                            turn_index=turn_index,
+                            deps=getattr(session, "run_deps", None),
+                            tool_use_id=event.tool_use_id,
+                            tool_name=event.tool_name,
+                            is_error=event.is_error,
+                            duration_ms=event.duration_ms,
+                            result=event.result,
+                            tool_result=event.tool_result,
+                        ),
+                    )
+            result_blocks: list[ContentBlock] = [
+                completed_tool_results[block.id] for block in tool_blocks
+            ]
+            # Feature E — inject recovery hint when ALL tools in the batch failed.
+            # Partial failures are left to the model to resolve on its own.
+            if (
+                result_blocks
+                and all(
+                    getattr(b, "type", None) == "tool_result" and getattr(b, "is_error", False)
+                    for b in result_blocks
+                )
+                and _recovery_hints
+            ):
+                _hint_text = "All tool calls failed. Recovery hints:\n" + "\n".join(
+                    f"- {hint}" for hint in _recovery_hints.values()
+                )
+                _hint_msg = Message(role="user", content=[TextBlock(text=_hint_text)])
+                await session.append([_hint_msg])
+                _hint_event: Event = UserEvent(message=_hint_msg)
+                await _persist_event(session, run_id, _hint_event)
+                yield _hint_event
+            result_message = Message(role="user", content=result_blocks)
+            already_appended = (
+                resume_checkpoint is not None
+                and turn_index == checkpoint.turn_index
+                and _last_message_has_tool_results(session, tool_blocks)
+            )
+            if not already_appended:
+                await session.append([result_message])
+            await _save_checkpoint(
+                "tool_results_appended",
+                turn_index=turn_index,
+                assistant_message=assembly.message,
+                assistant_stop_reason=assembly.stop_reason,
+                pending_tool_blocks=tool_blocks,
+                completed_tool_results=completed_tool_results,
+            )
+            event = UserEvent(message=result_message)
+            await _persist_event(session, run_id, event)
+            yield event
+
+            # ── Loop guard evaluation ─────────────────────────────────────
+            if _guard is not None and _guard_state is not None:
+                _decision = evaluate_loop_guard(_guard, _guard_state, tool_blocks, result_blocks)
+                if _decision.action != "continue":
+                    event = LoopGuardEvent(
+                        reason=_decision.reason,
+                        detail=_decision.detail,
+                        action=_decision.action,
+                    )
+                    await _persist_event(session, run_id, event)
+                    yield event
+                    if _decision.action == "force_final":
+                        # Inject a reminder so the model knows to summarise
+                        # without further tool calls, then let the loop run
+                        # one more tools-disabled turn.
+                        from ..skills.system_reminder import wrap_in_system_reminder
+
+                        _reminder_text = wrap_in_system_reminder(
+                            "You appear to be stuck in a loop or repeatedly "
+                            "encountering failures. Please provide your final "
+                            "answer now without making further tool calls."
+                        )
+                        _reminder_msg = Message(
+                            role="user", content=[TextBlock(text=_reminder_text)]
+                        )
+                        await session.append([_reminder_msg])
+                        _force_final_pending = True
+                        await _save_checkpoint("turn_complete", turn_index=turn_index)
+                        event = UserEvent(message=_reminder_msg)
+                        await _persist_event(session, run_id, event)
+                        yield event
+                    else:
+                        # Hard stop — emit error result and exit.
+                        _dur = int((time.time() - started) * 1000)
+                        _final_result = _RunResultInfo(
+                            run_id=run_id,
+                            session_id=session.id,
+                            subtype="error",
+                            stop_reason="error",
+                            total_usage=total,
+                            duration_ms=_dur,
+                        )
+                        await _end_active_turn()
+                        async for event in _error_result_tail(
+                            session,
+                            agent,
+                            run_id=run_id,
+                            run_record=run_record,
+                            checkpoint=checkpoint,
+                            total=total,
+                            duration_ms=_dur,
+                            running_cost=running_cost,
+                        ):
+                            yield event
+                        return
+            # Natural end of turn body (guard said "continue" or "force_final").
+            await _end_active_turn()
+            await _save_checkpoint("turn_complete", turn_index=turn_index)
+
+        # ── Max-turns exhausted ───────────────────────────────────────────
+        _dur = int((time.time() - started) * 1000)
+        _final_result = _RunResultInfo(
+            run_id=run_id,
+            session_id=session.id,
+            subtype="error",
+            stop_reason="error",
+            total_usage=total,
+            duration_ms=_dur,
+        )
+        async for event in _max_turns_tail(
+            session,
+            agent,
+            run_id=run_id,
+            run_record=run_record,
+            checkpoint=checkpoint,
+            max_turns=max_turns,
+            total=total,
+            duration_ms=_dur,
+            running_cost=running_cost,
+        ):
+            yield event
+    except AbortError:
+        await _cancel_background_workers(session)
+        _dur = int((time.time() - started) * 1000)
+        _final_result = _RunResultInfo(
+            run_id=run_id,
+            session_id=session.id,
+            subtype="aborted",
+            stop_reason="error",
+            total_usage=total,
+            duration_ms=_dur,
+        )
+        await _close_active_observer_spans(stop_reason="error")
+        event = ResultEvent(
+            subtype="aborted",
+            stop_reason="error",
+            total_usage=total,
+            duration_ms=_dur,
+            total_cost_usd=running_cost,
+        )
+        await _persist_event(session, run_id, event)
+        store = agent.run_store
+        if run_record is not None and store is not None:
+            checkpoint.phase = "aborted"
+            checkpoint.total_usage = total
+            await store.save_checkpoint(run_id, checkpoint, status="aborted")
+        yield event
+    except Exception as exc:
+        await _cancel_background_workers(session)
+        retryable = getattr(exc, "retryable", False)
+        status = getattr(exc, "status", None)
+        _err_dict: dict[str, object] = {
+            "name": exc.__class__.__name__,
+            "message": str(exc),
+            "retryable": retryable,
+            **({"status": status} if isinstance(status, int) else {}),
+        }
+        _dur = int((time.time() - started) * 1000)
+        _final_result = _RunResultInfo(
+            run_id=run_id,
+            session_id=session.id,
+            subtype="error",
+            stop_reason="error",
+            total_usage=total,
+            duration_ms=_dur,
+            error=_err_dict,
+        )
+        await _close_active_observer_spans(stop_reason="error")
+        event = ErrorEvent(error=_err_dict)
+        await _persist_event(session, run_id, event)
+        yield event
+        event = ResultEvent(
+            subtype="error",
+            stop_reason="error",
+            total_usage=total,
+            duration_ms=_dur,
+            total_cost_usd=running_cost,
+        )
+        await _persist_event(session, run_id, event)
+        store = agent.run_store
+        if run_record is not None and store is not None:
+            checkpoint.total_usage = total
+            await store.mark_failed(run_id, checkpoint, error=_err_dict)
+        yield event
+    finally:
+        # Release the merged-signal watcher when this run created one
+        # (opts.signal merged with the session controller); a plain session
+        # controller has no watcher and close() is a no-op.
+        if signal is not session._abort_controller:
+            signal.close()
+        await _close_active_observer_spans(stop_reason="error")
+        _run_result = _final_result or _RunResultInfo(
+            run_id=run_id,
+            session_id=session.id,
+            subtype="error",
+            stop_reason="error",
+            total_usage=total,
+            duration_ms=int((time.time() - started) * 1000),
+        )
+        await _dispatch_lifecycle(
+            HookEvent.AGENT_STOP,
+            AgentStopContext(
+                session=session,
+                run_id=run_id,
+                turn_index=_active_turn_index,
+                deps=getattr(session, "run_deps", None),
+                result=_run_result,
+            ),
+        )

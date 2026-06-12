@@ -170,6 +170,7 @@ def test_postgres_memory_store_is_public_optional_export(monkeypatch) -> None:
 async def test_memory_context_builder_injects_without_persisting() -> None:
     from linch import Agent
     from linch.config import FeatureFlags
+    from linch.hooks import ContextInjectionHook
     from linch.memory import MemoryContextBuilder
     from linch.sessions import InMemorySessionStore
     from linch.tools.registry import empty_tools
@@ -181,7 +182,7 @@ async def test_memory_context_builder_injects_without_persisting() -> None:
         provider=provider,
         tools=empty_tools(),
         deps=store,
-        context_builder=MemoryContextBuilder(namespace="docs", max_tokens=200),
+        hooks=[ContextInjectionHook(MemoryContextBuilder(namespace="docs", max_tokens=200))],
         permissions={"mode": "skip-dangerous"},
         session_store=InMemorySessionStore(),
         features=FeatureFlags(skills=False, subagents=False, mcp=False),
@@ -211,6 +212,7 @@ async def test_memory_context_builder_injects_without_persisting() -> None:
 async def test_memory_context_builder_reports_budget_trimming() -> None:
     from linch import Agent
     from linch.config import FeatureFlags
+    from linch.hooks import ContextInjectionHook
     from linch.memory import MemoryContextBuilder
     from linch.sessions import InMemorySessionStore
     from linch.tools.registry import empty_tools
@@ -221,7 +223,7 @@ async def test_memory_context_builder_reports_budget_trimming() -> None:
         model="gpt-5",
         provider=provider,
         tools=empty_tools(),
-        context_builder=MemoryContextBuilder(store, namespace="docs", max_tokens=1),
+        hooks=[ContextInjectionHook(MemoryContextBuilder(store, namespace="docs", max_tokens=1))],
         permissions={"mode": "skip-dangerous"},
         session_store=InMemorySessionStore(),
         features=FeatureFlags(skills=False, subagents=False, mcp=False),

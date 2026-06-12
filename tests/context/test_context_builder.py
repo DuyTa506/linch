@@ -69,7 +69,13 @@ def _fake_tool(name: str, tags: tuple[str, ...] = ()):
     return FakeTool()
 
 
-def _agent(provider: Any, *, context_builder: Any):
+def _context_hook(builder: Any):
+    from linch.hooks import ContextInjectionHook
+
+    return ContextInjectionHook(builder)
+
+
+def _agent(provider: Any, *, hooks: Any):
     from linch import Agent
     from linch.config import FeatureFlags
     from linch.sessions import InMemorySessionStore
@@ -81,7 +87,7 @@ def _agent(provider: Any, *, context_builder: Any):
         tools=empty_tools(_fake_tool("SearchDocs", ("rag",)), _fake_tool("WriteNote")),
         permissions={"mode": "skip-dangerous"},
         session_store=InMemorySessionStore(),
-        context_builder=context_builder,
+        hooks=hooks,
         features=FeatureFlags(skills=False, subagents=False, mcp=False),
         result_offload=None,
     )
@@ -114,7 +120,7 @@ class StaticBuilder:
 @pytest.mark.asyncio
 async def test_context_builder_reaches_provider_without_persisting():
     provider = RecordingProvider()
-    agent = _agent(provider, context_builder=StaticBuilder())
+    agent = _agent(provider, hooks=[_context_hook(StaticBuilder())])
     session = await agent.session()
 
     events = await _drain(session)
@@ -144,7 +150,7 @@ async def test_context_builders_run_in_stable_order():
             )
 
     provider = RecordingProvider()
-    agent = _agent(provider, context_builder=[Builder("a"), Builder("b")])
+    agent = _agent(provider, hooks=[_context_hook([Builder("a"), Builder("b")])])
     session = await agent.session()
     events = await _drain(session)
 
@@ -170,7 +176,7 @@ async def test_context_budget_trims_ephemeral_messages():
             )
 
     provider = RecordingProvider()
-    agent = _agent(provider, context_builder=BudgetBuilder())
+    agent = _agent(provider, hooks=[_context_hook(BudgetBuilder())])
     session = await agent.session()
     events = await _drain(session)
 
@@ -191,7 +197,7 @@ async def test_context_selected_tools_are_request_scoped():
             return ContextBuildResult(selected_tools={"SearchDocs"})
 
     provider = RecordingProvider()
-    agent = _agent(provider, context_builder=SelectingBuilder())
+    agent = _agent(provider, hooks=[_context_hook(SelectingBuilder())])
     session = await agent.session()
     await _drain(session)
 
@@ -236,7 +242,7 @@ async def test_context_builder_reruns_after_compaction_retry():
 
     builder = CountingBuilder()
     provider = RetryProvider()
-    agent = _agent(provider, context_builder=builder)
+    agent = _agent(provider, hooks=[_context_hook(builder)])
     agent.compaction = NoopCompaction()
     session = await agent.session()
     events = await _drain(session)

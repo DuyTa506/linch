@@ -30,7 +30,7 @@ class ObserverDispatcher:
 
     Usage::
 
-        hub = ObserverDispatcher(agent.observers)
+        hub = ObserverDispatcher([observer])
         await hub.dispatch("on_run_start", RunInfo(...))
     """
 

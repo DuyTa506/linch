@@ -102,15 +102,24 @@ class Session:
         self._abort_controller = AbortContext()
 
         async def iterator() -> AsyncIterator[Event]:
+            from .hooks import EventEmitContext, HookDispatcher, HookEvent
             from .loop import run_loop
-            from .observability import ObserverDispatcher
 
-            _obs_hub = ObserverDispatcher(getattr(self.agent, "observers", None))
+            _hooks = HookDispatcher(getattr(self.agent, "hooks", None))
             try:
                 async for event in run_loop(self, prompt, opts or RunOptions()):
                     yield event
-                    if _obs_hub.active:
-                        await _obs_hub.dispatch("on_event", event)
+                    if _hooks.active:
+                        await _hooks.dispatch(
+                            HookEvent.EVENT_EMIT,
+                            EventEmitContext(
+                                session=self,
+                                run_id=self.active_run_id or "",
+                                turn_index=None,
+                                deps=getattr(self, "run_deps", None),
+                                event=event,
+                            ),
+                        )
             finally:
                 self._active = False
                 self.active_run_id = None
@@ -130,15 +139,24 @@ class Session:
         self._abort_controller = AbortContext()
 
         async def iterator() -> AsyncIterator[Event]:
+            from .hooks import EventEmitContext, HookDispatcher, HookEvent
             from .loop import resume_loop
-            from .observability import ObserverDispatcher
 
-            _obs_hub = ObserverDispatcher(getattr(self.agent, "observers", None))
+            _hooks = HookDispatcher(getattr(self.agent, "hooks", None))
             try:
                 async for event in resume_loop(self, run_id, opts or RunOptions()):
                     yield event
-                    if _obs_hub.active:
-                        await _obs_hub.dispatch("on_event", event)
+                    if _hooks.active:
+                        await _hooks.dispatch(
+                            HookEvent.EVENT_EMIT,
+                            EventEmitContext(
+                                session=self,
+                                run_id=self.active_run_id or run_id,
+                                turn_index=None,
+                                deps=getattr(self, "run_deps", None),
+                                event=event,
+                            ),
+                        )
             finally:
                 self._active = False
                 self.active_run_id = None

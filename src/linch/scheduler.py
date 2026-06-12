@@ -17,11 +17,11 @@ from .events import (
     ToolCallEndEvent,
     ToolCallStartEvent,
 )
-from .middleware import (
-    MiddlewareContext,
-    ToolCallMiddlewareInput,
-    dispatch_after_tool_result,
-    dispatch_before_tool_call,
+from .hooks import (
+    HookDispatcher,
+    HookEvent,
+    PostToolUseContext,
+    PreToolUseContext,
 )
 from .permissions import PendingToolCall, PermissionDecision
 from .permissions.keys import permission_decision_key as _permission_key
@@ -50,6 +50,41 @@ class ToolExecutionOutcome:
 
 def _tool_result_error(content: str, duration_ms: int = 0) -> ToolResult:
     return ToolResult(content=content, is_error=True, duration_ms=duration_ms)
+
+
+async def _maybe_offload_block(
+    result: ToolResult,
+    *,
+    call: ResolvedCall,
+    agent: Any,
+    session: Any,
+) -> ToolResult:
+    """Return the provider-facing block for *result*, offloading oversized
+    payloads when a filesystem backend + offload config are configured.
+
+    Returns *result* unchanged when offload is disabled or not applicable
+    (``maybe_offload`` is a no-op on error / filesystem-tool results)."""
+    _fs = getattr(session, "filesystem", None)
+    _offload_cfg = getattr(agent, "result_offload", None)
+    if _fs is None or _offload_cfg is None:
+        return result
+    from .filesystem.offload import maybe_offload
+
+    offload_result = replace(
+        result,
+        metadata=dict(result.metadata),
+        citations=list(result.citations),
+        attachments=list(result.attachments),
+    )
+    return await maybe_offload(
+        offload_result,
+        tool_name=_tool_name(call),
+        call_id=call.id,
+        backend=_fs,
+        config=_offload_cfg,
+        token_estimator=getattr(agent, "token_estimator", None),
+        model=agent.model,
+    )
 
 
 def _execution_outcome(
@@ -147,34 +182,6 @@ def _skill_name_from_input(call: ResolvedCall, input: dict[str, Any]) -> str | N
     return raw[1:] if raw.startswith("/") else raw
 
 
-def _middleware_context(
-    call: ResolvedCall,
-    session: Any,
-    *,
-    turn_index: int | None,
-) -> MiddlewareContext:
-    return MiddlewareContext(
-        session_id=session.id,
-        run_id=session.active_run_id or "unknown",
-        turn_index=turn_index,
-        tool_use_id=call.id,
-        tool_name=_tool_name(call),
-        deps=getattr(session, "run_deps", None),
-    )
-
-
-def _middleware_call_input(
-    call: ResolvedCall,
-    input: dict[str, Any],
-) -> ToolCallMiddlewareInput:
-    return ToolCallMiddlewareInput(
-        tool_use_id=call.id,
-        tool_name=_tool_name(call),
-        input=input,
-        summary=call.summary,
-    )
-
-
 async def _execute_one(
     call: ResolvedCall,
     decision: PermissionDecision,
@@ -238,38 +245,10 @@ async def _execute_one(
             elapsed = int((time.perf_counter() - attempt_start) * 1000)
             if result.duration_ms <= 0:
                 result.duration_ms = elapsed
-            middleware = getattr(agent, "middleware", [])
-            if middleware:
-                result = await dispatch_after_tool_result(
-                    middleware,
-                    _middleware_call_input(call, effective_input),
-                    result,
-                    _middleware_context(call, session, turn_index=turn_index),
-                )
-                if result.duration_ms <= 0:
-                    result.duration_ms = elapsed
             # ── Auto-offload oversized results ────────────────────────────────
-            block_result = result
-            _fs = getattr(session, "filesystem", None)
-            _offload_cfg = getattr(agent, "result_offload", None)
-            if _fs is not None and _offload_cfg is not None:
-                from .filesystem.offload import maybe_offload
-
-                offload_result = replace(
-                    result,
-                    metadata=dict(result.metadata),
-                    citations=list(result.citations),
-                    attachments=list(result.attachments),
-                )
-                block_result = await maybe_offload(
-                    offload_result,
-                    tool_name=_tool_name(call),
-                    call_id=call.id,
-                    backend=_fs,
-                    config=_offload_cfg,
-                    token_estimator=getattr(agent, "token_estimator", None),
-                    model=agent.model,
-                )
+            block_result = await _maybe_offload_block(
+                result, call=call, agent=agent, session=session
+            )
             return _execution_outcome(call.id, result, block_result=block_result)
         except AbortError:
             raise
@@ -440,6 +419,80 @@ def _tool_retryable(call: ResolvedCall, exc: Exception) -> bool:
     return bool(getattr(exc, "retryable", False))
 
 
+def _scheduler_hooks(agent: Any) -> list[Any]:
+    return list(getattr(agent, "hooks", []) or [])
+
+
+async def _dispatch_pre_tool_use(
+    dispatcher: HookDispatcher,
+    call: ResolvedCall,
+    input: dict[str, Any],
+    session: Any,
+    *,
+    turn_index: int | None,
+) -> tuple[dict[str, Any], str | None, list[Event]]:
+    outcome = await dispatcher.dispatch(
+        HookEvent.PRE_TOOL_USE,
+        PreToolUseContext(
+            session=session,
+            run_id=session.active_run_id or "unknown",
+            turn_index=turn_index,
+            deps=getattr(session, "run_deps", None),
+            tool_use_id=call.id,
+            tool_name=_tool_name(call),
+            input=input,
+            summary=call.summary,
+            tool=call.tool,
+        ),
+    )
+    result = outcome.result
+    if result.action == "mutate" and result.input is not None:
+        return result.input, None, outcome.events
+    if result.action in {"block", "stop"}:
+        reason = result.reason or result.feedback or "Tool call blocked"
+        return result.input or input, reason, outcome.events
+    return input, None, outcome.events
+
+
+async def _dispatch_post_tool_use(
+    dispatcher: HookDispatcher,
+    call: ResolvedCall,
+    input: dict[str, Any],
+    outcome: ToolExecutionOutcome,
+    session: Any,
+    *,
+    agent: Any,
+    turn_index: int | None,
+) -> tuple[ToolExecutionOutcome, list[Event]]:
+    dispatched = await dispatcher.dispatch(
+        HookEvent.POST_TOOL_USE,
+        PostToolUseContext(
+            session=session,
+            run_id=session.active_run_id or "unknown",
+            turn_index=turn_index,
+            deps=getattr(session, "run_deps", None),
+            tool_use_id=call.id,
+            tool_name=_tool_name(call),
+            input=input,
+            result=outcome.tool_result,
+        ),
+    )
+    result = dispatched.result
+    if result.action == "mutate" and result.tool_result is not None:
+        mutated = result.tool_result
+        # Re-run offload so a mutated oversized result doesn't bypass the
+        # preview and re-inject the full payload into provider history.
+        block_result = await _maybe_offload_block(mutated, call=call, agent=agent, session=session)
+        return _execution_outcome(call.id, mutated, block_result=block_result), dispatched.events
+    if result.action in {"block", "stop"}:
+        blocked = _tool_result_error(
+            result.reason or result.feedback or "Tool result blocked",
+            outcome.duration_ms,
+        )
+        return _execution_outcome(call.id, blocked), dispatched.events
+    return outcome, dispatched.events
+
+
 def _partition_batches(
     resolved: list[ResolvedCall],
     decisions: list[PermissionDecision],
@@ -506,6 +559,7 @@ async def execute_tool_calls(
 
     effective_tools = getattr(session, "tools_override", None) or agent.tools
     resolved = [_resolve_call(b, effective_tools, agent.cwd) for b in blocks]
+    hook_dispatcher = HookDispatcher(_scheduler_hooks(agent))
 
     # First pass: synchronous evaluate()
     decisions: list[PermissionDecision] = []
@@ -594,30 +648,33 @@ async def execute_tool_calls(
                 reason=f"Permission resolution failed for {_tool_name(call)}",
             )
 
-    # Tool middleware can transform or block the permission-resolved input.
+    # PreToolUse hooks can transform or block the permission-resolved input.
     middleware_errors: dict[str, str] = {}
-    middleware = getattr(agent, "middleware", [])
-    if middleware:
+    if hook_dispatcher.active:
         for i, call in enumerate(resolved):
             if call.is_immediate_error or decisions[i].decision != "allow":
                 continue
             effective_input = _effective_input(call, decisions[i])
-            outcome = await dispatch_before_tool_call(
-                middleware,
-                _middleware_call_input(call, effective_input),
-                _middleware_context(call, session, turn_index=turn_index),
+            updated_input, blocked_reason, hook_events = await _dispatch_pre_tool_use(
+                hook_dispatcher,
+                call,
+                effective_input,
+                session,
+                turn_index=turn_index,
             )
+            for hook_event in hook_events:
+                yield hook_event
             decisions[i] = PermissionDecision(
                 decision="allow",
-                updated_input=outcome.call.input,
+                updated_input=updated_input,
             )
             try:
                 if call.tool is not None:
-                    call.summary = call.tool.summarize(outcome.call.input)
+                    call.summary = call.tool.summarize(updated_input)
             except Exception:
                 pass
-            if outcome.error is not None:
-                middleware_errors[call.id] = outcome.error
+            if blocked_reason is not None:
+                middleware_errors[call.id] = blocked_reason
 
     # Partition into bounded, resource-aware batches.
     batches = _partition_batches(
@@ -658,6 +715,17 @@ async def execute_tool_calls(
                         turn_index=turn_index,
                         middleware_error=middleware_errors.get(call.id),
                     )
+                    outcome, hook_events = await _dispatch_post_tool_use(
+                        hook_dispatcher,
+                        call,
+                        input,
+                        outcome,
+                        session,
+                        agent=agent,
+                        turn_index=turn_index,
+                    )
+                    for hook_event in hook_events:
+                        yield hook_event
                 except AbortError:
                     tool_result = _tool_result_error("aborted")
                     yield ToolCallEndEvent(
@@ -752,7 +820,19 @@ async def execute_tool_calls(
                             yield SkillCompletedEvent(name=sn, is_error=True)
                 raise
 
-            for (call, idx, _), outcome in zip(batch["calls"], results, strict=True):
+            for (call, idx, decision), outcome in zip(batch["calls"], results, strict=True):
+                input = _effective_input(call, decision)
+                outcome, hook_events = await _dispatch_post_tool_use(
+                    hook_dispatcher,
+                    call,
+                    input,
+                    outcome,
+                    session,
+                    agent=agent,
+                    turn_index=turn_index,
+                )
+                for hook_event in hook_events:
+                    yield hook_event
                 yield ToolCallEndEvent(
                     tool_use_id=call.id,
                     tool_name=_tool_name(call),

@@ -521,6 +521,7 @@ async def test_tiered_builder_groups_by_tier() -> None:
     """group_by_tier=True injects tier subheadings and remains ephemeral."""
     from linch import Agent
     from linch.config import FeatureFlags
+    from linch.hooks import ContextInjectionHook
     from linch.memory import InMemoryKeywordMemoryStore, MemoryContextBuilder, MemoryItem
     from linch.memory.tiered import TieredMemoryStore
     from linch.sessions import InMemorySessionStore
@@ -548,7 +549,7 @@ async def test_tiered_builder_groups_by_tier() -> None:
         provider=provider,
         tools=empty_tools(),
         deps=tiered,
-        context_builder=MemoryContextBuilder(group_by_tier=True),
+        hooks=[ContextInjectionHook(MemoryContextBuilder(group_by_tier=True))],
         permissions={"mode": "skip-dangerous"},
         session_store=InMemorySessionStore(),
         features=FeatureFlags(skills=False, subagents=False, mcp=False),
@@ -577,6 +578,7 @@ async def test_builder_default_flat_output_unchanged() -> None:
     """Default group_by_tier=False produces the same flat 'Retrieved memory:' output."""
     from linch import Agent
     from linch.config import FeatureFlags
+    from linch.hooks import ContextInjectionHook
     from linch.memory import InMemoryKeywordMemoryStore, MemoryContextBuilder, MemoryItem
     from linch.sessions import InMemorySessionStore
     from linch.tools.registry import empty_tools
@@ -592,7 +594,7 @@ async def test_builder_default_flat_output_unchanged() -> None:
         provider=provider,
         tools=empty_tools(),
         deps=store,
-        context_builder=MemoryContextBuilder(namespace="docs"),
+        hooks=[ContextInjectionHook(MemoryContextBuilder(namespace="docs"))],
         permissions={"mode": "skip-dangerous"},
         session_store=InMemorySessionStore(),
         features=FeatureFlags(skills=False, subagents=False, mcp=False),
