@@ -46,11 +46,13 @@ from .events import (
     ToolCallStartEvent,
     UsageEvent,
     UserEvent,
+    VerificationEvent,
     WorkflowEvent,
     is_budget_event,
     is_context_build_event,
     is_loop_guard_event,
     is_subagent_event,
+    is_verification_event,
     is_workflow_event,
 )
 from .filesystem import (
@@ -176,6 +178,14 @@ from .types import (
     ToolResultBlock,
     ToolUseBlock,
     Usage,
+)
+from .verification import (
+    ScorerVerifier,
+    Verdict,
+    VerificationContext,
+    Verifier,
+    evaluate_verifiers,
+    normalize_verifiers,
 )
 from .workflow import WorkflowContext, WorkflowError, WorkflowJournal
 
@@ -318,6 +328,14 @@ __all__ = [
     "LoopGuardState",
     "evaluate_loop_guard",
     "normalize_loop_guard",
+    "ScorerVerifier",
+    "Verdict",
+    "VerificationContext",
+    "VerificationEvent",
+    "Verifier",
+    "evaluate_verifiers",
+    "is_verification_event",
+    "normalize_verifiers",
     "connect_mcp_servers",
     "create_deep_agent",
     "defaultTools",

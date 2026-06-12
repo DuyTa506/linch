@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from html import escape
 from typing import Any, Literal, cast
 from uuid import uuid4
@@ -38,6 +39,7 @@ from .events import (
     ToolCallStartEvent,
     UsageEvent,
     UserEvent,
+    VerificationEvent,
 )
 from .pricing import cost_usd as _cost_usd
 from .run_store import RunCheckpoint, RunRecord
@@ -385,6 +387,16 @@ def _parse_structured_output(text: str, schema: object) -> tuple[dict | None, st
     return parsed, None
 
 
+def _last_assistant_text(session: Session) -> str | None:
+    """Last non-empty assistant text in the provider view, if any."""
+    for message in reversed(session.provider_view):
+        if message.role == "assistant":
+            text = final_text(message)
+            if text:
+                return text
+    return None
+
+
 def _loop_guard_state_to_dict(state: Any) -> dict[str, object] | None:
     if state is None:
         return None
@@ -487,6 +499,262 @@ async def _budget_exhausted_tail(
         checkpoint.total_usage = total
         await store.mark_failed(run_id, checkpoint, error=budget_error)
     yield event
+
+
+def _stop_when_met(predicate: Any, session: Session) -> bool:
+    """Evaluate a stop_when predicate; a raising predicate never stops a run."""
+    try:
+        return bool(predicate(session))
+    except Exception:
+        return False
+
+
+async def _stop_when_tail(
+    session: Session,
+    agent: Any,
+    *,
+    run_id: str,
+    run_record: Any,
+    checkpoint: Any,
+    total: Usage,
+    duration_ms: int,
+    running_cost: float | None,
+) -> AsyncIterator[Event]:
+    """Emit the graceful-stop event sequence for a met stop_when predicate."""
+    event: Event = ResultEvent(
+        subtype="success",
+        stop_reason="end_turn",
+        total_usage=total,
+        duration_ms=duration_ms,
+        final_text=_last_assistant_text(session),
+        total_cost_usd=running_cost,
+    )
+    await _persist_event(session, run_id, event)
+    store = agent.run_store
+    if run_record is not None and store is not None:
+        checkpoint.total_usage = total
+        await store.mark_completed(run_id, checkpoint)
+    yield event
+
+
+async def _error_result_tail(
+    session: Session,
+    agent: Any,
+    *,
+    run_id: str,
+    run_record: Any,
+    checkpoint: Any,
+    total: Usage,
+    duration_ms: int,
+    running_cost: float | None,
+    final_text_value: str | None = None,
+) -> AsyncIterator[Event]:
+    """Emit the error ResultEvent and mark the run failed.
+
+    Shared by the loop-guard hard stop and the verifier ``stop`` verdict."""
+    event: Event = ResultEvent(
+        subtype="error",
+        stop_reason="error",
+        total_usage=total,
+        duration_ms=duration_ms,
+        final_text=final_text_value,
+        total_cost_usd=running_cost,
+    )
+    await _persist_event(session, run_id, event)
+    store = agent.run_store
+    if run_record is not None and store is not None:
+        checkpoint.total_usage = total
+        await store.mark_failed(run_id, checkpoint)
+    yield event
+
+
+async def _success_result_tail(
+    session: Session,
+    agent: Any,
+    *,
+    run_id: str,
+    run_record: Any,
+    checkpoint: Any,
+    total: Usage,
+    duration_ms: int,
+    running_cost: float | None,
+    stop_reason: StopReason,
+    final_text_value: str | None = None,
+    structured_output: dict[str, Any] | None = None,
+    structured_error: str | None = None,
+) -> AsyncIterator[Event]:
+    """Emit the success ResultEvent and mark the run completed.
+
+    Shared by the final-text and final-tool terminal paths."""
+    event: Event = ResultEvent(
+        subtype="success",
+        stop_reason=stop_reason,
+        total_usage=total,
+        duration_ms=duration_ms,
+        final_text=final_text_value,
+        structured_output=structured_output,
+        structured_error=structured_error,
+        total_cost_usd=running_cost,
+    )
+    await _persist_event(session, run_id, event)
+    store = agent.run_store
+    if run_record is not None and store is not None:
+        checkpoint.total_usage = total
+        await store.mark_completed(run_id, checkpoint)
+    yield event
+
+
+async def _max_turns_tail(
+    session: Session,
+    agent: Any,
+    *,
+    run_id: str,
+    run_record: Any,
+    checkpoint: Any,
+    max_turns: int,
+    total: Usage,
+    duration_ms: int,
+    running_cost: float | None,
+) -> AsyncIterator[Event]:
+    """Emit the guard/error/result sequence for an exhausted max_turns."""
+    turn_error = {
+        "name": "TurnLimitError",
+        "message": "max turns exceeded",
+        "retryable": False,
+    }
+    event: Event = LoopGuardEvent(
+        reason="max_turns",
+        detail=f"Maximum turns ({max_turns}) reached.",
+        action="stop",
+    )
+    await _persist_event(session, run_id, event)
+    yield event
+    event = ErrorEvent(error=turn_error)
+    await _persist_event(session, run_id, event)
+    yield event
+    event = ResultEvent(
+        subtype="error",
+        stop_reason="error",
+        total_usage=total,
+        duration_ms=duration_ms,
+        total_cost_usd=running_cost,
+    )
+    await _persist_event(session, run_id, event)
+    store = agent.run_store
+    if run_record is not None and store is not None:
+        checkpoint.total_usage = total
+        await store.mark_failed(run_id, checkpoint, error=turn_error)
+    yield event
+
+
+async def _gate_retry_tail(
+    session: Session,
+    *,
+    run_id: str,
+    feedback: str,
+) -> AsyncIterator[Event]:
+    """Inject gate *feedback* as a system-reminder user message."""
+    from .skills.system_reminder import wrap_in_system_reminder
+
+    message = Message(role="user", content=[TextBlock(text=wrap_in_system_reminder(feedback))])
+    await session.append([message])
+    event: Event = UserEvent(message=message)
+    await _persist_event(session, run_id, event)
+    yield event
+
+
+@dataclass(slots=True)
+class _GateOutcome:
+    """Result of the closed-loop terminal gates (schema repair + verifiers)."""
+
+    decision: Literal["pass", "retry", "stop"]
+    events: list[Event]
+    feedback: str | None = None
+
+
+async def _evaluate_terminal_gates(
+    session: Session,
+    *,
+    run_id: str,
+    verifiers: list[Any],
+    max_schema_retries: int,
+    max_verify_retries: int,
+    attempts: list[int],
+    final_text_value: str | None,
+    structured_output: dict[str, Any] | None,
+    structured_error: str | None,
+    turn_index: int,
+) -> _GateOutcome:
+    """Run the schema-repair and verifier gates on a would-be-final answer.
+
+    *attempts* is a mutable ``[schema_attempts, verify_attempts]`` pair owned
+    by the run loop.  Emitted :class:`VerificationEvent`s are persisted here
+    and returned for the caller to yield.
+    """
+    if structured_error is not None and attempts[0] < max_schema_retries:
+        attempts[0] += 1
+        event: Event = VerificationEvent(
+            verifier="output_schema",
+            action="retry",
+            feedback=structured_error,
+            attempt=attempts[0],
+        )
+        await _persist_event(session, run_id, event)
+        feedback = (
+            "Your previous response failed structured-output validation: "
+            f"{structured_error}\n"
+            "Respond again with ONLY a JSON object matching the required schema."
+        )
+        return _GateOutcome(decision="retry", events=[event], feedback=feedback)
+
+    if not verifiers:
+        return _GateOutcome(decision="pass", events=[])
+
+    from .verification import VerificationContext, evaluate_verifiers
+
+    name, verdict = await evaluate_verifiers(
+        verifiers,
+        VerificationContext(
+            final_text=final_text_value,
+            structured_output=structured_output,
+            structured_error=structured_error,
+            turn_index=turn_index,
+            attempt=attempts[1],
+            session=session,
+        ),
+    )
+    if verdict.action == "stop":
+        event = VerificationEvent(
+            verifier=name,
+            action="stop",
+            feedback=verdict.feedback or verdict.reason,
+            attempt=attempts[1],
+        )
+        await _persist_event(session, run_id, event)
+        return _GateOutcome(decision="stop", events=[event])
+    if verdict.action == "retry":
+        if attempts[1] < max_verify_retries:
+            attempts[1] += 1
+            event = VerificationEvent(
+                verifier=name,
+                action="retry",
+                feedback=verdict.feedback,
+                attempt=attempts[1],
+            )
+            await _persist_event(session, run_id, event)
+            feedback = verdict.feedback or (
+                "The previous answer failed verification. Improve it and answer again."
+            )
+            return _GateOutcome(decision="retry", events=[event], feedback=feedback)
+        event = VerificationEvent(
+            verifier=name,
+            action="exhausted",
+            feedback=verdict.feedback,
+            attempt=attempts[1],
+        )
+        await _persist_event(session, run_id, event)
+        return _GateOutcome(decision="pass", events=[event])
+    return _GateOutcome(decision="pass", events=[])
 
 
 async def _stream_turn_with_ladder(
@@ -994,6 +1262,12 @@ async def _run_loop_impl(
     _final_result: _RunResultInfo | None = None
     _active_turn_index: int | None = None
     _active_provider_call: tuple[int, str, float] | None = None
+    # Closed-loop gate state (per-run; not checkpointed — a resumed run
+    # starts with fresh retry counters).
+    _verifiers = getattr(agent, "verifiers", None) or []
+    _max_verify_retries = int(getattr(agent, "max_verification_retries", 0) or 0)
+    _max_schema_retries = int(getattr(agent, "structured_output_retries", 0) or 0)
+    _gate_attempts = [0, 0]  # [schema_attempts, verify_attempts]
 
     async def _start_turn(turn_index: int) -> None:
         nonlocal _active_turn_index
@@ -1089,10 +1363,36 @@ async def _run_loop_impl(
                 ):
                     yield event
                 return
+            # ── stop_when predicate (closed-loop stop condition) ──────────
+            if opts.stop_when is not None and _stop_when_met(opts.stop_when, session):
+                _dur = int((time.time() - started) * 1000)
+                _final_result = _RunResultInfo(
+                    run_id=run_id,
+                    session_id=session.id,
+                    subtype="success",
+                    stop_reason="end_turn",
+                    total_usage=total,
+                    duration_ms=_dur,
+                )
+                async for event in _stop_when_tail(
+                    session,
+                    agent,
+                    run_id=run_id,
+                    run_record=run_record,
+                    checkpoint=checkpoint,
+                    total=total,
+                    duration_ms=_dur,
+                    running_cost=running_cost,
+                ):
+                    yield event
+                return
             # Drain background-worker notifications before this turn's provider call.
             async for note_event in _drain_pending_notifications(session, run_id):
                 yield note_event
             await _start_turn(turn_index)
+            # Captured before _force_final_pending is reset below: a guard-
+            # forced final answer must bypass the verification gates.
+            _forced_final_turn = _force_final_pending
             session.compaction_retry_used_this_turn = False
 
             pending = session.pending_skill_overlay
@@ -1287,21 +1587,19 @@ async def _run_loop_impl(
                         duration_ms=_dur,
                     )
                     await _end_active_turn()
-                    event = ResultEvent(
-                        subtype="success",
-                        stop_reason="tool_use",
-                        total_usage=total,
+                    async for event in _success_result_tail(
+                        session,
+                        agent,
+                        run_id=run_id,
+                        run_record=run_record,
+                        checkpoint=checkpoint,
+                        total=total,
                         duration_ms=_dur,
-                        final_text=None,
+                        running_cost=running_cost,
+                        stop_reason="tool_use",
                         structured_output=final_block.input,
-                        total_cost_usd=running_cost,
-                    )
-                    await _persist_event(session, run_id, event)
-                    store = agent.run_store
-                    if run_record is not None and store is not None:
-                        checkpoint.total_usage = total
-                        await store.mark_completed(run_id, checkpoint)
-                    yield event
+                    ):
+                        yield event
                     return
 
             # ── Normal text response (stop_reason != tool_use) ───────────
@@ -1315,6 +1613,57 @@ async def _run_loop_impl(
                         ft, effective_schema
                     )
 
+                # ── Closed-loop gates: schema repair, then verifiers ──────
+                # Skipped on a loop-guard force_final turn: a guard-tripped
+                # run must not be bounced back into the loop.
+                if not _forced_final_turn and (_max_schema_retries or _verifiers):
+                    _gate = await _evaluate_terminal_gates(
+                        session,
+                        run_id=run_id,
+                        verifiers=_verifiers,
+                        max_schema_retries=_max_schema_retries,
+                        max_verify_retries=_max_verify_retries,
+                        attempts=_gate_attempts,
+                        final_text_value=ft,
+                        structured_output=structured_output,
+                        structured_error=structured_error,
+                        turn_index=turn_index,
+                    )
+                    for event in _gate.events:
+                        yield event
+                    if _gate.decision == "stop":
+                        _dur = int((time.time() - started) * 1000)
+                        _final_result = _RunResultInfo(
+                            run_id=run_id,
+                            session_id=session.id,
+                            subtype="error",
+                            stop_reason="error",
+                            total_usage=total,
+                            duration_ms=_dur,
+                        )
+                        await _end_active_turn()
+                        async for event in _error_result_tail(
+                            session,
+                            agent,
+                            run_id=run_id,
+                            run_record=run_record,
+                            checkpoint=checkpoint,
+                            total=total,
+                            duration_ms=_dur,
+                            running_cost=running_cost,
+                            final_text_value=ft,
+                        ):
+                            yield event
+                        return
+                    if _gate.decision == "retry":
+                        async for event in _gate_retry_tail(
+                            session, run_id=run_id, feedback=_gate.feedback or ""
+                        ):
+                            yield event
+                        await _end_active_turn()
+                        await _save_checkpoint("turn_complete", turn_index=turn_index)
+                        continue
+
                 _dur = int((time.time() - started) * 1000)
                 _final_result = _RunResultInfo(
                     run_id=run_id,
@@ -1325,22 +1674,21 @@ async def _run_loop_impl(
                     duration_ms=_dur,
                 )
                 await _end_active_turn()
-                event = ResultEvent(
-                    subtype="success",
-                    stop_reason=assembly.stop_reason,
-                    total_usage=total,
+                async for event in _success_result_tail(
+                    session,
+                    agent,
+                    run_id=run_id,
+                    run_record=run_record,
+                    checkpoint=checkpoint,
+                    total=total,
                     duration_ms=_dur,
-                    final_text=ft,
+                    running_cost=running_cost,
+                    stop_reason=assembly.stop_reason,
+                    final_text_value=ft,
                     structured_output=structured_output,
                     structured_error=structured_error,
-                    total_cost_usd=running_cost,
-                )
-                await _persist_event(session, run_id, event)
-                store = agent.run_store
-                if run_record is not None and store is not None:
-                    checkpoint.total_usage = total
-                    await store.mark_completed(run_id, checkpoint)
-                yield event
+                ):
+                    yield event
                 return
 
             tool_blocks = [b for b in assembly.message.content if isinstance(b, ToolUseBlock)]
@@ -1527,19 +1875,17 @@ async def _run_loop_impl(
                             duration_ms=_dur,
                         )
                         await _end_active_turn()
-                        event = ResultEvent(
-                            subtype="error",
-                            stop_reason="error",
-                            total_usage=total,
+                        async for event in _error_result_tail(
+                            session,
+                            agent,
+                            run_id=run_id,
+                            run_record=run_record,
+                            checkpoint=checkpoint,
+                            total=total,
                             duration_ms=_dur,
-                            total_cost_usd=running_cost,
-                        )
-                        await _persist_event(session, run_id, event)
-                        store = agent.run_store
-                        if run_record is not None and store is not None:
-                            checkpoint.total_usage = total
-                            await store.mark_failed(run_id, checkpoint)
-                        yield event
+                            running_cost=running_cost,
+                        ):
+                            yield event
                         return
             # Natural end of turn body (guard said "continue" or "force_final").
             await _end_active_turn()
@@ -1555,43 +1901,18 @@ async def _run_loop_impl(
             total_usage=total,
             duration_ms=_dur,
         )
-        event = LoopGuardEvent(
-            reason="max_turns",
-            detail=f"Maximum turns ({max_turns}) reached.",
-            action="stop",
-        )
-        await _persist_event(session, run_id, event)
-        yield event
-        event = ErrorEvent(
-            error={
-                "name": "TurnLimitError",
-                "message": "max turns exceeded",
-                "retryable": False,
-            }
-        )
-        await _persist_event(session, run_id, event)
-        yield event
-        event = ResultEvent(
-            subtype="error",
-            stop_reason="error",
-            total_usage=total,
+        async for event in _max_turns_tail(
+            session,
+            agent,
+            run_id=run_id,
+            run_record=run_record,
+            checkpoint=checkpoint,
+            max_turns=max_turns,
+            total=total,
             duration_ms=_dur,
-            total_cost_usd=running_cost,
-        )
-        await _persist_event(session, run_id, event)
-        store = agent.run_store
-        if run_record is not None and store is not None:
-            checkpoint.total_usage = total
-            await store.mark_failed(
-                run_id,
-                checkpoint,
-                error={
-                    "name": "TurnLimitError",
-                    "message": "max turns exceeded",
-                    "retryable": False,
-                },
-            )
-        yield event
+            running_cost=running_cost,
+        ):
+            yield event
     except AbortError:
         await _cancel_background_workers(session)
         _dur = int((time.time() - started) * 1000)
