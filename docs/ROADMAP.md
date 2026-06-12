@@ -360,6 +360,20 @@ team protocols, coding fleets). No domain policy in core.
   a memory* are embedder-supplied; Linch ships the lifecycle seam.
 - **Verify:** with a stub extractor, a durable fact stated across turns is upserted once
   without an explicit tool call and isn't duplicated on re-run.
+- **Status (done):** `MemoryExtractionHook` (`hooks/memory.py`) fires on the `Stop` hook of a
+  successful terminal turn, runs a caller-supplied extractor over the `full_history` tail
+  (`MemoryExtractionContext`), content-dedups each candidate against the store
+  (`search` score ≥ `dedup_threshold`), and `upsert`s the survivors. It sits out turns where
+  the agent already called a memory-write tool (`memory_write_tools`, default `UpsertMemory`)
+  and never alters the answer (always returns `None`; the dispatcher isolates a raising
+  extractor). Consolidation is a neutral `ConsolidationGate` (`memory/lifecycle.py`) — time +
+  change-count + an in-process `asyncio.Lock` single-flight — running an embedder-supplied
+  `consolidator(store, ctx)` thunk only when gated. The extractor/consolidator (the LLM
+  side-query, the prompt, what counts as a memory) are embedder policy; Linch ships only the
+  wiring. Opt-in via `Agent(hooks=[MemoryExtractionHook(...)])`; with no such hook the loop is
+  byte-identical. **YAGNI deferrals:** no `consolidate()` method was added to the `MemoryStore`
+  protocol (the gate + thunk keeps stores untouched and the capability optional); a
+  multi-process consolidation lock (a store lock row) is left to durable store adapters.
 
 #### 3.2 System-prompt section assembly + cache boundary — *mechanism*
 - **Why:** the prompt is one config string; any dynamic block (memory/MCP) risks
