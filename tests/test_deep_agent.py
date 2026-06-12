@@ -213,6 +213,7 @@ async def test_deep_agent_loads_specialized_subagents(tmp_path: Path) -> None:
 
 def test_deep_agent_memory_store_wires_tools_and_context_builder(tmp_path: Path) -> None:
     from linch import InMemoryKeywordMemoryStore, MemoryContextBuilder, create_deep_agent
+    from linch.hooks import ContextInjectionHook
 
     store = InMemoryKeywordMemoryStore()
     agent = create_deep_agent(
@@ -224,11 +225,7 @@ def test_deep_agent_memory_store_wires_tools_and_context_builder(tmp_path: Path)
         memory_namespace="deep",
     )
     names = {tool.name for tool in agent.tools.list()}
-    builders = (
-        agent.context_builder
-        if isinstance(agent.context_builder, list)
-        else [agent.context_builder]
-    )
+    builders = [hook.builder for hook in agent.hooks if isinstance(hook, ContextInjectionHook)]
 
     assert {"SearchMemory", "UpsertMemory"} <= names
     assert any(isinstance(builder, MemoryContextBuilder) for builder in builders)
