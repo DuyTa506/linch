@@ -60,8 +60,8 @@ def test_build_payload_cache_marks_last_system_block():
 
     req = _make_req(
         system=[
-            SystemBlock(text="Block A"),
-            SystemBlock(text="Block B"),
+            SystemBlock(text="Block A", cacheable=True),
+            SystemBlock(text="Block B", cacheable=True),
         ],
         cache_prompt=True,
         cache_ttl="5m",
@@ -70,6 +70,73 @@ def test_build_payload_cache_marks_last_system_block():
     system = payload["system"]
     assert "cache_control" not in system[0]
     assert system[1]["cache_control"] == {"type": "ephemeral", "ttl": "5m"}
+
+
+def test_build_payload_cache_boundary_excludes_dynamic_tail():
+    # ROADMAP 3.2: the cache breakpoint sits at the end of the leading static
+    # (cacheable=True) run, so a volatile trailing section can change without
+    # invalidating the cached static prefix.
+    from linch.providers.anthropic import AnthropicProviderOptions, _build_payload
+    from linch.types import SystemBlock
+
+    def payload_for(dynamic_text: str):
+        req = _make_req(
+            system=[
+                SystemBlock(text="Static A", cacheable=True),
+                SystemBlock(text="Static B", cacheable=True),
+                SystemBlock(text=dynamic_text, cacheable=False),
+            ],
+            cache_prompt=True,
+            cache_ttl="5m",
+        )
+        return _build_payload(req, AnthropicProviderOptions())["system"]
+
+    s1 = payload_for("recalled: blue")
+    # Breakpoint on the last static block; the dynamic tail is uncached.
+    assert "cache_control" not in s1[0]
+    assert s1[1]["cache_control"] == {"type": "ephemeral", "ttl": "5m"}
+    assert "cache_control" not in s1[2]
+
+    # Changing only the dynamic tail leaves the cached static prefix byte-identical.
+    s2 = payload_for("recalled: green")
+    assert s1[:2] == s2[:2]
+    assert s1[2]["text"] != s2[2]["text"]
+
+
+def test_build_payload_cache_boundary_all_static_marks_last():
+    # With no dynamic block the breakpoint stays on the last block — byte-identical
+    # to the legacy "cache the last system block" behavior for real agent prompts.
+    from linch.providers.anthropic import AnthropicProviderOptions, _build_payload
+    from linch.types import SystemBlock
+
+    req = _make_req(
+        system=[
+            SystemBlock(text="A", cacheable=True),
+            SystemBlock(text="B", cacheable=True),
+            SystemBlock(text="C", cacheable=True),
+        ],
+        cache_prompt=True,
+    )
+    system = _build_payload(req, AnthropicProviderOptions())["system"]
+    assert "cache_control" not in system[0]
+    assert "cache_control" not in system[1]
+    assert system[2]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_build_payload_cache_boundary_leading_dynamic_disables_cache():
+    # If the very first block is dynamic there is no static prefix to cache.
+    from linch.providers.anthropic import AnthropicProviderOptions, _build_payload
+    from linch.types import SystemBlock
+
+    req = _make_req(
+        system=[
+            SystemBlock(text="volatile", cacheable=False),
+            SystemBlock(text="also static", cacheable=True),
+        ],
+        cache_prompt=True,
+    )
+    system = _build_payload(req, AnthropicProviderOptions())["system"]
+    assert all("cache_control" not in block for block in system)
 
 
 def test_build_payload_no_cache_when_false():
