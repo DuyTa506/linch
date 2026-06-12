@@ -7,7 +7,8 @@ Unlike the built-in ``Read``/``Write`` tools — which operate on the user's
 dedicated *root* directory (default ``<cwd>/.linch/offload``), so it stays
 out of the way and is trivial to clean up.
 
-All I/O runs via ``asyncio.to_thread`` so the event loop is never blocked.
+All I/O runs on a bounded daemon thread (``run_blocking``) so the event loop is
+never blocked, and is confined to the configured root.
 
 Use it like any other backend::
 
@@ -23,9 +24,9 @@ route a subtree with :class:`CompositeFileBackend`.
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 
+from .._blocking import run_blocking
 from .backend import _slice_lines, normalize_path
 
 
@@ -57,7 +58,7 @@ class DiskFileBackend:
                 raise FileNotFoundError(path)
             return target.read_text(encoding="utf-8")
 
-        text = await asyncio.to_thread(_read)
+        text = await run_blocking(_read)
         return _slice_lines(text, offset, limit)
 
     async def write(self, path: str, content: str) -> None:
@@ -67,7 +68,7 @@ class DiskFileBackend:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
 
-        await asyncio.to_thread(_write)
+        await run_blocking(_write)
 
     async def ls(self, prefix: str = "") -> list[str]:
         def _ls() -> list[str]:
@@ -77,7 +78,7 @@ class DiskFileBackend:
                     out.append("/" + str(p.relative_to(self.root)).replace("\\", "/"))
             return out
 
-        paths = await asyncio.to_thread(_ls)
+        paths = await run_blocking(_ls)
         if not prefix:
             return sorted(paths)
         pfx = normalize_path(prefix)
@@ -102,11 +103,11 @@ class DiskFileBackend:
             target.write_text(updated, encoding="utf-8")
             return count if replace_all else 1
 
-        return await asyncio.to_thread(_edit)
+        return await run_blocking(_edit)
 
     async def exists(self, path: str) -> bool:
         target = self._real_path(path)
-        return await asyncio.to_thread(target.is_file)
+        return await run_blocking(target.is_file)
 
     async def delete(self, path: str) -> None:
         target = self._real_path(path)
@@ -115,4 +116,4 @@ class DiskFileBackend:
             if target.is_file():
                 target.unlink()
 
-        await asyncio.to_thread(_delete)
+        await run_blocking(_delete)

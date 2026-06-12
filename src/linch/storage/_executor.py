@@ -1,19 +1,11 @@
-"""Single-worker-thread SQLite executor.
+"""Lock-serialized SQLite executor.
 
-Moves all blocking ``sqlite3`` I/O off the asyncio event loop while serialising
-all access to a single connection through one dedicated OS thread.
-
-Why a dedicated ``max_workers=1`` ``ThreadPoolExecutor`` rather than
-``asyncio.to_thread`` or a shared pool:
-
-* ``asyncio.to_thread`` dispatches to the *default* executor, which may use
-  many threads.  A ``sqlite3.Connection`` is NOT safe to share across threads
-  (even with ``check_same_thread=False``, concurrent commits race).
-* ``max_workers=1`` means exactly one OS thread ever touches the connection.
-  No ``asyncio.Lock`` is needed; ``check_same_thread=True`` (the default)
-  holds as a free correctness assertion.
-* The connection is *created* lazily on the worker thread during the first
-  operation, so it is never accessed from any other thread.
+Serializes access to a single SQLite connection behind a regular threading
+lock, and runs the blocking work on a bounded *daemon* thread (via
+``run_blocking``) so the event loop is never blocked.  Daemon threads avoid the
+non-daemon-executor-teardown hang seen in the managed test sandbox, and the
+lock preserves the important correctness property: only one operation touches
+the connection at a time.
 
 Usage::
 
@@ -31,23 +23,17 @@ executor can be used from async code (``await close()``) and from sync
 
 from __future__ import annotations
 
-import asyncio
 import sqlite3
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Lock
 from typing import TypeVar
 
 T = TypeVar("T")
 
 
 class SqliteExecutor:
-    """Pins a ``sqlite3`` connection to a single worker thread.
-
-    All calls to :meth:`run` are dispatched to that thread via
-    ``loop.run_in_executor``, so the event loop is never blocked.
-    Ops are serialised: only one runs at a time (one worker).
-    """
+    """Serializes all access to one ``sqlite3`` connection."""
 
     def __init__(
         self,
@@ -62,20 +48,17 @@ class SqliteExecutor:
         self._init = init
         self._conn: sqlite3.Connection | None = None
         self._closed = False
-        self._executor = ThreadPoolExecutor(
-            max_workers=1,
-            thread_name_prefix=thread_name,
-        )
+        self._lock = Lock()
 
     # ── worker-thread internals ──────────────────────────────────────────────
 
     def _connect(self) -> None:
-        """Run on the worker thread — creates and initialises the connection.
+        """Create and initialise the connection.
 
         If *init* raises, the connection is closed before re-raising so no
         file handle is leaked.
         """
-        conn = sqlite3.connect(self._path)  # check_same_thread=True — correct here
+        conn = sqlite3.connect(self._path, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         try:
             if self._wal and self._path not in (":memory:", ""):
@@ -88,46 +71,53 @@ class SqliteExecutor:
             raise
         self._conn = conn
 
-    # ── async public interface ───────────────────────────────────────────────
-
-    async def run(self, fn: Callable[[sqlite3.Connection], T]) -> T:
-        """Dispatch *fn(conn)* to the worker thread; return its result.
-
-        Uses ``loop.run_in_executor`` for OS-native wakeup — no polling.
-        Raises if the executor is already closed.
-        """
-        if self._closed:
-            raise RuntimeError("SqliteExecutor is closed")
-        loop = asyncio.get_running_loop()
-
-        def _call() -> T:
+    def _locked_call(self, fn: Callable[[sqlite3.Connection], T]) -> T:
+        """Run *fn(conn)* under the lock; rollback on error to keep the next
+        caller from inheriting a half-open transaction on the shared conn."""
+        with self._lock:
             conn = self._conn
             if conn is None:
                 self._connect()
                 conn = self._conn
             assert conn is not None
-            return fn(conn)
+            try:
+                return fn(conn)
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                raise
 
-        return await loop.run_in_executor(self._executor, _call)
+    # ── async public interface ───────────────────────────────────────────────
+
+    async def run(self, fn: Callable[[sqlite3.Connection], T]) -> T:
+        """Run *fn(conn)* on a bounded daemon thread under the executor lock.
+
+        The blocking SQLite work is kept off the event loop via ``run_blocking``;
+        the lock still guarantees only one operation touches the connection at a
+        time.
+        """
+        if self._closed:
+            raise RuntimeError("SqliteExecutor is closed")
+        from .._blocking import run_blocking
+
+        def _call() -> T:
+            return self._locked_call(fn)
+
+        return await run_blocking(_call)
 
     async def close(self) -> None:
-        """Close the connection and shut down the worker thread (async path)."""
+        """Close the connection (async path)."""
         if self._closed:
             return
         self._closed = True
-        loop = asyncio.get_running_loop()
 
-        def _do_close() -> None:
-            if self._conn is not None:
-                self._conn.close()
+        with self._lock:
+            conn = self._conn
+            if conn is not None:
+                conn.close()
                 self._conn = None
-
-        try:
-            await loop.run_in_executor(self._executor, _do_close)
-        finally:
-            # wait=False: _do_close just finished; the thread is idle and will
-            # exit on its own.  Avoids a blocking OS thread-join on the event loop.
-            self._executor.shutdown(wait=False, cancel_futures=True)
 
     def close_sync(self) -> None:
         """Close from a non-async context (``__exit__`` / sync ``close()``)."""
@@ -135,17 +125,7 @@ class SqliteExecutor:
             return
         self._closed = True
 
-        def _do_close() -> None:
+        with self._lock:
             if self._conn is not None:
                 self._conn.close()
                 self._conn = None
-
-        try:
-            fut = self._executor.submit(_do_close)
-            fut.result(timeout=10.0)
-        except Exception:
-            pass
-        finally:
-            # wait=False so a hung or timed-out _do_close does not cause
-            # close_sync() to block indefinitely beyond the timeout above.
-            self._executor.shutdown(wait=False, cancel_futures=True)

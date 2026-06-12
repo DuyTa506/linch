@@ -16,6 +16,7 @@ from pathlib import Path
 
 from linch import Agent, ContextBudget, ContextBuildResult, ContextBuildTurn
 from linch.context import apply_context_budget
+from linch.hooks import ContextInjectionHook
 from linch.sessions import InMemorySessionStore
 from linch.tools.registry import empty_tools
 from linch.types import Message, TextBlock
@@ -139,7 +140,7 @@ async def maybe_live_agent() -> None:
         model=MODEL,
         openai_api_key=os.environ.get("OPENAI_API_KEY"),
         tools=empty_tools(),
-        context_builder=builder,
+        hooks=[ContextInjectionHook(builder)],
         session_store=InMemorySessionStore(),
         system_prompt="Answer only from provided context when it is available.",
     )

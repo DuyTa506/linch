@@ -9,7 +9,7 @@ Demonstrates:
   3. Redacting tool output before it enters provider history
 
 This example uses a tiny fake provider so it runs without an API key.
-In a real agent, pass the same middleware objects to Agent(middleware=...).
+In a real agent, pass the same middleware objects through ToolMiddlewareHook.
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ from linch import (
     ToolResult,
     Usage,
 )
+from linch.hooks import ToolMiddlewareHook
 from linch.sessions import InMemorySessionStore
 from linch.tools.registry import empty_tools
 
@@ -141,7 +142,7 @@ async def run_scenario(label: str, *, query: str, max_results: int) -> None:
         tools=empty_tools(SearchDocsTool()),
         permissions={"mode": "skip-dangerous"},
         session_store=InMemorySessionStore(),
-        middleware=ToolGovernanceMiddleware(),
+        hooks=[ToolMiddlewareHook(ToolGovernanceMiddleware())],
     )
     session = await agent.session()
 

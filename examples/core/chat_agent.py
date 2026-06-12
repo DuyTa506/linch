@@ -74,6 +74,7 @@ def _last_user_text(messages) -> str:
 def _make_agent():
     from linch import Agent
     from linch.config import FeatureFlags, SystemPromptConfig
+    from linch.hooks import ContextInjectionHook
     from linch.providers import OpenAIChatCompletionsProvider
     from linch.providers.openai_chat import OpenAIChatProviderOptions
     from linch.sessions import InMemorySessionStore
@@ -137,7 +138,7 @@ def _make_agent():
                 "additionalProperties": False,
             },
         ),
-        context_builder=_PolicyContextBuilder(),
+        hooks=[ContextInjectionHook(_PolicyContextBuilder())],
         features=FeatureFlags(skills=False, subagents=False, mcp=False),
     )
 

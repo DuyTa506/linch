@@ -8,6 +8,7 @@ from ..config import SystemPromptConfig, SystemPromptSection
 from ..errors import ConfigError
 from ..filesystem.backend import CompositeFileBackend, StateFileBackend
 from ..filesystem.sqlite import SqliteFileBackend
+from ..hooks import ContextInjectionHook
 from ..memory import MemoryContextBuilder, MemorySearchTool, MemoryUpsertTool
 from ..run_store import SqliteRunStore
 from ..sessions import SqliteSessionStore
@@ -18,7 +19,6 @@ from .subagents import DEEP_AGENT_SUBAGENTS
 
 if TYPE_CHECKING:
     from ..config import FeatureFlags
-    from ..context import ContextBuilder
     from ..memory import MemoryStore
     from ..run_store import RunStore
     from ..sessions import SessionStore
@@ -74,11 +74,11 @@ def create_deep_agent(
     prompt_config = _merge_deep_agent_prompt(
         system_prompt_config, system_prompt, coordinator=coordinator
     )
-    context_builder = _deep_agent_context_builder(
-        agent_kwargs.pop("context_builder", None),
-        memory_store=memory_store,
-        namespace=memory_namespace,
-    )
+    hooks = list(agent_kwargs.pop("hooks", None) or [])
+    if memory_store is not None:
+        hooks.append(
+            ContextInjectionHook(MemoryContextBuilder(memory_store, namespace=memory_namespace))
+        )
     agent_kwargs.setdefault("enable_worker_tools", True)
     agent_kwargs.setdefault("retain_subagents", True)
     agent_kwargs.setdefault("enable_background_subagents", True)
@@ -107,7 +107,7 @@ def create_deep_agent(
         run_store=run_store,
         features=features,
         system_prompt_config=prompt_config,
-        context_builder=context_builder,
+        hooks=hooks,
         extra_subagents=DEEP_AGENT_SUBAGENTS,
         **agent_kwargs,
     )
@@ -139,23 +139,6 @@ def _deep_agent_tools(
             if registry.get(name) is not None:
                 registry.unregister(name)
     return registry
-
-
-def _deep_agent_context_builder(
-    context_builder: ContextBuilder | list[ContextBuilder] | None,
-    *,
-    memory_store: MemoryStore | None,
-    namespace: str | None,
-) -> ContextBuilder | list[ContextBuilder] | None:
-    if memory_store is None:
-        return context_builder
-
-    memory_builder = MemoryContextBuilder(memory_store, namespace=namespace)
-    if context_builder is None:
-        return memory_builder
-    if isinstance(context_builder, list):
-        return [memory_builder, *context_builder]
-    return [memory_builder, context_builder]
 
 
 def _merge_deep_agent_prompt(

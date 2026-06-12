@@ -21,6 +21,7 @@ import os
 from collections import defaultdict
 from pathlib import Path
 
+from linch.hooks import RunTelemetryHook
 from linch.observability import (
     BaseObserver,
     LoggingObserver,
@@ -117,7 +118,7 @@ async def main() -> None:
         permissions={"mode": "skip-dangerous"},
         session_store=InMemorySessionStore(),
         features=FeatureFlags(skills=False, subagents=False, mcp=False),
-        observers=[metrics, logger],
+        hooks=[RunTelemetryHook([metrics, logger])],
     )
     session = await agent.session()
 

@@ -1,7 +1,6 @@
-"""ContextBuilder patterns: RAG, schema context, and selected tools.
+"""ContextInjectionHook patterns: RAG, schema context, and selected tools.
 
-The filename is kept for continuity with older examples. The legacy
-context_hooks API has been removed; new code should use ContextBuilder.
+The filename is kept for continuity with older examples.
 """
 
 from __future__ import annotations
@@ -11,6 +10,7 @@ import os
 from pathlib import Path
 
 from linch import Agent, ContextBudget, ContextBuildResult, ContextBuildTurn
+from linch.hooks import ContextInjectionHook
 from linch.sessions import InMemorySessionStore
 from linch.tools import ToolContext, ToolResult
 from linch.tools.registry import empty_tools
@@ -135,10 +135,14 @@ async def maybe_live_agent() -> None:
         model=MODEL,
         openai_api_key=os.environ.get("OPENAI_API_KEY"),
         tools=empty_tools(LookupFactTool()),
-        context_builder=[
-            ProfileContextBuilder(),
-            KnowledgeContextBuilder(),
-            SearchOnlyContextBuilder(),
+        hooks=[
+            ContextInjectionHook(
+                [
+                    ProfileContextBuilder(),
+                    KnowledgeContextBuilder(),
+                    SearchOnlyContextBuilder(),
+                ]
+            )
         ],
         deps={
             "profile": {"role": "analyst", "region": "APAC"},

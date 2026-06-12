@@ -4,7 +4,7 @@ A :class:`Verifier` is a duck-typed gate evaluated when the loop is about to
 return a final answer (a text-only response).  Its :class:`Verdict` either
 lets the run finish (``"pass"``), bounces the answer back into the loop with
 feedback (``"retry"``), or fails the run (``"stop"``).  Verifiers are opt-in
-via ``Agent(verifiers=[...])`` — with the default ``None`` the loop behavior
+via ``Agent(hooks=[FinalAnswerVerifierHook(...)])`` — with the default ``None`` the loop behavior
 is unchanged.
 
 Retries are bounded by ``Agent(max_verification_retries=...)`` and still
@@ -64,7 +64,7 @@ class Verifier(Protocol):
 
 
 def normalize_verifiers(value: Any) -> list[Any]:
-    """Normalize ``Agent(verifiers=...)`` input to a list, validating shape."""
+    """Normalize verifier input to a list, validating shape."""
     if value is None:
         return []
     items = list(value) if isinstance(value, (list, tuple)) else [value]

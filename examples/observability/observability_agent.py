@@ -49,6 +49,7 @@ log = logging.getLogger("observability_demo")
 
 # ── Build observer list ────────────────────────────────────────────────────────
 
+from linch.hooks import RunTelemetryHook  # noqa: E402
 from linch.observability import LoggingObserver  # noqa: E402
 
 observers = [LoggingObserver(level=logging.INFO)]
@@ -92,7 +93,7 @@ else:
             session_store=InMemorySessionStore(),
             features=FeatureFlags(skills=False, subagents=False, mcp=False),
             loop_guard=None,
-            observers=observers,
+            hooks=[RunTelemetryHook(observers)],
         )
         session = await agent.session()
         async for _event in session.run("Reply with exactly: pong"):

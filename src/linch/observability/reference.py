@@ -105,7 +105,7 @@ class SpanCollector(BaseObserver):
     Use this in tests to assert that the expected spans were emitted::
 
         collector = SpanCollector()
-        agent = Agent(..., observers=[collector])
+        agent = Agent(..., hooks=[RunTelemetryHook([collector])])
         session = await agent.session()
         async for _ in session.run("hello"):
             pass

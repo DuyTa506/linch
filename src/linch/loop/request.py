@@ -6,12 +6,7 @@ from __future__ import annotations
 import time
 from typing import Any, Literal, cast
 
-from ..context import (
-    ContextBuildResult,
-    ContextBuildTurn,
-    apply_context_budget,
-    normalize_context_builder,
-)
+from ..context import ContextBuildResult, apply_context_budget
 from ..session import RunOptions, Session
 from ..types import (
     ContentBlock,
@@ -84,25 +79,46 @@ def _re_inject_skill_context(session: Session) -> None:
 
 async def _build_context_result(session: Session, turn_index: int) -> ContextBuildResult | None:
     agent = session.agent
-    builder = normalize_context_builder(getattr(agent, "context_builder", None))
-    if builder is None:
+    context_hooks = [
+        hook
+        for hook in getattr(agent, "hooks", [])
+        if callable(getattr(hook, "build_context", None))
+    ]
+    if not context_hooks:
         return None
-
-    turn = ContextBuildTurn(
-        session=session,
-        messages=list(session.provider_view),
-        turn_index=turn_index,
-        deps=getattr(session, "run_deps", None),
-        model=agent.model,
-        tools=getattr(session, "tools_override", None) or agent.tools,
-        token_estimator=getattr(agent, "token_estimator", None),
-    )
-    result = await builder.build(turn)
-    return apply_context_budget(
-        result,
-        estimator=getattr(agent, "token_estimator", None),
-        model=agent.model,
-    )
+    merged = ContextBuildResult()
+    for hook in context_hooks:
+        result = await hook.build_context(session, turn_index)
+        if result is None:
+            continue
+        merged.system_blocks.extend(result.system_blocks)
+        merged.messages.extend(result.messages)
+        if result.selected_tools is not None:
+            merged.selected_tools = result.selected_tools
+        if result.budget.max_tokens is not None:
+            merged.budget.max_tokens = result.budget.max_tokens
+        merged.budget.used_tokens += result.budget.used_tokens
+        if result.budget.remaining_tokens is not None:
+            merged.budget.remaining_tokens = result.budget.remaining_tokens
+        merged.budget.trimmed = merged.budget.trimmed or result.budget.trimmed
+        merged.metadata.update(result.metadata)
+    if (
+        not merged.system_blocks
+        and not merged.messages
+        and merged.selected_tools is None
+        and not merged.metadata
+    ):
+        return None
+    # Each hook budgets its own result in isolation; with more than one context
+    # hook their concatenation could exceed the intended cap, so re-apply the
+    # budget over the merged union (no-op for a single hook / unset budget).
+    if len(context_hooks) > 1 and merged.budget.max_tokens is not None:
+        return apply_context_budget(
+            merged,
+            estimator=getattr(agent, "token_estimator", None),
+            model=agent.model,
+        )
+    return merged
 
 
 def apply_provider_capabilities(req: ProviderRequest, caps: Any) -> ProviderRequest:
