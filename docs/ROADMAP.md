@@ -420,6 +420,28 @@ team protocols, coding fleets). No domain policy in core.
   configured. Emit a `ScheduleEvent`. The firing *payload/policy* is the embedder's.
 - **Verify:** a `* * * * *` schedule fires once/minute as a UserEvent; durable schedules
   survive a store reload; an invalid expression is rejected at register time.
+- **Status (done):** shipped as a new `scheduling/` package (named to avoid the tool
+  `scheduler.py` clash). `cron.py` is a dependency-free 5-field cron utility
+  (`validate_cron` / `cron_matches` / `next_cron_time`, `*` `a-b` `a,b` `*/n`, UTC,
+  Sun=0). `Schedule` (cron *or* interval, exactly one) validates the cron in
+  `__post_init__` and computes its own `next_run`. `ScheduleStore` is a protocol with two
+  adapters — `InMemoryScheduleStore` and a durable `SqliteScheduleStore`
+  (`SqliteExecutor`-backed, survives a reopen). `SchedulerLoop` is an `asyncio` task with a
+  pure, testable `tick()` core (1s cadence = `tick` + `asyncio.sleep`): each due schedule
+  is fired into `session.pending_notifications` as a `<scheduled-task>` message — the same
+  drain background workers use, so it surfaces as a `UserEvent` next turn — `next_run` is
+  recomputed (no double-fire) and persisted, and a `ScheduleEvent(status="fired")` is
+  emitted. `schedule_tools(store)` exposes `CreateSchedule` / `ListSchedules` /
+  `CancelSchedule` (cron validated at register time), auto-registered by
+  `Agent(schedule_store=...)`; off by default (byte-identical). The firing payload is
+  embedder policy. **YAGNI deferrals:** the multi-process leader-election lock row (so only
+  one of N processes fires a shared schedule) is left to the embedder — the single-process
+  loop is the common case and the durable store already covers restart survival; persisting
+  *via* `SqliteRunStore` was set aside in favor of a dedicated `schedules` table/store
+  (cleaner separation than overloading the run-checkpoint store); cron DOM/DOW use simple AND
+  (not the legacy OR) semantics; the `Agent` does not own the loop lifecycle (the embedder
+  starts/stops a `SchedulerLoop` bound to a session), keeping the timer explicit rather than
+  an implicit background thread inside `Agent`.
 
 ---
 

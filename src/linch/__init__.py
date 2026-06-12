@@ -39,6 +39,7 @@ from .events import (
     PartialAssistantEvent,
     PermissionRequestEvent,
     ResultEvent,
+    ScheduleEvent,
     SkillCompletedEvent,
     SkillInvokedEvent,
     SkillsLoadedEvent,
@@ -171,6 +172,17 @@ from .run_store import (
     SqliteRunStore,
     StoredRunEvent,
 )
+from .scheduling import (
+    InMemoryScheduleStore,
+    Schedule,
+    SchedulerLoop,
+    ScheduleStore,
+    SqliteScheduleStore,
+    cron_matches,
+    next_cron_time,
+    schedule_tools,
+    validate_cron,
+)
 from .session import RunOptions, Session
 from .subagents import (
     CreatedSubagentDefinition,
@@ -236,6 +248,16 @@ __all__ = [
     "WorkflowEvent",
     "WorkflowJournal",
     "is_workflow_event",
+    "ScheduleEvent",
+    "Schedule",
+    "ScheduleStore",
+    "InMemoryScheduleStore",
+    "SqliteScheduleStore",
+    "SchedulerLoop",
+    "schedule_tools",
+    "cron_matches",
+    "next_cron_time",
+    "validate_cron",
     "AgentMiddleware",
     "ContextBudget",
     "ContextBuilder",
