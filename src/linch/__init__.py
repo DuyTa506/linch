@@ -436,6 +436,7 @@ __all__ = [
     "create_deep_agent",
     "defaultTools",
     "default_tools",
+    "get_version",
     "__version__",
     "is_context_build_event",
     "get_provider_model_info",
