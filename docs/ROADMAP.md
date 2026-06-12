@@ -624,6 +624,17 @@ this track makes them explicit guarantees.
 - **Embedder docs for every seam** — each protocol added above (`IsolationBackend`,
   `Mailbox`, `ScheduleStore`, `SystemPromptBuilder`, memory lifecycle) ships with a "how to
   implement your own" doc, matching the existing `ExecutionBackend`/`MemoryStore` pattern.
+  - **Status (done):** [docs/usage/extending.md](usage/extending.md) is the consolidated
+    "implement your own seam" reference, linked from the usage index — one section each for
+    `IsolationBackend` (acquire/release), `Mailbox` (send/drain + the destructive-drain /
+    no-drop invariants), `ScheduleStore` (add/update/remove/get/list + the multi-process lock
+    note), system-prompt assembly, and the memory lifecycle (`MemoryExtractor` callable +
+    `ConsolidationGate`), each with the protocol signature and a minimal implementation. The
+    "SystemPromptBuilder" row is documented honestly as the two existing seams that fill that
+    role (`SystemPromptSection` with `cacheable` + per-turn `ContextBuilder` system blocks) —
+    no such builder was ever added (3.2 YAGNI). `ExecutionBackend`/`Tool`/`MemoryStore`/
+    `ContextBuilder`/provider/hook seams keep their existing per-page docs; this page
+    cross-links them.
 
 ---
 
