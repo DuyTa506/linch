@@ -1,0 +1,92 @@
+# Examples
+
+[← Usage guide](./README.md)
+
+Runnable example code lives in the `examples/` directory, organized by subsystem. Local demos (marked *local*) run without a live API key, so you can explore the mechanics offline before wiring up a provider.
+
+---
+
+## `core/`
+
+| File | What it shows |
+|------|---------------|
+| `core/minimal_agent.py` | Smallest possible agent |
+| `core/coding_agent.py` | Full SWE agent — tools_from_defaults, BashRule/PathRule safety fence, LoopGuard, multi-turn |
+| `core/policy_aware_execution.py` | Docker-backed Bash execution with permission rules and opt-in runtime restrictions |
+| `core/reading_agent.py` | Read-only codebase Q&A — exclude Write/Edit/Bash, PathRule, custom reviewer persona |
+| `core/chat_agent.py` | Pure conversation agent — no tools, custom domain, structured JSON output via ContextBuilder injection |
+| `core/custom_permissions.py` | All permission modes and rule types |
+| `core/system_prompts.py` | append, replace, per-session override, persona patterns |
+| `core/structured_output.py` | OutputSchema, final_tool_name, JSON extraction |
+| `core/event_streaming.py` | Consuming events for SSE, WebSocket, CLI progress |
+| `core/multi_session.py` | Web-app pattern: one Agent, many users, shared deps |
+| `core/loop_guard_agent.py` | LoopGuard — identical-call and failure-streak detection |
+| `core/interactive_cli.py` | Interactive REPL |
+| `core/deep_agent_resume.py` | `create_deep_agent` — 4 demos: planning + /memories, background worker + notification, fork/continue, coordinator mode |
+
+---
+
+## `tools/` — *local demos available*
+
+| File | What it shows |
+|------|---------------|
+| `tools/custom_tools.py` | 5 tool patterns: read, write, exec, parallel, with deps |
+| `tools/parallel_search_agent.py` | Scheduler V2: parallel search, resources, concurrency cap |
+| `tools/runtime_tools.py` | Runtime registry add/remove/replace/select and schema export |
+| `tools/tool_reliability_agent.py` | Timeout, per-tool opt-out (`execution_timeout_ms=0`), `RetryOptions` |
+| `tools/rag_tools.py` | RAG tool suite: hybrid_search, keyword_search, graph_search, web_search |
+| `tools/filesystem_offload.py` | Virtual filesystem backends, auto-offload of large results (*runs offline*) |
+
+---
+
+## `context/` — *local demos available*
+
+| File | What it shows |
+|------|---------------|
+| `context/context_injection.py` | ContextInjectionHook patterns: RAG per-turn, budget, selected tools |
+| `context/rag_context_builder.py` | ContextInjectionHook RAG with metadata and budget reporting |
+
+---
+
+## `memory/` — *local demos available*
+
+| File | What it shows |
+|------|---------------|
+| `memory/memory_agent.py` | Core memory primitives with search/upsert tools and citations |
+| `memory/sqlite_memory_agent.py` | SqliteMemoryStore — persistent memory, round-trip, upsert update |
+
+---
+
+## `observability/`
+
+| File | What it shows |
+|------|---------------|
+| `observability/observability_agent.py` | LoggingObserver + optional OpenTelemetryObserver |
+| `observability/custom_observer.py` | BaseObserver subclass: latency tracking, error counts per tool |
+
+---
+
+## `providers/`
+
+| File | What it shows |
+|------|---------------|
+| `providers/openai_agent.py` | OpenAIChatCompletionsProvider — basic Q&A, thinking events, tool use, thinking + tool use, structured output, multi-turn |
+| `providers/anthropic_agent.py` | AnthropicProvider — basic Q&A, extended thinking (with `PartialAssistantEvent`), prompt caching |
+| `providers/deepseek_agent.py` | DeepSeek via both OpenAI-compatible and Anthropic-compatible endpoints — thinking, tool use, thinking + tool use, multi-turn |
+
+---
+
+## `integrations/` — *local demo available*
+
+| File | What it shows |
+|------|---------------|
+| `integrations/subagent_coordinator.py` | Agent definition files, tool-filtered subagents, SubagentEvent |
+| `integrations/multi_agent_isolation.py` | Context isolation: child work never enters parent context; sequential pipeline; parallel analysts; subagent + filesystem offload (*runs offline*) |
+
+---
+
+Built-in subagents are available without disk definitions. After non-trivial implementation or workflow changes, ask the model to invoke `Subagent` with `subagent_type="verification"` and a prompt that includes the original task, artifacts or files changed, approach taken, and checks you expect it to run. The verification subagent is restricted to `Read`, `Glob`, `Grep`, and `Bash` and must end with `VERDICT: PASS`, `VERDICT: FAIL`, or `VERDICT: PARTIAL`.
+
+---
+
+Back to the [Usage guide index](./README.md).

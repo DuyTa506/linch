@@ -15,13 +15,13 @@ graph TD
     end
 
     subgraph Core["Linch Core"]
-        Agent["Agent\nmodel · provider · tools\npermissions · loop_guard\ncontext_builder · deps"]
+        Agent["Agent\nmodel · provider · tools\npermissions · loop_guard\nhooks · deps"]
         Session["Session\nprovider_view · full_history\nrun_deps · active_run_id"]
         RunLoop["run_loop()"]
 
         subgraph Pipeline["Turn Pipeline"]
             SK["_re_inject_skill_context()"]
-            CB["ContextBuilder\nRAG · budget · tool select"]
+            CB["ContextInjectionHook\nRAG · budget · tool select"]
             BTR["_build_turn_request()\n+ capability downgrade"]
             PERM["PermissionEngine\nrule eval · loop pause"]
             SCHED["Scheduler\nparallel · serialize · resource lock"]
@@ -579,7 +579,7 @@ classDiagram
         +provider: BaseProvider
         +tools: ToolRegistry
         +loop_guard: LoopGuard | None
-        +context_builder: ContextBuilder | None
+        +hooks: list[Any]
         +max_turns: float
         +permission_engine: PermissionEngine
         +deps: Any
