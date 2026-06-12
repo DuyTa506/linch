@@ -549,6 +549,17 @@ Small, high-confidence additions that complete the pure-SDK extension contract.
   Ordering/safety already handled by `_partition_batches`.
 - **Verify:** a tool returning `parallel(input)=True` for read-only inputs runs those
   concurrently while mutating inputs serialize; ordering preserved.
+- **Status (done):** `scheduler._tool_parallel` now treats a **callable** `parallel` as an
+  input-aware predicate: `parallel(input) -> bool`, consulted for *any* scope (so an
+  exec/write tool can opt safe inputs into concurrency, not just read tools), and **fail-closed**
+  — a predicate that raises serializes. A plain-bool `parallel`/`parallel_safe` attribute keeps
+  the legacy scope-gated path, so the default is byte-identical (no built-in tool ships a
+  callable `parallel`). `_partition_batches` passes the permission/hook-rewritten *effective*
+  input to the predicate (same input resources and execution see) and is otherwise unchanged:
+  it still greedily groups consecutive parallel-safe calls front-to-back under the
+  resource-conflict and `max_concurrency` guards, so ordering is preserved. Deferral (YAGNI):
+  no per-input cost/priority hinting on the same seam — concurrency-safety is the only
+  per-call decision exposed for now.
 
 ---
 
