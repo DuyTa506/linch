@@ -33,6 +33,7 @@ class RecordingTool:
 
 def _agent(provider: Any, *, hooks: Any = None, tools: Any = None):
 
+    from linch import Agent
     from linch.config import FeatureFlags
     from linch.sessions import InMemorySessionStore
     from linch.tools.registry import empty_tools

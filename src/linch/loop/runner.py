@@ -5,7 +5,7 @@ execution, guards, gates, budgets, and durable checkpoints."""
 from __future__ import annotations
 
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any, cast
 from uuid import uuid4
 
@@ -164,6 +164,94 @@ async def resume_loop(session: Session, run_id: str, opts: RunOptions) -> AsyncI
         resume_checkpoint=checkpoint,
     ):
         yield event
+
+
+class _SpanLifecycle:
+    """Tracks the open turn/provider-call observer spans for one run.
+
+    Owns the two pieces of mutable span state (`active_turn_index`,
+    `active_provider_call`) that the turn loop previously threaded through
+    `nonlocal` closures, and dispatches the matching lifecycle hook events
+    via the run's `_dispatch_lifecycle` callback.
+    """
+
+    def __init__(
+        self,
+        session: Session,
+        run_id: str,
+        dispatch: Callable[[HookEvent, Any], Awaitable[None]],
+    ) -> None:
+        self._session = session
+        self._run_id = run_id
+        self._dispatch = dispatch
+        self.active_turn_index: int | None = None
+        self.active_provider_call: tuple[int, str, float] | None = None
+
+    async def start_turn(self, turn_index: int) -> None:
+        await self._dispatch(
+            HookEvent.TURN_START,
+            TurnStartContext(
+                session=self._session,
+                run_id=self._run_id,
+                turn_index=turn_index,
+                deps=getattr(self._session, "run_deps", None),
+            ),
+        )
+        self.active_turn_index = turn_index
+
+    async def end_active_turn(self) -> None:
+        if self.active_turn_index is None:
+            return
+        turn_index = self.active_turn_index
+        self.active_turn_index = None
+        await self._dispatch(
+            HookEvent.TURN_STOP,
+            TurnStopContext(
+                session=self._session,
+                run_id=self._run_id,
+                turn_index=turn_index,
+                deps=getattr(self._session, "run_deps", None),
+            ),
+        )
+
+    async def start_provider_call(self, turn_index: int, model: str) -> None:
+        started_at = time.perf_counter()
+        await self._dispatch(
+            HookEvent.PROVIDER_CALL_START,
+            ProviderCallStartContext(
+                session=self._session,
+                run_id=self._run_id,
+                turn_index=turn_index,
+                deps=getattr(self._session, "run_deps", None),
+                model=model,
+            ),
+        )
+        self.active_provider_call = (turn_index, model, started_at)
+
+    async def end_active_provider_call(
+        self, *, stop_reason: str, usage: Usage | None = None
+    ) -> None:
+        if self.active_provider_call is None:
+            return
+        turn_index, model, started_at = self.active_provider_call
+        self.active_provider_call = None
+        await self._dispatch(
+            HookEvent.PROVIDER_CALL_STOP,
+            ProviderCallStopContext(
+                session=self._session,
+                run_id=self._run_id,
+                turn_index=turn_index,
+                deps=getattr(self._session, "run_deps", None),
+                model=model,
+                stop_reason=stop_reason,
+                usage=usage or Usage(),
+                duration_ms=int((time.perf_counter() - started_at) * 1000),
+            ),
+        )
+
+    async def close_active_observer_spans(self, *, stop_reason: str = "error") -> None:
+        await self.end_active_provider_call(stop_reason=stop_reason)
+        await self.end_active_turn()
 
 
 async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
@@ -464,80 +552,20 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         else session._abort_controller
     )
     _final_result: _RunResultInfo | None = None
-    _active_turn_index: int | None = None
-    _active_provider_call: tuple[int, str, float] | None = None
     # Closed-loop schema-repair state (per-run; not checkpointed — a resumed
     # run starts with fresh retry counters).
     _max_schema_retries = int(getattr(agent, "structured_output_retries", 0) or 0)
     _gate_attempts = [0]  # [schema_attempts]
 
-    async def _start_turn(turn_index: int) -> None:
-        nonlocal _active_turn_index
-        await _dispatch_lifecycle(
-            HookEvent.TURN_START,
-            TurnStartContext(
-                session=session,
-                run_id=run_id,
-                turn_index=turn_index,
-                deps=getattr(session, "run_deps", None),
-            ),
-        )
-        _active_turn_index = turn_index
-
-    async def _end_active_turn() -> None:
-        nonlocal _active_turn_index
-        if _active_turn_index is None:
-            return
-        turn_index = _active_turn_index
-        _active_turn_index = None
-        await _dispatch_lifecycle(
-            HookEvent.TURN_STOP,
-            TurnStopContext(
-                session=session,
-                run_id=run_id,
-                turn_index=turn_index,
-                deps=getattr(session, "run_deps", None),
-            ),
-        )
-
-    async def _start_provider_call(turn_index: int, model: str) -> None:
-        nonlocal _active_provider_call
-        started_at = time.perf_counter()
-        await _dispatch_lifecycle(
-            HookEvent.PROVIDER_CALL_START,
-            ProviderCallStartContext(
-                session=session,
-                run_id=run_id,
-                turn_index=turn_index,
-                deps=getattr(session, "run_deps", None),
-                model=model,
-            ),
-        )
-        _active_provider_call = (turn_index, model, started_at)
-
-    async def _end_active_provider_call(*, stop_reason: str, usage: Usage | None = None) -> None:
-        nonlocal _active_provider_call
-        if _active_provider_call is None:
-            return
-        turn_index, model, started_at = _active_provider_call
-        _active_provider_call = None
-        await _dispatch_lifecycle(
-            HookEvent.PROVIDER_CALL_STOP,
-            ProviderCallStopContext(
-                session=session,
-                run_id=run_id,
-                turn_index=turn_index,
-                deps=getattr(session, "run_deps", None),
-                model=model,
-                stop_reason=stop_reason,
-                usage=usage or Usage(),
-                duration_ms=int((time.perf_counter() - started_at) * 1000),
-            ),
-        )
-
-    async def _close_active_observer_spans(*, stop_reason: str = "error") -> None:
-        await _end_active_provider_call(stop_reason=stop_reason)
-        await _end_active_turn()
+    # Observer/hook span bookkeeping (turn + provider-call spans) lives in a
+    # small helper so the turn loop no longer threads its mutable span state
+    # through nonlocal closures. Local aliases keep the call sites unchanged.
+    _spans = _SpanLifecycle(session, run_id, _dispatch_lifecycle)
+    _start_turn = _spans.start_turn
+    _end_active_turn = _spans.end_active_turn
+    _start_provider_call = _spans.start_provider_call
+    _end_active_provider_call = _spans.end_active_provider_call
+    _close_active_observer_spans = _spans.close_active_observer_spans
 
     async def _dispatch_before_provider_call(
         request: Any,
@@ -1734,7 +1762,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             AgentStopContext(
                 session=session,
                 run_id=run_id,
-                turn_index=_active_turn_index,
+                turn_index=_spans.active_turn_index,
                 deps=getattr(session, "run_deps", None),
                 result=_run_result,
             ),
