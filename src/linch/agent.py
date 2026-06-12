@@ -443,6 +443,9 @@ class Agent:
         self._subagents_loaded: bool = False
         self._mcp_connect: Any = None
         self._mcp_connection: Any = None
+        # Additional MCP connections attached mid-run (closed alongside the
+        # primary connection in close()).
+        self._extra_mcp_connections: list[Any] = []
 
     def _configure_loop_guard(self, loop_guard: Any, loop_guard_alias: Any) -> None:
         from .loop_guard import LoopGuard as _LoopGuard
@@ -882,10 +885,8 @@ class Agent:
             from .mcp import connect_mcp_servers
 
             mcp_conn = await connect_mcp_servers(cast(Any, self._mcp_servers))
-            for tool in mcp_conn.tools:
-                self.tools.register(cast("Tool", tool))
+            self._attach_mcp_tools(mcp_conn)
             self._mcp_connection = mcp_conn
-            self._refresh_system_blocks()
 
         self._mcp_connect = _load()
         try:
@@ -893,6 +894,33 @@ class Agent:
         except Exception:
             self._mcp_connect = None
             raise
+
+    def _attach_mcp_tools(self, connection: Any) -> None:
+        """Register a connection's tools + derived permission rules into the live agent.
+
+        Shared by the configured-connect path and mid-run registration. Because
+        the per-turn request rebuilds its tool list from ``self.tools`` (no cache),
+        tools attached mid-run appear on the next turn. Destructive MCP tools map
+        to ``ask`` permission rules via the annotation→permission bridge.
+        """
+        from .mcp import mcp_permission_rules
+
+        for tool in connection.tools:
+            self.tools.register(cast("Tool", tool))
+        self.permission_engine.rules.extend(mcp_permission_rules(connection.tools))
+        self._refresh_system_blocks()
+
+    async def add_mcp_servers(self, servers: dict[str, Any]) -> Any:
+        """Connect additional MCP servers during a run; their tools appear next turn.
+
+        Returns the new :class:`McpConnection`, also tracked for ``close()``.
+        """
+        from .mcp import connect_mcp_servers
+
+        connection = await connect_mcp_servers(cast(Any, servers))
+        self._attach_mcp_tools(connection)
+        self._extra_mcp_connections.append(connection)
+        return connection
 
     async def session(
         self, id: str | None = None, meta: dict[str, object] | None = None
@@ -993,6 +1021,9 @@ class Agent:
         if self._mcp_connection is not None:
             await self._mcp_connection.close()
             self._mcp_connection = None
+        for connection in self._extra_mcp_connections:
+            await connection.close()
+        self._extra_mcp_connections.clear()
         if self._store is not None:
             await self._store.close()
         if self.run_store is not None:
