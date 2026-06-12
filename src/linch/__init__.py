@@ -168,6 +168,9 @@ from .providers import (
 from .providers.retry import RetryOptions
 from .reports import RunReport, build_run_report, load_run_report
 from .run_store import (
+    SCHEMA_VERSION as RUN_SCHEMA_VERSION,
+)
+from .run_store import (
     InMemoryRunStore,
     RunCheckpoint,
     RunRecord,
@@ -399,6 +402,7 @@ __all__ = [
     "ProviderModelInfo",
     "RetryOptions",
     "RunReport",
+    "RUN_SCHEMA_VERSION",
     "RunCheckpoint",
     "RunRecord",
     "RunStore",

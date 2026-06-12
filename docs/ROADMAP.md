@@ -576,6 +576,15 @@ this track makes them explicit guarantees.
   drain tasks (the `_cancel_background_workers` guarantees) under concurrency.
 - **Versioned serialization/resume** — treat `RunCheckpoint`/stored-event formats as a
   stable, versioned contract with forward-compat handling.
+  - **Status (done):** `run_store.SCHEMA_VERSION` (exported as `linch.RUN_SCHEMA_VERSION`)
+    stamps every serialized checkpoint (`checkpoint_to_dict` → `"schema_version"`).
+    `checkpoint_from_dict` already reads field-by-field with defaults, so a checkpoint from
+    a *newer* binary (higher version, unknown future keys) round-trips its known fields
+    without crashing. `load_events` now wraps `event_from_dict` and **skips** any row it
+    cannot decode (a future event type) instead of aborting the whole resume — the
+    checkpoint, not the event log, drives resume. YAGNI-deferred: no migration registry or
+    down-conversion (single live version); `RunCheckpoint` gains no in-memory `version`
+    field (a wire concern, kept off the dataclass).
 - **Streaming/backpressure ergonomics** — confirm the event `AsyncIterator` applies
   backpressure correctly to a slow host consumer; document the contract.
 - **Domain-agnostic proof** — ship a **non-coding** recipe (e.g. support or research agent)
