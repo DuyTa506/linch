@@ -220,8 +220,8 @@ class VerificationEvent:
             ``"stop"`` (run fails), or ``"exhausted"`` (a retry verdict was
             returned but no retries remain; the answer is accepted as-is).
         feedback: The feedback or error message attached to the verdict.
-        attempt: Retry attempts used so far for this gate kind (1-based on
-            the first retry).
+        attempt: Retry attempts used so far in this run (1-based on the
+            first retry; shared across all verifiers in the same run).
     """
 
     verifier: str

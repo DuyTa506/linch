@@ -75,6 +75,8 @@ class SqliteExecutor:
         """Run *fn(conn)* under the lock; rollback on error to keep the next
         caller from inheriting a half-open transaction on the shared conn."""
         with self._lock:
+            if self._closed:
+                raise RuntimeError("SqliteExecutor is closed")
             conn = self._conn
             if conn is None:
                 self._connect()

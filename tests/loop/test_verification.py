@@ -35,13 +35,13 @@ def _make_agent(provider: Any, *, loop_guard: Any = None, **kwargs: Any):
         def validate(self, raw):
             return raw
 
-        def summarize(self, input):
+        def summarize(self, inp):
             return "FakeTool"
 
-        def resources(self, input):
+        def resources(self, inp):
             return []
 
-        async def execute(self, input, ctx):
+        async def execute(self, inp, ctx):
             return ToolResult(content="ok")
 
     return Agent(

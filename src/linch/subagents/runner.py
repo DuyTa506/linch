@@ -212,23 +212,24 @@ async def run_subagent(args: RunSubagentArgs) -> RunSubagentResult:
 
     merged_signal = any_signal(child_session._abort_controller, args.signal)
     hook_dispatcher = HookDispatcher(getattr(agent, "hooks", None))
-    if hook_dispatcher.active:
-        await hook_dispatcher.dispatch(
-            HookEvent.SUBAGENT_START,
-            SubagentStartContext(
-                session=args.parent_session,
-                run_id=args.parent_session.active_run_id or "unknown",
-                turn_index=None,
-                deps=getattr(args.parent_session, "run_deps", None),
-                child_session_id=child_record.id,
-                subagent_run_id=args.subagent_run_id,
-                subagent_type=args.definition.frontmatter.name,
-                display_name=args.display_name,
-                prompt=args.prompt,
-            ),
-        )
-
+    result: RunSubagentResult | None = None
     try:
+        if hook_dispatcher.active:
+            await hook_dispatcher.dispatch(
+                HookEvent.SUBAGENT_START,
+                SubagentStartContext(
+                    session=args.parent_session,
+                    run_id=args.parent_session.active_run_id or "unknown",
+                    turn_index=None,
+                    deps=getattr(args.parent_session, "run_deps", None),
+                    child_session_id=child_record.id,
+                    subagent_run_id=args.subagent_run_id,
+                    subagent_type=args.definition.frontmatter.name,
+                    display_name=args.display_name,
+                    prompt=args.prompt,
+                ),
+            )
+
         result = await _drive_child(
             child_session,
             args.prompt,
@@ -240,29 +241,29 @@ async def run_subagent(args: RunSubagentArgs) -> RunSubagentResult:
             signal=merged_signal,
         )
     finally:
-        # Release the merged-signal watcher task so completed child runs do
-        # not leave pending tasks behind.
+        # Always release the merged-signal watcher task and dispatch
+        # SUBAGENT_STOP so cleanup runs on all failure and cancellation paths.
         merged_signal.close()
-
-    if hook_dispatcher.active:
-        await hook_dispatcher.dispatch(
-            HookEvent.SUBAGENT_STOP,
-            SubagentStopContext(
-                session=args.parent_session,
-                run_id=args.parent_session.active_run_id or "unknown",
-                turn_index=None,
-                deps=getattr(args.parent_session, "run_deps", None),
-                child_session_id=child_record.id,
-                subagent_run_id=args.subagent_run_id,
-                subagent_type=args.definition.frontmatter.name,
-                display_name=args.display_name,
-                result=result,
-            ),
-        )
+        if hook_dispatcher.active:
+            await hook_dispatcher.dispatch(
+                HookEvent.SUBAGENT_STOP,
+                SubagentStopContext(
+                    session=args.parent_session,
+                    run_id=args.parent_session.active_run_id or "unknown",
+                    turn_index=None,
+                    deps=getattr(args.parent_session, "run_deps", None),
+                    child_session_id=child_record.id,
+                    subagent_run_id=args.subagent_run_id,
+                    subagent_type=args.definition.frontmatter.name,
+                    display_name=args.display_name,
+                    result=result,
+                ),
+            )
 
     if not args.retain:
         agent._sessions.pop(child_record.id, None)
 
+    assert result is not None  # _drive_child succeeded if we reach here
     return result
 
 
@@ -302,22 +303,23 @@ async def continue_subagent(args: ContinueSubagentArgs) -> RunSubagentResult:
 
     subagent_run_id = f"sa_cont_{args.handle.worker_id}"
     hook_dispatcher = HookDispatcher(getattr(agent, "hooks", None))
-    if hook_dispatcher.active:
-        await hook_dispatcher.dispatch(
-            HookEvent.SUBAGENT_START,
-            SubagentStartContext(
-                session=args.parent_session,
-                run_id=args.parent_session.active_run_id or "unknown",
-                turn_index=None,
-                deps=getattr(args.parent_session, "run_deps", None),
-                child_session_id=child_session.id,
-                subagent_run_id=subagent_run_id,
-                subagent_type=handle.definition.frontmatter.name,
-                display_name=handle.display_name,
-                prompt=args.message,
-            ),
-        )
+    result: RunSubagentResult | None = None
     try:
+        if hook_dispatcher.active:
+            await hook_dispatcher.dispatch(
+                HookEvent.SUBAGENT_START,
+                SubagentStartContext(
+                    session=args.parent_session,
+                    run_id=args.parent_session.active_run_id or "unknown",
+                    turn_index=None,
+                    deps=getattr(args.parent_session, "run_deps", None),
+                    child_session_id=child_session.id,
+                    subagent_run_id=subagent_run_id,
+                    subagent_type=handle.definition.frontmatter.name,
+                    display_name=handle.display_name,
+                    prompt=args.message,
+                ),
+            )
         result = await _drive_child(
             child_session,
             args.message,
@@ -329,23 +331,26 @@ async def continue_subagent(args: ContinueSubagentArgs) -> RunSubagentResult:
             signal=merged_signal,
         )
     finally:
+        # Always release the merged-signal watcher task and dispatch
+        # SUBAGENT_STOP so cleanup runs on all failure and cancellation paths.
         merged_signal.close()
+        if hook_dispatcher.active:
+            await hook_dispatcher.dispatch(
+                HookEvent.SUBAGENT_STOP,
+                SubagentStopContext(
+                    session=args.parent_session,
+                    run_id=args.parent_session.active_run_id or "unknown",
+                    turn_index=None,
+                    deps=getattr(args.parent_session, "run_deps", None),
+                    child_session_id=child_session.id,
+                    subagent_run_id=subagent_run_id,
+                    subagent_type=handle.definition.frontmatter.name,
+                    display_name=handle.display_name,
+                    result=result,
+                ),
+            )
 
+    assert result is not None  # _drive_child succeeded if we reach here
     handle.last_result_text = result.final_text
     handle.status = "failed" if result.errored else "completed"
-    if hook_dispatcher.active:
-        await hook_dispatcher.dispatch(
-            HookEvent.SUBAGENT_STOP,
-            SubagentStopContext(
-                session=args.parent_session,
-                run_id=args.parent_session.active_run_id or "unknown",
-                turn_index=None,
-                deps=getattr(args.parent_session, "run_deps", None),
-                child_session_id=child_session.id,
-                subagent_run_id=subagent_run_id,
-                subagent_type=handle.definition.frontmatter.name,
-                display_name=handle.display_name,
-                result=result,
-            ),
-        )
     return result
