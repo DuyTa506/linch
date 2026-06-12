@@ -90,6 +90,7 @@ from .hooks import (
     normalize_hooks,
 )
 from .loop import apply_provider_capabilities
+from .mailbox import Correlator, InMemoryMailbox, Mailbox, MailboxMessage
 from .loop_guard import (
     LoopGuard,
     LoopGuardDecision,
@@ -372,6 +373,10 @@ __all__ = [
     "LoopGuard",
     "LoopGuardDecision",
     "LoopGuardEvent",
+    "Correlator",
+    "InMemoryMailbox",
+    "Mailbox",
+    "MailboxMessage",
     "ModelFallbackEvent",
     "LoopGuardState",
     "evaluate_loop_guard",
