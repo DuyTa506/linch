@@ -103,6 +103,40 @@ This matters for budgets too: with an unpriced model, only the token limit of a
 
 ---
 
+## Backpressure
+
+`session.run(prompt)` returns a plain `AsyncIterator[Event]` — an async generator
+that `yield`s each event and **suspends at the yield until you pull the next one**.
+The chain (`run_loop` → `session.run`) is generators all the way down; there is no
+unbounded internal queue draining events away from your consumer.
+
+The practical guarantee: **a slow consumer throttles the whole producer.** While
+you are not pulling, provider streaming and tool execution do not race ahead — the
+loop is parked at the last `yield`. So you can safely do slow per-event work
+(write to a socket, render a UI frame, persist to a DB) without the run buffering
+unboundedly in memory:
+
+```python
+async for event in session.run(prompt):
+    await slow_websocket.send(serialize(event))  # backpressure flows upstream
+```
+
+Consequences to design for:
+
+- **Always drain the iterator.** Abandoning it mid-stream leaves the run parked.
+  Either consume to the terminal `ResultEvent`, or call `session.abort()` (which
+  cancels in-flight provider/tool work and any background tasks) and then let the
+  generator finish. Breaking out of the `async for` triggers the generator's
+  `aclose()`, running the `finally` that clears the active-run flag.
+- **One active run per session.** A second `session.run()` while one is live
+  raises `ConfigError` — fan out with separate sessions (or subagents) instead.
+- **Background work is the explicit exception.** A `run_in_background=True` tool or
+  subagent detaches onto its own task and delivers completion as a drained
+  `<task-notification>` on a later turn — that path intentionally does *not* block
+  the foreground stream. See [Tools](./tools.md) and [deep-agent](./deep-agent.md).
+
+---
+
 ## Run reports
 
 Use run reports when you need a compact debugging export for a finished or

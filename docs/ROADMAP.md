@@ -604,6 +604,14 @@ this track makes them explicit guarantees.
     field (a wire concern, kept off the dataclass).
 - **Streaming/backpressure ergonomics** — confirm the event `AsyncIterator` applies
   backpressure correctly to a slow host consumer; document the contract.
+  - **Status (done):** `session.run()` is a plain async-generator chain (`run_loop` →
+    `session.run`), suspended at each `yield` until the consumer pulls — no unbounded
+    internal queue. `tests/test_backpressure.py` proves it: a consumer that pulls one event
+    then pauses leaves the tool *unexecuted* (the producer is parked, not racing ahead).
+    Documented in [usage/events.md](usage/events.md#backpressure): slow-consumer throttling,
+    drain/abort discipline, one-active-run-per-session, and background tasks as the explicit
+    non-blocking exception. YAGNI-deferred: no bounded-queue buffering mode or
+    drop-oldest/lossy stream option (the generator's natural backpressure is the contract).
 - **Domain-agnostic proof** — ship a **non-coding** recipe (e.g. support or research agent)
   under `examples/` to prove the SDK isn't coding-shaped and to exercise the seams above.
 - **Embedder docs for every seam** — each protocol added above (`IsolationBackend`,
