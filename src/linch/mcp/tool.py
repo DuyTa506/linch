@@ -15,7 +15,7 @@ McpCallTool = Any
 
 
 def to_input_schema(
-    mcp_schema: McpToolDef.inputSchema,
+    mcp_schema: Any,
 ) -> dict[str, Any]:
     schema = mcp_schema
     props = getattr(schema, "properties", None) or {}

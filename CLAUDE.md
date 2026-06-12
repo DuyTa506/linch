@@ -173,7 +173,7 @@ When the provider's context window approaches its limit, the compaction strategy
 
 Stdlib reference observers: `LoggingObserver` (one log line per span) and `SpanCollector` (in-memory span list for tests). `OpenTelemetryObserver` is the production integration point, behind the optional `[otel]` extra (lazily imported, `pip install 'linch[otel]'`). Langfuse, LangSmith, Honeycomb, and Datadog are all reached via the OTel adapter — no vendor-specific code in core.
 
-Observers are attached via `Agent(observers=[...])` and accessed as `agent.observers`.
+Observers attach through the unified hooks layer, not a dedicated `observers=` parameter: wrap them in the adapter hook — `Agent(hooks=[RunTelemetryHook([...])])`. The same pattern bridges the other legacy protocols into the single `HookDispatcher` runtime: `ToolMiddlewareHook(middleware)`, `FinalAnswerVerifierHook(verifiers)`, `StopPredicateHook(predicate)`, and `ContextInjectionHook(builder)` (all in `hooks/adapters.py`). `normalize_hooks` does **not** auto-detect a raw observer/verifier/middleware — always wrap via the matching adapter. Passing one unwrapped is unsupported and misbehaves: a few method names overlap (e.g. `RunObserver.on_turn_start`/`on_provider_call_start` collide with the hook dispatch methods), so those fire with the wrong context type while the rest are ignored. The legacy `RunObserver`/`Verifier`/middleware protocols remain exported for implementing your own; the loop dispatches everything through hooks, and `RunTelemetryHook` drives the wrapped observers via `ObserverDispatcher` (the single fan-out implementation — the adapter does not re-roll its own).
 
 ### Evals (`evals/`)
 
