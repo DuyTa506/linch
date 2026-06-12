@@ -159,6 +159,11 @@ Pure runtime mechanisms; no new subsystems. Highest leverage, fully self-contain
   clone the parent `file_read_tracker` into the child `ToolContext`.
 - **Verify:** a forked child over a long parent context yields cache-read tokens > 0 on a
   stub caching provider; `mode="normal"` still produces a fresh prefix.
+- **Status: done.** `RunSubagentArgs(fork=True)` (and `wf.agent(..., fork=True)`) seeds the
+  child with the parent's `provider_view`, system blocks, tools, and `file_read_tracker`,
+  so the request prefix is cache-identical; default (`fork=False`) stays isolated. Exposed
+  as a boolean rather than `mode="fork"` (KISS). 2 tests assert the seeded prefix + cloned
+  tracker structurally (a live cache-read count depends on the provider).
 
 #### 1.2 Compaction fidelity: post-recovery + LLM-free rungs — *mechanism*
 - **Why:** forced compaction is summary-only and lossy for in-flight work.

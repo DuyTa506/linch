@@ -41,6 +41,12 @@ class RunSubagentArgs:
     retain: bool = False
     """When True, the child session is kept in agent._sessions after completion
     so it can be continued later via SubagentContinue."""
+    fork: bool = False
+    """When True, the child continues from the parent's context instead of a
+    fresh one: it inherits the parent's ``provider_view`` (conversation prefix),
+    system blocks, tools, and ``file_read_tracker``. This makes the child's
+    request prefix byte-identical to the parent's, so a caching provider reuses
+    the cached prefix rather than re-paying for it. Trades isolation for cost."""
     on_child_registered: Any = None
     """Optional callback ``(child_session_id: str) -> None`` invoked as soon as the
     child session is registered in ``agent._sessions``, before the run is driven.
@@ -171,22 +177,35 @@ async def run_subagent(args: RunSubagentArgs) -> RunSubagentResult:
         tools_filter = args.definition.frontmatter.tools
 
     effective_tools = args.parent_session.tools_override or agent.tools
-    child_tools = build_child_tools(effective_tools, tools_filter)
 
-    # Build the child system blocks from the child's filtered tool names so the
-    # protocol block only describes tools the subagent actually has access to.
-    child_tool_names = sorted(t.name for t in child_tools.list())
-    builder = getattr(agent, "build_system_blocks_for_tool_names", None)
-    if callable(builder):
-        child_system = list(cast(Iterable[SystemBlock], builder(child_tool_names)))
-    else:
-        child_system = list(agent.system_blocks)
-    child_system.append(
-        SystemBlock(
-            text=f"User-provided instructions:\n\n{args.definition.body}",
-            cacheable=True,
+    if args.fork:
+        # Fork: reuse the parent's tools and system blocks verbatim (and seed the
+        # conversation prefix below) so the request prefix is byte-identical and
+        # the provider's prompt cache hits. A filter still narrows tools when given.
+        child_tools = (
+            effective_tools
+            if tools_filter is None
+            else build_child_tools(effective_tools, tools_filter)
         )
-    )
+        child_system = list(args.parent_session.system_blocks_override or agent.system_blocks)
+        seed_view = list(args.parent_session.provider_view)
+    else:
+        child_tools = build_child_tools(effective_tools, tools_filter)
+        # Build the child system blocks from the child's filtered tool names so the
+        # protocol block only describes tools the subagent actually has access to.
+        child_tool_names = sorted(t.name for t in child_tools.list())
+        builder = getattr(agent, "build_system_blocks_for_tool_names", None)
+        if callable(builder):
+            child_system = list(cast(Iterable[SystemBlock], builder(child_tool_names)))
+        else:
+            child_system = list(agent.system_blocks)
+        child_system.append(
+            SystemBlock(
+                text=f"User-provided instructions:\n\n{args.definition.body}",
+                cacheable=True,
+            )
+        )
+        seed_view = []
 
     child_session = Session(
         id=child_record.id,
@@ -194,8 +213,13 @@ async def run_subagent(args: RunSubagentArgs) -> RunSubagentResult:
         meta=child_record.meta,
         agent=agent,
         store=store,
-        provider_view=[],
+        provider_view=seed_view,
     )
+    if args.fork:
+        # Clone the parent's read-file tracker so the child skips re-reading files
+        # the parent already loaded.
+        for path in args.parent_session.file_read_tracker.files():
+            child_session.file_read_tracker.add(path)
     child_session.tools_override = child_tools
     child_session.system_blocks_override = child_system
     # Child joins the parent's spending cap: same RunBudget object, so child
