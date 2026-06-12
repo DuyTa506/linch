@@ -1,36 +1,24 @@
+"""The agent run loop: ``run_loop`` / ``resume_loop`` entry points and the
+turn-by-turn ``_run_loop_impl`` generator that drives provider calls, tool
+execution, guards, gates, budgets, and durable checkpoints."""
+
 from __future__ import annotations
 
-import json
 import time
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
-from html import escape
-from typing import Any, Literal, cast
+from typing import cast
 from uuid import uuid4
 
-from .compaction import (
-    apply_micro_compaction,
-    build_compaction_event,
-    maybe_compact,
-    run_forced_compaction,
-)
-from .context import (
-    ContextBuildResult,
-    ContextBuildTurn,
-    apply_context_budget,
-    context_budget_to_dict,
-    normalize_context_builder,
-)
-from .errors import AbortError, ContextLengthError
-from .events import (
+from ..compaction import build_compaction_event, maybe_compact
+from ..context import context_budget_to_dict
+from ..errors import AbortError
+from ..events import (
     AssistantEvent,
-    BackgroundWorkerEvent,
     BudgetEvent,
     ContextBuildEvent,
     ErrorEvent,
     Event,
     LoopGuardEvent,
-    PartialAssistantEvent,
     PermissionRequestEvent,
     ResultEvent,
     SkillsLoadedEvent,
@@ -39,86 +27,55 @@ from .events import (
     ToolCallStartEvent,
     UsageEvent,
     UserEvent,
-    VerificationEvent,
 )
-from .pricing import cost_usd as _cost_usd
-from .run_store import RunCheckpoint, RunRecord
-from .scheduler import execute_tool_calls
-from .session import RunOptions, Session
-from .types import (
+from ..pricing import cost_usd as _cost_usd
+from ..run_store import RunCheckpoint, RunRecord
+from ..scheduler import execute_tool_calls
+from ..session import RunOptions, Session
+from ..types import (
     AssistantAssembly,
     ContentBlock,
-    ImageBlock,
     Message,
-    ProviderRequest,
     StopReason,
     TextBlock,
-    ThinkingBlock,
     ToolResultBlock,
     ToolUseBlock,
     Usage,
-    message_to_dict,
 )
-
-ProviderEffort = Literal["low", "medium", "high", "xhigh", "max"]
-CacheTtl = Literal["5m", "1h"]
-
-
-def _provider_effort(value: str | None) -> ProviderEffort | None:
-    if value in {"low", "medium", "high", "xhigh", "max"}:
-        return cast(ProviderEffort, value)
-    return None
-
-
-def _cache_ttl(value: str | None) -> CacheTtl | None:
-    if value in {"5m", "1h"}:
-        return cast(CacheTtl, value)
-    return None
-
-
-def build_user_message(prompt: str, images: list[dict[str, str]] | None = None) -> Message:
-    content: list[ContentBlock] = [
-        TextBlock(text="<env>\nToday's date: " + time.strftime("%Y-%m-%d") + "\n</env>"),
-        TextBlock(text=prompt),
-    ]
-    for image in images or []:
-        if "url" in image:
-            content.append(ImageBlock(source={"type": "url", "url": image["url"]}))
-        else:
-            content.append(
-                ImageBlock(
-                    source={
-                        "type": "base64",
-                        "media_type": image["media_type"],
-                        "data": image["data"],
-                    }
-                )
-            )
-    return Message(role="user", content=content)
-
-
-def final_text(message: Message) -> str | None:
-    for block in message.content:
-        if isinstance(block, TextBlock):
-            return block.text
-    return None
-
-
-def _re_inject_skill_context(session: Session) -> None:
-    agent = session.agent
-    if not agent.skill_listing_text and not session.invoked_skills:
-        return
-    from .skills.system_reminder import wrap_in_system_reminder
-
-    if agent.skill_listing_text:
-        text = wrap_in_system_reminder(agent.skill_listing_text)
-        session.provider_view.append(Message(role="user", content=[TextBlock(text=text)]))
-    for rec in session.invoked_skills:
-        text = wrap_in_system_reminder(
-            f"Below is the body of a previously invoked skill "
-            f"named '{rec.name}'.\n\n{rec.substituted_body}"
-        )
-        session.provider_view.append(Message(role="user", content=[TextBlock(text=text)]))
+from .checkpoint import (
+    _background_workers_to_dict,
+    _interrupted_tool_result_block,
+    _last_message_has_tool_results,
+    _last_message_matches,
+    _loop_guard_state_from_dict,
+    _loop_guard_state_to_dict,
+    _persist_event,
+    _queue_crashed_worker_notifications,
+    _recover_completed_tool_results,
+    _skill_overlay_from_dict,
+    _skill_overlay_to_dict,
+    _tool_result_block_from_end,
+)
+from .request import (
+    _build_context_result,
+    _build_turn_request,
+    _context_selected_tool_names,
+    _re_inject_skill_context,
+    build_user_message,
+    final_text,
+)
+from .streaming import _stream_turn_with_compaction_retry, _stream_turn_with_ladder
+from .terminals import (
+    _budget_exhausted_tail,
+    _error_result_tail,
+    _evaluate_terminal_gates,
+    _gate_retry_tail,
+    _max_turns_tail,
+    _parse_structured_output,
+    _stop_when_met,
+    _stop_when_tail,
+    _success_result_tail,
+)
 
 
 async def _drain_pending_notifications(
@@ -149,860 +106,6 @@ async def _cancel_background_workers(session: Session) -> None:
         task = getattr(handle, "task", None)
         if task is not None and isinstance(task, asyncio.Task) and not task.done():
             task.cancel()
-
-
-def _background_workers_to_dict(
-    session: Session,
-    existing: dict[str, dict[str, object]] | None = None,
-) -> dict[str, dict[str, object]]:
-    out: dict[str, dict[str, object]] = {
-        str(worker_id): dict(metadata) for worker_id, metadata in (existing or {}).items()
-    }
-    workers = getattr(session, "workers", None)
-    if not workers:
-        return out
-    for worker_id, handle in workers.items():
-        out[str(worker_id)] = {
-            "worker_id": str(getattr(handle, "worker_id", worker_id)),
-            "display_name": str(getattr(handle, "display_name", worker_id)),
-            "status": str(getattr(handle, "status", "running")),
-            "child_session_id": str(getattr(handle, "child_session_id", "")),
-            "last_result_text": str(getattr(handle, "last_result_text", "")),
-        }
-    return out
-
-
-def _crashed_worker_notification(worker_id: str, display_name: str) -> Message:
-    text = (
-        "<task-notification>"
-        f"<task-id>{escape(worker_id)}</task-id>"
-        "<status>killed</status>"
-        f"<summary>Worker '{escape(display_name)}' was interrupted before it finished.</summary>"
-        "<error>Worker process was not live when the run resumed.</error>"
-        "</task-notification>"
-    )
-    return Message(role="user", content=[TextBlock(text=text)])
-
-
-async def _queue_crashed_worker_notifications(
-    session: Session,
-    checkpoint: RunCheckpoint,
-    run_id: str,
-) -> list[BackgroundWorkerEvent]:
-    if not checkpoint.background_workers:
-        return []
-    live_workers = getattr(session, "workers", {})
-    notifications = getattr(session, "pending_notifications", None)
-    if notifications is None:
-        return []
-
-    events: list[BackgroundWorkerEvent] = []
-    for worker_id, raw in checkpoint.background_workers.items():
-        if raw.get("status") != "running" or worker_id in live_workers:
-            continue
-        display_name = str(raw.get("display_name") or worker_id)
-        event = BackgroundWorkerEvent(
-            worker_id=worker_id,
-            status="killed",
-            display_name=display_name,
-        )
-        # Persist first: if this raises, we have not yet queued a stale
-        # notification nor mutated the in-memory checkpoint status.
-        await _persist_event(session, run_id, event)
-        notifications.append(_crashed_worker_notification(worker_id, display_name))
-        raw["status"] = "killed"
-        events.append(event)
-    return events
-
-
-async def _build_context_result(session: Session, turn_index: int) -> ContextBuildResult | None:
-    agent = session.agent
-    builder = normalize_context_builder(getattr(agent, "context_builder", None))
-    if builder is None:
-        return None
-
-    turn = ContextBuildTurn(
-        session=session,
-        messages=list(session.provider_view),
-        turn_index=turn_index,
-        deps=getattr(session, "run_deps", None),
-        model=agent.model,
-        tools=getattr(session, "tools_override", None) or agent.tools,
-        token_estimator=getattr(agent, "token_estimator", None),
-    )
-    result = await builder.build(turn)
-    return apply_context_budget(
-        result,
-        estimator=getattr(agent, "token_estimator", None),
-        model=agent.model,
-    )
-
-
-def apply_provider_capabilities(req: ProviderRequest, caps: Any) -> ProviderRequest:
-    """Downgrade *req* fields to match what *caps* says the provider supports.
-
-    * ``prompt_cache=False`` → clears ``req.cache_prompt`` and
-      ``req.cache_ttl`` so providers that ignore caching don't receive dead
-      flags (fixes current dead-plumbing where every request sends
-      ``cache_prompt=True`` regardless of provider).
-    * ``tool_choice=False`` → clears ``req.tool_choice``.
-    * ``structured_output=False`` → clears ``req.output_schema``; the loop
-      still text-parses using ``opts/agent.output_schema`` at
-      :func:`run_loop` line ~452, so the host's intent is preserved.
-    * ``parallel_tool_calls`` is informational and has no ``req`` field yet.
-
-    Modifies *req* in place and returns it.
-    """
-    if not caps.prompt_cache:
-        req.cache_prompt = None
-        req.cache_ttl = None
-    if not caps.tool_choice:
-        req.tool_choice = None
-    if not caps.structured_output:
-        req.output_schema = None
-    return req
-
-
-def _build_turn_request(
-    session: Session,
-    opts: RunOptions,
-    *,
-    context: ContextBuildResult | None = None,
-    model_override: str | None = None,
-) -> ProviderRequest:
-    """Build the :class:`ProviderRequest` for one provider call.
-
-    Collapses the two near-identical request builders (normal path and
-    ContextLengthError retry path) into one place.  Applies provider
-    capability downgrades before returning.
-    """
-    agent = session.agent
-
-    base_system = list(session.system_blocks_override or agent.system_blocks)
-    if context and context.system_blocks:
-        base_system = base_system + list(context.system_blocks)
-
-    messages = list(session.provider_view)
-    if context and context.messages:
-        messages.extend(context.messages)
-
-    tools = _select_context_tools(session, context)
-
-    req = ProviderRequest(
-        model=model_override or agent.model,
-        system=base_system,
-        tools=tools.schemas(),
-        messages=messages,
-        max_output_tokens=opts.max_output_tokens or agent.max_output_tokens,
-        temperature=opts.temperature,
-        thinking=opts.thinking,
-        effort=_provider_effort(opts.effort),
-        output_schema=opts.output_schema or agent.output_schema,
-        tool_choice=opts.tool_choice or agent.tool_choice,
-        max_retries=agent.max_retries,
-        cache_ttl=_cache_ttl(agent.cache_ttl),
-        cache_prompt=True,
-    )
-
-    # Apply provider capability downgrades (e.g. clear cache_prompt for
-    # providers that don't support it, strip output_schema when the
-    # provider has no native structured output, etc.).
-    if hasattr(agent.provider, "capabilities"):
-        caps = agent.provider.capabilities(req.model)
-        apply_provider_capabilities(req, caps)
-
-    return req
-
-
-def _select_context_tools(session: Session, context: ContextBuildResult | None) -> Any:
-    registry = session.tools_override or session.agent.tools
-    if context is None or context.selected_tools is None:
-        return registry
-
-    selected = context.selected_tools
-    if hasattr(selected, "schemas") and hasattr(selected, "get"):
-        return selected
-    if isinstance(selected, str):
-        return registry.select(names={selected})
-    if isinstance(selected, dict):
-        names = selected.get("names")
-        tags = selected.get("tags")
-        return registry.select(
-            names={str(name) for name in names} if isinstance(names, (list, set, tuple)) else None,
-            tags={str(tag) for tag in tags} if isinstance(tags, (list, set, tuple)) else None,
-        )
-    if isinstance(selected, (list, set, tuple)):
-        return registry.select(names={str(name) for name in selected})
-    return registry
-
-
-def _context_selected_tool_names(context: ContextBuildResult | None) -> list[str] | None:
-    if context is None or context.selected_tools is None:
-        return None
-    selected = context.selected_tools
-    if hasattr(selected, "list"):
-        return sorted(tool.name for tool in selected.list())
-    if isinstance(selected, str):
-        return [selected]
-    if isinstance(selected, dict):
-        names = selected.get("names")
-        tags = selected.get("tags")
-        parts: list[str] = []
-        if isinstance(names, (list, set, tuple)):
-            parts.extend(str(name) for name in names)
-        if isinstance(tags, (list, set, tuple)):
-            parts.extend(f"tag:{tag}" for tag in tags)
-        return sorted(parts)
-    if isinstance(selected, (list, set, tuple)):
-        return sorted(str(name) for name in selected)
-    return None
-
-
-def _parse_structured_output(text: str, schema: object) -> tuple[dict | None, str | None]:
-    """Try to parse *text* as JSON and optionally validate against *schema*.
-
-    Returns ``(parsed_dict, None)`` on success or ``(None, error_message)``
-    on failure.
-    """
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError as exc:
-        return None, f"JSON parse error: {exc}"
-
-    if not isinstance(parsed, dict):
-        return None, f"Expected a JSON object, got {type(parsed).__name__}"
-
-    # Optionally validate against the JSON Schema (requires jsonschema extra).
-    try:
-        import jsonschema  # type: ignore[import]
-
-        schema_dict = getattr(schema, "schema", None)
-        if schema_dict:
-            jsonschema.validate(parsed, schema_dict)
-    except ImportError:
-        pass  # jsonschema not installed — skip validation
-    except Exception as exc:
-        return None, f"Schema validation error: {exc}"
-
-    return parsed, None
-
-
-def _last_assistant_text(session: Session) -> str | None:
-    """Last non-empty assistant text in the provider view, if any."""
-    for message in reversed(session.provider_view):
-        if message.role == "assistant":
-            text = final_text(message)
-            if text:
-                return text
-    return None
-
-
-def _loop_guard_state_to_dict(state: Any) -> dict[str, object] | None:
-    if state is None:
-        return None
-    return {
-        "call_counts": dict(getattr(state, "call_counts", {})),
-        "consecutive_failures": int(getattr(state, "consecutive_failures", 0) or 0),
-    }
-
-
-def _loop_guard_state_from_dict(raw: dict[str, object] | None) -> Any:
-    if raw is None:
-        return None
-    from .loop_guard import LoopGuardState
-
-    call_counts_raw = raw.get("call_counts", {})
-    return LoopGuardState(
-        call_counts=(
-            {str(k): int(v) for k, v in call_counts_raw.items()}
-            if isinstance(call_counts_raw, dict)
-            else {}
-        ),
-        consecutive_failures=int(cast(Any, raw.get("consecutive_failures", 0) or 0)),
-    )
-
-
-def _skill_overlay_to_dict(overlay: Any) -> dict[str, object] | None:
-    if overlay is None:
-        return None
-    out: dict[str, object] = {}
-    allowed = getattr(overlay, "allowed_tools", None)
-    model = getattr(overlay, "model_override", None)
-    if allowed is not None:
-        out["allowed_tools"] = list(allowed)
-    if model is not None:
-        out["model_override"] = str(model)
-    return out
-
-
-def _skill_overlay_from_dict(raw: dict[str, object] | None) -> Any:
-    if raw is None:
-        return None
-    from .types import SkillOverlay
-
-    allowed_raw = raw.get("allowed_tools")
-    return SkillOverlay(
-        allowed_tools=[str(t) for t in allowed_raw] if isinstance(allowed_raw, list) else None,
-        model_override=(
-            str(raw.get("model_override")) if isinstance(raw.get("model_override"), str) else None
-        ),
-    )
-
-
-async def _persist_event(session: Session, run_id: str, event: Event) -> None:
-    if session.agent.run_store is not None:
-        await session.agent.run_store.append_event(run_id, event)
-
-
-async def _budget_exhausted_tail(
-    session: Session,
-    agent: Any,
-    *,
-    run_id: str,
-    run_record: Any,
-    checkpoint: Any,
-    budget: Any,
-    total: Usage,
-    duration_ms: int,
-    running_cost: float | None,
-) -> AsyncIterator[Event]:
-    """Emit the graceful-stop event sequence for an exhausted RunBudget."""
-    event: Event = BudgetEvent(
-        kind="exceeded",
-        spent_tokens=budget.spent_tokens,
-        spent_usd=budget.spent_usd,
-        max_tokens=budget.max_tokens,
-        max_cost_usd=budget.max_cost_usd,
-    )
-    await _persist_event(session, run_id, event)
-    yield event
-    budget_error = {
-        "name": "BudgetExceededError",
-        "message": (
-            f"run budget exhausted ({budget.spent_tokens} tokens, ${budget.spent_usd:.4f} spent)"
-        ),
-        "retryable": False,
-    }
-    event = ErrorEvent(error=budget_error)
-    await _persist_event(session, run_id, event)
-    yield event
-    event = ResultEvent(
-        subtype="error",
-        stop_reason="error",
-        total_usage=total,
-        duration_ms=duration_ms,
-        total_cost_usd=running_cost,
-    )
-    await _persist_event(session, run_id, event)
-    store = agent.run_store
-    if run_record is not None and store is not None:
-        checkpoint.total_usage = total
-        await store.mark_failed(run_id, checkpoint, error=budget_error)
-    yield event
-
-
-def _stop_when_met(predicate: Any, session: Session) -> bool:
-    """Evaluate a stop_when predicate; a raising predicate never stops a run."""
-    try:
-        return bool(predicate(session))
-    except Exception:
-        return False
-
-
-async def _stop_when_tail(
-    session: Session,
-    agent: Any,
-    *,
-    run_id: str,
-    run_record: Any,
-    checkpoint: Any,
-    total: Usage,
-    duration_ms: int,
-    running_cost: float | None,
-) -> AsyncIterator[Event]:
-    """Emit the graceful-stop event sequence for a met stop_when predicate."""
-    event: Event = ResultEvent(
-        subtype="success",
-        stop_reason="end_turn",
-        total_usage=total,
-        duration_ms=duration_ms,
-        final_text=_last_assistant_text(session),
-        total_cost_usd=running_cost,
-    )
-    await _persist_event(session, run_id, event)
-    store = agent.run_store
-    if run_record is not None and store is not None:
-        checkpoint.total_usage = total
-        await store.mark_completed(run_id, checkpoint)
-    yield event
-
-
-async def _error_result_tail(
-    session: Session,
-    agent: Any,
-    *,
-    run_id: str,
-    run_record: Any,
-    checkpoint: Any,
-    total: Usage,
-    duration_ms: int,
-    running_cost: float | None,
-    final_text_value: str | None = None,
-) -> AsyncIterator[Event]:
-    """Emit the error ResultEvent and mark the run failed.
-
-    Shared by the loop-guard hard stop and the verifier ``stop`` verdict."""
-    event: Event = ResultEvent(
-        subtype="error",
-        stop_reason="error",
-        total_usage=total,
-        duration_ms=duration_ms,
-        final_text=final_text_value,
-        total_cost_usd=running_cost,
-    )
-    await _persist_event(session, run_id, event)
-    store = agent.run_store
-    if run_record is not None and store is not None:
-        checkpoint.total_usage = total
-        await store.mark_failed(run_id, checkpoint)
-    yield event
-
-
-async def _success_result_tail(
-    session: Session,
-    agent: Any,
-    *,
-    run_id: str,
-    run_record: Any,
-    checkpoint: Any,
-    total: Usage,
-    duration_ms: int,
-    running_cost: float | None,
-    stop_reason: StopReason,
-    final_text_value: str | None = None,
-    structured_output: dict[str, Any] | None = None,
-    structured_error: str | None = None,
-) -> AsyncIterator[Event]:
-    """Emit the success ResultEvent and mark the run completed.
-
-    Shared by the final-text and final-tool terminal paths."""
-    event: Event = ResultEvent(
-        subtype="success",
-        stop_reason=stop_reason,
-        total_usage=total,
-        duration_ms=duration_ms,
-        final_text=final_text_value,
-        structured_output=structured_output,
-        structured_error=structured_error,
-        total_cost_usd=running_cost,
-    )
-    await _persist_event(session, run_id, event)
-    store = agent.run_store
-    if run_record is not None and store is not None:
-        checkpoint.total_usage = total
-        await store.mark_completed(run_id, checkpoint)
-    yield event
-
-
-async def _max_turns_tail(
-    session: Session,
-    agent: Any,
-    *,
-    run_id: str,
-    run_record: Any,
-    checkpoint: Any,
-    max_turns: int,
-    total: Usage,
-    duration_ms: int,
-    running_cost: float | None,
-) -> AsyncIterator[Event]:
-    """Emit the guard/error/result sequence for an exhausted max_turns."""
-    turn_error = {
-        "name": "TurnLimitError",
-        "message": "max turns exceeded",
-        "retryable": False,
-    }
-    event: Event = LoopGuardEvent(
-        reason="max_turns",
-        detail=f"Maximum turns ({max_turns}) reached.",
-        action="stop",
-    )
-    await _persist_event(session, run_id, event)
-    yield event
-    event = ErrorEvent(error=turn_error)
-    await _persist_event(session, run_id, event)
-    yield event
-    event = ResultEvent(
-        subtype="error",
-        stop_reason="error",
-        total_usage=total,
-        duration_ms=duration_ms,
-        total_cost_usd=running_cost,
-    )
-    await _persist_event(session, run_id, event)
-    store = agent.run_store
-    if run_record is not None and store is not None:
-        checkpoint.total_usage = total
-        await store.mark_failed(run_id, checkpoint, error=turn_error)
-    yield event
-
-
-async def _gate_retry_tail(
-    session: Session,
-    *,
-    run_id: str,
-    feedback: str,
-) -> AsyncIterator[Event]:
-    """Inject gate *feedback* as a system-reminder user message."""
-    from .skills.system_reminder import wrap_in_system_reminder
-
-    message = Message(role="user", content=[TextBlock(text=wrap_in_system_reminder(feedback))])
-    await session.append([message])
-    event: Event = UserEvent(message=message)
-    await _persist_event(session, run_id, event)
-    yield event
-
-
-@dataclass(slots=True)
-class _GateOutcome:
-    """Result of the closed-loop terminal gates (schema repair + verifiers)."""
-
-    decision: Literal["pass", "retry", "stop"]
-    events: list[Event]
-    feedback: str | None = None
-
-
-async def _evaluate_terminal_gates(
-    session: Session,
-    *,
-    run_id: str,
-    verifiers: list[Any],
-    max_schema_retries: int,
-    max_verify_retries: int,
-    attempts: list[int],
-    final_text_value: str | None,
-    structured_output: dict[str, Any] | None,
-    structured_error: str | None,
-    turn_index: int,
-) -> _GateOutcome:
-    """Run the schema-repair and verifier gates on a would-be-final answer.
-
-    *attempts* is a mutable ``[schema_attempts, verify_attempts]`` pair owned
-    by the run loop.  Emitted :class:`VerificationEvent`s are persisted here
-    and returned for the caller to yield.
-    """
-    if structured_error is not None and attempts[0] < max_schema_retries:
-        attempts[0] += 1
-        event: Event = VerificationEvent(
-            verifier="output_schema",
-            action="retry",
-            feedback=structured_error,
-            attempt=attempts[0],
-        )
-        await _persist_event(session, run_id, event)
-        feedback = (
-            "Your previous response failed structured-output validation: "
-            f"{structured_error}\n"
-            "Respond again with ONLY a JSON object matching the required schema."
-        )
-        return _GateOutcome(decision="retry", events=[event], feedback=feedback)
-
-    if not verifiers:
-        return _GateOutcome(decision="pass", events=[])
-
-    from .verification import VerificationContext, evaluate_verifiers
-
-    name, verdict = await evaluate_verifiers(
-        verifiers,
-        VerificationContext(
-            final_text=final_text_value,
-            structured_output=structured_output,
-            structured_error=structured_error,
-            turn_index=turn_index,
-            attempt=attempts[1],
-            session=session,
-        ),
-    )
-    if verdict.action == "stop":
-        event = VerificationEvent(
-            verifier=name,
-            action="stop",
-            feedback=verdict.feedback or verdict.reason,
-            attempt=attempts[1],
-        )
-        await _persist_event(session, run_id, event)
-        return _GateOutcome(decision="stop", events=[event])
-    if verdict.action == "retry":
-        if attempts[1] < max_verify_retries:
-            attempts[1] += 1
-            event = VerificationEvent(
-                verifier=name,
-                action="retry",
-                feedback=verdict.feedback,
-                attempt=attempts[1],
-            )
-            await _persist_event(session, run_id, event)
-            feedback = verdict.feedback or (
-                "The previous answer failed verification. Improve it and answer again."
-            )
-            return _GateOutcome(decision="retry", events=[event], feedback=feedback)
-        event = VerificationEvent(
-            verifier=name,
-            action="exhausted",
-            feedback=verdict.feedback,
-            attempt=attempts[1],
-        )
-        await _persist_event(session, run_id, event)
-        return _GateOutcome(decision="pass", events=[event])
-    return _GateOutcome(decision="pass", events=[])
-
-
-async def _stream_turn_with_ladder(
-    session: Session,
-    agent: Any,
-    opts: RunOptions,
-    req: Any,
-    *,
-    turn_index: int,
-    signal: Any,
-    ladder: Any,
-    forced_used: list[int],
-    save_checkpoint: Any,
-    start_provider_call: Any,
-    end_provider_call: Any,
-) -> AsyncIterator[Any]:
-    """Provider-call attempt loop with compaction-ladder recovery.
-
-    Yields the same items as :func:`stream_turn` (events + the final
-    ``AssistantAssembly``) plus recovery ``CompactionEvent``/
-    ``ContextBuildEvent`` items.  Nothing is persisted here — the caller
-    persists every non-assembly item it receives.
-
-    Rung 1: micro-compact (LLM-free, once per turn).  Rung 2: forced
-    compaction, capped per run by ``ladder.max_forced_compactions`` via the
-    *forced_used* one-element counter cell; once exhausted the
-    ``ContextLengthError`` surfaces.
-    """
-    micro_tried_this_turn = False
-    while True:
-        await save_checkpoint("provider_pending", turn_index=turn_index)
-        await start_provider_call(turn_index, req.model)
-        try:
-            async for item in stream_turn(session, req):
-                yield item
-            return
-        except ContextLengthError:
-            await end_provider_call(stop_reason="context_length_error")
-            recovered = False
-            if ladder.micro and not micro_tried_this_turn:
-                micro_tried_this_turn = True
-                recovered = apply_micro_compaction(
-                    session, agent, keep_recent_turns=ladder.keep_recent_turns
-                )
-            if not recovered:
-                if forced_used[0] >= ladder.max_forced_compactions:
-                    raise
-                forced_used[0] += 1
-                await run_forced_compaction(session, agent, signal)
-            yield build_compaction_event(session)
-            _re_inject_skill_context(session)
-            # Re-run context builders after compaction so fresh context lands.
-            context_result = await _build_context_result(session, turn_index)
-            if context_result is not None:
-                yield ContextBuildEvent(
-                    system_blocks=len(context_result.system_blocks),
-                    messages=len(context_result.messages),
-                    selected_tools=_context_selected_tool_names(context_result),
-                    budget=context_budget_to_dict(context_result.budget),
-                    metadata=dict(context_result.metadata),
-                )
-            req = _build_turn_request(session, opts, context=context_result)
-
-
-async def _stream_turn_with_compaction_retry(
-    session: Session,
-    agent: Any,
-    opts: RunOptions,
-    req: Any,
-    *,
-    turn_index: int,
-    signal: Any,
-    save_checkpoint: Any,
-    start_provider_call: Any,
-    end_provider_call: Any,
-) -> AsyncIterator[Any]:
-    """Legacy provider-call path: a single forced-compaction retry per turn.
-
-    Yields the same items as :func:`stream_turn` plus recovery events; the
-    caller persists every non-assembly item.  Behavior is identical to the
-    pre-ladder inline code (pinned by tests/loop/test_compaction_ladder.py).
-    """
-    await save_checkpoint("provider_pending", turn_index=turn_index)
-    await start_provider_call(turn_index, req.model)
-    try:
-        async for item in stream_turn(session, req):
-            yield item
-    except ContextLengthError:
-        if session.compaction_retry_used_this_turn:
-            raise
-        await end_provider_call(stop_reason="context_length_error")
-        session.mark_compaction_used()
-        await run_forced_compaction(session, agent, signal)
-        yield build_compaction_event(session)
-        _re_inject_skill_context(session)
-        # Re-run context builders after compaction so fresh context lands.
-        context_result = await _build_context_result(session, turn_index)
-        if context_result is not None:
-            yield ContextBuildEvent(
-                system_blocks=len(context_result.system_blocks),
-                messages=len(context_result.messages),
-                selected_tools=_context_selected_tool_names(context_result),
-                budget=context_budget_to_dict(context_result.budget),
-                metadata=dict(context_result.metadata),
-            )
-        req = _build_turn_request(session, opts, context=context_result)
-        await save_checkpoint("provider_pending", turn_index=turn_index)
-        await start_provider_call(turn_index, req.model)
-        async for item in stream_turn(session, req):
-            yield item
-
-
-def _tool_result_block_from_end(event: ToolCallEndEvent) -> ToolResultBlock:
-    return ToolResultBlock(
-        tool_use_id=event.tool_use_id,
-        content=event.result,
-        is_error=event.is_error,
-    )
-
-
-def _interrupted_tool_result_block(event: ToolCallStartEvent) -> ToolResultBlock:
-    return ToolResultBlock(
-        tool_use_id=event.tool_use_id,
-        content=(
-            "Tool execution was interrupted before a result was recorded; "
-            "not re-running automatically on resume."
-        ),
-        is_error=True,
-    )
-
-
-def _message_matches(left: Message, right: Message) -> bool:
-    return message_to_dict(left) == message_to_dict(right)
-
-
-def _last_message_matches(session: Session, message: Message) -> bool:
-    return bool(session.provider_view) and _message_matches(session.provider_view[-1], message)
-
-
-def _last_message_has_tool_results(session: Session, tool_blocks: list[ToolUseBlock]) -> bool:
-    if not session.provider_view:
-        return False
-    message = session.provider_view[-1]
-    if message.role != "user":
-        return False
-    results = [block for block in message.content if isinstance(block, ToolResultBlock)]
-    return {block.tool_use_id for block in results} == {block.id for block in tool_blocks}
-
-
-async def _recover_completed_tool_results(
-    session: Session,
-    run_id: str,
-    completed: dict[str, ToolResultBlock],
-) -> dict[str, ToolResultBlock]:
-    store = session.agent.run_store
-    if store is None:
-        return dict(completed)
-    recovered = dict(completed)
-    for stored in await store.load_events(run_id):
-        if isinstance(stored.event, ToolCallEndEvent):
-            recovered[stored.event.tool_use_id] = _tool_result_block_from_end(stored.event)
-    return recovered
-
-
-async def stream_turn(
-    session: Session, req: ProviderRequest
-) -> AsyncIterator[PartialAssistantEvent | AssistantAssembly]:
-    agent = session.agent
-    text_buf: list[str] = []
-    thinking_buf: list[str] = []
-    thinking_sig: str | None = None
-    tool_inputs: dict[str, list[str]] = {}
-    tool_meta: dict[str, tuple[str, str]] = {}
-    content: list[ContentBlock] = []
-    stop_reason: StopReason = "end_turn"
-    usage = Usage()
-    metadata: dict[str, Any] | None = None
-
-    def flush_text() -> None:
-        nonlocal text_buf
-        if text_buf:
-            content.append(TextBlock(text="".join(text_buf)))
-            text_buf = []
-
-    def flush_thinking() -> None:
-        nonlocal thinking_buf, thinking_sig
-        if thinking_buf:
-            content.append(ThinkingBlock(thinking="".join(thinking_buf), signature=thinking_sig))
-            thinking_buf = []
-            thinking_sig = None
-
-    async for event in agent.provider.stream(req):
-        typ = event["type"]
-        if typ == "text_delta":
-            flush_thinking()
-            text = str(event["text"])
-            text_buf.append(text)
-            if agent.include_partial_messages:
-                yield PartialAssistantEvent(delta={"kind": "text", "text": text})
-        elif typ == "thinking_delta":
-            flush_text()
-            text = str(event["text"])
-            thinking_buf.append(text)
-            signature = event.get("signature", thinking_sig)
-            thinking_sig = signature if isinstance(signature, str) else thinking_sig
-            if agent.include_partial_messages:
-                yield PartialAssistantEvent(delta={"kind": "thinking", "text": text})
-        elif typ == "tool_use_start":
-            flush_text()
-            flush_thinking()
-            tool_id = str(event["id"])
-            tool_meta[tool_id] = (tool_id, str(event["name"]))
-            tool_inputs[tool_id] = []
-        elif typ == "tool_use_input_delta":
-            tool_id = str(event["id"])
-            json_delta = str(event["json_delta"])
-            tool_inputs.setdefault(tool_id, []).append(json_delta)
-            if agent.include_partial_messages:
-                yield PartialAssistantEvent(
-                    delta={
-                        "kind": "tool_use_input",
-                        "tool_use_id": tool_id,
-                        "json_delta": json_delta,
-                    }
-                )
-        elif typ == "tool_use_end":
-            tool_id = str(event["id"])
-            meta = tool_meta.pop(tool_id, None)
-            raw = "".join(tool_inputs.pop(tool_id, []))
-            if meta is not None:
-                try:
-                    parsed = json.loads(raw) if raw else {}
-                    if not isinstance(parsed, dict):
-                        parsed = {}
-                except json.JSONDecodeError:
-                    parsed = {"__invalid_json": True, "raw": raw}
-                content.append(ToolUseBlock(id=meta[0], name=meta[1], input=parsed))
-        elif typ == "message_end":
-            flush_text()
-            flush_thinking()
-            stop_reason = cast(StopReason, event["stop_reason"])
-            raw_usage = event["usage"]
-            usage = raw_usage if isinstance(raw_usage, Usage) else Usage()
-            raw_metadata = event.get("provider_metadata")
-            metadata = raw_metadata if isinstance(raw_metadata, dict) else None
-
-    message = Message(role="assistant", content=content, provider_metadata=metadata)
-    yield AssistantAssembly(message=message, stop_reason=stop_reason, usage=usage)
 
 
 async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIterator[Event]:
@@ -1065,14 +168,14 @@ async def _run_loop_impl(
     _forced_compactions_used = [0]
 
     # ── Observability hub ─────────────────────────────────────────────────
-    from .observability import ObserverDispatcher
-    from .observability import ProviderCallInfo as _ProviderCallInfo
-    from .observability import ProviderCallResult as _ProviderCallResult
-    from .observability import RunInfo as _RunInfo
-    from .observability import RunResultInfo as _RunResultInfo
-    from .observability import ToolInfo as _ToolInfo
-    from .observability import ToolResultInfo as _ToolResultInfo
-    from .observability import TurnInfo as _TurnInfo
+    from ..observability import ObserverDispatcher
+    from ..observability import ProviderCallInfo as _ProviderCallInfo
+    from ..observability import ProviderCallResult as _ProviderCallResult
+    from ..observability import RunInfo as _RunInfo
+    from ..observability import RunResultInfo as _RunResultInfo
+    from ..observability import ToolInfo as _ToolInfo
+    from ..observability import ToolResultInfo as _ToolResultInfo
+    from ..observability import TurnInfo as _TurnInfo
 
     hub = ObserverDispatcher(getattr(agent, "observers", None))
 
@@ -1105,7 +208,7 @@ async def _run_loop_impl(
     # Loop guard — detects repeated identical tool calls and consecutive
     # failure streaks.  On by default (Agent sets self.loop_guard = LoopGuard()
     # unless the caller passes loop_guard=None).
-    from .loop_guard import LoopGuardState, evaluate_loop_guard
+    from ..loop_guard import LoopGuardState, evaluate_loop_guard
 
     _guard = getattr(agent, "loop_guard", None)
     _guard_state = LoopGuardState() if _guard is not None else None
@@ -1228,7 +331,7 @@ async def _run_loop_impl(
 
         user_message = build_user_message(prompt, opts.images)
         if agent.skill_listing_text and not session.tools_override:
-            from .skills.system_reminder import wrap_in_system_reminder
+            from ..skills.system_reminder import wrap_in_system_reminder
 
             reminder = wrap_in_system_reminder(agent.skill_listing_text)
             user_message.content.insert(0, TextBlock(text=reminder))
@@ -1240,7 +343,7 @@ async def _run_loop_impl(
     elif checkpoint.phase == "started":
         user_message = build_user_message(prompt, opts.images)
         if agent.skill_listing_text and not session.tools_override:
-            from .skills.system_reminder import wrap_in_system_reminder
+            from ..skills.system_reminder import wrap_in_system_reminder
 
             reminder = wrap_in_system_reminder(agent.skill_listing_text)
             user_message.content.insert(0, TextBlock(text=reminder))
@@ -1251,7 +354,7 @@ async def _run_loop_impl(
         await _persist_event(session, run_id, event)
         yield event
 
-    from .abort import any_signal, throw_if_aborted
+    from ..abort import any_signal, throw_if_aborted
 
     max_turns = int(agent.max_turns) if isinstance(agent.max_turns, int) else 10**9
     signal = (
@@ -1847,7 +950,7 @@ async def _run_loop_impl(
                         # Inject a reminder so the model knows to summarise
                         # without further tool calls, then let the loop run
                         # one more tools-disabled turn.
-                        from .skills.system_reminder import wrap_in_system_reminder
+                        from ..skills.system_reminder import wrap_in_system_reminder
 
                         _reminder_text = wrap_in_system_reminder(
                             "You appear to be stuck in a loop or repeatedly "
