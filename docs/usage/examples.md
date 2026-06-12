@@ -83,6 +83,12 @@ Runnable example code lives in the `examples/` directory, organized by subsystem
 | `integrations/subagent_coordinator.py` | Agent definition files, tool-filtered subagents, SubagentEvent |
 | `integrations/multi_agent_isolation.py` | Context isolation: child work never enters parent context; sequential pipeline; parallel analysts; subagent + filesystem offload (*runs offline*) |
 
+## `recipes/` — *local demo available*
+
+| File | What it shows |
+|------|---------------|
+| `recipes/research_desk.py` | A **non-coding** agent (literature analyst): domain tools (`search_library`/`read_article`/`record_citation`), `ctx.deps` corpus + citation ledger, an `OutputSchema` brief, and a closed-loop `Verifier` that bounces an uncited answer — proof the SDK isn't coding-shaped. Built via a factory so it runs offline under a `ScriptedProvider` |
+
 ---
 
 Built-in subagents are available without disk definitions. After non-trivial implementation or workflow changes, ask the model to invoke `Subagent` with `subagent_type="verification"` and a prompt that includes the original task, artifacts or files changed, approach taken, and checks you expect it to run. The verification subagent is restricted to `Read`, `Glob`, `Grep`, and `Bash` and must end with `VERDICT: PASS`, `VERDICT: FAIL`, or `VERDICT: PARTIAL`.

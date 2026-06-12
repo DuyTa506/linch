@@ -614,6 +614,13 @@ this track makes them explicit guarantees.
     drop-oldest/lossy stream option (the generator's natural backpressure is the contract).
 - **Domain-agnostic proof** — ship a **non-coding** recipe (e.g. support or research agent)
   under `examples/` to prove the SDK isn't coding-shaped and to exercise the seams above.
+  - **Status (done):** `examples/recipes/research_desk.py` — a literature-research analyst that
+    never touches a file or shell. Domain function tools (`search_library`/`read_article`/
+    `record_citation`) over a `ctx.deps` corpus + citation ledger, an `OutputSchema` brief, and
+    a closed-loop `CitedSourcesVerifier` (via `FinalAnswerVerifierHook`) that bounces an uncited
+    answer. Built by a `build_research_desk(provider=...)` factory so
+    `tests/test_example_research_desk.py` drives it offline with a `ScriptedProvider` and proves
+    the verifier-retry → cite → accept loop. Listed in [usage/examples.md](usage/examples.md).
 - **Embedder docs for every seam** — each protocol added above (`IsolationBackend`,
   `Mailbox`, `ScheduleStore`, `SystemPromptBuilder`, memory lifecycle) ships with a "how to
   implement your own" doc, matching the existing `ExecutionBackend`/`MemoryStore` pattern.
