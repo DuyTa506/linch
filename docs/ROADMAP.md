@@ -493,6 +493,27 @@ Small, high-confidence additions that complete the pure-SDK extension contract.
   event stream/HITL instead of auto-denying.
 - **Verify:** a project deny overrides a runtime allow; a subagent permission request
   surfaces to the parent caller.
+- **Status (done):** Layered sources ship as `permissions/ruleset.py`:
+  `PermissionRuleSet([PermissionLayer(name, rules), ...])` evaluates each layer as an
+  independent first-match flat list (reusing the extracted `engine.evaluate_rule_list`,
+  which the legacy flat path now also delegates to — DRY) and combines them with
+  **deny-override / policy-wins**: a `deny` from *any* layer is final (fail-closed),
+  otherwise the highest-precedence (last) non-abstaining layer wins; `None` when all
+  abstain. A new `passthrough` `RuleDecision` lets a matched rule abstain (scanning
+  continues past it), so a layer can carve out exceptions that defer to the next source.
+  `PermissionEngine(rule_set=...)` is the opt-in seam: when set, the layered combiner runs
+  before the flat rules + mode default; default `rule_set=None` is byte-identical.
+  Subagent bubbling: child sessions already share the parent's permission engine + responder
+  (so they were never auto-denied when a callback exists), but their events — including a
+  child `PermissionRequestEvent` — only landed in `session.pending_child_events`, a buffer
+  for host UIs. New `_drain_child_events` yields that buffer into the parent's event stream
+  at the same top-of-turn chokepoint as the notification/mailbox drains, so a child's
+  permission request now surfaces to the parent caller's iterator. Deferrals (YAGNI): the
+  `Agent`/permissions-config layer does not yet auto-assemble the four named sources
+  (defaults/project/local/runtime) — `PermissionRuleSet` is constructed by the embedder; no
+  cross-session *durable* HITL for a paused child (resolution stays inline via the shared
+  responder); child events bubble at top of the next parent turn (one turn after a
+  foreground child), not mid-tool-execution, which is sufficient for surfacing.
 
 #### 4.3 MCP: mid-run registration + annotation→permission bridge
 - **Where:** `mcp/`, `loop/request.py`, `permissions/`.

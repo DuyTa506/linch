@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Any, Literal, TypeAlias, cast
 
-RuleDecision = Literal["allow", "deny", "ask"]
+RuleDecision = Literal["allow", "deny", "ask", "passthrough"]
 BashPattern: TypeAlias = str | dict[str, str]
 BashRulePattern: TypeAlias = BashPattern | list[BashPattern]
 
@@ -304,7 +304,7 @@ def _first_matching_bash_decision(
 
 
 def _validate_decision(decision: str) -> RuleDecision:
-    if decision in {"allow", "deny", "ask"}:
+    if decision in {"allow", "deny", "ask", "passthrough"}:
         return cast(RuleDecision, decision)
     raise ValueError(f"invalid rule decision: {decision!r}")
 
