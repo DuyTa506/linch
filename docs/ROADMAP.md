@@ -317,9 +317,8 @@ team protocols, coding fleets). No domain policy in core.
   `_effective_cwd(session, agent)` (override → `agent.cwd`), so isolation is honored at all
   three cwd sites. Git-worktree stays an embedder impl of the protocol; the two-tier
   guidance (`ResourceAccess` vs isolation) is in the module docstring. Opt-in: no
-  `isolation` → child uses `agent.cwd` (byte-identical). **Deferred:** `wf.agent(isolation=)`
-  pass-through (next slice — `wf.agent` already funnels through `run_subagent`, so it's a
-  thin thread-through).
+  `isolation` → child uses `agent.cwd` (byte-identical). `wf.agent(isolation=, isolation_keep=)`
+  threads the backend through to `run_subagent`, so workflow fan-outs get per-branch cwds too.
 
 #### 2.3 Background-any-tool — *mechanism (generalizes background bash)*
 - **Why:** background execution is hard-wired to the subagent path; the substrate
