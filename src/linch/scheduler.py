@@ -23,6 +23,7 @@ from .hooks import (
     HookDispatcher,
     HookEvent,
     PostToolUseContext,
+    PostToolUseFailureContext,
     PreToolUseContext,
 )
 from .permissions import PendingToolCall, PermissionDecision
@@ -556,19 +557,58 @@ async def _dispatch_post_tool_use(
         ),
     )
     result = dispatched.result
+    events = list(dispatched.events)
     if result.action == "mutate" and result.tool_result is not None:
         mutated = result.tool_result
         # Re-run offload so a mutated oversized result doesn't bypass the
         # preview and re-inject the full payload into provider history.
         block_result = await _maybe_offload_block(mutated, call=call, agent=agent, session=session)
-        return _execution_outcome(call.id, mutated, block_result=block_result), dispatched.events
-    if result.action in {"block", "stop"}:
+        final = _execution_outcome(call.id, mutated, block_result=block_result)
+    elif result.action in {"block", "stop"}:
         blocked = _tool_result_error(
             result.reason or result.feedback or "Tool result blocked",
             outcome.duration_ms,
         )
-        return _execution_outcome(call.id, blocked), dispatched.events
-    return outcome, dispatched.events
+        final = _execution_outcome(call.id, blocked)
+    else:
+        final = outcome
+    # PostToolUseFailure: an observational notification fired only when the final
+    # (post-mutation) result is an error, so a failure-watcher hook need not
+    # re-derive "did this fail?" from every PostToolUse.
+    events.extend(
+        await _dispatch_post_tool_use_failure(
+            dispatcher, call, input, final, session, turn_index=turn_index
+        )
+    )
+    return final, events
+
+
+async def _dispatch_post_tool_use_failure(
+    dispatcher: HookDispatcher,
+    call: ResolvedCall,
+    input: dict[str, Any],
+    outcome: ToolExecutionOutcome,
+    session: Any,
+    *,
+    turn_index: int | None,
+) -> list[Event]:
+    tool_result = outcome.tool_result
+    if not dispatcher.active or tool_result is None or not getattr(tool_result, "is_error", False):
+        return []
+    dispatched = await dispatcher.dispatch(
+        HookEvent.POST_TOOL_USE_FAILURE,
+        PostToolUseFailureContext(
+            session=session,
+            run_id=session.active_run_id or "unknown",
+            turn_index=turn_index,
+            deps=getattr(session, "run_deps", None),
+            tool_use_id=call.id,
+            tool_name=_tool_name(call),
+            input=input,
+            result=tool_result,
+        ),
+    )
+    return dispatched.events
 
 
 def _partition_batches(

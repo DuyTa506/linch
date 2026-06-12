@@ -99,6 +99,10 @@ from .terminals import (
     _validate_structured_output,
 )
 
+# Max BeforeFinalAnswer-induced retries honored per run before the answer is
+# accepted as-is. Keeps a perpetually-blocking final-answer hook from looping.
+_MAX_FINAL_ANSWER_REENTRIES = 1
+
 
 async def _drain_pending_notifications(
     session: Session,
@@ -601,6 +605,11 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
     # run starts with fresh retry counters).
     _max_schema_retries = int(getattr(agent, "structured_output_retries", 0) or 0)
     _gate_attempts = [0]  # [schema_attempts]
+    # Re-entry guard: how many BeforeFinalAnswer-induced retries have been
+    # honored this run. A hook that *always* asks to retry would otherwise bounce
+    # the loop back every terminal until max_turns; the guard caps honored
+    # retries at _MAX_FINAL_ANSWER_REENTRIES, then accepts the answer as-is.
+    _final_answer_reentries = [0]
 
     # Observer/hook span bookkeeping (turn + provider-call spans) lives in a
     # small helper so the turn loop no longer threads its mutable span state
@@ -1204,7 +1213,11 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                     for hook_event in hook_events:
                         await _persist_event(session, run_id, hook_event)
                         yield hook_event
-                    if hook_action == "retry":
+                    if (
+                        hook_action == "retry"
+                        and _final_answer_reentries[0] < _MAX_FINAL_ANSWER_REENTRIES
+                    ):
+                        _final_answer_reentries[0] += 1
                         async for event in _final_tool_retry_tail(
                             session,
                             run_id=run_id,
@@ -1395,7 +1408,11 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 for hook_event in hook_events:
                     await _persist_event(session, run_id, hook_event)
                     yield hook_event
-                if hook_action == "retry":
+                if (
+                    hook_action == "retry"
+                    and _final_answer_reentries[0] < _MAX_FINAL_ANSWER_REENTRIES
+                ):
+                    _final_answer_reentries[0] += 1
                     async for event in _gate_retry_tail(
                         session, run_id=run_id, feedback=feedback or ""
                     ):

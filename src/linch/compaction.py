@@ -313,6 +313,22 @@ class DetailedCompaction:
 default_compaction = DefaultCompaction()
 
 
+def _compaction_hook_dispatcher(agent: Any) -> Any:
+    """A live :class:`HookDispatcher` for *agent* iff it has active hooks, else None.
+
+    Built lazily (and imported lazily) so compaction stays zero-overhead and free
+    of a hooks import when no hooks are configured — preserving byte-identical
+    behavior for the no-hook path.
+    """
+    hooks = getattr(agent, "hooks", None)
+    if not hooks:
+        return None
+    from .hooks import HookDispatcher
+
+    dispatcher = HookDispatcher(hooks)
+    return dispatcher if dispatcher.active else None
+
+
 async def _run_compaction_impl(
     session: Any,
     agent: Any,
@@ -321,6 +337,24 @@ async def _run_compaction_impl(
 ) -> None:
     messages_before = len(session.provider_view)
     tokens_before = _estimate_tokens(agent, session.provider_view)
+
+    dispatcher = _compaction_hook_dispatcher(agent)
+    run_id = getattr(session, "active_run_id", None) or "unknown"
+    if dispatcher is not None:
+        from .hooks import HookEvent, PreCompactContext
+
+        await dispatcher.dispatch(
+            HookEvent.PRE_COMPACT,
+            PreCompactContext(
+                session=session,
+                run_id=run_id,
+                turn_index=None,
+                deps=getattr(session, "run_deps", None),
+                messages=messages_before,
+                tokens=tokens_before,
+                strategy=strategy.id,
+            ),
+        )
 
     snapshot = list(session.provider_view)
     ctx = CompactionContext(
@@ -341,6 +375,25 @@ async def _run_compaction_impl(
         "tokens_after": _estimate_tokens(agent, session.provider_view),
         "strategy": strategy.id,
     }
+
+    if dispatcher is not None:
+        from .hooks import HookEvent, PostCompactContext
+
+        info = session.last_compaction_info
+        await dispatcher.dispatch(
+            HookEvent.POST_COMPACT,
+            PostCompactContext(
+                session=session,
+                run_id=run_id,
+                turn_index=None,
+                deps=getattr(session, "run_deps", None),
+                messages_before=info["messages_before"],
+                messages_after=info["messages_after"],
+                tokens_before=info["tokens_before"],
+                tokens_after=info["tokens_after"],
+                strategy=strategy.id,
+            ),
+        )
 
 
 async def maybe_compact(

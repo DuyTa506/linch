@@ -460,6 +460,30 @@ Small, high-confidence additions that complete the pure-SDK extension contract.
   **re-entry guard** so a blocking hook can't loop.
 - **Verify:** a pre-tool hook's `updated_input` reaches `execute`; hook-allow + config-deny
   → denied; a blocking final-answer hook fires once.
+- **Status (done):** `PRE_TOOL_USE` input rewrite was already wired end-to-end
+  (`HookResult.input` → `PermissionDecision.updated_input` → `_effective_input` →
+  validate→execute; covered by `test_tool_hooks_rewrite_input_block_and_result`), so this
+  item only *confirmed* it. `SUBAGENT_START/STOP` were already dispatched in
+  `subagents/runner.py`. New work: (1) the **allow-invariant** is structural — PreToolUse
+  hooks run only over already-`allow`ed calls (`scheduler.py` skips any non-allow decision)
+  and there is no `allow` `HookAction`, so a hook cannot resurrect a denied call; added a
+  regression test proving a `ToolRule` deny wins and the hook never even fires. (2) Three new
+  observational events — `POST_TOOL_USE_FAILURE` (dispatched in `_dispatch_post_tool_use`
+  only when the final, post-mutation result `is_error`; gated on `dispatcher.active` for
+  zero overhead) and `PRE_COMPACT`/`POST_COMPACT` (dispatched at the single real-compaction
+  chokepoint `compaction._run_compaction_impl`, so both proactive *and* forced/ladder-rung-2
+  compaction notify). (3) A **re-entry guard** (`_MAX_FINAL_ANSWER_REENTRIES = 1`,
+  per-run counter in `loop/runner.py`) caps `BeforeFinalAnswer`-induced retries: the retry is
+  honored once, then ignored so the answer is accepted — bounding a perpetually-blocking
+  hook without skipping the dispatch (which would break legitimate retry-then-mutate flows).
+  Default-off / byte-identical: with no hooks every dispatcher is inactive and the guard
+  counter never moves. Deferrals (YAGNI): `PRE_COMPACT`/`POST_COMPACT` are **observational
+  notifications** (no mutate/abort of the compaction) — a mutating compaction hook is added
+  only if an embedder needs it; micro-elision (ladder rung 1) is a cache optimization, not a
+  summarizing compaction, so it intentionally does not emit these; the re-entry cap is a
+  module constant, not an `Agent` knob, until a caller needs >1 honored retry; the STOP
+  hook's `force_continue` remains bounded by `max_turns` rather than the new guard (separate
+  seam, not "the final-answer hook").
 
 #### 4.2 Permissions: layered sources, passthrough, subagent bubbling
 - **Where:** `permissions/`, `subagents/`.
