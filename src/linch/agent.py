@@ -294,8 +294,11 @@ class Agent:
         context_builder: ContextBuilder | list[ContextBuilder] | None = None,
         deps: Any = None,
         output_schema: OutputSchema | None = None,
+        structured_output_retries: int = 0,
         tool_choice: ToolChoice | None = None,
         final_tool_name: str | None = None,
+        verifiers: Any = None,
+        max_verification_retries: int = 2,
         loop_guard: Any = _UNSET,
         loopGuard: Any = _UNSET,
         observers: Any = None,
@@ -406,6 +409,13 @@ class Agent:
         self.output_schema: OutputSchema | None = output_schema
         self.tool_choice: ToolChoice | None = tool_choice
         self.final_tool_name: str | None = final_tool_name
+        # Closed-loop gates: structured-output repair retries (0 = legacy
+        # single-attempt behavior) and final-answer verifiers (None = off).
+        self.structured_output_retries = max(0, int(structured_output_retries))
+        from .verification import normalize_verifiers as _normalize_verifiers
+
+        self.verifiers: list[Any] = _normalize_verifiers(verifiers)
+        self.max_verification_retries = max(0, int(max_verification_retries))
 
         # Store SystemPromptConfig for use in _build_system_blocks
         self._system_prompt_config: SystemPromptConfig | None = system_prompt_config

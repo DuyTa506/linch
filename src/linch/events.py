@@ -210,6 +210,28 @@ class LoopGuardEvent:
 
 
 @dataclass(slots=True)
+class VerificationEvent:
+    """Emitted when a closed-loop gate acts on a would-be-final answer.
+
+    Attributes:
+        verifier: Name of the gate — a custom verifier's ``name`` or
+            ``"output_schema"`` for the built-in structured-output repair.
+        action: ``"retry"`` (feedback injected, loop continues),
+            ``"stop"`` (run fails), or ``"exhausted"`` (a retry verdict was
+            returned but no retries remain; the answer is accepted as-is).
+        feedback: The feedback or error message attached to the verdict.
+        attempt: Retry attempts used so far for this gate kind (1-based on
+            the first retry).
+    """
+
+    verifier: str
+    action: str
+    feedback: str = ""
+    attempt: int = 0
+    type: Literal["verification"] = "verification"
+
+
+@dataclass(slots=True)
 class WorkflowEvent:
     """Progress/journal event emitted by the workflow engine.
 
@@ -247,6 +269,7 @@ Event: TypeAlias = (
     | SubagentEvent
     | BackgroundWorkerEvent
     | LoopGuardEvent
+    | VerificationEvent
     | WorkflowEvent
 )
 
@@ -321,6 +344,10 @@ def is_subagent_event(e: Event) -> bool:
 
 def is_loop_guard_event(e: Event) -> bool:
     return e.type == "loop_guard"  # type: ignore[comparison-overlap]
+
+
+def is_verification_event(e: Event) -> bool:
+    return e.type == "verification"  # type: ignore[comparison-overlap]
 
 
 def is_workflow_event(e: Event) -> bool:
@@ -569,6 +596,14 @@ def event_to_dict(event: Event) -> dict[str, Any]:
             "detail": event.detail,
             "action": event.action,
         }
+    if isinstance(event, VerificationEvent):
+        return {
+            "type": event.type,
+            "verifier": event.verifier,
+            "action": event.action,
+            "feedback": event.feedback,
+            "attempt": event.attempt,
+        }
     if isinstance(event, WorkflowEvent):
         return {
             "type": event.type,
@@ -730,6 +765,13 @@ def event_from_dict(raw: dict[str, Any]) -> Event:
             reason=str(raw.get("reason", "")),
             detail=str(raw.get("detail", "")),
             action=str(raw.get("action", "stop")),
+        )
+    if typ == "verification":
+        return VerificationEvent(
+            verifier=str(raw.get("verifier", "")),
+            action=str(raw.get("action", "")),
+            feedback=str(raw.get("feedback", "")),
+            attempt=int(raw.get("attempt", 0) or 0),
         )
     if typ == "workflow":
         _kind = raw.get("kind")

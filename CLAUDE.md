@@ -67,6 +67,17 @@ Abstract interface (`BaseProvider`) with three methods: `context_window(model)`,
 
 The guard is **on by default** at `Agent()` construction. Disable with `Agent(loop_guard=None)`. When tripped it emits a `LoopGuardEvent` and either stops immediately (default) or runs one final tools-disabled turn (`force_final_answer=True`). Max-turns exhaustion also emits a `LoopGuardEvent(reason="max_turns")` for clarity alongside the existing `ErrorEvent(TurnLimitError)`.
 
+### Verification (`verification.py`)
+
+Opt-in closed-loop gates evaluated when the loop is about to return a final answer (text-only response). All default-off; with defaults the loop is byte-identical to before.
+
+- **Structured-output repair**: `Agent(structured_output_retries=N)` — when the final text fails `output_schema` parsing/validation, the error is injected back as a system-reminder user message and the loop runs another turn (up to N times) instead of terminating with `structured_error`. Default `0` = legacy single-attempt.
+- **Verifier protocol**: `Agent(verifiers=[...], max_verification_retries=2)` — a `Verifier` is duck-typed (`name` + `verify(ctx) -> Verdict`, sync or async). `Verdict.action` is `"pass"` (accept), `"retry"` (inject `Verdict.feedback`, run another turn), or `"stop"` (fail the run with an error `ResultEvent`). First non-pass verdict wins; a verifier that raises is treated as passing (mirrors the observer contract). Each gate action emits a `VerificationEvent` (`verifier`, `action` ∈ retry/stop/exhausted, `feedback`, `attempt`). When retries are exhausted, the answer is accepted as-is with an `action="exhausted"` event.
+- **`ScorerVerifier`**: lifts an output-based evals scorer (`text_contains`, `schema_valid`) into a live verifier (`ScorerVerifier(scorer, feedback=..., on_fail="retry"|"stop")`). Event-based scorers get no events in a live run — write a custom verifier for those.
+- **`RunOptions.stop_when`**: a `(session) -> bool` predicate checked before each provider turn; `True` ends the run gracefully (success result, final text = last assistant text). A raising predicate counts as `False`.
+
+Gates are skipped on a loop-guard `force_final` turn so a guard-tripped run is never bounced back into the loop. Verification retries count toward `max_turns` and the run budget, so a strict verifier cannot loop unboundedly. Retry counters are per-run and not checkpointed — a resumed run starts fresh. The schema-repair gate runs before custom verifiers; gate evaluation lives in `_evaluate_terminal_gates` (`loop.py`), wired at the same chokepoint as the loop guard.
+
 ### Tools (`tools/`)
 
 Tools are **protocols** (duck-typed), not subclasses. Each tool has: `name`, `description`, `input_schema`, `scope`, `parallel_safe`, and methods `validate()`, `execute()`, `summarize()`. V2 tools may also expose `parallel`, `resources(input)`, `tags`, `capabilities`, and `cost_hint`. Built-ins: `Read`, `Write`, `Edit`, `Bash`, `Glob`, `Grep`. The `ToolRegistry` holds available tools; `default_tools()` returns the standard set.

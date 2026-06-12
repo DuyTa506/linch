@@ -38,6 +38,11 @@ class RunOptions:
     budget: Any = None  # RunBudget | None
     """Spending cap for this run (and its subagent tree).  Overrides
     ``Agent.budget`` when set.  See :class:`~linch.budget.RunBudget`."""
+    stop_when: Any = None  # Callable[[Session], bool] | None
+    """Optional stop predicate evaluated before each provider turn.  When it
+    returns ``True`` the run ends gracefully with a success result (the
+    final text is the last assistant text, if any).  A predicate that raises
+    is treated as ``False`` — it never crashes a run."""
 
 
 @dataclass(slots=True)
