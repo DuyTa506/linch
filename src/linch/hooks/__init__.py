@@ -27,6 +27,7 @@ from .contexts import (
     UserPromptSubmitContext,
 )
 from .dispatcher import HookDispatcher, HookDispatchResult, normalize_hooks
+from .memory import MemoryExtractionHook
 from .types import HookAction, HookEvent, HookResult
 
 __all__ = [
@@ -60,4 +61,5 @@ __all__ = [
     "FinalAnswerVerifierHook",
     "StopPredicateHook",
     "RunTelemetryHook",
+    "MemoryExtractionHook",
 ]
