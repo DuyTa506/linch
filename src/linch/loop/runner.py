@@ -158,6 +158,28 @@ async def _drain_mailbox(session: Session, run_id: str) -> AsyncIterator[Event]:
         yield event
 
 
+async def _drain_child_events(session: Session, run_id: str) -> AsyncIterator[Event]:
+    """Surface accumulated subagent events to the parent's event stream.
+
+    Foreground/background subagents append their events (wrapped as
+    ``SubagentEvent``) to ``session.pending_child_events``. Yielding them here —
+    at the same top-of-turn chokepoint as the other drains — bubbles a child's
+    ``PermissionRequestEvent`` (and every other child event) up to the parent
+    caller's iterator instead of leaving it in a buffer only host UIs can poll.
+    These are observational and are *not* injected into ``provider_view`` (the
+    subagent's tool result already represents the work). No-op (byte-identical)
+    when no subagent has run.
+    """
+    pending = getattr(session, "pending_child_events", None)
+    if not pending:
+        return
+    to_drain = list(pending)
+    pending.clear()
+    for event in to_drain:
+        await _persist_event(session, run_id, event)
+        yield event
+
+
 async def _cancel_background_workers(session: Session) -> None:
     """Cancel any running asyncio.Tasks in session.workers (abort cleanup)."""
     import asyncio
@@ -823,6 +845,9 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             # Drain peer mailbox messages addressed to this session, same chokepoint.
             async for mail_event in _drain_mailbox(session, run_id):
                 yield mail_event
+            # Bubble accumulated subagent events (incl. child PermissionRequests).
+            async for child_event in _drain_child_events(session, run_id):
+                yield child_event
             await _start_turn(turn_index)
             # Captured before _force_final_pending is reset below: a guard-
             # forced final answer must bypass the verification gates.
