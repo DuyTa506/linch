@@ -132,6 +132,7 @@ async def maybe_live_agent() -> None:
         return
 
     from linch import Agent
+    from linch.hooks import ContextInjectionHook
     from linch.sessions import InMemorySessionStore
     from linch.tools import ToolRegistry
 
@@ -144,7 +145,7 @@ async def maybe_live_agent() -> None:
         openai_api_key=os.environ.get("OPENAI_API_KEY"),
         tools=registry,
         deps=store,
-        context_builder=MemoryContextBuilder(namespace=NS, max_tokens=300),
+        hooks=[ContextInjectionHook(MemoryContextBuilder(namespace=NS, max_tokens=300))],
         session_store=InMemorySessionStore(),
         permissions={"mode": "skip-dangerous"},
         system_prompt="Use memory context and search tools when relevant.",

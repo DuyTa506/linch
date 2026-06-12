@@ -232,6 +232,15 @@ class VerificationEvent:
 
 
 @dataclass(slots=True)
+class HookEventRecord:
+    event: str
+    hook: str
+    action: str
+    reason: str = ""
+    type: Literal["hook"] = "hook"
+
+
+@dataclass(slots=True)
 class WorkflowEvent:
     """Progress/journal event emitted by the workflow engine.
 
@@ -270,6 +279,7 @@ Event: TypeAlias = (
     | BackgroundWorkerEvent
     | LoopGuardEvent
     | VerificationEvent
+    | HookEventRecord
     | WorkflowEvent
 )
 
@@ -348,6 +358,10 @@ def is_loop_guard_event(e: Event) -> bool:
 
 def is_verification_event(e: Event) -> bool:
     return e.type == "verification"  # type: ignore[comparison-overlap]
+
+
+def is_hook_event(e: Event) -> bool:
+    return e.type == "hook"  # type: ignore[comparison-overlap]
 
 
 def is_workflow_event(e: Event) -> bool:
@@ -604,6 +618,14 @@ def event_to_dict(event: Event) -> dict[str, Any]:
             "feedback": event.feedback,
             "attempt": event.attempt,
         }
+    if isinstance(event, HookEventRecord):
+        return {
+            "type": event.type,
+            "event": event.event,
+            "hook": event.hook,
+            "action": event.action,
+            "reason": event.reason,
+        }
     if isinstance(event, WorkflowEvent):
         return {
             "type": event.type,
@@ -772,6 +794,13 @@ def event_from_dict(raw: dict[str, Any]) -> Event:
             action=str(raw.get("action", "")),
             feedback=str(raw.get("feedback", "")),
             attempt=int(raw.get("attempt", 0) or 0),
+        )
+    if typ == "hook":
+        return HookEventRecord(
+            event=str(raw.get("event", "")),
+            hook=str(raw.get("hook", "")),
+            action=str(raw.get("action", "")),
+            reason=str(raw.get("reason", "")),
         )
     if typ == "workflow":
         _kind = raw.get("kind")

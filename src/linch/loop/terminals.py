@@ -21,7 +21,15 @@ from ..events import (
     VerificationEvent,
 )
 from ..session import Session
-from ..types import Message, StopReason, TextBlock, Usage
+from ..types import (
+    ContentBlock,
+    Message,
+    StopReason,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    Usage,
+)
 from .checkpoint import _persist_event
 from .request import final_text
 
@@ -40,19 +48,26 @@ def _parse_structured_output(text: str, schema: object) -> tuple[dict | None, st
     if not isinstance(parsed, dict):
         return None, f"Expected a JSON object, got {type(parsed).__name__}"
 
-    # Optionally validate against the JSON Schema (requires jsonschema extra).
+    validation_error = _validate_structured_output(parsed, schema)
+    if validation_error is not None:
+        return None, validation_error
+
+    return parsed, None
+
+
+def _validate_structured_output(value: dict[str, Any], schema: object) -> str | None:
+    """Validate a parsed structured-output object against *schema*."""
     try:
         import jsonschema  # type: ignore[import]
 
         schema_dict = getattr(schema, "schema", None)
         if schema_dict:
-            jsonschema.validate(parsed, schema_dict)
+            jsonschema.validate(value, schema_dict)
     except ImportError:
-        pass  # jsonschema not installed — skip validation
+        return None  # jsonschema not installed — skip validation
     except Exception as exc:
-        return None, f"Schema validation error: {exc}"
-
-    return parsed, None
+        return f"Schema validation error: {exc}"
+    return None
 
 
 def _last_assistant_text(session: Session) -> str | None:
@@ -110,14 +125,6 @@ async def _budget_exhausted_tail(
         checkpoint.total_usage = total
         await store.mark_failed(run_id, checkpoint, error=budget_error)
     yield event
-
-
-def _stop_when_met(predicate: Any, session: Session) -> bool:
-    """Evaluate a stop_when predicate; a raising predicate never stops a run."""
-    try:
-        return bool(predicate(session))
-    except Exception:
-        return False
 
 
 async def _stop_when_tail(
@@ -274,6 +281,42 @@ async def _gate_retry_tail(
     yield event
 
 
+async def _final_tool_retry_tail(
+    session: Session,
+    *,
+    run_id: str,
+    tool_blocks: list[ToolUseBlock],
+    final_id: str,
+    feedback: str,
+) -> AsyncIterator[Event]:
+    """Bounce a final-tool answer back into the loop with *feedback*.
+
+    Unlike :func:`_gate_retry_tail`, the assistant message that triggered this
+    already contains an (unanswered) terminal ``tool_use`` block.  Injecting a
+    plain user message would leave that ``tool_use`` unmatched and make the next
+    provider request invalid (providers reject ``tool_use`` without a paired
+    ``tool_result``).  So we answer every ``tool_use`` in the assistant turn —
+    the terminal one carries the repair *feedback*, any others are marked not
+    executed — which both satisfies pairing and delivers the instruction."""
+    content: list[ContentBlock] = []
+    for block in tool_blocks:
+        if block.id == final_id:
+            content.append(ToolResultBlock(tool_use_id=block.id, content=feedback, is_error=True))
+        else:
+            content.append(
+                ToolResultBlock(
+                    tool_use_id=block.id,
+                    content="Tool not executed; revise and resubmit your final answer.",
+                    is_error=True,
+                )
+            )
+    message = Message(role="user", content=content)
+    await session.append([message])
+    event: Event = UserEvent(message=message)
+    await _persist_event(session, run_id, event)
+    yield event
+
+
 @dataclass(slots=True)
 class _GateOutcome:
     """Result of the closed-loop terminal gates (schema repair + verifiers)."""
@@ -287,20 +330,17 @@ async def _evaluate_terminal_gates(
     session: Session,
     *,
     run_id: str,
-    verifiers: list[Any],
     max_schema_retries: int,
-    max_verify_retries: int,
     attempts: list[int],
-    final_text_value: str | None,
     structured_output: dict[str, Any] | None,
     structured_error: str | None,
-    turn_index: int,
 ) -> _GateOutcome:
-    """Run the schema-repair and verifier gates on a would-be-final answer.
+    """Run the schema-repair gate on a would-be-final answer.
 
-    *attempts* is a mutable ``[schema_attempts, verify_attempts]`` pair owned
-    by the run loop.  Emitted :class:`VerificationEvent`s are persisted here
-    and returned for the caller to yield.
+    *attempts* is a mutable ``[schema_attempts]`` cell owned by the run loop.
+    Emitted :class:`VerificationEvent`s are persisted here and returned for the
+    caller to yield. Final-answer verifier/eval hooks run through
+    ``BeforeFinalAnswer``.
     """
     if structured_error is not None and attempts[0] < max_schema_retries:
         attempts[0] += 1
@@ -317,51 +357,12 @@ async def _evaluate_terminal_gates(
             "Respond again with ONLY a JSON object matching the required schema."
         )
         return _GateOutcome(decision="retry", events=[event], feedback=feedback)
-
-    if not verifiers:
-        return _GateOutcome(decision="pass", events=[])
-
-    from ..verification import VerificationContext, evaluate_verifiers
-
-    name, verdict = await evaluate_verifiers(
-        verifiers,
-        VerificationContext(
-            final_text=final_text_value,
-            structured_output=structured_output,
-            structured_error=structured_error,
-            turn_index=turn_index,
-            attempt=attempts[1],
-            session=session,
-        ),
-    )
-    if verdict.action == "stop":
+    if structured_error is not None and max_schema_retries > 0:
         event = VerificationEvent(
-            verifier=name,
-            action="stop",
-            feedback=verdict.feedback or verdict.reason,
-            attempt=attempts[1],
-        )
-        await _persist_event(session, run_id, event)
-        return _GateOutcome(decision="stop", events=[event])
-    if verdict.action == "retry":
-        if attempts[1] < max_verify_retries:
-            attempts[1] += 1
-            event = VerificationEvent(
-                verifier=name,
-                action="retry",
-                feedback=verdict.feedback,
-                attempt=attempts[1],
-            )
-            await _persist_event(session, run_id, event)
-            feedback = verdict.feedback or (
-                "The previous answer failed verification. Improve it and answer again."
-            )
-            return _GateOutcome(decision="retry", events=[event], feedback=feedback)
-        event = VerificationEvent(
-            verifier=name,
+            verifier="output_schema",
             action="exhausted",
-            feedback=verdict.feedback,
-            attempt=attempts[1],
+            feedback=structured_error,
+            attempt=attempts[0],
         )
         await _persist_event(session, run_id, event)
         return _GateOutcome(decision="pass", events=[event])

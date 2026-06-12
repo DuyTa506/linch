@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any, cast
 from ._version import get_version
 from .config import FeatureFlags, SystemPromptConfig
 from .errors import ConfigError
-from .middleware import normalize_middleware
 from .openai_responses import OpenAIOptions, OpenAIReasoning
 from .permissions import BashRule, CanUseTool, PathRule, PermissionEngine, PermissionRule, ToolRule
 from .providers import BaseProvider, OpenAIResponsesProvider, OpenAIResponsesProviderOptions
@@ -18,7 +17,6 @@ from .tools import ToolRegistry, default_tools
 from .types import InvokedSkillRecord, PermissionMode, SystemBlock
 
 if TYPE_CHECKING:
-    from .context import ContextBuilder
     from .run_store import RunStore
     from .session import Session
     from .subagents.types import AgentDefinition
@@ -232,16 +230,14 @@ class AgentOptions:
     token_estimator: Any = None
     budget: Any = None  # RunBudget | None
     features: FeatureFlags | None = None
-    context_builder: Any = None
     deps: Any = None
     output_schema: Any = None  # OutputSchema | None
     tool_choice: Any = None  # ToolChoice | None
     final_tool_name: str | None = None
     loop_guard: Any = None  # LoopGuard | None; None means "use default LoopGuard"
-    observers: list[Any] | None = None  # list[RunObserver] | None
     filesystem: Any = None  # FileBackend | None
     result_offload: Any = None  # OffloadConfig | None; None = use default OffloadConfig()
-    middleware: Any = None  # AgentMiddleware | list[AgentMiddleware] | None
+    hooks: Any = None
     extra_subagents: list[AgentDefinition] | None = None
     enable_worker_tools: bool = False
     retain_subagents: bool = False
@@ -291,20 +287,16 @@ class Agent:
         token_estimator: Any = None,
         budget: Any = None,
         features: FeatureFlags | None = None,
-        context_builder: ContextBuilder | list[ContextBuilder] | None = None,
         deps: Any = None,
         output_schema: OutputSchema | None = None,
         structured_output_retries: int = 0,
         tool_choice: ToolChoice | None = None,
         final_tool_name: str | None = None,
-        verifiers: Any = None,
-        max_verification_retries: int = 2,
         loop_guard: Any = _UNSET,
         loopGuard: Any = _UNSET,
-        observers: Any = None,
         filesystem: Any = None,
         result_offload: Any = _DEFAULT_OFFLOAD,
-        middleware: Any = None,
+        hooks: Any = None,
         extra_subagents: list[AgentDefinition] | None = None,
         enable_worker_tools: bool = False,
         retain_subagents: bool = False,
@@ -399,9 +391,6 @@ class Agent:
         # Feature flags (controls which subsystems connect in session())
         self.features: FeatureFlags = features or FeatureFlags()
 
-        # Per-turn context builder hook
-        self.context_builder: ContextBuilder | list[ContextBuilder] | None = context_builder
-
         # App-state dependency object threaded into ToolContext.deps
         self.deps: Any = deps
 
@@ -409,19 +398,13 @@ class Agent:
         self.output_schema: OutputSchema | None = output_schema
         self.tool_choice: ToolChoice | None = tool_choice
         self.final_tool_name: str | None = final_tool_name
-        # Closed-loop gates: structured-output repair retries (0 = legacy
-        # single-attempt behavior) and final-answer verifiers (None = off).
         self.structured_output_retries = max(0, int(structured_output_retries))
-        from .verification import normalize_verifiers as _normalize_verifiers
-
-        self.verifiers: list[Any] = _normalize_verifiers(verifiers)
-        self.max_verification_retries = max(0, int(max_verification_retries))
 
         # Store SystemPromptConfig for use in _build_system_blocks
         self._system_prompt_config: SystemPromptConfig | None = system_prompt_config
         self._cached_system_blocks: list[SystemBlock] | None = None
         self._configure_loop_guard(loop_guard, loopGuard)
-        self._configure_hooks(observers, middleware)
+        self._configure_hooks(hooks=hooks)
         self._configure_filesystem(filesystem, result_offload)
 
     def _initialize_extension_state(
@@ -460,11 +443,10 @@ class Agent:
         else:
             self.loop_guard = _normalize_loop_guard(effective_lg)
 
-    def _configure_hooks(self, observers: Any, middleware: Any) -> None:
-        from .observability import normalize_observers as _normalize_observers
+    def _configure_hooks(self, *, hooks: Any) -> None:
+        from .hooks import normalize_hooks
 
-        self._observers: list[Any] = _normalize_observers(observers)
-        self.middleware: list[Any] = normalize_middleware(middleware)
+        self._hooks: list[Any] = normalize_hooks(hooks)
 
     def _configure_filesystem(self, filesystem: Any, result_offload: Any) -> None:
         self._filesystem_default: Any = filesystem
@@ -518,14 +500,14 @@ class Agent:
         self._store = value
 
     @property
-    def observers(self) -> list[Any]:
-        return self._observers
+    def hooks(self) -> list[Any]:
+        return self._hooks
 
-    @observers.setter
-    def observers(self, value: Any) -> None:
-        from .observability import normalize_observers as _normalize_observers
+    @hooks.setter
+    def hooks(self, value: Any) -> None:
+        from .hooks import normalize_hooks
 
-        self._observers = _normalize_observers(value)
+        self._hooks = normalize_hooks(value)
 
     def context_window(self) -> int:
         return self.provider.context_window(self.model)
@@ -959,16 +941,27 @@ class Agent:
                 result = closer()
                 if _inspect.isawaitable(result):
                     await result
-
-        for obs in self._observers:
-            closer = getattr(obs, "aclose", None) or getattr(obs, "close", None)
+        if self._filesystem_default is not None:
+            closer = getattr(self._filesystem_default, "aclose", None) or getattr(
+                self._filesystem_default, "close", None
+            )
             if closer is not None:
-                try:
-                    result = closer()
-                    if _inspect.isawaitable(result):
-                        await result
-                except Exception:
-                    pass
+                result = closer()
+                if _inspect.isawaitable(result):
+                    await result
+
+        # Close hooks that expose a closer (e.g. RunTelemetryHook flushes its
+        # wrapped observers).  A faulty closer never aborts agent shutdown.
+        for hook in self._hooks:
+            closer = getattr(hook, "aclose", None) or getattr(hook, "close", None)
+            if closer is None:
+                continue
+            try:
+                result = closer()
+                if _inspect.isawaitable(result):
+                    await result
+            except Exception:
+                pass
 
 
 def _normalize_permission_mode(raw: object) -> PermissionMode:

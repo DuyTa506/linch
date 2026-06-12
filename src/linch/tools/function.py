@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import inspect
 import json
 from collections.abc import Callable
@@ -129,6 +128,14 @@ def _result_from_value(value: Any, summary: str) -> ToolResult:
     return ToolResult(content=str(value), summary=summary)
 
 
+async def _run_sync_callable(fn: Callable[..., Any], kwargs: dict[str, Any]) -> Any:
+    # Bounded daemon-thread offload: keeps blocking user code off the event loop
+    # without unbounded thread creation or interpreter-teardown hangs.
+    from .._blocking import run_blocking
+
+    return await run_blocking(fn, **kwargs)
+
+
 @dataclass(slots=True)
 class FunctionTool:
     fn: Callable[..., Any]
@@ -182,7 +189,7 @@ class FunctionTool:
         else:
             # Run sync user functions off the event loop so blocking I/O or
             # CPU work doesn't stall the agent loop.
-            value = await asyncio.to_thread(self.fn, **kwargs)
+            value = await _run_sync_callable(self.fn, kwargs)
             if inspect.isawaitable(value):
                 value = await value
         return _result_from_value(value, self.summarize(input))
