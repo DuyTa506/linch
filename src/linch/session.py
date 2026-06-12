@@ -92,6 +92,10 @@ class Session:
     """This session's inbox address on ``agent.mailbox``; drained into provider_view
     each turn when set. Workers default to their display_name; the root is set by
     the embedder. ``None`` means this session does not receive peer messages."""
+    cwd_override: str | None = None
+    """Per-session working directory overriding ``agent.cwd`` for tool execution and
+    permission path-rule matching. Set by an :class:`~linch.tools.isolation.IsolationBackend`
+    so a subagent branch runs in its own cwd. ``None`` = use ``agent.cwd``."""
     """Per-session virtual filesystem backend (:class:`~linch.filesystem.backend.FileBackend`).
     Threaded into :attr:`~linch.tools.base.ToolContext.filesystem` on every
     tool call.  ``None`` when the filesystem subsystem is disabled."""

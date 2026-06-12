@@ -157,6 +157,11 @@ def _resolve_call(block: ToolUseBlock, tools: Any, cwd: str) -> ResolvedCall:
     )
 
 
+def _effective_cwd(session: Any, agent: Any) -> str:
+    """Session cwd override (set by an isolation backend) or the agent's cwd."""
+    return getattr(session, "cwd_override", None) or agent.cwd
+
+
 def _tool_name(call: ResolvedCall) -> str:
     return call.tool.name if call.tool else call.block.name
 
@@ -217,7 +222,7 @@ async def _execute_one(
     last_exc: Exception | None = None
 
     ctx = ToolContext(
-        cwd=agent.cwd,
+        cwd=_effective_cwd(session, agent),
         session_id=session.id,
         run_id=session.active_run_id or "unknown",
         session_store=session.store,
@@ -578,7 +583,7 @@ async def execute_tool_calls(
                 tool_use_id=call.id,
                 tool=tool_obj,
                 input=call.input,
-                cwd=agent.cwd,
+                cwd=_effective_cwd(session, agent),
             )
         )
 
@@ -628,7 +633,7 @@ async def execute_tool_calls(
                     tool_use_id=call.id,
                     tool=call.tool,
                     input=call.input,
-                    cwd=agent.cwd,
+                    cwd=_effective_cwd(session, agent),
                 ),
                 signal,
             )

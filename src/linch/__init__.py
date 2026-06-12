@@ -90,7 +90,6 @@ from .hooks import (
     normalize_hooks,
 )
 from .loop import apply_provider_capabilities
-from .mailbox import Correlator, InMemoryMailbox, Mailbox, MailboxMessage
 from .loop_guard import (
     LoopGuard,
     LoopGuardDecision,
@@ -98,6 +97,7 @@ from .loop_guard import (
     evaluate_loop_guard,
     normalize_loop_guard,
 )
+from .mailbox import Correlator, InMemoryMailbox, Mailbox, MailboxMessage
 from .mcp import (
     McpHttpServerConfig,
     McpServerConfig,
@@ -189,6 +189,7 @@ from .tools import (
     default_tools,
     tool,
 )
+from .tools.isolation import IsolationBackend, TempDirIsolation
 from .tools.registry import empty_tools, tools_from_defaults
 from .types import (
     ContentBlock,
@@ -377,6 +378,8 @@ __all__ = [
     "InMemoryMailbox",
     "Mailbox",
     "MailboxMessage",
+    "IsolationBackend",
+    "TempDirIsolation",
     "ModelFallbackEvent",
     "LoopGuardState",
     "evaluate_loop_guard",

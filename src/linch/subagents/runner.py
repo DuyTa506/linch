@@ -52,6 +52,14 @@ class RunSubagentArgs:
     child session is registered in ``agent._sessions``, before the run is driven.
     Lets the caller record the real child id immediately, so a worker cancelled
     mid-run (``CancelledError`` before this function returns) is still addressable."""
+    isolation: Any = None
+    """Optional :class:`~linch.tools.isolation.IsolationBackend`. When set, the
+    child runs in its own acquired working directory (``ToolContext.cwd``), so
+    parallel branches editing the same relative path don't collide. The scratch
+    dir is released when the child finishes (see ``isolation_keep``)."""
+    isolation_keep: bool = False
+    """When True, the acquired isolation cwd is preserved after the child finishes
+    (e.g. so the embedder can merge its file artifacts); otherwise it is removed."""
 
 
 @dataclass
@@ -242,6 +250,10 @@ async def run_subagent(args: RunSubagentArgs) -> RunSubagentResult:
     hook_dispatcher = HookDispatcher(getattr(agent, "hooks", None))
     result: RunSubagentResult | None = None
     try:
+        # Acquire an isolated working directory (if configured) inside the try so
+        # the finally always releases it, even on a mid-run failure path.
+        if args.isolation is not None:
+            child_session.cwd_override = await args.isolation.acquire()
         if hook_dispatcher.active:
             await hook_dispatcher.dispatch(
                 HookEvent.SUBAGENT_START,
@@ -269,6 +281,9 @@ async def run_subagent(args: RunSubagentArgs) -> RunSubagentResult:
             signal=merged_signal,
         )
     finally:
+        # Release the isolation cwd (unless kept) before other cleanup.
+        if args.isolation is not None and child_session.cwd_override:
+            await args.isolation.release(child_session.cwd_override, keep=args.isolation_keep)
         # Always release the merged-signal watcher task and dispatch
         # SUBAGENT_STOP so cleanup runs on all failure and cancellation paths.
         merged_signal.close()
