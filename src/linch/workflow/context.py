@@ -66,6 +66,7 @@ class WorkflowContext:
         name: str | None = None,
         label: str | None = None,
         tools: list[str] | None = None,
+        fork: bool = False,
     ) -> str:
         """Run a subagent and return its final text.
 
@@ -73,6 +74,12 @@ class WorkflowContext:
         (default: the built-in general-purpose subagent).  Results are
         journaled; on resume an unchanged call returns its cached result
         without a provider call.
+
+        ``fork=True`` runs the subagent as a *continuation* of the workflow
+        host's context (shared conversation prefix, system blocks, tools, and
+        read-file tracker) so a caching provider reuses the cached prefix — a
+        cost win for fans over a large shared context. Default ``False`` keeps
+        each subagent isolated.
         """
         from ..subagents.default_agent import DEFAULT_AGENT
         from ..subagents.runner import RunSubagentArgs, run_subagent
@@ -126,6 +133,7 @@ class WorkflowContext:
                 subagent_run_id=f"wf_{uuid4().hex[:8]}",
                 tools_filter=tools,
                 emit=self._emit_sync,
+                fork=fork,
             )
         )
         if result.errored:
