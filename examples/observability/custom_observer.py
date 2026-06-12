@@ -128,6 +128,8 @@ async def main() -> None:
     async for _event in session.run("How many files are there?"):
         pass
 
+    await agent.close()
+
 
 if __name__ == "__main__":
     asyncio.run(main())

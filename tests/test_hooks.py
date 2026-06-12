@@ -8,28 +8,31 @@ import pytest
 class RecordingTool:
     name = "Record"
     description = "Records input."
-    input_schema = {"type": "object", "properties": {"value": {"type": "string"}}}
     scope = "read"
     parallel = False
 
     def __init__(self) -> None:
         self.inputs: list[dict[str, Any]] = []
+        self.input_schema: dict[str, Any] = {
+            "type": "object",
+            "properties": {"value": {"type": "string"}},
+        }
 
     def validate(self, raw: dict[str, Any]) -> dict[str, Any]:
         return dict(raw)
 
-    def summarize(self, input: dict[str, Any]) -> str:
-        return f"Record({input.get('value', '')})"
+    def summarize(self, inp: dict[str, Any]) -> str:
+        return f"Record({inp.get('value', '')})"
 
-    async def execute(self, input: dict[str, Any], ctx: Any) -> Any:
+    async def execute(self, inp: dict[str, Any], ctx: Any) -> Any:
         from linch import ToolResult
 
-        self.inputs.append(dict(input))
-        return ToolResult(content=f"tool:{input.get('value', '')}")
+        self.inputs.append(dict(inp))
+        return ToolResult(content=f"tool:{inp.get('value', '')}")
 
 
 def _agent(provider: Any, *, hooks: Any = None, tools: Any = None):
-    from linch import Agent
+
     from linch.config import FeatureFlags
     from linch.sessions import InMemorySessionStore
     from linch.tools.registry import empty_tools

@@ -42,13 +42,13 @@ hook only needs to define the methods it cares about.
 | `on_agent_start` | run begins | `model`, `prompt`, `tools` | observe only |
 | `on_user_prompt_submit` | before the prompt is appended | `prompt`, `images` | mutate prompt/images, block/stop |
 | `on_turn_start` / `on_turn_stop` | around each turn | `turn_index` | observe only |
-| `on_before_provider_call` | before each provider call | `request`, `context_result` | mutate request, stop, force_continue |
+| `on_before_provider_call` | before each provider call | `request`, `context_result` | mutate request, block/stop, force_continue |
 | `on_provider_call_start` / `on_provider_call_stop` | around the provider call | `model`, `stop_reason`, `usage`, `duration_ms` | observe only |
-| `on_after_provider_call` | after the assistant turn is assembled | `assembly` | mutate assembly, stop, retry/force_continue |
+| `on_after_provider_call` | after the assistant turn is assembled | `assembly` | mutate assembly, block/stop, retry/force_continue |
 | `on_pre_tool_use` | after permission, before execution | `tool_name`, `input`, `tool` | mutate input, block/stop |
 | `on_tool_use_start` / `on_tool_use_stop` | around each tool | `tool_name`, `result`, `is_error`, `duration_ms` | observe only |
 | `on_post_tool_use` | after a tool result is produced | `tool_name`, `input`, `result` | mutate result, block/stop |
-| `on_before_final_answer` | before a text/structured final answer | `final_text`, `structured_output`, `structured_error`, `stop_reason` | mutate answer, retry/force_continue, stop |
+| `on_before_final_answer` | before a text/structured final answer | `final_text`, `structured_output`, `structured_error`, `stop_reason` | mutate answer, block/stop, retry/force_continue |
 | `on_stop` | the run is about to return its `ResultEvent` | `result_event` | mutate result, force_continue, stop |
 | `on_subagent_start` / `on_subagent_stop` | around a subagent run | `subagent_type`, `display_name`, `prompt`, `result` | observe only |
 | `on_event_emit` | for every event yielded to the caller | `event` | observe only |
@@ -93,7 +93,7 @@ Which actions are honored depends on the chokepoint:
   A `BeforeProviderCall` `force_continue` re-runs the turn without calling the
   provider.
 - A graceful early **success** stop is available at `BeforeProviderCall`: return
-  `HookResult.stop(metadata={"subtype": "success"})` (this is how
+  `HookResult.stop("stop_when", metadata={"subtype": "success"})` (this is how
   `StopPredicateHook` works).
 
 Lifecycle-only chokepoints (`agent_start/stop`, `turn_*`, `provider_call_*`,

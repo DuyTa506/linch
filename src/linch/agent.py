@@ -447,6 +447,9 @@ class Agent:
         from .hooks import normalize_hooks
 
         self._hooks: list[Any] = normalize_hooks(hooks)
+        # Accumulates hooks removed by the hooks setter so Agent.close() can
+        # still call their close/aclose methods and avoid resource leaks.
+        self._replaced_hooks: list[Any] = []
 
     def _configure_filesystem(self, filesystem: Any, result_offload: Any) -> None:
         self._filesystem_default: Any = filesystem
@@ -507,7 +510,11 @@ class Agent:
     def hooks(self, value: Any) -> None:
         from .hooks import normalize_hooks
 
-        self._hooks = normalize_hooks(value)
+        new_hooks = normalize_hooks(value)
+        # Track replaced hooks so Agent.close() can still flush/close them.
+        removed = [h for h in self._hooks if h not in new_hooks]
+        self._replaced_hooks.extend(removed)
+        self._hooks = new_hooks
 
     def context_window(self) -> int:
         return self.provider.context_window(self.model)
@@ -952,7 +959,9 @@ class Agent:
 
         # Close hooks that expose a closer (e.g. RunTelemetryHook flushes its
         # wrapped observers).  A faulty closer never aborts agent shutdown.
-        for hook in self._hooks:
+        # Also close any hooks that were replaced via the hooks setter so their
+        # resources (e.g. OTel exporters) are not orphaned.
+        for hook in [*self._hooks, *self._replaced_hooks]:
             closer = getattr(hook, "aclose", None) or getattr(hook, "close", None)
             if closer is None:
                 continue

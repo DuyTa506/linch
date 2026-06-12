@@ -74,7 +74,9 @@ def create_deep_agent(
     prompt_config = _merge_deep_agent_prompt(
         system_prompt_config, system_prompt, coordinator=coordinator
     )
-    hooks = list(agent_kwargs.pop("hooks", None) or [])
+    from ..hooks import normalize_hooks as _normalize_hooks
+
+    hooks = _normalize_hooks(agent_kwargs.pop("hooks", None))
     if memory_store is not None:
         hooks.append(
             ContextInjectionHook(MemoryContextBuilder(memory_store, namespace=memory_namespace))

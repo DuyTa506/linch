@@ -86,7 +86,8 @@ One complete agent turn — from receiving the prompt to deciding whether to con
 sequenceDiagram
     actor Caller
     participant RL as run_loop()
-    participant CB as ContextBuilder
+    participant SK as _re_inject_skill_context()
+    participant CB as ContextInjectionHook
     participant PR as Provider
     participant PE as PermissionEngine
     participant SC as Scheduler
@@ -97,11 +98,12 @@ sequenceDiagram
     RL-->>Caller: UserEvent
 
     loop Each turn
-        RL->>CB: build(ContextBuildTurn)
+        RL->>SK: inject skill context (if skill active)
+        RL->>CB: build_context(session, turn_index)
         CB-->>RL: ContextBuildResult
         RL-->>Caller: ContextBuildEvent
 
-        Note over RL: _build_turn_request()<br/>+ apply_provider_capabilities()
+        Note over RL: assemble ProviderRequest<br/>+ apply_provider_capabilities() (capability downgrade)
 
         RL->>PR: stream(ProviderRequest)
         PR-->>Caller: PartialAssistantEvent (streaming)
@@ -226,7 +228,7 @@ stateDiagram-v2
 
 ### 3.3 Provider Capabilities — Request Downgrade
 
-Every provider declares its feature support. `_build_turn_request` applies downgrades so no provider receives flags it cannot handle.
+Every provider declares its feature support. `apply_provider_capabilities()` (called during `ProviderRequest` assembly in `loop/request.py`) applies downgrades so no provider receives flags it cannot handle.
 
 ```mermaid
 flowchart LR
@@ -302,17 +304,17 @@ by the rest of the loop.
 
 ### 3.4 Context Building Pipeline
 
-Context builders fire before every provider call, injecting ephemeral context without mutating conversation history.
+`ContextInjectionHook` fires before every provider call, injecting ephemeral context without mutating conversation history.
 
 ```mermaid
 flowchart TD
     SNAP["session.provider_view\n(immutable snapshot)"]
 
-    subgraph Chain["ContextBuilderChain (registration order)"]
+    subgraph Hook["Agent(hooks=[ContextInjectionHook(builder), ...])"]
         direction TB
-        B1["Builder 1\ne.g. MemoryContextBuilder"]
-        B2["Builder 2\ne.g. custom RAG"]
-        BN["Builder N"]
+        B1["Hook 1: ContextInjectionHook(MemoryContextBuilder)\nrecall · system_blocks · messages"]
+        B2["Hook 2: ContextInjectionHook(custom RAG builder)"]
+        BN["Hook N"]
         B1 --> B2 --> BN
     end
 
@@ -324,14 +326,14 @@ flowchart TD
 
     EVENT["yield ContextBuildEvent\n(block count · tool count · budget)"]
 
-    SNAP --> Chain --> CBR --> BUDGET --> MERGE --> EVENT
+    SNAP --> Hook --> CBR --> BUDGET --> MERGE --> EVENT
 ```
 
 **Rules:**
 - Builder output is **ephemeral** — appended only to `ProviderRequest`, never to `session.provider_view` or `full_history`.
 - `ContextBudget(max_tokens=N)` trims messages and system blocks before the request is sent.
 - `selected_tools` narrows the provider schema list for this turn only; `session.agent.tools` is not mutated.
-- Multiple builders compose via `ContextBuilderChain`; each receives the same unmodified view snapshot.
+- Multiple `ContextInjectionHook`s can be registered; each receives the same unmodified view snapshot and their outputs are merged and re-budgeted as a whole.
 - Builders must not block — use `await` for I/O.
 
 ---
@@ -354,13 +356,13 @@ graph TD
 
     COMP["Compaction\nmutates provider_view only\nreplaces old messages with summary\nnever touches full_history"]
 
-    CTX["ContextBuilder output\nephemeral per-request\nappended to ProviderRequest only\nnot stored in either list"]
+    CTX["ContextInjectionHook output\nephemeral per-request\nappended to ProviderRequest only\nnot stored in either list"]
 
     COMP --> PV
     CTX -.->|"injected per-request"| PV
 ```
 
-**Invariant:** `full_history` is a strict superset of the logical conversation. Do not write to it outside `loop.py`.
+**Invariant:** `full_history` is a strict superset of the logical conversation. Do not write to it outside the `loop/` package.
 
 ---
 
@@ -658,17 +660,17 @@ classDiagram
 |--------|---------------|
 | `agent.py` | Immutable config; system block assembly; `session()` factory |
 | `session.py` | Per-conversation state: `provider_view`, `full_history`, `run_deps`, `RunOptions` |
-| `loop.py` | Turn orchestration, event emission, compaction trigger, loop guard wiring, capability downgrade |
+| `loop/` | Turn orchestration (`runner.py`), streaming + `ContextLengthError` recovery (`streaming.py`), `ProviderRequest` assembly (`request.py`), terminal event tails + gate evaluation (`terminals.py`), event persistence + checkpoint serialization (`checkpoint.py`) |
 | `types.py` | Shared dataclasses: `Message`, `ContentBlock`, `ProviderRequest`, `OutputSchema` |
 | `events.py` | All event dataclasses + round-trip serialization (`event_to_dict` / `event_from_dict`) |
 | `config.py` | `FeatureFlags`, `SystemPromptConfig` |
-| `context/` | `ContextBuilder`, `ContextBuildResult`, `ContextBudget`, `ContextBuilderChain` |
+| `context/` | `ContextBuilder` protocol, `ContextBuildResult`, `ContextBudget`, `apply_context_budget`; consumed by `ContextInjectionHook` in `hooks/adapters.py` |
 | `loop_guard/` | `LoopGuard`, `LoopGuardState`, `LoopGuardDecision`, `evaluate_loop_guard`, `normalize_loop_guard` |
 | `memory/` | `MemoryStore` protocol, reference stores including `TieredMemoryStore`, `MemoryContextBuilder`, memory tools |
 | `filesystem/` | `FileBackend` protocol, `StateFileBackend`, `DiskFileBackend`, `SqliteFileBackend`, `CompositeFileBackend`, `OffloadConfig`, ls/read_file/write_file/edit_file tools |
 | `scheduler.py` | Resource-aware parallel tool execution with concurrency cap; applies `maybe_offload` at the result chokepoint |
 | `compaction.py` | Context-window management; calls `agent.provider` directly; `CompactionLadder` + `micro_compact` recovery rungs |
-| `budget.py` | `RunBudget` — token/USD spending caps shared across the agent tree; charged per turn in `loop.py` |
+| `budget.py` | `RunBudget` — token/USD spending caps shared across the agent tree; charged per turn in `loop/runner.py` |
 | `workflow/` | Deterministic workflow engine: `WorkflowContext` (`context.py`), content-addressed journal (`journal.py`), `run_workflow` driver (`engine.py`) |
 | `permissions/` | `PermissionEngine`: rule evaluation, event emission, loop suspension, durable permission decision keys |
 | `pricing.py` | `ModelPricing`, `_DEFAULT_PRICING`, `cost_usd()` for per-turn and cumulative cost events |
@@ -835,7 +837,7 @@ flowchart LR
     subgraph B["Path B — Forced Tool\nfinal_tool_name on Agent or RunOptions"]
         direction TB
         B1["Model calls final_tool_name\nstop_reason = tool_use"]
-        B2["loop.py intercepts ToolUseBlock\nbefore scheduler — tool is NOT executed"]
+        B2["loop/ intercepts ToolUseBlock\nbefore scheduler — tool is NOT executed"]
         B3["ResultEvent.structured_output = block.input"]
         B1 --> B2 --> B3
     end
@@ -874,7 +876,7 @@ byte-identical.
   summarization when elision frees enough) and reactively, once per turn, when
   the provider raises `ContextLengthError`.
 - **Rung 2 — forced compaction with a circuit breaker**: the reactive path
-  (`_stream_turn_with_ladder` in `loop.py`) retries with forced compactions up
+  (`_stream_turn_with_ladder` in `loop/streaming.py`) retries with forced compactions up
   to `max_forced_compactions` per run, then lets the error surface. The legacy
   path (no ladder) keeps its original single-retry-per-turn semantics in
   `_stream_turn_with_compaction_retry`.
@@ -910,7 +912,7 @@ not copied from the parent. Gated by `FeatureFlags(subagents=True)`.
 - `SubagentTool` always passes `retain=True` so the child session stays live in `agent._sessions` after the run ends.
 - `session.workers: dict[str, WorkerHandle]` indexes every spawned worker by `worker_id`.
 - **`run_in_background=True`** on `SubagentTool`: spawns `asyncio.create_task(_bg_run())` and returns an acknowledgement immediately. On completion, the task appends a `<task-notification>` XML `Message` to `session.pending_notifications`.
-- The loop drains `session.pending_notifications` at the top of each turn (`_drain_pending_notifications`), yielding each notification as a `UserEvent` before `ContextBuilder.build()` runs, so the model sees task-completion content before the next provider call.
+- The loop drains `session.pending_notifications` at the top of each turn (`_drain_pending_notifications`), yielding each notification as a `UserEvent` before `ContextInjectionHook.build_context()` runs, so the model sees task-completion content before the next provider call.
 - `SubagentContinueTool` resolves a worker by id or display name via `resolve_worker`, then calls `continue_subagent()`, which re-drives the live child session using the full prior `provider_view`.
 - `TaskStopTool` cancels the background `asyncio.Task` and signals abort on the child session; the `WorkerHandle` remains in `session.workers` so the worker can be continued later.
 - `session.abort()` and `agent.close()` both cancel all running background worker tasks. `agent.close()` additionally clears `agent._sessions`.
@@ -957,7 +959,7 @@ These must not break across refactors:
 
 | # | Invariant |
 |---|---|
-| 1 | **`full_history` is append-only** — only `loop.py` appends; never write to it elsewhere. |
+| 1 | **`full_history` is append-only** — only the `loop/` package appends; never write to it elsewhere. |
 | 2 | **`provider_view` is the only thing compaction mutates** — `full_history` is untouched. |
 | 3 | **Tool protocol is duck-typed** — no base class, no `isinstance`; check attribute presence. |
 | 4 | **`stream()` yields normalized dicts** — the loop must not import any provider's raw types. |
@@ -966,12 +968,12 @@ These must not break across refactors:
 | 7 | **Context builders do not mutate history** — they receive a `provider_view` snapshot and return ephemeral request context. |
 | 8 | **`run_deps` is set once per `run_loop` call** — at the top, from `opts.deps ?? agent.deps`. |
 | 9 | **Loop guard is on by default** — `Agent()` without `loop_guard=` gets `LoopGuard()` with safe thresholds; disable explicitly with `Agent(loop_guard=None)`. |
-| 10 | **Provider capabilities apply per-request** — `_build_turn_request()` always calls `apply_provider_capabilities()` when the provider has `capabilities()`; no provider receives features it declared unsupported. |
+| 10 | **Provider capabilities apply per-request** — `loop/request.py` always calls `apply_provider_capabilities()` when the provider has `capabilities()`; no provider receives features it declared unsupported. |
 | 11 | **Offload only replaces `ToolResult.content` before block construction** — the full result is preserved on `ToolCallEndEvent.tool_result`; `full_history` and `provider_view` receive the preview only. `maybe_offload` never raises — a backend write failure silently returns the original result so a storage hiccup never breaks a run. |
 | 12 | **Filesystem tools are excluded from offloading** — `read_file`, `write_file`, `edit_file`, `ls` are in `OffloadConfig.skip_tools` by default; reading a large file back cannot trigger a recursive re-offload. |
 | 13 | **Background workers are cancelled at both exit paths** — `_cancel_background_workers(session)` is called in both the `except AbortError` and `except Exception` handlers in `run_loop`. Worker tasks must never write into a session whose run has already ended. |
 | 14 | **`SubagentTool` always uses `retain=True`** — child sessions remain in `agent._sessions` until `agent.close()` clears them. `continue_subagent` relies on the child session being live; removing it would silently break fork/continue. |
-| 15 | **`session.pending_notifications` is drained before `ContextBuilder.build()`** — `_drain_pending_notifications` converts each queued `<task-notification>` Message into a `UserEvent` at the top of every new turn, so the model sees background task results before the next provider call. |
+| 15 | **`session.pending_notifications` is drained before `ContextInjectionHook.build_context()`** — `_drain_pending_notifications` converts each queued `<task-notification>` Message into a `UserEvent` at the top of every new turn, so the model sees background task results before the next provider call. |
 | 16 | **One `RunBudget` object per agent tree** — children inherit the parent's `active_budget` by reference in `run_subagent`; charging happens only in `run_loop` next to the `UsageEvent`. Never copy a budget into a child. |
 | 17 | **`micro_compact` is copy-on-write** — provider-view messages/blocks are shared with `full_history`; elision must build new `Message`/`ToolResultBlock` objects, never mutate in place. With `compaction_ladder=None` the compaction/retry event sequence is byte-identical to the pre-ladder code (pinned by `test_ladder_disabled_is_byte_identical`). |
 | 18 | **Workflow journal records are append-only `WorkflowEvent`s in the run store** — replay correctness depends on `agent_end`/`agent_replayed` events being persisted for every completed `wf.agent` call; do not emit them for failed calls. |
