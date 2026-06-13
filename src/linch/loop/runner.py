@@ -700,7 +700,6 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
 
     async def _finalize_final_tool_answer(
         turn_index: int,
-        assembly: AssistantAssembly,
         tool_blocks: list[ToolUseBlock],
         final_block: ToolUseBlock,
     ) -> AsyncIterator[Event]:
@@ -709,7 +708,6 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         async for event in finalize_final_tool_answer(
             _fctx,
             turn_index=turn_index,
-            assembly=assembly,
             tool_blocks=tool_blocks,
             final_block=final_block,
             total=total,
@@ -1054,7 +1052,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 final_block = next((b for b in tool_blocks if b.name == effective_final_tool), None)
                 if final_block is not None:
                     async for event in _finalize_final_tool_answer(
-                        turn_index, assembly, tool_blocks, final_block
+                        turn_index, tool_blocks, final_block
                     ):
                         yield event
                     if _final_result is not None:

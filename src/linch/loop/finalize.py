@@ -177,7 +177,6 @@ async def finalize_final_tool_answer(
     ctx: FinalizeCtx,
     *,
     turn_index: int,
-    assembly: AssistantAssembly,
     tool_blocks: list[ToolUseBlock],
     final_block: ToolUseBlock,
     total: Usage,
