@@ -672,42 +672,41 @@ def _partition_batches(
     return batches
 
 
-async def execute_tool_calls(
-    blocks: list[ToolUseBlock],
-    agent: Any,
-    session: Any,
-    signal: AbortContext,
-    *,
-    turn_index: int | None = None,
-) -> AsyncIterator[Event]:
-    if not blocks:
-        return
+def _strip_background_hints(
+    blocks: list[ToolUseBlock], agent: Any
+) -> tuple[list[ToolUseBlock], dict[str, str]]:
+    """Pull the ``run_in_background`` hint off blocks when background-any-tool is
+    enabled, returning the cleaned blocks and a ``{block_id: bg_id}`` map.
 
-    # Background-any-tool: strip the run_in_background hint before validation so
-    # any tool can be backgrounded without declaring the key in its schema. Opt-in;
-    # when disabled the hint is left untouched and passed through to the tool.
+    Opt-in (``Agent(enable_background_tools=True)``); otherwise blocks pass
+    through untouched and the map is empty so any tool can be backgrounded
+    without declaring the key in its schema."""
+    if not getattr(agent, "enable_background_tools", False):
+        return blocks, {}
     bg_ids: dict[str, str] = {}
-    if getattr(agent, "enable_background_tools", False):
-        stripped: list[ToolUseBlock] = []
-        for b in blocks:
-            inp = b.input
-            if isinstance(inp, dict) and inp.get("run_in_background"):
-                bg_ids[b.id] = f"bgtool_{uuid4().hex[:8]}"
-                stripped.append(
-                    replace(b, input={k: v for k, v in inp.items() if k != "run_in_background"})
-                )
-            else:
-                stripped.append(b)
-        blocks = stripped
+    stripped: list[ToolUseBlock] = []
+    for b in blocks:
+        inp = b.input
+        if isinstance(inp, dict) and inp.get("run_in_background"):
+            bg_ids[b.id] = f"bgtool_{uuid4().hex[:8]}"
+            stripped.append(
+                replace(b, input={k: v for k, v in inp.items() if k != "run_in_background"})
+            )
+        else:
+            stripped.append(b)
+    return stripped, bg_ids
 
-    effective_tools = getattr(session, "tools_override", None) or agent.tools
-    resolved = [_resolve_call(b, effective_tools, agent.cwd) for b in blocks]
-    hook_dispatcher = HookDispatcher(_scheduler_hooks(agent))
 
-    # First pass: synchronous evaluate()
+def _evaluate_permissions(
+    resolved: list[ResolvedCall], agent: Any, session: Any
+) -> tuple[list[PermissionDecision], list[int]]:
+    """First (synchronous) permission pass.
+
+    Returns the per-call decisions plus the indices still needing an async
+    ``resolve()`` (the ``ask`` calls). Handles immediate errors, Seam-A
+    stored-decision replay, and the per-turn allowed-tools allowlist."""
     decisions: list[PermissionDecision] = []
     ask_indices: list[int] = []
-
     for i, call in enumerate(resolved):
         if call.is_immediate_error:
             decisions.append(
@@ -724,28 +723,270 @@ async def execute_tool_calls(
                 cwd=_effective_cwd(session, agent),
             )
         )
-
-        if initial.decision == "ask":
-            # Seam A: replay a stored decision before falling through to the callback.
-            _stored_decisions = getattr(session, "current_turn_permission_decisions", None)
-            _key = _permission_key(_tool_name(call), call.input)
-            if _stored_decisions is not None and _key in _stored_decisions:
-                from .permissions.keys import permission_decision_from_dict as _pd_from_dict
-
-                try:
-                    decisions.append(_pd_from_dict(_stored_decisions[_key]))
-                except (AttributeError, TypeError, ValueError):
-                    ask_indices.append(i)
-                    decisions.append(initial)
-            else:
-                allowed_tools = getattr(session, "current_turn_allowed_tools", None)
-                if allowed_tools and tool_obj is not None and tool_obj.name in allowed_tools:
-                    decisions.append(PermissionDecision(decision="allow"))
-                else:
-                    ask_indices.append(i)
-                    decisions.append(initial)
-        else:
+        if initial.decision != "ask":
             decisions.append(initial)
+            continue
+
+        # Seam A: replay a stored decision before falling through to the callback.
+        _stored_decisions = getattr(session, "current_turn_permission_decisions", None)
+        _key = _permission_key(_tool_name(call), call.input)
+        if _stored_decisions is not None and _key in _stored_decisions:
+            from .permissions.keys import permission_decision_from_dict as _pd_from_dict
+
+            try:
+                decisions.append(_pd_from_dict(_stored_decisions[_key]))
+            except (AttributeError, TypeError, ValueError):
+                ask_indices.append(i)
+                decisions.append(initial)
+        else:
+            allowed_tools = getattr(session, "current_turn_allowed_tools", None)
+            if allowed_tools and tool_obj is not None and tool_obj.name in allowed_tools:
+                decisions.append(PermissionDecision(decision="allow"))
+            else:
+                ask_indices.append(i)
+                decisions.append(initial)
+    return decisions, ask_indices
+
+
+async def _resolve_ask_decisions(
+    resolved: list[ResolvedCall],
+    ask_indices: list[int],
+    decisions: list[PermissionDecision],
+    agent: Any,
+    session: Any,
+    signal: AbortContext,
+) -> None:
+    """Second (async) permission pass: drive ``resolve()`` for each ``ask`` call,
+    mutating *decisions* in place.
+
+    Persists allow + explicit user-deny outcomes so resume can replay them
+    (Seam B); exception-path denials (network failure, abort) are NOT persisted."""
+    for idx in ask_indices:
+        call = resolved[idx]
+        try:
+            decisions[idx] = await agent.permission_engine.resolve(
+                PendingToolCall(
+                    tool_use_id=call.id,
+                    tool=call.tool,
+                    input=call.input,
+                    cwd=_effective_cwd(session, agent),
+                ),
+                signal,
+            )
+            if decisions[idx].decision in ("allow", "deny"):
+                _pd = getattr(session, "current_turn_permission_decisions", None)
+                if _pd is not None:
+                    from .permissions.keys import permission_decision_to_dict as _pd_to_dict
+
+                    _pd[_permission_key(_tool_name(call), call.input)] = _pd_to_dict(decisions[idx])
+        except AbortError:
+            raise
+        except Exception:
+            decisions[idx] = PermissionDecision(
+                decision="deny",
+                reason=f"Permission resolution failed for {_tool_name(call)}",
+            )
+
+
+async def _run_serial_batch(
+    batch: Any,
+    *,
+    agent: Any,
+    session: Any,
+    signal: AbortContext,
+    hook_dispatcher: HookDispatcher,
+    middleware_errors: dict[str, str],
+    turn_index: int | None,
+) -> AsyncIterator[Event]:
+    """Run a serial (one-call-at-a-time) batch, yielding skill + start/end events."""
+    for call, _idx, decision in batch["calls"]:
+        input = _effective_input(call, decision)
+        skill_name = _skill_name_from_input(call, input)
+        if skill_name is not None:
+            args = input.get("args")
+            yield SkillInvokedEvent(
+                name=skill_name,
+                args=args if isinstance(args, str) else None,
+            )
+        yield ToolCallStartEvent(
+            tool_use_id=call.id,
+            tool_name=_tool_name(call),
+            input=input,
+            summary=call.summary,
+        )
+        try:
+            outcome = await _execute_one(
+                call,
+                decision,
+                agent,
+                session,
+                signal,
+                turn_index=turn_index,
+                middleware_error=middleware_errors.get(call.id),
+            )
+            outcome, hook_events = await _dispatch_post_tool_use(
+                hook_dispatcher,
+                call,
+                input,
+                outcome,
+                session,
+                agent=agent,
+                turn_index=turn_index,
+            )
+            for hook_event in hook_events:
+                yield hook_event
+        except AbortError:
+            tool_result = _tool_result_error("aborted")
+            yield ToolCallEndEvent(
+                tool_use_id=call.id,
+                tool_name=_tool_name(call),
+                result=tool_result.content,
+                is_error=tool_result.is_error,
+                duration_ms=tool_result.duration_ms,
+                tool_result=tool_result,
+            )
+            raise
+        yield ToolCallEndEvent(
+            tool_use_id=call.id,
+            tool_name=_tool_name(call),
+            result=str(outcome.block.content),
+            is_error=outcome.block.is_error,
+            duration_ms=outcome.duration_ms,
+            tool_result=outcome.tool_result,
+        )
+        if skill_name is not None:
+            yield SkillCompletedEvent(name=skill_name, is_error=outcome.block.is_error)
+
+
+async def _run_parallel_batch(
+    batch: Any,
+    *,
+    agent: Any,
+    session: Any,
+    signal: AbortContext,
+    hook_dispatcher: HookDispatcher,
+    middleware_errors: dict[str, str],
+    turn_index: int | None,
+) -> AsyncIterator[Event]:
+    """Run a parallel batch: emit all starts, gather concurrently, then all ends.
+
+    On abort/cancel, synthesises an ``aborted`` end event for every call that
+    started but never produced a result (orphan-bracket synthesis)."""
+    skill_names: dict[str, str | None] = {}
+    for call, _idx, decision in batch["calls"]:
+        input = _effective_input(call, decision)
+        skill_name = _skill_name_from_input(call, input)
+        skill_names[call.id] = skill_name
+        if skill_name is not None:
+            args = input.get("args")
+            yield SkillInvokedEvent(
+                name=skill_name,
+                args=args if isinstance(args, str) else None,
+            )
+        yield ToolCallStartEvent(
+            tool_use_id=call.id,
+            tool_name=_tool_name(call),
+            input=input,
+            summary=call.summary,
+        )
+
+    tasks = [
+        asyncio.ensure_future(
+            _execute_one(
+                call,
+                decision,
+                agent,
+                session,
+                signal,
+                turn_index=turn_index,
+                middleware_error=middleware_errors.get(call.id),
+            )
+        )
+        for call, _idx, decision in batch["calls"]
+    ]
+
+    started_ids: set[str] = set()
+    id_to_call: dict[str, ResolvedCall] = {}
+    for call, *_ in batch["calls"]:
+        started_ids.add(call.id)
+        id_to_call[call.id] = call
+
+    try:
+        results = await asyncio.gather(*tasks)
+    except (AbortError, asyncio.CancelledError):
+        for t in tasks:
+            t.cancel()
+        # Orphan-bracket synthesis
+        finished_ids: set[str] = set()
+        for t in tasks:
+            if t.done() and not t.cancelled():
+                try:
+                    outcome = t.result()
+                    finished_ids.add(outcome.block.tool_use_id)
+                except Exception:
+                    pass
+        for tid in started_ids:
+            if tid not in finished_ids:
+                orphan_call = id_to_call.get(tid)
+                tool_result = _tool_result_error("aborted")
+                yield ToolCallEndEvent(
+                    tool_use_id=tid,
+                    tool_name=(_tool_name(orphan_call) if orphan_call else "unknown"),
+                    result=tool_result.content,
+                    is_error=tool_result.is_error,
+                    duration_ms=tool_result.duration_ms,
+                    tool_result=tool_result,
+                )
+                sn = skill_names.get(tid)
+                if sn is not None:
+                    yield SkillCompletedEvent(name=sn, is_error=True)
+        raise
+
+    for (call, _idx, decision), outcome in zip(batch["calls"], results, strict=True):
+        input = _effective_input(call, decision)
+        outcome, hook_events = await _dispatch_post_tool_use(
+            hook_dispatcher,
+            call,
+            input,
+            outcome,
+            session,
+            agent=agent,
+            turn_index=turn_index,
+        )
+        for hook_event in hook_events:
+            yield hook_event
+        yield ToolCallEndEvent(
+            tool_use_id=call.id,
+            tool_name=_tool_name(call),
+            result=str(outcome.block.content),
+            is_error=outcome.block.is_error,
+            duration_ms=outcome.duration_ms,
+            tool_result=outcome.tool_result,
+        )
+        sn = skill_names.get(call.id)
+        if sn is not None:
+            yield SkillCompletedEvent(name=sn, is_error=outcome.block.is_error)
+
+
+async def execute_tool_calls(
+    blocks: list[ToolUseBlock],
+    agent: Any,
+    session: Any,
+    signal: AbortContext,
+    *,
+    turn_index: int | None = None,
+) -> AsyncIterator[Event]:
+    if not blocks:
+        return
+
+    blocks, bg_ids = _strip_background_hints(blocks, agent)
+
+    effective_tools = getattr(session, "tools_override", None) or agent.tools
+    resolved = [_resolve_call(b, effective_tools, agent.cwd) for b in blocks]
+    hook_dispatcher = HookDispatcher(_scheduler_hooks(agent))
+
+    # First pass: synchronous evaluate()
+    decisions, ask_indices = _evaluate_permissions(resolved, agent, session)
 
     # Emit single aggregated PermissionRequestEvent before resolve
     if ask_indices:
@@ -763,33 +1004,7 @@ async def execute_tool_calls(
         yield PermissionRequestEvent(requests=items)
 
     # Second pass: async resolve()
-    for idx in ask_indices:
-        call = resolved[idx]
-        try:
-            decisions[idx] = await agent.permission_engine.resolve(
-                PendingToolCall(
-                    tool_use_id=call.id,
-                    tool=call.tool,
-                    input=call.input,
-                    cwd=_effective_cwd(session, agent),
-                ),
-                signal,
-            )
-            # Seam B: persist allow + explicit user-deny so resume can replay.
-            # Exception-path denials (network failure, abort) are NOT persisted.
-            if decisions[idx].decision in ("allow", "deny"):
-                _pd = getattr(session, "current_turn_permission_decisions", None)
-                if _pd is not None:
-                    from .permissions.keys import permission_decision_to_dict as _pd_to_dict
-
-                    _pd[_permission_key(_tool_name(call), call.input)] = _pd_to_dict(decisions[idx])
-        except AbortError:
-            raise
-        except Exception:
-            decisions[idx] = PermissionDecision(
-                decision="deny",
-                reason=f"Permission resolution failed for {_tool_name(call)}",
-            )
+    await _resolve_ask_decisions(resolved, ask_indices, decisions, agent, session, signal)
 
     # PreToolUse hooks can transform or block the permission-resolved input.
     middleware_errors: dict[str, str] = {}
@@ -881,165 +1096,17 @@ async def execute_tool_calls(
         max_concurrency=_max_concurrency(agent),
     )
 
-    # Execute batches in order
-    result_pairs: list[tuple[int, ToolResultBlock]] = []
+    # Execute batches in order; each batch runs on its serial or parallel lane.
     for batch in batches:
         throw_if_aborted(signal)
-
-        if not batch["parallel"]:
-            # Serial lane — one call at a time
-            for call, idx, decision in batch["calls"]:
-                input = _effective_input(call, decision)
-                skill_name = _skill_name_from_input(call, input)
-                if skill_name is not None:
-                    args = input.get("args")
-                    yield SkillInvokedEvent(
-                        name=skill_name,
-                        args=args if isinstance(args, str) else None,
-                    )
-                yield ToolCallStartEvent(
-                    tool_use_id=call.id,
-                    tool_name=_tool_name(call),
-                    input=input,
-                    summary=call.summary,
-                )
-                try:
-                    outcome = await _execute_one(
-                        call,
-                        decision,
-                        agent,
-                        session,
-                        signal,
-                        turn_index=turn_index,
-                        middleware_error=middleware_errors.get(call.id),
-                    )
-                    outcome, hook_events = await _dispatch_post_tool_use(
-                        hook_dispatcher,
-                        call,
-                        input,
-                        outcome,
-                        session,
-                        agent=agent,
-                        turn_index=turn_index,
-                    )
-                    for hook_event in hook_events:
-                        yield hook_event
-                except AbortError:
-                    tool_result = _tool_result_error("aborted")
-                    yield ToolCallEndEvent(
-                        tool_use_id=call.id,
-                        tool_name=_tool_name(call),
-                        result=tool_result.content,
-                        is_error=tool_result.is_error,
-                        duration_ms=tool_result.duration_ms,
-                        tool_result=tool_result,
-                    )
-                    raise
-                yield ToolCallEndEvent(
-                    tool_use_id=call.id,
-                    tool_name=_tool_name(call),
-                    result=str(outcome.block.content),
-                    is_error=outcome.block.is_error,
-                    duration_ms=outcome.duration_ms,
-                    tool_result=outcome.tool_result,
-                )
-                if skill_name is not None:
-                    yield SkillCompletedEvent(name=skill_name, is_error=outcome.block.is_error)
-                result_pairs.append((idx, outcome.block))
-        else:
-            # Parallel lane — all starts first, then run concurrently, then all ends
-            skill_names: dict[str, str | None] = {}
-            for call, _idx, decision in batch["calls"]:
-                input = _effective_input(call, decision)
-                skill_name = _skill_name_from_input(call, input)
-                skill_names[call.id] = skill_name
-                if skill_name is not None:
-                    args = input.get("args")
-                    yield SkillInvokedEvent(
-                        name=skill_name,
-                        args=args if isinstance(args, str) else None,
-                    )
-                yield ToolCallStartEvent(
-                    tool_use_id=call.id,
-                    tool_name=_tool_name(call),
-                    input=input,
-                    summary=call.summary,
-                )
-
-            tasks = [
-                asyncio.ensure_future(
-                    _execute_one(
-                        call,
-                        decision,
-                        agent,
-                        session,
-                        signal,
-                        turn_index=turn_index,
-                        middleware_error=middleware_errors.get(call.id),
-                    )
-                )
-                for call, _idx, decision in batch["calls"]
-            ]
-
-            started_ids: set[str] = set()
-            id_to_call: dict[str, ResolvedCall] = {}
-            for call, *_ in batch["calls"]:
-                started_ids.add(call.id)
-                id_to_call[call.id] = call
-
-            try:
-                results = await asyncio.gather(*tasks)
-            except (AbortError, asyncio.CancelledError):
-                for t in tasks:
-                    t.cancel()
-                # Orphan-bracket synthesis
-                finished_ids: set[str] = set()
-                for t in tasks:
-                    if t.done() and not t.cancelled():
-                        try:
-                            outcome = t.result()
-                            finished_ids.add(outcome.block.tool_use_id)
-                        except Exception:
-                            pass
-                for tid in started_ids:
-                    if tid not in finished_ids:
-                        orphan_call = id_to_call.get(tid)
-                        tool_result = _tool_result_error("aborted")
-                        yield ToolCallEndEvent(
-                            tool_use_id=tid,
-                            tool_name=(_tool_name(orphan_call) if orphan_call else "unknown"),
-                            result=tool_result.content,
-                            is_error=tool_result.is_error,
-                            duration_ms=tool_result.duration_ms,
-                            tool_result=tool_result,
-                        )
-                        sn = skill_names.get(tid)
-                        if sn is not None:
-                            yield SkillCompletedEvent(name=sn, is_error=True)
-                raise
-
-            for (call, idx, decision), outcome in zip(batch["calls"], results, strict=True):
-                input = _effective_input(call, decision)
-                outcome, hook_events = await _dispatch_post_tool_use(
-                    hook_dispatcher,
-                    call,
-                    input,
-                    outcome,
-                    session,
-                    agent=agent,
-                    turn_index=turn_index,
-                )
-                for hook_event in hook_events:
-                    yield hook_event
-                yield ToolCallEndEvent(
-                    tool_use_id=call.id,
-                    tool_name=_tool_name(call),
-                    result=str(outcome.block.content),
-                    is_error=outcome.block.is_error,
-                    duration_ms=outcome.duration_ms,
-                    tool_result=outcome.tool_result,
-                )
-                sn = skill_names.get(call.id)
-                if sn is not None:
-                    yield SkillCompletedEvent(name=sn, is_error=outcome.block.is_error)
-                result_pairs.append((idx, outcome.block))
+        lane = _run_serial_batch if not batch["parallel"] else _run_parallel_batch
+        async for event in lane(
+            batch,
+            agent=agent,
+            session=session,
+            signal=signal,
+            hook_dispatcher=hook_dispatcher,
+            middleware_errors=middleware_errors,
+            turn_index=turn_index,
+        ):
+            yield event
