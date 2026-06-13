@@ -65,16 +65,28 @@ class PermissionEngine:
         rules: list[PermissionRule] | None = None,
         can_use_tool: CanUseTool | None = None,
         project_root: str = "",
+        rule_set: Any = None,
     ) -> None:
         self.mode = mode
         self.rules: list[PermissionRule] = list(rules or [])
         self.can_use_tool = can_use_tool
         self.project_root = project_root
+        # Opt-in layered policy combiner (PermissionRuleSet). Default None keeps
+        # the flat-rule path byte-identical.
+        self.rule_set = rule_set
 
     def evaluate(self, call: PendingToolCall) -> PermissionDecision:
         invalid_reason = _validate_pending_call(call)
         if invalid_reason is not None:
             return PermissionDecision(decision="deny", reason=invalid_reason)
+
+        # Layered sources (deny-override / policy-wins) take precedence; they
+        # fall through to the flat rules + mode default only when every layer
+        # abstains.
+        if self.rule_set is not None:
+            layered = self.rule_set.evaluate(call)
+            if layered is not None:
+                return layered
 
         rule_decision = self._evaluate_rules(call)
         if rule_decision is not None:
@@ -161,42 +173,54 @@ class PermissionEngine:
         return PermissionDecision(decision="allow", updated_input=validated)
 
     def _evaluate_rules(self, call: PendingToolCall) -> PermissionDecision | None:
-        tool_name = call.tool.name
-        for idx, rule in enumerate(self.rules):
-            if isinstance(rule, ToolRule) and match_tool_rule(rule, tool_name, call.input):
-                return PermissionDecision(
-                    decision=rule.decision,
-                    reason=f"{rule.kind} rule matched {tool_name}."
-                    if rule.decision == "deny"
-                    else None,
-                )
-            if isinstance(rule, PathRule) and match_path_rule(
-                rule,
-                tool_name,
-                call.input,
-                self.project_root,
-                call.cwd,
-            ):
-                return PermissionDecision(
-                    decision=rule.decision,
-                    reason=f"{rule.kind} rule matched {tool_name}."
-                    if rule.decision == "deny"
-                    else None,
-                )
-            if isinstance(rule, BashRule) and tool_name == "Bash":
-                command = call.input.get("command")
-                if not isinstance(command, str):
-                    continue
-                bash_rules = _bash_rules_from(self.rules, idx)
-                bash_decision = evaluate_bash_rules(bash_rules, command)
-                if bash_decision is not None:
-                    return PermissionDecision(
-                        decision=bash_decision,
-                        reason=f"{rule.kind} rule matched {tool_name}."
-                        if bash_decision == "deny"
-                        else None,
-                    )
-        return None
+        return evaluate_rule_list(self.rules, call, self.project_root)
+
+
+def _rule_outcome(decision: _ToolDecision, kind: str, tool_name: str) -> PermissionDecision:
+    return PermissionDecision(
+        decision=decision,
+        reason=f"{kind} rule matched {tool_name}." if decision == "deny" else None,
+    )
+
+
+def evaluate_rule_list(
+    rules: list[PermissionRule],
+    call: PendingToolCall,
+    project_root: str,
+) -> PermissionDecision | None:
+    """First-match decision for one flat rule list, or None when it abstains.
+
+    A matched ``passthrough`` rule abstains: scanning continues past it (so a
+    layer can carve out exceptions that defer to the next source) and the list
+    yields ``None`` if nothing else matches.
+    """
+    tool_name = call.tool.name
+    for idx, rule in enumerate(rules):
+        if isinstance(rule, ToolRule) and match_tool_rule(rule, tool_name, call.input):
+            decision = rule.decision
+            if decision == "passthrough":
+                continue
+            return _rule_outcome(decision, rule.kind, tool_name)
+        if isinstance(rule, PathRule) and match_path_rule(
+            rule,
+            tool_name,
+            call.input,
+            project_root,
+            call.cwd,
+        ):
+            decision = rule.decision
+            if decision == "passthrough":
+                continue
+            return _rule_outcome(decision, rule.kind, tool_name)
+        if isinstance(rule, BashRule) and tool_name == "Bash":
+            command = call.input.get("command")
+            if not isinstance(command, str):
+                continue
+            bash_rules = _bash_rules_from(rules, idx)
+            bash_decision = evaluate_bash_rules(bash_rules, command)
+            if bash_decision is not None and bash_decision != "passthrough":
+                return _rule_outcome(bash_decision, rule.kind, tool_name)
+    return None
 
 
 def _mode_default(tool: Any, mode: str) -> PermissionDecision:

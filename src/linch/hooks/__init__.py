@@ -13,7 +13,10 @@ from .contexts import (
     BeforeProviderCallContext,
     EventEmitContext,
     HookContext,
+    PostCompactContext,
     PostToolUseContext,
+    PostToolUseFailureContext,
+    PreCompactContext,
     PreToolUseContext,
     ProviderCallStartContext,
     ProviderCallStopContext,
@@ -27,6 +30,7 @@ from .contexts import (
     UserPromptSubmitContext,
 )
 from .dispatcher import HookDispatcher, HookDispatchResult, normalize_hooks
+from .memory import MemoryExtractionHook
 from .types import HookAction, HookEvent, HookResult
 
 __all__ = [
@@ -47,6 +51,9 @@ __all__ = [
     "ToolUseStartContext",
     "ToolUseStopContext",
     "PostToolUseContext",
+    "PostToolUseFailureContext",
+    "PreCompactContext",
+    "PostCompactContext",
     "BeforeFinalAnswerContext",
     "StopContext",
     "SubagentStartContext",
@@ -60,4 +67,5 @@ __all__ = [
     "FinalAnswerVerifierHook",
     "StopPredicateHook",
     "RunTelemetryHook",
+    "MemoryExtractionHook",
 ]

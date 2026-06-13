@@ -138,6 +138,20 @@ class CompactionEvent:
 
 
 @dataclass(slots=True)
+class ModelFallbackEvent:
+    """Emitted when the active model is swapped after a provider overload.
+
+    The swap is run-level: every subsequent turn uses ``to_model`` until the
+    run ends or another overload escalates to the next fallback.
+    """
+
+    from_model: str
+    to_model: str
+    reason: str = ""
+    type: Literal["model_fallback"] = "model_fallback"
+
+
+@dataclass(slots=True)
 class ContextBuildEvent:
     system_blocks: int
     messages: int
@@ -241,6 +255,21 @@ class HookEventRecord:
 
 
 @dataclass(slots=True)
+class ScheduleEvent:
+    """Emitted when a :class:`~linch.scheduling.Schedule` fires.
+
+    The fired payload is also enqueued into ``session.pending_notifications`` and
+    surfaces as a ``UserEvent`` on the next turn (the same drain background
+    workers use). This event is the observability signal for the firing itself.
+    """
+
+    schedule_id: str
+    status: str  # "fired"
+    payload: str = ""
+    type: Literal["schedule"] = "schedule"
+
+
+@dataclass(slots=True)
 class WorkflowEvent:
     """Progress/journal event emitted by the workflow engine.
 
@@ -269,6 +298,7 @@ Event: TypeAlias = (
     | UsageEvent
     | BudgetEvent
     | CompactionEvent
+    | ModelFallbackEvent
     | ContextBuildEvent
     | ResultEvent
     | ErrorEvent
@@ -280,6 +310,7 @@ Event: TypeAlias = (
     | LoopGuardEvent
     | VerificationEvent
     | HookEventRecord
+    | ScheduleEvent
     | WorkflowEvent
 )
 
@@ -548,6 +579,20 @@ def event_to_dict(event: Event) -> dict[str, Any]:
             "tokens_after": event.tokens_after,
             "strategy": event.strategy,
         }
+    if isinstance(event, ModelFallbackEvent):
+        return {
+            "type": event.type,
+            "from_model": event.from_model,
+            "to_model": event.to_model,
+            "reason": event.reason,
+        }
+    if isinstance(event, ScheduleEvent):
+        return {
+            "type": event.type,
+            "schedule_id": event.schedule_id,
+            "status": event.status,
+            "payload": event.payload,
+        }
     if isinstance(event, ContextBuildEvent):
         return {
             "type": event.type,
@@ -719,6 +764,18 @@ def event_from_dict(raw: dict[str, Any]) -> Event:
             tokens_before=int(raw.get("tokens_before", 0) or 0),
             tokens_after=int(raw.get("tokens_after", 0) or 0),
             strategy=str(raw.get("strategy", "")),
+        )
+    if typ == "model_fallback":
+        return ModelFallbackEvent(
+            from_model=str(raw.get("from_model", "")),
+            to_model=str(raw.get("to_model", "")),
+            reason=str(raw.get("reason", "")),
+        )
+    if typ == "schedule":
+        return ScheduleEvent(
+            schedule_id=str(raw.get("schedule_id", "")),
+            status=str(raw.get("status", "")),
+            payload=str(raw.get("payload", "")),
         )
     if typ == "context_build":
         selected_raw = raw.get("selected_tools")

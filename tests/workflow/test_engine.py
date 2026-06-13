@@ -87,6 +87,36 @@ async def test_wf_agent_runs_subagent_and_returns_final_text() -> None:
     assert end.title == "summarizer"
 
 
+async def test_wf_agent_passes_isolation_to_subagent() -> None:
+    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.tools import ToolRegistry, tool
+    from linch.tools.isolation import TempDirIsolation
+
+    recorded: list[str] = []
+
+    @tool
+    def record_cwd(ctx: Any) -> str:
+        """Record the execution cwd."""
+        recorded.append(ctx.cwd)
+        return "ok"
+
+    tools = ToolRegistry()
+    tools.register(record_cwd)
+    provider = ScriptedProvider(
+        [ToolUseTurn(tool_name="record_cwd", tool_input={}), TextTurn("done")]
+    )
+    agent = _make_agent(provider, tools=tools)
+    iso = TempDirIsolation()
+
+    async def flow(wf: Any) -> str:
+        return await wf.agent("go", isolation=iso)
+
+    await agent.run_workflow(flow)
+
+    assert len(recorded) == 1
+    assert recorded[0] != agent.cwd
+
+
 async def test_wf_agent_unknown_name_raises_config_error() -> None:
     from linch.errors import ConfigError
 

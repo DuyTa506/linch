@@ -285,6 +285,7 @@ class Agent:
         compaction: Any = None,
         compaction_ladder: Any = None,
         token_estimator: Any = None,
+        fallback_models: list[str] | None = None,
         budget: Any = None,
         features: FeatureFlags | None = None,
         deps: Any = None,
@@ -296,12 +297,15 @@ class Agent:
         loopGuard: Any = _UNSET,
         filesystem: Any = None,
         result_offload: Any = _DEFAULT_OFFLOAD,
+        mailbox: Any = None,
+        schedule_store: Any = None,
         hooks: Any = None,
         extra_subagents: list[AgentDefinition] | None = None,
         enable_worker_tools: bool = False,
         retain_subagents: bool = False,
         enable_background_subagents: bool = False,
         enable_task_stop: bool = False,
+        enable_background_tools: bool = False,
         execution_backend: Any = None,
     ) -> None:
         system_prompt = _resolve_system_prompt(system_prompt, systemPrompt, system_prompt_config)
@@ -379,11 +383,16 @@ class Agent:
             enable_background_subagents=enable_background_subagents,
             enable_task_stop=enable_task_stop,
         )
+        self.enable_background_tools = bool(enable_background_tools)
         self.compaction: Any = compaction
         # Opt-in micro/reactive compaction rungs (CompactionLadder | None).
         # None keeps the legacy single-retry behavior byte-identical.
         self.compaction_ladder: Any = compaction_ladder
         self.token_estimator = token_estimator
+        # Ordered alternate models tried, in turn, when the active model
+        # overloads mid-run (ProviderError(retryable=True)). None/[] = disabled
+        # (default byte-identical).
+        self.fallback_models: list[str] | None = fallback_models
         # Default spending cap shared by every session/run of this agent.
         # Prefer RunOptions(budget=...) for per-run caps.
         self.budget: Any = budget
@@ -406,6 +415,8 @@ class Agent:
         self._configure_loop_guard(loop_guard, loopGuard)
         self._configure_hooks(hooks=hooks)
         self._configure_filesystem(filesystem, result_offload)
+        self._configure_mailbox(mailbox)
+        self._configure_schedule_store(schedule_store)
 
     def _initialize_extension_state(
         self,
@@ -432,6 +443,9 @@ class Agent:
         self._subagents_loaded: bool = False
         self._mcp_connect: Any = None
         self._mcp_connection: Any = None
+        # Additional MCP connections attached mid-run (closed alongside the
+        # primary connection in close()).
+        self._extra_mcp_connections: list[Any] = []
 
     def _configure_loop_guard(self, loop_guard: Any, loop_guard_alias: Any) -> None:
         from .loop_guard import LoopGuard as _LoopGuard
@@ -468,6 +482,48 @@ class Agent:
                 self.tools.register(t)
             except Exception:
                 pass  # already registered (e.g. caller added them manually)
+        self._refresh_system_blocks()
+
+    def _configure_mailbox(self, mailbox: Any) -> None:
+        """Register the peer-messaging tool when a mailbox is provided.
+
+        Opt-in: with ``mailbox=None`` no tool is added and no drain runs, so the
+        loop stays byte-identical. Workers share this same ``Agent`` object, so
+        ``self.mailbox`` is reachable from every session in the agent tree.
+        """
+        self.mailbox: Any = mailbox
+        if mailbox is None:
+            return
+
+        from .tools.send_message import SendMessageTool
+
+        get_session = lambda sid: self._sessions.get(sid)  # noqa: E731
+        try:
+            self.tools.register(
+                cast("Tool", SendMessageTool(mailbox=mailbox, get_session=get_session))
+            )
+        except ConfigError:
+            pass  # already registered (e.g. caller added it manually)
+        self._refresh_system_blocks()
+
+    def _configure_schedule_store(self, schedule_store: Any) -> None:
+        """Register the schedule create/list/cancel tools when a store is provided.
+
+        Opt-in: with ``schedule_store=None`` no tool is added and the loop stays
+        byte-identical. The embedder drives a ``SchedulerLoop`` over the same
+        store to fire due schedules into a session.
+        """
+        self.schedule_store: Any = schedule_store
+        if schedule_store is None:
+            return
+
+        from .scheduling import schedule_tools
+
+        for schedule_tool in schedule_tools(schedule_store):
+            try:
+                self.tools.register(cast("Tool", schedule_tool))
+            except ConfigError:
+                pass  # already registered (e.g. caller added it manually)
         self._refresh_system_blocks()
 
     def _filesystem_active(self) -> bool:
@@ -829,10 +885,8 @@ class Agent:
             from .mcp import connect_mcp_servers
 
             mcp_conn = await connect_mcp_servers(cast(Any, self._mcp_servers))
-            for tool in mcp_conn.tools:
-                self.tools.register(cast("Tool", tool))
+            self._attach_mcp_tools(mcp_conn)
             self._mcp_connection = mcp_conn
-            self._refresh_system_blocks()
 
         self._mcp_connect = _load()
         try:
@@ -840,6 +894,33 @@ class Agent:
         except Exception:
             self._mcp_connect = None
             raise
+
+    def _attach_mcp_tools(self, connection: Any) -> None:
+        """Register a connection's tools + derived permission rules into the live agent.
+
+        Shared by the configured-connect path and mid-run registration. Because
+        the per-turn request rebuilds its tool list from ``self.tools`` (no cache),
+        tools attached mid-run appear on the next turn. Destructive MCP tools map
+        to ``ask`` permission rules via the annotation→permission bridge.
+        """
+        from .mcp import mcp_permission_rules
+
+        for tool in connection.tools:
+            self.tools.register(cast("Tool", tool))
+        self.permission_engine.rules.extend(mcp_permission_rules(connection.tools))
+        self._refresh_system_blocks()
+
+    async def add_mcp_servers(self, servers: dict[str, Any]) -> Any:
+        """Connect additional MCP servers during a run; their tools appear next turn.
+
+        Returns the new :class:`McpConnection`, also tracked for ``close()``.
+        """
+        from .mcp import connect_mcp_servers
+
+        connection = await connect_mcp_servers(cast(Any, servers))
+        self._attach_mcp_tools(connection)
+        self._extra_mcp_connections.append(connection)
+        return connection
 
     async def session(
         self, id: str | None = None, meta: dict[str, object] | None = None
@@ -935,11 +1016,26 @@ class Agent:
                 task = getattr(handle, "task", None)
                 if task is not None and isinstance(task, asyncio.Task) and not task.done():
                     task.cancel()
+            # Cancel detached background-tool tasks too (mirrors session.abort),
+            # so closing the agent never orphans an in-flight background tool.
+            for task in getattr(sess, "background_tasks", []):
+                if isinstance(task, asyncio.Task) and not task.done():
+                    task.cancel()
         self._sessions.clear()
 
         if self._mcp_connection is not None:
             await self._mcp_connection.close()
             self._mcp_connection = None
+        for connection in self._extra_mcp_connections:
+            try:
+                await connection.close()
+            except Exception as exc:
+                import logging as _logging
+
+                _logging.getLogger(__name__).warning(
+                    "Error closing MCP connection %r during agent close: %s", connection, exc
+                )
+        self._extra_mcp_connections.clear()
         if self._store is not None:
             await self._store.close()
         if self.run_store is not None:

@@ -246,19 +246,41 @@ def _translate_system(
     cache: bool | None,
     ttl: str | None,
 ) -> list[dict[str, Any]]:
-    """Convert system blocks to the Anthropic system array, with optional caching."""
+    """Convert system blocks to the Anthropic system array, with optional caching.
+
+    The cache breakpoint is placed at the end of the leading contiguous run of
+    static (``cacheable=True``) blocks (ROADMAP 3.2). A volatile trailing block
+    (``cacheable=False``, e.g. a per-turn dynamic section) therefore sits outside
+    the cached prefix and never invalidates it. When every block is static this
+    is the last block — byte-identical to the legacy "cache the last block"
+    behavior for the all-static prompts the agent builds today.
+    """
     if not blocks:
         return []
-    result: list[dict[str, Any]] = []
-    for i, block in enumerate(blocks):
-        item: dict[str, Any] = {"type": "text", "text": block.text}
-        if cache and i == len(blocks) - 1:
-            cc: dict[str, Any] = {"type": "ephemeral"}
-            if ttl:
-                cc["ttl"] = ttl
-            item["cache_control"] = cc
-        result.append(item)
+    result: list[dict[str, Any]] = [{"type": "text", "text": block.text} for block in blocks]
+    if not cache:
+        return result
+    boundary = _cache_breakpoint_index(blocks)
+    if boundary is not None:
+        cc: dict[str, Any] = {"type": "ephemeral"}
+        if ttl:
+            cc["ttl"] = ttl
+        result[boundary]["cache_control"] = cc
     return result
+
+
+def _cache_breakpoint_index(blocks: list[SystemBlock]) -> int | None:
+    """Index of the last block in the leading contiguous ``cacheable`` run.
+
+    Returns ``None`` when the first block is already dynamic — there is then no
+    static prefix to cache.
+    """
+    end = -1
+    for index, block in enumerate(blocks):
+        if not getattr(block, "cacheable", False):
+            break
+        end = index
+    return end if end >= 0 else None
 
 
 def _translate_tools(

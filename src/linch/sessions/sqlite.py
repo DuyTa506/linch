@@ -160,6 +160,54 @@ def _delete_task_sync(conn: sqlite3.Connection, session_id: str, task_id: str) -
     return bool(cur.rowcount)
 
 
+def _claim_task_sync(
+    conn: sqlite3.Connection, session_id: str, task_id: str, owner: str
+) -> Task | None:
+    now = now_iso()
+    cur = conn.execute(
+        """
+        update tasks set owner = ?, updated_at = ?
+        where session_id = ? and id = ? and owner is null and status = 'pending'
+        """,
+        (owner, now, session_id, task_id),
+    )
+    if cur.rowcount == 0:
+        conn.commit()  # close the implicit txn; nothing was claimable
+        return None
+    conn.execute("update sessions set updated_at = ? where id = ?", (now, session_id))
+    conn.commit()
+    return _get_task_sync(conn, session_id, task_id)
+
+
+def _ready_tasks_sync(conn: sqlite3.Connection, session_id: str) -> list[Task]:
+    tasks = _list_tasks(conn, session_id)
+    by_id = {t.id: t for t in tasks}
+    return [
+        t
+        for t in tasks
+        if t.status == "pending"
+        and t.owner is None
+        and all(by_id.get(b) is not None and by_id[b].status == "completed" for b in t.blocked_by)
+    ]
+
+
+def _release_task_sync(conn: sqlite3.Connection, session_id: str, task_id: str) -> Task | None:
+    task = _get_task_sync(conn, session_id, task_id)
+    if task is None:
+        return None
+    if task.status == "completed":
+        return task  # don't resurrect a finished task
+    now = now_iso()
+    conn.execute(
+        "update tasks set owner = null, status = 'pending', updated_at = ? "
+        "where session_id = ? and id = ?",
+        (now, session_id, task_id),
+    )
+    conn.execute("update sessions set updated_at = ? where id = ?", (now, session_id))
+    conn.commit()
+    return _get_task_sync(conn, session_id, task_id)
+
+
 # ── Store ────────────────────────────────────────────────────────────────────
 
 
@@ -226,6 +274,15 @@ class SqliteSessionStore:
 
     async def delete_task(self, session_id: str, task_id: str) -> bool:
         return await self._exec.run(lambda c: _delete_task_sync(c, session_id, task_id))
+
+    async def claim_task(self, session_id: str, task_id: str, owner: str) -> Task | None:
+        return await self._exec.run(lambda c: _claim_task_sync(c, session_id, task_id, owner))
+
+    async def ready_tasks(self, session_id: str) -> list[Task]:
+        return await self._exec.run(lambda c: _ready_tasks_sync(c, session_id))
+
+    async def release_task(self, session_id: str, task_id: str) -> Task | None:
+        return await self._exec.run(lambda c: _release_task_sync(c, session_id, task_id))
 
     async def close(self) -> None:
         await self._exec.close()

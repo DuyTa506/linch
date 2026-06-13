@@ -15,7 +15,7 @@ McpCallTool = Any
 
 
 def to_input_schema(
-    mcp_schema: McpToolDef.inputSchema,
+    mcp_schema: Any,
 ) -> dict[str, Any]:
     schema = mcp_schema
     props = getattr(schema, "properties", None) or {}
@@ -47,10 +47,16 @@ def make_mcp_tool(
     name = build_mcp_tool_name(server_name, mcp_tool.name)
     annotations = getattr(mcp_tool, "annotations", None)
     read_only = getattr(annotations, "readOnlyHint", False) if annotations is not None else False
+    is_destructive = (
+        bool(getattr(annotations, "destructiveHint", False)) if annotations is not None else False
+    )
 
     class _McpTool:
         scope = "read" if read_only else "write"
         parallel = read_only
+        # Surfaced for the annotation→permission bridge (mcp_permission_rules):
+        # a server's destructiveHint maps to an "ask" permission tier.
+        destructive = is_destructive
 
         def __init__(self) -> None:
             self.name = name

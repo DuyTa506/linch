@@ -257,9 +257,12 @@ class RunTelemetryHook:
     name = "observers"
 
     def __init__(self, observers: Any) -> None:
-        from ..observability import normalize_observers
+        from ..observability import ObserverDispatcher, normalize_observers
 
         self.observers = normalize_observers(observers)
+        # Reuse the observability hub for fan-out (await async, isolate
+        # exceptions) instead of re-implementing it here.
+        self._hub = ObserverDispatcher(self.observers)
 
     async def on_agent_start(self, ctx: AgentStartContext) -> None:
         from ..observability import RunInfo
@@ -372,17 +375,4 @@ class RunTelemetryHook:
                 _log.exception("observer %r raised on close; continuing", type(observer).__name__)
 
     async def _dispatch(self, method: str, *args: Any) -> None:
-        for observer in self.observers:
-            fn = getattr(observer, method, None)
-            if fn is None:
-                continue
-            try:
-                result = fn(*args)
-                if inspect.isawaitable(result):
-                    await result
-            except Exception:
-                _log.exception(
-                    "observer %r raised in hook %s; continuing",
-                    type(observer).__name__,
-                    method,
-                )
+        await self._hub.dispatch(method, *args)

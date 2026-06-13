@@ -41,11 +41,25 @@ class RunSubagentArgs:
     retain: bool = False
     """When True, the child session is kept in agent._sessions after completion
     so it can be continued later via SubagentContinue."""
+    fork: bool = False
+    """When True, the child continues from the parent's context instead of a
+    fresh one: it inherits the parent's ``provider_view`` (conversation prefix),
+    system blocks, tools, and ``file_read_tracker``. This makes the child's
+    request prefix byte-identical to the parent's, so a caching provider reuses
+    the cached prefix rather than re-paying for it. Trades isolation for cost."""
     on_child_registered: Any = None
     """Optional callback ``(child_session_id: str) -> None`` invoked as soon as the
     child session is registered in ``agent._sessions``, before the run is driven.
     Lets the caller record the real child id immediately, so a worker cancelled
     mid-run (``CancelledError`` before this function returns) is still addressable."""
+    isolation: Any = None
+    """Optional :class:`~linch.tools.isolation.IsolationBackend`. When set, the
+    child runs in its own acquired working directory (``ToolContext.cwd``), so
+    parallel branches editing the same relative path don't collide. The scratch
+    dir is released when the child finishes (see ``isolation_keep``)."""
+    isolation_keep: bool = False
+    """When True, the acquired isolation cwd is preserved after the child finishes
+    (e.g. so the embedder can merge its file artifacts); otherwise it is removed."""
 
 
 @dataclass
@@ -171,22 +185,35 @@ async def run_subagent(args: RunSubagentArgs) -> RunSubagentResult:
         tools_filter = args.definition.frontmatter.tools
 
     effective_tools = args.parent_session.tools_override or agent.tools
-    child_tools = build_child_tools(effective_tools, tools_filter)
 
-    # Build the child system blocks from the child's filtered tool names so the
-    # protocol block only describes tools the subagent actually has access to.
-    child_tool_names = sorted(t.name for t in child_tools.list())
-    builder = getattr(agent, "build_system_blocks_for_tool_names", None)
-    if callable(builder):
-        child_system = list(cast(Iterable[SystemBlock], builder(child_tool_names)))
-    else:
-        child_system = list(agent.system_blocks)
-    child_system.append(
-        SystemBlock(
-            text=f"User-provided instructions:\n\n{args.definition.body}",
-            cacheable=True,
+    if args.fork:
+        # Fork: reuse the parent's tools and system blocks verbatim (and seed the
+        # conversation prefix below) so the request prefix is byte-identical and
+        # the provider's prompt cache hits. A filter still narrows tools when given.
+        child_tools = (
+            effective_tools
+            if tools_filter is None
+            else build_child_tools(effective_tools, tools_filter)
         )
-    )
+        child_system = list(args.parent_session.system_blocks_override or agent.system_blocks)
+        seed_view = list(args.parent_session.provider_view)
+    else:
+        child_tools = build_child_tools(effective_tools, tools_filter)
+        # Build the child system blocks from the child's filtered tool names so the
+        # protocol block only describes tools the subagent actually has access to.
+        child_tool_names = sorted(t.name for t in child_tools.list())
+        builder = getattr(agent, "build_system_blocks_for_tool_names", None)
+        if callable(builder):
+            child_system = list(cast(Iterable[SystemBlock], builder(child_tool_names)))
+        else:
+            child_system = list(agent.system_blocks)
+        child_system.append(
+            SystemBlock(
+                text=f"User-provided instructions:\n\n{args.definition.body}",
+                cacheable=True,
+            )
+        )
+        seed_view = []
 
     child_session = Session(
         id=child_record.id,
@@ -194,10 +221,19 @@ async def run_subagent(args: RunSubagentArgs) -> RunSubagentResult:
         meta=child_record.meta,
         agent=agent,
         store=store,
-        provider_view=[],
+        provider_view=seed_view,
     )
+    if args.fork:
+        # Clone the parent's read-file tracker so the child skips re-reading files
+        # the parent already loaded.
+        for path in args.parent_session.file_read_tracker.files():
+            child_session.file_read_tracker.add(path)
     child_session.tools_override = child_tools
     child_session.system_blocks_override = child_system
+    # Give the worker a peer-mailbox address (its display_name) so siblings can
+    # message it; no-op when the agent has no mailbox configured.
+    if getattr(agent, "mailbox", None) is not None:
+        child_session.mailbox_address = args.display_name
     # Child joins the parent's spending cap: same RunBudget object, so child
     # turns are visible to the parent's next pre-call budget check.
     child_session.inherited_budget = getattr(args.parent_session, "active_budget", None)
@@ -214,6 +250,10 @@ async def run_subagent(args: RunSubagentArgs) -> RunSubagentResult:
     hook_dispatcher = HookDispatcher(getattr(agent, "hooks", None))
     result: RunSubagentResult | None = None
     try:
+        # Acquire an isolated working directory (if configured) inside the try so
+        # the finally always releases it, even on a mid-run failure path.
+        if args.isolation is not None:
+            child_session.cwd_override = await args.isolation.acquire()
         if hook_dispatcher.active:
             await hook_dispatcher.dispatch(
                 HookEvent.SUBAGENT_START,
@@ -241,6 +281,9 @@ async def run_subagent(args: RunSubagentArgs) -> RunSubagentResult:
             signal=merged_signal,
         )
     finally:
+        # Release the isolation cwd (unless kept) before other cleanup.
+        if args.isolation is not None and child_session.cwd_override:
+            await args.isolation.release(child_session.cwd_override, keep=args.isolation_keep)
         # Always release the merged-signal watcher task and dispatch
         # SUBAGENT_STOP so cleanup runs on all failure and cancellation paths.
         merged_signal.close()

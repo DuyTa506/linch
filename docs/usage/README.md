@@ -87,6 +87,7 @@ One `Agent`, many `Session`s is the canonical web-app shape — see
 | [Workflows](./workflows.md) | Deterministic fleet loops (`run_workflow`), journaling, resume |
 | [Deep agent](./deep-agent.md) | `create_deep_agent`, background workers, fork/continue, coordinator mode |
 | [Skills](./skills.md) | Slash-command prompt workflows, the built-in `verify` skill |
+| [Extending](./extending.md) | Implement your own seam: `IsolationBackend`, `Mailbox`, `ScheduleStore`, prompt assembly, memory lifecycle |
 | [Examples](./examples.md) | Index of runnable examples under `examples/` |
 
 ---

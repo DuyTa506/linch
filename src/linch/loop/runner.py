@@ -5,11 +5,15 @@ execution, guards, gates, budgets, and durable checkpoints."""
 from __future__ import annotations
 
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any, cast
 from uuid import uuid4
 
-from ..compaction import build_compaction_event, maybe_compact
+from ..compaction import (
+    build_compaction_event,
+    maybe_compact,
+    reset_read_tracker_after_compaction,
+)
 from ..context import context_budget_to_dict
 from ..errors import AbortError
 from ..events import (
@@ -95,6 +99,10 @@ from .terminals import (
     _validate_structured_output,
 )
 
+# Max BeforeFinalAnswer-induced retries honored per run before the answer is
+# accepted as-is. Keeps a perpetually-blocking final-answer hook from looping.
+_MAX_FINAL_ANSWER_REENTRIES = 1
+
 
 async def _drain_pending_notifications(
     session: Session,
@@ -113,16 +121,76 @@ async def _drain_pending_notifications(
         yield event
 
 
+def _render_peer_message(message: Any) -> Message:
+    """Wrap a drained :class:`MailboxMessage` as a ``<peer-message>`` user message."""
+    from xml.sax.saxutils import escape
+
+    parts = [
+        "<peer-message>",
+        f"<from>{escape(message.sender)}</from>",
+        f"<type>{escape(message.type)}</type>",
+    ]
+    if message.request_id:
+        parts.append(f"<request-id>{escape(message.request_id)}</request-id>")
+    if message.in_reply_to:
+        parts.append(f"<in-reply-to>{escape(message.in_reply_to)}</in-reply-to>")
+    parts.append(f"<content>{escape(message.content)}</content>")
+    parts.append("</peer-message>")
+    return Message(role="user", content=[TextBlock(text="".join(parts))])
+
+
+async def _drain_mailbox(session: Session, run_id: str) -> AsyncIterator[Event]:
+    """Drain peer messages for this session's address into provider_view.
+
+    No-op (byte-identical) unless the agent has a ``mailbox`` and the session has
+    a ``mailbox_address``. Mirrors :func:`_drain_pending_notifications`.
+    """
+    mailbox = getattr(session.agent, "mailbox", None)
+    address = getattr(session, "mailbox_address", None)
+    if mailbox is None or not address:
+        return
+    messages = await mailbox.drain(address)
+    for message in messages:
+        note = _render_peer_message(message)
+        await session.append([note])
+        event: Event = UserEvent(message=note)
+        await _persist_event(session, run_id, event)
+        yield event
+
+
+async def _drain_child_events(session: Session, run_id: str) -> AsyncIterator[Event]:
+    """Surface accumulated subagent events to the parent's event stream.
+
+    Foreground/background subagents append their events (wrapped as
+    ``SubagentEvent``) to ``session.pending_child_events``. Yielding them here —
+    at the same top-of-turn chokepoint as the other drains — bubbles a child's
+    ``PermissionRequestEvent`` (and every other child event) up to the parent
+    caller's iterator instead of leaving it in a buffer only host UIs can poll.
+    These are observational and are *not* injected into ``provider_view`` (the
+    subagent's tool result already represents the work). No-op (byte-identical)
+    when no subagent has run.
+    """
+    pending = getattr(session, "pending_child_events", None)
+    if not pending:
+        return
+    to_drain = list(pending)
+    pending.clear()
+    for event in to_drain:
+        await _persist_event(session, run_id, event)
+        yield event
+
+
 async def _cancel_background_workers(session: Session) -> None:
     """Cancel any running asyncio.Tasks in session.workers (abort cleanup)."""
     import asyncio
 
     workers = getattr(session, "workers", None)
-    if not workers:
-        return
-    for handle in workers.values():
+    for handle in (workers or {}).values():
         task = getattr(handle, "task", None)
         if task is not None and isinstance(task, asyncio.Task) and not task.done():
+            task.cancel()
+    for task in getattr(session, "background_tasks", None) or []:
+        if isinstance(task, asyncio.Task) and not task.done():
             task.cancel()
 
 
@@ -166,6 +234,94 @@ async def resume_loop(session: Session, run_id: str, opts: RunOptions) -> AsyncI
         yield event
 
 
+class _SpanLifecycle:
+    """Tracks the open turn/provider-call observer spans for one run.
+
+    Owns the two pieces of mutable span state (`active_turn_index`,
+    `active_provider_call`) that the turn loop previously threaded through
+    `nonlocal` closures, and dispatches the matching lifecycle hook events
+    via the run's `_dispatch_lifecycle` callback.
+    """
+
+    def __init__(
+        self,
+        session: Session,
+        run_id: str,
+        dispatch: Callable[[HookEvent, Any], Awaitable[None]],
+    ) -> None:
+        self._session = session
+        self._run_id = run_id
+        self._dispatch = dispatch
+        self.active_turn_index: int | None = None
+        self.active_provider_call: tuple[int, str, float] | None = None
+
+    async def start_turn(self, turn_index: int) -> None:
+        await self._dispatch(
+            HookEvent.TURN_START,
+            TurnStartContext(
+                session=self._session,
+                run_id=self._run_id,
+                turn_index=turn_index,
+                deps=getattr(self._session, "run_deps", None),
+            ),
+        )
+        self.active_turn_index = turn_index
+
+    async def end_active_turn(self) -> None:
+        if self.active_turn_index is None:
+            return
+        turn_index = self.active_turn_index
+        self.active_turn_index = None
+        await self._dispatch(
+            HookEvent.TURN_STOP,
+            TurnStopContext(
+                session=self._session,
+                run_id=self._run_id,
+                turn_index=turn_index,
+                deps=getattr(self._session, "run_deps", None),
+            ),
+        )
+
+    async def start_provider_call(self, turn_index: int, model: str) -> None:
+        started_at = time.perf_counter()
+        await self._dispatch(
+            HookEvent.PROVIDER_CALL_START,
+            ProviderCallStartContext(
+                session=self._session,
+                run_id=self._run_id,
+                turn_index=turn_index,
+                deps=getattr(self._session, "run_deps", None),
+                model=model,
+            ),
+        )
+        self.active_provider_call = (turn_index, model, started_at)
+
+    async def end_active_provider_call(
+        self, *, stop_reason: str, usage: Usage | None = None
+    ) -> None:
+        if self.active_provider_call is None:
+            return
+        turn_index, model, started_at = self.active_provider_call
+        self.active_provider_call = None
+        await self._dispatch(
+            HookEvent.PROVIDER_CALL_STOP,
+            ProviderCallStopContext(
+                session=self._session,
+                run_id=self._run_id,
+                turn_index=turn_index,
+                deps=getattr(self._session, "run_deps", None),
+                model=model,
+                stop_reason=stop_reason,
+                usage=usage or Usage(),
+                duration_ms=int((time.perf_counter() - started_at) * 1000),
+            ),
+        )
+
+    async def close_active_observer_spans(self, *, stop_reason: str = "error") -> None:
+        await self.end_active_provider_call(stop_reason=stop_reason)
+        await self.end_active_turn()
+
+
 async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
     session: Session,
     prompt: str,
@@ -177,6 +333,9 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
 ) -> AsyncIterator[Event]:
     agent = session.agent
     session.active_run_id = run_id
+    # Reset run-level model-fallback state so each run starts on the primary model.
+    session.active_model = None
+    session.fallback_index = 0
     started = time.time()
     total = Usage()
     running_cost: float | None = None  # accumulated USD cost; None until first priced turn
@@ -464,80 +623,25 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         else session._abort_controller
     )
     _final_result: _RunResultInfo | None = None
-    _active_turn_index: int | None = None
-    _active_provider_call: tuple[int, str, float] | None = None
     # Closed-loop schema-repair state (per-run; not checkpointed — a resumed
     # run starts with fresh retry counters).
     _max_schema_retries = int(getattr(agent, "structured_output_retries", 0) or 0)
     _gate_attempts = [0]  # [schema_attempts]
+    # Re-entry guard: how many BeforeFinalAnswer-induced retries have been
+    # honored this run. A hook that *always* asks to retry would otherwise bounce
+    # the loop back every terminal until max_turns; the guard caps honored
+    # retries at _MAX_FINAL_ANSWER_REENTRIES, then accepts the answer as-is.
+    _final_answer_reentries = [0]
 
-    async def _start_turn(turn_index: int) -> None:
-        nonlocal _active_turn_index
-        await _dispatch_lifecycle(
-            HookEvent.TURN_START,
-            TurnStartContext(
-                session=session,
-                run_id=run_id,
-                turn_index=turn_index,
-                deps=getattr(session, "run_deps", None),
-            ),
-        )
-        _active_turn_index = turn_index
-
-    async def _end_active_turn() -> None:
-        nonlocal _active_turn_index
-        if _active_turn_index is None:
-            return
-        turn_index = _active_turn_index
-        _active_turn_index = None
-        await _dispatch_lifecycle(
-            HookEvent.TURN_STOP,
-            TurnStopContext(
-                session=session,
-                run_id=run_id,
-                turn_index=turn_index,
-                deps=getattr(session, "run_deps", None),
-            ),
-        )
-
-    async def _start_provider_call(turn_index: int, model: str) -> None:
-        nonlocal _active_provider_call
-        started_at = time.perf_counter()
-        await _dispatch_lifecycle(
-            HookEvent.PROVIDER_CALL_START,
-            ProviderCallStartContext(
-                session=session,
-                run_id=run_id,
-                turn_index=turn_index,
-                deps=getattr(session, "run_deps", None),
-                model=model,
-            ),
-        )
-        _active_provider_call = (turn_index, model, started_at)
-
-    async def _end_active_provider_call(*, stop_reason: str, usage: Usage | None = None) -> None:
-        nonlocal _active_provider_call
-        if _active_provider_call is None:
-            return
-        turn_index, model, started_at = _active_provider_call
-        _active_provider_call = None
-        await _dispatch_lifecycle(
-            HookEvent.PROVIDER_CALL_STOP,
-            ProviderCallStopContext(
-                session=session,
-                run_id=run_id,
-                turn_index=turn_index,
-                deps=getattr(session, "run_deps", None),
-                model=model,
-                stop_reason=stop_reason,
-                usage=usage or Usage(),
-                duration_ms=int((time.perf_counter() - started_at) * 1000),
-            ),
-        )
-
-    async def _close_active_observer_spans(*, stop_reason: str = "error") -> None:
-        await _end_active_provider_call(stop_reason=stop_reason)
-        await _end_active_turn()
+    # Observer/hook span bookkeeping (turn + provider-call spans) lives in a
+    # small helper so the turn loop no longer threads its mutable span state
+    # through nonlocal closures. Local aliases keep the call sites unchanged.
+    _spans = _SpanLifecycle(session, run_id, _dispatch_lifecycle)
+    _start_turn = _spans.start_turn
+    _end_active_turn = _spans.end_active_turn
+    _start_provider_call = _spans.start_provider_call
+    _end_active_provider_call = _spans.end_active_provider_call
+    _close_active_observer_spans = _spans.close_active_observer_spans
 
     async def _dispatch_before_provider_call(
         request: Any,
@@ -738,6 +842,12 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             # Drain background-worker notifications before this turn's provider call.
             async for note_event in _drain_pending_notifications(session, run_id):
                 yield note_event
+            # Drain peer mailbox messages addressed to this session, same chokepoint.
+            async for mail_event in _drain_mailbox(session, run_id):
+                yield mail_event
+            # Bubble accumulated subagent events (incl. child PermissionRequests).
+            async for child_event in _drain_child_events(session, run_id):
+                yield child_event
             await _start_turn(turn_index)
             # Captured before _force_final_pending is reset below: a guard-
             # forced final answer must bypass the verification gates.
@@ -790,6 +900,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 resumed_assistant = True
 
             if not resumed_assistant and await maybe_compact(session, agent, signal):
+                reset_read_tracker_after_compaction(session, agent)
                 event = build_compaction_event(session)
                 await _persist_event(session, run_id, event)
                 yield event
@@ -1127,7 +1238,11 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                     for hook_event in hook_events:
                         await _persist_event(session, run_id, hook_event)
                         yield hook_event
-                    if hook_action == "retry":
+                    if (
+                        hook_action == "retry"
+                        and _final_answer_reentries[0] < _MAX_FINAL_ANSWER_REENTRIES
+                    ):
+                        _final_answer_reentries[0] += 1
                         async for event in _final_tool_retry_tail(
                             session,
                             run_id=run_id,
@@ -1318,7 +1433,11 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 for hook_event in hook_events:
                     await _persist_event(session, run_id, hook_event)
                     yield hook_event
-                if hook_action == "retry":
+                if (
+                    hook_action == "retry"
+                    and _final_answer_reentries[0] < _MAX_FINAL_ANSWER_REENTRIES
+                ):
+                    _final_answer_reentries[0] += 1
                     async for event in _gate_retry_tail(
                         session, run_id=run_id, feedback=feedback or ""
                     ):
@@ -1734,7 +1853,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             AgentStopContext(
                 session=session,
                 run_id=run_id,
-                turn_index=_active_turn_index,
+                turn_index=_spans.active_turn_index,
                 deps=getattr(session, "run_deps", None),
                 result=_run_result,
             ),
