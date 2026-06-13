@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from linch.mailbox import (
+from linch.coordination.mailbox import (
     Correlator,
     InMemoryMailbox,
     MailboxMessage,

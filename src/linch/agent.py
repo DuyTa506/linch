@@ -560,7 +560,7 @@ class Agent:
         if mailbox is None:
             return
 
-        from .tools.send_message import SendMessageTool
+        from .coordination.send_message import SendMessageTool
 
         get_session = lambda sid: self._sessions.get(sid)  # noqa: E731
         try:
@@ -582,7 +582,7 @@ class Agent:
         if schedule_store is None:
             return
 
-        from .scheduling import schedule_tools
+        from .coordination.scheduling import schedule_tools
 
         for schedule_tool in schedule_tools(schedule_store):
             try:

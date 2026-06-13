@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .base import ToolContext, ToolResult, ToolScope
+from ..tools.base import ToolContext, ToolResult, ToolScope
 
 SEND_MESSAGE_TOOL_NAME = "send_message"
 
@@ -82,7 +82,7 @@ class SendMessageTool:
         return f"Send message to {input.get('to', '?')}"
 
     async def execute(self, input: dict[str, object], ctx: ToolContext) -> ToolResult:
-        from ..mailbox import MailboxMessage
+        from .mailbox import MailboxMessage
 
         recipient = str(input["to"]).strip()
         session = self._get_session(ctx.session_id)
