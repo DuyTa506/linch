@@ -643,6 +643,91 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
     _end_active_provider_call = _spans.end_active_provider_call
     _close_active_observer_spans = _spans.close_active_observer_spans
 
+    def _build_run_result(
+        subtype: str,
+        stop_reason: str,
+        *,
+        duration_ms: int,
+        error: dict[str, Any] | None = None,
+    ) -> _RunResultInfo:
+        """Build the run's terminal :class:`RunResultInfo` from current run state.
+
+        Centralises the ``run_id``/``session_id``/``total_usage`` boilerplate
+        repeated at every loop exit (success, error, abort, max-turns, finally)."""
+        return _RunResultInfo(
+            run_id=run_id,
+            session_id=session.id,
+            subtype=subtype,
+            stop_reason=stop_reason,
+            total_usage=total,
+            duration_ms=duration_ms,
+            error=error,
+        )
+
+    async def _emit_error_terminal(
+        *,
+        final_text_value: str | None = None,
+        duration_ms: int | None = None,
+        end_provider_call_usage: Usage | None = None,
+    ) -> AsyncIterator[Event]:
+        """Record the error ``_final_result``, close spans, and emit the error tail.
+
+        Shared by every in-loop error exit (BeforeProviderCall/AfterProviderCall/
+        Stop hooks, schema-gate stop, loop-guard hard stop). The caller still
+        issues ``return`` afterwards so the control-flow exit stays visible at the
+        call site. ``duration_ms`` defaults to a fresh wall-clock reading; pass it
+        explicitly when the original site reused a ``_dur`` computed earlier.
+        ``end_provider_call_usage`` closes the active provider-call span first
+        (the AfterProviderCall stop path)."""
+        nonlocal _final_result
+        _dur = duration_ms if duration_ms is not None else int((time.time() - started) * 1000)
+        _final_result = _build_run_result("error", "error", duration_ms=_dur)
+        if end_provider_call_usage is not None:
+            await _end_active_provider_call(stop_reason="error", usage=end_provider_call_usage)
+        await _end_active_turn()
+        async for event in _error_result_tail(
+            session,
+            agent,
+            run_id=run_id,
+            run_record=run_record,
+            checkpoint=checkpoint,
+            total=total,
+            duration_ms=_dur,
+            running_cost=running_cost,
+            final_text_value=final_text_value,
+        ):
+            yield event
+
+    async def _emit_success_terminal(
+        proposed: ResultEvent,
+        *,
+        duration_ms: int,
+    ) -> AsyncIterator[Event]:
+        """Record the success ``_final_result``, close the turn span, and emit the
+        success tail from a hook-approved ``proposed`` ResultEvent.
+
+        Shared by the final-tool and final-text success exits."""
+        nonlocal _final_result
+        _final_result = _build_run_result(
+            proposed.subtype, proposed.stop_reason, duration_ms=duration_ms
+        )
+        await _end_active_turn()
+        async for event in _success_result_tail(
+            session,
+            agent,
+            run_id=run_id,
+            run_record=run_record,
+            checkpoint=checkpoint,
+            total=total,
+            duration_ms=duration_ms,
+            running_cost=running_cost,
+            stop_reason=proposed.stop_reason,
+            final_text_value=proposed.final_text,
+            structured_output=proposed.structured_output,
+            structured_error=proposed.structured_error,
+        ):
+            yield event
+
     async def _dispatch_before_provider_call(
         request: Any,
         turn_index: int,
@@ -791,6 +876,227 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             return result_event, dispatched.events, "stop", result.reason or result.feedback
         return result_event, dispatched.events, None, None
 
+    async def _finalize_final_tool_answer(
+        turn_index: int,
+        assembly: AssistantAssembly,
+        tool_blocks: list[ToolUseBlock],
+        final_block: ToolUseBlock,
+    ) -> AsyncIterator[Event]:
+        """Terminal final-tool path: treat the tool input as structured output,
+        run the schema/verifier/stop gates, then emit the success or error tail.
+
+        Sets ``_final_result`` (via the ``_emit_*`` helpers) iff the run should
+        end; if it instead bounces the answer back for another turn it ends the
+        turn and leaves ``_final_result`` unset — the caller reads the flag to
+        decide between ``return`` and ``continue``."""
+        raw_structured_output = dict(final_block.input)
+        structured_output: dict[str, Any] | None = raw_structured_output
+        structured_error: str | None = None
+        effective_schema = opts.output_schema or getattr(agent, "output_schema", None)
+        if effective_schema is not None:
+            structured_error = _validate_structured_output(raw_structured_output, effective_schema)
+            if structured_error is not None:
+                structured_output = None
+        if not _forced_final_turn and _max_schema_retries:
+            _gate = await _evaluate_terminal_gates(
+                session,
+                run_id=run_id,
+                max_schema_retries=_max_schema_retries,
+                attempts=_gate_attempts,
+                structured_output=structured_output,
+                structured_error=structured_error,
+            )
+            for event in _gate.events:
+                yield event
+            if _gate.decision == "stop":
+                async for event in _emit_error_terminal():
+                    yield event
+                return
+            if _gate.decision == "retry":
+                async for event in _final_tool_retry_tail(
+                    session,
+                    run_id=run_id,
+                    tool_blocks=tool_blocks,
+                    final_id=final_block.id,
+                    feedback=_gate.feedback or "",
+                ):
+                    yield event
+                await _end_active_turn()
+                await _save_checkpoint("turn_complete", turn_index=turn_index)
+                return
+
+        (
+            ft,
+            structured_output,
+            structured_error,
+            hook_events,
+            hook_action,
+            feedback,
+        ) = await _dispatch_before_final_answer(
+            turn_index=turn_index,
+            final_text_value=None,
+            structured_output=structured_output,
+            structured_error=structured_error,
+            stop_reason="tool_use",
+            final_tool_name=effective_final_tool,
+            tool_use=final_block,
+            skip=_forced_final_turn,
+        )
+        for hook_event in hook_events:
+            await _persist_event(session, run_id, hook_event)
+            yield hook_event
+        if hook_action == "retry" and _final_answer_reentries[0] < _MAX_FINAL_ANSWER_REENTRIES:
+            _final_answer_reentries[0] += 1
+            async for event in _final_tool_retry_tail(
+                session,
+                run_id=run_id,
+                tool_blocks=tool_blocks,
+                final_id=final_block.id,
+                feedback=feedback or "",
+            ):
+                yield event
+            await _end_active_turn()
+            await _save_checkpoint("turn_complete", turn_index=turn_index)
+            return
+        if hook_action == "stop":
+            async for event in _emit_error_terminal(final_text_value=feedback):
+                yield event
+            return
+        _dur = int((time.time() - started) * 1000)
+        proposed = ResultEvent(
+            subtype="success",
+            stop_reason="tool_use",
+            total_usage=total,
+            duration_ms=_dur,
+            final_text=ft,
+            structured_output=structured_output,
+            structured_error=structured_error,
+            total_cost_usd=running_cost,
+        )
+        proposed, hook_events, stop_action, feedback = await _dispatch_stop(proposed, turn_index)
+        for hook_event in hook_events:
+            await _persist_event(session, run_id, hook_event)
+            yield hook_event
+        if stop_action == "continue":
+            async for event in _final_tool_retry_tail(
+                session,
+                run_id=run_id,
+                tool_blocks=tool_blocks,
+                final_id=final_block.id,
+                feedback=feedback or "",
+            ):
+                yield event
+            await _end_active_turn()
+            await _save_checkpoint("turn_complete", turn_index=turn_index)
+            return
+        if stop_action == "stop":
+            async for event in _emit_error_terminal(final_text_value=feedback, duration_ms=_dur):
+                yield event
+            return
+        async for event in _emit_success_terminal(proposed, duration_ms=_dur):
+            yield event
+
+    async def _finalize_text_answer(
+        turn_index: int,
+        assembly: AssistantAssembly,
+    ) -> AsyncIterator[Event]:
+        """Terminal plain-text path: parse/validate structured output, run the
+        schema/verifier/stop gates, then emit the success or error tail.
+
+        Same ``_final_result`` signalling contract as
+        :func:`_finalize_final_tool_answer`."""
+        ft = final_text(assembly.message)
+        structured_output: dict[str, Any] | None = None
+        structured_error: str | None = None
+        effective_schema = opts.output_schema or getattr(agent, "output_schema", None)
+        if effective_schema is not None and ft is not None:
+            structured_output, structured_error = _parse_structured_output(ft, effective_schema)
+
+        # ── Closed-loop gates: schema repair, then verifiers ──────
+        # Skipped on a loop-guard force_final turn: a guard-tripped run must not
+        # be bounced back into the loop.
+        if not _forced_final_turn and _max_schema_retries:
+            _gate = await _evaluate_terminal_gates(
+                session,
+                run_id=run_id,
+                max_schema_retries=_max_schema_retries,
+                attempts=_gate_attempts,
+                structured_output=structured_output,
+                structured_error=structured_error,
+            )
+            for event in _gate.events:
+                yield event
+            if _gate.decision == "stop":
+                async for event in _emit_error_terminal(final_text_value=ft):
+                    yield event
+                return
+            if _gate.decision == "retry":
+                async for event in _gate_retry_tail(
+                    session, run_id=run_id, feedback=_gate.feedback or ""
+                ):
+                    yield event
+                await _end_active_turn()
+                await _save_checkpoint("turn_complete", turn_index=turn_index)
+                return
+
+        (
+            ft,
+            structured_output,
+            structured_error,
+            hook_events,
+            hook_action,
+            feedback,
+        ) = await _dispatch_before_final_answer(
+            turn_index=turn_index,
+            final_text_value=ft,
+            structured_output=structured_output,
+            structured_error=structured_error,
+            stop_reason=assembly.stop_reason,
+            skip=_forced_final_turn,
+        )
+        for hook_event in hook_events:
+            await _persist_event(session, run_id, hook_event)
+            yield hook_event
+        if hook_action == "retry" and _final_answer_reentries[0] < _MAX_FINAL_ANSWER_REENTRIES:
+            _final_answer_reentries[0] += 1
+            async for event in _gate_retry_tail(session, run_id=run_id, feedback=feedback or ""):
+                yield event
+            await _end_active_turn()
+            await _save_checkpoint("turn_complete", turn_index=turn_index)
+            return
+        if hook_action == "stop":
+            async for event in _emit_error_terminal(final_text_value=feedback):
+                yield event
+            return
+
+        _dur = int((time.time() - started) * 1000)
+        proposed = ResultEvent(
+            subtype="success",
+            stop_reason=assembly.stop_reason,
+            total_usage=total,
+            duration_ms=_dur,
+            final_text=ft,
+            structured_output=structured_output,
+            structured_error=structured_error,
+            total_cost_usd=running_cost,
+        )
+        proposed, hook_events, stop_action, feedback = await _dispatch_stop(proposed, turn_index)
+        for hook_event in hook_events:
+            await _persist_event(session, run_id, hook_event)
+            yield hook_event
+        if stop_action == "continue":
+            async for event in _gate_retry_tail(session, run_id=run_id, feedback=feedback or ""):
+                yield event
+            await _end_active_turn()
+            await _save_checkpoint("turn_complete", turn_index=turn_index)
+            return
+        if stop_action == "stop":
+            async for event in _emit_error_terminal(final_text_value=feedback, duration_ms=_dur):
+                yield event
+            return
+        async for event in _emit_success_terminal(proposed, duration_ms=_dur):
+            yield event
+
     start_turn = checkpoint.turn_index
     if resume_checkpoint is not None and checkpoint.phase in {
         "tool_results_appended",
@@ -818,14 +1124,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             # max-turns tail below.
             if _budget is not None and _budget.exceeded:
                 _dur = int((time.time() - started) * 1000)
-                _final_result = _RunResultInfo(
-                    run_id=run_id,
-                    session_id=session.id,
-                    subtype="error",
-                    stop_reason="error",
-                    total_usage=total,
-                    duration_ms=_dur,
-                )
+                _final_result = _build_run_result("error", "error", duration_ms=_dur)
                 async for event in _budget_exhausted_tail(
                     session,
                     agent,
@@ -960,14 +1259,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                     continue
                 if provider_action == "stop_success":
                     _dur = int((time.time() - started) * 1000)
-                    _final_result = _RunResultInfo(
-                        run_id=run_id,
-                        session_id=session.id,
-                        subtype="success",
-                        stop_reason="end_turn",
-                        total_usage=total,
-                        duration_ms=_dur,
-                    )
+                    _final_result = _build_run_result("success", "end_turn", duration_ms=_dur)
                     await _end_active_turn()
                     async for event in _stop_when_tail(
                         session,
@@ -982,27 +1274,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                         yield event
                     return
                 if provider_action == "stop":
-                    _dur = int((time.time() - started) * 1000)
-                    _final_result = _RunResultInfo(
-                        run_id=run_id,
-                        session_id=session.id,
-                        subtype="error",
-                        stop_reason="error",
-                        total_usage=total,
-                        duration_ms=_dur,
-                    )
-                    await _end_active_turn()
-                    async for event in _error_result_tail(
-                        session,
-                        agent,
-                        run_id=run_id,
-                        run_record=run_record,
-                        checkpoint=checkpoint,
-                        total=total,
-                        duration_ms=_dur,
-                        running_cost=running_cost,
-                        final_text_value=provider_feedback,
-                    ):
+                    async for event in _emit_error_terminal(final_text_value=provider_feedback):
                         yield event
                     return
 
@@ -1072,27 +1344,9 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                     await _persist_event(session, run_id, hook_event)
                     yield hook_event
                 if after_action == "stop":
-                    _dur = int((time.time() - started) * 1000)
-                    _final_result = _RunResultInfo(
-                        run_id=run_id,
-                        session_id=session.id,
-                        subtype="error",
-                        stop_reason="error",
-                        total_usage=total,
-                        duration_ms=_dur,
-                    )
-                    await _end_active_provider_call(stop_reason="error", usage=_provider_usage)
-                    await _end_active_turn()
-                    async for event in _error_result_tail(
-                        session,
-                        agent,
-                        run_id=run_id,
-                        run_record=run_record,
-                        checkpoint=checkpoint,
-                        total=total,
-                        duration_ms=_dur,
-                        running_cost=running_cost,
+                    async for event in _emit_error_terminal(
                         final_text_value=after_feedback,
+                        end_provider_call_usage=_provider_usage,
                     ):
                         yield event
                     return
@@ -1158,392 +1412,21 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 tool_blocks = [b for b in assembly.message.content if isinstance(b, ToolUseBlock)]
                 final_block = next((b for b in tool_blocks if b.name == effective_final_tool), None)
                 if final_block is not None:
-                    # Terminal: treat the tool input as structured output,
-                    # do NOT execute it as a normal tool call.
-                    raw_structured_output = dict(final_block.input)
-                    structured_output: dict[str, Any] | None = raw_structured_output
-                    structured_error = None
-                    effective_schema = opts.output_schema or getattr(agent, "output_schema", None)
-                    if effective_schema is not None:
-                        structured_error = _validate_structured_output(
-                            raw_structured_output,
-                            effective_schema,
-                        )
-                        if structured_error is not None:
-                            structured_output = None
-                    if not _forced_final_turn and _max_schema_retries:
-                        _gate = await _evaluate_terminal_gates(
-                            session,
-                            run_id=run_id,
-                            max_schema_retries=_max_schema_retries,
-                            attempts=_gate_attempts,
-                            structured_output=structured_output,
-                            structured_error=structured_error,
-                        )
-                        for event in _gate.events:
-                            yield event
-                        if _gate.decision == "stop":
-                            _dur = int((time.time() - started) * 1000)
-                            _final_result = _RunResultInfo(
-                                run_id=run_id,
-                                session_id=session.id,
-                                subtype="error",
-                                stop_reason="error",
-                                total_usage=total,
-                                duration_ms=_dur,
-                            )
-                            await _end_active_turn()
-                            async for event in _error_result_tail(
-                                session,
-                                agent,
-                                run_id=run_id,
-                                run_record=run_record,
-                                checkpoint=checkpoint,
-                                total=total,
-                                duration_ms=_dur,
-                                running_cost=running_cost,
-                            ):
-                                yield event
-                            return
-                        if _gate.decision == "retry":
-                            async for event in _final_tool_retry_tail(
-                                session,
-                                run_id=run_id,
-                                tool_blocks=tool_blocks,
-                                final_id=final_block.id,
-                                feedback=_gate.feedback or "",
-                            ):
-                                yield event
-                            await _end_active_turn()
-                            await _save_checkpoint("turn_complete", turn_index=turn_index)
-                            continue
-
-                    (
-                        ft,
-                        structured_output,
-                        structured_error,
-                        hook_events,
-                        hook_action,
-                        feedback,
-                    ) = await _dispatch_before_final_answer(
-                        turn_index=turn_index,
-                        final_text_value=None,
-                        structured_output=structured_output,
-                        structured_error=structured_error,
-                        stop_reason="tool_use",
-                        final_tool_name=effective_final_tool,
-                        tool_use=final_block,
-                        skip=_forced_final_turn,
-                    )
-                    for hook_event in hook_events:
-                        await _persist_event(session, run_id, hook_event)
-                        yield hook_event
-                    if (
-                        hook_action == "retry"
-                        and _final_answer_reentries[0] < _MAX_FINAL_ANSWER_REENTRIES
-                    ):
-                        _final_answer_reentries[0] += 1
-                        async for event in _final_tool_retry_tail(
-                            session,
-                            run_id=run_id,
-                            tool_blocks=tool_blocks,
-                            final_id=final_block.id,
-                            feedback=feedback or "",
-                        ):
-                            yield event
-                        await _end_active_turn()
-                        await _save_checkpoint("turn_complete", turn_index=turn_index)
-                        continue
-                    if hook_action == "stop":
-                        _dur = int((time.time() - started) * 1000)
-                        _final_result = _RunResultInfo(
-                            run_id=run_id,
-                            session_id=session.id,
-                            subtype="error",
-                            stop_reason="error",
-                            total_usage=total,
-                            duration_ms=_dur,
-                        )
-                        await _end_active_turn()
-                        async for event in _error_result_tail(
-                            session,
-                            agent,
-                            run_id=run_id,
-                            run_record=run_record,
-                            checkpoint=checkpoint,
-                            total=total,
-                            duration_ms=_dur,
-                            running_cost=running_cost,
-                            final_text_value=feedback,
-                        ):
-                            yield event
-                        return
-                    _dur = int((time.time() - started) * 1000)
-                    proposed = ResultEvent(
-                        subtype="success",
-                        stop_reason="tool_use",
-                        total_usage=total,
-                        duration_ms=_dur,
-                        final_text=ft,
-                        structured_output=structured_output,
-                        structured_error=structured_error,
-                        total_cost_usd=running_cost,
-                    )
-                    proposed, hook_events, stop_action, feedback = await _dispatch_stop(
-                        proposed,
-                        turn_index,
-                    )
-                    for hook_event in hook_events:
-                        await _persist_event(session, run_id, hook_event)
-                        yield hook_event
-                    if stop_action == "continue":
-                        async for event in _final_tool_retry_tail(
-                            session,
-                            run_id=run_id,
-                            tool_blocks=tool_blocks,
-                            final_id=final_block.id,
-                            feedback=feedback or "",
-                        ):
-                            yield event
-                        await _end_active_turn()
-                        await _save_checkpoint("turn_complete", turn_index=turn_index)
-                        continue
-                    if stop_action == "stop":
-                        _final_result = _RunResultInfo(
-                            run_id=run_id,
-                            session_id=session.id,
-                            subtype="error",
-                            stop_reason="error",
-                            total_usage=total,
-                            duration_ms=_dur,
-                        )
-                        await _end_active_turn()
-                        async for event in _error_result_tail(
-                            session,
-                            agent,
-                            run_id=run_id,
-                            run_record=run_record,
-                            checkpoint=checkpoint,
-                            total=total,
-                            duration_ms=_dur,
-                            running_cost=running_cost,
-                            final_text_value=feedback,
-                        ):
-                            yield event
-                        return
-                    _final_result = _RunResultInfo(
-                        run_id=run_id,
-                        session_id=session.id,
-                        subtype=proposed.subtype,
-                        stop_reason=proposed.stop_reason,
-                        total_usage=total,
-                        duration_ms=_dur,
-                    )
-                    await _end_active_turn()
-                    async for event in _success_result_tail(
-                        session,
-                        agent,
-                        run_id=run_id,
-                        run_record=run_record,
-                        checkpoint=checkpoint,
-                        total=total,
-                        duration_ms=_dur,
-                        running_cost=running_cost,
-                        stop_reason=proposed.stop_reason,
-                        final_text_value=proposed.final_text,
-                        structured_output=proposed.structured_output,
-                        structured_error=proposed.structured_error,
+                    async for event in _finalize_final_tool_answer(
+                        turn_index, assembly, tool_blocks, final_block
                     ):
                         yield event
-                    return
+                    if _final_result is not None:
+                        return
+                    continue
 
             # ── Normal text response (stop_reason != tool_use) ───────────
             if assembly.stop_reason != "tool_use":
-                ft = final_text(assembly.message)
-                structured_output = None
-                structured_error = None
-                effective_schema = opts.output_schema or getattr(agent, "output_schema", None)
-                if effective_schema is not None and ft is not None:
-                    structured_output, structured_error = _parse_structured_output(
-                        ft, effective_schema
-                    )
-
-                # ── Closed-loop gates: schema repair, then verifiers ──────
-                # Skipped on a loop-guard force_final turn: a guard-tripped
-                # run must not be bounced back into the loop.
-                if not _forced_final_turn and _max_schema_retries:
-                    _gate = await _evaluate_terminal_gates(
-                        session,
-                        run_id=run_id,
-                        max_schema_retries=_max_schema_retries,
-                        attempts=_gate_attempts,
-                        structured_output=structured_output,
-                        structured_error=structured_error,
-                    )
-                    for event in _gate.events:
-                        yield event
-                    if _gate.decision == "stop":
-                        _dur = int((time.time() - started) * 1000)
-                        _final_result = _RunResultInfo(
-                            run_id=run_id,
-                            session_id=session.id,
-                            subtype="error",
-                            stop_reason="error",
-                            total_usage=total,
-                            duration_ms=_dur,
-                        )
-                        await _end_active_turn()
-                        async for event in _error_result_tail(
-                            session,
-                            agent,
-                            run_id=run_id,
-                            run_record=run_record,
-                            checkpoint=checkpoint,
-                            total=total,
-                            duration_ms=_dur,
-                            running_cost=running_cost,
-                            final_text_value=ft,
-                        ):
-                            yield event
-                        return
-                    if _gate.decision == "retry":
-                        async for event in _gate_retry_tail(
-                            session, run_id=run_id, feedback=_gate.feedback or ""
-                        ):
-                            yield event
-                        await _end_active_turn()
-                        await _save_checkpoint("turn_complete", turn_index=turn_index)
-                        continue
-
-                (
-                    ft,
-                    structured_output,
-                    structured_error,
-                    hook_events,
-                    hook_action,
-                    feedback,
-                ) = await _dispatch_before_final_answer(
-                    turn_index=turn_index,
-                    final_text_value=ft,
-                    structured_output=structured_output,
-                    structured_error=structured_error,
-                    stop_reason=assembly.stop_reason,
-                    skip=_forced_final_turn,
-                )
-                for hook_event in hook_events:
-                    await _persist_event(session, run_id, hook_event)
-                    yield hook_event
-                if (
-                    hook_action == "retry"
-                    and _final_answer_reentries[0] < _MAX_FINAL_ANSWER_REENTRIES
-                ):
-                    _final_answer_reentries[0] += 1
-                    async for event in _gate_retry_tail(
-                        session, run_id=run_id, feedback=feedback or ""
-                    ):
-                        yield event
-                    await _end_active_turn()
-                    await _save_checkpoint("turn_complete", turn_index=turn_index)
-                    continue
-                if hook_action == "stop":
-                    _dur = int((time.time() - started) * 1000)
-                    _final_result = _RunResultInfo(
-                        run_id=run_id,
-                        session_id=session.id,
-                        subtype="error",
-                        stop_reason="error",
-                        total_usage=total,
-                        duration_ms=_dur,
-                    )
-                    await _end_active_turn()
-                    async for event in _error_result_tail(
-                        session,
-                        agent,
-                        run_id=run_id,
-                        run_record=run_record,
-                        checkpoint=checkpoint,
-                        total=total,
-                        duration_ms=_dur,
-                        running_cost=running_cost,
-                        final_text_value=feedback,
-                    ):
-                        yield event
-                    return
-
-                _dur = int((time.time() - started) * 1000)
-                proposed = ResultEvent(
-                    subtype="success",
-                    stop_reason=assembly.stop_reason,
-                    total_usage=total,
-                    duration_ms=_dur,
-                    final_text=ft,
-                    structured_output=structured_output,
-                    structured_error=structured_error,
-                    total_cost_usd=running_cost,
-                )
-                proposed, hook_events, stop_action, feedback = await _dispatch_stop(
-                    proposed,
-                    turn_index,
-                )
-                for hook_event in hook_events:
-                    await _persist_event(session, run_id, hook_event)
-                    yield hook_event
-                if stop_action == "continue":
-                    async for event in _gate_retry_tail(
-                        session, run_id=run_id, feedback=feedback or ""
-                    ):
-                        yield event
-                    await _end_active_turn()
-                    await _save_checkpoint("turn_complete", turn_index=turn_index)
-                    continue
-                if stop_action == "stop":
-                    _final_result = _RunResultInfo(
-                        run_id=run_id,
-                        session_id=session.id,
-                        subtype="error",
-                        stop_reason="error",
-                        total_usage=total,
-                        duration_ms=_dur,
-                    )
-                    await _end_active_turn()
-                    async for event in _error_result_tail(
-                        session,
-                        agent,
-                        run_id=run_id,
-                        run_record=run_record,
-                        checkpoint=checkpoint,
-                        total=total,
-                        duration_ms=_dur,
-                        running_cost=running_cost,
-                        final_text_value=feedback,
-                    ):
-                        yield event
-                    return
-                _final_result = _RunResultInfo(
-                    run_id=run_id,
-                    session_id=session.id,
-                    subtype=proposed.subtype,
-                    stop_reason=proposed.stop_reason,
-                    total_usage=total,
-                    duration_ms=_dur,
-                )
-                await _end_active_turn()
-                async for event in _success_result_tail(
-                    session,
-                    agent,
-                    run_id=run_id,
-                    run_record=run_record,
-                    checkpoint=checkpoint,
-                    total=total,
-                    duration_ms=_dur,
-                    running_cost=running_cost,
-                    stop_reason=proposed.stop_reason,
-                    final_text_value=proposed.final_text,
-                    structured_output=proposed.structured_output,
-                    structured_error=proposed.structured_error,
-                ):
+                async for event in _finalize_text_answer(turn_index, assembly):
                     yield event
-                return
+                if _final_result is not None:
+                    return
+                continue
 
             tool_blocks = [b for b in assembly.message.content if isinstance(b, ToolUseBlock)]
             completed_tool_results = await _recover_completed_tool_results(
@@ -1722,26 +1605,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                         yield event
                     else:
                         # Hard stop — emit error result and exit.
-                        _dur = int((time.time() - started) * 1000)
-                        _final_result = _RunResultInfo(
-                            run_id=run_id,
-                            session_id=session.id,
-                            subtype="error",
-                            stop_reason="error",
-                            total_usage=total,
-                            duration_ms=_dur,
-                        )
-                        await _end_active_turn()
-                        async for event in _error_result_tail(
-                            session,
-                            agent,
-                            run_id=run_id,
-                            run_record=run_record,
-                            checkpoint=checkpoint,
-                            total=total,
-                            duration_ms=_dur,
-                            running_cost=running_cost,
-                        ):
+                        async for event in _emit_error_terminal():
                             yield event
                         return
             # Natural end of turn body (guard said "continue" or "force_final").
@@ -1750,14 +1614,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
 
         # ── Max-turns exhausted ───────────────────────────────────────────
         _dur = int((time.time() - started) * 1000)
-        _final_result = _RunResultInfo(
-            run_id=run_id,
-            session_id=session.id,
-            subtype="error",
-            stop_reason="error",
-            total_usage=total,
-            duration_ms=_dur,
-        )
+        _final_result = _build_run_result("error", "error", duration_ms=_dur)
         async for event in _max_turns_tail(
             session,
             agent,
@@ -1773,14 +1630,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
     except AbortError:
         await _cancel_background_workers(session)
         _dur = int((time.time() - started) * 1000)
-        _final_result = _RunResultInfo(
-            run_id=run_id,
-            session_id=session.id,
-            subtype="aborted",
-            stop_reason="error",
-            total_usage=total,
-            duration_ms=_dur,
-        )
+        _final_result = _build_run_result("aborted", "error", duration_ms=_dur)
         await _close_active_observer_spans(stop_reason="error")
         event = ResultEvent(
             subtype="aborted",
@@ -1807,15 +1657,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             **({"status": status} if isinstance(status, int) else {}),
         }
         _dur = int((time.time() - started) * 1000)
-        _final_result = _RunResultInfo(
-            run_id=run_id,
-            session_id=session.id,
-            subtype="error",
-            stop_reason="error",
-            total_usage=total,
-            duration_ms=_dur,
-            error=_err_dict,
-        )
+        _final_result = _build_run_result("error", "error", duration_ms=_dur, error=_err_dict)
         await _close_active_observer_spans(stop_reason="error")
         event = ErrorEvent(error=_err_dict)
         await _persist_event(session, run_id, event)
@@ -1840,13 +1682,8 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         if signal is not session._abort_controller:
             signal.close()
         await _close_active_observer_spans(stop_reason="error")
-        _run_result = _final_result or _RunResultInfo(
-            run_id=run_id,
-            session_id=session.id,
-            subtype="error",
-            stop_reason="error",
-            total_usage=total,
-            duration_ms=int((time.time() - started) * 1000),
+        _run_result = _final_result or _build_run_result(
+            "error", "error", duration_ms=int((time.time() - started) * 1000)
         )
         await _dispatch_lifecycle(
             HookEvent.AGENT_STOP,
