@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
+from functools import partial
 from typing import Any, cast
 from uuid import uuid4
 
@@ -33,21 +34,16 @@ from ..events import (
     UserEvent,
 )
 from ..hooks import (
-    AfterProviderCallContext,
     AgentStartContext,
     AgentStopContext,
-    BeforeFinalAnswerContext,
-    BeforeProviderCallContext,
     HookDispatcher,
     HookEvent,
     ProviderCallStartContext,
     ProviderCallStopContext,
-    StopContext,
     ToolUseStartContext,
     ToolUseStopContext,
     TurnStartContext,
     TurnStopContext,
-    UserPromptSubmitContext,
 )
 from ..pricing import cost_usd as _cost_usd
 from ..run_store import RunCheckpoint, RunRecord
@@ -77,26 +73,36 @@ from .checkpoint import (
     _skill_overlay_to_dict,
     _tool_result_block_from_end,
 )
+from .dispatch import (
+    dispatch_after_provider_call,
+    dispatch_before_final_answer,
+    dispatch_before_provider_call,
+    dispatch_lifecycle,
+    dispatch_stop,
+    dispatch_user_prompt,
+)
+from .finalize import (
+    FinalizeCtx,
+    TerminalOutcome,
+    build_run_result,
+    emit_error_terminal,
+    finalize_final_tool_answer,
+    finalize_text_answer,
+)
 from .request import (
     _build_context_result,
     _build_turn_request,
     _context_selected_tool_names,
     _re_inject_skill_context,
     build_user_message,
-    final_text,
 )
 from .streaming import _stream_turn_with_compaction_retry, _stream_turn_with_ladder
 from .terminals import (
     _budget_exhausted_tail,
     _error_result_tail,
-    _evaluate_terminal_gates,
-    _final_tool_retry_tail,
     _gate_retry_tail,
     _max_turns_tail,
-    _parse_structured_output,
     _stop_when_tail,
-    _success_result_tail,
-    _validate_structured_output,
 )
 
 # Max BeforeFinalAnswer-induced retries honored per run before the answer is
@@ -349,6 +355,21 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
     _hooks = list(getattr(agent, "hooks", None) or [])
     hook_dispatcher = HookDispatcher(_hooks)
 
+    # Bind the hook-dispatch wrappers (in loop/dispatch.py) to this run's
+    # dispatcher/session/run_id so the call sites below stay argument-light.
+    _dispatch_user_prompt = partial(dispatch_user_prompt, hook_dispatcher, session, run_id)
+    _dispatch_lifecycle = partial(dispatch_lifecycle, hook_dispatcher)
+    _dispatch_before_provider_call = partial(
+        dispatch_before_provider_call, hook_dispatcher, session, run_id
+    )
+    _dispatch_after_provider_call = partial(
+        dispatch_after_provider_call, hook_dispatcher, session, run_id
+    )
+    _dispatch_before_final_answer = partial(
+        dispatch_before_final_answer, hook_dispatcher, session, run_id
+    )
+    _dispatch_stop = partial(dispatch_stop, hook_dispatcher, session, run_id)
+
     # Resolve per-run deps: RunOptions.deps wins over Agent.deps
     session.run_deps = opts.deps if opts.deps is not None else getattr(agent, "deps", None)
 
@@ -407,35 +428,6 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         total_usage=total,
     )
 
-    async def _dispatch_user_prompt(
-        prompt_value: str,
-        images_value: list[dict[str, str]] | None,
-    ) -> tuple[str, list[dict[str, str]] | None, list[Event], str | None]:
-        if not hook_dispatcher.active:
-            return prompt_value, images_value, [], None
-        dispatched = await hook_dispatcher.dispatch(
-            HookEvent.USER_PROMPT_SUBMIT,
-            UserPromptSubmitContext(
-                session=session,
-                run_id=run_id,
-                turn_index=None,
-                deps=getattr(session, "run_deps", None),
-                prompt=prompt_value,
-                images=images_value,
-            ),
-        )
-        result = dispatched.result
-        if result.action == "mutate":
-            return (
-                result.prompt if result.prompt is not None else prompt_value,
-                result.images if result.images is not None else images_value,
-                dispatched.events,
-                None,
-            )
-        if result.action in {"block", "stop"}:
-            return prompt_value, images_value, dispatched.events, result.reason or result.feedback
-        return prompt_value, images_value, dispatched.events, None
-
     async def _save_checkpoint(
         phase: str,
         *,
@@ -479,10 +471,6 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             session, checkpoint.background_workers
         )
         await store.save_checkpoint(run_id, checkpoint, status=status)
-
-    async def _dispatch_lifecycle(event: HookEvent, ctx: Any) -> None:
-        if hook_dispatcher.active:
-            await hook_dispatcher.dispatch(event, ctx)
 
     async def _handle_prompt_block(block_reason: str) -> AsyncIterator[Event]:
         # Terminal path for a UserPromptSubmit hook that blocked the prompt.
@@ -652,17 +640,41 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
     ) -> _RunResultInfo:
         """Build the run's terminal :class:`RunResultInfo` from current run state.
 
-        Centralises the ``run_id``/``session_id``/``total_usage`` boilerplate
-        repeated at every loop exit (success, error, abort, max-turns, finally)."""
-        return _RunResultInfo(
+        Used at the loop exits that don't go through the finalizers (stop_when,
+        budget, max-turns, abort, exception, finally)."""
+        return build_run_result(
             run_id=run_id,
             session_id=session.id,
             subtype=subtype,
             stop_reason=stop_reason,
-            total_usage=total,
+            total=total,
             duration_ms=duration_ms,
             error=error,
         )
+
+    # Terminal-answer finalization lives in loop/finalize.py; FinalizeCtx bundles
+    # this run's dependencies so the call sites below stay short. The thin
+    # wrappers copy the resolved RunResultInfo back into _final_result, which the
+    # turn loop reads to choose between returning and continuing.
+    _fctx = FinalizeCtx(
+        session=session,
+        agent=agent,
+        run_id=run_id,
+        run_record=run_record,
+        checkpoint=checkpoint,
+        started=started,
+        opts=opts,
+        effective_final_tool=effective_final_tool,
+        max_schema_retries=_max_schema_retries,
+        max_final_answer_reentries=_MAX_FINAL_ANSWER_REENTRIES,
+        gate_attempts=_gate_attempts,
+        final_answer_reentries=_final_answer_reentries,
+        save_checkpoint=_save_checkpoint,
+        end_active_turn=_end_active_turn,
+        end_active_provider_call=_end_active_provider_call,
+        dispatch_before_final_answer=_dispatch_before_final_answer,
+        dispatch_stop=_dispatch_stop,
+    )
 
     async def _emit_error_terminal(
         *,
@@ -670,211 +682,21 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         duration_ms: int | None = None,
         end_provider_call_usage: Usage | None = None,
     ) -> AsyncIterator[Event]:
-        """Record the error ``_final_result``, close spans, and emit the error tail.
-
-        Shared by every in-loop error exit (BeforeProviderCall/AfterProviderCall/
-        Stop hooks, schema-gate stop, loop-guard hard stop). The caller still
-        issues ``return`` afterwards so the control-flow exit stays visible at the
-        call site. ``duration_ms`` defaults to a fresh wall-clock reading; pass it
-        explicitly when the original site reused a ``_dur`` computed earlier.
-        ``end_provider_call_usage`` closes the active provider-call span first
-        (the AfterProviderCall stop path)."""
+        """Error exit shared by the provider/after/stop-hook and guard hard-stop
+        paths. The caller still issues ``return`` after iterating this."""
         nonlocal _final_result
-        _dur = duration_ms if duration_ms is not None else int((time.time() - started) * 1000)
-        _final_result = _build_run_result("error", "error", duration_ms=_dur)
-        if end_provider_call_usage is not None:
-            await _end_active_provider_call(stop_reason="error", usage=end_provider_call_usage)
-        await _end_active_turn()
-        async for event in _error_result_tail(
-            session,
-            agent,
-            run_id=run_id,
-            run_record=run_record,
-            checkpoint=checkpoint,
+        outcome = TerminalOutcome()
+        async for event in emit_error_terminal(
+            _fctx,
             total=total,
-            duration_ms=_dur,
             running_cost=running_cost,
+            outcome=outcome,
             final_text_value=final_text_value,
-        ):
-            yield event
-
-    async def _emit_success_terminal(
-        proposed: ResultEvent,
-        *,
-        duration_ms: int,
-    ) -> AsyncIterator[Event]:
-        """Record the success ``_final_result``, close the turn span, and emit the
-        success tail from a hook-approved ``proposed`` ResultEvent.
-
-        Shared by the final-tool and final-text success exits."""
-        nonlocal _final_result
-        _final_result = _build_run_result(
-            proposed.subtype, proposed.stop_reason, duration_ms=duration_ms
-        )
-        await _end_active_turn()
-        async for event in _success_result_tail(
-            session,
-            agent,
-            run_id=run_id,
-            run_record=run_record,
-            checkpoint=checkpoint,
-            total=total,
             duration_ms=duration_ms,
-            running_cost=running_cost,
-            stop_reason=proposed.stop_reason,
-            final_text_value=proposed.final_text,
-            structured_output=proposed.structured_output,
-            structured_error=proposed.structured_error,
+            end_provider_call_usage=end_provider_call_usage,
         ):
             yield event
-
-    async def _dispatch_before_provider_call(
-        request: Any,
-        turn_index: int,
-        context_result: Any,
-    ) -> tuple[Any, list[Event], str | None, str | None]:
-        if not hook_dispatcher.active:
-            return request, [], None, None
-        dispatched = await hook_dispatcher.dispatch(
-            HookEvent.BEFORE_PROVIDER_CALL,
-            BeforeProviderCallContext(
-                session=session,
-                run_id=run_id,
-                turn_index=turn_index,
-                deps=getattr(session, "run_deps", None),
-                request=request,
-                context_result=context_result,
-            ),
-        )
-        result = dispatched.result
-        if result.action == "mutate" and result.request is not None:
-            return result.request, dispatched.events, None, None
-        if result.action in {"stop", "block"}:
-            if result.metadata.get("subtype") == "success":
-                return request, dispatched.events, "stop_success", result.reason or result.feedback
-            return request, dispatched.events, "stop", result.reason or result.feedback
-        if result.action == "force_continue":
-            return request, dispatched.events, "continue", result.feedback
-        return request, dispatched.events, None, None
-
-    async def _dispatch_after_provider_call(
-        assembly: AssistantAssembly,
-        turn_index: int,
-    ) -> tuple[AssistantAssembly, list[Event], str | None, str | None]:
-        if not hook_dispatcher.active:
-            return assembly, [], None, None
-        dispatched = await hook_dispatcher.dispatch(
-            HookEvent.AFTER_PROVIDER_CALL,
-            AfterProviderCallContext(
-                session=session,
-                run_id=run_id,
-                turn_index=turn_index,
-                deps=getattr(session, "run_deps", None),
-                assembly=assembly,
-            ),
-        )
-        result = dispatched.result
-        if result.action == "mutate" and result.assembly is not None:
-            return result.assembly, dispatched.events, None, None
-        if result.action in {"stop", "block"}:
-            return assembly, dispatched.events, "stop", result.reason or result.feedback
-        if result.action in {"retry", "force_continue"}:
-            return assembly, dispatched.events, "continue", result.feedback
-        return assembly, dispatched.events, None, None
-
-    async def _dispatch_before_final_answer(
-        *,
-        turn_index: int,
-        final_text_value: str | None,
-        structured_output: dict[str, object] | None,
-        structured_error: str | None,
-        stop_reason: StopReason,
-        final_tool_name: str | None = None,
-        tool_use: ToolUseBlock | None = None,
-        skip: bool = False,
-    ) -> tuple[
-        str | None,
-        dict[str, object] | None,
-        str | None,
-        list[Event],
-        str | None,
-        str | None,
-    ]:
-        if skip or not hook_dispatcher.active:
-            return final_text_value, structured_output, structured_error, [], None, None
-        dispatched = await hook_dispatcher.dispatch(
-            HookEvent.BEFORE_FINAL_ANSWER,
-            BeforeFinalAnswerContext(
-                session=session,
-                run_id=run_id,
-                turn_index=turn_index,
-                deps=getattr(session, "run_deps", None),
-                final_text=final_text_value,
-                structured_output=structured_output,
-                structured_error=structured_error,
-                stop_reason=stop_reason,
-                final_tool_name=final_tool_name,
-                tool_use=tool_use,
-            ),
-        )
-        result = dispatched.result
-        if result.action == "mutate":
-            return (
-                result.final_text if result.final_text is not None else final_text_value,
-                result.structured_output
-                if result.structured_output is not None
-                else structured_output,
-                result.structured_error
-                if result.structured_error is not None
-                else structured_error,
-                dispatched.events,
-                None,
-                None,
-            )
-        if result.action in {"retry", "force_continue"}:
-            return (
-                final_text_value,
-                structured_output,
-                structured_error,
-                dispatched.events,
-                "retry",
-                result.feedback,
-            )
-        if result.action in {"stop", "block"}:
-            return (
-                final_text_value,
-                structured_output,
-                structured_error,
-                dispatched.events,
-                "stop",
-                result.reason or result.feedback,
-            )
-        return final_text_value, structured_output, structured_error, dispatched.events, None, None
-
-    async def _dispatch_stop(
-        result_event: ResultEvent,
-        turn_index: int | None,
-    ) -> tuple[ResultEvent, list[Event], str | None, str | None]:
-        if not hook_dispatcher.active:
-            return result_event, [], None, None
-        dispatched = await hook_dispatcher.dispatch(
-            HookEvent.STOP,
-            StopContext(
-                session=session,
-                run_id=run_id,
-                turn_index=turn_index,
-                deps=getattr(session, "run_deps", None),
-                result_event=result_event,
-            ),
-        )
-        result = dispatched.result
-        if result.action == "mutate" and result.result_event is not None:
-            return cast(ResultEvent, result.result_event), dispatched.events, None, None
-        if result.action == "force_continue":
-            return result_event, dispatched.events, "continue", result.feedback
-        if result.action in {"stop", "block"}:
-            return result_event, dispatched.events, "stop", result.reason or result.feedback
-        return result_event, dispatched.events, None, None
+        _final_result = outcome.result
 
     async def _finalize_final_tool_answer(
         turn_index: int,
@@ -882,220 +704,39 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         tool_blocks: list[ToolUseBlock],
         final_block: ToolUseBlock,
     ) -> AsyncIterator[Event]:
-        """Terminal final-tool path: treat the tool input as structured output,
-        run the schema/verifier/stop gates, then emit the success or error tail.
-
-        Sets ``_final_result`` (via the ``_emit_*`` helpers) iff the run should
-        end; if it instead bounces the answer back for another turn it ends the
-        turn and leaves ``_final_result`` unset — the caller reads the flag to
-        decide between ``return`` and ``continue``."""
-        raw_structured_output = dict(final_block.input)
-        structured_output: dict[str, Any] | None = raw_structured_output
-        structured_error: str | None = None
-        effective_schema = opts.output_schema or getattr(agent, "output_schema", None)
-        if effective_schema is not None:
-            structured_error = _validate_structured_output(raw_structured_output, effective_schema)
-            if structured_error is not None:
-                structured_output = None
-        if not _forced_final_turn and _max_schema_retries:
-            _gate = await _evaluate_terminal_gates(
-                session,
-                run_id=run_id,
-                max_schema_retries=_max_schema_retries,
-                attempts=_gate_attempts,
-                structured_output=structured_output,
-                structured_error=structured_error,
-            )
-            for event in _gate.events:
-                yield event
-            if _gate.decision == "stop":
-                async for event in _emit_error_terminal():
-                    yield event
-                return
-            if _gate.decision == "retry":
-                async for event in _final_tool_retry_tail(
-                    session,
-                    run_id=run_id,
-                    tool_blocks=tool_blocks,
-                    final_id=final_block.id,
-                    feedback=_gate.feedback or "",
-                ):
-                    yield event
-                await _end_active_turn()
-                await _save_checkpoint("turn_complete", turn_index=turn_index)
-                return
-
-        (
-            ft,
-            structured_output,
-            structured_error,
-            hook_events,
-            hook_action,
-            feedback,
-        ) = await _dispatch_before_final_answer(
+        nonlocal _final_result
+        outcome = TerminalOutcome()
+        async for event in finalize_final_tool_answer(
+            _fctx,
             turn_index=turn_index,
-            final_text_value=None,
-            structured_output=structured_output,
-            structured_error=structured_error,
-            stop_reason="tool_use",
-            final_tool_name=effective_final_tool,
-            tool_use=final_block,
-            skip=_forced_final_turn,
-        )
-        for hook_event in hook_events:
-            await _persist_event(session, run_id, hook_event)
-            yield hook_event
-        if hook_action == "retry" and _final_answer_reentries[0] < _MAX_FINAL_ANSWER_REENTRIES:
-            _final_answer_reentries[0] += 1
-            async for event in _final_tool_retry_tail(
-                session,
-                run_id=run_id,
-                tool_blocks=tool_blocks,
-                final_id=final_block.id,
-                feedback=feedback or "",
-            ):
-                yield event
-            await _end_active_turn()
-            await _save_checkpoint("turn_complete", turn_index=turn_index)
-            return
-        if hook_action == "stop":
-            async for event in _emit_error_terminal(final_text_value=feedback):
-                yield event
-            return
-        _dur = int((time.time() - started) * 1000)
-        proposed = ResultEvent(
-            subtype="success",
-            stop_reason="tool_use",
-            total_usage=total,
-            duration_ms=_dur,
-            final_text=ft,
-            structured_output=structured_output,
-            structured_error=structured_error,
-            total_cost_usd=running_cost,
-        )
-        proposed, hook_events, stop_action, feedback = await _dispatch_stop(proposed, turn_index)
-        for hook_event in hook_events:
-            await _persist_event(session, run_id, hook_event)
-            yield hook_event
-        if stop_action == "continue":
-            async for event in _final_tool_retry_tail(
-                session,
-                run_id=run_id,
-                tool_blocks=tool_blocks,
-                final_id=final_block.id,
-                feedback=feedback or "",
-            ):
-                yield event
-            await _end_active_turn()
-            await _save_checkpoint("turn_complete", turn_index=turn_index)
-            return
-        if stop_action == "stop":
-            async for event in _emit_error_terminal(final_text_value=feedback, duration_ms=_dur):
-                yield event
-            return
-        async for event in _emit_success_terminal(proposed, duration_ms=_dur):
+            assembly=assembly,
+            tool_blocks=tool_blocks,
+            final_block=final_block,
+            total=total,
+            running_cost=running_cost,
+            forced_final_turn=_forced_final_turn,
+            outcome=outcome,
+        ):
             yield event
+        _final_result = outcome.result
 
     async def _finalize_text_answer(
         turn_index: int,
         assembly: AssistantAssembly,
     ) -> AsyncIterator[Event]:
-        """Terminal plain-text path: parse/validate structured output, run the
-        schema/verifier/stop gates, then emit the success or error tail.
-
-        Same ``_final_result`` signalling contract as
-        :func:`_finalize_final_tool_answer`."""
-        ft = final_text(assembly.message)
-        structured_output: dict[str, Any] | None = None
-        structured_error: str | None = None
-        effective_schema = opts.output_schema or getattr(agent, "output_schema", None)
-        if effective_schema is not None and ft is not None:
-            structured_output, structured_error = _parse_structured_output(ft, effective_schema)
-
-        # ── Closed-loop gates: schema repair, then verifiers ──────
-        # Skipped on a loop-guard force_final turn: a guard-tripped run must not
-        # be bounced back into the loop.
-        if not _forced_final_turn and _max_schema_retries:
-            _gate = await _evaluate_terminal_gates(
-                session,
-                run_id=run_id,
-                max_schema_retries=_max_schema_retries,
-                attempts=_gate_attempts,
-                structured_output=structured_output,
-                structured_error=structured_error,
-            )
-            for event in _gate.events:
-                yield event
-            if _gate.decision == "stop":
-                async for event in _emit_error_terminal(final_text_value=ft):
-                    yield event
-                return
-            if _gate.decision == "retry":
-                async for event in _gate_retry_tail(
-                    session, run_id=run_id, feedback=_gate.feedback or ""
-                ):
-                    yield event
-                await _end_active_turn()
-                await _save_checkpoint("turn_complete", turn_index=turn_index)
-                return
-
-        (
-            ft,
-            structured_output,
-            structured_error,
-            hook_events,
-            hook_action,
-            feedback,
-        ) = await _dispatch_before_final_answer(
+        nonlocal _final_result
+        outcome = TerminalOutcome()
+        async for event in finalize_text_answer(
+            _fctx,
             turn_index=turn_index,
-            final_text_value=ft,
-            structured_output=structured_output,
-            structured_error=structured_error,
-            stop_reason=assembly.stop_reason,
-            skip=_forced_final_turn,
-        )
-        for hook_event in hook_events:
-            await _persist_event(session, run_id, hook_event)
-            yield hook_event
-        if hook_action == "retry" and _final_answer_reentries[0] < _MAX_FINAL_ANSWER_REENTRIES:
-            _final_answer_reentries[0] += 1
-            async for event in _gate_retry_tail(session, run_id=run_id, feedback=feedback or ""):
-                yield event
-            await _end_active_turn()
-            await _save_checkpoint("turn_complete", turn_index=turn_index)
-            return
-        if hook_action == "stop":
-            async for event in _emit_error_terminal(final_text_value=feedback):
-                yield event
-            return
-
-        _dur = int((time.time() - started) * 1000)
-        proposed = ResultEvent(
-            subtype="success",
-            stop_reason=assembly.stop_reason,
-            total_usage=total,
-            duration_ms=_dur,
-            final_text=ft,
-            structured_output=structured_output,
-            structured_error=structured_error,
-            total_cost_usd=running_cost,
-        )
-        proposed, hook_events, stop_action, feedback = await _dispatch_stop(proposed, turn_index)
-        for hook_event in hook_events:
-            await _persist_event(session, run_id, hook_event)
-            yield hook_event
-        if stop_action == "continue":
-            async for event in _gate_retry_tail(session, run_id=run_id, feedback=feedback or ""):
-                yield event
-            await _end_active_turn()
-            await _save_checkpoint("turn_complete", turn_index=turn_index)
-            return
-        if stop_action == "stop":
-            async for event in _emit_error_terminal(final_text_value=feedback, duration_ms=_dur):
-                yield event
-            return
-        async for event in _emit_success_terminal(proposed, duration_ms=_dur):
+            assembly=assembly,
+            total=total,
+            running_cost=running_cost,
+            forced_final_turn=_forced_final_turn,
+            outcome=outcome,
+        ):
             yield event
+        _final_result = outcome.result
 
     start_turn = checkpoint.turn_index
     if resume_checkpoint is not None and checkpoint.phase in {
