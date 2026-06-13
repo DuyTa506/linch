@@ -172,7 +172,9 @@ def _build_turn_request(
     tools = _select_context_tools(session, context)
 
     req = ProviderRequest(
-        model=model_override or agent.model,
+        # A run-level fallback (set by the model-fallback recovery path) overrides
+        # agent.model for the rest of the run; an explicit model_override wins.
+        model=model_override or getattr(session, "active_model", None) or agent.model,
         system=base_system,
         tools=tools.schemas(),
         messages=messages,

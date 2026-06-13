@@ -104,6 +104,30 @@ class PostToolUseContext(HookContext):
 
 
 @dataclass(slots=True)
+class PostToolUseFailureContext(HookContext):
+    tool_use_id: str = ""
+    tool_name: str = ""
+    input: dict[str, Any] = field(default_factory=dict)
+    result: ToolResult | None = None
+
+
+@dataclass(slots=True)
+class PreCompactContext(HookContext):
+    messages: int = 0
+    tokens: int = 0
+    strategy: str = ""
+
+
+@dataclass(slots=True)
+class PostCompactContext(HookContext):
+    messages_before: int = 0
+    messages_after: int = 0
+    tokens_before: int = 0
+    tokens_after: int = 0
+    strategy: str = ""
+
+
+@dataclass(slots=True)
 class BeforeFinalAnswerContext(HookContext):
     final_text: str | None = None
     structured_output: dict[str, Any] | None = None

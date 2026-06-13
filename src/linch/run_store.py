@@ -21,6 +21,12 @@ from .types import (
     message_to_dict,
 )
 
+# Wire-format version for the serialized RunCheckpoint and stored-event log.
+# Bump only on a breaking change to the persisted shape. `checkpoint_from_dict`
+# reads any version best-effort (unknown future keys are ignored) and
+# `load_events` drops events it cannot decode, so a newer store is forward-safe.
+SCHEMA_VERSION = 1
+
 RunStatus = Literal["running", "waiting_permission", "completed", "failed", "aborted"]
 RunPhase = Literal[
     "started",
@@ -109,6 +115,7 @@ class RunStore(Protocol):
 
 def checkpoint_to_dict(checkpoint: RunCheckpoint) -> dict[str, Any]:
     return {
+        "schema_version": SCHEMA_VERSION,
         "phase": checkpoint.phase,
         "prompt": checkpoint.prompt,
         "turn_index": checkpoint.turn_index,
@@ -461,14 +468,17 @@ def _load_events(
         "select seq, appended_at, event from run_events where run_id = ? and seq > ? order by seq",
         (run_id, after_seq),
     ).fetchall()
-    return [
-        StoredRunEvent(
-            seq=row[0],
-            appended_at=row[1],
-            event=event_from_dict(json.loads(row[2])),
-        )
-        for row in rows
-    ]
+    out: list[StoredRunEvent] = []
+    for row in rows:
+        try:
+            event = event_from_dict(json.loads(row[2]))
+        except (ValueError, KeyError, TypeError, json.JSONDecodeError):
+            # Forward-compat: an event written by a newer schema (unknown type or
+            # shape) is skipped rather than aborting the whole resume. The
+            # checkpoint, not the event log, drives resume.
+            continue
+        out.append(StoredRunEvent(seq=row[0], appended_at=row[1], event=event))
+    return out
 
 
 def _mark_failed(

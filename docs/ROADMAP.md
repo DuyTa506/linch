@@ -1,71 +1,661 @@
 # Linch SDK Roadmap
 
-This file is intentionally kept as a lightweight roadmap/status page.
+This file is a lightweight roadmap/status page **and** the implementation plan for
+Linch as a **pure-mechanism, embeddable agent runtime SDK**.
 
 ---
 
+## North star
 
-## Future Development Directions
+Linch ships the **harness**, not the agent. It provides **mechanisms, protocols, seams,
+and primitives** — never policy, prompts, domain tools, or product UX. A coding agent is
+*one* application an embedder builds on Linch; a support agent, a research agent, and a
+data agent are equally first-class. If a capability only makes sense for one domain, it
+belongs in the embedder's app, not in Linch.
 
-Linch should keep its center of gravity as an explicit, embeddable runtime for
-context-heavy agent workflows. It does not need to copy every part of a broader
-agent ecosystem SDK. The strategic advantage is runtime transparency: clear
-context construction, policy-aware tool execution, inspectable events,
-resource-aware scheduling, durable state, and a small surface that application
-developers can embed without surrendering control.
+**The discriminating rule for every line of this roadmap:**
 
----
+> Is it a *mechanism* every embedded agent needs regardless of domain, or a
+> *behavior/policy* specific to one kind of agent? Mechanism → SDK. Behavior → out.
 
-## Phase 4 — Budgets, compaction ladder, workflow engine (2026-06)
+When a useful capability is domain-flavored, the SDK ships the **generic seam** and lets
+the embedder supply the domain piece — exactly how `execution.py` exposes an
+`ExecutionBackend` protocol (`LocalBackend`/`DockerBackend`) rather than hardcoding one
+runner.
 
-- **A. Budget primitive** — `RunBudget` token/USD caps shared across the agent tree;
-  `BudgetEvent` warning/exceeded; graceful error stop.
-  Primary files: src/linch/budget.py, src/linch/loop/, src/linch/session.py,
-  src/linch/subagents/runner.py, src/linch/events.py
-- **B. Compaction ladder** — micro-compact (LLM-free tool-result elision), reactive
-  recovery on ContextLengthError, forced-compaction circuit breaker; opt-in via
-  `Agent(compaction_ladder=CompactionLadder())`.
-  Primary files: src/linch/compaction.py, src/linch/loop/
-- **C. Workflow engine** — `agent.run_workflow(fn)`: WorkflowContext
-  (agent/parallel/pipeline/phase/budget), content-addressed journal on RunStore,
-  resume replay, WorkflowEvent.
-  Primary files: src/linch/workflow/{context,journal,engine}.py, src/linch/events.py,
-  src/linch/agent.py
+**Hard constraint:** every item is opt-in and additive. With defaults unchanged, the loop
+stays byte-identical — the discipline already used for `loop_guard`, `compaction_ladder`,
+verification gates, and `result_offload`.
 
 ---
 
-## Phase 5 — Loop package split + unified hooks extension layer (2026-06)
+## Two loops on one axis: open ↔ closed
 
-- **A. Loop package split** — `loop.py` decomposed into a `loop/` package by
-  responsibility (runner, streaming, request assembly, terminal tails/gates,
-  checkpointing); public surface re-exported so `from linch.loop import ...` is
-  unchanged.
-  Primary files: src/linch/loop/{runner,streaming,request,terminals,checkpoint,__init__}.py
-- **B. Closed-loop verification gates** — structured-output schema repair
-  (`structured_output_retries`), final-answer verifier protocol + `ScorerVerifier`
-  bridge, and a `stop_when`-style stop predicate; all opt-in and bounded by
-  `max_turns` / the run budget.
-  Primary files: src/linch/verification.py, src/linch/loop/terminals.py
-- **C. Unified hooks layer** — a single `Agent(hooks=[...])` extension surface
-  replacing the separate `observers` / `middleware` / `context_builder` /
-  `verifiers` / `stop_when` parameters. Typed `HookEvent` chokepoints
-  (agent/turn/provider/tool/final-answer/stop/subagent/event), `HookResult`
-  actions (continue/mutate/block/retry/stop/force_continue), a fan-out
-  `HookDispatcher` with per-hook telemetry (`HookEventRecord`), and built-in
-  adapters: `ContextInjectionHook`, `ToolMiddlewareHook`, `FinalAnswerVerifierHook`,
-  `StopPredicateHook`, `RunTelemetryHook`.
-  Primary files: src/linch/hooks/{types,contexts,dispatcher,adapters,__init__}.py,
-  src/linch/loop/runner.py, src/linch/scheduler.py, src/linch/session.py,
-  src/linch/agent.py
-- **D. Runtime hardening** — final-tool retries pair the terminal `tool_use` with
-  a synthetic `tool_result`; tool middleware fails closed; PostToolUse mutations
-  preserve large-result offload; AgentStop/observer-close fire on every terminal
-  path; multi-hook context is globally budgeted; blocking disk/SQLite/sync-tool
-  work runs on a bounded daemon-thread offload (`_blocking.run_blocking`) so the
-  event loop is never blocked.
-  Primary files: src/linch/loop/{runner,terminals,request}.py, src/linch/scheduler.py,
-  src/linch/hooks/adapters.py, src/linch/_blocking.py, src/linch/filesystem/disk.py,
-  src/linch/storage/_executor.py, src/linch/tools/function.py
+Every agent runs the same cycle — **Discovery → Planning → Execution → Verification →
+Iteration** — alone or fanned out across an orchestrator + specialists. What decides
+*which you can afford to run* is a single axis, **open ↔ closed**, defined by **who
+authors the path**:
+
+| | **Closed loop** | **Open loop** |
+|---|---|---|
+| Path author | **human** writes it first | **model** discovers it at runtime |
+| Shape | bounded, set steps, eval at each step | wide, exploratory, roams and builds new |
+| Cost | cheap, repeatable, improves every run | burns tokens, needs a large budget |
+| Honesty | the standard keeps it honest | loose standard = a fast slop machine |
+| **Linch surface** | **`run_workflow`** (core mechanism) | **`create_deep_agent`** (experimental preset) |
+
+`run_workflow` is the closed loop: a deterministic, journaled, resumable fleet script the
+embedder authors. `create_deep_agent` is the open loop: a coordinator that owns the goal
+and lets the model author the path. *Single-vs-fleet is an independent axis* — both
+surfaces fan out; the line that separates them is open-vs-closed.
+
+**The SDK's job is the control surface that lets an embedder dial any agent along this
+axis** — and Linch already owns both knobs:
+
+- **Budget (`RunBudget`)** — the *cost line*. Propagates across the whole subagent tree by
+  reference; `wf.budget` shares it. This is the "normal vs unlimited budget" control.
+- **Verification + evals (`verification.py`, `ScorerVerifier`, `evals/`)** — the *standard
+  that keeps it honest*. It stops an open loop from becoming a slop machine and makes a
+  closed loop improve each run.
+
+**Design consequence (pure-mechanism):** Linch ships the *mechanism* for each cycle stage
+(Discovery → `ContextBuilder`/`memory`; Planning → task DAG; Execution → tools;
+Verification → `verification.py`; Iteration → the loop + verifier retry) and the two
+control knobs — but it must **never** bake the DPEVI cycle in as policy. The cycle is
+assembled by a preset (`deep_agent`) or the embedder, not the core loop.
+
+**Roadmap implications:**
+
+1. **Unify the control surface across both loops.** Budget and verification must apply
+   *identically* to `run_workflow`, `create_deep_agent`, and any hand-rolled loop. Confirm
+   `wf` exposes per-step verification (not just budget) so a closed loop can eval at each
+   step (panel 3's "eval at each step"); confirm a workflow step can run a `Verifier`/
+   `ScorerVerifier`. *Verify:* a workflow step failing its scorer surfaces a typed failure;
+   a deep-agent run and a workflow run charge the same shared `RunBudget`.
+2. **Graduate the open loop from "experimental."** `create_deep_agent` is open by nature,
+   so its safety rails are the difference between "runnable" and "slop machine." But a
+   *default budget number* is an arbitrary cost guess and a *default verifier* is a domain
+   quality standard — both are policy a pure-mechanism SDK must not own (and forcing them
+   would break "default byte-identical"). So instead of fabricating defaults, make the
+   rails **first-class and discoverable**: `loop_guard` stays on by default (a domain-
+   agnostic mechanism); `budget=`, `verifiers=` (auto-wrapped into the hooks layer),
+   `max_verification_retries=`, and `max_turns=` are explicit, documented parameters on
+   `create_deep_agent`, with an "Open-loop safety rails" docstring telling the embedder to
+   set them. *(Done — `deep_agent/factory.py`.)*
+3. **Keep `run_workflow` the closed-loop reference.** Its journaling/resume + deterministic
+   replay are the "cheap, repeatable, gets better every run" guarantees — protect them as a
+   versioned contract (ties into Phase 5 serialization hardening).
+4. **Label the presets honestly.** `run_workflow` = supported core mechanism (closed loop);
+   `create_deep_agent` = experimental open-loop preset/example, not a product direction —
+   consistent with the pure-mechanism stance.
+
+---
+
+## Where Linch already leads
+
+This roadmap is derived from a section-by-section study of the `learn-claude-code`
+harness curriculum (s01–s20), **filtered to mechanism only** and measured against Linch's
+actual code. Linch already matches or exceeds the reference on the core runtime:
+
+- **Loop core** — `loop/` split, loop guard, max-turns, budgets, verification gates;
+  continuation keys off tool-use *block presence*, not a `stop_reason` string.
+- **Tool scheduling** — `scheduler._partition_batches` already does order-preserving
+  consecutive-batch partitioning with `ResourceAccess` conflict detection, concurrency
+  caps, retry, timeouts, `result_offload`.
+- **Permissions** — `PermissionEngine` + **durable HITL decisions in the run checkpoint**.
+- **Hooks** — unified `HookDispatcher` with typed `HookResult`/`HookContext` + adapters.
+- **Memory storage** — `MemoryStore` protocol, Sqlite/Postgres/keyword/tiered stores.
+- **Compaction** — ladder (COW `micro_compact` + forced-compaction circuit breaker).
+- **Task model** — `Task`/`TaskPatch` already carry the full dependency graph
+  (`owner`, `blocks`, `blocked_by`, edge mutation, `active_form`).
+- **Subagents** — child sessions, retain+continue, background workers with notification
+  drain, `WorkerHandle` registry, budget inheritance.
+- **Provider-agnostic** — OpenAI/Anthropic/Gemini/llama.cpp behind one interface +
+  capability downgrade.
+- **Embedder testing** — `ScriptedProvider`, `evals/`, deterministic harness.
+- **Durable resume** — `RunCheckpoint`/`SqliteRunStore`.
+
+The gaps below are domain-agnostic runtime mechanisms layered on these primitives.
+
+---
+
+## Out of scope (deliberately left to embedders)
+
+These appear in the reference curriculum but are **coding-product policy**, not SDK
+mechanism. Linch will *not* ship them; an embedder builds them on the primitives below:
+
+- Git **worktree** provisioning — coding/VCS-specific. The SDK ships a generic
+  filesystem-isolation seam (2.2); git-worktree is one embedder implementation.
+- **Background bash** as a special case — the SDK ships background-*any-tool* (2.3); Bash
+  is just one caller.
+- **TodoWrite** UX and planning-drift nudges — assistant ergonomics.
+- Coding **system prompts**, git-aware behaviors, and an assumed Read/Edit/Write coding
+  toolset as the *default* agent. (The built-in fs/shell tools remain as domain-neutral
+  primitives and `deep_agent` remains an optional example — neither is extended as a
+  product direction.)
+- **Autonomous coding fleets** and **scheduled coding tasks** — choreography/policy the
+  embedder composes from the coordination + scheduling primitives (2.x, 3.3).
+
+---
+
+## Implementation plan (phased)
+
+Each item lists **why**, **where** (modules), **approach**, and **verify** (the success
+check to loop against, per the repo's TDD rules).
+
+---
+
+### Phase 1 — Runtime resilience & cost
+
+Pure runtime mechanisms; no new subsystems. Highest leverage, fully self-contained.
+
+#### 1.1 Fork-mode subagents (prompt-cache sharing) — *mechanism*
+- **Why:** every child gets fresh context today — correct for isolation, expensive for
+  fan-out. A cache-friendly forked prefix makes any parallel agent tree cheaper.
+- **Where:** `subagents/` (`SubagentTool`, `RunSubagentArgs`, `_drive_child`),
+  `AnthropicProvider` (already supports `prompt_cache=True`).
+- **Approach:** `mode="fork"` builds a byte-identical cache prefix from the parent
+  `provider_view` (system + tools + model + message prefix + thinking config identical);
+  clone the parent `file_read_tracker` into the child `ToolContext`.
+- **Verify:** a forked child over a long parent context yields cache-read tokens > 0 on a
+  stub caching provider; `mode="normal"` still produces a fresh prefix.
+- **Status: done.** `RunSubagentArgs(fork=True)` (and `wf.agent(..., fork=True)`) seeds the
+  child with the parent's `provider_view`, system blocks, tools, and `file_read_tracker`,
+  so the request prefix is cache-identical; default (`fork=False`) stays isolated. Exposed
+  as a boolean rather than `mode="fork"` (KISS). 2 tests assert the seeded prefix + cloned
+  tracker structurally (a live cache-read count depends on the provider).
+
+#### 1.2 Compaction fidelity: post-recovery + LLM-free rungs — *mechanism*
+- **Why:** forced compaction is summary-only and lossy for in-flight work.
+- **Where:** `compaction.py`, `CompactionLadder`, `memory/`.
+- **Approach:** three additive rungs, all domain-agnostic —
+  1. **Post-compaction recovery:** after summarizing, re-attach the most recent *tool
+     results* and any caller-pinned context (generalized from the reference's
+     "re-read files" — Linch keys off `file_read_tracker`/recent `ToolResultBlock`s, not a
+     coding assumption).
+  2. **`sessionMemoryCompact`:** try an LLM-free summary from `MemoryStore` before paying
+     for the LLM summary.
+  3. **Snip rung:** COW middle-message elision (keep head + recent tail) between
+     `micro_compact` and forced compaction.
+  Switch the proactive trigger to a token threshold
+  (`provider.context_window(model) − max_output_tokens − buffer`); add summary-prompt
+  guardrails (`TEXT ONLY, no tools`, `<analysis>`/`<summary>` tags).
+- **Verify:** after a forced compaction, recent tool results survive in `provider_view`;
+  the memory rung makes zero provider calls when memory suffices.
+- **Status: done (scoped to the one real gap).** Audited against the existing ladder and
+  found most of this sub-item already shipped, so — per YAGNI/KISS — only the genuine gap
+  was built:
+  - **Post-compaction read-tracker reset (new).** A compaction (micro elision *or* forced
+    summary) can remove a file's contents from `provider_view` while
+    `session.file_read_tracker` still records it as read; the `Edit` tool gates on
+    `has_read`, so a stale entry would permit a *blind* edit on content the model can no
+    longer see. `reset_read_tracker_after_compaction` (`compaction.py`) clears the tracker
+    after a compaction, gated on `CompactionLadder(reset_read_tracker=True)` (ladder
+    default). Wired at the proactive (`loop/runner.py`) and reactive (`loop/streaming.py`
+    ladder path) chokepoints; the legacy non-ladder path is intentionally left untouched so
+    defaults stay byte-identical. This is the domain-agnostic generalization of the
+    reference's "re-read files after compaction" — keyed off the core `file_read_tracker`,
+    not a coding assumption. (3 unit + 3 integration tests.)
+  - **Already present (not rebuilt):** recent tool results already survive forced
+    compaction (`DefaultCompaction`/`DetailedCompaction` keep the last *N* turns verbatim);
+    the proactive trigger is already a token threshold (`estimate + reserve ≥ 0.8·limit`);
+    the detailed-summary guardrails (`TEXT ONLY`, `<analysis>`/`<summary>`) already live in
+    `_DETAILED_SUMMARY_PROMPT`.
+  - **Deferred as speculative (YAGNI):** the `sessionMemoryCompact` rung (an LLM-free
+    summary sourced from `MemoryStore`) and a separate COW "snip" rung — `micro_compact`
+    already covers LLM-free tool-result reduction, and a memory-sourced summary needs a
+    concrete embedder use case before it earns its complexity. Revisit if a real need
+    surfaces.
+
+#### 1.3 Output-truncation & model-fallback recovery — *mechanism*
+- **Why:** `loop/streaming.py` recovers from `context_length_error` but not output
+  truncation or provider overload.
+- **Where:** `loop/streaming.py`, `providers/with_retry`, loop State/checkpoint.
+- **Approach:** **`max_tokens` escalation** — on a truncated finish, retry the identical
+  request with a raised cap (8K→64K) *without* appending the truncated block; only then
+  append + inject a continuation system-reminder, capped at 3 with a `<500`-token
+  diminishing-returns stop. **Model fallback** — `Agent(fallback_models=[...])`: after K
+  consecutive overload errors, swap the active model for the run and emit an event.
+- **Verify:** a provider that truncates once then completes drives exactly one escalated
+  retry with no duplicated output; K overloads trigger one model swap + event.
+- **Status: model fallback done; truncation escalation deferred.**
+  - **Model fallback (new, shipped).** `Agent(fallback_models=[...])` — there was *no*
+    overload resilience in the loop (`with_retry` exists but is unwired, so a `ProviderError`
+    killed the run). On a retryable `ProviderError` (overload, e.g. 529) the recovery path
+    swaps the active model to the next fallback **for the rest of the run** and retries,
+    emitting a `ModelFallbackEvent`. The swap is run-level: persisted on
+    `session.active_model` (read in `loop/request.py`) and reset at run start, with
+    `session.fallback_index` tracking consumption (robust to duplicate model names). Wired
+    into both streaming attempt-loops (`_stream_turn_with_ladder` + the legacy retry path,
+    now a fallback while-loop); with `fallback_models` unset both stay byte-identical.
+    Overload raises *before* any token streams, so there is no duplicated output. Simplified
+    from the roadmap's "after K consecutive overloads" to "swap on overload" (KISS — backoff
+    is `with_retry`'s job, not the fallback's). (4 tests: fallback, no-fallback byte-identical,
+    run-level persistence across turns, exhaustion → error.)
+  - **Truncation `max_tokens` escalation/continuation — deferred (YAGNI/policy).** Auto-raising
+    the output cap past the embedder's configured `max_output_tokens` is policy a
+    pure-mechanism SDK should expose as an explicit opt-in, and the continuation half
+    (append-truncated + diminishing-returns `<500`-token stop) entangles with
+    partial-event duplication for streaming UIs. Lower real-world frequency than overload
+    (a misconfigured cap is embedder-fixable). Revisit as a focused opt-in
+    (`Agent(truncation_recovery=...)`) when a concrete need surfaces.
+
+#### 1.4 Task coordination primitives: claim / ready / release — *mechanism*
+- **Why:** the DAG **model** already exists; the *coordination verbs* don't. These are
+  store-level primitives any multi-agent embedder needs — not a choreography.
+- **Where:** `sessions/store.py` (protocol), `sessions/sqlite.py`, `sessions/postgres.py`.
+- **Approach:** add to `SessionStore`:
+  - `claim_task(session_id, task_id, owner)` — atomic, owner-guarded (SQL conditional
+    `UPDATE … WHERE owner IS NULL` in a transaction; TOCTOU-safe, no lockfile).
+  - `ready_tasks(session_id)` — `pending AND owner IS NULL AND all blocked_by completed`.
+  - On complete, surface newly-unblocked downstream ids.
+  - **Release-on-failure:** when an owning worker aborts
+    (`_cancel_background_workers`/`agent.close()`), clear `owner` + reset `status→pending`.
+  The SDK ships these verbs; *how* an embedder distributes work over them is the
+  embedder's choreography.
+- **Verify:** two concurrent claims on one task → exactly one wins; completing an upstream
+  task moves dependents into `ready_tasks`; killing an owner releases its tasks.
+- **Status:** the store *verbs* (`claim_task`/`ready_tasks`/`release_task`) are **done**
+  across all three `SessionStore` backends + protocol (7 parametrized tests). The
+  *auto-release-on-worker-death wiring* is deferred to Phase 2.3 — it needs the
+  `owner == worker_id` convention the autonomous board establishes; wiring it before then
+  would be dead code (nothing claims tasks by worker id yet).
+
+---
+
+### Phase 2 — Coordination & isolation primitives
+
+The SDK ships the **substrate**; the embedder writes the choreography (autonomous loops,
+team protocols, coding fleets). No domain policy in core.
+
+#### 2.1 Mailbox substrate + protocol-correlation seam — *mechanism*
+- **Why:** workers report only *up* to the parent today; there is no peer-addressable
+  inbox or shared coordination space. This is the substrate under any multi-agent pattern.
+- **Where:** new `mailbox/` module; reuse `WorkerHandle`/`session.workers`.
+- **Approach:** a `Mailbox` protocol with `SqliteMailbox` (reuse `sessions/` infra) and an
+  optional lock-guarded `FileMailbox`. A `send_message(to, content, type)` function-tool
+  for parent and workers; on a worker's next `_drive_child` turn, drain its mailbox into
+  `provider_view` exactly like `pending_notifications`. Provide a neutral
+  **request/response correlation helper** (`request_id` + `pending → resolved` FSM) as a
+  primitive — *not* specific protocols (shutdown/plan-approval are embedder choreography).
+- **Verify:** worker A → worker B message is visible on B's next turn; concurrent writes to
+  one inbox don't drop messages; the correlation helper matches a response to its request.
+- **Status:** done (in-process substrate). `mailbox/` ships `Mailbox` protocol +
+  `InMemoryMailbox` (per-recipient FIFO, async-lock guarded so concurrent sends never drop;
+  destructive/atomic `drain`), `MailboxMessage` (neutral `type` + `request_id`/`in_reply_to`),
+  and a non-blocking `Correlator` (pending→resolved FSM — a turn-based agent polls across
+  turns rather than blocking its turn). `Agent(mailbox=...)` auto-registers the
+  `send_message` tool; the loop drains a session's `mailbox_address` into `provider_view`
+  each turn at the same chokepoint as `pending_notifications` (so parent and workers are
+  served uniformly — workers default `mailbox_address` to their display_name). Opt-in:
+  no mailbox → no tool, no drain (byte-identical). **Deferred (YAGNI):** durable
+  `SqliteMailbox`/`FileMailbox` adapters — the live drain is in-process (workers are
+  `agent._sessions`), so durability is an embedder concern reachable through the same
+  protocol, mirroring the app-owned `MemoryStore`/`SessionStore` pattern. Add when a
+  cross-process delivery need is concrete.
+
+#### 2.2 Generic filesystem isolation backend — *seam (generalizes worktrees)*
+- **Why:** parallel subagents share one cwd — real-disk edit collisions are unaddressed.
+  The SDK must not hardcode `git`; it exposes the *isolation seam*.
+- **Where:** new `IsolationBackend` protocol alongside `tools/execution.py`;
+  `run_subagent`, `workflow/`.
+- **Approach:** `IsolationBackend.acquire() -> cwd` / `release(cwd, keep=False)`. Add
+  `isolation=<backend>` to `run_subagent` and `wf.agent(...)`, running the child with
+  `ToolContext.cwd` overridden to the acquired path. Ship a trivial `TempDirIsolation`
+  (copy/scratch dir). **Git-worktree is an embedder implementation of the protocol**, not
+  shipped in core. Document two tiers: `ResourceAccess` (cheap, serialize same-resource
+  writes) vs isolation backend (strong, parallel branches).
+- **Verify:** two parallel subagents writing the same relative path under
+  `TempDirIsolation` don't collide; `keep=False` cleans up; a custom backend slots in via
+  the protocol.
+- **Status:** done for `run_subagent`. `tools/isolation.py` ships the `IsolationBackend`
+  protocol + `TempDirIsolation` (fresh scratch dir per `acquire`, optional `source` seed
+  copy, blocking fs work off-loop via `asyncio.to_thread`). `RunSubagentArgs` gains
+  `isolation` + `isolation_keep`; the child runs under an acquired cwd via the new
+  `Session.cwd_override`, released in the `finally` (leak-safe — acquired inside the try).
+  The scheduler routes execution **and** permission path-rule matching through
+  `_effective_cwd(session, agent)` (override → `agent.cwd`), so isolation is honored at all
+  three cwd sites. Git-worktree stays an embedder impl of the protocol; the two-tier
+  guidance (`ResourceAccess` vs isolation) is in the module docstring. Opt-in: no
+  `isolation` → child uses `agent.cwd` (byte-identical). `wf.agent(isolation=, isolation_keep=)`
+  threads the backend through to `run_subagent`, so workflow fan-outs get per-branch cwds too.
+
+#### 2.3 Background-any-tool — *mechanism (generalizes background bash)*
+- **Why:** background execution is hard-wired to the subagent path; the substrate
+  (detached task + notification drain) is general but unexposed for arbitrary tools.
+- **Where:** `scheduler.py`, `tools/` (a `run_in_background` call hint), `loop/runner.py`.
+- **Approach:** let the scheduler background *any* tool call carrying a `run_in_background`
+  hint — detached `asyncio` task, output streamed to the virtual `FileBackend`
+  (reuse `result_offload`), completion delivered through the existing
+  `pending_notifications` chokepoint, tracked via a `WorkerHandle`-like record. Bash gains
+  nothing special — it's just one tool that may set the hint.
+- **Verify:** a backgrounded long-running tool returns an immediate ack, its completion
+  notification arrives on a later turn, and `session.abort()` cancels it.
+- **Status:** done (core mechanism). `Agent(enable_background_tools=True)` lets the scheduler
+  background **any** allowed tool call carrying a `run_in_background` hint: the hint is
+  stripped before validation (so no tool needs to declare it), the call is detached as an
+  `asyncio` task tracked in `session.background_tasks`, an immediate ack becomes its
+  tool-result block, and completion is posted as a `<task-notification>` through the existing
+  `pending_notifications` chokepoint (drained next turn). `session.abort()` (and the loop's
+  abort cleanup) cancel the detached tasks. Denied / errored / hook-blocked calls fall
+  through to normal foreground handling. Opt-in: with the flag off the hint is passed through
+  untouched and the tool runs inline (byte-identical). Bash gets no special path — it's just
+  one tool that may set the hint. **Deferred (YAGNI):** streaming live tool output to the
+  virtual `FileBackend` via `result_offload` — the completion notification already carries the
+  result; live-tail streaming is an enhancement to add when a concrete long-output need appears.
+
+---
+
+### Phase 3 — Context, memory & scheduling mechanisms
+
+#### 3.1 Memory lifecycle hooks: extraction + consolidation — *mechanism*
+- **Why:** retrieval is strong, but memory only accumulates on explicit writes. The
+  extract→consolidate *loop* is the missing mechanism — the embedder supplies the
+  extraction prompt/policy; the SDK supplies the wiring.
+- **Where:** `hooks/` (a `MemoryExtractionHook` seam), `memory/` (add `consolidate()`).
+- **Approach:** a hook on terminal turns that runs a caller-provided side-query over the
+  pre-compaction `full_history` tail, dedups against existing entries, and `upsert`s —
+  skipped if the agent already wrote memory this turn. A `consolidate()` store capability
+  gated like the reference (time + change-count + lock). The *prompt* and *what counts as
+  a memory* are embedder-supplied; Linch ships the lifecycle seam.
+- **Verify:** with a stub extractor, a durable fact stated across turns is upserted once
+  without an explicit tool call and isn't duplicated on re-run.
+- **Status (done):** `MemoryExtractionHook` (`hooks/memory.py`) fires on the `Stop` hook of a
+  successful terminal turn, runs a caller-supplied extractor over the `full_history` tail
+  (`MemoryExtractionContext`), content-dedups each candidate against the store
+  (`search` score ≥ `dedup_threshold`), and `upsert`s the survivors. It sits out turns where
+  the agent already called a memory-write tool (`memory_write_tools`, default `UpsertMemory`)
+  and never alters the answer (always returns `None`; the dispatcher isolates a raising
+  extractor). Consolidation is a neutral `ConsolidationGate` (`memory/lifecycle.py`) — time +
+  change-count + an in-process `asyncio.Lock` single-flight — running an embedder-supplied
+  `consolidator(store, ctx)` thunk only when gated. The extractor/consolidator (the LLM
+  side-query, the prompt, what counts as a memory) are embedder policy; Linch ships only the
+  wiring. Opt-in via `Agent(hooks=[MemoryExtractionHook(...)])`; with no such hook the loop is
+  byte-identical. **YAGNI deferrals:** no `consolidate()` method was added to the `MemoryStore`
+  protocol (the gate + thunk keeps stores untouched and the capability optional); a
+  multi-process consolidation lock (a store lock row) is left to durable store adapters.
+
+#### 3.2 System-prompt section assembly + cache boundary — *mechanism*
+- **Why:** the prompt is one config string; any dynamic block (memory/MCP) risks
+  invalidating the whole cached prefix.
+- **Where:** new `SystemPromptBuilder` (mirror `ContextBuilder`), `loop/request.py`.
+- **Approach:** an ordered registry of named sections, each `static`/`dynamic` with a
+  `condition(state)` predicate; `Agent(system_prompt=...)` becomes one section. Emit
+  `(static_block, dynamic_block)` and wire a cache boundary in
+  `apply_provider_capabilities` so caching providers cache only the static prefix. Move
+  volatile facts to a prepended `<system-reminder>` user message.
+- **Verify:** changing a dynamic section leaves the cached static prefix intact
+  (cache-read tokens unchanged on a stub caching provider).
+- **Status (done):** the section-assembly half already shipped — `SystemPromptConfig`
+  carries ordered named `SystemPromptSection`s (`placement` ∈ before_defaults / after_defaults
+  / after_env) each with a `cacheable` flag, and every block is a `SystemBlock(cacheable=...)`.
+  The real gap was the **cache boundary**: `_translate_system` ignored `cacheable` and always
+  marked the *literal last* system block, so a volatile trailing section thrashed the whole
+  cached prefix. Fixed by placing the Anthropic cache breakpoint at the end of the leading
+  contiguous static (`cacheable=True`) run (`_cache_breakpoint_index`); a `cacheable=False`
+  block ends the cached prefix and is re-sent uncached each turn. Because the agent's built-in
+  prompt blocks are all `cacheable=True`, the breakpoint stays on the last block — byte-identical
+  for real prompts; the change only takes effect once a caller introduces a dynamic block (a
+  `SystemPromptSection(cacheable=False)` or a `ContextBuilder` system block, which already
+  defaults to `cacheable=False`). Volatile per-turn facts are already a *user* message:
+  `build_user_message` prepends `<env>` (today's date) and `MemoryContextBuilder` injects recall
+  as a user message, both outside the system prefix. **YAGNI deferrals:** no separate
+  `SystemPromptBuilder` registry was added — `SystemPromptConfig.sections` (static, with
+  `cacheable`) plus the existing per-turn `ContextBuilder` system-block seam already cover ordered
+  static-prefix + dynamic-suffix assembly, so a parallel builder with `condition(state)`
+  predicates would duplicate that seam without unlocking a new capability. Multi-breakpoint
+  caching (Anthropic allows up to 4) is left unused; one breakpoint at the static/dynamic boundary
+  is sufficient.
+
+#### 3.3 Scheduling primitive — *mechanism*
+- **Why:** no time-trigger exists. A neutral scheduler is a mechanism; *what* gets
+  scheduled is embedder policy.
+- **Where:** new `scheduler/` module (distinct from the tool `scheduler.py`); persist via
+  `SqliteRunStore`.
+- **Approach:** a `Schedule` abstraction (interval + a neutral `cron_matches`/
+  `validate_cron` utility), an async `SchedulerLoop` (`asyncio.create_task`, 1s tick — not
+  a thread), and a `ScheduleStore` protocol for durability + a multi-process lock row. On
+  fire, enqueue into `session.pending_notifications` (reuse the existing drain). Expose
+  register/list/cancel as `@tool` functions, auto-registered when a `ScheduleStore` is
+  configured. Emit a `ScheduleEvent`. The firing *payload/policy* is the embedder's.
+- **Verify:** a `* * * * *` schedule fires once/minute as a UserEvent; durable schedules
+  survive a store reload; an invalid expression is rejected at register time.
+- **Status (done):** shipped as a new `scheduling/` package (named to avoid the tool
+  `scheduler.py` clash). `cron.py` is a dependency-free 5-field cron utility
+  (`validate_cron` / `cron_matches` / `next_cron_time`, `*` `a-b` `a,b` `*/n`, UTC,
+  Sun=0). `Schedule` (cron *or* interval, exactly one) validates the cron in
+  `__post_init__` and computes its own `next_run`. `ScheduleStore` is a protocol with two
+  adapters — `InMemoryScheduleStore` and a durable `SqliteScheduleStore`
+  (`SqliteExecutor`-backed, survives a reopen). `SchedulerLoop` is an `asyncio` task with a
+  pure, testable `tick()` core (1s cadence = `tick` + `asyncio.sleep`): each due schedule
+  is fired into `session.pending_notifications` as a `<scheduled-task>` message — the same
+  drain background workers use, so it surfaces as a `UserEvent` next turn — `next_run` is
+  recomputed (no double-fire) and persisted, and a `ScheduleEvent(status="fired")` is
+  emitted. `schedule_tools(store)` exposes `CreateSchedule` / `ListSchedules` /
+  `CancelSchedule` (cron validated at register time), auto-registered by
+  `Agent(schedule_store=...)`; off by default (byte-identical). The firing payload is
+  embedder policy. **YAGNI deferrals:** the multi-process leader-election lock row (so only
+  one of N processes fires a shared schedule) is left to the embedder — the single-process
+  loop is the common case and the durable store already covers restart survival; persisting
+  *via* `SqliteRunStore` was set aside in favor of a dedicated `schedules` table/store
+  (cleaner separation than overloading the run-checkpoint store); cron DOM/DOW use simple AND
+  (not the legacy OR) semantics; the `Agent` does not own the loop lifecycle (the embedder
+  starts/stops a `SchedulerLoop` bound to a session), keeping the timer explicit rather than
+  an implicit background thread inside `Agent`.
+
+---
+
+### Phase 4 — Extension-surface hardening
+
+Small, high-confidence additions that complete the pure-SDK extension contract.
+
+#### 4.1 Hook contract: input mutation, allow-invariant, more events
+- **Where:** `hooks/`, `scheduler.py`, `subagents/runner.py`, `compaction.py`,
+  `loop/terminals.py`.
+- **Approach:** confirm/add **`updated_input`** on `HookResult` (a `PRE_TOOL_USE` hook
+  rewrites tool input before execution, wired through validate→execute); enforce the
+  **allow-invariant** (a hook `allow` cannot bypass a configured deny/ask rule — add a
+  regression test at the hook↔permission seam); add `SUBAGENT_START/STOP`,
+  `PRE_COMPACT/POST_COMPACT`, `POST_TOOL_USE_FAILURE` events; add a final-answer
+  **re-entry guard** so a blocking hook can't loop.
+- **Verify:** a pre-tool hook's `updated_input` reaches `execute`; hook-allow + config-deny
+  → denied; a blocking final-answer hook fires once.
+- **Status (done):** `PRE_TOOL_USE` input rewrite was already wired end-to-end
+  (`HookResult.input` → `PermissionDecision.updated_input` → `_effective_input` →
+  validate→execute; covered by `test_tool_hooks_rewrite_input_block_and_result`), so this
+  item only *confirmed* it. `SUBAGENT_START/STOP` were already dispatched in
+  `subagents/runner.py`. New work: (1) the **allow-invariant** is structural — PreToolUse
+  hooks run only over already-`allow`ed calls (`scheduler.py` skips any non-allow decision)
+  and there is no `allow` `HookAction`, so a hook cannot resurrect a denied call; added a
+  regression test proving a `ToolRule` deny wins and the hook never even fires. (2) Three new
+  observational events — `POST_TOOL_USE_FAILURE` (dispatched in `_dispatch_post_tool_use`
+  only when the final, post-mutation result `is_error`; gated on `dispatcher.active` for
+  zero overhead) and `PRE_COMPACT`/`POST_COMPACT` (dispatched at the single real-compaction
+  chokepoint `compaction._run_compaction_impl`, so both proactive *and* forced/ladder-rung-2
+  compaction notify). (3) A **re-entry guard** (`_MAX_FINAL_ANSWER_REENTRIES = 1`,
+  per-run counter in `loop/runner.py`) caps `BeforeFinalAnswer`-induced retries: the retry is
+  honored once, then ignored so the answer is accepted — bounding a perpetually-blocking
+  hook without skipping the dispatch (which would break legitimate retry-then-mutate flows).
+  Default-off / byte-identical: with no hooks every dispatcher is inactive and the guard
+  counter never moves. Deferrals (YAGNI): `PRE_COMPACT`/`POST_COMPACT` are **observational
+  notifications** (no mutate/abort of the compaction) — a mutating compaction hook is added
+  only if an embedder needs it; micro-elision (ladder rung 1) is a cache optimization, not a
+  summarizing compaction, so it intentionally does not emit these; the re-entry cap is a
+  module constant, not an `Agent` knob, until a caller needs >1 honored retry; the STOP
+  hook's `force_continue` remains bounded by `max_turns` rather than the new guard (separate
+  seam, not "the final-answer hook").
+
+#### 4.2 Permissions: layered sources, passthrough, subagent bubbling
+- **Where:** `permissions/`, `subagents/`.
+- **Approach:** a `PermissionRuleSet` merging ordered sources
+  (defaults < project < local < runtime/session) with policy-wins semantics; a
+  `passthrough` decision; **bubble** a subagent's `PermissionRequestEvent` to the parent's
+  event stream/HITL instead of auto-denying.
+- **Verify:** a project deny overrides a runtime allow; a subagent permission request
+  surfaces to the parent caller.
+- **Status (done):** Layered sources ship as `permissions/ruleset.py`:
+  `PermissionRuleSet([PermissionLayer(name, rules), ...])` evaluates each layer as an
+  independent first-match flat list (reusing the extracted `engine.evaluate_rule_list`,
+  which the legacy flat path now also delegates to — DRY) and combines them with
+  **deny-override / policy-wins**: a `deny` from *any* layer is final (fail-closed),
+  otherwise the highest-precedence (last) non-abstaining layer wins; `None` when all
+  abstain. A new `passthrough` `RuleDecision` lets a matched rule abstain (scanning
+  continues past it), so a layer can carve out exceptions that defer to the next source.
+  `PermissionEngine(rule_set=...)` is the opt-in seam: when set, the layered combiner runs
+  before the flat rules + mode default; default `rule_set=None` is byte-identical.
+  Subagent bubbling: child sessions already share the parent's permission engine + responder
+  (so they were never auto-denied when a callback exists), but their events — including a
+  child `PermissionRequestEvent` — only landed in `session.pending_child_events`, a buffer
+  for host UIs. New `_drain_child_events` yields that buffer into the parent's event stream
+  at the same top-of-turn chokepoint as the notification/mailbox drains, so a child's
+  permission request now surfaces to the parent caller's iterator. Deferrals (YAGNI): the
+  `Agent`/permissions-config layer does not yet auto-assemble the four named sources
+  (defaults/project/local/runtime) — `PermissionRuleSet` is constructed by the embedder; no
+  cross-session *durable* HITL for a paused child (resolution stays inline via the shared
+  responder); child events bubble at top of the next parent turn (one turn after a
+  foreground child), not mid-tool-execution, which is sufficient for surfacing.
+
+#### 4.3 MCP: mid-run registration + annotation→permission bridge
+- **Where:** `mcp/`, `loop/request.py`, `permissions/`.
+- **Approach:** support connecting a server **during a run** so its tools appear next turn
+  (request assembly already rebuilds per turn — ensure registry mutation is picked up and
+  stale cache dropped); map server `readOnly`/`destructive` annotations to `ToolRule`
+  tiers. Defer OAuth/PKCE and reverse channels (YAGNI).
+- **Verify:** a server connected mid-run is callable next turn; a `destructive` MCP tool
+  triggers a permission prompt.
+- **Status (done):** Mid-run registration needed no cache-busting — `loop/request.py`'s
+  `_select_context_tools` already rebuilds the tool list from `session.tools_override or
+  agent.tools` every turn, so tools added to the live registry appear on the next turn. New
+  `Agent.add_mcp_servers(servers)` connects additional servers during a run and routes
+  through the extracted `Agent._attach_mcp_tools(connection)` helper (shared with the
+  configured-connect path — DRY), which registers the tools, applies the permission bridge,
+  refreshes system blocks, and tracks the connection so `close()` shuts it down too.
+  Annotation→permission bridge: `make_mcp_tool` already mapped `readOnlyHint` → read scope
+  (auto-allow + parallel); it now also stamps a `destructive` flag from `destructiveHint`.
+  The mcp-free `mcp/permission_bridge.py::mcp_permission_rules(tools)` maps each destructive
+  tool to a `ToolRule(name, "ask")`, which (evaluated before mode default) forces a prompt
+  even under `skip-dangerous`/`acceptEdits`, where a plain write tool would auto-allow.
+  Default byte-identical: MCP is opt-in, and a destructive tool was already write-scoped
+  (so it asked under the default mode anyway); the bridge only adds the prompt under
+  permissive modes. Deferrals (YAGNI): OAuth/PKCE and reverse channels not implemented;
+  read-only tools get no explicit `allow` rule (their read scope already auto-allows — a
+  redundant rule would be noise); the `Agent`/permissions config still does not auto-merge
+  named permission sources (see 4.2 deferral).
+
+#### 4.4 Input-aware concurrency seam *(Low)*
+- **Where:** tool protocol, `scheduler._tool_parallel`.
+- **Approach:** let `parallel` be a callable `parallel(input) -> bool` so a tool can decide
+  concurrency-safety per call (a generic seam; any tool, not just Bash, can use it).
+  Ordering/safety already handled by `_partition_batches`.
+- **Verify:** a tool returning `parallel(input)=True` for read-only inputs runs those
+  concurrently while mutating inputs serialize; ordering preserved.
+- **Status (done):** `scheduler._tool_parallel` now treats a **callable** `parallel` as an
+  input-aware predicate: `parallel(input) -> bool`, consulted for *any* scope (so an
+  exec/write tool can opt safe inputs into concurrency, not just read tools), and **fail-closed**
+  — a predicate that raises serializes. A plain-bool `parallel`/`parallel_safe` attribute keeps
+  the legacy scope-gated path, so the default is byte-identical (no built-in tool ships a
+  callable `parallel`). `_partition_batches` passes the permission/hook-rewritten *effective*
+  input to the predicate (same input resources and execution see) and is otherwise unchanged:
+  it still greedily groups consecutive parallel-safe calls front-to-back under the
+  resource-conflict and `max_concurrency` guards, so ordering is preserved. Deferral (YAGNI):
+  no per-input cost/priority hinting on the same seam — concurrency-safety is the only
+  per-call decision exposed for now.
+
+---
+
+### Phase 5 — SDK-grade hardening
+
+The reference curriculum is a *product* tutorial, so it never teaches these — yet they are
+exactly what separates an embeddable SDK from an app. Several Linch already does well;
+this track makes them explicit guarantees.
+
+- **Curated public API + semver** — an explicit `__all__`/public-surface contract and a
+  versioning policy embedders can pin to; mark internal modules clearly.
+  - **Status (done):** `tests/test_public_api.py` locks the surface — every `__all__` name
+    resolves, no duplicates, and no public (non-underscore) attribute leaks onto the package
+    undeclared (submodules excluded). `get_version` promoted into `__all__`. `docs/versioning.md`
+    is the semver contract: public = `linch.__all__` (top-level imports only), submodule
+    paths/underscore names are private, wire formats version independently via
+    `RUN_SCHEMA_VERSION`, plus MAJOR/MINOR/PATCH rules for protocols and a deprecation policy.
+    YAGNI-deferred: no per-name `@public`/`@internal` decorators or a generated API-reference
+    site (the `__all__` snapshot + guard test is the contract).
+- **No global state / multi-tenancy / cancellation** — audit for process-global state so N
+  agents run in one host process safely; verify `session.abort()`/`agent.close()` fully
+  drain tasks (the `_cancel_background_workers` guarantees) under concurrency.
+  - **Status (done):** audit found no process-global mutable state — every `Agent` builds its
+    own tool registry, sessions dict, permission engine, and extension state; the one
+    module-level singleton (`default_compaction`) is immutable. `tests/test_multitenancy.py`
+    pins it: three agents run concurrently with disjoint sessions and no cross-talk. The
+    audit also surfaced a real **cancellation leak** — `agent.close()` cancelled subagent
+    workers but not detached background-*tool* tasks (`session.background_tasks`); now fixed
+    to mirror `session.abort()`, and the test proves closing agent A drains A's worker while
+    agent B's stays live. YAGNI-deferred: no tenant-id namespacing or per-tenant quota (the
+    embedder owns multi-tenant routing; Linch just stays isolated).
+- **Versioned serialization/resume** — treat `RunCheckpoint`/stored-event formats as a
+  stable, versioned contract with forward-compat handling.
+  - **Status (done):** `run_store.SCHEMA_VERSION` (exported as `linch.RUN_SCHEMA_VERSION`)
+    stamps every serialized checkpoint (`checkpoint_to_dict` → `"schema_version"`).
+    `checkpoint_from_dict` already reads field-by-field with defaults, so a checkpoint from
+    a *newer* binary (higher version, unknown future keys) round-trips its known fields
+    without crashing. `load_events` now wraps `event_from_dict` and **skips** any row it
+    cannot decode (a future event type) instead of aborting the whole resume — the
+    checkpoint, not the event log, drives resume. YAGNI-deferred: no migration registry or
+    down-conversion (single live version); `RunCheckpoint` gains no in-memory `version`
+    field (a wire concern, kept off the dataclass).
+- **Streaming/backpressure ergonomics** — confirm the event `AsyncIterator` applies
+  backpressure correctly to a slow host consumer; document the contract.
+  - **Status (done):** `session.run()` is a plain async-generator chain (`run_loop` →
+    `session.run`), suspended at each `yield` until the consumer pulls — no unbounded
+    internal queue. `tests/test_backpressure.py` proves it: a consumer that pulls one event
+    then pauses leaves the tool *unexecuted* (the producer is parked, not racing ahead).
+    Documented in [usage/events.md](usage/events.md#backpressure): slow-consumer throttling,
+    drain/abort discipline, one-active-run-per-session, and background tasks as the explicit
+    non-blocking exception. YAGNI-deferred: no bounded-queue buffering mode or
+    drop-oldest/lossy stream option (the generator's natural backpressure is the contract).
+- **Domain-agnostic proof** — ship a **non-coding** recipe (e.g. support or research agent)
+  under `examples/` to prove the SDK isn't coding-shaped and to exercise the seams above.
+  - **Status (done):** `examples/recipes/research_desk.py` — a literature-research analyst that
+    never touches a file or shell. Domain function tools (`search_library`/`read_article`/
+    `record_citation`) over a `ctx.deps` corpus + citation ledger, an `OutputSchema` brief, and
+    a closed-loop `CitedSourcesVerifier` (via `FinalAnswerVerifierHook`) that bounces an uncited
+    answer. Built by a `build_research_desk(provider=...)` factory so
+    `tests/test_example_research_desk.py` drives it offline with a `ScriptedProvider` and proves
+    the verifier-retry → cite → accept loop. Listed in [usage/examples.md](usage/examples.md).
+- **Embedder docs for every seam** — each protocol added above (`IsolationBackend`,
+  `Mailbox`, `ScheduleStore`, `SystemPromptBuilder`, memory lifecycle) ships with a "how to
+  implement your own" doc, matching the existing `ExecutionBackend`/`MemoryStore` pattern.
+  - **Status (done):** [docs/usage/extending.md](usage/extending.md) is the consolidated
+    "implement your own seam" reference, linked from the usage index — one section each for
+    `IsolationBackend` (acquire/release), `Mailbox` (send/drain + the destructive-drain /
+    no-drop invariants), `ScheduleStore` (add/update/remove/get/list + the multi-process lock
+    note), system-prompt assembly, and the memory lifecycle (`MemoryExtractor` callable +
+    `ConsolidationGate`), each with the protocol signature and a minimal implementation. The
+    "SystemPromptBuilder" row is documented honestly as the two existing seams that fill that
+    role (`SystemPromptSection` with `cacheable` + per-turn `ContextBuilder` system blocks) —
+    no such builder was ever added (3.2 YAGNI). `ExecutionBackend`/`Tool`/`MemoryStore`/
+    `ContextBuilder`/provider/hook seams keep their existing per-page docs; this page
+    cross-links them.
+
+---
+
+## Sequencing summary
+
+| Phase | Theme | Items | Gate |
+|---|---|---|---|
+| 1 | Runtime resilience & cost | fork subagents · compaction fidelity · output/fallback recovery · task claim/ready/release | none — start here |
+| 2 | Coordination & isolation | mailbox substrate · isolation backend · background-any-tool | needs 1.4 for multi-agent |
+| 3 | Context/memory/scheduling | memory lifecycle hooks · prompt assembly · scheduling primitive | independent |
+| 4 | Extension surface | hook contract · permission layering · MCP · concurrency seam | independent |
+| 5 | SDK-grade hardening | API/semver · multitenancy · serialization · backpressure · non-coding recipe · seam docs | continuous |
+
+Everything is a **mechanism or seam**: an embedder assembles a coding agent — or any other
+agent — on top, and Linch never ships the domain policy.
+
+**Mapped to the open↔closed axis:** Phase 1 (resilience/cost) + Phase 2 (coordination)
+harden the **open loop** (`create_deep_agent`) so it can roam without becoming a slop
+machine; the budget + verification control surface and Phase 5's serialization contract
+keep the **closed loop** (`run_workflow`) cheap, honest, and repeatable. Both loops draw
+from the same primitives — the axis is a dial, not two codebases.
 
 ---
 

@@ -12,3 +12,6 @@ build/
 .claude/
 .codex/
 .linch/
+
+# Vendored reference material (has its own git repo)
+learn-claude-code/

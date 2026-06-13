@@ -61,6 +61,12 @@ class Session:
     """Budget inherited from a parent session (set on subagent child sessions
     by ``run_subagent``).  Same object as the parent's ``active_budget``."""
     compaction_retry_used_this_turn: bool = False
+    active_model: str | None = None
+    """Run-level model override set by the model-fallback recovery path when the
+    primary model overloads. ``None`` means use ``agent.model``. Reset at the
+    start of each run."""
+    fallback_index: int = 0
+    """How many entries of ``agent.fallback_models`` have been consumed this run."""
     pending_skill_overlay: SkillOverlay | None = None
     current_turn_allowed_tools: list[str] | None = None
     current_turn_permission_decisions: dict[str, dict] = field(default_factory=dict)
@@ -71,7 +77,13 @@ class Session:
     file_read_tracker: FileReadTracker = field(default_factory=FileReadTracker)
     _abort_controller: AbortContext = field(default_factory=AbortContext)
     run_deps: Any = None
+    """Resolved dependency object for the current run.  Set by ``run_loop``
+    from ``RunOptions.deps`` (falling back to ``Agent.deps``) and threaded
+    into :attr:`~linch.tools.ToolContext.deps` via the scheduler."""
     filesystem: Any = None
+    """Per-session virtual filesystem backend (:class:`~linch.filesystem.backend.FileBackend`).
+    Threaded into :attr:`~linch.tools.base.ToolContext.filesystem` on every
+    tool call.  ``None`` when the filesystem subsystem is disabled."""
     workers: dict[str, Any] = field(default_factory=dict)
     """Live in-process worker handles keyed by worker_id.
 
@@ -82,12 +94,17 @@ class Session:
     """SubagentEvents accumulated by in-flight child sessions; available to host UIs."""
     pending_notifications: list[Message] = field(default_factory=list)
     """In-process background-worker <task-notification> messages, drained next turn."""
-    """Per-session virtual filesystem backend (:class:`~linch.filesystem.backend.FileBackend`).
-    Threaded into :attr:`~linch.tools.base.ToolContext.filesystem` on every
-    tool call.  ``None`` when the filesystem subsystem is disabled."""
-    """Resolved dependency object for the current run.  Set by ``run_loop``
-    from ``RunOptions.deps`` (falling back to ``Agent.deps``) and threaded
-    into :attr:`~linch.tools.ToolContext.deps` via the scheduler."""
+    background_tasks: list[Any] = field(default_factory=list)
+    """Detached asyncio.Tasks for backgrounded tool calls (run_in_background hint).
+    Cancelled on abort so they never write into a dead session."""
+    mailbox_address: str | None = None
+    """This session's inbox address on ``agent.mailbox``; drained into provider_view
+    each turn when set. Workers default to their display_name; the root is set by
+    the embedder. ``None`` means this session does not receive peer messages."""
+    cwd_override: str | None = None
+    """Per-session working directory overriding ``agent.cwd`` for tool execution and
+    permission path-rule matching. Set by an :class:`~linch.tools.isolation.IsolationBackend`
+    so a subagent branch runs in its own cwd. ``None`` = use ``agent.cwd``."""
 
     @property
     def message_count(self) -> int:
@@ -172,6 +189,10 @@ class Session:
         for handle in self.workers.values():
             task = getattr(handle, "task", None)
             if task is not None and isinstance(task, asyncio.Task) and not task.done():
+                task.cancel()
+        # Cancel detached background-tool tasks too.
+        for task in self.background_tasks:
+            if isinstance(task, asyncio.Task) and not task.done():
                 task.cancel()
 
     def mark_compaction_used(self) -> None:

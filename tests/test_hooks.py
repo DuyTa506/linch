@@ -33,6 +33,7 @@ class RecordingTool:
 
 def _agent(provider: Any, *, hooks: Any = None, tools: Any = None):
 
+    from linch import Agent
     from linch.config import FeatureFlags
     from linch.sessions import InMemorySessionStore
     from linch.tools.registry import empty_tools
@@ -493,3 +494,195 @@ async def test_stop_when_runs_through_before_provider_hook() -> None:
         and event.action == "stop"
         for event in events
     )
+
+
+# ── Phase 4.1 — hook contract hardening ──────────────────────────────────────
+
+
+class FailingTool:
+    name = "Boom"
+    description = "Always fails."
+    scope = "read"
+    parallel = False
+    input_schema = {"type": "object", "properties": {}}
+
+    def validate(self, raw: dict[str, Any]) -> dict[str, Any]:
+        return dict(raw)
+
+    def summarize(self, inp: dict[str, Any]) -> str:
+        return "Boom()"
+
+    async def execute(self, inp: dict[str, Any], ctx: Any) -> Any:
+        from linch import ToolResult
+
+        return ToolResult(content="kaboom", is_error=True)
+
+
+@pytest.mark.asyncio
+async def test_pre_tool_hook_allow_cannot_bypass_config_deny() -> None:
+    # Allow-invariant: a configured deny wins; a PreToolUse hook never even runs
+    # on a denied call, so it cannot resurrect (or rewrite the input of) a tool
+    # the permission layer refused.
+    from linch import Agent, HookResult, ToolCallEndEvent, ToolRegistry
+    from linch.config import FeatureFlags
+    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.permissions.rules import ToolRule
+    from linch.sessions import InMemorySessionStore
+
+    tool = RecordingTool()
+    registry = ToolRegistry()
+    registry.add(tool)
+
+    hook_ran: list[str] = []
+
+    class Hooks:
+        def on_pre_tool_use(self, ctx):
+            hook_ran.append(ctx.tool_name)
+            return HookResult.mutate(input={"value": "rewritten"})
+
+    provider = ScriptedProvider(
+        [ToolUseTurn(tool_name="Record", tool_input={"value": "raw"}), TextTurn(text="done")]
+    )
+    agent = Agent(
+        model="test-model",
+        provider=provider,
+        tools=registry,
+        permissions={"mode": "default", "rules": [ToolRule("Record", "deny")]},
+        session_store=InMemorySessionStore(),
+        hooks=[Hooks()],
+        features=FeatureFlags(skills=False, subagents=False, mcp=False),
+        result_offload=None,
+    )
+    session = await agent.session()
+    events = await _collect(session)
+
+    end = next(event for event in events if isinstance(event, ToolCallEndEvent))
+    assert end.is_error is True
+    assert tool.inputs == []  # tool never executed
+    assert hook_ran == []  # PreToolUse hook never fired on a denied call
+
+
+@pytest.mark.asyncio
+async def test_post_tool_use_failure_hook_fires_only_on_error() -> None:
+    from linch import ToolRegistry
+    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+
+    failing = FailingTool()
+    ok = RecordingTool()
+    registry = ToolRegistry()
+    registry.add(failing)
+    registry.add(ok)
+
+    failures: list[tuple[str, bool]] = []
+    post_calls: list[str] = []
+
+    class Hooks:
+        def on_post_tool_use(self, ctx):
+            post_calls.append(ctx.tool_name)
+            return None
+
+        def on_post_tool_use_failure(self, ctx):
+            failures.append((ctx.tool_name, ctx.result.is_error))
+            return None
+
+    provider = ScriptedProvider(
+        [
+            ToolUseTurn(tool_name="Boom", tool_input={}),
+            ToolUseTurn(tool_name="Record", tool_input={"value": "x"}),
+            TextTurn(text="done"),
+        ]
+    )
+    agent = _agent(provider, hooks=[Hooks()], tools=registry)
+    session = await agent.session()
+    await _collect(session)
+
+    # PostToolUse fires for both calls; the failure event fires only for Boom.
+    assert post_calls == ["Boom", "Record"]
+    assert failures == [("Boom", True)]
+
+
+@pytest.mark.asyncio
+async def test_before_final_answer_reentry_guard_caps_retries() -> None:
+    # A hook that *always* asks to retry must not loop forever: the re-entry
+    # guard honors the retry once, then accepts the answer as-is.
+    from linch import Agent, HookResult
+    from linch.config import FeatureFlags
+    from linch.evals import ScriptedProvider, TextTurn
+    from linch.sessions import InMemorySessionStore
+
+    class Hooks:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def on_before_final_answer(self, ctx):
+            self.calls += 1
+            return HookResult.retry("never satisfied")
+
+    hooks = Hooks()
+    # Plenty of turns available; the guard, not exhaustion, must stop the loop.
+    provider = ScriptedProvider([TextTurn(text=f"draft-{i}") for i in range(8)])
+    agent = Agent(
+        model="test-model",
+        provider=provider,
+        permissions={"mode": "skip-dangerous"},
+        session_store=InMemorySessionStore(),
+        hooks=[hooks],
+        max_turns=20,
+        features=FeatureFlags(skills=False, subagents=False, mcp=False),
+        result_offload=None,
+    )
+    session = await agent.session()
+    events = await _collect(session)
+
+    assert events[-1].type == "result"
+    assert events[-1].subtype == "success"  # accepted, not a turn-limit error
+    # Dispatched on the first terminal (retry honored) and the re-entered one
+    # (retry ignored by the guard) — exactly one honored retry.
+    assert hooks.calls == 2
+    assert events[-1].final_text == "draft-1"
+
+
+@pytest.mark.asyncio
+async def test_compaction_dispatches_pre_and_post_compact_hooks() -> None:
+    from linch.abort import AbortContext
+    from linch.compaction import run_forced_compaction
+    from linch.types import Message, TextBlock
+
+    class FakeStrategy:
+        id = "fake"
+
+        async def compact(self, ctx: Any, provider: Any) -> list[Message]:
+            return [Message(role="user", content=[TextBlock(text="summary")])]
+
+    recorder: list[tuple[str, int, int]] = []
+
+    class Hooks:
+        def on_pre_compact(self, ctx):
+            recorder.append(("pre", ctx.messages, ctx.tokens))
+
+        def on_post_compact(self, ctx):
+            recorder.append(("post", ctx.messages_before, ctx.messages_after))
+
+    class FakeAgent:
+        model = "m"
+        provider = object()
+        hooks = [Hooks()]
+        compaction = FakeStrategy()
+        token_estimator = None
+        max_output_tokens = None
+
+    class FakeSession:
+        active_run_id = "r"
+
+        def __init__(self) -> None:
+            self.provider_view = [
+                Message(role="user", content=[TextBlock(text="a" * 100)]) for _ in range(5)
+            ]
+            self.last_compaction_info: dict[str, Any] | None = None
+
+    session = FakeSession()
+    await run_forced_compaction(session, FakeAgent(), AbortContext())
+
+    assert [r[0] for r in recorder] == ["pre", "post"]
+    assert recorder[0][1] == 5  # pre: messages observed before compaction
+    assert recorder[1][1] == 5 and recorder[1][2] == 1  # post: before=5, after=1

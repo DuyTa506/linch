@@ -162,5 +162,39 @@ class InMemorySessionStore:
             self._sessions[session_id].updated_at = now_iso()
         return existed
 
+    async def claim_task(self, session_id: str, task_id: str, owner: str) -> Task | None:
+        task = self._tasks.get(session_id, {}).get(task_id)
+        if task is None or task.owner is not None or task.status != "pending":
+            return None
+        task.owner = owner
+        task.updated_at = now_iso()
+        self._sessions[session_id].updated_at = task.updated_at
+        return task
+
+    async def ready_tasks(self, session_id: str) -> list[Task]:
+        bucket = self._tasks.get(session_id, {})
+        out: list[Task] = []
+        for task in sorted(bucket.values(), key=lambda t: int(t.id)):
+            if task.status != "pending" or task.owner is not None:
+                continue
+            if all(
+                (dep := bucket.get(bid)) is not None and dep.status == "completed"
+                for bid in task.blocked_by
+            ):
+                out.append(task)
+        return out
+
+    async def release_task(self, session_id: str, task_id: str) -> Task | None:
+        task = self._tasks.get(session_id, {}).get(task_id)
+        if task is None:
+            return None
+        if task.status == "completed":
+            return task
+        task.owner = None
+        task.status = "pending"
+        task.updated_at = now_iso()
+        self._sessions[session_id].updated_at = task.updated_at
+        return task
+
     async def close(self) -> None:
         return None

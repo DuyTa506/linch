@@ -7,6 +7,7 @@ from .config import (
     mcp_server_type,
 )
 from .naming import build_mcp_tool_name, normalize_name_for_mcp
+from .permission_bridge import mcp_permission_rules
 
 try:
     from .client import McpConnection, connect_mcp_servers  # type: ignore[assignment]
@@ -44,6 +45,7 @@ __all__ = [
     "build_mcp_tool_name",
     "connect_mcp_servers",
     "make_mcp_tool",
+    "mcp_permission_rules",
     "mcp_server_type",
     "normalize_name_for_mcp",
 ]

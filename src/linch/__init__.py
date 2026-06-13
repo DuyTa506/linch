@@ -35,9 +35,11 @@ from .events import (
     Event,
     HookEventRecord,
     LoopGuardEvent,
+    ModelFallbackEvent,
     PartialAssistantEvent,
     PermissionRequestEvent,
     ResultEvent,
+    ScheduleEvent,
     SkillCompletedEvent,
     SkillInvokedEvent,
     SkillsLoadedEvent,
@@ -77,7 +79,11 @@ from .hooks import (
     HookDispatchResult,
     HookEvent,
     HookResult,
+    MemoryExtractionHook,
+    PostCompactContext,
     PostToolUseContext,
+    PostToolUseFailureContext,
+    PreCompactContext,
     PreToolUseContext,
     RunTelemetryHook,
     StopContext,
@@ -96,6 +102,7 @@ from .loop_guard import (
     evaluate_loop_guard,
     normalize_loop_guard,
 )
+from .mailbox import Correlator, InMemoryMailbox, Mailbox, MailboxMessage
 from .mcp import (
     McpHttpServerConfig,
     McpServerConfig,
@@ -103,8 +110,11 @@ from .mcp import (
     connect_mcp_servers,
 )
 from .memory import (
+    ConsolidationGate,
     InMemoryKeywordMemoryStore,
     MemoryContextBuilder,
+    MemoryExtractionContext,
+    MemoryExtractor,
     MemoryItem,
     MemorySearchResult,
     MemorySearchTool,
@@ -158,12 +168,26 @@ from .providers import (
 from .providers.retry import RetryOptions
 from .reports import RunReport, build_run_report, load_run_report
 from .run_store import (
+    SCHEMA_VERSION as RUN_SCHEMA_VERSION,
+)
+from .run_store import (
     InMemoryRunStore,
     RunCheckpoint,
     RunRecord,
     RunStore,
     SqliteRunStore,
     StoredRunEvent,
+)
+from .scheduling import (
+    InMemoryScheduleStore,
+    Schedule,
+    SchedulerLoop,
+    ScheduleStore,
+    SqliteScheduleStore,
+    cron_matches,
+    next_cron_time,
+    schedule_tools,
+    validate_cron,
 )
 from .session import RunOptions, Session
 from .subagents import (
@@ -187,6 +211,7 @@ from .tools import (
     default_tools,
     tool,
 )
+from .tools.isolation import IsolationBackend, TempDirIsolation
 from .tools.registry import empty_tools, tools_from_defaults
 from .types import (
     ContentBlock,
@@ -229,6 +254,16 @@ __all__ = [
     "WorkflowEvent",
     "WorkflowJournal",
     "is_workflow_event",
+    "ScheduleEvent",
+    "Schedule",
+    "ScheduleStore",
+    "InMemoryScheduleStore",
+    "SqliteScheduleStore",
+    "SchedulerLoop",
+    "schedule_tools",
+    "cron_matches",
+    "next_cron_time",
+    "validate_cron",
     "AgentMiddleware",
     "ContextBudget",
     "ContextBuilder",
@@ -272,6 +307,9 @@ __all__ = [
     "AfterProviderCallContext",
     "PreToolUseContext",
     "PostToolUseContext",
+    "PostToolUseFailureContext",
+    "PreCompactContext",
+    "PostCompactContext",
     "BeforeFinalAnswerContext",
     "StopContext",
     "SubagentStartContext",
@@ -281,6 +319,7 @@ __all__ = [
     "FinalAnswerVerifierHook",
     "StopPredicateHook",
     "RunTelemetryHook",
+    "MemoryExtractionHook",
     "normalize_hooks",
     "is_hook_event",
     "ImageBlock",
@@ -295,7 +334,10 @@ __all__ = [
     "McpHttpServerConfig",
     "McpServerConfig",
     "McpStdioServerConfig",
+    "ConsolidationGate",
     "MemoryContextBuilder",
+    "MemoryExtractionContext",
+    "MemoryExtractor",
     "MemoryItem",
     "MemorySearchResult",
     "MemorySearchTool",
@@ -360,6 +402,7 @@ __all__ = [
     "ProviderModelInfo",
     "RetryOptions",
     "RunReport",
+    "RUN_SCHEMA_VERSION",
     "RunCheckpoint",
     "RunRecord",
     "RunStore",
@@ -371,6 +414,13 @@ __all__ = [
     "LoopGuard",
     "LoopGuardDecision",
     "LoopGuardEvent",
+    "Correlator",
+    "InMemoryMailbox",
+    "Mailbox",
+    "MailboxMessage",
+    "IsolationBackend",
+    "TempDirIsolation",
+    "ModelFallbackEvent",
     "LoopGuardState",
     "evaluate_loop_guard",
     "normalize_loop_guard",
@@ -386,6 +436,7 @@ __all__ = [
     "create_deep_agent",
     "defaultTools",
     "default_tools",
+    "get_version",
     "__version__",
     "is_context_build_event",
     "get_provider_model_info",

@@ -608,3 +608,74 @@ async def test_deep_agent_can_resume_with_durable_defaults(tmp_path: Path) -> No
 
     assert [event.type for event in resume_events] == ["tool_call_start", "tool_call_end"]
     assert restarted_tool.calls == 1
+
+
+# ── Open-loop safety rails (ROADMAP Step 2) ─────────────────────────────────
+
+
+def test_deep_agent_verifiers_are_wired_as_hook(tmp_path: Path) -> None:
+    from linch import create_deep_agent
+    from linch.hooks import FinalAnswerVerifierHook
+
+    class _V:
+        name = "v"
+
+        def verify(self, ctx: Any) -> Any:
+            from linch.verification import Verdict
+
+            return Verdict(action="pass")
+
+    agent = create_deep_agent(
+        model="gpt-5",
+        provider=FakeProvider(),
+        cwd=str(tmp_path),
+        durable=False,
+        verifiers=[_V()],
+    )
+
+    assert any(isinstance(h, FinalAnswerVerifierHook) for h in agent.hooks)
+
+
+def test_deep_agent_no_verifiers_adds_no_verifier_hook(tmp_path: Path) -> None:
+    from linch import create_deep_agent
+    from linch.hooks import FinalAnswerVerifierHook
+
+    agent = create_deep_agent(
+        model="gpt-5",
+        provider=FakeProvider(),
+        cwd=str(tmp_path),
+        durable=False,
+    )
+
+    assert not any(isinstance(h, FinalAnswerVerifierHook) for h in agent.hooks)
+
+
+def test_deep_agent_forwards_budget_and_max_turns(tmp_path: Path) -> None:
+    from linch import create_deep_agent
+    from linch.budget import RunBudget
+
+    budget = RunBudget(max_tokens=1000)
+    agent = create_deep_agent(
+        model="gpt-5",
+        provider=FakeProvider(),
+        cwd=str(tmp_path),
+        durable=False,
+        budget=budget,
+        max_turns=7,
+    )
+
+    assert agent.budget is budget
+    assert agent.max_turns == 7
+
+
+def test_deep_agent_loop_guard_on_by_default(tmp_path: Path) -> None:
+    from linch import create_deep_agent
+
+    agent = create_deep_agent(
+        model="gpt-5",
+        provider=FakeProvider(),
+        cwd=str(tmp_path),
+        durable=False,
+    )
+
+    assert agent.loop_guard is not None

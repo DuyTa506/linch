@@ -81,6 +81,41 @@ value wins over the capability-driven auto-wiring. The resolution order is:
 `RunOptions.final_tool_name` → `Agent.final_tool_name` → schema name when the
 provider supports native structured output.
 
+### OpenAI-compatible endpoints: `json_mode` (DeepSeek and friends)
+
+`OpenAIChatCompletionsProvider` drives both real OpenAI and OpenAI-compatible
+endpoints (DeepSeek, etc.). It has two `response_format` modes, selected by
+`json_mode` on `OpenAIChatProviderOptions`:
+
+| `json_mode` | request `response_format` | who accepts it |
+|---|---|---|
+| `False` *(default)* | `{"type": "json_schema", strict}` | real OpenAI (gpt-4o, …) |
+| `True` | `{"type": "json_object"}` | DeepSeek **and** real OpenAI |
+
+The strict `json_schema` form is enforced server-side, but **many
+OpenAI-compatible endpoints don't implement it** — DeepSeek rejects it with
+`400 ... response_format type unavailable`. Those endpoints support only
+`{"type": "json_object"}` (valid JSON, schema *not* enforced by the API). So for
+DeepSeek and similar, pass `json_mode=True`:
+
+```python
+from linch.providers.openai_chat import (
+    OpenAIChatCompletionsProvider,
+    OpenAIChatProviderOptions,
+)
+
+provider = OpenAIChatCompletionsProvider(
+    OpenAIChatProviderOptions(
+        api_key=..., base_url="https://api.deepseek.com", json_mode=True
+    )
+)
+```
+
+With `json_object`, the API only guarantees valid JSON — Linch then **text-parses
+and validates** it against your `OutputSchema.schema` (the JSON-text path above),
+so you still get a checked `structured_output`. `AnthropicProvider` is unaffected:
+it has no `response_format` and uses the forced-tool method regardless.
+
 ---
 
 ## Schema validation

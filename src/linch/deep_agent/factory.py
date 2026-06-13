@@ -44,6 +44,10 @@ def create_deep_agent(
     system_prompt_config: SystemPromptConfig | None = None,
     memory_store: MemoryStore | None = None,
     memory_namespace: str | None = None,
+    budget: Any = None,
+    max_turns: int | None = None,
+    verifiers: Any = None,
+    max_verification_retries: int = 2,
     **agent_kwargs: Any,
 ) -> Agent:
     """Create a normal :class:`Agent` with deep-agent defaults.
@@ -58,6 +62,19 @@ def create_deep_agent(
     all real work to worker subagents. A coordinator-specific system prompt is
     injected and ``run_in_background`` becomes the default worker pattern.
     A persistent ``/memories`` filesystem partition is set up for durable state.
+
+    **Open-loop safety rails.** A deep agent is an *open loop*: the model authors
+    its own path, so by default it runs unbounded (``max_turns`` is infinite, no
+    budget cap). ``loop_guard`` is on by default (it stops pathological repeat/
+    failure loops) but does not bound a productive-but-endless exploration. The
+    SDK deliberately does **not** fabricate a default cost ceiling or quality
+    standard — those are policy you own. Set them explicitly to keep the loop
+    honest and affordable:
+
+    - ``budget=RunBudget(...)`` — the cost line; also caps the whole subagent tree.
+    - ``verifiers=[...]`` — the standard checked before the final answer; wired
+      into the hooks layer for you (``max_verification_retries`` bounds retries).
+    - ``max_turns=N`` — a hard length cap.
     """
 
     if coordinator and features is not None and not getattr(features, "subagents", True):
@@ -81,6 +98,10 @@ def create_deep_agent(
         hooks.append(
             ContextInjectionHook(MemoryContextBuilder(memory_store, namespace=memory_namespace))
         )
+    if verifiers is not None:
+        from ..hooks import FinalAnswerVerifierHook
+
+        hooks.append(FinalAnswerVerifierHook(verifiers, max_retries=max_verification_retries))
     agent_kwargs.setdefault("enable_worker_tools", True)
     agent_kwargs.setdefault("retain_subagents", True)
     agent_kwargs.setdefault("enable_background_subagents", True)
@@ -110,6 +131,8 @@ def create_deep_agent(
         features=features,
         system_prompt_config=prompt_config,
         hooks=hooks,
+        budget=budget,
+        max_turns=max_turns,
         extra_subagents=DEEP_AGENT_SUBAGENTS,
         **agent_kwargs,
     )

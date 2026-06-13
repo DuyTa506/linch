@@ -7,6 +7,7 @@ from .engine import (
     PermissionEngine,
 )
 from .rules import BashRule, PathRule, PermissionRule, ToolRule
+from .ruleset import PermissionLayer, PermissionRuleSet
 
 __all__ = [
     "BashRule",
@@ -17,6 +18,8 @@ __all__ = [
     "PendingToolCall",
     "PermissionDecision",
     "PermissionEngine",
+    "PermissionLayer",
     "PermissionRule",
+    "PermissionRuleSet",
     "ToolRule",
 ]
