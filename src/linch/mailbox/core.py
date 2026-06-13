@@ -74,5 +74,7 @@ class InMemoryMailbox:
             if not inbox:
                 return []
             drained = list(inbox)
-            inbox.clear()
+            # Drop the now-empty bucket so the dict doesn't grow unbounded with
+            # one stale entry per recipient ever addressed.
+            del self._inboxes[recipient]
             return drained

@@ -579,6 +579,20 @@ def event_to_dict(event: Event) -> dict[str, Any]:
             "tokens_after": event.tokens_after,
             "strategy": event.strategy,
         }
+    if isinstance(event, ModelFallbackEvent):
+        return {
+            "type": event.type,
+            "from_model": event.from_model,
+            "to_model": event.to_model,
+            "reason": event.reason,
+        }
+    if isinstance(event, ScheduleEvent):
+        return {
+            "type": event.type,
+            "schedule_id": event.schedule_id,
+            "status": event.status,
+            "payload": event.payload,
+        }
     if isinstance(event, ContextBuildEvent):
         return {
             "type": event.type,
@@ -750,6 +764,18 @@ def event_from_dict(raw: dict[str, Any]) -> Event:
             tokens_before=int(raw.get("tokens_before", 0) or 0),
             tokens_after=int(raw.get("tokens_after", 0) or 0),
             strategy=str(raw.get("strategy", "")),
+        )
+    if typ == "model_fallback":
+        return ModelFallbackEvent(
+            from_model=str(raw.get("from_model", "")),
+            to_model=str(raw.get("to_model", "")),
+            reason=str(raw.get("reason", "")),
+        )
+    if typ == "schedule":
+        return ScheduleEvent(
+            schedule_id=str(raw.get("schedule_id", "")),
+            status=str(raw.get("status", "")),
+            payload=str(raw.get("payload", "")),
         )
     if typ == "context_build":
         selected_raw = raw.get("selected_tools")

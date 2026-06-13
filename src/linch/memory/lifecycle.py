@@ -81,9 +81,13 @@ class ConsolidationGate:
                 return False
             if self._last_run is not None and (now - self._last_run) < self._min_interval:
                 return False
+            # Snapshot the count we are consolidating. ``record()`` does not take
+            # the lock, so increments can land while we await below; subtract only
+            # the snapshot afterwards so those new changes are not lost.
+            applied = self._changes
             outcome = consolidator()
             if inspect.isawaitable(outcome):
                 await outcome
             self._last_run = now
-            self._changes = 0
+            self._changes = max(0, self._changes - applied)
             return True

@@ -107,6 +107,8 @@ async def read_article(article_id: str, ctx: ToolContext) -> str:
     summary=lambda input: f"record_citation({input.get('article_id', '?')})",
 )
 async def record_citation(article_id: str, claim: str, ctx: ToolContext) -> str:
+    if article_id not in ctx.deps["library"]:
+        return f"No article {article_id} — cite only ids returned by search_library."
     ctx.deps["citations"].append({"article_id": article_id, "claim": claim})
     return f"Recorded citation to {article_id}."
 
@@ -211,6 +213,10 @@ async def main() -> None:
             print(f"  · {event.tool_name}: {event.summary}")
         elif event.type == "result":
             final = event
+
+    if final is None:
+        print("\nNo result event was produced (the run ended early).")
+        return
 
     print("\nBrief:")
     brief = final.structured_output
