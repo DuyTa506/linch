@@ -482,6 +482,7 @@ class PostgresSessionStore:
         pool = await self._ensure()
         async with pool.acquire() as conn:
             async with conn.transaction():
+                ts = now_iso()
                 # Row-level conditional update: only one concurrent claimer wins.
                 claimed = await conn.fetchrow(
                     """
@@ -490,15 +491,13 @@ class PostgresSessionStore:
                     RETURNING id
                     """,
                     owner,
-                    now_iso(),
+                    ts,
                     session_id,
                     task_id,
                 )
                 if claimed is None:
                     return None
-                await conn.execute(
-                    "UPDATE sessions SET updated_at=$1 WHERE id=$2", now_iso(), session_id
-                )
+                await conn.execute("UPDATE sessions SET updated_at=$1 WHERE id=$2", ts, session_id)
                 return await _get_task_pg(conn, session_id, task_id)
 
     async def ready_tasks(self, session_id: str) -> list[Task]:

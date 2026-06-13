@@ -502,7 +502,7 @@ class Agent:
             self.tools.register(
                 cast("Tool", SendMessageTool(mailbox=mailbox, get_session=get_session))
             )
-        except Exception:
+        except ConfigError:
             pass  # already registered (e.g. caller added it manually)
         self._refresh_system_blocks()
 
@@ -522,7 +522,7 @@ class Agent:
         for schedule_tool in schedule_tools(schedule_store):
             try:
                 self.tools.register(cast("Tool", schedule_tool))
-            except Exception:
+            except ConfigError:
                 pass  # already registered (e.g. caller added it manually)
         self._refresh_system_blocks()
 
@@ -1027,7 +1027,14 @@ class Agent:
             await self._mcp_connection.close()
             self._mcp_connection = None
         for connection in self._extra_mcp_connections:
-            await connection.close()
+            try:
+                await connection.close()
+            except Exception as exc:
+                import logging as _logging
+
+                _logging.getLogger(__name__).warning(
+                    "Error closing MCP connection %r during agent close: %s", connection, exc
+                )
         self._extra_mcp_connections.clear()
         if self._store is not None:
             await self._store.close()

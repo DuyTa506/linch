@@ -77,7 +77,13 @@ class Session:
     file_read_tracker: FileReadTracker = field(default_factory=FileReadTracker)
     _abort_controller: AbortContext = field(default_factory=AbortContext)
     run_deps: Any = None
+    """Resolved dependency object for the current run.  Set by ``run_loop``
+    from ``RunOptions.deps`` (falling back to ``Agent.deps``) and threaded
+    into :attr:`~linch.tools.ToolContext.deps` via the scheduler."""
     filesystem: Any = None
+    """Per-session virtual filesystem backend (:class:`~linch.filesystem.backend.FileBackend`).
+    Threaded into :attr:`~linch.tools.base.ToolContext.filesystem` on every
+    tool call.  ``None`` when the filesystem subsystem is disabled."""
     workers: dict[str, Any] = field(default_factory=dict)
     """Live in-process worker handles keyed by worker_id.
 
@@ -99,12 +105,6 @@ class Session:
     """Per-session working directory overriding ``agent.cwd`` for tool execution and
     permission path-rule matching. Set by an :class:`~linch.tools.isolation.IsolationBackend`
     so a subagent branch runs in its own cwd. ``None`` = use ``agent.cwd``."""
-    """Per-session virtual filesystem backend (:class:`~linch.filesystem.backend.FileBackend`).
-    Threaded into :attr:`~linch.tools.base.ToolContext.filesystem` on every
-    tool call.  ``None`` when the filesystem subsystem is disabled."""
-    """Resolved dependency object for the current run.  Set by ``run_loop``
-    from ``RunOptions.deps`` (falling back to ``Agent.deps``) and threaded
-    into :attr:`~linch.tools.ToolContext.deps` via the scheduler."""
 
     @property
     def message_count(self) -> int:

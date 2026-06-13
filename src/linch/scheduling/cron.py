@@ -13,9 +13,10 @@ from datetime import datetime, timedelta, timezone
 # (low, high) inclusive bounds per field.
 _FIELD_BOUNDS = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 6))
 _FIELD_NAMES = ("minute", "hour", "day-of-month", "month", "day-of-week")
-# A brute-force next-run search caps here (one leap year of minutes) so an
-# unsatisfiable expression fails loudly instead of spinning forever.
-_MAX_SEARCH_MINUTES = 366 * 24 * 60
+# A brute-force next-run search caps here so an unsatisfiable expression fails
+# loudly instead of spinning forever. The window spans a full leap cycle (4
+# years) so a legitimate rare match like "Feb 29" is never falsely rejected.
+_MAX_SEARCH_MINUTES = 4 * 366 * 24 * 60
 
 
 def _parse_field(field: str, low: int, high: int, *, name: str) -> set[int]:
@@ -46,15 +47,17 @@ def _parse_field(field: str, low: int, high: int, *, name: str) -> set[int]:
                 start = end = int(rng)
             except ValueError as exc:
                 raise ValueError(f"invalid value in {name} field: {part!r}") from exc
-        # Day-of-week 7 is an alias for Sunday (0).
-        if name == "day-of-week":
-            if start == 7:
-                start = 0
-            if end == 7:
-                end = 0
-        if start < low or end > high or start > end:
+        # Day-of-week 7 is an alias for Sunday (0). Accept 7 as a single value
+        # or a range endpoint (e.g. "7", "0-7", "6-7"), then fold it to 0 after
+        # expansion so matching (0..6) still works without collapsing the range.
+        effective_high = 7 if name == "day-of-week" else high
+        if start < low or end > effective_high or start > end:
             raise ValueError(f"{name} value out of range [{low},{high}]: {part!r}")
-        values.update(range(start, end + 1, step))
+        expanded = set(range(start, end + 1, step))
+        if name == "day-of-week" and 7 in expanded:
+            expanded.discard(7)
+            expanded.add(0)
+        values.update(expanded)
     return values
 
 
@@ -99,4 +102,4 @@ def next_cron_time(expr: str, after_epoch: float) -> float:
         if cron_matches(expr, candidate):
             return candidate.timestamp()
         candidate += timedelta(minutes=1)
-    raise ValueError(f"cron expression never matches within a year: {expr!r}")
+    raise ValueError(f"cron expression never matches within the search window: {expr!r}")

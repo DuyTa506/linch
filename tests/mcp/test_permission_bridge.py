@@ -89,7 +89,10 @@ def test_destructive_rule_forces_ask_under_permissive_mode() -> None:
 
 
 def test_make_mcp_tool_derives_destructive_flag() -> None:
-    if "mcp.types" not in sys.modules:
+    injected = "mcp.types" not in sys.modules
+    orig_mcp = sys.modules.get("mcp")
+    orig_mcp_types = sys.modules.get("mcp.types")
+    if injected:
         mcp = _pytypes.ModuleType("mcp")
         mcp.__path__ = []  # type: ignore[attr-defined]
         types_mod = _pytypes.ModuleType("mcp.types")
@@ -106,22 +109,31 @@ def test_make_mcp_tool_derives_destructive_flag() -> None:
         sys.modules["mcp"] = mcp
         sys.modules["mcp.types"] = types_mod
 
-    from linch.mcp.tool import make_mcp_tool
+    try:
+        from linch.mcp.tool import make_mcp_tool
 
-    annotations = _pytypes.SimpleNamespace(readOnlyHint=False, destructiveHint=True)
-    mcp_tool = _pytypes.SimpleNamespace(
-        name="rm",
-        description="remove",
-        inputSchema=_pytypes.SimpleNamespace(properties={}, required=None),
-        annotations=annotations,
-    )
+        annotations = _pytypes.SimpleNamespace(readOnlyHint=False, destructiveHint=True)
+        mcp_tool = _pytypes.SimpleNamespace(
+            name="rm",
+            description="remove",
+            inputSchema=_pytypes.SimpleNamespace(properties={}, required=None),
+            annotations=annotations,
+        )
 
-    async def _call(*_a: Any, **_k: Any) -> Any:  # pragma: no cover - not invoked
-        return None
+        async def _call(*_a: Any, **_k: Any) -> Any:  # pragma: no cover - not invoked
+            return None
 
-    tool = make_mcp_tool("srv", mcp_tool, _call)
-    assert tool.destructive is True
-    assert tool.scope == "write"
+        tool = make_mcp_tool("srv", mcp_tool, _call)
+        assert tool.destructive is True
+        assert tool.scope == "write"
+    finally:
+        if injected:
+            # Restore sys.modules so the injected fakes don't leak into other tests.
+            for key, orig in (("mcp", orig_mcp), ("mcp.types", orig_mcp_types)):
+                if orig is None:
+                    sys.modules.pop(key, None)
+                else:
+                    sys.modules[key] = orig
 
 
 async def test_tool_attached_mid_run_appears_next_turn() -> None:
