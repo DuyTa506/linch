@@ -88,6 +88,18 @@ Runnable example code lives in the `examples/` directory, organized by subsystem
 | File | What it shows |
 |------|---------------|
 | `recipes/research_desk.py` | A **non-coding** agent (literature analyst): domain tools (`search_library`/`read_article`/`record_citation`), `ctx.deps` corpus + citation ledger, an `OutputSchema` brief, and a closed-loop `Verifier` that bounces an uncited answer — proof the SDK isn't coding-shaped. Built via a factory so it runs offline under a `ScriptedProvider` |
+| `recipes/ralph_loop.py` | The **Ralph loop** for long-horizon work: an outer loop where each pass gets a *fresh* `session` (no compaction — discard and restart), reads the same spec, and carries state only through the virtual filesystem (`StateFileBackend`), looping until a done-predicate. A harness pattern composed from existing seams; `max_iterations` bounds the spend |
+
+## `coordination/` — *local demos available*
+
+The optional [coordination layer](./coordination.md) — advancing the loop from a
+clock or a peer. Both are built via a factory so they run offline under a
+`ScriptedProvider` (smoke-tested in `tests/test_example_coordination.py`).
+
+| File | What it shows |
+|------|---------------|
+| `coordination/scheduling_agent.py` | An agent that schedules its own recurring work: `Agent(schedule_store=...)` auto-registers `CreateSchedule`, a `SchedulerLoop` fires the due payload into `pending_notifications`, and the next turn drains it as a `<scheduled-task>` |
+| `coordination/team_mailbox.py` | A two-agent team over a shared `InMemoryMailbox`: one peer addresses another with `send_message` and it drains into the recipient's next turn, plus a `Correlator` request/response handshake (plan approval) |
 
 ---
 
