@@ -10,7 +10,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from ..tools import ToolResult, tool
+from ...tools import ToolResult, tool
 from .schedule import Schedule
 from .store import ScheduleStore
 

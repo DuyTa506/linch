@@ -18,8 +18,8 @@ from collections.abc import Callable
 from typing import Any
 from xml.sax.saxutils import escape
 
-from ..events import ScheduleEvent
-from ..types import Message, TextBlock
+from ...events import ScheduleEvent
+from ...types import Message, TextBlock
 from .schedule import Schedule
 from .store import ScheduleStore
 

@@ -256,7 +256,7 @@ class HookEventRecord:
 
 @dataclass(slots=True)
 class ScheduleEvent:
-    """Emitted when a :class:`~linch.scheduling.Schedule` fires.
+    """Emitted when a :class:`~linch.Schedule` fires.
 
     The fired payload is also enqueued into ``session.pending_notifications`` and
     surfaces as a ``UserEvent`` on the next turn (the same drain background

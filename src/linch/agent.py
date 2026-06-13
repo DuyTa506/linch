@@ -202,6 +202,71 @@ def _system_prompt_section_blocks(cfg: SystemPromptConfig | None) -> dict[str, l
     return grouped
 
 
+# Built-in software-engineering identity prepended to the system prompt in
+# default mode (skipped when SystemPromptConfig.replace_defaults is set).
+_SWE_IDENTITY = (
+    "You are Linch, an autonomous software engineering assistant. "
+    "You work inside a codebase on the user's computer, using the "
+    "file and shell tools provided to read, modify, and run code. "
+    "Your goal is to complete the user's coding task correctly and "
+    "minimally.\n\n"
+    "Behave like an experienced engineer: read before you write, run "
+    "before you claim, prefer small focused changes, surface "
+    "uncertainty instead of guessing. Do not narrate trivial "
+    "operations. Do not produce status reports unless the user asked."
+)
+
+# Tools whose presence marks an agent as doing software-engineering work.
+_SWE_TOOL_FAMILIES = {"Read", "Edit", "Write", "Glob", "Grep", "Bash"}
+
+
+def _build_tool_protocol_lines(
+    present: set[str], *, has_swe_tools: bool, bash_sandboxed: bool
+) -> list[str]:
+    """Build the tool-use-protocol bullet lines for the tools actually present.
+
+    Only clauses for present tools are emitted so non-SWE agents (RAG, SQL, …)
+    aren't given misleading file/shell instructions."""
+    lines: list[str] = []
+    if {"Read", "Edit"} & present:
+        lines.append("- Read a file before you Edit it. The Edit tool will refuse if you have not.")
+        lines.append(
+            "- Edits require an exact byte-for-byte match of the old_string "
+            "in the current file contents, including indentation."
+        )
+    if {"Write", "Edit"} & present:
+        lines.append(
+            "- Prefer Edit over Write when modifying an existing file. Use "
+            "Write only for new files or full rewrites."
+        )
+    if {"Glob", "Grep"} & present:
+        lines.append(
+            "- Glob is for finding files by name pattern; Grep is for "
+            "searching file contents. They are read-only."
+        )
+    if "Bash" in present:
+        if bash_sandboxed:
+            lines.append(
+                "- Bash runs inside a sandbox. Commands are isolated from the host environment."
+            )
+        else:
+            lines.append(
+                "- Bash runs in the user's environment with full permissions. "
+                "There is no sandbox. Avoid commands that change global state "
+                "unless the user asked for them."
+            )
+    # Always include the generic parallel-tool hint when any tools exist.
+    if present:
+        if has_swe_tools:
+            lines.append(
+                "- Issue multiple tool calls in a single turn when they are "
+                "independent. Read, Glob, and Grep can run concurrently."
+            )
+        else:
+            lines.append("- Issue multiple tool calls in a single turn when they are independent.")
+    return lines
+
+
 @dataclass(slots=True)
 class AgentOptions:
     model: str
@@ -495,7 +560,7 @@ class Agent:
         if mailbox is None:
             return
 
-        from .tools.send_message import SendMessageTool
+        from .coordination.send_message import SendMessageTool
 
         get_session = lambda sid: self._sessions.get(sid)  # noqa: E731
         try:
@@ -517,7 +582,7 @@ class Agent:
         if schedule_store is None:
             return
 
-        from .scheduling import schedule_tools
+        from .coordination.scheduling import schedule_tools
 
         for schedule_tool in schedule_tools(schedule_store):
             try:
@@ -598,73 +663,16 @@ class Agent:
         py_ver = platform.python_version()
         os_info = f"{platform.system()} {platform.release()} ({platform.machine()})"
 
-        # ── SWE identity block ───────────────────────────────────────────────
-        _SWE_IDENTITY = (
-            "You are Linch, an autonomous software engineering assistant. "
-            "You work inside a codebase on the user's computer, using the "
-            "file and shell tools provided to read, modify, and run code. "
-            "Your goal is to complete the user's coding task correctly and "
-            "minimally.\n\n"
-            "Behave like an experienced engineer: read before you write, run "
-            "before you claim, prefer small focused changes, surface "
-            "uncertainty instead of guessing. Do not narrate trivial "
-            "operations. Do not produce status reports unless the user asked."
-        )
-
         # ── Tool-aware protocol block ────────────────────────────────────────
         # Only include clauses for the tools that are actually present so
         # non-SWE agents (RAG, SQL, …) aren't given misleading instructions.
         present = set(tool_names)
-        swe_tool_families = {
-            "Read",
-            "Edit",
-            "Write",
-            "Glob",
-            "Grep",
-            "Bash",
-        }
-        has_swe_tools = bool(present & swe_tool_families)
-        protocol_lines: list[str] = []
-        if {"Read", "Edit"} & present:
-            protocol_lines.append(
-                "- Read a file before you Edit it. The Edit tool will refuse if you have not."
-            )
-            protocol_lines.append(
-                "- Edits require an exact byte-for-byte match of the old_string "
-                "in the current file contents, including indentation."
-            )
-        if {"Write", "Edit"} & present:
-            protocol_lines.append(
-                "- Prefer Edit over Write when modifying an existing file. Use "
-                "Write only for new files or full rewrites."
-            )
-        if {"Glob", "Grep"} & present:
-            protocol_lines.append(
-                "- Glob is for finding files by name pattern; Grep is for "
-                "searching file contents. They are read-only."
-            )
-        if "Bash" in present:
-            if self.execution_backend is None:
-                protocol_lines.append(
-                    "- Bash runs in the user's environment with full permissions. "
-                    "There is no sandbox. Avoid commands that change global state "
-                    "unless the user asked for them."
-                )
-            else:
-                protocol_lines.append(
-                    "- Bash runs inside a sandbox. Commands are isolated from the host environment."
-                )
-        # Always include the generic parallel-tool hint when any tools exist.
-        if present:
-            if has_swe_tools:
-                protocol_lines.append(
-                    "- Issue multiple tool calls in a single turn when they are "
-                    "independent. Read, Glob, and Grep can run concurrently."
-                )
-            else:
-                protocol_lines.append(
-                    "- Issue multiple tool calls in a single turn when they are independent."
-                )
+        has_swe_tools = bool(present & _SWE_TOOL_FAMILIES)
+        protocol_lines = _build_tool_protocol_lines(
+            present,
+            has_swe_tools=has_swe_tools,
+            bash_sandboxed=self.execution_backend is not None,
+        )
 
         # ── env block (always included) ──────────────────────────────────────
         env_text = (
