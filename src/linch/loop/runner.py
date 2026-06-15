@@ -16,7 +16,7 @@ from ..compaction import (
     reset_read_tracker_after_compaction,
 )
 from ..context import context_budget_to_dict
-from ..errors import AbortError
+from ..errors import AbortError, ConfigError
 from ..events import (
     AssistantEvent,
     BudgetEvent,
@@ -122,7 +122,7 @@ async def _drain_pending_notifications(
     notifications.clear()
     for note in to_drain:
         await session.append([note])
-        event: Event = UserEvent(message=note)
+        event: Event = UserEvent(message=note, subtype="notification")
         await _persist_event(session, run_id, event)
         yield event
 
@@ -159,9 +159,59 @@ async def _drain_mailbox(session: Session, run_id: str) -> AsyncIterator[Event]:
     for message in messages:
         note = _render_peer_message(message)
         await session.append([note])
-        event: Event = UserEvent(message=note)
+        event: Event = UserEvent(message=note, subtype="notification")
         await _persist_event(session, run_id, event)
         yield event
+
+
+async def _drain_alignment(
+    session: Session,
+    run_id: str,
+    dispatch_user_prompt_fn: Callable[
+        [str, list[dict[str, str]] | None, str],
+        Awaitable[tuple[str, list[dict[str, str]] | None, list[Event], str | None]],
+    ],
+) -> AsyncIterator[Event]:
+    queue = getattr(session, "alignment_queue", None)
+    if not queue:
+        return
+    entries = list(queue)
+    queue.clear()
+    for entry in entries:
+        try:
+            prompt, images, hook_events, block_reason = await dispatch_user_prompt_fn(
+                entry.prompt,
+                entry.images,
+                "align",
+            )
+            for hook_event in hook_events:
+                await _persist_event(session, run_id, hook_event)
+                yield hook_event
+            if block_reason is not None:
+                # Hook blocked this align: drop only this message (reject its
+                # promise), no ErrorEvent — remaining queued messages still
+                # inject. The block was already surfaced via hook_events above.
+                if not entry.future.done():
+                    entry.future.set_exception(ConfigError(block_reason))
+                continue
+            user_message = build_user_message(prompt, images)
+            await session.append([user_message])
+            event: Event = UserEvent(message=user_message, subtype="alignment")
+            await _persist_event(session, run_id, event)
+            if not entry.future.done():
+                entry.future.set_result(None)
+            yield event
+        except Exception as exc:
+            # Unexpected fault applying this align (dispatch/build/append/persist).
+            # Notify the align() caller AND surface it on the event stream — even
+            # when the future is already done — so it is never silently dropped.
+            if not entry.future.done():
+                entry.future.set_exception(exc)
+            error_event: Event = ErrorEvent(
+                error={"name": type(exc).__name__, "message": str(exc), "retryable": False}
+            )
+            await _persist_event(session, run_id, error_event)
+            yield error_event
 
 
 async def _drain_child_events(session: Session, run_id: str) -> AsyncIterator[Event]:
@@ -561,7 +611,9 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             await _persist_event(session, run_id, event)
             yield event
 
-        prompt, images, hook_events, block_reason = await _dispatch_user_prompt(prompt, opts.images)
+        prompt, images, hook_events, block_reason = await _dispatch_user_prompt(
+            prompt, opts.images, "run"
+        )
         for hook_event in hook_events:
             await _persist_event(session, run_id, hook_event)
             yield hook_event
@@ -577,11 +629,13 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             user_message.content.insert(0, TextBlock(text=reminder))
         await session.append([user_message])
         await _save_checkpoint("user_appended")
-        event = UserEvent(message=user_message)
+        event = UserEvent(message=user_message, subtype="prompt")
         await _persist_event(session, run_id, event)
         yield event
     elif checkpoint.phase == "started":
-        prompt, images, hook_events, block_reason = await _dispatch_user_prompt(prompt, opts.images)
+        prompt, images, hook_events, block_reason = await _dispatch_user_prompt(
+            prompt, opts.images, "run"
+        )
         for hook_event in hook_events:
             await _persist_event(session, run_id, hook_event)
             yield hook_event
@@ -598,7 +652,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         if not _last_message_matches(session, user_message):
             await session.append([user_message])
         await _save_checkpoint("user_appended")
-        event = UserEvent(message=user_message)
+        event = UserEvent(message=user_message, subtype="prompt")
         await _persist_event(session, run_id, event)
         yield event
 
@@ -786,6 +840,28 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             # Bubble accumulated subagent events (incl. child PermissionRequests).
             async for child_event in _drain_child_events(session, run_id):
                 yield child_event
+            if session.interrupt_requested:
+                session._reject_pending_alignment(
+                    ConfigError("run interrupted before alignment was applied")
+                )
+                _dur = int((time.time() - started) * 1000)
+                _final_result = _build_run_result("interrupted", "interrupted", duration_ms=_dur)
+                event = ResultEvent(
+                    subtype="interrupted",
+                    stop_reason="interrupted",
+                    total_usage=total,
+                    duration_ms=_dur,
+                    total_cost_usd=running_cost,
+                )
+                await _persist_event(session, run_id, event)
+                store = agent.run_store
+                if run_record is not None and store is not None:
+                    checkpoint.total_usage = total
+                    await store.mark_completed(run_id, checkpoint)
+                yield event
+                return
+            async for align_event in _drain_alignment(session, run_id, _dispatch_user_prompt):
+                yield align_event
             await _start_turn(turn_index)
             # Captured before _force_final_pending is reset below: a guard-
             # forced final answer must bypass the verification gates.
@@ -1188,7 +1264,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 )
                 _hint_msg = Message(role="user", content=[TextBlock(text=_hint_text)])
                 await session.append([_hint_msg])
-                _hint_event: Event = UserEvent(message=_hint_msg)
+                _hint_event: Event = UserEvent(message=_hint_msg, subtype="notification")
                 await _persist_event(session, run_id, _hint_event)
                 yield _hint_event
             result_message = Message(role="user", content=result_blocks)
@@ -1207,7 +1283,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 pending_tool_blocks=tool_blocks,
                 completed_tool_results=completed_tool_results,
             )
-            event = UserEvent(message=result_message)
+            event = UserEvent(message=result_message, subtype="tool_result")
             await _persist_event(session, run_id, event)
             yield event
 
@@ -1239,7 +1315,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                         await session.append([_reminder_msg])
                         _force_final_pending = True
                         await _save_checkpoint("turn_complete", turn_index=turn_index)
-                        event = UserEvent(message=_reminder_msg)
+                        event = UserEvent(message=_reminder_msg, subtype="notification")
                         await _persist_event(session, run_id, event)
                         yield event
                     else:

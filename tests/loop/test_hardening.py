@@ -506,10 +506,24 @@ def test_import_linch_without_mcp_installed(monkeypatch: pytest.MonkeyPatch) -> 
             raise ModuleNotFoundError("No module named 'mcp'")
         return original_import(name, globals, locals, fromlist, level)
 
-    for key in list(sys.modules):
-        if key == "mcp" or key.startswith("mcp.") or key.startswith("linch"):
-            sys.modules.pop(key, None)
+    def _linch_or_mcp(key: str) -> bool:
+        return key == "mcp" or key.startswith("mcp.") or key.startswith("linch")
 
-    monkeypatch.setattr(builtins, "__import__", blocked_import)
-    mod = importlib.import_module("linch")
-    assert hasattr(mod, "connect_mcp_servers")
+    # Snapshot so the fresh reimport below does not pollute global sys.modules
+    # for later tests. Without restoring, a reimported linch.errors leaves a
+    # *second* AbortError class around, and `pytest.raises(AbortError)` in an
+    # unrelated provider test stops matching the original class object.
+    saved = {key: mod for key, mod in sys.modules.items() if _linch_or_mcp(key)}
+    try:
+        for key in list(sys.modules):
+            if _linch_or_mcp(key):
+                sys.modules.pop(key, None)
+
+        monkeypatch.setattr(builtins, "__import__", blocked_import)
+        mod = importlib.import_module("linch")
+        assert hasattr(mod, "connect_mcp_servers")
+    finally:
+        for key in list(sys.modules):
+            if _linch_or_mcp(key):
+                sys.modules.pop(key, None)
+        sys.modules.update(saved)

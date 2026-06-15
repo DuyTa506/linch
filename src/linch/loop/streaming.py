@@ -22,6 +22,7 @@ from ..types import (
     ContentBlock,
     Message,
     ProviderRequest,
+    RedactedThinkingBlock,
     StopReason,
     TextBlock,
     ThinkingBlock,
@@ -244,6 +245,10 @@ async def stream_turn(
             thinking_sig = signature if isinstance(signature, str) else thinking_sig
             if agent.include_partial_messages:
                 yield PartialAssistantEvent(delta={"kind": "thinking", "text": text})
+        elif typ == "redacted_thinking":
+            flush_text()
+            flush_thinking()
+            content.append(RedactedThinkingBlock(data=str(event.get("data", ""))))
         elif typ == "tool_use_start":
             flush_text()
             flush_thinking()

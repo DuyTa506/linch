@@ -6,6 +6,12 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from ._http_errors import (
+    error_message,
+    error_status,
+    is_prompt_length_error,
+    retry_after_seconds,
+)
 from .errors import AbortError, AuthError, ContextLengthError, ProviderError, RateLimitError
 from .types import (
     ImageBlock,
@@ -224,13 +230,17 @@ def build_usage(raw: dict[str, Any] | None) -> Usage:
 
 def map_openai_error(err: Exception) -> Exception:
     name = err.__class__.__name__.lower()
-    status = getattr(err, "status_code", None) or getattr(err, "status", None)
-    message = str(err)
+    status = error_status(err)
+    message = error_message(err)
     if "authentication" in name or status == 401:
         return AuthError(message)
     if "ratelimit" in name or status == 429:
-        return RateLimitError(message)
-    if status == 400 and "context" in message.lower():
+        return RateLimitError(message, retry_after_seconds=retry_after_seconds(err))
+    # Reclassify a prompt-length error when the status is a bad-request (400) or
+    # unknown (None). OpenAI-compatible/local endpoints (DeepSeek, llama.cpp)
+    # often raise context overflows without an integer status_code; gating only
+    # on 400 let those fall through to the retryable fallback — a retry storm.
+    if (status == 400 or status is None) and is_prompt_length_error(err):
         return ContextLengthError(message)
     if isinstance(err, asyncio.CancelledError):
         return AbortError("aborted")
@@ -275,7 +285,11 @@ class OpenAIResponsesClient:
             stream = await client.responses.create(**payload)
             async for event in stream:
                 yield event.model_dump() if hasattr(event, "model_dump") else dict(event)
+        except asyncio.CancelledError as exc:
+            raise AbortError("aborted") from exc
         except Exception as exc:
+            if getattr(req.signal, "aborted", False):
+                raise AbortError("aborted") from exc
             raise map_openai_error(exc) from exc
 
 

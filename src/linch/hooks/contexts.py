@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from ..context import ContextBuildResult
 from ..tools import ToolResult
@@ -20,6 +20,7 @@ class HookContext:
 class UserPromptSubmitContext(HookContext):
     prompt: str = ""
     images: list[dict[str, str]] | None = None
+    source: Literal["run", "align"] = "run"
 
 
 @dataclass(slots=True)
