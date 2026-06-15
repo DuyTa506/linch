@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from .abort import AbortContext
+from .errors import ConfigError
 from .events import Event
 from .sessions import SessionStore
 from .tools import FileReadTracker
@@ -41,6 +43,13 @@ class RunOptions:
 
 
 @dataclass(slots=True)
+class AlignmentEntry:
+    prompt: str
+    images: list[dict[str, str]] | None
+    future: asyncio.Future[None]
+
+
+@dataclass(slots=True)
 class Session:
     id: str
     created_at: str
@@ -51,6 +60,8 @@ class Session:
     full_history: list[Message] = field(default_factory=list)
     _active: bool = False
     active_run_id: str | None = None
+    alignment_queue: list[AlignmentEntry] = field(default_factory=list)
+    interrupt_requested: bool = False
     last_usage: Usage | None = None
     last_compaction_info: dict[str, Any] | None = None
     active_budget: Any = None  # RunBudget | None
@@ -112,10 +123,9 @@ class Session:
 
     def run(self, prompt: str, opts: RunOptions | None = None) -> AsyncIterator[Event]:
         if self._active:
-            from .errors import ConfigError
-
             raise ConfigError("Session already has an active run")
         self._active = True
+        self.interrupt_requested = False
         self._abort_controller = AbortContext()
 
         async def iterator() -> AsyncIterator[Event]:
@@ -138,6 +148,9 @@ class Session:
                             ),
                         )
             finally:
+                self._reject_pending_alignment(
+                    ConfigError("run ended before alignment was applied")
+                )
                 self._active = False
                 self.active_run_id = None
 
@@ -145,14 +158,11 @@ class Session:
 
     def resume(self, run_id: str, opts: RunOptions | None = None) -> AsyncIterator[Event]:
         if self._active:
-            from .errors import ConfigError
-
             raise ConfigError("Session already has an active run")
         if self.agent.run_store is None:
-            from .errors import ConfigError
-
             raise ConfigError("Agent has no run_store configured")
         self._active = True
+        self.interrupt_requested = False
         self._abort_controller = AbortContext()
 
         async def iterator() -> AsyncIterator[Event]:
@@ -175,14 +185,48 @@ class Session:
                             ),
                         )
             finally:
+                self._reject_pending_alignment(
+                    ConfigError("run ended before alignment was applied")
+                )
                 self._active = False
                 self.active_run_id = None
 
         return iterator()
 
-    def abort(self) -> None:
-        import asyncio
+    async def align(
+        self,
+        prompt: str,
+        *,
+        images: list[dict[str, str]] | None = None,
+        timeout_s: float | None = None,
+    ) -> None:
+        if not self._active:
+            raise ConfigError("Session has no active run to align")
+        if not isinstance(prompt, str) or prompt == "":
+            raise ConfigError("alignment prompt must be a non-empty string")
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[None] = loop.create_future()
+        entry = AlignmentEntry(prompt=prompt, images=images, future=future)
+        self.alignment_queue.append(entry)
+        if timeout_s is None:
+            await future
+            return
+        try:
+            await asyncio.wait_for(future, timeout_s)
+        except asyncio.TimeoutError:
+            # The run never reached a alignment boundary in time. Drop the still
+            # -pending entry so it cannot inject into a later turn, and surface
+            # the timeout instead of blocking the caller indefinitely. (If the
+            # drain already removed it, the future is now cancelled and the
+            # drain's `future.done()` guard makes its set_result a no-op.)
+            if entry in self.alignment_queue:
+                self.alignment_queue.remove(entry)
+            raise ConfigError("alignment timed out before it was applied") from None
 
+    def interrupt(self) -> None:
+        self.interrupt_requested = True
+
+    def abort(self) -> None:
         self._abort_controller.abort()
         # Cancel any running background worker tasks so they don't write into
         # a dead session after the run ends.
@@ -194,6 +238,14 @@ class Session:
         for task in self.background_tasks:
             if isinstance(task, asyncio.Task) and not task.done():
                 task.cancel()
+        self._reject_pending_alignment(ConfigError("run aborted before alignment was applied"))
+
+    def _reject_pending_alignment(self, exc: Exception) -> None:
+        entries = list(self.alignment_queue)
+        self.alignment_queue.clear()
+        for entry in entries:
+            if not entry.future.done():
+                entry.future.set_exception(exc)
 
     def mark_compaction_used(self) -> None:
         self.compaction_retry_used_this_turn = True

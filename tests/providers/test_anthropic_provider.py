@@ -69,7 +69,7 @@ def test_build_payload_cache_marks_last_system_block():
     payload = _build_payload(req, AnthropicProviderOptions())
     system = payload["system"]
     assert "cache_control" not in system[0]
-    assert system[1]["cache_control"] == {"type": "ephemeral", "ttl": "5m"}
+    assert system[1]["cache_control"] == {"type": "ephemeral"}
 
 
 def test_build_payload_cache_boundary_excludes_dynamic_tail():
@@ -94,7 +94,7 @@ def test_build_payload_cache_boundary_excludes_dynamic_tail():
     s1 = payload_for("recalled: blue")
     # Breakpoint on the last static block; the dynamic tail is uncached.
     assert "cache_control" not in s1[0]
-    assert s1[1]["cache_control"] == {"type": "ephemeral", "ttl": "5m"}
+    assert s1[1]["cache_control"] == {"type": "ephemeral"}
     assert "cache_control" not in s1[2]
 
     # Changing only the dynamic tail leaves the cached static prefix byte-identical.
@@ -123,8 +123,8 @@ def test_build_payload_cache_boundary_all_static_marks_last():
     assert system[2]["cache_control"] == {"type": "ephemeral"}
 
 
-def test_build_payload_cache_boundary_leading_dynamic_disables_cache():
-    # If the very first block is dynamic there is no static prefix to cache.
+def test_build_payload_cache_boundary_leading_dynamic_marks_later_cacheable():
+    # Cache breakpoint is the last cacheable system block, not just a leading prefix.
     from linch.providers.anthropic import AnthropicProviderOptions, _build_payload
     from linch.types import SystemBlock
 
@@ -136,7 +136,8 @@ def test_build_payload_cache_boundary_leading_dynamic_disables_cache():
         cache_prompt=True,
     )
     system = _build_payload(req, AnthropicProviderOptions())["system"]
-    assert all("cache_control" not in block for block in system)
+    assert "cache_control" not in system[0]
+    assert system[1]["cache_control"] == {"type": "ephemeral"}
 
 
 def test_build_payload_no_cache_when_false():
@@ -171,7 +172,7 @@ def test_build_payload_tool_schema_translated():
     # Anthropic uses input_schema (same key as ours)
 
 
-def test_build_payload_cache_marks_last_tool():
+def test_build_payload_cache_does_not_mark_tools():
     from linch.providers.anthropic import AnthropicProviderOptions, _build_payload
 
     req = _make_req(
@@ -192,7 +193,57 @@ def test_build_payload_cache_marks_last_tool():
     payload = _build_payload(req, AnthropicProviderOptions())
     tools = payload["tools"]
     assert "cache_control" not in tools[0]
-    assert tools[1]["cache_control"]["type"] == "ephemeral"
+    assert "cache_control" not in tools[1]
+
+
+def test_build_payload_cache_marks_most_recent_user_message_only():
+    from linch.providers.anthropic import AnthropicProviderOptions, _build_payload
+    from linch.types import Message, TextBlock
+
+    req = _make_req(
+        messages=[
+            Message(role="user", content=[TextBlock(text="first")]),
+            Message(role="user", content=[TextBlock(text="second")]),
+        ],
+        cache_prompt=True,
+    )
+    payload = _build_payload(req, AnthropicProviderOptions())
+    messages = payload["messages"]
+
+    assert "cache_control" not in messages[0]["content"][0]
+    assert messages[1]["content"][0]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_build_payload_cache_ttl_1h_only():
+    from linch.providers.anthropic import AnthropicProviderOptions, _build_payload
+
+    req = _make_req(cache_prompt=True, cache_ttl="1h")
+    payload = _build_payload(req, AnthropicProviderOptions())
+
+    assert payload["system"][0]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+    assert payload["messages"][0]["content"][0]["cache_control"] == {
+        "type": "ephemeral",
+        "ttl": "1h",
+    }
+
+
+def test_translate_redacted_thinking_round_trip():
+    from linch.providers.anthropic import _translate_messages
+    from linch.types import Message, RedactedThinkingBlock, ToolUseBlock
+
+    messages = [
+        Message(
+            role="assistant",
+            content=[
+                RedactedThinkingBlock(data="opaque"),
+                ToolUseBlock(id="call_1", name="Search", input={"q": "x"}),
+            ],
+        )
+    ]
+
+    translated = _translate_messages(messages)
+    assert translated[0]["content"][0] == {"type": "redacted_thinking", "data": "opaque"}
+    assert translated[0]["content"][1]["type"] == "tool_use"
 
 
 # ---------------------------------------------------------------------------
@@ -444,6 +495,65 @@ def test_error_mapping_context_length():
     err = BadReq("prompt is too long: 201537 tokens > 200000 maximum")
     result = _map_anthropic_error(err)
     assert isinstance(result, ContextLengthError)
+
+
+def test_error_mapping_context_length_without_status_is_not_retried():
+    """A context-overflow lacking an int status must not become a retryable error.
+
+    An Anthropic-compatible proxy / wrapper may surface a context-overflow with
+    no status_code; gating on ``status == 400`` then produced a retryable
+    ProviderError and an unrecoverable retry storm.
+    """
+    from linch.errors import ContextLengthError, ProviderError
+    from linch.providers.anthropic import _map_anthropic_error
+
+    class NoStatusCtx(Exception):
+        body = {"error": {"code": "context_length_exceeded", "message": "too long"}}
+
+    mapped = _map_anthropic_error(NoStatusCtx("boom"))
+    assert isinstance(mapped, ContextLengthError)
+    assert not isinstance(mapped, ProviderError)
+    assert mapped.retryable is False
+
+    class NoStatusMsg(Exception):
+        pass
+
+    mapped2 = _map_anthropic_error(NoStatusMsg("prompt is too long: 201537 tokens"))
+    assert isinstance(mapped2, ContextLengthError)
+    assert mapped2.retryable is False
+
+
+def test_error_mapping_retry_after_http_date():
+    from datetime import datetime, timedelta, timezone
+    from email.utils import format_datetime
+
+    from linch.errors import RateLimitError
+    from linch.providers.anthropic import _map_anthropic_error
+
+    class Resp:
+        headers = {
+            "retry-after": format_datetime(datetime.now(timezone.utc) + timedelta(seconds=5))
+        }
+
+    class RateLimited(Exception):
+        status_code = 429
+        response = Resp()
+
+    result = _map_anthropic_error(RateLimited("rate limited"))
+    assert isinstance(result, RateLimitError)
+    assert result.retry_after_seconds is not None
+    assert result.retry_after_seconds > 0
+
+
+def test_error_mapping_non_context_400_stays_provider_error():
+    from linch.errors import ProviderError
+    from linch.providers.anthropic import _map_anthropic_error
+
+    class BadReq(Exception):
+        status_code = 400
+
+    result = _map_anthropic_error(BadReq("invalid tool schema context value"))
+    assert isinstance(result, ProviderError)
 
 
 def test_provider_missing_package(monkeypatch):

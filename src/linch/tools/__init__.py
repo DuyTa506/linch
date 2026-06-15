@@ -1,3 +1,11 @@
+from .ask_user import (
+    AskUserHandler,
+    AskUserOption,
+    AskUserQuestion,
+    AskUserRequest,
+    AskUserResponse,
+    AskUserTool,
+)
 from .base import Citation, ResourceAccess, ResourceMode, Tool, ToolContext, ToolResult, ToolScope
 from .builtin import BashTool, EditTool, GlobTool, GrepTool, ReadTool, WriteTool
 from .file_tracker import FileReadTracker
@@ -8,6 +16,12 @@ from .tasks import TaskCreateTool, TaskGetTool, TaskListTool, TaskUpdateTool
 defaultTools = default_tools
 __all__ = [
     "BashTool",
+    "AskUserHandler",
+    "AskUserOption",
+    "AskUserQuestion",
+    "AskUserRequest",
+    "AskUserResponse",
+    "AskUserTool",
     "Citation",
     "EditTool",
     "FileReadTracker",

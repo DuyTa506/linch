@@ -77,6 +77,7 @@ async def test_hook_dispatcher_orders_sync_async_and_isolates_errors() -> None:
             return HookResult.mutate(prompt=ctx.prompt + "!")
 
     ctx = UserPromptSubmitContext(session=object(), run_id="r1", turn_index=0, prompt="hi")
+    assert ctx.source == "run"
     result = await HookDispatcher([First(), Broken(), Last()]).dispatch(
         HookEvent.USER_PROMPT_SUBMIT,
         ctx,

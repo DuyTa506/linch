@@ -67,3 +67,62 @@ async def test_map_wire_events_tool_call() -> None:
     assert events[3] == {"type": "tool_use_end", "id": "call_1"}
     assert events[-1]["stop_reason"] == "tool_use"
     assert isinstance(events[-1]["usage"], Usage)
+
+
+def test_map_openai_error_retry_after_numeric_and_non_context_400() -> None:
+    from linch.errors import ProviderError, RateLimitError
+    from linch.openai_responses import map_openai_error
+
+    class Resp:
+        headers = {"retry-after": "3"}
+
+    class RateLimited(Exception):
+        status_code = 429
+        response = Resp()
+
+    rate = map_openai_error(RateLimited("rate limited"))
+    assert isinstance(rate, RateLimitError)
+    assert rate.retry_after_seconds == 3
+
+    class BadReq(Exception):
+        status_code = 400
+
+    bad = map_openai_error(BadReq("context field is malformed"))
+    assert isinstance(bad, ProviderError)
+
+
+def test_map_openai_error_structured_context_length() -> None:
+    from linch.errors import ContextLengthError
+    from linch.openai_responses import map_openai_error
+
+    class BadReq(Exception):
+        status_code = 400
+        body = {"error": {"code": "context_length_exceeded", "message": "too many tokens"}}
+
+    assert isinstance(map_openai_error(BadReq("bad request")), ContextLengthError)
+
+
+def test_map_openai_error_context_length_without_status_is_not_retried() -> None:
+    """A context-overflow from a status-less endpoint must not become a retry storm.
+
+    OpenAI-compatible / local servers (DeepSeek, llama.cpp) may raise a
+    context-overflow with no integer status_code. Gating context-length detection
+    on ``status == 400`` then misclassified it as a retryable ProviderError.
+    """
+    from linch.errors import ContextLengthError, ProviderError
+    from linch.openai_responses import map_openai_error
+
+    class NoStatusStructured(Exception):
+        body = {"error": {"code": "context_length_exceeded", "message": "too long"}}
+
+    mapped = map_openai_error(NoStatusStructured("boom"))
+    assert isinstance(mapped, ContextLengthError)
+    assert not isinstance(mapped, ProviderError)
+    assert mapped.retryable is False
+
+    class NoStatusMessage(Exception):
+        pass
+
+    mapped2 = map_openai_error(NoStatusMessage("prompt is too long: 201537 tokens"))
+    assert isinstance(mapped2, ContextLengthError)
+    assert mapped2.retryable is False

@@ -5,6 +5,12 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, cast
 
+from linch._http_errors import (
+    error_message,
+    error_status,
+    is_prompt_length_error,
+    retry_after_seconds,
+)
 from linch.errors import (
     AbortError,
     AuthError,
@@ -18,6 +24,7 @@ from linch.types import (
     Message,
     ModelId,
     ProviderRequest,
+    RedactedThinkingBlock,
     StopReason,
     SystemBlock,
     TextBlock,
@@ -116,6 +123,9 @@ class AnthropicProvider(BaseProvider):
                     if cb.type == "tool_use":
                         tool_idx[event.index] = cb.id
                         yield {"type": "tool_use_start", "id": cb.id, "name": cb.name}
+                    elif cb.type == "redacted_thinking":
+                        data = getattr(cb, "data", "")
+                        yield {"type": "redacted_thinking", "data": str(data)}
                     # text / thinking blocks: their deltas follow separately
 
                 elif etype == "content_block_delta":
@@ -165,6 +175,8 @@ class AnthropicProvider(BaseProvider):
         except asyncio.CancelledError as exc:
             raise AbortError("aborted") from exc
         except Exception as exc:
+            if getattr(req.signal, "aborted", False):
+                raise AbortError("aborted") from exc
             raise _map_anthropic_error(exc) from exc
 
         yield {
@@ -197,11 +209,11 @@ def _build_payload(req: ProviderRequest, opts: AnthropicProviderOptions) -> dict
         payload["system"] = system_blocks
 
     # ── Messages ──────────────────────────────────────────────────────────
-    payload["messages"] = _translate_messages(req.messages)
+    payload["messages"] = _translate_messages(req.messages, req.cache_prompt, req.cache_ttl)
 
     # ── Tools ─────────────────────────────────────────────────────────────
     if req.tools:
-        payload["tools"] = _translate_tools(req.tools, req.cache_prompt, req.cache_ttl)
+        payload["tools"] = _translate_tools(req.tools)
 
     # ── Optional scalar fields ────────────────────────────────────────────
     if req.temperature is not None:
@@ -248,12 +260,18 @@ def _translate_system(
 ) -> list[dict[str, Any]]:
     """Convert system blocks to the Anthropic system array, with optional caching.
 
-    The cache breakpoint is placed at the end of the leading contiguous run of
-    static (``cacheable=True``) blocks (ROADMAP 3.2). A volatile trailing block
-    (``cacheable=False``, e.g. a per-turn dynamic section) therefore sits outside
-    the cached prefix and never invalidates it. When every block is static this
-    is the last block — byte-identical to the legacy "cache the last block"
-    behavior for the all-static prompts the agent builds today.
+    The cache breakpoint is placed on the *last* ``cacheable=True`` block in the
+    array (ROADMAP 3.2), so the cached prefix extends as far as possible. A
+    ``cacheable=False`` block placed *after* the last static block (a volatile
+    trailing section) therefore sits outside the cached prefix and never
+    invalidates it. When every block is static this is simply the last block —
+    byte-identical to the legacy "cache the last block" behavior for the
+    all-static prompts the agent builds today.
+
+    Note the tradeoff: a ``cacheable=False`` block that appears *before* the last
+    cacheable block is still inside the cached prefix, so changing it invalidates
+    the cache. The agent keeps per-turn dynamic content (env/date) in user
+    messages, not the system array, so this does not arise in practice.
     """
     if not blocks:
         return []
@@ -262,53 +280,51 @@ def _translate_system(
         return result
     boundary = _cache_breakpoint_index(blocks)
     if boundary is not None:
-        cc: dict[str, Any] = {"type": "ephemeral"}
-        if ttl:
-            cc["ttl"] = ttl
-        result[boundary]["cache_control"] = cc
+        result[boundary]["cache_control"] = _cache_control(ttl)
     return result
 
 
 def _cache_breakpoint_index(blocks: list[SystemBlock]) -> int | None:
-    """Index of the last block in the leading contiguous ``cacheable`` run.
-
-    Returns ``None`` when the first block is already dynamic — there is then no
-    static prefix to cache.
-    """
-    end = -1
-    for index, block in enumerate(blocks):
-        if not getattr(block, "cacheable", False):
-            break
-        end = index
-    return end if end >= 0 else None
+    """Index of the last cacheable system block."""
+    for index in range(len(blocks) - 1, -1, -1):
+        if getattr(blocks[index], "cacheable", False):
+            return index
+    return None
 
 
-def _translate_tools(
-    tools: list[dict[str, Any]],
-    cache: bool | None,
-    ttl: str | None,
-) -> list[dict[str, Any]]:
+def _cache_control(ttl: str | None) -> dict[str, Any]:
+    cc: dict[str, Any] = {"type": "ephemeral"}
+    if ttl == "1h":
+        cc["ttl"] = "1h"
+    return cc
+
+
+def _translate_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Convert Linch tool schemas to Anthropic ToolParam dicts."""
     result: list[dict[str, Any]] = []
-    for i, tool in enumerate(tools):
+    for tool in tools:
         item: dict[str, Any] = {
             "name": tool["name"],
             "description": tool.get("description", ""),
             "input_schema": tool["input_schema"],
         }
-        if cache and i == len(tools) - 1:
-            cc: dict[str, Any] = {"type": "ephemeral"}
-            if ttl:
-                cc["ttl"] = ttl
-            item["cache_control"] = cc
         result.append(item)
     return result
 
 
-def _translate_messages(messages: list[Message]) -> list[dict[str, Any]]:
+def _translate_messages(
+    messages: list[Message],
+    cache: bool | None = None,
+    ttl: str | None = None,
+) -> list[dict[str, Any]]:
     """Convert internal Message objects to Anthropic message dicts."""
     result: list[dict[str, Any]] = []
-    for msg in messages:
+    last_user_index = next(
+        (i for i in range(len(messages) - 1, -1, -1) if messages[i].role == "user"),
+        None,
+    )
+    for index, msg in enumerate(messages):
+        emitted_for_message: list[dict[str, Any]] = []
         if msg.role == "assistant":
             content = _translate_assistant_content(msg.content)
             if content:
@@ -320,9 +336,9 @@ def _translate_messages(messages: list[Message]) -> list[dict[str, Any]]:
                 if isinstance(block, ToolResultBlock):
                     # Flush accumulated text parts before emitting tool result
                     if text_parts:
-                        result.append({"role": "user", "content": text_parts})
+                        emitted_for_message.append({"role": "user", "content": text_parts})
                         text_parts = []
-                    result.append(
+                    emitted_for_message.append(
                         {
                             "role": "user",
                             "content": [_translate_tool_result(block)],
@@ -333,8 +349,24 @@ def _translate_messages(messages: list[Message]) -> list[dict[str, Any]]:
                 elif isinstance(block, ImageBlock):
                     text_parts.append(_translate_image(block))
             if text_parts:
-                result.append({"role": "user", "content": text_parts})
+                emitted_for_message.append({"role": "user", "content": text_parts})
+            if cache and index == last_user_index:
+                _mark_last_cacheable_content(emitted_for_message, ttl)
+            result.extend(emitted_for_message)
     return result
+
+
+def _mark_last_cacheable_content(entries: list[dict[str, Any]], ttl: str | None) -> None:
+    for entry in reversed(entries):
+        content = entry.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in reversed(content):
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") in {"text", "image", "tool_result"}:
+                block["cache_control"] = _cache_control(ttl)
+                return
 
 
 def _translate_assistant_content(
@@ -360,6 +392,8 @@ def _translate_assistant_content(
             if block.signature:
                 item["signature"] = block.signature
             parts.append(item)
+        elif isinstance(block, RedactedThinkingBlock):
+            parts.append({"type": "redacted_thinking", "data": block.data})
     return parts
 
 
@@ -423,30 +457,20 @@ def _map_stop_reason(raw: str | None) -> StopReason:
 
 def _map_anthropic_error(exc: Exception) -> Exception:
     name = exc.__class__.__name__.lower()
-    status = getattr(exc, "status_code", None)
-    message = str(exc)
-    message_lower = message.lower()
+    status = error_status(exc)
+    message = error_message(exc)
 
     if "authentication" in name or status == 401:
         return AuthError(message)
 
     if "ratelimit" in name or status == 429:
-        retry_after: float | None = None
-        resp = getattr(exc, "response", None)
-        if resp is not None:
-            raw = getattr(resp, "headers", {}).get("retry-after")
-            if raw:
-                try:
-                    retry_after = float(raw)
-                except (ValueError, TypeError):
-                    pass
-        return RateLimitError(message, retry_after_seconds=retry_after)
+        return RateLimitError(message, retry_after_seconds=retry_after_seconds(exc))
 
-    if status == 400 and (
-        "too long" in message_lower
-        or "prompt" in message_lower
-        or ("token" in message_lower and "limit" in message_lower)
-    ):
+    # Reclassify a prompt-length error when the status is a bad-request (400) or
+    # unknown (None). OpenAI-compatible/local endpoints often raise context
+    # overflows without an integer status_code; gating only on 400 let those
+    # fall through to the retryable fallback below — an unrecoverable retry storm.
+    if (status == 400 or status is None) and is_prompt_length_error(exc):
         return ContextLengthError(message)
 
     if isinstance(exc, asyncio.CancelledError):

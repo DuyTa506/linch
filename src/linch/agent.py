@@ -372,6 +372,7 @@ class Agent:
         enable_task_stop: bool = False,
         enable_background_tools: bool = False,
         execution_backend: Any = None,
+        ask_user: Any = None,
     ) -> None:
         system_prompt = _resolve_system_prompt(system_prompt, systemPrompt, system_prompt_config)
         if maxRetries is not None:
@@ -417,6 +418,10 @@ class Agent:
 
             if self.tools.get("Bash") is not None:
                 self.tools.replace(BashTool(backend=execution_backend))
+        if ask_user is not None:
+            from .tools.ask_user import AskUserTool
+
+            self.tools.replace(AskUserTool(ask_user))
         self.permission_engine = PermissionEngine(
             mode=permissions_config.mode,
             rules=permissions_config.rules,

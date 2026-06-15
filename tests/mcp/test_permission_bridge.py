@@ -158,7 +158,7 @@ async def test_tool_attached_mid_run_appears_next_turn() -> None:
 
     # Attach a connection mid-run (as add_mcp_servers does after connecting).
     tool = _FakeMcpTool("srv__danger", destructive=True)
-    agent._attach_mcp_tools(McpConnection(tools=[tool]))
+    agent._attach_mcp_tools(McpConnection(tools=[tool], sessions=[]))
 
     # Turn 2: the tool is offered, and its destructive annotation forced an ask rule.
     _ = [event async for event in session.run("second")]
