@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
-from linch.errors import ProviderError
+from linch.errors import AbortError, ProviderError
 from linch.openai_responses import map_openai_error
 from linch.providers.base import BaseProvider, ProviderCapabilities
 from linch.types import (
@@ -149,7 +150,11 @@ class OpenAIChatCompletionsProvider(BaseProvider):
                         input_tokens=int(getattr(cu, "prompt_tokens", 0) or 0),
                         output_tokens=int(getattr(cu, "completion_tokens", 0) or 0),
                     )
+        except asyncio.CancelledError as exc:
+            raise AbortError("aborted") from exc
         except Exception as exc:
+            if getattr(req.signal, "aborted", False):
+                raise AbortError("aborted") from exc
             raise map_openai_error(exc) from exc
         # Some OpenAI-compatible servers (e.g. llama.cpp) stream a complete
         # tool_calls payload and then close the choice with finish_reason="stop"

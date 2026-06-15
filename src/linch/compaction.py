@@ -329,6 +329,44 @@ def _compaction_hook_dispatcher(agent: Any) -> Any:
     return dispatcher if dispatcher.active else None
 
 
+def strip_response_chaining(messages: list[Message]) -> list[Message]:
+    """Drop ``provider_metadata.openai_responses.response_id`` from every message.
+
+    A compacted ``provider_view`` that retains a ``response_id`` makes the OpenAI
+    Responses provider chain the next request onto the server's stored,
+    *uncompacted* history (see ``openai_responses.previous_response``) — the
+    inserted summary at the head would never be sent and compaction is silently
+    defeated.  Returns copies only for messages that needed a strip; untouched
+    messages are returned by identity, since they are shared with
+    ``full_history`` and the session store and must not be mutated.  Pure
+    metadata surgery so :mod:`linch.compaction` stays free of an
+    ``openai_responses`` import.
+    """
+    out: list[Message] = []
+    for message in messages:
+        metadata = message.provider_metadata
+        if not metadata:
+            out.append(message)
+            continue
+        responses = metadata.get("openai_responses")
+        if not responses or "response_id" not in responses:
+            out.append(message)
+            continue
+
+        new_responses = {k: v for k, v in responses.items() if k != "response_id"}
+        new_meta = {k: v for k, v in metadata.items() if k != "openai_responses"}
+        if new_responses:
+            new_meta["openai_responses"] = new_responses
+        out.append(
+            Message(
+                role=message.role,
+                content=message.content,
+                provider_metadata=new_meta or None,
+            )
+        )
+    return out
+
+
 async def _run_compaction_impl(
     session: Any,
     agent: Any,
@@ -363,6 +401,7 @@ async def _run_compaction_impl(
         signal=signal,
     )
     compacted = await strategy.compact(ctx, agent.provider)
+    compacted = strip_response_chaining(compacted)
 
     session.provider_view.clear()
     session.provider_view.extend(compacted)

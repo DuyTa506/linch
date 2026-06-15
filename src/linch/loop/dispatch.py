@@ -31,6 +31,7 @@ async def dispatch_user_prompt(
     run_id: str,
     prompt_value: str,
     images_value: list[dict[str, str]] | None,
+    source: str = "run",
 ) -> tuple[str, list[dict[str, str]] | None, list[Event], str | None]:
     if not hook_dispatcher.active:
         return prompt_value, images_value, [], None
@@ -43,6 +44,7 @@ async def dispatch_user_prompt(
             deps=getattr(session, "run_deps", None),
             prompt=prompt_value,
             images=images_value,
+            source="align" if source == "align" else "run",
         ),
     )
     result = dispatched.result

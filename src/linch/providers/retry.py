@@ -20,9 +20,9 @@ class RetryOptions:
 
 
 def _delay_for_error(err: Exception, attempt: int, opts: RetryOptions) -> float:
-    if isinstance(err, RateLimitError) and getattr(err, "retry_after_seconds", None):
-        retry_after = cast(float, err.retry_after_seconds)
-        return min(float(retry_after) * 1000.0, float(opts.max_delay_ms))
+    retry_after = err.retry_after_seconds if isinstance(err, RateLimitError) else None
+    if retry_after is not None:
+        return min(float(cast(float, retry_after)) * 1000.0, float(opts.max_delay_ms))
     exp = min(float(opts.base_delay_ms) * (2**attempt), float(opts.max_delay_ms))
     jitter = exp * opts.jitter * ((random.random() * 2.0) - 1.0)
     return max(0.0, exp + jitter)

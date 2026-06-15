@@ -4,7 +4,13 @@ from dataclasses import dataclass
 from typing import Any, Literal, TypeAlias, TypeGuard
 
 StopReason: TypeAlias = Literal[
-    "end_turn", "tool_use", "max_tokens", "stop_sequence", "refusal", "error"
+    "end_turn",
+    "tool_use",
+    "max_tokens",
+    "stop_sequence",
+    "refusal",
+    "error",
+    "interrupted",
 ]
 PermissionMode: TypeAlias = Literal["default", "acceptEdits", "skip-dangerous"]
 ModelId: TypeAlias = str
@@ -40,12 +46,20 @@ class ThinkingBlock:
 
 
 @dataclass(slots=True)
+class RedactedThinkingBlock:
+    data: str
+    type: Literal["redacted_thinking"] = "redacted_thinking"
+
+
+@dataclass(slots=True)
 class ImageBlock:
     source: dict[str, str]
     type: Literal["image"] = "image"
 
 
-ContentBlock: TypeAlias = TextBlock | ToolUseBlock | ToolResultBlock | ThinkingBlock | ImageBlock
+ContentBlock: TypeAlias = (
+    TextBlock | ToolUseBlock | ToolResultBlock | ThinkingBlock | RedactedThinkingBlock | ImageBlock
+)
 
 
 def is_text_block(block: ContentBlock) -> TypeGuard[TextBlock]:
@@ -62,6 +76,10 @@ def is_tool_result_block(block: ContentBlock) -> TypeGuard[ToolResultBlock]:
 
 def is_thinking_block(block: ContentBlock) -> TypeGuard[ThinkingBlock]:
     return isinstance(block, ThinkingBlock)
+
+
+def is_redacted_thinking_block(block: ContentBlock) -> TypeGuard[RedactedThinkingBlock]:
+    return isinstance(block, RedactedThinkingBlock)
 
 
 def is_image_block(block: ContentBlock) -> TypeGuard[ImageBlock]:
@@ -196,6 +214,8 @@ def block_to_dict(block: ContentBlock) -> dict[str, Any]:
         if block.signature is not None:
             out["signature"] = block.signature
         return out
+    if isinstance(block, RedactedThinkingBlock):
+        return {"type": "redacted_thinking", "data": block.data}
     if isinstance(block, ImageBlock):
         return {"type": "image", "source": block.source}
     raise TypeError(f"unknown block {block!r}")
@@ -233,6 +253,8 @@ def block_from_dict(raw: dict[str, Any]) -> ContentBlock:
             thinking=str(raw.get("thinking", "")),
             signature=raw.get("signature") if isinstance(raw.get("signature"), str) else None,
         )
+    if typ == "redacted_thinking":
+        return RedactedThinkingBlock(data=str(raw.get("data", "")))
     if typ == "image":
         return ImageBlock(source=dict(raw.get("source", {})))
     raise ValueError(f"unknown content block type: {typ!r}")

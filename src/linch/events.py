@@ -24,6 +24,7 @@ class SystemEvent:
 class UserEvent:
     message: Message
     type: Literal["user"] = "user"
+    subtype: Literal["prompt", "tool_result", "alignment", "notification"] = "prompt"
 
 
 @dataclass(slots=True)
@@ -101,7 +102,7 @@ class BudgetEvent:
 
 @dataclass(slots=True)
 class ResultEvent:
-    subtype: Literal["success", "error", "aborted"]
+    subtype: Literal["success", "error", "aborted", "interrupted"]
     stop_reason: StopReason
     total_usage: Usage
     duration_ms: int
@@ -508,7 +509,11 @@ def event_to_dict(event: Event) -> dict[str, Any]:
             "cwd": event.cwd,
         }
     if isinstance(event, UserEvent):
-        return {"type": event.type, "message": message_to_dict(event.message)}
+        return {
+            "type": event.type,
+            "subtype": event.subtype,
+            "message": message_to_dict(event.message),
+        }
     if isinstance(event, AssistantEvent):
         return {
             "type": event.type,
@@ -697,7 +702,13 @@ def event_from_dict(raw: dict[str, Any]) -> Event:
             subtype="init",
         )
     if typ == "user":
-        return UserEvent(message=message_from_dict(dict(raw.get("message", {}))))
+        subtype = raw.get("subtype", "prompt")
+        if subtype not in {"prompt", "tool_result", "alignment", "notification"}:
+            subtype = "prompt"
+        return UserEvent(
+            message=message_from_dict(dict(raw.get("message", {}))),
+            subtype=subtype,
+        )
     if typ == "assistant":
         return AssistantEvent(
             message=message_from_dict(dict(raw.get("message", {}))),
