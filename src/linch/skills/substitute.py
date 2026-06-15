@@ -19,7 +19,7 @@ def substitute_skill_body(
         body = body.replace(f"${name}", value)
 
     body = body.replace("$ARGUMENTS", args)
-    body = body.replace("${SKAWLD_SKILL_DIR}", skill.dir)
-    body = body.replace("${SKAWLD_SESSION_ID}", session_id)
+    body = body.replace("${LINCH_SKILL_DIR}", skill.dir)
+    body = body.replace("${LINCH_SESSION_ID}", session_id)
 
     return f"Skill base directory: {skill.dir}\n\n{body}"
