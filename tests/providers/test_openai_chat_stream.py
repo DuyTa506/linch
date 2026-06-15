@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from linch.providers import OpenAIChatCompletionsProvider
 from linch.types import ProviderRequest
 
@@ -147,3 +149,32 @@ async def test_stream_text_only_unaffected() -> None:
     assert {"type": "text_delta", "text": "hi"} in events
     assert not any(e.get("type") == "tool_use_end" for e in events)
     assert events[-1]["stop_reason"] == "end_turn"
+
+
+async def test_stream_maps_aborted_mid_stream_failure_to_abort_error() -> None:
+    from linch.abort import AbortContext
+    from linch.errors import AbortError
+
+    class _BrokenStream:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise RuntimeError("connection closed")
+
+    class _BrokenCompletions:
+        async def create(self, **payload):
+            return _BrokenStream()
+
+    signal = AbortContext()
+    signal.abort()
+    provider = OpenAIChatCompletionsProvider()
+    provider._client = SimpleNamespace(
+        chat=SimpleNamespace(completions=_BrokenCompletions()),
+    )
+
+    with pytest.raises(AbortError):
+        async for _ in provider.stream(
+            ProviderRequest(model="gpt-4o", system=[], tools=[], messages=[], signal=signal)
+        ):
+            pass

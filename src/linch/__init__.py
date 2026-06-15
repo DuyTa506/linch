@@ -199,6 +199,12 @@ from .subagents import (
     write_subagent_definition,
 )
 from .tools import (
+    AskUserHandler,
+    AskUserOption,
+    AskUserQuestion,
+    AskUserRequest,
+    AskUserResponse,
+    AskUserTool,
     Citation,
     FileReadTracker,
     FunctionTool,
@@ -220,6 +226,7 @@ from .types import (
     ModelId,
     OutputSchema,
     PermissionMode,
+    RedactedThinkingBlock,
     StopReason,
     TextBlock,
     ThinkingBlock,
@@ -243,6 +250,12 @@ __version__ = get_version()
 
 __all__ = [
     "AbortError",
+    "AskUserHandler",
+    "AskUserOption",
+    "AskUserQuestion",
+    "AskUserRequest",
+    "AskUserResponse",
+    "AskUserTool",
     "Agent",
     "LinchError",
     "AgentOptions",
@@ -355,6 +368,7 @@ __all__ = [
     "ProviderError",
     "PostgresMemoryStore",
     "RateLimitError",
+    "RedactedThinkingBlock",
     "ResultEvent",
     "RunOptions",
     "ResourceAccess",
