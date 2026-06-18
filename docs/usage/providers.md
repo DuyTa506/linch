@@ -20,6 +20,8 @@ talking to.
 | Anthropic Claude — extended thinking, prompt caching, thinking signatures | `AnthropicProvider` |
 | Google Gemini — large context windows, Google tool semantics | `GeminiProvider` (`[gemini]` extra) |
 | A self-hosted `llama.cpp` server | `LlamaCppProvider` |
+| A self-hosted vLLM server | `VLLMProvider` |
+| A self-hosted SGLang server | `SGLangProvider` |
 
 The two axes that matter most:
 
@@ -148,6 +150,49 @@ agent = Agent(
     include_partial_messages=True,
 )
 
+# ── vLLM server ──────────────────────────────────────────────────────────────
+# Uses vLLM's OpenAI-compatible /v1/chat/completions route.
+# Server-specific request fields can be passed through extra_body.
+from linch.providers import VLLMProvider, VLLMProviderOptions
+
+agent = Agent(
+    model=os.environ["VLLM_MODEL"],
+    provider=VLLMProvider(
+        VLLMProviderOptions(
+            api_key=os.environ.get("VLLM_API_KEY", "EMPTY"),
+            base_url=os.environ["VLLM_BASE_URL"],
+            context_window=128_000,
+            extra_body={"top_k": 40},
+        )
+    ),
+    session_store=InMemorySessionStore(),
+    include_partial_messages=True,
+)
+
+# ── SGLang server ────────────────────────────────────────────────────────────
+# Uses SGLang's OpenAI-compatible chat completions endpoint.
+# The provider omits OpenAI stream_options by default. Set
+# include_stream_options=True if your deployment accepts that OpenAI field.
+# SGLang sampling/cache-report controls are exposed through extra_body.
+from linch.providers import SGLangProvider, SGLangProviderOptions
+
+agent = Agent(
+    model=os.environ["SGLANG_MODEL"],
+    provider=SGLangProvider(
+        SGLangProviderOptions(
+            api_key=os.environ.get("SGLANG_API_KEY", "EMPTY"),
+            base_url=os.environ["SGLANG_BASE_URL"],
+            context_window=128_000,
+            include_stream_options=False,
+            sampling_params={"top_p": 0.9},
+            enable_cache_report=True,
+            extra_body={"custom": "value"},
+        )
+    ),
+    session_store=InMemorySessionStore(),
+    include_partial_messages=True,
+)
+
 # ── DeepSeek via Anthropic-compatible endpoint ───────────────────────────────
 agent = Agent(
     model="deepseek-v4-flash",
@@ -184,7 +229,7 @@ A few practical notes on the snippets above:
 Use a direct provider when Linch has native semantics for that API: OpenAI
 Responses for stateful reasoning controls, Anthropic for prompt caching and
 Claude thinking signatures, Gemini for Google model/tool semantics, and
-llama.cpp for self-hosted local servers.
+llama.cpp, vLLM, or SGLang for self-hosted local servers.
 
 Use `OpenAIChatCompletionsProvider(base_url=...)` when a service implements the
 OpenAI Chat Completions protocol. This is the recommended path for DeepSeek,
@@ -192,8 +237,10 @@ Azure, Groq, Together, and similar OpenAI-compatible endpoints. DeepSeek is not
 a separate runtime provider in Linch; configure it with `base_url` and the
 DeepSeek model id.
 
-llama.cpp model names and context windows are server configuration, so they are
-resolved dynamically by `LlamaCppProvider` rather than listed in the static
+llama.cpp, vLLM, and SGLang model names and context windows are deployment
+configuration. `LlamaCppProvider` can auto-detect `n_ctx` from the server when
+available; vLLM and SGLang default to `128_000` and let you set
+`context_window` explicitly. These providers are not listed in the static
 catalog.
 
 ---
@@ -218,9 +265,9 @@ print(info.capabilities.structured_output if info else None)
 catalog, so guard the result before reading attributes (as above).
 
 The static catalog covers the built-in direct providers. It intentionally
-**excludes** OpenAI-compatible/local models (DeepSeek, llama.cpp), because their
-model lists and context windows come from external configuration rather than a
-fixed table.
+**excludes** OpenAI-compatible/local models (DeepSeek, llama.cpp, vLLM, SGLang),
+because their model lists and context windows come from external configuration
+rather than a fixed table.
 
 | Provider id | Path | Static catalog | Pricing |
 |---|---|---:|---|
@@ -229,6 +276,8 @@ fixed table.
 | `anthropic` | `AnthropicProvider` | Yes | Known Claude entries from `linch.pricing` |
 | `gemini` | `GeminiProvider` | Yes | `None` unless you pass custom pricing |
 | `llamacpp` | `LlamaCppProvider` | No, dynamic/self-hosted | `None` unless you pass custom pricing |
+| `vllm` | `VLLMProvider` | No, deployment-specific | `None` unless you pass custom pricing |
+| `sglang` | `SGLangProvider` | No, deployment-specific | `None` unless you pass custom pricing |
 | DeepSeek | OpenAI-compatible `base_url` | No separate provider | `None` unless you pass custom pricing |
 
 Only known Claude models carry pricing out of the box. For every other provider,
@@ -249,11 +298,13 @@ backends.
 
 | Provider id | Structured output | Tool choice | Prompt cache |
 |---|---:|---:|---:|
-| `openai-responses` | Yes | Yes | No |
-| `openai-chat` | Yes | Yes | No |
+| `openai-responses` | Yes | Yes | Yes |
+| `openai-chat` | Yes | Yes | Yes |
 | `anthropic` | Yes | Yes | Yes |
-| `gemini` | Yes | Yes | No |
-| `llamacpp` | Yes | Yes | No |
+| `gemini` | Yes | Yes | Yes |
+| `llamacpp` | Yes | Yes | Yes |
+| `vllm` | Yes | Yes | Yes |
+| `sglang` | Yes | Yes | Yes |
 
 Structured output is supported on every direct provider but reached differently
 per backend (Anthropic, for instance, uses a generated final-schema tool). The

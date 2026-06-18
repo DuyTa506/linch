@@ -12,6 +12,7 @@ from ._http_errors import (
     is_prompt_length_error,
     retry_after_seconds,
 )
+from ._prompt_cache import openai_responses_cached_tokens
 from .errors import AbortError, AuthError, ContextLengthError, ProviderError, RateLimitError
 from .types import (
     ImageBlock,
@@ -220,11 +221,10 @@ def derive_stop_reason(
 
 
 def build_usage(raw: dict[str, Any] | None) -> Usage:
-    details = (raw or {}).get("input_tokens_details") or {}
     return Usage(
         input_tokens=int((raw or {}).get("input_tokens") or 0),
         output_tokens=int((raw or {}).get("output_tokens") or 0),
-        cache_read_tokens=int(details.get("cached_tokens") or 0),
+        cache_read_tokens=openai_responses_cached_tokens(raw),
     )
 
 

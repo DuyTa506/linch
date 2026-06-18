@@ -93,7 +93,13 @@ def test_llamacpp_payload_json_mode() -> None:
 
 
 def test_llamacpp_payload_includes_llamacpp_specific_options() -> None:
-    req = ProviderRequest(model="local-tool-model", system=[], tools=[], messages=[])
+    req = ProviderRequest(
+        model="local-tool-model",
+        system=[],
+        tools=[],
+        messages=[],
+        cache_prompt=True,
+    )
     options = LlamaCppProviderOptions(
         parallel_tool_calls=False,
         chat_template_kwargs={"enable_thinking": False},
@@ -113,6 +119,35 @@ def test_llamacpp_payload_includes_llamacpp_specific_options() -> None:
     assert payload["extra_body"]["generation_prompt"] == "<think>\n"
     assert payload["extra_body"]["parse_tool_calls"] is True
     assert payload["extra_body"]["cache_prompt"] is True
+
+
+def test_llamacpp_payload_enables_cache_prompt_from_request() -> None:
+    req = ProviderRequest(
+        model="local-tool-model",
+        system=[],
+        tools=[],
+        messages=[],
+        cache_prompt=True,
+    )
+
+    payload = _build_llamacpp_payload(req)
+
+    assert payload["extra_body"]["cache_prompt"] is True
+
+
+def test_llamacpp_payload_preserves_explicit_cache_prompt_override() -> None:
+    req = ProviderRequest(
+        model="local-tool-model",
+        system=[],
+        tools=[],
+        messages=[],
+        cache_prompt=True,
+    )
+    options = LlamaCppProviderOptions(extra_body={"cache_prompt": False})
+
+    payload = _build_llamacpp_payload(req, options)
+
+    assert payload["extra_body"]["cache_prompt"] is False
 
 
 def test_llamacpp_payload_round_trips_reasoning_history() -> None:
@@ -144,7 +179,11 @@ async def test_llamacpp_stream_emits_text_reasoning_and_usage() -> None:
         _chunk(
             delta=SimpleNamespace(content=None, reasoning_content=None, tool_calls=[]),
             finish_reason="stop",
-            usage=SimpleNamespace(prompt_tokens=3, completion_tokens=5),
+            usage=SimpleNamespace(
+                prompt_tokens=3,
+                completion_tokens=5,
+                prompt_tokens_details=SimpleNamespace(cached_tokens=2),
+            ),
         ),
     ]
     provider = LlamaCppProvider()
@@ -162,7 +201,11 @@ async def test_llamacpp_stream_emits_text_reasoning_and_usage() -> None:
     assert events[2] == {"type": "text_delta", "text": "answer"}
     assert events[-1]["type"] == "message_end"
     assert events[-1]["stop_reason"] == "end_turn"
-    assert events[-1]["usage"] == Usage(input_tokens=3, output_tokens=5)
+    assert events[-1]["usage"] == Usage(
+        input_tokens=3,
+        output_tokens=5,
+        cache_read_tokens=2,
+    )
     assert provider._client.completions.payload["stream"] is True
     assert "stream_options" not in provider._client.completions.payload
 
@@ -234,7 +277,7 @@ def test_llamacpp_capabilities_use_options() -> None:
     assert caps.parallel_tool_calls is False
     assert caps.structured_output is True
     assert caps.tool_choice is True
-    assert caps.prompt_cache is False
+    assert caps.prompt_cache is True
 
 
 def test_llamacpp_props_urls_try_v1_and_root_props() -> None:
