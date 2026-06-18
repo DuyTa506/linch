@@ -147,14 +147,7 @@ async def main():
 
     out["B_raw_stream"] = {"run1": await streamed(), "run2": await streamed()}
 
-    # C. linch SGLangProvider (stream_options off by design) + enable_cache_report
-    prov = SGLangProvider(
-        SGLangProviderOptions(
-            api_key="EMPTY", base_url=BASE, context_window=16384, enable_cache_report=True
-        )
-    )
-
-    async def via_linch():
+    async def via_linch(prov):
         req = ProviderRequest(
             model=SERVED,
             system=[SystemBlock(text=BIG)],
@@ -169,7 +162,31 @@ async def main():
                 usage = ev["usage"]
         return {"input": usage.input_tokens, "cache_read": usage.cache_read_tokens}
 
-    out["C_linch_provider"] = {"run1": await via_linch(), "run2": await via_linch()}
+    # C. linch SGLangProvider with default stream_options OFF + enable_cache_report
+    prov_off = SGLangProvider(
+        SGLangProviderOptions(
+            api_key="EMPTY", base_url=BASE, context_window=16384, enable_cache_report=True
+        )
+    )
+    out["C_linch_stream_options_off"] = {
+        "run1": await via_linch(prov_off),
+        "run2": await via_linch(prov_off),
+    }
+
+    # D. linch SGLangProvider with include_stream_options=True + enable_cache_report
+    prov_on = SGLangProvider(
+        SGLangProviderOptions(
+            api_key="EMPTY",
+            base_url=BASE,
+            context_window=16384,
+            enable_cache_report=True,
+            include_stream_options=True,
+        )
+    )
+    out["D_linch_stream_options_on"] = {
+        "run1": await via_linch(prov_on),
+        "run2": await via_linch(prov_on),
+    }
     return out
 
 
