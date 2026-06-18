@@ -13,7 +13,7 @@ import sys
 import time
 import urllib.request
 
-MODEL = "cyankiwi/Qwen3.6-35B-A3B-AWQ-4bit"
+MODEL = os.environ.get("LINCH_TEST_MODEL", "cyankiwi/Qwen3.6-35B-A3B-AWQ-4bit")
 SERVED = "qwen35"
 PORT = 30000
 REPO = "https://github.com/DuyTa506/linch.git"
