@@ -84,15 +84,23 @@ def health():
 
 
 ts = time.time()
+ready = False
 while time.time() - ts < 900:
     if proc.poll() is not None:
         log(f"[serve] DIED rc={proc.returncode}")
         print("".join(open("/content/vllm.log").readlines()[-60:]))
         sys.exit(1)
     if health():
+        ready = True
         log(f"[serve] READY in {time.time() - ts:.0f}s")
         break
     time.sleep(3)
+
+if not ready:
+    log("[serve] TIMEOUT after 900s without becoming ready")
+    if proc.poll() is None:
+        proc.terminate()
+    sys.exit(1)
 
 import asyncio  # noqa: E402
 
