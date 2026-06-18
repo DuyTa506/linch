@@ -120,6 +120,17 @@ class OpenAIChatCompletionsProvider(BaseProvider):
         try:
             stream = await client.chat.completions.create(**payload)
             async for chunk in stream:
+                # Usage can arrive on its own final chunk whose `choices` list is
+                # empty — OpenAI streaming with stream_options.include_usage emits
+                # it that way (as do vLLM/SGLang). Capture it before the
+                # empty-choices gate, otherwise every streamed turn reports zero.
+                cu = getattr(chunk, "usage", None)
+                if cu is not None:
+                    usage = Usage(
+                        input_tokens=int(getattr(cu, "prompt_tokens", 0) or 0),
+                        output_tokens=int(getattr(cu, "completion_tokens", 0) or 0),
+                        cache_read_tokens=openai_cached_tokens(cu),
+                    )
                 choices = getattr(chunk, "choices", None) or []
                 if not choices:
                     continue
@@ -157,13 +168,6 @@ class OpenAIChatCompletionsProvider(BaseProvider):
                     stop_reason = "refusal"
                 elif finish_reason == "stop":
                     stop_reason = "end_turn"
-                cu = getattr(chunk, "usage", None)
-                if cu is not None:
-                    usage = Usage(
-                        input_tokens=int(getattr(cu, "prompt_tokens", 0) or 0),
-                        output_tokens=int(getattr(cu, "completion_tokens", 0) or 0),
-                        cache_read_tokens=openai_cached_tokens(cu),
-                    )
         except asyncio.CancelledError as exc:
             raise AbortError("aborted") from exc
         except Exception as exc:
