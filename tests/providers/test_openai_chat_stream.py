@@ -157,6 +157,42 @@ async def test_stream_text_only_unaffected() -> None:
     assert events[-1]["usage"].cache_read_tokens == 6
 
 
+async def test_stream_captures_usage_from_final_empty_choices_chunk() -> None:
+    # Per the OpenAI streaming spec, when stream_options.include_usage is set the
+    # server emits token usage in a FINAL chunk whose `choices` list is empty.
+    # vLLM/SGLang/OpenAI all do this, so the provider must read usage before the
+    # empty-choices gate or it reports zero tokens for every streamed turn.
+    chunks = [
+        _chunk(
+            delta=SimpleNamespace(content="hi", reasoning_content=None, tool_calls=[]),
+            finish_reason="stop",
+        ),
+        SimpleNamespace(
+            choices=[],
+            usage=SimpleNamespace(
+                prompt_tokens=37,
+                completion_tokens=512,
+                prompt_tokens_details=SimpleNamespace(cached_tokens=11),
+            ),
+        ),
+    ]
+    provider = OpenAIChatCompletionsProvider()
+    provider._client = _FakeClient(chunks)
+
+    events = [
+        event
+        async for event in provider.stream(
+            ProviderRequest(model="gpt-4o", system=[], tools=[], messages=[])
+        )
+    ]
+
+    end = events[-1]
+    assert end["type"] == "message_end"
+    assert end["usage"].input_tokens == 37
+    assert end["usage"].output_tokens == 512
+    assert end["usage"].cache_read_tokens == 11
+
+
 async def test_stream_maps_aborted_mid_stream_failure_to_abort_error() -> None:
     from linch.abort import AbortContext
     from linch.errors import AbortError
