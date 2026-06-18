@@ -33,8 +33,8 @@ sh(f"{sys.executable} -m pip install -q uv")
 sh(
     f"{sys.executable} -m uv pip install --system -q "
     f"'sglang[all]' 'huggingface_hub[hf_transfer]' 'git+{REPO}@{BRANCH}' "
-    "nvidia-cudnn-cu12==9.16.0.29 "  # SGLang guards against the torch 2.9.1 + cuDNN<9.15 Conv3d bug
-    "--torch-backend=cu126"
+    # cu128 -> torch 2.11.0+cu128 ships cuDNN 9.19 (>=9.15), passing SGLang's guard
+    "--torch-backend=cu128"
 )
 log(f"[install] {time.time() - t0:.0f}s")
 
