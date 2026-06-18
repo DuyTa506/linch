@@ -51,7 +51,7 @@ def test_openai_chat_capabilities():
     assert caps.context_window == 128_000
     assert caps.structured_output is True
     assert caps.tool_choice is True
-    assert caps.prompt_cache is False
+    assert caps.prompt_cache is True
 
 
 def test_openai_responses_capabilities():
@@ -63,7 +63,31 @@ def test_openai_responses_capabilities():
     assert caps.context_window > 0
     assert caps.structured_output is True
     assert caps.tool_choice is True
-    assert caps.prompt_cache is False
+    assert caps.prompt_cache is True
+
+
+def test_vllm_capabilities():
+    from linch.providers import VLLMProvider, VLLMProviderOptions
+
+    provider = VLLMProvider(VLLMProviderOptions(context_window=65_536))
+    caps = provider.capabilities("served-model")
+
+    assert caps.context_window == 65_536
+    assert caps.structured_output is True
+    assert caps.tool_choice is True
+    assert caps.prompt_cache is True
+
+
+def test_sglang_capabilities():
+    from linch.providers import SGLangProvider, SGLangProviderOptions
+
+    provider = SGLangProvider(SGLangProviderOptions(context_window=65_536))
+    caps = provider.capabilities("served-model")
+
+    assert caps.context_window == 65_536
+    assert caps.structured_output is True
+    assert caps.tool_choice is True
+    assert caps.prompt_cache is True
 
 
 def test_anthropic_capabilities():
@@ -177,8 +201,8 @@ def test_apply_clears_output_schema_when_not_supported():
     assert req.output_schema is None
 
 
-def test_apply_full_downgrade_for_openai_chat():
-    """OpenAI Chat caps: cache cleared, others preserved."""
+def test_apply_preserves_cache_for_openai_chat():
+    """OpenAI Chat uses provider-native automatic prompt caching."""
     from linch.loop import apply_provider_capabilities
     from linch.providers import OpenAIChatCompletionsProvider
 
@@ -188,9 +212,8 @@ def test_apply_full_downgrade_for_openai_chat():
 
     apply_provider_capabilities(req, caps)
 
-    # Prompt cache not supported → cleared
-    assert req.cache_prompt is None
-    assert req.cache_ttl is None
+    assert req.cache_prompt is True
+    assert req.cache_ttl == "5m"
     # Structured output supported → preserved
     assert req.output_schema is not None
     # Tool choice supported → preserved

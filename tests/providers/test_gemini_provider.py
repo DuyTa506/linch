@@ -103,12 +103,12 @@ def test_gemini_capabilities_tool_choice():
     assert caps.tool_choice is True
 
 
-def test_gemini_capabilities_no_prompt_cache():
-    """GeminiProvider declares prompt_cache=False (not GA on Vertex)."""
+def test_gemini_capabilities_prompt_cache():
+    """GeminiProvider preserves cache intent and reports cached token usage."""
     from linch.providers.gemini import GeminiProvider
 
     caps = GeminiProvider().capabilities("gemini-2.5-pro")
-    assert caps.prompt_cache is False
+    assert caps.prompt_cache is True
 
 
 # ---------------------------------------------------------------------------

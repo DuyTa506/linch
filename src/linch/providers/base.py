@@ -30,9 +30,12 @@ class ProviderCapabilities:
             text-parsing the response.
         tool_choice: Whether the provider honours ``tool_choice`` hints.
             When ``False``, ``req.tool_choice`` is cleared.
-        prompt_cache: Whether the provider reads ``cache_prompt`` /
-            ``cache_ttl`` on the request.  When ``False``, those fields are
-            cleared so they are not sent.
+        prompt_cache: Whether the provider is cache-aware and should receive
+            the request-level cache intent. Providers may implement this with
+            explicit wire controls (Anthropic cache breakpoints, llama.cpp
+            ``cache_prompt``) or with provider-native automatic prefix/session
+            caching plus usage reporting (OpenAI/Gemini). When ``False``,
+            those fields are cleared before the provider sees the request.
     """
 
     context_window: int = 128_000

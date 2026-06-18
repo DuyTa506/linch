@@ -21,6 +21,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
+from .._prompt_cache import gemini_cached_tokens
 from ..errors import AuthError, ContextLengthError, ProviderError, RateLimitError
 from ..types import (
     Message,
@@ -150,7 +151,7 @@ class GeminiProvider(BaseProvider):
             parallel_tool_calls=True,
             structured_output=True,
             tool_choice=True,
-            prompt_cache=False,
+            prompt_cache=True,
         )
 
     def _get_genai(self) -> Any:
@@ -207,6 +208,7 @@ class GeminiProvider(BaseProvider):
 
         input_tokens = 0
         output_tokens = 0
+        cache_read_tokens = 0
         stop_reason: StopReason = "end_turn"
         # Cross-chunk dedup: Gemini sends complete function calls (name + full
         # args), not incremental arg deltas. If the SDK re-surfaces the same
@@ -224,6 +226,7 @@ class GeminiProvider(BaseProvider):
                         input_tokens = um.prompt_token_count
                     if hasattr(um, "candidates_token_count") and um.candidates_token_count:
                         output_tokens = um.candidates_token_count
+                    cache_read_tokens = gemini_cached_tokens(um)
 
                 if not chunk.candidates:
                     continue
@@ -284,6 +287,10 @@ class GeminiProvider(BaseProvider):
         yield {
             "type": "message_end",
             "stop_reason": stop_reason,
-            "usage": Usage(input_tokens=input_tokens, output_tokens=output_tokens),
+            "usage": Usage(
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cache_read_tokens=cache_read_tokens,
+            ),
             "provider_metadata": None,
         }
