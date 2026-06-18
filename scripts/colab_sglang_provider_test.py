@@ -33,8 +33,8 @@ sh(f"{sys.executable} -m pip install -q uv")
 sh(
     f"{sys.executable} -m uv pip install --system -q "
     f"'sglang[all]' 'huggingface_hub[hf_transfer]' 'git+{REPO}@{BRANCH}' "
-    # cu128 -> torch 2.11.0+cu128 ships cuDNN 9.19 (>=9.15), passing SGLang's guard
-    "--torch-backend=cu128"
+    # cu126 is the consistent stack: torch 2.9.1, triton 3.5.1, sglang 0.5.9 all import
+    "--torch-backend=cu126"
 )
 log(f"[install] {time.time() - t0:.0f}s")
 
@@ -48,6 +48,9 @@ import linch  # noqa: E402
 log(f"[install] linch SGLangProvider={'SGLangProvider' in linch.__all__}")
 
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+# Text-only inference never exercises Conv3d, so bypass SGLang's torch-2.9.1 /
+# cuDNN<9.15 guard (it blocks startup on the cu126 stack).
+os.environ["SGLANG_DISABLE_CUDNN_CHECK"] = "1"
 from huggingface_hub import snapshot_download  # noqa: E402
 
 local = snapshot_download(MODEL, ignore_patterns=["*.pt", "*.gguf", "original/*"])
