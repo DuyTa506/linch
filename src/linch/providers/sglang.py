@@ -19,7 +19,9 @@ class SGLangProviderOptions:
     context_window: int = 128_000
     json_mode: bool = False
     parallel_tool_calls: bool | None = None
-    include_stream_options: bool = False
+    # On by default so SGLang streams token usage (incl. cached_tokens with
+    # enable_cache_report); set False for servers that reject stream_options.
+    include_stream_options: bool = True
     sampling_params: dict[str, Any] | None = None
     enable_cache_report: bool | None = None
     extra_body: dict[str, Any] | None = None
