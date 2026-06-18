@@ -12,7 +12,24 @@ def test_catalog_lists_direct_provider_records() -> None:
     assert "openai-chat" in provider_ids
     assert "gemini" in provider_ids
     assert "llamacpp" not in provider_ids
+    assert "sglang" not in provider_ids
+    assert "vllm" not in provider_ids
     assert "deepseek" not in provider_ids
+
+
+def test_local_server_providers_are_importable() -> None:
+    import linch
+    from linch.providers import (
+        SGLangProvider,
+        SGLangProviderOptions,
+        VLLMProvider,
+        VLLMProviderOptions,
+    )
+
+    assert linch.SGLangProvider is SGLangProvider
+    assert linch.SGLangProviderOptions is SGLangProviderOptions
+    assert linch.VLLMProvider is VLLMProvider
+    assert linch.VLLMProviderOptions is VLLMProviderOptions
 
 
 def test_catalog_filters_by_provider_id() -> None:

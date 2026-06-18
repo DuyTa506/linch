@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
+from linch._prompt_cache import openai_cached_tokens
 from linch.errors import AbortError, ProviderError
 from linch.openai_responses import map_openai_error
 from linch.providers.base import BaseProvider, ProviderCapabilities
@@ -42,6 +43,10 @@ class OpenAIChatProviderOptions:
     api_key: str | None = None
     base_url: str | None = None
     default_headers: dict[str, str] | None = None
+    context_window: int | None = None
+    parallel_tool_calls: bool | None = None
+    extra_body: dict[str, Any] | None = None
+    include_stream_options: bool = True
     # Use response_format={type:"json_object"} instead of json_schema.
     # Required for providers that support JSON mode but not schema enforcement
     # (e.g. DeepSeek, older Azure deployments).  The loop still text-parses and
@@ -57,15 +62,17 @@ class OpenAIChatCompletionsProvider(BaseProvider):
         self._client: Any | None = None
 
     def context_window(self, model: ModelId) -> int:
+        if self._options.context_window is not None:
+            return self._options.context_window
         return _KNOWN_CONTEXT.get(model, 128_000)
 
     def capabilities(self, model: ModelId) -> ProviderCapabilities:
         return ProviderCapabilities(
             context_window=self.context_window(model),
-            parallel_tool_calls=True,
+            parallel_tool_calls=self._options.parallel_tool_calls is not False,
             structured_output=True,
             tool_choice=True,
-            prompt_cache=False,
+            prompt_cache=True,
         )
 
     async def _get_client(self) -> Any:
@@ -88,7 +95,13 @@ class OpenAIChatCompletionsProvider(BaseProvider):
         return self._client
 
     def _build_payload(self, req: ProviderRequest) -> dict[str, Any]:
-        return _build_chat_payload(req, json_mode=self._options.json_mode)
+        return _build_openai_compatible_payload(
+            req,
+            json_mode=self._options.json_mode,
+            include_stream_options=self._options.include_stream_options,
+            parallel_tool_calls=self._options.parallel_tool_calls,
+            extra_body=self._options.extra_body,
+        )
 
     async def stream(self, req: ProviderRequest) -> AsyncIterator[dict[str, object]]:
         client = await self._get_client()
@@ -149,6 +162,7 @@ class OpenAIChatCompletionsProvider(BaseProvider):
                     usage = Usage(
                         input_tokens=int(getattr(cu, "prompt_tokens", 0) or 0),
                         output_tokens=int(getattr(cu, "completion_tokens", 0) or 0),
+                        cache_read_tokens=openai_cached_tokens(cu),
                     )
         except asyncio.CancelledError as exc:
             raise AbortError("aborted") from exc
@@ -278,4 +292,22 @@ def _build_chat_payload(req: ProviderRequest, *, json_mode: bool = False) -> dic
             }
         else:
             payload["tool_choice"] = req.tool_choice
+    return payload
+
+
+def _build_openai_compatible_payload(
+    req: ProviderRequest,
+    *,
+    json_mode: bool = False,
+    include_stream_options: bool = True,
+    parallel_tool_calls: bool | None = None,
+    extra_body: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = _build_chat_payload(req, json_mode=json_mode)
+    if not include_stream_options:
+        payload.pop("stream_options", None)
+    if parallel_tool_calls is not None:
+        payload["parallel_tool_calls"] = parallel_tool_calls
+    if extra_body:
+        payload["extra_body"] = dict(extra_body)
     return payload

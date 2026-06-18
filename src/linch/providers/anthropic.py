@@ -11,6 +11,11 @@ from linch._http_errors import (
     is_prompt_length_error,
     retry_after_seconds,
 )
+from linch._prompt_cache import (
+    ANTHROPIC_PROMPT_CACHE,
+    mark_last_cacheable_message_content,
+    mark_system_cache_breakpoint,
+)
 from linch.errors import (
     AbortError,
     AuthError,
@@ -278,25 +283,14 @@ def _translate_system(
     result: list[dict[str, Any]] = [{"type": "text", "text": block.text} for block in blocks]
     if not cache:
         return result
-    boundary = _cache_breakpoint_index(blocks)
-    if boundary is not None:
-        result[boundary]["cache_control"] = _cache_control(ttl)
+    mark_system_cache_breakpoint(
+        result,
+        blocks,
+        cache=cache,
+        ttl=ttl,
+        wire=ANTHROPIC_PROMPT_CACHE,
+    )
     return result
-
-
-def _cache_breakpoint_index(blocks: list[SystemBlock]) -> int | None:
-    """Index of the last cacheable system block."""
-    for index in range(len(blocks) - 1, -1, -1):
-        if getattr(blocks[index], "cacheable", False):
-            return index
-    return None
-
-
-def _cache_control(ttl: str | None) -> dict[str, Any]:
-    cc: dict[str, Any] = {"type": "ephemeral"}
-    if ttl == "1h":
-        cc["ttl"] = "1h"
-    return cc
 
 
 def _translate_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -351,22 +345,15 @@ def _translate_messages(
             if text_parts:
                 emitted_for_message.append({"role": "user", "content": text_parts})
             if cache and index == last_user_index:
-                _mark_last_cacheable_content(emitted_for_message, ttl)
+                mark_last_cacheable_message_content(
+                    emitted_for_message,
+                    cache=cache,
+                    ttl=ttl,
+                    wire=ANTHROPIC_PROMPT_CACHE,
+                    content_types={"text", "image", "tool_result"},
+                )
             result.extend(emitted_for_message)
     return result
-
-
-def _mark_last_cacheable_content(entries: list[dict[str, Any]], ttl: str | None) -> None:
-    for entry in reversed(entries):
-        content = entry.get("content")
-        if not isinstance(content, list):
-            continue
-        for block in reversed(content):
-            if not isinstance(block, dict):
-                continue
-            if block.get("type") in {"text", "image", "tool_result"}:
-                block["cache_control"] = _cache_control(ttl)
-                return
 
 
 def _translate_assistant_content(
