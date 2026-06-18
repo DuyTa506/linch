@@ -134,6 +134,11 @@ async def test_stream_text_only_unaffected() -> None:
         _chunk(
             delta=SimpleNamespace(content=None, reasoning_content=None, tool_calls=[]),
             finish_reason="stop",
+            usage=SimpleNamespace(
+                prompt_tokens=10,
+                completion_tokens=2,
+                prompt_tokens_details=SimpleNamespace(cached_tokens=6),
+            ),
         ),
     ]
     provider = OpenAIChatCompletionsProvider()
@@ -149,6 +154,7 @@ async def test_stream_text_only_unaffected() -> None:
     assert {"type": "text_delta", "text": "hi"} in events
     assert not any(e.get("type") == "tool_use_end" for e in events)
     assert events[-1]["stop_reason"] == "end_turn"
+    assert events[-1]["usage"].cache_read_tokens == 6
 
 
 async def test_stream_maps_aborted_mid_stream_failure_to_abort_error() -> None:

@@ -123,15 +123,17 @@ flowchart LR
 | `OpenAIResponsesProvider` | ✗ | ✓ | ✓ |
 | `OpenAIChatCompletionsProvider` | ✗ | ✓ | ✓ |
 | `LlamaCppProvider` | ✗ | ✓ | ✓ |
+| `VLLMProvider` | ✗ | ✓ | ✓ |
+| `SGLangProvider` | ✗ | ✓ | ✓ |
 | `AnthropicProvider` | ✓ | ✓ | ✓ |
 | `GeminiProvider` | ✗ | ✓ | ✓ |
 
 `structured_output=True` means the provider/loop pair can enforce or route
 structured output without falling back to untyped free text. OpenAI Chat,
-OpenAI Responses, llama.cpp, and Gemini map `output_schema` to provider-native
-schema parameters. Anthropic maps `output_schema` to a generated final schema
-tool; the loop treats that schema tool as terminal structured output rather
-than dispatching it as a real tool.
+OpenAI Responses, llama.cpp, vLLM, SGLang, and Gemini map `output_schema` to
+provider-native schema parameters. Anthropic maps `output_schema` to a generated
+final schema tool; the loop treats that schema tool as terminal structured
+output rather than dispatching it as a real tool.
 
 **Choosing between the two OpenAI providers:**
 
@@ -151,6 +153,11 @@ streaming enabled with `stream: true`, omits OpenAI's `stream_options` field,
 maps structured output to llama.cpp's documented `response_format` shape, and
 uses `/v1/props` or `/props` to cache the server's `n_ctx` context window when
 that endpoint is available.
+
+`VLLMProvider` and `SGLangProvider` are Chat Completions variants for
+self-hosted OpenAI-compatible servers. They share the OpenAI-compatible stream
+parser, expose deployment-specific request extensions through `extra_body`, and
+leave model ids/context windows to runtime configuration.
 
 `GeminiProvider` uses the optional `linch[gemini]` dependency and translates
 Gemini content parts/function calls into the same normalized stream events used

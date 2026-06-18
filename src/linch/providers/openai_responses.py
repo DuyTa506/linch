@@ -45,7 +45,7 @@ class OpenAIResponsesProvider(BaseProvider):
             parallel_tool_calls=True,
             structured_output=True,
             tool_choice=True,
-            prompt_cache=False,
+            prompt_cache=True,
         )
 
     async def stream(self, req: ProviderRequest) -> AsyncIterator[dict[str, object]]:

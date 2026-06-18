@@ -6,6 +6,7 @@ from typing import Any
 from urllib import error, request
 from urllib.parse import urlsplit, urlunsplit
 
+from linch._prompt_cache import LLAMACPP_PROMPT_CACHE, apply_extra_body_cache
 from linch.providers.base import ProviderCapabilities
 from linch.providers.openai_chat import (
     OpenAIChatCompletionsProvider,
@@ -69,7 +70,7 @@ class LlamaCppProvider(OpenAIChatCompletionsProvider):
             parallel_tool_calls=self._llamacpp_options.parallel_tool_calls is not False,
             structured_output=True,
             tool_choice=True,
-            prompt_cache=False,
+            prompt_cache=True,
         )
 
     def _build_payload(self, req: ProviderRequest) -> dict[str, Any]:
@@ -106,6 +107,7 @@ def _build_llamacpp_payload(
         extra_body["generation_prompt"] = opts.generation_prompt
     if opts.parse_tool_calls is not None:
         extra_body["parse_tool_calls"] = opts.parse_tool_calls
+    apply_extra_body_cache(extra_body, req, wire=LLAMACPP_PROMPT_CACHE)
     if extra_body:
         payload["extra_body"] = extra_body
 

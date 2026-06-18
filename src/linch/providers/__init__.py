@@ -14,6 +14,8 @@ from .llamacpp import LlamaCppProvider, LlamaCppProviderOptions
 from .openai_chat import OpenAIChatCompletionsProvider, OpenAIChatProviderOptions
 from .openai_responses import OpenAIResponsesProvider, OpenAIResponsesProviderOptions
 from .retry import RetryOptions, with_retry
+from .sglang import SGLangProvider, SGLangProviderOptions
+from .vllm import VLLMProvider, VLLMProviderOptions
 
 __all__ = [
     "AnthropicProvider",
@@ -31,10 +33,14 @@ __all__ = [
     "ProviderCapabilities",
     "ProviderModelInfo",
     "RetryOptions",
+    "SGLangProvider",
+    "SGLangProviderOptions",
     "ThinkingAdaptive",
     "ThinkingConfig",
     "ThinkingDisabled",
     "ThinkingEnabled",
+    "VLLMProvider",
+    "VLLMProviderOptions",
     "get_provider_model_info",
     "list_provider_models",
     "with_retry",
