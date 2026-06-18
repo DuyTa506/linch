@@ -171,8 +171,9 @@ agent = Agent(
 
 # ── SGLang server ────────────────────────────────────────────────────────────
 # Uses SGLang's OpenAI-compatible chat completions endpoint.
-# The provider omits OpenAI stream_options by default. Set
-# include_stream_options=True if your deployment accepts that OpenAI field.
+# The provider sends OpenAI stream_options by default so SGLang streams token
+# usage (input/output, plus cached_tokens when enable_cache_report is set). Set
+# include_stream_options=False for servers that reject that OpenAI field.
 # SGLang sampling/cache-report controls are exposed through extra_body.
 from linch.providers import SGLangProvider, SGLangProviderOptions
 
@@ -183,7 +184,6 @@ agent = Agent(
             api_key=os.environ.get("SGLANG_API_KEY", "EMPTY"),
             base_url=os.environ["SGLANG_BASE_URL"],
             context_window=128_000,
-            include_stream_options=False,
             sampling_params={"top_p": 0.9},
             enable_cache_report=True,
             extra_body={"custom": "value"},

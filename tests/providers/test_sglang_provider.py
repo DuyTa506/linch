@@ -57,7 +57,7 @@ def test_sglang_capabilities_and_provider_id() -> None:
     assert caps.prompt_cache is True
 
 
-def test_sglang_payload_includes_sglang_extras_and_omits_stream_options() -> None:
+def test_sglang_payload_includes_sglang_extras_and_stream_options_by_default() -> None:
     req = ProviderRequest(
         model="served-model",
         system=[],
@@ -75,7 +75,8 @@ def test_sglang_payload_includes_sglang_extras_and_omits_stream_options() -> Non
     payload = _build_sglang_payload(req, options)
 
     assert payload["stream"] is True
-    assert "stream_options" not in payload
+    # stream_options is on by default so SGLang returns token usage (incl. cache).
+    assert payload["stream_options"] == {"include_usage": True}
     assert payload["parallel_tool_calls"] is True
     assert payload["response_format"]["type"] == "json_schema"
     assert payload["extra_body"] == {
@@ -85,16 +86,16 @@ def test_sglang_payload_includes_sglang_extras_and_omits_stream_options() -> Non
     }
 
 
-def test_sglang_payload_can_include_stream_options() -> None:
+def test_sglang_payload_can_omit_stream_options() -> None:
     req = ProviderRequest(model="served-model", system=[], tools=[], messages=[])
 
     payload = _build_sglang_payload(
         req,
-        SGLangProviderOptions(include_stream_options=True),
+        SGLangProviderOptions(include_stream_options=False),
     )
 
     assert payload["stream"] is True
-    assert payload["stream_options"] == {"include_usage": True}
+    assert "stream_options" not in payload
 
 
 async def test_sglang_stream_text_tool_reasoning_and_cache_usage() -> None:
@@ -154,5 +155,5 @@ async def test_sglang_stream_text_tool_reasoning_and_cache_usage() -> None:
         output_tokens=13,
         cache_read_tokens=5,
     )
-    assert "stream_options" not in provider._client.completions.payload
+    assert provider._client.completions.payload["stream_options"] == {"include_usage": True}
     assert provider._client.completions.payload["extra_body"]["enable_cache_report"] is True
