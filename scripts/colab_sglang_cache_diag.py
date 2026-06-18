@@ -4,7 +4,7 @@ Serves a standard model with RadixAttention (default) + --enable-cache-report,
 then on an identical long prefix sent twice measures cached_tokens via:
   A. raw openai client, non-streaming
   B. raw openai client, streaming + stream_options.include_usage
-  C. linch SGLangProvider (sends stream_options OFF, enable_cache_report=True)
+  C. linch SGLangProvider (include_stream_options=False, enable_cache_report=True)
 """
 
 import json
@@ -165,7 +165,11 @@ async def main():
     # C. linch SGLangProvider with default stream_options OFF + enable_cache_report
     prov_off = SGLangProvider(
         SGLangProviderOptions(
-            api_key="EMPTY", base_url=BASE, context_window=16384, enable_cache_report=True
+            api_key="EMPTY",
+            base_url=BASE,
+            context_window=16384,
+            enable_cache_report=True,
+            include_stream_options=False,
         )
     )
     out["C_linch_stream_options_off"] = {
