@@ -261,8 +261,8 @@ async def main():
         "raw_tail": r["text"][-120:],
     }
 
-    # T4 usage/caching — SGLangProvider sends stream_options off, so usage may be
-    # absent in streaming; record what comes back.
+    # T4 usage/caching — SGLangProvider now defaults to include_stream_options=True,
+    # so usage will always be present in streaming responses; record what comes back.
     big = "You are an assistant. " + "Remember this context carefully. " * 400
     p = provider(THINK_OFF)
     r1 = await drive(p, req(big, "Reply with exactly: OK", max_output_tokens=8, temperature=0.0))
