@@ -41,7 +41,8 @@ log(f"[install] {time.time() - t0:.0f}s")
 import torch  # noqa: E402
 
 log(
-    f"[install] torch={torch.__version__} cuda={torch.version.cuda} avail={torch.cuda.is_available()}"
+    f"[install] torch={torch.__version__} cuda={torch.version.cuda} "
+    f"avail={torch.cuda.is_available()}"
 )
 import linch  # noqa: E402
 
