@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from linch._prompt_cache import openai_cached_tokens
@@ -103,6 +103,15 @@ class OpenAIChatCompletionsProvider(BaseProvider):
             extra_body=self._options.extra_body,
         )
 
+    def _chunk_cache_read_tokens(self, chunk: Any) -> int | None:
+        """Cached prompt tokens reported outside the standard `usage` object.
+
+        Base providers carry cache info in `usage`; this hook lets subclasses
+        read provider-specific fields (e.g. llama.cpp's `timings.cache_n`).
+        Returns None when the chunk carries no such signal.
+        """
+        return None
+
     async def stream(self, req: ProviderRequest) -> AsyncIterator[dict[str, object]]:
         client = await self._get_client()
         payload = self._build_payload(req)
@@ -113,6 +122,9 @@ class OpenAIChatCompletionsProvider(BaseProvider):
         # tc.id) can be routed to the correct tool call started in the first chunk.
         tool_idx_to_id: dict[int, str] = {}
         usage = Usage()
+        # Cache reads some servers report outside `usage` (e.g. llama.cpp
+        # timings.cache_n); captured here and merged into usage at the end.
+        extra_cache_read: int | None = None
         stop_reason: StopReason = "end_turn"
         # Tool ids that already had a tool_use_end emitted, so the post-loop
         # flush does not double-emit when finish_reason was "tool_calls".
@@ -131,6 +143,9 @@ class OpenAIChatCompletionsProvider(BaseProvider):
                         output_tokens=int(getattr(cu, "completion_tokens", 0) or 0),
                         cache_read_tokens=openai_cached_tokens(cu),
                     )
+                chunk_cache = self._chunk_cache_read_tokens(chunk)
+                if chunk_cache is not None:
+                    extra_cache_read = chunk_cache
                 choices = getattr(chunk, "choices", None) or []
                 if not choices:
                     continue
@@ -185,6 +200,8 @@ class OpenAIChatCompletionsProvider(BaseProvider):
                 yield {"type": "tool_use_end", "id": tid}
         if tool_meta:
             stop_reason = "tool_use"
+        if extra_cache_read and not usage.cache_read_tokens:
+            usage = replace(usage, cache_read_tokens=extra_cache_read)
         yield {"type": "message_end", "stop_reason": stop_reason, "usage": usage}
 
 
