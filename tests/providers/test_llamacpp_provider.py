@@ -36,17 +36,27 @@ class _FakeClient:
         self.chat = SimpleNamespace(completions=self.completions)
 
 
-def _chunk(*, delta, finish_reason=None, usage=None):
+def _chunk(*, delta, finish_reason=None, usage=None, timings=None):
     return SimpleNamespace(
         choices=[SimpleNamespace(delta=delta, finish_reason=finish_reason)],
         usage=usage,
+        timings=timings,
     )
 
 
-def test_llamacpp_payload_omits_openai_stream_options() -> None:
+def test_llamacpp_payload_includes_stream_options_by_default() -> None:
     req = ProviderRequest(model="local-tool-model", system=[], tools=[], messages=[])
 
     payload = _build_llamacpp_payload(req)
+
+    assert payload["stream"] is True
+    assert payload["stream_options"] == {"include_usage": True}
+
+
+def test_llamacpp_payload_omits_stream_options_when_opted_out() -> None:
+    req = ProviderRequest(model="local-tool-model", system=[], tools=[], messages=[])
+
+    payload = _build_llamacpp_payload(req, LlamaCppProviderOptions(include_stream_options=False))
 
     assert payload["stream"] is True
     assert "stream_options" not in payload
@@ -207,7 +217,68 @@ async def test_llamacpp_stream_emits_text_reasoning_and_usage() -> None:
         cache_read_tokens=2,
     )
     assert provider._client.completions.payload["stream"] is True
-    assert "stream_options" not in provider._client.completions.payload
+    assert provider._client.completions.payload["stream_options"] == {"include_usage": True}
+
+
+async def test_llamacpp_stream_reads_cache_read_tokens_from_timings() -> None:
+    # llama.cpp reports prefix-cache reuse in `timings.cache_n`, not in
+    # usage.prompt_tokens_details (which it leaves null).
+    chunks = [
+        _chunk(delta=SimpleNamespace(content="ok", reasoning_content=None, tool_calls=[])),
+        _chunk(
+            delta=SimpleNamespace(content=None, reasoning_content=None, tool_calls=[]),
+            finish_reason="stop",
+            usage=SimpleNamespace(
+                prompt_tokens=6318,
+                completion_tokens=2,
+                prompt_tokens_details=None,
+            ),
+            timings={"cache_n": 5806, "prompt_n": 512},
+        ),
+    ]
+    provider = LlamaCppProvider()
+    provider._client = _FakeClient(chunks)
+
+    events = [
+        event
+        async for event in provider.stream(
+            ProviderRequest(model="local-tool-model", system=[], tools=[], messages=[])
+        )
+    ]
+
+    assert events[-1]["usage"] == Usage(
+        input_tokens=6318,
+        output_tokens=2,
+        cache_read_tokens=5806,
+    )
+
+
+async def test_llamacpp_stream_reads_cache_read_tokens_from_model_extra() -> None:
+    # When the OpenAI SDK keeps the field as a pydantic extra, timings lives
+    # under chunk.model_extra rather than a direct attribute.
+    final = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                delta=SimpleNamespace(content=None, reasoning_content=None, tool_calls=[]),
+                finish_reason="stop",
+            )
+        ],
+        usage=SimpleNamespace(prompt_tokens=100, completion_tokens=4, prompt_tokens_details=None),
+        model_extra={"timings": {"cache_n": 80, "prompt_n": 20}},
+    )
+    provider = LlamaCppProvider()
+    provider._client = _FakeClient(
+        [_chunk(delta=SimpleNamespace(content="ok", reasoning_content=None, tool_calls=[])), final]
+    )
+
+    events = [
+        event
+        async for event in provider.stream(
+            ProviderRequest(model="local-tool-model", system=[], tools=[], messages=[])
+        )
+    ]
+
+    assert events[-1]["usage"].cache_read_tokens == 80
 
 
 async def test_llamacpp_stream_emits_tool_call_events() -> None:
