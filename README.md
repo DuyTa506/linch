@@ -93,8 +93,16 @@ linch keeps the loop small, but makes the surrounding runtime explicit: context,
 
 ## Install
 
+From [PyPI](https://pypi.org/project/linch/):
+
 ```sh
 pip install linch
+```
+
+With optional extras (Anthropic, MCP, Gemini, OpenTelemetry, Postgres):
+
+```sh
+pip install 'linch[anthropic,mcp,gemini]'
 ```
 
 For local development:
