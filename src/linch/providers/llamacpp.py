@@ -25,6 +25,9 @@ class LlamaCppProviderOptions:
     auto_context_window: bool = True
     context_window_timeout: float = 2.0
     json_mode: bool = False
+    # On by default so llama.cpp streams token usage in the final chunk; set
+    # False for older server builds that reject the OpenAI stream_options field.
+    include_stream_options: bool = True
     parallel_tool_calls: bool | None = None
     chat_template_kwargs: dict[str, Any] | None = None
     reasoning_format: str | None = None
@@ -76,6 +79,34 @@ class LlamaCppProvider(OpenAIChatCompletionsProvider):
     def _build_payload(self, req: ProviderRequest) -> dict[str, Any]:
         return _build_llamacpp_payload(req, self._llamacpp_options)
 
+    def _chunk_cache_read_tokens(self, chunk: Any) -> int | None:
+        return _llamacpp_cache_read_tokens(chunk)
+
+
+def _llamacpp_cache_read_tokens(chunk: Any) -> int | None:
+    """Read prefix-cache reuse from llama.cpp's per-response `timings.cache_n`.
+
+    llama.cpp leaves usage.prompt_tokens_details null and instead reports the
+    number of prompt tokens served from the KV cache in `timings.cache_n`,
+    exposed either as a direct chunk attribute or under `model_extra`.
+    """
+    timings = getattr(chunk, "timings", None)
+    if timings is None:
+        extra = getattr(chunk, "model_extra", None)
+        if isinstance(extra, dict):
+            timings = extra.get("timings")
+    if timings is None:
+        return None
+    cache_n = (
+        timings.get("cache_n") if isinstance(timings, dict) else getattr(timings, "cache_n", None)
+    )
+    if cache_n is None:
+        return None
+    try:
+        return int(cache_n)
+    except (TypeError, ValueError):
+        return None
+
 
 def _build_llamacpp_payload(
     req: ProviderRequest, options: LlamaCppProviderOptions | None = None
@@ -83,9 +114,11 @@ def _build_llamacpp_payload(
     opts = options or LlamaCppProviderOptions()
     payload = _build_chat_payload(req, json_mode=False)
 
-    # llama.cpp does not document OpenAI's stream_options field and older
-    # server builds reject unknown request keys.
-    payload.pop("stream_options", None)
+    # stream_options.include_usage is what makes llama.cpp emit token usage in
+    # the final stream chunk; without it the run reports zero tokens. Older
+    # server builds reject the unknown field, so allow opting out.
+    if not opts.include_stream_options:
+        payload.pop("stream_options", None)
 
     if req.output_schema is not None:
         if opts.json_mode:
