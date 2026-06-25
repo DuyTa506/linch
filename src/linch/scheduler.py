@@ -546,7 +546,11 @@ async def _dispatch_pre_tool_use(
     if result.action == "resolve":
         # A hook served a result (e.g. cache hit): skip execution, use it as-is.
         if result.tool_result is not None:
-            return input, None, result.tool_result, outcome.events
+            # Report the input the served result was keyed on — the final, fully
+            # mutated input — so the recorded decision / ToolCallStartEvent match
+            # the served output even when an earlier hook rewrote the input.
+            served_input = getattr(outcome.context, "input", input)
+            return served_input, None, result.tool_result, outcome.events
         # Malformed resolve (no tool_result): the hook meant to short-circuit, so
         # block rather than silently running the tool it intended to suppress.
         reason = result.reason or result.feedback or "resolve hook returned no tool_result"

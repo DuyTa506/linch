@@ -15,18 +15,27 @@ This is an *efficiency* layer, not a *safety* one: it does not terminate runaway
 loops (a cached call is cheap but the model can still ask forever). Keep the loop
 guard as the backstop.
 
-Known limitation: the per-run cache assumes the agent's own tools are the only
-writers. A read whose underlying data is mutated by an *external* process between
-two identical calls in the same run could be served stale.
+Known limitations:
+
+- The per-run cache assumes the agent's own foreground tools are the only
+  writers. A read whose underlying data is mutated by an *external* process
+  between two identical calls in the same run could be served stale.
+- A **backgrounded** write (``run_in_background=True``) only invalidates at
+  pre-dispatch, not on completion: the background path never dispatches
+  PostToolUse, so the on-completion clear cannot fire. A read cached while such a
+  write is still in flight may be served stale. Fixing this properly means
+  dispatching PostToolUse hooks for background tools — a broader behavior change
+  for *all* post-tool hooks — so it is intentionally deferred; keep cacheable
+  tools off data mutated by background writes.
 """
 
 from __future__ import annotations
 
-import json
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..permissions.keys import permission_decision_key
 from ..tools import ToolResult
 from .contexts import AgentStopContext, PostToolUseContext, PreToolUseContext
 from .types import HookResult
@@ -181,11 +190,13 @@ def _bounded_set(od: OrderedDict, key: Any, value: Any, cap: int) -> None:
 
 
 def _cache_key(tool_name: str, input: dict[str, Any]) -> str | None:
+    # Reuse the shared canonical (tool_name + sorted-JSON input) signature so the
+    # cache agrees with the permission engine / loop guard on call identity and
+    # can't silently drift from them. Non-serializable input → not cacheable.
     try:
-        payload = json.dumps(input, sort_keys=True, separators=(",", ":"), default=str)
+        return permission_decision_key(tool_name, input)
     except (TypeError, ValueError):
         return None
-    return f"{tool_name}\x00{payload}"
 
 
 def _cache_event(kind: str, tool_name: str) -> Any:
