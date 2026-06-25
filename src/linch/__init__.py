@@ -123,7 +123,7 @@ from .loop_guard import (
     evaluate_loop_guard,
     normalize_loop_guard,
 )
-from .looping import (
+from .loop_runner import (
     FileLoopArtifactStore,
     FileLoopLeaseStore,
     InMemoryLoopLeaseStore,
