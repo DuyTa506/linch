@@ -1066,6 +1066,21 @@ class Agent:
                 if _inspect.isawaitable(result):
                     await result
 
+        # Close the provider's transport (e.g. the OpenAI/httpx connection pool)
+        # so closing the agent never leaks sockets/file descriptors. Duck-typed:
+        # providers without a closer (test doubles) are skipped, and a faulty
+        # closer never aborts shutdown.
+        provider_closer = getattr(self._provider, "aclose", None) or getattr(
+            self._provider, "close", None
+        )
+        if provider_closer is not None:
+            try:
+                result = provider_closer()
+                if _inspect.isawaitable(result):
+                    await result
+            except Exception:
+                pass
+
         # Close hooks that expose a closer (e.g. RunTelemetryHook flushes its
         # wrapped observers).  A faulty closer never aborts agent shutdown.
         # Also close any hooks that were replaced via the hooks setter so their

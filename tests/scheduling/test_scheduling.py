@@ -12,8 +12,9 @@ time.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -147,7 +148,7 @@ async def test_fired_schedule_drains_as_user_event() -> None:
 
     events = [event async for event in session.run("go")]
     user_texts = " ".join(
-        b.text for e in events if e.type == "user" for b in e.message.content if hasattr(b, "text")
+        str(getattr(b, "text", "")) for e in events if e.type == "user" for b in e.message.content
     )
     assert "scheduled-task" in user_texts
     assert "ping" in user_texts
@@ -173,6 +174,91 @@ async def test_sqlite_store_survives_reload(tmp_path: Any) -> None:
         assert loaded[0].next_run == 4242.0
         assert await store2.remove(schedule.id) is True
         assert await store2.list() == []
+
+
+async def test_sqlite_claim_due_is_atomic_across_store_instances(tmp_path: Any) -> None:
+    from linch import Schedule, SqliteScheduleStore
+
+    db = tmp_path / "schedules.db"
+    schedule = Schedule(payload="run once", interval_s=60, next_run=1000.0)
+    async with SqliteScheduleStore(db) as writer:
+        await writer.add(schedule)
+
+    first = SqliteScheduleStore(db)
+    second = SqliteScheduleStore(db)
+    try:
+        claimed_a, claimed_b = await asyncio.gather(
+            first.claim_due(1000.0),
+            second.claim_due(1000.0),
+        )
+    finally:
+        await first.aclose()
+        await second.aclose()
+
+    claimed = claimed_a + claimed_b
+    assert [s.id for s in claimed] == [schedule.id]
+
+    async with SqliteScheduleStore(db) as reader:
+        loaded = await reader.get(schedule.id)
+        assert loaded is not None
+        assert loaded.next_run == 1060.0
+
+
+async def test_two_scheduler_loops_do_not_double_fire_sqlite_schedule(tmp_path: Any) -> None:
+    from linch import Schedule, SchedulerLoop, SqliteScheduleStore
+
+    db = tmp_path / "schedules.db"
+    schedule = Schedule(payload="cluster tick", interval_s=60, next_run=1000.0)
+    async with SqliteScheduleStore(db) as writer:
+        await writer.add(schedule)
+
+    store_a = SqliteScheduleStore(db)
+    store_b = SqliteScheduleStore(db)
+    session_a = _FakeSession()
+    session_b = _FakeSession()
+    loop_a = SchedulerLoop(store_a, session_a, clock=lambda: 1000.0)
+    loop_b = SchedulerLoop(store_b, session_b, clock=lambda: 1000.0)
+    try:
+        fired_a, fired_b = await asyncio.gather(loop_a.tick(), loop_b.tick())
+    finally:
+        await store_a.aclose()
+        await store_b.aclose()
+
+    assert [s.id for s in fired_a + fired_b] == [schedule.id]
+    notifications = session_a.pending_notifications + session_b.pending_notifications
+    assert len(notifications) == 1
+    assert "cluster tick" in notifications[0].content[0].text
+
+
+async def test_claim_tick_isolates_a_failing_fire_from_sibling_schedules(tmp_path: Any) -> None:
+    # Regression: with a claiming store, claim_due advances+commits every due
+    # schedule's next_run before _fire runs. A raising on_event sink for one
+    # claimed schedule must not abort delivery of the others claimed this tick.
+    from linch import Schedule, SchedulerLoop, SqliteScheduleStore
+    from linch.events import ScheduleEvent
+
+    db = tmp_path / "schedules.db"
+    async with SqliteScheduleStore(db) as writer:
+        await writer.add(Schedule(id="a", payload="alpha", interval_s=60, next_run=1000.0))
+        await writer.add(Schedule(id="b", payload="bravo", interval_s=60, next_run=1000.0))
+
+    def explode_on_a(event: ScheduleEvent) -> None:
+        if event.schedule_id == "a":
+            raise RuntimeError("sink failed for a")
+
+    store = SqliteScheduleStore(db)
+    session = _FakeSession()
+    loop = SchedulerLoop(store, session, clock=lambda: 1000.0, on_event=explode_on_a)
+    try:
+        fired = await loop.tick()
+    finally:
+        await store.aclose()
+
+    # Both schedules were claimed and both deliveries landed despite a's sink
+    # raising — the failure did not drop the sibling b.
+    assert {s.id for s in fired} == {"a", "b"}
+    payloads = "".join(msg.content[0].text for msg in session.pending_notifications)
+    assert "alpha" in payloads and "bravo" in payloads
 
 
 # ── tools ────────────────────────────────────────────────────────────────────
@@ -208,7 +294,7 @@ async def test_agent_autoregisters_schedule_tools() -> None:
 
     agent = Agent(
         model="m",
-        provider=object(),
+        provider=cast(Any, object()),
         session_store=InMemorySessionStore(),
         cwd=".",
         schedule_store=InMemoryScheduleStore(),
@@ -223,7 +309,7 @@ def test_no_schedule_store_registers_nothing() -> None:
 
     agent = Agent(
         model="m",
-        provider=object(),
+        provider=cast(Any, object()),
         session_store=InMemorySessionStore(),
         cwd=".",
     )

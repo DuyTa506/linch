@@ -21,7 +21,7 @@ from xml.sax.saxutils import escape
 from ...events import ScheduleEvent
 from ...types import Message, TextBlock
 from .schedule import Schedule
-from .store import ScheduleStore
+from .store import ClaimingScheduleStore, ScheduleStore
 
 
 def render_schedule_message(schedule: Schedule) -> Message:
@@ -78,6 +78,20 @@ class SchedulerLoop:
     async def tick(self) -> list[Schedule]:
         """Fire every schedule whose ``next_run`` is due. Returns those fired."""
         now = self._clock()
+        if isinstance(self._store, ClaimingScheduleStore):
+            fired = await self._store.claim_due(now)
+            for schedule in fired:
+                # claim_due has already advanced+committed each next_run, so a
+                # raising _fire must not abort the remaining already-claimed
+                # schedules this tick — that would silently drop them. Delivery
+                # (the notification append) precedes the on_event sink in _fire,
+                # so an exception here means only the observability sink failed.
+                try:
+                    await self._fire(schedule)
+                except Exception:
+                    pass
+            return fired
+
         fired: list[Schedule] = []
         for schedule in await self._store.list():
             if not schedule.enabled or schedule.next_run is None:

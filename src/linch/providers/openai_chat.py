@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
@@ -43,6 +44,7 @@ class OpenAIChatProviderOptions:
     api_key: str | None = None
     base_url: str | None = None
     default_headers: dict[str, str] | None = None
+    timeout: float | None = None
     context_window: int | None = None
     parallel_tool_calls: bool | None = None
     extra_body: dict[str, Any] | None = None
@@ -91,8 +93,22 @@ class OpenAIChatCompletionsProvider(BaseProvider):
             kwargs["base_url"] = self._options.base_url
         if self._options.default_headers is not None:
             kwargs["default_headers"] = self._options.default_headers
+        if self._options.timeout is not None:
+            kwargs["timeout"] = self._options.timeout
         self._client = AsyncOpenAI(**kwargs)
         return self._client
+
+    async def aclose(self) -> None:
+        client = self._client
+        self._client = None
+        if client is None:
+            return
+        closer = getattr(client, "aclose", None) or getattr(client, "close", None)
+        if closer is None:
+            return
+        result = closer()
+        if inspect.isawaitable(result):
+            await result
 
     def _build_payload(self, req: ProviderRequest) -> dict[str, Any]:
         return _build_openai_compatible_payload(
