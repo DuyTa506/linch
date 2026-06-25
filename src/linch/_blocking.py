@@ -1,15 +1,12 @@
 """Bounded, daemon-thread offload for blocking work.
 
 The core loop must never run blocking disk/DB/CPU work directly on the event
-loop thread.  ``asyncio.to_thread`` dispatches onto the default executor whose
-*non-daemon* worker threads can keep the interpreter (and the managed test
-sandbox) alive at teardown, and an unbounded ``threading.Thread`` per call has
-no backpressure.
+loop thread. ``asyncio.to_thread`` uses the default executor, whose non-daemon
+workers can keep the interpreter alive at teardown in the managed test sandbox.
 
-``run_blocking`` threads the needle: each call runs on a fresh *daemon* thread
-(never blocks teardown) and a per-loop semaphore caps how many run at once
-(backpressure).  Wakeup is via ``loop.call_soon_threadsafe`` so the awaiting
-coroutine resumes reliably.
+``run_blocking`` starts a daemon worker and resumes the awaiter via a future
+woken with ``loop.call_soon_threadsafe`` — an event-driven wakeup with no
+polling, so a waiting call adds no latency and never spins the event loop.
 """
 
 from __future__ import annotations
@@ -38,34 +35,33 @@ def _loop_semaphore(loop: asyncio.AbstractEventLoop) -> asyncio.Semaphore:
 
 
 async def run_blocking(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
-    """Run ``fn(*args, **kwargs)`` on a bounded daemon thread; return its result.
+    """Run ``fn(*args, **kwargs)`` on a bounded daemon thread.
 
     Propagates any exception ``fn`` raises to the awaiter.  If the awaiting
-    coroutine is cancelled the daemon thread still runs to completion (the same
-    contract as ``asyncio.to_thread``), but it never blocks interpreter exit.
+    coroutine is cancelled, the daemon thread still runs to completion.
     """
     loop = asyncio.get_running_loop()
     sem = _loop_semaphore(loop)
     async with sem:
         fut: asyncio.Future[T] = loop.create_future()
 
+        def _set_result(value: T) -> None:
+            if not fut.done():
+                fut.set_result(value)
+
+        def _set_exception(exc: BaseException) -> None:
+            if not fut.done():
+                fut.set_exception(exc)
+
         def _target() -> None:
             try:
                 value = fn(*args, **kwargs)
             except BaseException as exc:  # noqa: BLE001 - propagated to awaiter
-                loop.call_soon_threadsafe(_safe_set_exception, fut, exc)
-                return
-            loop.call_soon_threadsafe(_safe_set_result, fut, value)
+                loop.call_soon_threadsafe(_set_exception, exc)
+            else:
+                loop.call_soon_threadsafe(_set_result, value)
 
         threading.Thread(target=_target, name="linch-blocking", daemon=True).start()
+        # If the awaiter is cancelled, the daemon thread still runs to completion;
+        # its later call_soon_threadsafe is a no-op on the already-cancelled future.
         return await fut
-
-
-def _safe_set_result(fut: asyncio.Future[Any], value: Any) -> None:
-    if not fut.done():
-        fut.set_result(value)
-
-
-def _safe_set_exception(fut: asyncio.Future[Any], exc: BaseException) -> None:
-    if not fut.done():
-        fut.set_exception(exc)
