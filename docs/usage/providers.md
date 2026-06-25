@@ -227,8 +227,8 @@ A few practical notes on the snippets above:
 ## Choosing a provider path
 
 Use a direct provider when Linch has native semantics for that API: OpenAI
-Responses for stateful reasoning controls, Anthropic for prompt caching and
-Claude thinking signatures, Gemini for Google model/tool semantics, and
+Responses for stateful reasoning controls, Anthropic for explicit prompt-cache
+markers and Claude thinking signatures, Gemini for Google model/tool semantics, and
 llama.cpp, vLLM, or SGLang for self-hosted local servers.
 
 Use `OpenAIChatCompletionsProvider(base_url=...)` when a service implements the
@@ -309,8 +309,11 @@ backends.
 Structured output is supported on every direct provider but reached differently
 per backend (Anthropic, for instance, uses a generated final-schema tool). The
 mechanics — and how schema-repair retries work — live in
-[Structured output](./structured-output.md). Prompt caching is Anthropic-only;
-enable it via the provider options, not a global flag.
+[Structured output](./structured-output.md). Every direct provider reports
+`prompt_cache=True`, but the mechanism differs: Anthropic and llama.cpp use
+explicit cache-control markers you opt into via `cache_prompt`/`cache_ttl`,
+while OpenAI (chat + responses) and Gemini cache automatically and Linch only
+reports the cached-token counts back.
 
 ---
 
