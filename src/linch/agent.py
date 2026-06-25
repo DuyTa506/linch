@@ -175,6 +175,30 @@ def _resolve_result_offload(result_offload: Any, provider: BaseProvider, model: 
     return result_offload
 
 
+def _resolve_tool_cache(value: Any) -> Any:
+    """Normalize the ``tool_cache`` arg into a ToolCacheHook or ``None`` (off).
+
+    * ``None`` / ``False`` → disabled.
+    * ``True`` → cache every read-scope tool.
+    * ``ToolCacheConfig`` → cache per that config.
+    * a ``ToolCacheHook`` (anything exposing ``on_pre_tool_use``) → used as-is.
+    """
+    if value is None or value is False:
+        return None
+    from .hooks.tool_cache import ToolCacheConfig, ToolCacheHook
+
+    if value is True:
+        return ToolCacheHook()
+    if isinstance(value, ToolCacheConfig):
+        return ToolCacheHook(value)
+    if hasattr(value, "on_pre_tool_use"):
+        return value
+    raise TypeError(
+        "tool_cache must be a ToolCacheConfig, ToolCacheHook, True, None, or False; "
+        f"got {type(value)!r}"
+    )
+
+
 def _system_prompt_section_blocks(cfg: SystemPromptConfig | None) -> dict[str, list[SystemBlock]]:
     grouped: dict[str, list[SystemBlock]] = {placement: [] for placement in _SECTION_PLACEMENTS}
     if cfg is None or not cfg.sections:
@@ -365,6 +389,7 @@ class Agent:
         mailbox: Any = None,
         schedule_store: Any = None,
         hooks: Any = None,
+        tool_cache: Any = None,
         extra_subagents: list[AgentDefinition] | None = None,
         enable_worker_tools: bool = False,
         retain_subagents: bool = False,
@@ -483,7 +508,7 @@ class Agent:
         self._system_prompt_config: SystemPromptConfig | None = system_prompt_config
         self._cached_system_blocks: list[SystemBlock] | None = None
         self._configure_loop_guard(loop_guard, loopGuard)
-        self._configure_hooks(hooks=hooks)
+        self._configure_hooks(hooks=hooks, tool_cache=tool_cache)
         self._configure_filesystem(filesystem, result_offload)
         self._configure_mailbox(mailbox)
         self._configure_schedule_store(schedule_store)
@@ -527,10 +552,16 @@ class Agent:
         else:
             self.loop_guard = _normalize_loop_guard(effective_lg)
 
-    def _configure_hooks(self, *, hooks: Any) -> None:
+    def _configure_hooks(self, *, hooks: Any, tool_cache: Any = None) -> None:
         from .hooks import normalize_hooks
 
         self._hooks: list[Any] = normalize_hooks(hooks)
+        # Tool-result cache is opt-in. Append it LAST so it keys on the input
+        # after any user PreToolUse hook has mutated it, and serves only once
+        # those hooks have run. Replacing `agent.hooks` wholesale drops it.
+        cache_hook = _resolve_tool_cache(tool_cache)
+        if cache_hook is not None:
+            self._hooks.append(cache_hook)
         # Accumulates hooks removed by the hooks setter so Agent.close() can
         # still call their close/aclose methods and avoid resource leaks.
         self._replaced_hooks: list[Any] = []

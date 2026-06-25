@@ -84,7 +84,7 @@ class HookDispatcher:
                 current = _combine_mutation(current, raw)
                 continue
             current = raw
-            if raw.action in {"block", "retry", "stop", "force_continue"}:
+            if raw.action in {"block", "retry", "stop", "force_continue", "resolve"}:
                 break
         return HookDispatchResult(result=current, events=telemetry)
 
