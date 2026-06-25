@@ -39,6 +39,7 @@ HookAction = Literal[
     "retry",
     "stop",
     "force_continue",
+    "resolve",
 ]
 
 
@@ -95,6 +96,12 @@ class HookResult:
     @classmethod
     def force_continue(cls, feedback: str, *, reason: str = "", **kwargs: Any) -> HookResult:
         return cls(action="force_continue", feedback=feedback, reason=reason, **kwargs)
+
+    @classmethod
+    def resolve(cls, *, tool_result: ToolResult, **kwargs: Any) -> HookResult:
+        """Short-circuit a tool call at ``PreToolUse``: skip execution and use
+        ``tool_result`` as the outcome (success or error per its ``is_error``)."""
+        return cls(action="resolve", tool_result=tool_result, **kwargs)
 
     def with_events(self, events: list[Any]) -> HookResult:
         self.metadata = {**self.metadata, "events": [*self.metadata.get("events", []), *events]}
