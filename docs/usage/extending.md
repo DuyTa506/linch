@@ -12,6 +12,11 @@ A protocol is satisfied structurally: implement the listed methods with matching
 signatures and pass your object where the built-in adapter would go. The runtime
 probes optional methods with `getattr`/`hasattr`, so adding extra methods is harmless.
 
+Copyable starter files live in
+[`examples/extensions/`](../../examples/extensions/): provider, memory store,
+virtual filesystem backend, tool package, and hook package templates. They are
+kept importable and smoke-tested so they track the public protocols.
+
 ---
 
 ## `IsolationBackend` — where a subagent runs

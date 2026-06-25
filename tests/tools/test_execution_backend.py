@@ -50,7 +50,7 @@ def _docker_usable() -> bool:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 async def test_local_backend_runs_command_returns_stdout(tmp_path) -> None:
     from linch.tools.execution import LocalBackend
 
@@ -61,7 +61,7 @@ async def test_local_backend_runs_command_returns_stdout(tmp_path) -> None:
     assert result.timed_out is False
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 async def test_local_backend_nonzero_returncode(tmp_path) -> None:
     from linch.tools.execution import LocalBackend
 
@@ -71,7 +71,7 @@ async def test_local_backend_nonzero_returncode(tmp_path) -> None:
     assert result.timed_out is False
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 async def test_local_backend_timeout_kills_and_flags(tmp_path) -> None:
     from linch.tools.execution import LocalBackend
 
@@ -80,7 +80,7 @@ async def test_local_backend_timeout_kills_and_flags(tmp_path) -> None:
     assert result.timed_out is True
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 async def test_local_backend_abort_interrupts_running_command(tmp_path) -> None:
     """session.abort() must interrupt a running LocalBackend command (raises AbortError)."""
     from linch.abort import AbortContext
@@ -104,7 +104,7 @@ async def test_local_backend_abort_interrupts_running_command(tmp_path) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 async def test_bash_tool_defaults_to_local_backend(tmp_path) -> None:
     from linch.tools.builtin import BashTool
 
@@ -164,7 +164,7 @@ def _docker_rm_args(calls: list[list[str]]) -> list[str]:
     return next(call for call in calls if call[1] == "rm")
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 async def test_bash_tool_uses_injected_backend(tmp_path) -> None:
     from linch.tools.builtin import BashTool
 
@@ -179,7 +179,7 @@ async def test_bash_tool_uses_injected_backend(tmp_path) -> None:
     assert result.is_error is False
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 async def test_bash_tool_timeout_raises_tool_execution_error(tmp_path) -> None:
     from linch.errors import ToolExecutionError
     from linch.tools.builtin import BashTool
@@ -192,7 +192,7 @@ async def test_bash_tool_timeout_raises_tool_execution_error(tmp_path) -> None:
         await tool.execute(validated, ctx)
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 async def test_bash_tool_negative_timeout_runs_command(tmp_path) -> None:
     """A negative timeout_ms must be floored to a positive value so the command runs."""
     from linch.tools.builtin import BashTool
@@ -211,7 +211,7 @@ async def test_bash_tool_negative_timeout_runs_command(tmp_path) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 async def test_docker_backend_missing_docker_raises_on_run(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
@@ -236,7 +236,7 @@ def test_docker_backend_missing_docker_does_not_raise_at_construction(
     DockerBackend()
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 async def test_docker_backend_default_args_preserve_legacy_shape(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
@@ -270,7 +270,7 @@ async def test_docker_backend_default_args_preserve_legacy_shape(
     ]
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 async def test_docker_backend_policy_args(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     import linch.tools.execution as execution_mod
     from linch.tools.execution import DockerBackend
@@ -315,7 +315,7 @@ async def test_docker_backend_policy_args(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert args[-4] == "alpine:3.20"
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 async def test_docker_backend_timeout_removes_named_container(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
@@ -349,7 +349,7 @@ async def test_docker_backend_timeout_removes_named_container(
     assert rm_args == ["/usr/bin/docker", "rm", "-f", run_args[4]]
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 async def test_docker_backend_abort_removes_named_container(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
@@ -404,7 +404,7 @@ def test_docker_backend_invalid_workspace_mount_raises() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 @pytest.mark.skipif(not _docker_usable(), reason="docker daemon not available")
 async def test_docker_backend_smoke(tmp_path) -> None:
     from linch.tools.execution import DockerBackend
@@ -420,7 +420,7 @@ async def test_docker_backend_smoke(tmp_path) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 async def test_agent_replaces_bash_with_backend(tmp_path) -> None:
     from linch.tools.builtin import BashTool
 
@@ -512,7 +512,7 @@ class _HangingProcess:
             self._drained.set()
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 async def test_communicate_abort_raises_and_drains_communicate_task() -> None:
     """Aborting mid-communicate raises AbortError and drains the cancelled task."""
     from linch.abort import AbortContext
@@ -533,7 +533,7 @@ async def test_communicate_abort_raises_and_drains_communicate_task() -> None:
     assert drained.is_set()
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 async def test_communicate_uses_public_wait_api_not_private_event() -> None:
     """Abort monitoring goes through the public AbortContext.wait() coroutine."""
     from linch.abort import AbortContext
@@ -562,7 +562,7 @@ async def test_communicate_uses_public_wait_api_not_private_event() -> None:
     assert waited.is_set(), "public wait() must be used to monitor the abort signal"
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 async def test_abort_context_wait_unblocks_on_abort() -> None:
     """AbortContext.wait() returns once the signal is aborted."""
     from linch.abort import AbortContext

@@ -44,6 +44,14 @@ Live API tests are skipped unless `OPENAI_API_KEY` is set:
 OPENAI_API_KEY="$OPENAI_API_KEY" pytest tests/integration/test_live_api.py
 ```
 
+The live LoopRunner test loads project `.env`, accepts DeepSeek-compatible
+`API_KEY`/`BASE_URL`/`model` keys or explicit provider keys, and requires an
+explicit quota-spend opt-in:
+
+```bash
+LINCH_RUN_LIVE_LOOP_TESTS=1 pytest tests/integration/test_live_loop_runner.py
+```
+
 ---
 
 ## Code rules
