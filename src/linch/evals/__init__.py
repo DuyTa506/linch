@@ -4,9 +4,19 @@ Provides:
 - ``ScriptedProvider`` / ``TextTurn`` / ``ToolUseTurn`` — deterministic provider
 - ``EvalCase`` / ``CaseResult`` / ``EvalResult`` — structured results
 - ``run_eval`` — run an agent over a list of cases and score outputs
+- ``EvalSuite`` / ``run_eval_benchmark`` — compare one suite across targets
 - Built-in scorers for text, tools, schema, cost, context, memory, and recovery
 """
 
+from .benchmark import (
+    EvalBenchmarkResult,
+    EvalBenchmarkTarget,
+    EvalSuite,
+    EvalTargetResult,
+    load_eval_suite,
+    load_scripted_turns,
+    run_eval_benchmark,
+)
 from .harness import CaseResult, EvalCase, EvalResult, run_eval
 from .scorers import (
     context_metadata_contains,
@@ -28,6 +38,13 @@ __all__ = [
     "EvalCase",
     "CaseResult",
     "EvalResult",
+    "EvalSuite",
+    "EvalBenchmarkTarget",
+    "EvalTargetResult",
+    "EvalBenchmarkResult",
+    "run_eval_benchmark",
+    "load_eval_suite",
+    "load_scripted_turns",
     # Scripted provider
     "ScriptedProvider",
     "TextTurn",
