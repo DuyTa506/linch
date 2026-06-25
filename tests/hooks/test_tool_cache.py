@@ -7,6 +7,8 @@ write/exec tools and errors are never cached, and it is off unless configured.
 
 from __future__ import annotations
 
+import pytest
+
 from linch import Agent, ToolCacheConfig
 from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
 from linch.sessions import InMemorySessionStore
@@ -230,6 +232,15 @@ async def test_agent_stop_evicts_bucket_on_any_termination() -> None:
 
     await hook.on_agent_stop(AgentStopContext(session=None, run_id="r", turn_index=0))
     assert "r" not in hook._runs
+
+
+def test_invalid_config_is_rejected() -> None:
+    from linch.hooks.tool_cache import ToolCacheHook
+
+    with pytest.raises(ValueError):
+        ToolCacheHook(ToolCacheConfig(max_entries=0))
+    with pytest.raises(ValueError):
+        ToolCacheHook(ToolCacheConfig(max_value_bytes=-1))
 
 
 async def test_oversized_results_are_not_cached() -> None:

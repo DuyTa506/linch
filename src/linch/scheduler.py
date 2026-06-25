@@ -543,24 +543,24 @@ async def _dispatch_pre_tool_use(
         ),
     )
     result = outcome.result
+    # The fully mutated input (after every PreToolUse `mutate`). Report it on
+    # every short-circuit path so the recorded decision / ToolCallStartEvent
+    # match what actually ran or was served, even when a hook rewrote the input.
+    final_input = getattr(outcome.context, "input", input)
     if result.action == "resolve":
         # A hook served a result (e.g. cache hit): skip execution, use it as-is.
         if result.tool_result is not None:
-            # Report the input the served result was keyed on — the final, fully
-            # mutated input — so the recorded decision / ToolCallStartEvent match
-            # the served output even when an earlier hook rewrote the input.
-            served_input = getattr(outcome.context, "input", input)
-            return served_input, None, result.tool_result, outcome.events
+            return final_input, None, result.tool_result, outcome.events
         # Malformed resolve (no tool_result): the hook meant to short-circuit, so
         # block rather than silently running the tool it intended to suppress.
         reason = result.reason or result.feedback or "resolve hook returned no tool_result"
-        return input, reason, None, outcome.events
+        return final_input, reason, None, outcome.events
     if result.action == "mutate" and result.input is not None:
         return result.input, None, None, outcome.events
     if result.action in {"block", "stop"}:
         reason = result.reason or result.feedback or "Tool call blocked"
-        return result.input or input, reason, None, outcome.events
-    return input, None, None, outcome.events
+        return final_input, reason, None, outcome.events
+    return final_input, None, None, outcome.events
 
 
 async def _dispatch_post_tool_use(

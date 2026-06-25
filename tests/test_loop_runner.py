@@ -279,3 +279,34 @@ def test_loop_types_are_exported() -> None:
         assert name in linch.__all__
 
     assert FileLoopArtifactStore(root="domains") is not None
+
+
+def test_loop_runner_rejects_non_finite_ttl(tmp_path) -> None:
+    provider = ScriptedProvider([TextTurn(text="x")])
+    with pytest.raises(ConfigError):
+        LoopRunner(_agent(provider, tmp_path), lease_ttl_s=float("inf"))
+    with pytest.raises(ConfigError):
+        LoopRunner(_agent(provider, tmp_path), lease_ttl_s=float("nan"))
+
+
+async def test_refresh_rejects_expired_lease(tmp_path) -> None:
+    store = FileLoopLeaseStore(root=tmp_path / "domains")
+    lease = await store.try_acquire("docs-loop", owner="owner", ttl_s=0.01)
+    assert lease is not None
+    await asyncio.sleep(0.02)  # let the lease expire
+
+    with pytest.raises(ConfigError, match="expired"):
+        await store.refresh(lease, ttl_s=60)
+
+
+async def test_verification_failure_marks_report_status(tmp_path) -> None:
+    provider = ScriptedProvider([TextTurn(text="done")])
+
+    async def verify(_result) -> bool:
+        return False
+
+    runner = LoopRunner(_agent(provider, tmp_path), verify=verify)
+    result = await runner.run_once(_spec(tmp_path))
+
+    assert result.status == "verification_failed"
+    assert result.report.status == "verification_failed"  # persisted report stays consistent

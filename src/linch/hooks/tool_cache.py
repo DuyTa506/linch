@@ -92,7 +92,12 @@ class ToolCacheHook:
     name = "tool_cache"
 
     def __init__(self, config: ToolCacheConfig | None = None) -> None:
-        self._cfg = config or ToolCacheConfig()
+        cfg = config or ToolCacheConfig()
+        if cfg.max_entries < 1:
+            raise ValueError("ToolCacheConfig.max_entries must be >= 1")
+        if cfg.max_value_bytes < 0:
+            raise ValueError("ToolCacheConfig.max_value_bytes must be >= 0")
+        self._cfg = cfg
         self._runs: OrderedDict[str, _RunCache] = OrderedDict()
 
     async def on_pre_tool_use(self, ctx: PreToolUseContext) -> HookResult | None:
