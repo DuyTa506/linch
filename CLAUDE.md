@@ -9,7 +9,7 @@ linked docs when a task touches a specific subsystem.
 embedding a software-engineering agent loop inside other applications. Core
 flow:
 
-```
+```text
 Agent (config) → Session (state) → run_loop() → Events → caller
 ```
 

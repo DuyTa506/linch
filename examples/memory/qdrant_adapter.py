@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
 from collections.abc import Callable, Coroutine
 from typing import Any
 
@@ -96,13 +97,15 @@ class QdrantMemoryStore:
             return []
         await self.ensure_collection()
         [query_vector] = await self._embed_fn([query])
-        hits = await self._client.search(
-            collection_name=self._collection,
-            query_vector=query_vector,
-            query_filter=_filter(namespace, metadata_filter),
-            limit=limit,
-            with_payload=True,
-        )
+        hits = (
+            await self._client.query_points(
+                collection_name=self._collection,
+                query=query_vector,
+                query_filter=_filter(namespace, metadata_filter),
+                limit=limit,
+                with_payload=True,
+            )
+        ).points
         results: list[MemorySearchResult] = []
         for hit in hits:
             payload = hit.payload or {}
@@ -120,8 +123,14 @@ class QdrantMemoryStore:
         return results
 
 
+# Qdrant point IDs must be a uint64 or a UUID — not an arbitrary string. Derive a
+# deterministic UUIDv5 from (namespace, item_id) so upserts are idempotent; the
+# original MemoryItem.id and namespace are preserved in the payload for recall.
+_POINT_NAMESPACE = uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+
+
 def _point_id(namespace: str | None, item_id: str) -> str:
-    return f"{namespace or ''}:{item_id}"
+    return str(uuid.uuid5(_POINT_NAMESPACE, f"{namespace or ''}:{item_id}"))
 
 
 def _filter(namespace: str | None, metadata_filter: dict[str, Any] | None) -> Any:

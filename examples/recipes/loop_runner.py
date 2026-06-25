@@ -68,7 +68,7 @@ def verify(result: LoopTickResult) -> bool:
 async def main() -> None:
     load_project_env()
     deepseek_key = os.environ.get("DEEPSEEK_API_KEY")
-    openai_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("OPENAPI_KEY")
+    openai_key = os.environ.get("OPENAI_API_KEY")
     generic_key = os.environ.get("API_KEY")
     api_key = deepseek_key or openai_key or generic_key
     if not api_key:

@@ -33,13 +33,13 @@ current work, and the next step. The section wording is domain-neutral (it asks
 for identifiers — paths, URLs, IDs, names — rather than assuming files/code), so
 it suits non-coding hosts too.
 
-Both built-in strategies' summary instructions are coding-oriented (they ask for
-file paths, commands, and the like). Since linch is *embeddable* and not every
-host is a coding agent, both accept a `prompt=` override —
-`DefaultCompaction(prompt=...)` / `DetailedCompaction(prompt=...)` — so a
-non-coding host can reword the summary without reimplementing a
-`CompactionStrategy`. Omitting it keeps the built-in (coding-oriented) prompt,
-so default behavior is unchanged. A ready-made domain-neutral prompt ships as
+`DefaultCompaction`'s default prompt is coding-oriented (it asks for file paths,
+tool calls, and the like); `DetailedCompaction`'s default is domain-neutral.
+Since linch is *embeddable* and not every host is a coding agent, **both** accept
+a `prompt=` override — `DefaultCompaction(prompt=...)` /
+`DetailedCompaction(prompt=...)` — so a non-coding host can reword the summary
+without reimplementing a `CompactionStrategy`. Omitting it keeps each strategy's
+built-in prompt, so default behavior is unchanged. A ready-made domain-neutral prompt ships as
 `GENERAL_SUMMARY_PROMPT` (public) for hosts that want a sensible non-coding
 default without writing their own:
 `Agent(compaction=DefaultCompaction(prompt=GENERAL_SUMMARY_PROMPT))`.
