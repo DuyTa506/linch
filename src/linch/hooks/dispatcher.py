@@ -65,7 +65,9 @@ class HookDispatcher:
                 telemetry.append(_hook_event(event_value, name, "error", str(exc)))
                 continue
             if raw is None:
-                telemetry.append(_hook_event(event_value, name, "continue", ""))
+                # A no-op hook emits no telemetry: a default-on hook (e.g.
+                # read_before_write) fires on every tool call, so emitting a
+                # "continue" record here would flood the event stream with noise.
                 continue
             if not isinstance(raw, HookResult):
                 telemetry.append(
