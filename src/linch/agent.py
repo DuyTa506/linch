@@ -1109,8 +1109,12 @@ class Agent:
                 result = provider_closer()
                 if _inspect.isawaitable(result):
                     await result
-            except Exception:
-                pass
+            except Exception as exc:
+                import logging as _logging
+
+                _logging.getLogger(__name__).warning(
+                    "Error closing provider %r during agent close: %s", self._provider, exc
+                )
 
         # Close hooks that expose a closer (e.g. RunTelemetryHook flushes its
         # wrapped observers).  A faulty closer never aborts agent shutdown.

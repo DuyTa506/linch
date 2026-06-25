@@ -13,6 +13,7 @@ What a schedule *means* (its payload) is embedder policy; the loop only delivers
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import Callable
 from typing import Any
@@ -89,7 +90,14 @@ class SchedulerLoop:
                 try:
                     await self._fire(schedule)
                 except Exception:
-                    pass
+                    # Sibling isolation: one schedule's failure (almost always
+                    # the on_event sink, since delivery precedes it) must not
+                    # abort the others already claimed this tick. Log so the
+                    # drop isn't silent — next_run is already committed, so a
+                    # claimed schedule cannot be retried next tick.
+                    logging.getLogger(__name__).warning(
+                        "SchedulerLoop: _fire failed for schedule %r", schedule.id, exc_info=True
+                    )
             return fired
 
         fired: list[Schedule] = []

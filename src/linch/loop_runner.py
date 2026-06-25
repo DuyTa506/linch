@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import math
 import os
 import socket
 import threading
@@ -358,6 +359,10 @@ class FileLoopLeaseStore:
             current = _read_lease_file(path)
             if current is None or current.token != lease.token:
                 raise ConfigError(f"Loop lease for {lease.loop_id!r} is not held by this owner")
+            if current.expires_at <= time.time():
+                # An expired lease is reclaimable by another worker at any moment;
+                # don't resurrect it under the old token.
+                raise ConfigError(f"Loop lease for {lease.loop_id!r} has expired")
             refreshed = LoopLease(
                 loop_id=lease.loop_id,
                 owner=lease.owner,
@@ -511,6 +516,8 @@ class LoopRunner:
         if verification_error is not None:
             result.done = False
             result.status = "verification_failed"
+            # Keep the persisted report artifact consistent with the tick status.
+            report.status = "verification_failed"
 
         result.artifact_paths = await self.artifacts.write_run_artifacts(
             spec,
@@ -541,8 +548,8 @@ def _validate_ttl(ttl_s: float) -> float:
         ttl = float(ttl_s)
     except (TypeError, ValueError) as exc:
         raise ConfigError("lease_ttl_s must be a positive number") from exc
-    if ttl <= 0:
-        raise ConfigError("lease_ttl_s must be a positive number")
+    if not math.isfinite(ttl) or ttl <= 0:
+        raise ConfigError("lease_ttl_s must be a positive, finite number")
     return ttl
 
 
