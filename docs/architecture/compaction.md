@@ -28,8 +28,21 @@ flowchart TD
 
 `DefaultCompaction` remains the default. `DetailedCompaction` is opt-in via
 `Agent(compaction=DetailedCompaction())` and uses a continuation-safe summary
-with user intent, artifacts/files/code touched, errors/fixes, pending tasks,
-current work, and the next step.
+with user intent, key information/artifacts touched, errors/fixes, pending tasks,
+current work, and the next step. The section wording is domain-neutral (it asks
+for identifiers — paths, URLs, IDs, names — rather than assuming files/code), so
+it suits non-coding hosts too.
+
+Both built-in strategies' summary instructions are coding-oriented (they ask for
+file paths, commands, and the like). Since linch is *embeddable* and not every
+host is a coding agent, both accept a `prompt=` override —
+`DefaultCompaction(prompt=...)` / `DetailedCompaction(prompt=...)` — so a
+non-coding host can reword the summary without reimplementing a
+`CompactionStrategy`. Omitting it keeps the built-in (coding-oriented) prompt,
+so default behavior is unchanged. A ready-made domain-neutral prompt ships as
+`GENERAL_SUMMARY_PROMPT` (public) for hosts that want a sensible non-coding
+default without writing their own:
+`Agent(compaction=DefaultCompaction(prompt=GENERAL_SUMMARY_PROMPT))`.
 
 ### Compaction ladder (opt-in)
 
