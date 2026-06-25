@@ -34,6 +34,10 @@ from .types import HookEvent, HookResult
 class HookDispatchResult:
     result: HookResult = field(default_factory=HookResult.continue_)
     events: list[Any] = field(default_factory=list)
+    # The context after all mutations were applied — lets callers read the final
+    # (possibly mutated) fields even when a later hook short-circuits (e.g. a
+    # cache `resolve` that follows an `input` mutation).
+    context: Any = None
 
 
 class HookDispatcher:
@@ -86,7 +90,7 @@ class HookDispatcher:
             current = raw
             if raw.action in {"block", "retry", "stop", "force_continue", "resolve"}:
                 break
-        return HookDispatchResult(result=current, events=telemetry)
+        return HookDispatchResult(result=current, events=telemetry, context=ctx)
 
     def _hook_fn(self, hook: Any, event_value: str) -> Any:
         generic = getattr(hook, "on_hook", None)

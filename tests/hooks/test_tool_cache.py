@@ -282,6 +282,34 @@ async def test_resolve_without_tool_result_blocks_instead_of_executing() -> None
     assert calls["n"] == 0  # malformed resolve blocks; the tool never runs
 
 
+async def test_resolve_reports_the_mutated_input_in_telemetry() -> None:
+    # When an earlier PreToolUse hook rewrites the input and the cache serves a
+    # hit keyed on that rewritten input, the ToolCallStartEvent must show the
+    # mutated input (what the served result corresponds to), not the original.
+    from linch.events import ToolCallStartEvent
+    from linch.hooks import HookResult
+
+    search, calls = _read_tool()
+
+    class Rewrite:
+        def on_pre_tool_use(self, ctx):
+            if ctx.tool_name == "Search":
+                return HookResult.mutate(input={"query": "X"})
+            return None
+
+    agent = _agent(_twice("Search", {"query": "x"}), [search], tool_cache=ToolCacheConfig())
+    agent.hooks = [Rewrite(), *agent.hooks]  # mutate first, cache appended last
+
+    inputs = []
+    session = await agent.session()
+    async for ev in session.run("go"):
+        if isinstance(ev, ToolCallStartEvent) and ev.tool_name == "Search":
+            inputs.append(ev.input)
+
+    assert calls["n"] == 1  # 2nd call served from cache (keyed on mutated input)
+    assert inputs == [{"query": "X"}, {"query": "X"}]  # both report the mutated input
+
+
 async def test_resolve_action_short_circuits_dispatch() -> None:
     from linch.hooks import HookDispatcher, HookResult
     from linch.hooks.contexts import PreToolUseContext
