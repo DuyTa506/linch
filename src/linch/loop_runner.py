@@ -307,6 +307,19 @@ class InMemoryLoopLeaseStore:
 
 
 class FileLoopLeaseStore:
+    """Best-effort cross-process loop lease backed by a ``.lock.json`` file.
+
+    Mutual exclusion is TTL-based, not a strict distributed lock: ``try_acquire``
+    reclaims an expired lease, and ``refresh`` rejects an expired/foreign one.
+    Each op is individually atomic where it matters (``O_EXCL`` create), but the
+    read-then-write paths are *not* serialized across processes, so at the exact
+    TTL-expiry boundary two processes can still briefly race (e.g. a refresh that
+    truncates a lease another worker reclaimed microseconds earlier). This is the
+    inherent limitation of a file-TTL lease; for strict single-firing guarantees
+    use a real lock service or a transactional store. Keep ``lease_ttl_s`` well
+    above a tick's duration so the boundary is rarely reached.
+    """
+
     def __init__(self, root: str | Path = "domains") -> None:
         self.root = Path(root)
 
