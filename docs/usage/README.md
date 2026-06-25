@@ -79,12 +79,16 @@ One `Agent`, many `Session`s is the canonical web-app shape — see
 | [Agent & session](./agent.md) | Session stores, feature flags, system prompt, compaction, run budgets |
 | [Providers](./providers.md) | Choosing a provider, model catalog, capabilities, thinking events |
 | [Events](./events.md) | Event stream, cost fields, run reports, long-run eval scorers |
+| [Evals and benchmarks](./evals.md) | `EvalSuite`, `run_eval_benchmark`, and `scripts/eval_benchmark.py` for CI/provider comparison |
 | [Tools](./tools.md) | `@tool`, `FunctionTool`, class tools, scheduler, timeouts/retry, Bash backend, deps, permissions |
 | [Structured output](./structured-output.md) | `OutputSchema`, final-tool capture, schema repair |
 | [Hooks](./hooks.md) | The canonical extension mechanism: chokepoints, `HookResult`, built-in adapters |
+| [Tool cache](./tool-cache.md) | Opt-in per-run memoization of read-scope tool calls (`tool_cache=`) |
 | [Context & memory](./context-and-memory.md) | Per-turn RAG context building, memory primitives, tiered memory |
+| [Vector memory adapters](./vector-memory-adapters.md) | FAISS, pgvector, and Qdrant recipes using the existing `MemoryStore` seam |
 | [Virtual filesystem](./filesystem.md) | Large-result offloading and the `ls`/`read_file`/`write_file`/`edit_file` tools |
 | [Workflows](./workflows.md) | Deterministic fleet loops (`run_workflow`), journaling, resume |
+| [Outer loop runner](./loop-runner.md) | `LoopSpec` + `LoopRunner.run_once()` for cron, CI, webhooks, and manual recurring work |
 | [Deep agent](./deep-agent.md) | `create_deep_agent`, background workers, fork/continue, coordinator mode |
 | [Coordination](./coordination.md) | Advance the loop from a clock or a peer: scheduling (cron/interval) and multi-agent teams (mailbox + correlator) |
 | [Skills](./skills.md) | Slash-command prompt workflows, the built-in `verify` skill |

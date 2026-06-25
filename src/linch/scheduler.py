@@ -288,6 +288,16 @@ async def _execute_one(
     if middleware_error is not None:
         return _execution_outcome(call.id, _tool_result_error(middleware_error))
 
+    # A PreToolUse hook short-circuited this call (e.g. cache hit): use the
+    # supplied result instead of executing. Re-run offload so an oversized
+    # served result still gets a preview rather than re-injecting the full body.
+    precomputed = getattr(decision, "precomputed_result", None)
+    if precomputed is not None:
+        block_result = await _maybe_offload_block(
+            precomputed, call=call, agent=agent, session=session
+        )
+        return _execution_outcome(call.id, precomputed, block_result=block_result)
+
     tool = call.tool
     result_timeout_ms = _tool_timeout_ms(agent, tool)
     opts = _retry_options(agent)
@@ -517,7 +527,7 @@ async def _dispatch_pre_tool_use(
     session: Any,
     *,
     turn_index: int | None,
-) -> tuple[dict[str, Any], str | None, list[Event]]:
+) -> tuple[dict[str, Any], str | None, Any, list[Event]]:
     outcome = await dispatcher.dispatch(
         HookEvent.PRE_TOOL_USE,
         PreToolUseContext(
@@ -533,12 +543,24 @@ async def _dispatch_pre_tool_use(
         ),
     )
     result = outcome.result
+    # The fully mutated input (after every PreToolUse `mutate`). Report it on
+    # every short-circuit path so the recorded decision / ToolCallStartEvent
+    # match what actually ran or was served, even when a hook rewrote the input.
+    final_input = getattr(outcome.context, "input", input)
+    if result.action == "resolve":
+        # A hook served a result (e.g. cache hit): skip execution, use it as-is.
+        if result.tool_result is not None:
+            return final_input, None, result.tool_result, outcome.events
+        # Malformed resolve (no tool_result): the hook meant to short-circuit, so
+        # block rather than silently running the tool it intended to suppress.
+        reason = result.reason or result.feedback or "resolve hook returned no tool_result"
+        return final_input, reason, None, outcome.events
     if result.action == "mutate" and result.input is not None:
-        return result.input, None, outcome.events
+        return result.input, None, None, outcome.events
     if result.action in {"block", "stop"}:
         reason = result.reason or result.feedback or "Tool call blocked"
-        return result.input or input, reason, outcome.events
-    return input, None, outcome.events
+        return final_input, reason, None, outcome.events
+    return final_input, None, None, outcome.events
 
 
 async def _dispatch_post_tool_use(
@@ -1013,7 +1035,12 @@ async def execute_tool_calls(
             if call.is_immediate_error or decisions[i].decision != "allow":
                 continue
             effective_input = _effective_input(call, decisions[i])
-            updated_input, blocked_reason, hook_events = await _dispatch_pre_tool_use(
+            (
+                updated_input,
+                blocked_reason,
+                precomputed_result,
+                hook_events,
+            ) = await _dispatch_pre_tool_use(
                 hook_dispatcher,
                 call,
                 effective_input,
@@ -1025,6 +1052,7 @@ async def execute_tool_calls(
             decisions[i] = PermissionDecision(
                 decision="allow",
                 updated_input=updated_input,
+                precomputed_result=precomputed_result,
             )
             try:
                 if call.tool is not None:

@@ -13,6 +13,7 @@ What a schedule *means* (its payload) is embedder policy; the loop only delivers
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import Callable
 from typing import Any
@@ -21,7 +22,7 @@ from xml.sax.saxutils import escape
 from ...events import ScheduleEvent
 from ...types import Message, TextBlock
 from .schedule import Schedule
-from .store import ScheduleStore
+from .store import ClaimingScheduleStore, ScheduleStore
 
 
 def render_schedule_message(schedule: Schedule) -> Message:
@@ -78,6 +79,27 @@ class SchedulerLoop:
     async def tick(self) -> list[Schedule]:
         """Fire every schedule whose ``next_run`` is due. Returns those fired."""
         now = self._clock()
+        if isinstance(self._store, ClaimingScheduleStore):
+            fired = await self._store.claim_due(now)
+            for schedule in fired:
+                # claim_due has already advanced+committed each next_run, so a
+                # raising _fire must not abort the remaining already-claimed
+                # schedules this tick — that would silently drop them. Delivery
+                # (the notification append) precedes the on_event sink in _fire,
+                # so an exception here means only the observability sink failed.
+                try:
+                    await self._fire(schedule)
+                except Exception:
+                    # Sibling isolation: one schedule's failure (almost always
+                    # the on_event sink, since delivery precedes it) must not
+                    # abort the others already claimed this tick. Log so the
+                    # drop isn't silent — next_run is already committed, so a
+                    # claimed schedule cannot be retried next tick.
+                    logging.getLogger(__name__).warning(
+                        "SchedulerLoop: _fire failed for schedule %r", schedule.id, exc_info=True
+                    )
+            return fired
+
         fired: list[Schedule] = []
         for schedule in await self._store.list():
             if not schedule.enabled or schedule.next_run is None:

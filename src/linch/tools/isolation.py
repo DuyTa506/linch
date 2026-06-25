@@ -16,11 +16,12 @@ Two tiers of conflict control, smallest first:
 
 from __future__ import annotations
 
-import asyncio
 import shutil
 import tempfile
 from pathlib import Path
 from typing import Protocol, runtime_checkable
+
+from .._blocking import run_blocking
 
 
 @runtime_checkable
@@ -51,7 +52,7 @@ class TempDirIsolation:
         self._root = str(Path(root).resolve()) if root else None
 
     async def acquire(self) -> str:
-        return await asyncio.to_thread(self._acquire_sync)
+        return await run_blocking(self._acquire_sync)
 
     def _acquire_sync(self) -> str:
         if self._root:
@@ -64,4 +65,4 @@ class TempDirIsolation:
     async def release(self, cwd: str, *, keep: bool = False) -> None:
         if keep:
             return
-        await asyncio.to_thread(shutil.rmtree, cwd, ignore_errors=True)
+        await run_blocking(shutil.rmtree, cwd, ignore_errors=True)

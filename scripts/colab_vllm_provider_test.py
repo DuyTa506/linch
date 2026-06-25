@@ -44,7 +44,8 @@ log(f"[install] rc={rc} in {time.time() - t0:.0f}s")
 import torch  # noqa: E402
 
 log(
-    f"[install] torch={torch.__version__} cuda={torch.version.cuda} avail={torch.cuda.is_available()}"
+    f"[install] torch={torch.__version__} cuda={torch.version.cuda} "
+    f"avail={torch.cuda.is_available()}"
 )
 import vllm._C  # noqa: F401,E402  # gate: cu13 ops load
 

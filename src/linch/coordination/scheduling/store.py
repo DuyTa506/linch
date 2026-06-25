@@ -21,6 +21,13 @@ class ScheduleStore(Protocol):
     async def list(self) -> list[Schedule]: ...
 
 
+@runtime_checkable
+class ClaimingScheduleStore(ScheduleStore, Protocol):
+    """Optional extension for stores that can atomically claim due schedules."""
+
+    async def claim_due(self, now: float) -> list[Schedule]: ...
+
+
 class InMemoryScheduleStore:
     """Process-local schedule store guarded by an ``asyncio.Lock``."""
 
@@ -47,6 +54,18 @@ class InMemoryScheduleStore:
     async def list(self) -> list[Schedule]:
         async with self._lock:
             return list(self._items.values())
+
+    async def claim_due(self, now: float) -> list[Schedule]:
+        async with self._lock:
+            claimed: list[Schedule] = []
+            for schedule in self._items.values():
+                if not schedule.enabled or schedule.next_run is None:
+                    continue
+                if schedule.next_run > now:
+                    continue
+                schedule.next_run = schedule.compute_next_run(now)
+                claimed.append(schedule)
+            return claimed
 
     def dump(self) -> list[dict[str, Any]]:
         """Serialize all schedules (handy for tests / lightweight persistence)."""
