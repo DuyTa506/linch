@@ -88,10 +88,83 @@ def test_build_run_report_summarizes_events():
     assert report.loop_guards[0]["reason"] == "max_turns"
     assert report.usage["cumulative_cost_usd"] == 0.01
     assert report.final["final_text"] == "done"
+    assert report.summary["duration_ms"] == 100
+    assert report.summary["event_counts"] == {
+        "context_build": 1,
+        "loop_guard": 1,
+        "permission_request": 1,
+        "result": 1,
+        "system": 1,
+        "tool_call_end": 1,
+        "tool_call_start": 1,
+        "usage": 1,
+    }
+    assert report.summary["usage"]["total_tokens"] == 15
+    assert report.summary["usage"]["total_cost_usd"] == 0.01
+    assert report.summary["tools"]["average_duration_ms"] == 12
+    assert report.summary["tools"]["slowest_tool"]["tool_name"] == "Search"
     assert report.long_run["context"]["builds"] == 1
     assert report.long_run["context"]["metadata_keys"] == ["source"]
     assert report.long_run["quality"]["completed"] is True
+    assert "Summary" in report.to_markdown()
     assert "Tool Calls" in report.to_markdown()
+
+
+def test_float_tool_duration_is_counted_not_dropped():
+    # Regression: a float duration_ms (e.g. from a custom provider/tool) must be
+    # coerced into the summary aggregates, not silently dropped to 0.
+    from linch import build_run_report
+    from linch.events import ToolCallEndEvent, ToolCallStartEvent
+    from linch.tools import ToolResult
+
+    events = [
+        ToolCallStartEvent(tool_use_id="t1", tool_name="Slow", input={}, summary="Slow"),
+        ToolCallEndEvent(
+            tool_use_id="t1",
+            tool_name="Slow",
+            result="ok",
+            is_error=False,
+            duration_ms=42.7,
+            tool_result=ToolResult(content="ok"),
+        ),
+    ]
+
+    report = build_run_report(events)
+
+    assert report.summary["tools"]["total_duration_ms"] == 42
+    assert report.summary["tools"]["slowest_tool"]["tool_name"] == "Slow"
+
+
+def test_non_finite_budget_value_does_not_crash_report_building():
+    # Regression: report building is a non-throwing read model. A NaN/Infinity
+    # numeric field (json.loads accepts these, so they survive a persisted-event
+    # round-trip) must be dropped, not int()-coerced into a ValueError/OverflowError.
+    from linch import build_run_report
+    from linch.events import ContextBuildEvent, ResultEvent
+    from linch.types import Usage
+
+    events = [
+        ContextBuildEvent(
+            system_blocks=1,
+            messages=1,
+            selected_tools=[],
+            budget={"max_tokens": float("inf"), "used_tokens": float("nan")},
+            metadata={},
+        ),
+        ResultEvent(
+            subtype="success",
+            stop_reason="end_turn",
+            total_usage=Usage(input_tokens=1, output_tokens=1),
+            duration_ms=float("nan"),
+            final_text="done",
+        ),
+    ]
+
+    report = build_run_report(events)  # must not raise
+
+    # Non-finite budget value is dropped, not coerced.
+    assert report.summary["context"]["max_used_tokens"] in (0, None)
+    assert "Summary" in report.to_markdown()
 
 
 def test_build_run_report_includes_long_run_memory_and_recovery_signals():
@@ -180,7 +253,106 @@ def test_build_run_report_includes_long_run_memory_and_recovery_signals():
     assert report.long_run["memory"]["tier_counts"] == {"semantic": 1}
     assert report.long_run["quality"]["failed_tool_calls"] == 1
     assert report.long_run["quality"]["recovery_hints"] == 1
+    assert report.summary["tools"]["total"] == 2
+    assert report.summary["tools"]["failed"] == 1
+    assert report.summary["tools"]["error_rate"] == 0.5
+    assert report.summary["context"]["max_utilization"] == 1.04
+    assert report.summary["risk"]["recovery_hints"] == 1
     assert "Long-Run Signals" in report.to_markdown()
+
+
+def test_build_run_report_exposes_recovery_and_efficiency_counters():
+    from linch import build_run_report
+    from linch.events import (
+        CompactionEvent,
+        HookEventRecord,
+        ModelFallbackEvent,
+        ResultEvent,
+        ToolCallEndEvent,
+        VerificationEvent,
+    )
+    from linch.tools import ToolResult
+    from linch.types import Usage
+
+    events = [
+        CompactionEvent(
+            messages_before=20,
+            messages_after=8,
+            tokens_before=10_000,
+            tokens_after=4_000,
+            strategy="micro",
+        ),
+        ModelFallbackEvent(
+            from_model="primary",
+            to_model="backup",
+            reason="overloaded",
+        ),
+        VerificationEvent(
+            verifier="judge",
+            action="retry",
+            feedback="fix it",
+            attempt=1,
+        ),
+        HookEventRecord(
+            event="before_final_answer",
+            hook="policy",
+            action="retry",
+            reason="needs citation",
+        ),
+        ToolCallEndEvent(
+            tool_use_id="t1",
+            tool_name="Search",
+            is_error=False,
+            tool_result=ToolResult(
+                content="preview",
+                truncated=True,
+                metadata={"offloaded_to": "/offload/Search_t1.txt"},
+            ),
+        ),
+        ToolCallEndEvent(
+            tool_use_id="t2",
+            tool_name="Read",
+            is_error=False,
+            tool_result=ToolResult(content="small"),
+        ),
+        ResultEvent(
+            subtype="success",
+            stop_reason="end_turn",
+            total_usage=Usage(
+                input_tokens=30,
+                output_tokens=10,
+                cache_read_tokens=15,
+                cache_creation_tokens=5,
+            ),
+            duration_ms=100,
+            final_text="done",
+        ),
+    ]
+
+    report = build_run_report(events)
+
+    assert report.summary["usage"]["total_tokens"] == 60
+    assert report.summary["usage"]["cache_read_ratio"] == 0.3
+    assert report.summary["recovery"] == {
+        "compactions": 1,
+        "compaction_tokens_saved": 6000,
+        "model_fallbacks": 1,
+        "fallback_paths": [
+            {
+                "from_model": "primary",
+                "to_model": "backup",
+                "reason": "overloaded",
+            }
+        ],
+        "verification_retries": 1,
+        "hook_retries": 1,
+        "result_offloads": 1,
+        "offload_hit_rate": 0.5,
+    }
+    assert report.summary["risk"]["model_fallbacks"] == 1
+    assert report.summary["risk"]["verification_retries"] == 1
+    assert report.summary["risk"]["hook_retries"] == 1
+    assert "cache read ratio: 0.3" in report.to_markdown()
 
 
 @pytest.mark.asyncio

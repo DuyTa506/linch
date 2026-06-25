@@ -4,9 +4,9 @@ The core loop must never run blocking disk/DB/CPU work directly on the event
 loop thread. ``asyncio.to_thread`` uses the default executor, whose non-daemon
 workers can keep the interpreter alive at teardown in the managed test sandbox.
 
-``run_blocking`` starts a daemon worker and polls its completion with a short
-async sleep. That keeps teardown safe and avoids relying on cross-thread event
-loop wakeups, which are not reliable in every host environment.
+``run_blocking`` starts a daemon worker and resumes the awaiter via a future
+woken with ``loop.call_soon_threadsafe`` — an event-driven wakeup with no
+polling, so a waiting call adds no latency and never spins the event loop.
 """
 
 from __future__ import annotations
@@ -43,21 +43,25 @@ async def run_blocking(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
     loop = asyncio.get_running_loop()
     sem = _loop_semaphore(loop)
     async with sem:
-        done = threading.Event()
-        result: list[T] = []
-        error: list[BaseException] = []
+        fut: asyncio.Future[T] = loop.create_future()
+
+        def _set_result(value: T) -> None:
+            if not fut.done():
+                fut.set_result(value)
+
+        def _set_exception(exc: BaseException) -> None:
+            if not fut.done():
+                fut.set_exception(exc)
 
         def _target() -> None:
             try:
-                result.append(fn(*args, **kwargs))
+                value = fn(*args, **kwargs)
             except BaseException as exc:  # noqa: BLE001 - propagated to awaiter
-                error.append(exc)
-            finally:
-                done.set()
+                loop.call_soon_threadsafe(_set_exception, exc)
+            else:
+                loop.call_soon_threadsafe(_set_result, value)
 
         threading.Thread(target=_target, name="linch-blocking", daemon=True).start()
-        while not done.is_set():
-            await asyncio.sleep(0.001)
-        if error:
-            raise error[0]
-        return result[0]
+        # If the awaiter is cancelled, the daemon thread still runs to completion;
+        # its later call_soon_threadsafe is a no-op on the already-cancelled future.
+        return await fut

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -37,6 +38,7 @@ class RunReport:
     usage: dict[str, Any] | None = None
     final: dict[str, Any] | None = None
     checkpoint: dict[str, Any] | None = None
+    summary: dict[str, Any] = field(default_factory=dict)
     long_run: dict[str, Any] = field(default_factory=dict)
     timeline: list[dict[str, Any]] = field(default_factory=list)
 
@@ -60,6 +62,7 @@ class RunReport:
             "usage": self.usage,
             "final": self.final,
             "checkpoint": self.checkpoint,
+            "summary": self.summary,
             "long_run": self.long_run,
         }
         if include_timeline:
@@ -67,6 +70,9 @@ class RunReport:
         return out
 
     def to_markdown(self) -> str:
+        usage = self.summary.get("usage", {})
+        tools = self.summary.get("tools", {})
+        context = self.summary.get("context", {})
         lines = [
             f"# Linch Run Report: {self.run_id or '<unknown>'}",
             "",
@@ -78,7 +84,31 @@ class RunReport:
             f"- context builds: {len(self.context_builds)}",
             f"- loop guard events: {len(self.loop_guards)}",
             f"- errors: {len(self.errors)}",
+            f"- duration_ms: {self.summary.get('duration_ms')}",
+            f"- total_tokens: {usage.get('total_tokens')}",
+            f"- total_cost_usd: {usage.get('total_cost_usd')}",
         ]
+        if self.summary:
+            slowest = tools.get("slowest_tool")
+            lines.extend(
+                [
+                    "",
+                    "## Summary",
+                    f"- tool duration ms: total={tools.get('total_duration_ms', 0)} "
+                    f"avg={tools.get('average_duration_ms', 0)} "
+                    f"max={tools.get('max_duration_ms', 0)}",
+                    f"- tool error rate: {tools.get('error_rate', 0)}",
+                    f"- cache read ratio: {usage.get('cache_read_ratio', 0)}",
+                    f"- max context utilization: {context.get('max_utilization')}",
+                ]
+            )
+            if isinstance(slowest, dict):
+                lines.append(
+                    "- slowest tool: {tool} ({duration}ms)".format(
+                        tool=slowest.get("tool_name", ""),
+                        duration=slowest.get("duration_ms", 0),
+                    )
+                )
         if self.long_run:
             context = self.long_run.get("context", {})
             memory = self.long_run.get("memory", {})
@@ -240,6 +270,24 @@ def build_run_report(
             if not status_from_run and status in {"unknown", "running"}:
                 status = "completed" if event.subtype == "success" else event.subtype
 
+    long_run = _long_run_summary(
+        context_builds=context_builds,
+        tool_calls=tool_calls,
+        checkpoint=checkpoint,
+        final=final,
+    )
+    summary = _report_summary(
+        timeline=timeline,
+        tool_calls=tool_calls,
+        permission_requests=permission_requests,
+        context_builds=context_builds,
+        loop_guards=loop_guards,
+        errors=errors,
+        usage=usage,
+        final=final,
+        long_run=long_run,
+    )
+
     return RunReport(
         run_id=run_id,
         session_id=session_id,
@@ -254,13 +302,9 @@ def build_run_report(
         usage=usage,
         final=final,
         checkpoint=checkpoint,
+        summary=summary,
         timeline=timeline,
-        long_run=_long_run_summary(
-            context_builds=context_builds,
-            tool_calls=tool_calls,
-            checkpoint=checkpoint,
-            final=final,
-        ),
+        long_run=long_run,
     )
 
 
@@ -381,6 +425,234 @@ def _long_run_summary(
             "turn_index": checkpoint.get("turn_index") if checkpoint is not None else None,
         },
     }
+
+
+def _report_summary(
+    *,
+    timeline: list[dict[str, Any]],
+    tool_calls: list[dict[str, Any]],
+    permission_requests: list[dict[str, Any]],
+    context_builds: list[dict[str, Any]],
+    loop_guards: list[dict[str, Any]],
+    errors: list[dict[str, Any]],
+    usage: dict[str, Any] | None,
+    final: dict[str, Any] | None,
+    long_run: dict[str, Any],
+) -> dict[str, Any]:
+    event_counts: dict[str, int] = {}
+    for item in timeline:
+        event_type = item.get("type")
+        if isinstance(event_type, str):
+            event_counts[event_type] = event_counts.get(event_type, 0) + 1
+
+    tool_durations = [
+        duration
+        for duration in (_maybe_int(call.get("duration_ms")) for call in tool_calls)
+        if duration is not None
+    ]
+    failed_tools = sum(1 for call in tool_calls if call.get("is_error") is True)
+    slowest_tool = _slowest_tool(tool_calls)
+    usage_source = _usage_source(usage=usage, final=final)
+    context_summary = _context_summary(context_builds, long_run)
+    recovery_summary = _recovery_summary(timeline, tool_calls)
+
+    return {
+        "duration_ms": final.get("duration_ms") if final is not None else None,
+        "event_counts": dict(sorted(event_counts.items())),
+        "first_event_at": timeline[0].get("appended_at") if timeline else None,
+        "last_event_at": timeline[-1].get("appended_at") if timeline else None,
+        "usage": {
+            "input_tokens": usage_source.get("input_tokens", 0),
+            "output_tokens": usage_source.get("output_tokens", 0),
+            "cache_read_tokens": usage_source.get("cache_read_tokens", 0),
+            "cache_creation_tokens": usage_source.get("cache_creation_tokens", 0),
+            "total_tokens": _total_tokens(usage_source),
+            "cache_read_ratio": _cache_read_ratio(usage_source),
+            "total_cost_usd": final.get("total_cost_usd") if final is not None else None,
+        },
+        "tools": {
+            "total": len(tool_calls),
+            "failed": failed_tools,
+            "error_rate": round(failed_tools / len(tool_calls), 4) if tool_calls else 0.0,
+            "total_duration_ms": sum(tool_durations),
+            "average_duration_ms": round(sum(tool_durations) / len(tool_durations), 2)
+            if tool_durations
+            else 0,
+            "max_duration_ms": max(tool_durations) if tool_durations else 0,
+            "slowest_tool": slowest_tool,
+            "by_name": _tool_counts(tool_calls),
+        },
+        "context": context_summary,
+        "recovery": recovery_summary,
+        "risk": {
+            "permission_requests": len(permission_requests),
+            "loop_guards": len(loop_guards),
+            "errors": len(errors),
+            "recovery_hints": long_run.get("quality", {}).get("recovery_hints", 0),
+            "model_fallbacks": recovery_summary["model_fallbacks"],
+            "verification_retries": recovery_summary["verification_retries"],
+            "hook_retries": recovery_summary["hook_retries"],
+        },
+    }
+
+
+def _usage_source(*, usage: dict[str, Any] | None, final: dict[str, Any] | None) -> dict[str, Any]:
+    if final is not None and isinstance(final.get("total_usage"), dict):
+        return final["total_usage"]
+    if usage is not None and isinstance(usage.get("cumulative"), dict):
+        return usage["cumulative"]
+    return {}
+
+
+def _total_tokens(usage: dict[str, Any]) -> int:
+    return sum(
+        _maybe_int(usage.get(key)) or 0
+        for key in (
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_creation_tokens",
+        )
+    )
+
+
+def _cache_read_ratio(usage: dict[str, Any]) -> float:
+    cache_read = _maybe_int(usage.get("cache_read_tokens")) or 0
+    prompt_tokens = sum(
+        _maybe_int(usage.get(key)) or 0
+        for key in ("input_tokens", "cache_read_tokens", "cache_creation_tokens")
+    )
+    return round(cache_read / prompt_tokens, 4) if prompt_tokens else 0.0
+
+
+def _recovery_summary(
+    timeline: list[dict[str, Any]],
+    tool_calls: list[dict[str, Any]],
+) -> dict[str, Any]:
+    compactions = 0
+    compaction_tokens_saved = 0
+    model_fallbacks = 0
+    fallback_paths: list[dict[str, str]] = []
+    verification_retries = 0
+    hook_retries = 0
+
+    for item in timeline:
+        event_type = item.get("type")
+        event = item.get("event")
+        if not isinstance(event, dict):
+            event = {}
+        if event_type == "compaction":
+            compactions += 1
+            before = _maybe_int(event.get("tokens_before")) or 0
+            after = _maybe_int(event.get("tokens_after")) or 0
+            compaction_tokens_saved += max(before - after, 0)
+        elif event_type == "model_fallback":
+            model_fallbacks += 1
+            fallback_paths.append(
+                {
+                    "from_model": str(event.get("from_model", "")),
+                    "to_model": str(event.get("to_model", "")),
+                    "reason": str(event.get("reason", "")),
+                }
+            )
+        elif event_type == "verification" and event.get("action") == "retry":
+            verification_retries += 1
+        elif event_type == "hook" and event.get("action") == "retry":
+            hook_retries += 1
+
+    result_offloads = _result_offload_count(tool_calls)
+    return {
+        "compactions": compactions,
+        "compaction_tokens_saved": compaction_tokens_saved,
+        "model_fallbacks": model_fallbacks,
+        "fallback_paths": fallback_paths,
+        "verification_retries": verification_retries,
+        "hook_retries": hook_retries,
+        "result_offloads": result_offloads,
+        "offload_hit_rate": round(result_offloads / len(tool_calls), 4) if tool_calls else 0.0,
+    }
+
+
+def _result_offload_count(tool_calls: list[dict[str, Any]]) -> int:
+    total = 0
+    for call in tool_calls:
+        tool_result = call.get("tool_result")
+        if not isinstance(tool_result, dict):
+            continue
+        metadata = tool_result.get("metadata")
+        if tool_result.get("truncated") is True and isinstance(metadata, dict):
+            total += 1 if isinstance(metadata.get("offloaded_to"), str) else 0
+    return total
+
+
+def _slowest_tool(tool_calls: list[dict[str, Any]]) -> dict[str, Any] | None:
+    slowest: dict[str, Any] | None = None
+    slowest_duration = -1
+    for call in tool_calls:
+        duration = _maybe_int(call.get("duration_ms"))
+        if duration is None or duration < slowest_duration:
+            continue
+        slowest_duration = duration
+        slowest = {
+            "tool_use_id": call.get("tool_use_id", ""),
+            "tool_name": call.get("tool_name", ""),
+            "summary": call.get("summary", ""),
+            "duration_ms": duration,
+            "is_error": call.get("is_error", False),
+        }
+    return slowest
+
+
+def _tool_counts(tool_calls: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for call in tool_calls:
+        tool_name = call.get("tool_name")
+        if isinstance(tool_name, str):
+            counts[tool_name] = counts.get(tool_name, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _context_summary(
+    context_builds: list[dict[str, Any]],
+    long_run: dict[str, Any],
+) -> dict[str, Any]:
+    max_utilization: float | None = None
+    max_used_tokens: int | None = None
+    max_tokens_seen: int | None = None
+
+    for build in context_builds:
+        budget = build.get("budget")
+        if not isinstance(budget, dict):
+            continue
+        used = _maybe_int(budget.get("used_tokens"))
+        maximum = _maybe_int(budget.get("max_tokens"))
+        if used is not None:
+            max_used_tokens = used if max_used_tokens is None else max(max_used_tokens, used)
+        if maximum is not None:
+            max_tokens_seen = maximum if max_tokens_seen is None else max(max_tokens_seen, maximum)
+        if used is not None and maximum and maximum > 0:
+            ratio = round(used / maximum, 4)
+            max_utilization = ratio if max_utilization is None else max(max_utilization, ratio)
+
+    context = long_run.get("context", {})
+    return {
+        "builds": len(context_builds),
+        "trimmed_builds": context.get("trimmed_builds", 0),
+        "max_used_tokens": max_used_tokens,
+        "max_tokens_seen": max_tokens_seen,
+        "max_utilization": max_utilization,
+    }
+
+
+def _maybe_int(value: Any) -> int | None:
+    # Coerce finite floats too: a provider/tool reporting a float duration_ms or
+    # token count would otherwise be silently dropped from the report aggregates.
+    # NaN/Infinity (which json.loads accepts, so they survive a persisted-event
+    # round-trip) are dropped rather than coerced — int(nan)/int(inf) would raise
+    # and crash report building, which must stay a non-throwing read model.
+    if isinstance(value, float):
+        return int(value) if math.isfinite(value) else None
+    return value if isinstance(value, int) else None
 
 
 def _add_strings(target: set[str], value: Any) -> None:
