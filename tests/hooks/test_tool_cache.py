@@ -160,6 +160,128 @@ async def test_allowlist_excludes_unlisted_read_tool() -> None:
 # ── plumbing: the resolve action ──────────────────────────────────────────────
 
 
+# ── unit: phase ordering / leaks (drive the hook directly) ────────────────────
+
+
+class _FakeTool:
+    def __init__(self, scope: str) -> None:
+        self.scope = scope
+
+
+def _pre(tid: str, name: str, scope: str, inp: dict):
+    from linch.hooks.contexts import PreToolUseContext
+
+    return PreToolUseContext(
+        session=None,
+        run_id="r",
+        turn_index=0,
+        tool_use_id=tid,
+        tool_name=name,
+        input=inp,
+        tool=_FakeTool(scope),
+    )
+
+
+def _post(tid: str, name: str, inp: dict, result):
+    from linch.hooks.contexts import PostToolUseContext
+
+    return PostToolUseContext(
+        session=None,
+        run_id="r",
+        turn_index=0,
+        tool_use_id=tid,
+        tool_name=name,
+        input=inp,
+        result=result,
+    )
+
+
+async def test_same_turn_read_then_write_invalidates_the_cached_read() -> None:
+    # Regression for the phase-ordering bug: the scheduler runs the whole
+    # PreToolUse pass over a turn BEFORE any tool executes, then all PostToolUse.
+    # A [Search, Write] turn must NOT leave a stale Search cached.
+    from linch.hooks.tool_cache import ToolCacheConfig, ToolCacheHook
+    from linch.tools import ToolResult
+
+    hook = ToolCacheHook(ToolCacheConfig())
+
+    # Pre pass over both blocks, then post pass over both (scheduler order).
+    assert await hook.on_pre_tool_use(_pre("s1", "Search", "read", {"q": "x"})) is None
+    assert await hook.on_pre_tool_use(_pre("w1", "Write", "write", {"f": "f"})) is None
+    await hook.on_post_tool_use(_post("s1", "Search", {"q": "x"}, ToolResult(content="OLD")))
+    await hook.on_post_tool_use(_post("w1", "Write", {"f": "f"}, ToolResult(content="wrote")))
+
+    # Next turn: an identical Search must MISS (not be served the pre-write value).
+    res = await hook.on_pre_tool_use(_pre("s2", "Search", "read", {"q": "x"}))
+    assert res is None  # cache invalidated by the write's PostToolUse
+
+
+async def test_agent_stop_evicts_bucket_on_any_termination() -> None:
+    # on_stop fires only on success terminals; on_agent_stop fires on every
+    # terminal (incl. error/abort/budget), so eviction must hang off it.
+    from linch.hooks.contexts import AgentStopContext
+    from linch.hooks.tool_cache import ToolCacheConfig, ToolCacheHook
+    from linch.tools import ToolResult
+
+    hook = ToolCacheHook(ToolCacheConfig())
+    await hook.on_pre_tool_use(_pre("s1", "Search", "read", {"q": "x"}))
+    await hook.on_post_tool_use(_post("s1", "Search", {"q": "x"}, ToolResult(content="v")))
+    assert "r" in hook._runs
+
+    await hook.on_agent_stop(AgentStopContext(session=None, run_id="r", turn_index=0))
+    assert "r" not in hook._runs
+
+
+async def test_oversized_results_are_not_cached() -> None:
+    # Large results are left to the offload subsystem; caching them would pin
+    # full payloads and re-offload on each hit. Above max_value_bytes → re-runs.
+    search, calls = _read_tool()
+    agent = _agent(
+        _twice("Search", {"query": "x"}),
+        [search],
+        tool_cache=ToolCacheConfig(max_value_bytes=2),  # "r1:x" exceeds 2 bytes
+    )
+    await _run(agent)
+    assert calls["n"] == 2  # not cached → executed both times
+
+
+async def test_unmatched_pending_misses_are_bounded() -> None:
+    # A backgrounded read records a pending entry but never fires PostToolUse;
+    # pending must be LRU-bounded so it can't grow without limit over a long run.
+    from linch.hooks.tool_cache import ToolCacheConfig, ToolCacheHook
+
+    hook = ToolCacheHook(ToolCacheConfig(max_entries=4))
+    for i in range(20):
+        await hook.on_pre_tool_use(_pre(f"bg{i}", "Search", "read", {"q": i}))  # no post
+    assert len(hook._runs["r"].pending) <= 4
+
+
+async def test_resolve_without_tool_result_blocks_instead_of_executing() -> None:
+    from linch.hooks import HookResult
+
+    calls = {"n": 0}
+
+    @tool(name="Danger", scope="write")
+    def danger(x: str) -> str:
+        calls["n"] += 1
+        return "ran"
+
+    class BadResolve:
+        def on_pre_tool_use(self, ctx):
+            return HookResult(action="resolve")  # tool_result left None
+
+    provider = ScriptedProvider(
+        [
+            ToolUseTurn(tool_name="Danger", tool_input={"x": "y"}, tool_id="t1"),
+            TextTurn(text="done"),
+        ]
+    )
+    agent = _agent(provider, [danger], permissions={"mode": "skip-dangerous"})
+    agent.hooks = [BadResolve()]
+    await _run(agent)
+    assert calls["n"] == 0  # malformed resolve blocks; the tool never runs
+
+
 async def test_resolve_action_short_circuits_dispatch() -> None:
     from linch.hooks import HookDispatcher, HookResult
     from linch.hooks.contexts import PreToolUseContext

@@ -543,9 +543,14 @@ async def _dispatch_pre_tool_use(
         ),
     )
     result = outcome.result
-    if result.action == "resolve" and result.tool_result is not None:
+    if result.action == "resolve":
         # A hook served a result (e.g. cache hit): skip execution, use it as-is.
-        return input, None, result.tool_result, outcome.events
+        if result.tool_result is not None:
+            return input, None, result.tool_result, outcome.events
+        # Malformed resolve (no tool_result): the hook meant to short-circuit, so
+        # block rather than silently running the tool it intended to suppress.
+        reason = result.reason or result.feedback or "resolve hook returned no tool_result"
+        return input, reason, None, outcome.events
     if result.action == "mutate" and result.input is not None:
         return result.input, None, None, outcome.events
     if result.action in {"block", "stop"}:

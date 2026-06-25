@@ -28,13 +28,15 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..tools import ToolResult
-from .contexts import PostToolUseContext, PreToolUseContext, StopContext
+from .contexts import AgentStopContext, PostToolUseContext, PreToolUseContext
 from .types import HookResult
 
-# Number of completed-but-not-evicted run buckets to retain as a leak guard in
-# case a ``Stop`` event never fires (e.g. a hard crash). Far above any real
-# concurrency; normal runs evict their bucket on ``on_stop``.
+# Leak guard on the number of run buckets, in case ``on_agent_stop`` somehow
+# never fires (e.g. a hard crash). Normal runs evict their bucket on that hook.
 _MAX_RUNS = 64
+
+# Distinguishes "absent" from a stored ``None`` value in writers.pop().
+_MISSING: Any = object()
 
 
 @dataclass(slots=True)
@@ -46,18 +48,27 @@ class ToolCacheConfig:
             read scope). ``None`` = every read-scope tool.
         deny: Tool names never cached, even if read-scope.
         max_entries: Per-run cap on cached entries (LRU eviction).
+        max_value_bytes: Results whose content exceeds this are not cached. Large
+            results are what the offload subsystem already handles; caching them
+            would keep full payloads resident and re-offload on every served hit.
     """
 
     allow: set[str] | None = None
     deny: frozenset[str] = frozenset()
     max_entries: int = 256
+    max_value_bytes: int = 100_000
 
 
 @dataclass(slots=True)
 class _RunCache:
     entries: OrderedDict[str, ToolResult] = field(default_factory=OrderedDict)
     # tool_use_id -> cache key, for a cacheable miss awaiting its result in post.
-    pending: dict[str, str] = field(default_factory=dict)
+    # Bounded (LRU) because a backgrounded read never fires PostToolUse, so its
+    # entry would otherwise never be popped.
+    pending: OrderedDict[str, str] = field(default_factory=OrderedDict)
+    # tool_use_ids of write/exec calls awaiting PostToolUse, where they clear the
+    # cache *after* executing (so a read+write in the same turn invalidates too).
+    writers: OrderedDict[str, None] = field(default_factory=OrderedDict)
 
 
 class ToolCacheHook:
@@ -77,12 +88,17 @@ class ToolCacheHook:
 
     async def on_pre_tool_use(self, ctx: PreToolUseContext) -> HookResult | None:
         scope = getattr(ctx.tool, "scope", None)
-        # A mutating call invalidates the run's cached reads — they may now be
-        # stale. Clear before it executes; this run's later reads re-cache fresh.
         if scope in ("write", "exec"):
-            bucket = self._runs.get(ctx.run_id)
-            if bucket is not None:
-                bucket.entries.clear()
+            # Clear now to drop prior-turn reads before the write runs, and mark
+            # the writer so on_post_tool_use clears AGAIN after it executes — the
+            # PreToolUse pass runs over the whole turn before any tool executes,
+            # so a read emitted before this write in the same turn is cached at
+            # *its* PostToolUse, after this pre-clear; the post-clear catches it.
+            # (The pre-clear is also the only invalidation a backgrounded write
+            # gets, since the background path never dispatches PostToolUse.)
+            bucket = self._bucket(ctx.run_id)
+            bucket.entries.clear()
+            _bounded_set(bucket.writers, ctx.tool_use_id, None, self._cfg.max_entries)
             return None
         if not self._cacheable(ctx.tool_name, scope):
             return None
@@ -97,12 +113,17 @@ class ToolCacheHook:
                 [_cache_event("cache_hit", ctx.tool_name)]
             )
         # Miss on a cacheable call: record so on_post_tool_use stores the result.
-        bucket.pending[ctx.tool_use_id] = key
+        _bounded_set(bucket.pending, ctx.tool_use_id, key, self._cfg.max_entries)
         return None
 
     async def on_post_tool_use(self, ctx: PostToolUseContext) -> HookResult | None:
         bucket = self._runs.get(ctx.run_id)
         if bucket is None:
+            return None
+        if bucket.writers.pop(ctx.tool_use_id, _MISSING) is not _MISSING:
+            # A write/exec just finished executing — invalidate cached reads now,
+            # which catches a read cached earlier in this same turn.
+            bucket.entries.clear()
             return None
         key = bucket.pending.pop(ctx.tool_use_id, None)
         if key is None:
@@ -111,14 +132,17 @@ class ToolCacheHook:
         # Never cache errors — let the model retry a failed call.
         if result is None or getattr(result, "is_error", False):
             return None
-        bucket.entries[key] = result
-        bucket.entries.move_to_end(key)
-        while len(bucket.entries) > self._cfg.max_entries:
-            bucket.entries.popitem(last=False)
+        # Don't cache large results: offload handles those, and caching them
+        # would pin full payloads in memory and re-offload on each served hit.
+        if _result_size(result) > self._cfg.max_value_bytes:
+            return None
+        _bounded_set(bucket.entries, key, result, self._cfg.max_entries)
         return None
 
-    async def on_stop(self, ctx: StopContext) -> HookResult | None:
-        # A run ended — drop its cache (true per-run lifetime).
+    async def on_agent_stop(self, ctx: AgentStopContext) -> HookResult | None:
+        # A run ended (success OR error/abort/budget — on_agent_stop fires in the
+        # loop's finally on every terminal path) — drop its cache so an error
+        # termination doesn't orphan the bucket. True per-run lifetime.
         self._runs.pop(ctx.run_id, None)
         return None
 
@@ -141,6 +165,19 @@ class ToolCacheHook:
         if self._cfg.allow is not None and tool_name not in self._cfg.allow:
             return False
         return True
+
+
+def _result_size(result: ToolResult) -> int:
+    content = getattr(result, "content", "")
+    return len(content) if isinstance(content, str) else len(str(content))
+
+
+def _bounded_set(od: OrderedDict, key: Any, value: Any, cap: int) -> None:
+    """Insert/refresh ``key`` at the MRU end, evicting the LRU entry past ``cap``."""
+    od[key] = value
+    od.move_to_end(key)
+    while len(od) > cap:
+        od.popitem(last=False)
 
 
 def _cache_key(tool_name: str, input: dict[str, Any]) -> str | None:
