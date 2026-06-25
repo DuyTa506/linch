@@ -120,13 +120,13 @@ flowchart LR
 
 | Provider | `prompt_cache` | `structured_output` | `tool_choice` |
 |---|---|---|---|
-| `OpenAIResponsesProvider` | ✗ | ✓ | ✓ |
-| `OpenAIChatCompletionsProvider` | ✗ | ✓ | ✓ |
-| `LlamaCppProvider` | ✗ | ✓ | ✓ |
-| `VLLMProvider` | ✗ | ✓ | ✓ |
-| `SGLangProvider` | ✗ | ✓ | ✓ |
+| `OpenAIResponsesProvider` | ✓ | ✓ | ✓ |
+| `OpenAIChatCompletionsProvider` | ✓ | ✓ | ✓ |
+| `LlamaCppProvider` | ✓ | ✓ | ✓ |
+| `VLLMProvider` | ✓ | ✓ | ✓ |
+| `SGLangProvider` | ✓ | ✓ | ✓ |
 | `AnthropicProvider` | ✓ | ✓ | ✓ |
-| `GeminiProvider` | ✗ | ✓ | ✓ |
+| `GeminiProvider` | ✓ | ✓ | ✓ |
 
 `structured_output=True` means the provider/loop pair can enforce or route
 structured output without falling back to untyped free text. OpenAI Chat,
