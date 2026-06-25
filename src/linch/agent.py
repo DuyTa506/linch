@@ -220,8 +220,11 @@ def _resolve_read_before_write(value: Any) -> Any:
 
 
 def _has_read_before_write_hook(hooks: list[Any]) -> bool:
-    names = {"read_before_write", "ReadBeforeWriteHook"}
-    return any(getattr(hook, "name", hook.__class__.__name__) in names for hook in hooks)
+    # Match by type, not by name string: an unrelated hook that happens to be
+    # named "read_before_write" must not silently suppress the default guard.
+    from .hooks.read_before_write import ReadBeforeWriteHook
+
+    return any(isinstance(hook, ReadBeforeWriteHook) for hook in hooks)
 
 
 def _system_prompt_section_blocks(cfg: SystemPromptConfig | None) -> dict[str, list[SystemBlock]]:
