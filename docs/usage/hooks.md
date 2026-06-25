@@ -71,6 +71,7 @@ HookResult.block("reason")                   # reject (tool/prompt) → error re
 HookResult.retry("feedback")                 # bounce the answer back for another turn
 HookResult.force_continue("feedback")        # run another turn even past a stop
 HookResult.stop("reason")                    # end the run with an error result
+HookResult.resolve(tool_result=tr)           # PreToolUse: serve tr, skip execution
 ```
 
 Which actions are honored depends on the chokepoint:
@@ -95,6 +96,9 @@ Which actions are honored depends on the chokepoint:
 - A graceful early **success** stop is available at `BeforeProviderCall`: return
   `HookResult.stop("stop_when", metadata={"subtype": "success"})` (this is how
   `StopPredicateHook` works).
+- **`resolve`** — only at `PreToolUse`: the tool is **not executed**; the supplied
+  `tool_result` becomes the outcome (success or error per its `is_error`). This is
+  how a cache serves a hit — see [`ToolCacheHook`](./tool-cache.md).
 
 Lifecycle-only chokepoints (`agent_start/stop`, `turn_*`, `provider_call_*`,
 `tool_use_*`, `subagent_*`, `event_emit`) ignore the return value — use them for
@@ -122,6 +126,7 @@ core ones are also re-exported from `linch`).
 | `FinalAnswerVerifierHook(verifiers, max_retries=2)` | output verifiers | `verifiers=` / `max_verification_retries=` |
 | `StopPredicateHook(predicate)` | a `(session) -> bool` stop predicate | `RunOptions(stop_when=...)` |
 | `RunTelemetryHook(observers)` | one or more `RunObserver`s | `observers=` |
+| `ToolCacheHook(config)` | per-run memoization of read-scope tool calls | `tool_cache=` — see [tool-cache.md](./tool-cache.md) |
 
 ```python
 from linch.hooks import (
