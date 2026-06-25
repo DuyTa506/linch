@@ -52,7 +52,7 @@ load_project_env()
 
 RUN_LIVE = os.environ.get("LINCH_RUN_LIVE_LOOP_TESTS") == "1"
 DEEPSEEK_KEY = os.environ.get("DEEPSEEK_API_KEY")
-OPENAI_KEY = os.environ.get("OPENAI_API_KEY") or os.environ.get("OPENAPI_KEY")
+OPENAI_KEY = os.environ.get("OPENAI_API_KEY")
 GENERIC_KEY = os.environ.get("API_KEY")
 API_KEY = DEEPSEEK_KEY or OPENAI_KEY or GENERIC_KEY
 BASE_URL = (

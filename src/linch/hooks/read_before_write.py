@@ -149,8 +149,14 @@ class ReadBeforeWriteHook:
             try:
                 return await backend.exists(normalize_path(raw))
             except Exception:
-                logger.debug("read_before_write: backend.exists failed; assuming new file")
-                return False
+                # Fail CLOSED, like the workspace branch: if we can't tell whether
+                # the file exists, treat it as existing so the overwrite gate
+                # blocks rather than risking a blind overwrite.
+                logger.warning(
+                    "read_before_write: backend.exists failed for %r; gating (fail-closed)",
+                    raw,
+                )
+                return True
         return False
 
 

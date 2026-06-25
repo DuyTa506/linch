@@ -196,7 +196,7 @@ def test_cache_prefix_stable_across_turns():
     #    no longer marks turn 1's (now-cached) user message.
     assert p1["messages"][-1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
     assert p2["messages"][-1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
-    assert "cache_control" not in s2[0]["content"][0]
+    assert "cache_control" not in p2["messages"][0]["content"][0]
 
 
 def test_build_payload_cache_boundary_leading_dynamic_marks_later_cacheable():

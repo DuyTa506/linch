@@ -181,7 +181,8 @@ Notes:
 
 Every hook invocation that **acts** emits a `hook` event in the stream
 (`HookEventRecord`) with `event` (the chokepoint), `hook` (the hook's `name` or
-class name), `action` (`mutate`/`block`/`retry`/`stop`/`force_continue`/`error`),
+class name),
+`action` (`mutate`/`block`/`retry`/`stop`/`force_continue`/`resolve`/`error`),
 and `reason`. A hook that returns `None` (a no-op `continue`) emits nothing, so a
 default-on hook that fires on every tool call does not flood the stream. This
 makes hook decisions visible to UIs, [run reports](./events.md), and `on_event`
