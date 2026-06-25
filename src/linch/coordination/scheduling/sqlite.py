@@ -2,9 +2,9 @@
 
 Mirrors :class:`~linch.memory.sqlite.SqliteMemoryStore`: all DB I/O runs on a
 single dedicated worker thread so the event loop never blocks. Durable schedules
-survive a process restart / store reload. A multi-process leader-election lock
-(so only one of N processes fires a given schedule) is intentionally out of
-scope here and left to the embedder.
+survive a process restart / store reload. Due schedules can be claimed
+transactionally so multiple scheduler workers sharing the same database do not
+fire the same tick twice.
 """
 
 from __future__ import annotations
@@ -85,6 +85,9 @@ class SqliteScheduleStore:
         rows = await self._exec.run(_fetch_all)
         return [_row_to_schedule(row) for row in rows]
 
+    async def claim_due(self, now: float) -> list[Schedule]:
+        return await self._exec.run(lambda conn: _claim_due(conn, now))
+
     async def aclose(self) -> None:
         await self._exec.close()
 
@@ -139,4 +142,36 @@ def _fetch_one(conn: sqlite3.Connection, schedule_id: str) -> dict[str, Any] | N
 
 def _fetch_all(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     cursor = conn.execute("SELECT * FROM schedules")
+    return [dict(row) for row in cursor.fetchall()]
+
+
+def _claim_due(conn: sqlite3.Connection, now: float) -> list[Schedule]:
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        rows = _fetch_due(conn, now)
+        schedules = [_row_to_schedule(row) for row in rows]
+        for schedule in schedules:
+            schedule.next_run = schedule.compute_next_run(now)
+            conn.execute(
+                "UPDATE schedules SET next_run = ? WHERE id = ?",
+                (schedule.next_run, schedule.id),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return schedules
+
+
+def _fetch_due(conn: sqlite3.Connection, now: float) -> list[dict[str, Any]]:
+    cursor = conn.execute(
+        """
+        SELECT * FROM schedules
+        WHERE enabled = 1
+          AND next_run IS NOT NULL
+          AND next_run <= ?
+        ORDER BY next_run ASC, id ASC
+        """,
+        (now,),
+    )
     return [dict(row) for row in cursor.fetchall()]
