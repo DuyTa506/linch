@@ -43,7 +43,7 @@ class _FakeNonOpenAIProvider:
 _DETAILED_SUMMARY = """\
 <summary>
 1. Primary Request and Intent: Implement the requested change.
-2. Files, Artifacts, and Code Sections: src/example.py was inspected.
+2. Key Information and Artifacts: src/example.py was inspected.
 3. Errors and Fixes: None.
 4. Pending Tasks: Run tests.
 5. Current Work: Preparing verification.
@@ -132,13 +132,93 @@ async def test_detailed_compaction_uses_no_tool_provider_request():
     assert "<detailed summary of earlier conversation>" in summary.text
     for section in (
         "Primary Request and Intent",
-        "Files, Artifacts, and Code Sections",
+        "Key Information and Artifacts",
         "Errors and Fixes",
         "Pending Tasks",
         "Current Work",
         "Next Step",
     ):
         assert section in summary.text
+
+
+@pytest.mark.asyncio
+async def test_default_compaction_accepts_custom_prompt():
+    """A non-coding embedder can reword the summary without writing a strategy."""
+    provider = _FakeNonOpenAIProvider()
+    signal = AbortContext()
+    messages = _make_messages(30)
+
+    custom = "Summarize for a customer-support transcript. Capture open tickets only."
+    strategy = DefaultCompaction(prompt=custom)
+    ctx = CompactionContext(messages=messages, model="model-x", signal=signal)
+    await strategy.compact(ctx, provider)
+
+    assert provider._stream_calls[0].system[0].text == custom
+
+
+@pytest.mark.asyncio
+async def test_default_compaction_prompt_defaults_unchanged():
+    """Omitting prompt keeps the coding-oriented default (byte-identical)."""
+    provider = _FakeNonOpenAIProvider()
+    signal = AbortContext()
+    messages = _make_messages(30)
+
+    strategy = DefaultCompaction()
+    ctx = CompactionContext(messages=messages, model="model-x", signal=signal)
+    await strategy.compact(ctx, provider)
+
+    assert "Summarize the conversation so far" in provider._stream_calls[0].system[0].text
+
+
+@pytest.mark.asyncio
+async def test_general_summary_prompt_is_domain_neutral():
+    """A ready-made non-coding default: importable and free of file/path framing."""
+    from linch import GENERAL_SUMMARY_PROMPT
+
+    provider = _FakeNonOpenAIProvider()
+    signal = AbortContext()
+    messages = _make_messages(30)
+
+    strategy = DefaultCompaction(prompt=GENERAL_SUMMARY_PROMPT)
+    ctx = CompactionContext(messages=messages, model="model-x", signal=signal)
+    await strategy.compact(ctx, provider)
+
+    sent = provider._stream_calls[0].system[0].text
+    assert sent == GENERAL_SUMMARY_PROMPT
+    assert "Files" not in sent  # no coding/filesystem assumption
+
+
+@pytest.mark.asyncio
+async def test_detailed_compaction_accepts_custom_prompt():
+    provider = _FakeDetailedSummaryProvider()
+    signal = AbortContext()
+    messages = _make_messages(30)
+
+    custom = "Custom continuation summary instructions."
+    strategy = DetailedCompaction(prompt=custom)
+    ctx = CompactionContext(messages=messages, model="model-x", signal=signal)
+    await strategy.compact(ctx, provider)
+
+    assert provider._stream_calls[0].system[0].text == custom
+
+
+def test_detailed_prompt_is_domain_neutral():
+    """The opt-in detailed handoff must not assume a coding host, while keeping
+    its continuation-safe structure (6 sections + text-only guard)."""
+    from linch.compaction import _DETAILED_SUMMARY_PROMPT
+
+    p = _DETAILED_SUMMARY_PROMPT
+    assert "CRITICAL: Respond with TEXT ONLY" in p
+    for section in (
+        "Primary Request and Intent",
+        "Errors and Fixes",
+        "Pending Tasks",
+        "Current Work",
+        "Next Step",
+    ):
+        assert section in p
+    for coding_term in ("Code Sections", "API names", "public interfaces", "test results"):
+        assert coding_term not in p
 
 
 @pytest.mark.asyncio

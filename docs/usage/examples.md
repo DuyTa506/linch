@@ -54,6 +54,9 @@ Runnable example code lives in the `examples/` directory, organized by subsystem
 |------|---------------|
 | `memory/memory_agent.py` | Core memory primitives with search/upsert tools and citations |
 | `memory/sqlite_memory_agent.py` | SqliteMemoryStore — persistent memory, round-trip, upsert update |
+| `memory/faiss_adapter.py` | FAISS vector-memory adapter recipe using the existing `MemoryStore` seam |
+| `memory/pgvector_memory.py` | pgvector adapter recipe for Postgres semantic search |
+| `memory/qdrant_adapter.py` | Qdrant vector-memory adapter recipe |
 
 ---
 
@@ -83,11 +86,22 @@ Runnable example code lives in the `examples/` directory, organized by subsystem
 | `integrations/subagent_coordinator.py` | Agent definition files, tool-filtered subagents, SubagentEvent |
 | `integrations/multi_agent_isolation.py` | Context isolation: child work never enters parent context; sequential pipeline; parallel analysts; subagent + filesystem offload (*runs offline*) |
 
+## `extensions/` — *templates*
+
+| File | What it shows |
+|------|---------------|
+| `extensions/provider_template.py` | Minimal `BaseProvider` adapter with normalized streaming events |
+| `extensions/memory_store_template.py` | Duck-typed `MemoryStore` with search/upsert signatures |
+| `extensions/filesystem_backend_template.py` | Virtual `FileBackend` path operations |
+| `extensions/tool_package_template.py` | `@tool` first, with an advanced class-shaped tool plus registry factory |
+| `extensions/hook_package_template.py` | Hook object with dispatcher method names and `HookResult` actions |
+
 ## `recipes/` — *local demo available*
 
 | File | What it shows |
 |------|---------------|
 | `recipes/research_desk.py` | A **non-coding** agent (literature analyst): domain tools (`search_library`/`read_article`/`record_citation`), `ctx.deps` corpus + citation ledger, an `OutputSchema` brief, and a closed-loop `Verifier` that bounces an uncited answer — proof the SDK isn't coding-shaped. Built via a factory so it runs offline under a `ScriptedProvider` |
+| `recipes/loop_runner.py` | `LoopSpec` + `LoopRunner.run_once()` as the SDK-native outer-loop primitive. Loads project `.env` (`API_KEY`/`BASE_URL`/`model`, or explicit provider keys), writes `domains/<loop_id>/README.md`, `LOG.md`, and per-run report artifacts |
 | `recipes/ralph_loop.py` | The **Ralph loop** for long-horizon work: an outer loop where each pass gets a *fresh* `session` (no compaction — discard and restart), reads the same spec, and carries state only through the virtual filesystem (`StateFileBackend`), looping until a done-predicate. A harness pattern composed from existing seams; `max_iterations` bounds the spend |
 
 ## `coordination/` — *local demos available*

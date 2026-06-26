@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import pytest
 
@@ -10,10 +11,11 @@ from linch.coordination.mailbox import (
     Correlator,
     InMemoryMailbox,
     MailboxMessage,
+    SqliteMailbox,
 )
 
 
-def _msg(sender: str, recipient: str, content: str = "hi", **kw: object) -> MailboxMessage:
+def _msg(sender: str, recipient: str, content: str = "hi", **kw: Any) -> MailboxMessage:
     return MailboxMessage(sender=sender, recipient=recipient, content=content, **kw)
 
 
@@ -130,3 +132,90 @@ def test_pending_lists_unresolved_requests() -> None:
 def test_response_unknown_request_is_none() -> None:
     c = Correlator()
     assert c.response("nope") is None
+
+
+# --- Durable SQLite mailbox --------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sqlite_mailbox_persists_across_reopen(tmp_path) -> None:
+    path = tmp_path / "mailbox.db"
+    first = SqliteMailbox(path)
+    await first.send(
+        MailboxMessage(
+            sender="alice",
+            recipient="bob",
+            content="persisted",
+            type="question",
+            request_id="req-1",
+        )
+    )
+    await first.aclose()
+
+    second = SqliteMailbox(path)
+    drained = await second.drain("bob")
+    await second.aclose()
+
+    assert len(drained) == 1
+    assert drained[0].sender == "alice"
+    assert drained[0].content == "persisted"
+    assert drained[0].type == "question"
+    assert drained[0].request_id == "req-1"
+
+
+@pytest.mark.asyncio
+async def test_sqlite_mailbox_drain_is_destructive(tmp_path) -> None:
+    box = SqliteMailbox(tmp_path / "mailbox.db")
+    await box.send(_msg("a", "b", "one"))
+
+    first = await box.drain("b")
+    second = await box.drain("b")
+    await box.aclose()
+
+    assert [m.content for m in first] == ["one"]
+    assert second == []
+
+
+@pytest.mark.asyncio
+async def test_sqlite_mailbox_preserves_fifo_order(tmp_path) -> None:
+    box = SqliteMailbox(tmp_path / "mailbox.db")
+    for i in range(5):
+        await box.send(_msg("a", "b", str(i)))
+
+    drained = await box.drain("b")
+    await box.aclose()
+
+    assert [m.content for m in drained] == ["0", "1", "2", "3", "4"]
+
+
+@pytest.mark.asyncio
+async def test_sqlite_mailbox_concurrent_sends_dont_drop_messages(tmp_path) -> None:
+    box = SqliteMailbox(tmp_path / "mailbox.db")
+    n = 100
+
+    await asyncio.gather(*(box.send(_msg("a", "b", str(i))) for i in range(n)))
+
+    drained = await box.drain("b")
+    await box.aclose()
+
+    assert sorted(int(m.content) for m in drained) == list(range(n))
+
+
+@pytest.mark.asyncio
+async def test_sqlite_mailbox_concurrent_drains_deliver_once(tmp_path) -> None:
+    path = tmp_path / "mailbox.db"
+    writer = SqliteMailbox(path)
+    for i in range(20):
+        await writer.send(_msg("a", "b", str(i)))
+    await writer.aclose()
+
+    first = SqliteMailbox(path)
+    second = SqliteMailbox(path)
+    drained_a, drained_b = await asyncio.gather(first.drain("b"), second.drain("b"))
+    await first.aclose()
+    await second.aclose()
+
+    contents = [m.content for m in drained_a + drained_b]
+    assert sorted(int(content) for content in contents) == list(range(20))
+    assert len(drained_a) in {0, 20}
+    assert len(drained_b) in {0, 20}

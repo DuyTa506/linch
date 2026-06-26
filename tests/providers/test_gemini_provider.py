@@ -409,3 +409,20 @@ async def test_stream_two_distinct_tool_calls_both_emit():
     assert len(starts) == 2
     names = {e["name"] for e in starts}
     assert names == {"Read"}
+
+
+def test_gemini_cached_tokens_surfaced_from_usage_metadata() -> None:
+    """Gemini implicit-cache hits must surface as cache_read_tokens
+    (read from usage_metadata.cached_content_token_count)."""
+    from linch._prompt_cache import gemini_cached_tokens
+
+    class _UM:
+        cached_content_token_count = 512
+
+    assert gemini_cached_tokens(_UM()) == 512
+
+    class _Empty:
+        cached_content_token_count = None
+
+    assert gemini_cached_tokens(_Empty()) == 0
+    assert gemini_cached_tokens(object()) == 0

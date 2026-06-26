@@ -120,13 +120,13 @@ flowchart LR
 
 | Provider | `prompt_cache` | `structured_output` | `tool_choice` |
 |---|---|---|---|
-| `OpenAIResponsesProvider` | ✗ | ✓ | ✓ |
-| `OpenAIChatCompletionsProvider` | ✗ | ✓ | ✓ |
-| `LlamaCppProvider` | ✗ | ✓ | ✓ |
-| `VLLMProvider` | ✗ | ✓ | ✓ |
-| `SGLangProvider` | ✗ | ✓ | ✓ |
+| `OpenAIResponsesProvider` | ✓ | ✓ | ✓ |
+| `OpenAIChatCompletionsProvider` | ✓ | ✓ | ✓ |
+| `LlamaCppProvider` | ✓ | ✓ | ✓ |
+| `VLLMProvider` | ✓ | ✓ | ✓ |
+| `SGLangProvider` | ✓ | ✓ | ✓ |
 | `AnthropicProvider` | ✓ | ✓ | ✓ |
-| `GeminiProvider` | ✗ | ✓ | ✓ |
+| `GeminiProvider` | ✓ | ✓ | ✓ |
 
 `structured_output=True` means the provider/loop pair can enforce or route
 structured output without falling back to untyped free text. OpenAI Chat,
@@ -310,12 +310,17 @@ tier metadata falls back to `working`. `MemorySearchTool` preserves result ids,
 tier counts, and citation tier metadata so run reports and eval scorers can
 measure recall behavior in long-running sessions.
 
-`RunReport.long_run` synthesizes long-horizon signals from the event stream and
-checkpoint: context trimming and selected tools, memory searches/upserts,
-recalled ids, tier counts, failed tool calls, recovery hints, completion, cost,
-and resume phase. The eval package includes companion scorers for context
-selection, context trimming, context metadata, memory recall, recovery after
-tool failures, and successful completion.
+`RunReport.summary` exposes the compact observability surface from the event
+stream: event counts, duration, token/cost totals, tool latency/error rate,
+cache-read ratio, context utilization, recovery counters for compaction, model
+fallback, verifier/hook retry, result offload, and risk counters.
+`RunReport.long_run` synthesizes
+long-horizon signals from the event stream and checkpoint: context trimming and
+selected tools, memory searches/upserts, recalled ids, tier counts, failed tool
+calls, recovery hints, completion, cost, and resume phase. The eval package
+includes companion scorers for context selection, context trimming, context
+metadata, memory recall, recovery after tool failures, and successful
+completion.
 
 Do not add vector database or embedding dependencies to core; adapters implement the protocol and live in examples.
 

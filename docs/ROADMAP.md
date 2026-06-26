@@ -145,6 +145,99 @@ check to loop against, per the repo's TDD rules).
 
 ---
 
+## Current hardening priorities
+
+Linch is already feature-rich for an embeddable SDK. The next tranche should
+optimize stability, cost visibility, and developer experience before adding large new
+agentic abstractions.
+
+| Priority | Area | Status | Next action |
+|---|---|---|---|
+| 1 | CI / test reliability | **Done.** GitHub Actions now runs the same local check script as developers. The suite is guarded with `pytest-timeout`, dependency pins were tightened for `pytest>=8`, and the subprocess execution-backend tests run in their own phase to avoid order-dependent hangs. | Keep CI as the merge gate. Investigate the execution-backend order dependency separately so the split can eventually be removed. |
+| 2 | Lint hygiene | **Done.** Ruff issues in the Colab provider scripts were fixed and `scripts/check.sh` includes `ruff check .` plus `ruff format --check .`. | Treat any new lint failure as a PR blocker. |
+| 3 | Core orchestration complexity | **Ongoing.** The loop already has many mechanisms: budgets, verification, compaction, subagents, background tools, scheduling, mailbox. New runtime work should stay opt-in and tightly measured. | Prefer targeted simplification and regression tests over new orchestration surfaces. |
+| 4 | Cost / context efficiency measurement | **Done for the current pass.** `RunReport.long_run` tracks context/memory/recovery signals, and `RunReport.summary` now adds event counts, duration, token/cost totals, cache-read ratio, tool latency/error rate, context utilization, compaction/fallback/retry/offload counters, and risk counters. | Use real run reports to decide which cost/context optimizations are worth implementing next. |
+| 5 | Provider resilience | **Mostly done.** Model fallback is shipped and emits a typed event. Output-truncation recovery remains intentionally deferred because automatically raising `max_output_tokens` is policy-sensitive. | Revisit only as an explicit opt-in, e.g. `truncation_recovery=...`, once a real provider/use case needs it. |
+
+### Completed in the current hardening pass
+
+- **CI/dev health command:** added `.github/workflows/ci.yml` and
+  `scripts/check.sh`; local and CI checks now run the same Ruff, format, Pyright, and split
+  pytest sequence.
+- **Persistence/test reliability:** fixed blocking/off-loop behavior around SQLite-backed
+  helpers so the test suite no longer hangs under the current pytest/runtime environment.
+- **Lint cleanup:** fixed existing Ruff violations in the Colab vLLM/SGLang scripts.
+- **Observability/reporting baseline:** added the compact `RunReport.summary` payload and
+  surfaced it in Markdown/docs so hosts can read per-run health without parsing the full
+  timeline. The summary now includes explicit cache-read, compaction, model fallback,
+  verifier/hook retry, and result-offload counters.
+- **Runtime report viewer baseline:** added `scripts/run_report.py` to render a concise
+  summary, Markdown, or JSON export from a durable `SqliteRunStore` by `run_id`.
+
+### Next feature candidates, in practical order
+
+1. **Runtime metrics/report viewer.** A first local viewer now exists as
+   `scripts/run_report.py` (`summary` / `markdown` / `json` output from `SqliteRunStore`).
+   The report summary now exposes explicit cache-read, fallback/retry, compaction, and
+   offload counters without requiring callers to parse the raw timeline. Next improvements
+   should be driven by real run data, for example trend snapshots, top slow tools, or export
+   formats for CI artifacts.
+2. **Outer loop primitive V0.** **Done.** `LoopSpec` + `LoopRunner.run_once()` provide a
+   deterministic one-shot harness that a host can call from cron, CI, webhooks,
+   `SchedulerLoop`, or another agent. It creates a fresh session per tick, writes
+   file-backed `domains/<loop_id>/` artifacts, emits Markdown/JSON `RunReport`s, and leaves
+   trigger ownership and daemon lifecycle to the embedder. V1 adds optional
+   `LoopLeaseStore` support (`InMemoryLoopLeaseStore`, `FileLoopLeaseStore`) for
+   multi-process overlap protection.
+3. **Durable coordination backends.** **Mostly done.** `SqliteMailbox` now provides a
+   durable peer-message adapter with transactional destructive drain for cross-process
+   teams and restart survival. `SqliteScheduleStore` now supports atomic due claims so
+   multiple scheduler workers sharing one database do not double-fire the same tick.
+   Distributed queue/lease backends remain future work.
+4. **Eval/benchmark harness as first-class API/CLI.** **Done for V0.**
+   `EvalSuite`, `EvalBenchmarkTarget`, and `run_eval_benchmark()` provide the library
+   surface for comparing one suite across targets, while `scripts/eval_benchmark.py`
+   runs JSON/YAML suites against deterministic `ScriptedProvider` targets with
+   summary/Markdown/JSON output and CI pass-rate exits. Future benchmark suites can layer
+   in live-provider comparison, concurrency measurements, compaction, fallback behavior,
+   and memory retrieval checks without changing the harness contract.
+5. **Extension templates.** **Done for V0.** `examples/extensions/` now ships
+   copyable, dependency-free templates for provider, memory store, virtual filesystem
+   backend, tool package, and hook package. The tool package leads with `@tool` for the
+   common case and includes a class-shaped advanced example for custom validation/resources.
+   The templates are importable and smoke-tested so they track public protocol names.
+6. **Memory/RAG adapters.** **Done for docs/examples V0.** No new core abstraction was
+   added: vector stores adapt to the existing `MemoryStore` shape. Docs now cover the
+   `MemoryItem` / `MemorySearchResult` mapping and wiring through `MemoryContextBuilder`,
+   `MemorySearchTool`, `MemoryUpsertTool`, and `Agent(deps=...)`. Example recipes cover
+   FAISS, pgvector, and Qdrant with optional dependencies kept outside core.
+
+### Proposed: outer autonomous harness loop
+
+The `/loop` skill pattern is valuable, but it belongs in Linch as a host-runner mechanism,
+not as shell-sentinel behavior in core. `create_deep_agent` is the **inner open loop**: the
+model authors a path inside one run using tasks, tools, subagents, memory, budgets, and
+verification. An autonomous harness loop is the **outer loop**: the host decides when to
+wake the agent and submit another prompt/run.
+
+- **Status (V0/V1 done):** `LoopSpec`, `LoopTrigger`, `LoopTickResult`,
+  `LoopArtifactStore`, `FileLoopArtifactStore`, `LoopLeaseStore`,
+  `InMemoryLoopLeaseStore`, `FileLoopLeaseStore`, and `LoopRunner.run_once()` ship the
+  library primitive. It is deterministic and host-called: fresh session per tick,
+  file-backed `domains/<loop_id>/` layout, caller-supplied verification/done predicates,
+  per-run Markdown/JSON reports, append-only `LOG.md`, an in-process per-loop overlap
+  guard, and optional durable leases with TTL-based stale-lock recovery.
+- **Future mechanism:** daemon lifecycle, webhook adapters, fixed-interval helpers,
+  heartbeat/backoff policy, and stronger distributed lease backends can wrap `run_once()`
+  later without changing the artifact/report contract.
+- **Integration:** `ScheduleStore` / `SchedulerLoop` can decide when a schedule is due, but
+  the host still calls `LoopRunner.run_once()`; scheduler does not own execution.
+- **Out of scope for core:** shell `while true` sentinels, OS cron ownership, domain-specific
+  watcher implementations, and policy for what makes the next tick worth running. Those
+  remain skills/examples/embedder code on top of the runner.
+
+---
+
 ### Phase 1 — Runtime resilience & cost
 
 Pure runtime mechanisms; no new subsystems. Highest leverage, fully self-contained.
@@ -280,19 +373,18 @@ team protocols, coding fleets). No domain policy in core.
   primitive — *not* specific protocols (shutdown/plan-approval are embedder choreography).
 - **Verify:** worker A → worker B message is visible on B's next turn; concurrent writes to
   one inbox don't drop messages; the correlation helper matches a response to its request.
-- **Status:** done (in-process substrate). `mailbox/` ships `Mailbox` protocol +
+- **Status:** done (in-process + SQLite substrate). `mailbox/` ships `Mailbox` protocol +
   `InMemoryMailbox` (per-recipient FIFO, async-lock guarded so concurrent sends never drop;
-  destructive/atomic `drain`), `MailboxMessage` (neutral `type` + `request_id`/`in_reply_to`),
+  destructive/atomic `drain`), `SqliteMailbox` (durable, per-recipient FIFO, restart-safe,
+  transactional destructive drain), `MailboxMessage` (neutral `type` + `request_id`/`in_reply_to`),
   and a non-blocking `Correlator` (pending→resolved FSM — a turn-based agent polls across
   turns rather than blocking its turn). `Agent(mailbox=...)` auto-registers the
   `send_message` tool; the loop drains a session's `mailbox_address` into `provider_view`
   each turn at the same chokepoint as `pending_notifications` (so parent and workers are
   served uniformly — workers default `mailbox_address` to their display_name). Opt-in:
-  no mailbox → no tool, no drain (byte-identical). **Deferred (YAGNI):** durable
-  `SqliteMailbox`/`FileMailbox` adapters — the live drain is in-process (workers are
-  `agent._sessions`), so durability is an embedder concern reachable through the same
-  protocol, mirroring the app-owned `MemoryStore`/`SessionStore` pattern. Add when a
-  cross-process delivery need is concrete.
+  no mailbox → no tool, no drain (byte-identical). **Deferred:** `FileMailbox` and
+  distributed queue adapters; Redis/SQS/etc. remain embedders' implementations behind the
+  same protocol.
 
 #### 2.2 Generic filesystem isolation backend — *seam (generalizes worktrees)*
 - **Why:** parallel subagents share one cwd — real-disk edit collisions are unaddressed.
@@ -414,7 +506,7 @@ team protocols, coding fleets). No domain policy in core.
   `SqliteRunStore`.
 - **Approach:** a `Schedule` abstraction (interval + a neutral `cron_matches`/
   `validate_cron` utility), an async `SchedulerLoop` (`asyncio.create_task`, 1s tick — not
-  a thread), and a `ScheduleStore` protocol for durability + a multi-process lock row. On
+  a thread), and a `ScheduleStore` protocol for durability + atomic due claims. On
   fire, enqueue into `session.pending_notifications` (reuse the existing drain). Expose
   register/list/cancel as `@tool` functions, auto-registered when a `ScheduleStore` is
   configured. Emit a `ScheduleEvent`. The firing *payload/policy* is the embedder's.
@@ -426,22 +518,23 @@ team protocols, coding fleets). No domain policy in core.
   Sun=0). `Schedule` (cron *or* interval, exactly one) validates the cron in
   `__post_init__` and computes its own `next_run`. `ScheduleStore` is a protocol with two
   adapters — `InMemoryScheduleStore` and a durable `SqliteScheduleStore`
-  (`SqliteExecutor`-backed, survives a reopen). `SchedulerLoop` is an `asyncio` task with a
-  pure, testable `tick()` core (1s cadence = `tick` + `asyncio.sleep`): each due schedule
-  is fired into `session.pending_notifications` as a `<scheduled-task>` message — the same
-  drain background workers use, so it surfaces as a `UserEvent` next turn — `next_run` is
-  recomputed (no double-fire) and persisted, and a `ScheduleEvent(status="fired")` is
-  emitted. `schedule_tools(store)` exposes `CreateSchedule` / `ListSchedules` /
-  `CancelSchedule` (cron validated at register time), auto-registered by
-  `Agent(schedule_store=...)`; off by default (byte-identical). The firing payload is
-  embedder policy. **YAGNI deferrals:** the multi-process leader-election lock row (so only
-  one of N processes fires a shared schedule) is left to the embedder — the single-process
-  loop is the common case and the durable store already covers restart survival; persisting
-  *via* `SqliteRunStore` was set aside in favor of a dedicated `schedules` table/store
-  (cleaner separation than overloading the run-checkpoint store); cron DOM/DOW use simple AND
-  (not the legacy OR) semantics; the `Agent` does not own the loop lifecycle (the embedder
-  starts/stops a `SchedulerLoop` bound to a session), keeping the timer explicit rather than
-  an implicit background thread inside `Agent`.
+  (`SqliteExecutor`-backed, survives a reopen, and implements transactional
+  `claim_due(now)`). `SchedulerLoop` is an `asyncio` task with a pure, testable `tick()`
+  core (1s cadence = `tick` + `asyncio.sleep`): stores that implement
+  `ClaimingScheduleStore` atomically advance due rows before firing, so two processes
+  sharing a SQLite database cannot both fire the same schedule tick. Each claimed schedule
+  fires into `session.pending_notifications` as a `<scheduled-task>` message — the same
+  drain background workers use, so it surfaces as a `UserEvent` next turn — and a
+  `ScheduleEvent(status="fired")` is emitted. `schedule_tools(store)` exposes
+  `CreateSchedule` / `ListSchedules` / `CancelSchedule` (cron validated at register time),
+  auto-registered by `Agent(schedule_store=...)`; off by default (byte-identical). The
+  firing payload is embedder policy. **YAGNI deferrals:** distributed scheduler backends /
+  external leader-election services remain embedder implementations; persisting *via*
+  `SqliteRunStore` was set aside in favor of a dedicated `schedules` table/store (cleaner
+  separation than overloading the run-checkpoint store); cron DOM/DOW use simple AND (not
+  the legacy OR) semantics; the `Agent` does not own the loop lifecycle (the embedder
+  starts/stops a `SchedulerLoop` bound to a session), keeping the timer explicit rather
+  than an implicit background thread inside `Agent`.
 
 ---
 

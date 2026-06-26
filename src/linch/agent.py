@@ -199,6 +199,34 @@ def _resolve_tool_cache(value: Any) -> Any:
     )
 
 
+def _resolve_read_before_write(value: Any) -> Any:
+    """Normalize ``read_before_write`` into a safety hook or ``None``."""
+    if value is None or value is False:
+        return None
+    from .hooks.read_before_write import ReadBeforeWriteConfig, ReadBeforeWriteHook
+
+    if value is True:
+        return ReadBeforeWriteHook()
+    if isinstance(value, ReadBeforeWriteConfig):
+        return ReadBeforeWriteHook(value)
+    if isinstance(value, ReadBeforeWriteHook):
+        return value
+    if hasattr(value, "on_pre_tool_use") and hasattr(value, "on_post_tool_use"):
+        return value
+    raise TypeError(
+        "read_before_write must be True, False, ReadBeforeWriteConfig, "
+        f"or ReadBeforeWriteHook; got {type(value)!r}"
+    )
+
+
+def _has_read_before_write_hook(hooks: list[Any]) -> bool:
+    # Match by type, not by name string: an unrelated hook that happens to be
+    # named "read_before_write" must not silently suppress the default guard.
+    from .hooks.read_before_write import ReadBeforeWriteHook
+
+    return any(isinstance(hook, ReadBeforeWriteHook) for hook in hooks)
+
+
 def _system_prompt_section_blocks(cfg: SystemPromptConfig | None) -> dict[str, list[SystemBlock]]:
     grouped: dict[str, list[SystemBlock]] = {placement: [] for placement in _SECTION_PLACEMENTS}
     if cfg is None or not cfg.sections:
@@ -327,6 +355,7 @@ class AgentOptions:
     filesystem: Any = None  # FileBackend | None
     result_offload: Any = None  # OffloadConfig | None; None = use default OffloadConfig()
     hooks: Any = None
+    read_before_write: Any = True
     extra_subagents: list[AgentDefinition] | None = None
     enable_worker_tools: bool = False
     retain_subagents: bool = False
@@ -389,6 +418,7 @@ class Agent:
         mailbox: Any = None,
         schedule_store: Any = None,
         hooks: Any = None,
+        read_before_write: Any = True,
         tool_cache: Any = None,
         extra_subagents: list[AgentDefinition] | None = None,
         enable_worker_tools: bool = False,
@@ -508,7 +538,11 @@ class Agent:
         self._system_prompt_config: SystemPromptConfig | None = system_prompt_config
         self._cached_system_blocks: list[SystemBlock] | None = None
         self._configure_loop_guard(loop_guard, loopGuard)
-        self._configure_hooks(hooks=hooks, tool_cache=tool_cache)
+        self._configure_hooks(
+            hooks=hooks,
+            read_before_write=read_before_write,
+            tool_cache=tool_cache,
+        )
         self._configure_filesystem(filesystem, result_offload)
         self._configure_mailbox(mailbox)
         self._configure_schedule_store(schedule_store)
@@ -552,10 +586,19 @@ class Agent:
         else:
             self.loop_guard = _normalize_loop_guard(effective_lg)
 
-    def _configure_hooks(self, *, hooks: Any, tool_cache: Any = None) -> None:
+    def _configure_hooks(
+        self,
+        *,
+        hooks: Any,
+        read_before_write: Any = True,
+        tool_cache: Any = None,
+    ) -> None:
         from .hooks import normalize_hooks
 
         self._hooks: list[Any] = normalize_hooks(hooks)
+        rbw_hook = _resolve_read_before_write(read_before_write)
+        if rbw_hook is not None and not _has_read_before_write_hook(self._hooks):
+            self._hooks.append(rbw_hook)
         # Tool-result cache is opt-in. Append it LAST so it keys on the input
         # after any user PreToolUse hook has mutated it, and serves only once
         # those hooks have run. Replacing `agent.hooks` wholesale drops it.

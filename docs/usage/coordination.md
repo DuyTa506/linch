@@ -58,8 +58,10 @@ fired = await loop.tick()    # returns the schedules that fired this tick
 
 `Schedule` takes exactly one of `cron` / `interval_s`; the cron expression is
 validated at creation, so an invalid expression is rejected before it can fire.
-`SqliteScheduleStore` makes schedules durable across restarts. A `ScheduleEvent`
-is emitted on each fire for observers.
+`SqliteScheduleStore` makes schedules durable across restarts and supports atomic
+due claims: if two `SchedulerLoop`s share the same SQLite database, only one loop
+claims and fires a due schedule for a given tick. A `ScheduleEvent` is emitted on
+each fire for observers.
 
 **When to reach for it:** the agent itself should set up recurring work
 ("check CI every 30 min", "summarize the inbox at 9am"). If your *application*
@@ -115,8 +117,20 @@ c.resolve(MailboxMessage(sender="lead", recipient="alice",
 assert c.is_resolved("req-001")                      # requester checks on a later turn
 ```
 
-`InMemoryMailbox` is in-process (one agent, many workers). For cross-process teams,
-implement the `Mailbox` protocol over Redis/SQS — see [Extending](./extending.md).
+`InMemoryMailbox` is in-process (one agent, many workers). For cross-process teams
+or restart survival, use `SqliteMailbox`:
+
+```python
+from linch import Agent, SqliteMailbox
+
+box = SqliteMailbox("coordination.db")
+agent = Agent(model="gpt-5", mailbox=box)
+```
+
+`SqliteMailbox` preserves FIFO order per recipient and makes `drain()` destructive
+inside one SQLite transaction, so two workers draining the same inbox do not both
+receive the same message. For Redis/SQS or other infrastructure, implement the
+same `Mailbox` protocol — see [Extending](./extending.md).
 
 **When to reach for it:** long-lived teammates that negotiate (plan approval,
 graceful shutdown) or self-organize. For one-shot delegation, plain

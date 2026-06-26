@@ -61,6 +61,10 @@ class SqliteExecutor:
         conn = sqlite3.connect(self._path, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         try:
+            # Wait for a contended write lock instead of failing fast with
+            # SQLITE_BUSY — concurrent `BEGIN IMMEDIATE` drains (e.g. two
+            # SqliteMailbox connections) then serialize reliably.
+            conn.execute("pragma busy_timeout=5000")
             if self._wal and self._path not in (":memory:", ""):
                 conn.execute("pragma journal_mode=wal")
                 conn.commit()
