@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-`linch` is a Python SDK packaged from `src/linch`. Core runtime code lives in modules such as `agent.py`, `loop.py`, `scheduler.py`, `types.py`, and feature packages like `providers/`, `tools/`, `filesystem/`, `memory/`, `sessions/`, `skills/`, `subagents/`, and `observability/`. Tests mirror these areas under `tests/`, with focused subdirectories such as `tests/providers/`, `tests/tools/`, `tests/storage/`, and `tests/integration/`. Runnable examples are grouped by topic under `examples/`, docs live in `docs/`, and utility scripts live in `scripts/`.
+`linch` is a Python SDK packaged from `src/linch` (src-layout). Core runtime modules include `agent.py`, `session.py`, `scheduler.py`, `compaction.py`, `events.py`, and `types.py`; the agent loop is the `loop/` package (split by responsibility: `runner.py`, `streaming.py`, `request.py`, `terminals.py`, `finalize.py`). Feature packages include `providers/`, `tools/`, `context/`, `memory/`, `filesystem/`, `permissions/`, `sessions/`, `skills/`, `subagents/`, `coordination/`, `workflow/`, `deep_agent/`, `evals/`, `hooks/`, `observability/`, `loop_guard/`, and `mcp/`. Tests mirror these areas under `tests/`, with focused subdirectories such as `tests/providers/`, `tests/tools/`, `tests/storage/`, and `tests/integration/`. Runnable examples are grouped by topic under `examples/`, utility scripts live in `scripts/`, and docs live in `docs/` — start at `docs/architecture/README.md` (subsystem contracts and invariants) and `docs/usage/README.md` (how to use each feature), and read the relevant page before changing a subsystem.
 
 ## Build, Test, and Development Commands
 
@@ -24,7 +24,7 @@ Use targeted tests while iterating, for example `pytest tests/tools/test_functio
 
 ## Coding Style & Naming Conventions
 
-Target Python 3.10+. Ruff enforces imports and lint rules (`E`, `F`, `I`, `UP`, `B`) with a 100-character line length. Use 4-space indentation, type annotations for public surfaces, and `slots=True` on new dataclasses following existing primitives. Keep runtime/provider paths async; avoid blocking I/O in `loop.py`, `scheduler.py`, `compaction.py`, and provider modules. Tool classes are duck-typed; do not introduce base-class inheritance where protocols are expected.
+Target Python 3.10+. Ruff enforces imports and lint rules (`E`, `F`, `I`, `UP`, `B`) with a 100-character line length. Use 4-space indentation, type annotations for public surfaces, and `slots=True` on new dataclasses following existing primitives. Keep runtime/provider paths async; avoid blocking I/O in `loop/`, `scheduler.py`, `compaction.py`, and provider modules. Tools are duck-typed protocols; do not introduce base-class inheritance where protocols are expected. The supported public surface is exactly `linch.__all__` (`tests/test_public_api.py` guards it); submodule paths and underscore names are private.
 
 ## Testing Guidelines
 

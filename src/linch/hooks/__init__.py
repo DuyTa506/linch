@@ -31,6 +31,7 @@ from .contexts import (
 )
 from .dispatcher import HookDispatcher, HookDispatchResult, normalize_hooks
 from .memory import MemoryExtractionHook
+from .read_before_write import ReadBeforeWriteConfig, ReadBeforeWriteHook
 from .tool_cache import ToolCacheConfig, ToolCacheHook
 from .types import HookAction, HookEvent, HookResult
 
@@ -69,6 +70,8 @@ __all__ = [
     "StopPredicateHook",
     "RunTelemetryHook",
     "MemoryExtractionHook",
+    "ReadBeforeWriteHook",
+    "ReadBeforeWriteConfig",
     "ToolCacheHook",
     "ToolCacheConfig",
 ]

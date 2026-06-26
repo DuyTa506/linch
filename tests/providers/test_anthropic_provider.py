@@ -123,6 +123,82 @@ def test_build_payload_cache_boundary_all_static_marks_last():
     assert system[2]["cache_control"] == {"type": "ephemeral"}
 
 
+def test_cache_prefix_stable_across_turns():
+    """End-to-end cache-hit validation: the cached prefix (tools + static system
+    + earlier messages) is byte-identical from one turn to the next, so Anthropic
+    reads the prior turn's prefix from cache instead of re-billing it.
+
+    This is the property that produces *hits* — the other tests only check where
+    a single turn's breakpoints land. Anthropic's cached prefix is ordered
+    tools -> system -> messages, so all three must stay stable.
+    """
+    from linch.providers.anthropic import AnthropicProviderOptions, _build_payload
+    from linch.types import Message, ProviderRequest, SystemBlock, TextBlock
+
+    tools = [
+        {"name": "read", "description": "", "input_schema": {"type": "object"}},
+        {"name": "write", "description": "", "input_schema": {"type": "object"}},
+    ]
+
+    def payload_for(messages, recalled):
+        req = ProviderRequest(
+            model="claude-sonnet-4-6",
+            system=[
+                SystemBlock(text="Static identity", cacheable=True),
+                SystemBlock(text="Static protocol", cacheable=True),
+                # Volatile per-turn tail (e.g. memory recall) — cacheable=False.
+                SystemBlock(text=f"recalled: {recalled}", cacheable=False),
+            ],
+            tools=tools,
+            messages=messages,
+            cache_prompt=True,
+        )
+        return _build_payload(req, AnthropicProviderOptions())
+
+    turn1 = [Message(role="user", content=[TextBlock(text="q1")])]
+    turn2 = [
+        Message(role="user", content=[TextBlock(text="q1")]),
+        Message(role="assistant", content=[TextBlock(text="a1")]),
+        Message(role="user", content=[TextBlock(text="q2")]),
+    ]
+
+    # The volatile tail changes between turns; the cached prefix must not.
+    p1 = payload_for(turn1, recalled="blue")
+    p2 = payload_for(turn2, recalled="green")
+
+    # 1. Tools (first in the cached prefix) are byte-identical across turns.
+    assert p1["tools"] == p2["tools"]
+
+    # 2. Static system prefix up to and including the breakpoint is byte-identical,
+    #    even though the volatile tail block changed.
+    assert p1["system"][:2] == p2["system"][:2]
+    assert p1["system"][1]["cache_control"] == {"type": "ephemeral"}  # breakpoint
+    assert "cache_control" not in p1["system"][2]  # volatile tail stays uncached
+    assert p1["system"][2]["text"] != p2["system"][2]["text"]
+
+    # 3. Turn 1's messages survive verbatim as the prefix of turn 2 (ignoring the
+    #    moving message breakpoint), so that prefix is a cache read next turn.
+    def strip(msgs):
+        return [
+            {
+                **m,
+                "content": [
+                    {k: v for k, v in b.items() if k != "cache_control"} for b in m["content"]
+                ],
+            }
+            for m in msgs
+        ]
+
+    s1, s2 = strip(p1["messages"]), strip(p2["messages"])
+    assert s2[: len(s1)] == s1
+
+    # 4. The moving breakpoint sits on the last user message each turn, and turn 2
+    #    no longer marks turn 1's (now-cached) user message.
+    assert p1["messages"][-1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert p2["messages"][-1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in p2["messages"][0]["content"][0]
+
+
 def test_build_payload_cache_boundary_leading_dynamic_marks_later_cacheable():
     # Cache breakpoint is the last cacheable system block, not just a leading prefix.
     from linch.providers.anthropic import AnthropicProviderOptions, _build_payload

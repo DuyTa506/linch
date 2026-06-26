@@ -227,8 +227,8 @@ A few practical notes on the snippets above:
 ## Choosing a provider path
 
 Use a direct provider when Linch has native semantics for that API: OpenAI
-Responses for stateful reasoning controls, Anthropic for prompt caching and
-Claude thinking signatures, Gemini for Google model/tool semantics, and
+Responses for stateful reasoning controls, Anthropic for explicit prompt-cache
+markers and Claude thinking signatures, Gemini for Google model/tool semantics, and
 llama.cpp, vLLM, or SGLang for self-hosted local servers.
 
 Use `OpenAIChatCompletionsProvider(base_url=...)` when a service implements the
@@ -309,8 +309,45 @@ backends.
 Structured output is supported on every direct provider but reached differently
 per backend (Anthropic, for instance, uses a generated final-schema tool). The
 mechanics — and how schema-repair retries work — live in
-[Structured output](./structured-output.md). Prompt caching is Anthropic-only;
-enable it via the provider options, not a global flag.
+[Structured output](./structured-output.md).
+
+---
+
+## Prompt caching
+
+Every direct provider reports `prompt_cache=True`, but the wire mechanism
+differs:
+
+| Provider | Mechanism | What Linch emits |
+|---|---|---|
+| `anthropic` | Explicit `cache_control` breakpoints | Marks the last static system block **and** the last user message — caches `tools → system → conversation`, the prefix growing each turn |
+| `llamacpp` | Explicit `cache_prompt` | Sends `cache_prompt: true` in the request body |
+| `sglang` | RadixAttention (automatic) | `enable_cache_report: true` so the server streams cached-token counts |
+| `openai-chat`, `openai-responses` | Automatic prefix cache | Nothing — sets `stream_options.include_usage` so usage (incl. cached tokens) is returned |
+| `vllm` | Automatic prefix cache (APC) | Nothing (inherits the OpenAI-chat path) |
+| `gemini` | **Implicit** cache (Gemini 2.5) | Nothing — Google caches automatically; Linch only reads the counts back. There is no explicit cache-control knob for Gemini |
+
+Regardless of mechanism, a cache **hit** is surfaced uniformly as
+`Usage.cache_read_tokens`, which rolls up into `RunReport`'s cache-read ratio —
+that is the observable proof the cache is working.
+
+### Keeping the cached prefix stable (what produces hits)
+
+A hit requires the **leading bytes of the request to be identical** to a prior
+call. Linch is built for this: the system prompt is materialized once per agent
+(date/`cwd` frozen at construction), tools keep a stable insertion order, and
+per-turn dynamic content (memory recall, ephemeral notes) is appended **after**
+the static prefix as `cacheable=False` blocks, so it sits outside the cached
+region. Two host-controlled actions deliberately break the prefix and cost you a
+re-cache:
+
+- **Compaction** rewrites the message history into a summary, so the message
+  prefix changes from that point (the `tools + system` cache still survives).
+  This is occasional and intentional.
+- **Per-turn tool selection** — a `ContextBuilder` that returns a different
+  `selected_tools` set each turn changes the tools array, which is *first* in the
+  cached prefix, so it invalidates the whole cache every turn. Keep the tool set
+  stable across turns if you rely on caching.
 
 ---
 

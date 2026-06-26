@@ -190,7 +190,9 @@ SQLite memory, optional Postgres memory via `pip install 'linch[postgres]'`,
 tiered memory, and memory search/upsert tools. `PostgresMemoryStore` mirrors the
 SQLite store's keyword-search API, so you can promote from SQLite to Postgres for
 shared, persistent memory without touching your builder or tool wiring. Vector
-databases and embedding models stay in the host app or an adapter.
+databases and embedding models stay in the host app or an adapter. See
+[Vector memory adapters](./vector-memory-adapters.md) for FAISS, pgvector, and
+Qdrant recipes using this same `MemoryStore` shape.
 
 ---
 
@@ -219,5 +221,6 @@ provider request.
 
 - [./hooks.md](./hooks.md) — `ContextInjectionHook` and the hook lifecycle
 - [./tools.md](./tools.md) — the shared `deps` object and `ToolContext`
+- [./vector-memory-adapters.md](./vector-memory-adapters.md) — vector DB adapter recipes
 - [./filesystem.md](./filesystem.md) — offloading large payloads to durable references
 - [../architecture.md](../architecture.md) — how context and memory fit the loop

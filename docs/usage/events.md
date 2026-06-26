@@ -153,6 +153,7 @@ report = await load_run_report(agent.run_store, run_id)
 print(report.to_markdown())
 
 payload = report.to_dict()
+print(payload["summary"])
 print(payload["context_builds"])
 print(payload["permission_requests"])
 print(payload["tool_calls"])
@@ -175,6 +176,20 @@ report = build_run_report(events)
 
 Use `to_markdown()` for a human-readable dump (logs, PR comments) and
 `to_dict()` when you want to inspect or serialize specific facets.
+
+For a quick local report from a durable SQLite run store, use the bundled script:
+
+```bash
+python scripts/run_report.py --runs-db .linch/runs.db <run_id>
+python scripts/run_report.py --runs-db .linch/runs.db --format markdown <run_id>
+python scripts/run_report.py --runs-db .linch/runs.db --format json <run_id>
+```
+
+`payload["summary"]` is the compact observability surface: event counts,
+duration, total tokens/cost, cache-read ratio, tool latency and error rate,
+context utilization, recovery counters for compaction, model fallback,
+verifier/hook retry, result offload, and risk counters such as permission
+requests, loop guards, errors, and recovery hints.
 
 `payload["long_run"]` summarizes signals that matter in long-horizon sessions:
 context build counts, trimmed context builds, max used context tokens, selected
@@ -221,12 +236,14 @@ result = await run_eval(
 per-scorer pass/fail/`None`. A `None` means "not applicable / not observed" —
 distinct from a hard fail — so a scorer that never saw the relevant signal does
 not silently count as a pass. Pair this with a `ScriptedProvider` to grade
-behavior without spending a live model call.
+behavior without spending a live model call. For suite files, target
+comparisons, and CI exit codes, see [Evals and benchmarks](./evals.md).
 
 ---
 
 ## Related pages
 
 - [Hooks](./hooks.md) — observe this stream via `on_event_emit` and react in-loop.
+- [Evals and benchmarks](./evals.md) — run eval suites across deterministic targets.
 - [Providers](./providers.md) — what `partial_assistant`/`usage` events carry per backend.
 - [Agent](./agent.md) — `RunBudget` and the `budget` event.

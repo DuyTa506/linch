@@ -127,6 +127,7 @@ core ones are also re-exported from `linch`).
 | `StopPredicateHook(predicate)` | a `(session) -> bool` stop predicate | `RunOptions(stop_when=...)` |
 | `RunTelemetryHook(observers)` | one or more `RunObserver`s | `observers=` |
 | `ToolCacheHook(config)` | per-run memoization of read-scope tool calls | `tool_cache=` — see [tool-cache.md](./tool-cache.md) |
+| `ReadBeforeWriteHook(config)` | read-before-edit gate for the virtual filesystem | `read_before_write=` (default `True`) |
 
 ```python
 from linch.hooks import (
@@ -158,6 +159,16 @@ Notes:
   `before_tool_call` the tool is *blocked* (error result), and if it raises in
   `after_tool_result` the result becomes an error — a guard that throws never
   silently lets the tool through.
+- **`ReadBeforeWriteHook`** (installed by default, disable with
+  `Agent(read_before_write=False)`) blocks an in-place `edit_file` on the virtual
+  filesystem until that file has been read or written this session — a successful
+  `read_file`/`write_file` marks it. Workspace `Edit` is *not* covered here: the
+  builtin `Edit` tool enforces its own read-before-edit gate (single source of
+  truth, keeps its "You must Read…" message), so this flag governs only the
+  virtual gate. Whole-file overwrites (`Write`/`write_file`) are allowed by
+  default — that is their purpose — but a host can opt into overwrite-gating of
+  *existing* files via `ReadBeforeWriteConfig(overwrite_tools=...)`. A windowed
+  (`offset`/`limit`) read does not unlock edits to the unseen parts of a file.
 - **`RunTelemetryHook`** translates loop events into the `RunObserver` protocol
   (`on_run_start/end`, `on_turn_*`, `on_provider_call_*`, `on_tool_*`,
   `on_event`). It also forwards `aclose()`/`close()` to the wrapped observers on
@@ -168,11 +179,14 @@ Notes:
 
 ## Telemetry: `HookEventRecord`
 
-Every hook invocation emits a `hook` event in the stream (`HookEventRecord`)
-with `event` (the chokepoint), `hook` (the hook's `name` or class name),
-`action` (`continue`/`mutate`/`block`/`retry`/`stop`/`force_continue`/`error`),
-and `reason`. This makes hook decisions visible to UIs, [run reports](./events.md),
-and `on_event` consumers without extra wiring.
+Every hook invocation that **acts** emits a `hook` event in the stream
+(`HookEventRecord`) with `event` (the chokepoint), `hook` (the hook's `name` or
+class name),
+`action` (`mutate`/`block`/`retry`/`stop`/`force_continue`/`resolve`/`error`),
+and `reason`. A hook that returns `None` (a no-op `continue`) emits nothing, so a
+default-on hook that fires on every tool call does not flood the stream. This
+makes hook decisions visible to UIs, [run reports](./events.md), and `on_event`
+consumers without extra wiring.
 
 ```python
 from linch import is_hook_event

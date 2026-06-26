@@ -191,11 +191,25 @@ _SUMMARY_PROMPT = (
     "Keep it factual and dense. Omit greetings, restated goals, and meta commentary."
 )
 
+#: Domain-neutral alternative to :data:`_SUMMARY_PROMPT` for non-coding hosts.
+#: linch is embeddable, so its built-in default leans coding (file paths, tool
+#: calls). Pass this to a strategy — ``DefaultCompaction(prompt=GENERAL_SUMMARY_PROMPT)``
+#: — when the host is not a software-engineering agent and the file/tool framing
+#: would just be noise. Part of the public API.
+GENERAL_SUMMARY_PROMPT = (
+    "Summarize the conversation so far. Capture:\n"
+    "- Decisions made and conclusions reached\n"
+    "- Key facts, entities, and data established (with identifiers)\n"
+    "- Actions taken and their outcomes\n"
+    "- Open questions and current task state\n"
+    "Keep it factual and dense. Omit greetings, restated goals, and meta commentary."
+)
+
 _DETAILED_SUMMARY_PROMPT = (
     "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\n"
     "\n"
     "Create a continuation-safe summary of the earlier conversation. Capture enough "
-    "technical detail for another agent to continue the work without access to the "
+    "detail for another agent to continue the work without access to the "
     "compacted messages.\n"
     "\n"
     "Before the final summary, you may use an <analysis> block to organize details. "
@@ -203,18 +217,18 @@ _DETAILED_SUMMARY_PROMPT = (
     "sections:\n"
     "\n"
     "1. Primary Request and Intent: the user's explicit requests and intent.\n"
-    "2. Files, Artifacts, and Code Sections: files, artifacts, data, or code read, "
-    "modified, created, or discussed; include paths and relevant identifiers when known.\n"
-    "3. Errors and Fixes: errors, failed commands, failed assumptions, and how they "
-    "were resolved.\n"
+    "2. Key Information and Artifacts: facts, decisions, data, documents, files, or "
+    "other artifacts read, produced, or discussed; include identifiers (paths, URLs, "
+    "IDs, names) when known.\n"
+    "3. Errors and Fixes: errors, failures, wrong assumptions, and how they were "
+    "resolved.\n"
     "4. Pending Tasks: outstanding tasks explicitly requested or discovered.\n"
     "5. Current Work: what was being worked on immediately before compaction.\n"
     "6. Next Step: the next concrete action aligned with the latest user request; "
     "write 'None' if the prior task was complete.\n"
     "\n"
-    "Be factual and dense. Preserve exact paths, commands, API names, public "
-    "interfaces, test results, and user corrections. Do not invent work that was "
-    "not done."
+    "Be factual and dense. Preserve exact identifiers, values, parameters, and "
+    "results, along with any user corrections. Do not invent work that was not done."
 )
 
 
@@ -256,6 +270,12 @@ async def summarize_with_provider(
 class DefaultCompaction:
     id = "default-keep-recent-10"
 
+    def __init__(self, *, prompt: str = _SUMMARY_PROMPT) -> None:
+        """*prompt* lets a non-coding embedder reword the summary instructions
+        without reimplementing the strategy; defaults to the built-in
+        coding-oriented :data:`_SUMMARY_PROMPT`."""
+        self.prompt = prompt
+
     async def compact(self, ctx: CompactionContext, provider: Any) -> list[Message]:
         recent = last_n_turn_boundaries(ctx.messages, 10)
         boundary = len(ctx.messages) - len(recent)
@@ -264,7 +284,9 @@ class DefaultCompaction:
         if not older:
             return ctx.messages
 
-        summary_text = await summarize_with_provider(provider, ctx.model, older, ctx.signal)
+        summary_text = await summarize_with_provider(
+            provider, ctx.model, older, ctx.signal, prompt=self.prompt
+        )
 
         summary_msg = Message(
             role="user",
@@ -275,13 +297,20 @@ class DefaultCompaction:
 
 
 class DetailedCompaction:
-    """Continuation-safe compaction with detailed technical handoff sections."""
+    """Continuation-safe compaction with detailed, domain-neutral handoff sections."""
 
     id = "detailed-continuation-keep-recent-10"
 
-    def __init__(self, *, keep_recent_turns: int = 10, max_output_tokens: int = 8192) -> None:
+    def __init__(
+        self,
+        *,
+        keep_recent_turns: int = 10,
+        max_output_tokens: int = 8192,
+        prompt: str = _DETAILED_SUMMARY_PROMPT,
+    ) -> None:
         self.keep_recent_turns = keep_recent_turns
         self.max_output_tokens = max_output_tokens
+        self.prompt = prompt
 
     async def compact(self, ctx: CompactionContext, provider: Any) -> list[Message]:
         recent = last_n_turn_boundaries(ctx.messages, self.keep_recent_turns)
@@ -296,7 +325,7 @@ class DetailedCompaction:
             ctx.model,
             older,
             ctx.signal,
-            prompt=_DETAILED_SUMMARY_PROMPT,
+            prompt=self.prompt,
             max_output_tokens=self.max_output_tokens,
         )
 

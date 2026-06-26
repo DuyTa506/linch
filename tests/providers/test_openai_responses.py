@@ -126,3 +126,22 @@ def test_map_openai_error_context_length_without_status_is_not_retried() -> None
     mapped2 = map_openai_error(NoStatusMessage("prompt is too long: 201537 tokens"))
     assert isinstance(mapped2, ContextLengthError)
     assert mapped2.retryable is False
+
+
+def test_build_usage_surfaces_cache_read_tokens() -> None:
+    """Responses API cache hits must surface as Usage.cache_read_tokens
+    (the observable proof the prompt cache is working)."""
+    from linch.openai_responses import build_usage
+
+    raw = {
+        "input_tokens": 1000,
+        "output_tokens": 50,
+        "input_tokens_details": {"cached_tokens": 768},
+    }
+    usage = build_usage(raw)
+    assert usage.input_tokens == 1000
+    assert usage.cache_read_tokens == 768
+
+    # No cache details / no usage → 0, never raises.
+    assert build_usage({"input_tokens": 10, "output_tokens": 2}).cache_read_tokens == 0
+    assert build_usage(None).cache_read_tokens == 0
