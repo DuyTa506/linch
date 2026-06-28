@@ -48,6 +48,11 @@ def test_run_report_summary_format_is_scannable():
     assert "- cache_read_ratio: 0.2308" in text
     assert "- failed: 1" in text
     assert "- slowest: Search (25ms, error=True)" in text
+    assert "- top slow:" in text
+    assert "  - Search (25ms, error=True)" in text
+    assert "- top failures:" in text
+    assert "  - Search (25ms)" in text
+    assert "- pressure: none" in text
     assert "Recovery" in text
     assert "- result_offloads: 0" in text
     assert "Risk" in text

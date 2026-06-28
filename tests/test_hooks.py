@@ -644,6 +644,131 @@ async def test_before_final_answer_reentry_guard_caps_retries() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "method",
+    [
+        "on_agent_start",
+        "on_turn_start",
+        "on_before_provider_call",
+        "on_provider_call_start",
+        "on_provider_call_stop",
+        "on_after_provider_call",
+        "on_turn_stop",
+        "on_agent_stop",
+    ],
+)
+async def test_hook_exception_at_lifecycle_chokepoint_does_not_crash_run(method: str) -> None:
+    """Embedding gate: a hook that raises at any lifecycle chokepoint must not
+    crash the run loop — the exception is isolated and the run still completes
+    successfully."""
+    from linch.evals import ScriptedProvider, TextTurn
+
+    def _raise(self: Any, ctx: Any) -> None:
+        raise RuntimeError("hook boom")
+
+    Boom = type("Boom", (), {"name": "boom", method: _raise})
+
+    provider = ScriptedProvider([TextTurn(text="done")])
+    agent = _agent(provider, hooks=[Boom()])
+    session = await agent.session()
+    events = await _collect(session, "hello")
+
+    assert events[-1].type == "result"
+    assert events[-1].subtype == "success"
+    assert events[-1].final_text == "done"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["on_before_provider_call", "on_after_provider_call"])
+async def test_provider_path_hook_exception_is_surfaced_as_error_event(method: str) -> None:
+    """On the per-turn provider path the isolated hook error is also forwarded to
+    the event stream as a ``HookEventRecord`` with ``action='error'``."""
+    from linch import HookEventRecord
+    from linch.evals import ScriptedProvider, TextTurn
+
+    def _raise(self: Any, ctx: Any) -> None:
+        raise RuntimeError("hook boom")
+
+    Boom = type("Boom", (), {"name": "boom", method: _raise})
+
+    provider = ScriptedProvider([TextTurn(text="done")])
+    agent = _agent(provider, hooks=[Boom()])
+    session = await agent.session()
+    events = await _collect(session, "hello")
+
+    assert events[-1].subtype == "success"
+    assert any(
+        isinstance(event, HookEventRecord) and event.hook == "boom" and event.action == "error"
+        for event in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_hook_exception_is_logged(caplog: Any) -> None:
+    """Lifecycle notifications (AgentStart/TurnStart/...) do not forward telemetry
+    to the event stream, so the isolated hook error must at least be logged —
+    never swallowed silently."""
+    import logging
+
+    from linch.evals import ScriptedProvider, TextTurn
+
+    def _raise(self: Any, ctx: Any) -> None:
+        raise RuntimeError("hook boom")
+
+    Boom = type("Boom", (), {"name": "boom", "on_turn_start": _raise})
+
+    provider = ScriptedProvider([TextTurn(text="done")])
+    agent = _agent(provider, hooks=[Boom()])
+    session = await agent.session()
+    with caplog.at_level(logging.WARNING, logger="linch.observability"):
+        events = await _collect(session, "hello")
+
+    assert events[-1].subtype == "success"
+    assert any(
+        "boom" in record.getMessage() and "TurnStart" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_post_tool_use_hook_exception_does_not_crash_tool_loop() -> None:
+    """A raising PostToolUse hook is isolated: the tool's result still flows and
+    the run completes (the unmutated result is used, since the hook never
+    returned a mutation)."""
+    from linch import HookEventRecord, ToolCallEndEvent, ToolRegistry
+    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+
+    tool = RecordingTool()
+    registry = ToolRegistry()
+    registry.add(tool)
+
+    class Boom:
+        name = "boom"
+
+        def on_post_tool_use(self, ctx: Any) -> None:
+            raise RuntimeError("post boom")
+
+    provider = ScriptedProvider(
+        [ToolUseTurn(tool_name="Record", tool_input={"value": "raw"}), TextTurn(text="done")]
+    )
+    agent = _agent(provider, hooks=[Boom()], tools=registry)
+    session = await agent.session()
+    events = await _collect(session)
+
+    assert events[-1].type == "result"
+    assert events[-1].subtype == "success"
+    end = next(event for event in events if isinstance(event, ToolCallEndEvent))
+    assert end.result == "tool:raw"  # original result survived the broken hook
+    assert any(
+        isinstance(event, HookEventRecord)
+        and event.event == "PostToolUse"
+        and event.hook == "boom"
+        and event.action == "error"
+        for event in events
+    )
+
+
+@pytest.mark.asyncio
 async def test_compaction_dispatches_pre_and_post_compact_hooks() -> None:
     from linch.abort import AbortContext
     from linch.compaction import run_forced_compaction

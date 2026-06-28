@@ -181,6 +181,37 @@ agent = Agent(
 
 ---
 
+## Truncation recovery
+
+When a model's text response is cut off because it hit the output-token limit
+(normalized to `stop_reason == "max_tokens"`), the default loop returns that
+truncated text as the final answer. Linch never silently raises the output cap —
+that changes cost and latency, which is your policy decision.
+
+`TruncationRecovery` is the explicit, opt-in knob: a truncated text turn is not
+finalized while attempts remain — the loop injects a continuation nudge as a user
+turn and runs again so the model can finish. With `truncation_recovery=None`
+(the default) behavior is byte-identical.
+
+```python
+from linch import Agent, TruncationRecovery
+
+agent = Agent(
+    model="gpt-5",
+    truncation_recovery=TruncationRecovery(
+        max_attempts=2,          # continuation turns to spend per run
+        # feedback="Continue ...",  # the nudge sent to the model (has a default)
+    ),
+)
+```
+
+Once `max_attempts` is exhausted the truncated answer is returned as-is, with
+`ResultEvent.stop_reason == "max_tokens"` so the host can still tell it was cut
+off. Each continuation is a normal turn, so it counts against `max_turns` and the
+run `RunBudget`.
+
+---
+
 ## Run budgets
 
 `RunBudget` caps total spending — tokens, USD, or both — for a run **and every

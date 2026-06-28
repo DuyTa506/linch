@@ -76,7 +76,8 @@ One `Agent`, many `Session`s is the canonical web-app shape — see
 
 | Page | What it covers |
 |---|---|
-| [Agent & session](./agent.md) | Session stores, feature flags, system prompt, compaction, run budgets |
+| [Production wiring](./production.md) | Minimal checklist to embed Linch in a service: persistence, streaming, HITL, resume, shutdown, blast radius |
+| [Agent & session](./agent.md) | Session stores, feature flags, system prompt, compaction, run budgets, truncation recovery |
 | [Providers](./providers.md) | Choosing a provider, model catalog, capabilities, thinking events |
 | [Events](./events.md) | Event stream, cost fields, run reports, long-run eval scorers |
 | [Evals and benchmarks](./evals.md) | `EvalSuite`, `run_eval_benchmark`, and `scripts/eval_benchmark.py` for CI/provider comparison |
