@@ -115,6 +115,10 @@ pip install -e '.[dev,mcp,anthropic,gemini]'
 
 ## Quickstart
 
+New to Linch? The step-by-step guide is in
+[`docs/usage/quickstart.md`](docs/usage/quickstart.md), including an offline
+smoke test that runs without an API key.
+
 ```python
 import asyncio
 import os

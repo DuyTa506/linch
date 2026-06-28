@@ -1,8 +1,8 @@
 # Using Linch
 
 This is the practical guide to building with Linch — installing it, wiring an
-agent, and using each subsystem. It is split by topic so you can jump straight
-to what you need instead of scrolling one long file.
+agent, and using each subsystem. If you are new to the SDK, start with
+[Quickstart](./quickstart.md); then come back here for the subsystem map.
 
 For the *why* behind the design (data flow, the turn pipeline, module
 boundaries) see [`../architecture.md`](../architecture.md).
@@ -76,6 +76,7 @@ One `Agent`, many `Session`s is the canonical web-app shape — see
 
 | Page | What it covers |
 |---|---|
+| [Quickstart](./quickstart.md) | New-developer path: install, offline smoke test, live provider, first tool, persistence |
 | [Production wiring](./production.md) | Minimal checklist to embed Linch in a service: persistence, streaming, HITL, resume, shutdown, blast radius |
 | [Agent & session](./agent.md) | Session stores, feature flags, system prompt, compaction, run budgets, truncation recovery |
 | [Providers](./providers.md) | Choosing a provider, model catalog, capabilities, thinking events |
