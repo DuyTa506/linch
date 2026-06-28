@@ -60,6 +60,7 @@ class RunCheckpoint:
     assistant_stop_reason: str | None = None
     permission_decisions: dict[str, dict] = field(default_factory=dict)
     background_workers: dict[str, dict[str, object]] = field(default_factory=dict)
+    truncation_attempts: int = 0
 
 
 @dataclass(slots=True)
@@ -136,6 +137,7 @@ def checkpoint_to_dict(checkpoint: RunCheckpoint) -> dict[str, Any]:
         "assistant_stop_reason": checkpoint.assistant_stop_reason,
         "permission_decisions": checkpoint.permission_decisions,
         "background_workers": checkpoint.background_workers,
+        "truncation_attempts": checkpoint.truncation_attempts,
     }
 
 
@@ -194,6 +196,7 @@ def checkpoint_from_dict(raw: dict[str, Any]) -> RunCheckpoint:
             if isinstance(raw.get("background_workers"), dict)
             else {}
         ),
+        truncation_attempts=max(0, int(raw.get("truncation_attempts", 0) or 0)),
     )
 
 

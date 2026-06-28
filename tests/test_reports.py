@@ -103,6 +103,9 @@ def test_build_run_report_summarizes_events():
     assert report.summary["usage"]["total_cost_usd"] == 0.01
     assert report.summary["tools"]["average_duration_ms"] == 12
     assert report.summary["tools"]["slowest_tool"]["tool_name"] == "Search"
+    assert report.summary["tools"]["top_slowest"][0]["tool_name"] == "Search"
+    assert report.summary["tools"]["by_name_errors"] == {}
+    assert report.summary["context"]["pressure"] == "none"
     assert report.long_run["context"]["builds"] == 1
     assert report.long_run["context"]["metadata_keys"] == ["source"]
     assert report.long_run["quality"]["completed"] is True
@@ -135,6 +138,136 @@ def test_float_tool_duration_is_counted_not_dropped():
     assert report.summary["tools"]["slowest_tool"]["tool_name"] == "Slow"
 
 
+def test_run_report_ranks_top_slowest_tools_deterministically():
+    from linch import build_run_report
+    from linch.events import ToolCallEndEvent, ToolCallStartEvent
+
+    calls = [
+        ("fast", "Read", 10),
+        ("slow-a", "Search", 50),
+        ("slow-b", "Write", 50),
+        ("medium", "List", 25),
+        ("fifth", "Glob", 5),
+        ("sixth", "Patch", 1),
+    ]
+    events = []
+    for tool_use_id, tool_name, duration_ms in calls:
+        events.append(
+            ToolCallStartEvent(
+                tool_use_id=tool_use_id,
+                tool_name=tool_name,
+                input={},
+                summary=tool_use_id,
+            )
+        )
+        events.append(
+            ToolCallEndEvent(
+                tool_use_id=tool_use_id,
+                tool_name=tool_name,
+                is_error=False,
+                duration_ms=duration_ms,
+            )
+        )
+
+    report = build_run_report(events)
+
+    assert [call["tool_use_id"] for call in report.summary["tools"]["top_slowest"]] == [
+        "slow-a",
+        "slow-b",
+        "medium",
+        "fast",
+        "fifth",
+    ]
+
+
+def test_run_report_summarizes_failed_tools_by_name_and_event_order():
+    from linch import build_run_report
+    from linch.events import ToolCallEndEvent, ToolCallStartEvent
+    from linch.tools import ToolResult
+
+    events = [
+        ToolCallStartEvent(tool_use_id="r1", tool_name="Read", input={}, summary="read one"),
+        ToolCallEndEvent(
+            tool_use_id="r1",
+            tool_name="Read",
+            result="missing file",
+            is_error=True,
+            duration_ms=9,
+        ),
+        ToolCallStartEvent(tool_use_id="s1", tool_name="Search", input={}, summary="search"),
+        ToolCallEndEvent(
+            tool_use_id="s1",
+            tool_name="Search",
+            is_error=False,
+            duration_ms=3,
+        ),
+        ToolCallStartEvent(tool_use_id="r2", tool_name="Read", input={}, summary="read two"),
+        ToolCallEndEvent(
+            tool_use_id="r2",
+            tool_name="Read",
+            is_error=True,
+            duration_ms=12,
+            tool_result=ToolResult(content="permission denied\ntry another path", is_error=True),
+        ),
+    ]
+
+    report = build_run_report(events)
+
+    assert report.summary["tools"]["by_name"] == {"Read": 2, "Search": 1}
+    assert report.summary["tools"]["by_name_errors"] == {"Read": 2}
+    assert report.summary["tools"]["top_failures"] == [
+        {
+            "tool_use_id": "r1",
+            "tool_name": "Read",
+            "summary": "read one",
+            "duration_ms": 9,
+            "result": "missing file",
+            "error": "missing file",
+        },
+        {
+            "tool_use_id": "r2",
+            "tool_name": "Read",
+            "summary": "read two",
+            "duration_ms": 12,
+            "result": "permission denied try another path",
+            "error": "permission denied try another path",
+        },
+    ]
+    markdown = report.to_markdown()
+    assert "Top Slow Tools" in markdown
+    assert "Failing Tools" in markdown
+
+
+@pytest.mark.parametrize(
+    ("budget", "pressure"),
+    [
+        ({"max_tokens": 100, "used_tokens": 74}, "none"),
+        ({"max_tokens": 100, "used_tokens": 75}, "moderate"),
+        ({"max_tokens": 100, "used_tokens": 90}, "high"),
+        ({"max_tokens": 100, "used_tokens": 100}, "high"),
+        ({"max_tokens": 100, "used_tokens": 101}, "over"),
+        ({"used_tokens": 100}, "none"),
+    ],
+)
+def test_context_utilization_maps_to_pressure_labels(budget, pressure):
+    from linch import build_run_report
+    from linch.events import ContextBuildEvent
+
+    report = build_run_report(
+        [
+            ContextBuildEvent(
+                system_blocks=1,
+                messages=1,
+                selected_tools=[],
+                budget=budget,
+                metadata={},
+            )
+        ]
+    )
+
+    assert report.summary["context"]["pressure"] == pressure
+
+
 def test_non_finite_budget_value_does_not_crash_report_building():
     # Regression: report building is a non-throwing read model. A NaN/Infinity
     # numeric field (json.loads accepts these, so they survive a persisted-event
@@ -165,6 +298,51 @@ def test_non_finite_budget_value_does_not_crash_report_building():
     # Non-finite budget value is dropped, not coerced.
     assert report.summary["context"]["max_used_tokens"] in (0, None)
     assert "Summary" in report.to_markdown()
+
+
+def test_report_diagnostics_ignore_missing_and_non_finite_values():
+    from linch import build_run_report
+    from linch.events import ToolCallEndEvent
+
+    events = [
+        ToolCallEndEvent(
+            tool_use_id="nan",
+            tool_name="BadDuration",
+            is_error=True,
+            duration_ms=float("nan"),
+        ),
+        ToolCallEndEvent(
+            tool_use_id="default",
+            tool_name="DefaultDuration",
+            is_error=True,
+        ),
+    ]
+
+    report = build_run_report(events)
+
+    assert report.summary["tools"]["top_slowest"] == [
+        {
+            "tool_use_id": "default",
+            "tool_name": "DefaultDuration",
+            "summary": "",
+            "duration_ms": 0,
+            "is_error": True,
+        }
+    ]
+    assert report.summary["tools"]["top_failures"] == [
+        {
+            "tool_use_id": "nan",
+            "tool_name": "BadDuration",
+            "summary": "",
+            "duration_ms": None,
+        },
+        {
+            "tool_use_id": "default",
+            "tool_name": "DefaultDuration",
+            "summary": "",
+            "duration_ms": 0,
+        },
+    ]
 
 
 def test_build_run_report_includes_long_run_memory_and_recovery_signals():

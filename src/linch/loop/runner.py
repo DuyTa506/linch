@@ -453,6 +453,9 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
 
     _guard = getattr(agent, "loop_guard", None)
     _guard_state = LoopGuardState() if _guard is not None else None
+    # Opt-in output-truncation recovery (None = off, byte-identical default).
+    _truncation_recovery = getattr(agent, "truncation_recovery", None)
+    _truncation_attempts = 0
     _force_final_pending = False
     if resume_checkpoint is not None:
         total = resume_checkpoint.total_usage
@@ -470,6 +473,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         )
         session.current_turn_allowed_tools = resume_checkpoint.current_turn_allowed_tools
         session.current_turn_permission_decisions = dict(resume_checkpoint.permission_decisions)
+        _truncation_attempts = resume_checkpoint.truncation_attempts
 
     checkpoint = resume_checkpoint or RunCheckpoint(
         phase="started",
@@ -520,6 +524,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         checkpoint.background_workers = _background_workers_to_dict(
             session, checkpoint.background_workers
         )
+        checkpoint.truncation_attempts = _truncation_attempts
         await store.save_checkpoint(run_id, checkpoint, status=status)
 
     async def _handle_prompt_block(block_reason: str) -> AsyncIterator[Event]:
@@ -1137,6 +1142,25 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
 
             # ── Normal text response (stop_reason != tool_use) ───────────
             if assembly.stop_reason != "tool_use":
+                # Opt-in truncation recovery: a text answer cut off by the
+                # output-token limit is not finalized while attempts remain —
+                # inject a continuation nudge and run again so the model can
+                # finish. Skipped on a loop-guard forced-final turn. Off by
+                # default (byte-identical).
+                if (
+                    _truncation_recovery is not None
+                    and assembly.stop_reason == "max_tokens"
+                    and not _forced_final_turn
+                    and _truncation_attempts < _truncation_recovery.max_attempts
+                ):
+                    _truncation_attempts += 1
+                    async for event in _gate_retry_tail(
+                        session, run_id=run_id, feedback=_truncation_recovery.feedback
+                    ):
+                        yield event
+                    await _end_active_turn()
+                    await _save_checkpoint("turn_complete", turn_index=turn_index)
+                    continue
                 async for event in _finalize_text_answer(turn_index, assembly):
                     yield event
                 if _final_result is not None:

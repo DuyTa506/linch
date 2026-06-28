@@ -170,10 +170,22 @@ async def test_durable_lease_blocks_second_runner(tmp_path) -> None:
 
 async def test_file_lease_store_reclaims_stale_lease(tmp_path) -> None:
     store = FileLoopLeaseStore(root=tmp_path / "domains")
-    lease = await store.try_acquire("docs-loop", owner="first", ttl_s=0.01)
+    lease = await store.try_acquire("docs-loop", owner="first", ttl_s=60)
     assert lease is not None
     assert await store.try_acquire("docs-loop", owner="second", ttl_s=60) is None
-    await asyncio.sleep(0.02)
+
+    lock = tmp_path / "domains" / "docs-loop" / ".lock.json"
+    lock.write_text(
+        json.dumps(
+            {
+                "loop_id": lease.loop_id,
+                "owner": lease.owner,
+                "token": lease.token,
+                "expires_at": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
 
     reclaimed = await store.try_acquire("docs-loop", owner="second", ttl_s=60)
 

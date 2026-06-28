@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import logging
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -28,6 +29,8 @@ from .contexts import (
     UserPromptSubmitContext,
 )
 from .types import HookEvent, HookResult
+
+_log = logging.getLogger("linch.observability")
 
 
 @dataclass(slots=True)
@@ -62,6 +65,14 @@ class HookDispatcher:
                 if inspect.isawaitable(raw):
                     raw = await raw
             except Exception as exc:
+                # Isolate the failing hook. The error is recorded as telemetry,
+                # but not every chokepoint forwards telemetry to the event
+                # stream (lifecycle notifications like AgentStart/TurnStart do
+                # not), so also log it — otherwise a hook raising there would be
+                # swallowed silently.
+                _log.warning(
+                    "hook %r raised at %s; isolating and continuing: %s", name, event_value, exc
+                )
                 telemetry.append(_hook_event(event_value, name, "error", str(exc)))
                 continue
             if raw is None:

@@ -4,7 +4,9 @@
 
 `LoopRunner` is the SDK-native outer-loop primitive for recurring agent work. It is
 not a daemon and it does not own webhooks, cron, or process lifetime. A host calls
-`run_once()` whenever some external trigger says another tick should run.
+`run_once()` whenever some external trigger says another tick should run. Tiny
+host-owned wrappers for cron, webhook, fixed-interval, and CI-gate triggers live in
+[`examples/recipes/runner_recipes.py`](../../examples/recipes/runner_recipes.py).
 
 Each tick creates a fresh session, runs the agent once, writes a `RunReport`, and
 persists loop state through files under `domains/<loop_id>/`.

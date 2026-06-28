@@ -19,6 +19,8 @@ def format_summary(report: RunReport) -> str:
     recovery = _dict(summary.get("recovery"))
     risk = _dict(summary.get("risk"))
     slowest = _dict(tools.get("slowest_tool"))
+    top_slowest = _list_of_dicts(tools.get("top_slowest"))
+    top_failures = _list_of_dicts(tools.get("top_failures"))
 
     lines = [
         f"Linch run report: {report.run_id or '<unknown>'}",
@@ -52,6 +54,29 @@ def format_summary(report: RunReport) -> str:
                 error=slowest.get("is_error", False),
             )
         )
+    if top_slowest:
+        lines.append("- top slow:")
+        for call in top_slowest:
+            lines.append(
+                "  - {tool} ({duration}ms, error={error}) {summary}".format(
+                    tool=call.get("tool_name", ""),
+                    duration=call.get("duration_ms", 0),
+                    error=call.get("is_error", False),
+                    summary=call.get("summary", ""),
+                ).rstrip()
+            )
+    if top_failures:
+        lines.append("- top failures:")
+        for call in top_failures:
+            detail = call.get("error") or call.get("result") or ""
+            lines.append(
+                "  - {tool} ({duration}ms) {summary}{detail}".format(
+                    tool=call.get("tool_name", ""),
+                    duration=call.get("duration_ms"),
+                    summary=call.get("summary", ""),
+                    detail=f": {detail}" if detail else "",
+                ).rstrip()
+            )
 
     lines.extend(
         [
@@ -62,6 +87,7 @@ def format_summary(report: RunReport) -> str:
             f"- max_used_tokens: {context.get('max_used_tokens')}",
             f"- max_tokens_seen: {context.get('max_tokens_seen')}",
             f"- max_utilization: {context.get('max_utilization')}",
+            f"- pressure: {context.get('pressure', 'none')}",
             "",
             "Recovery",
             f"- compactions: {recovery.get('compactions', 0)}",
@@ -120,6 +146,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def _list_of_dicts(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
 
 
 async def _main(argv: list[str] | None = None) -> int:
