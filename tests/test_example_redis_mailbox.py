@@ -39,3 +39,30 @@ async def test_redis_mailbox_round_trips_message_fields() -> None:
 
     assert got.id == sent.id
     assert (got.sender, got.recipient, got.content, got.request_id) == ("a", "b", "hi", "r1")
+
+
+async def test_redis_mailbox_wraps_plain_redis_client_with_atomic_script() -> None:
+    example = _load()
+
+    class PlainRedis:
+        def __init__(self) -> None:
+            self.data: dict[str, list[str]] = {}
+
+        async def rpush(self, key: str, value: str) -> int:
+            self.data.setdefault(key, []).append(value)
+            return len(self.data[key])
+
+        def register_script(self, _script: str):
+            async def drain(*, keys):
+                return self.data.pop(keys[0], [])
+
+            return drain
+
+    mailbox = example.RedisMailbox(PlainRedis())
+    sent = MailboxMessage(sender="a", recipient="b", content="hi")
+
+    await mailbox.send(sent)
+    [got] = await mailbox.drain("b")
+
+    assert got.id == sent.id
+    assert await mailbox.drain("b") == []

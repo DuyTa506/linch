@@ -71,7 +71,10 @@ class HookDispatcher:
                 # not), so also log it — otherwise a hook raising there would be
                 # swallowed silently.
                 _log.warning(
-                    "hook %r raised at %s; isolating and continuing: %s", name, event_value, exc
+                    "hook %r raised at %s; isolating and continuing",
+                    name,
+                    event_value,
+                    exc_info=exc,
                 )
                 telemetry.append(_hook_event(event_value, name, "error", str(exc)))
                 continue

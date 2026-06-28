@@ -95,6 +95,7 @@ from .request import (
     _context_selected_tool_names,
     _re_inject_skill_context,
     build_user_message,
+    final_text,
 )
 from .streaming import _stream_turn_with_compaction_retry, _stream_turn_with_ladder
 from .terminals import (
@@ -456,6 +457,8 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
     # Opt-in output-truncation recovery (None = off, byte-identical default).
     _truncation_recovery = getattr(agent, "truncation_recovery", None)
     _truncation_attempts = 0
+    _truncation_prefix = ""
+    _pending_truncation_feedback: str | None = None
     _force_final_pending = False
     if resume_checkpoint is not None:
         total = resume_checkpoint.total_usage
@@ -474,6 +477,8 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         session.current_turn_allowed_tools = resume_checkpoint.current_turn_allowed_tools
         session.current_turn_permission_decisions = dict(resume_checkpoint.permission_decisions)
         _truncation_attempts = resume_checkpoint.truncation_attempts
+        _truncation_prefix = resume_checkpoint.truncation_prefix
+        _pending_truncation_feedback = resume_checkpoint.pending_truncation_feedback
 
     checkpoint = resume_checkpoint or RunCheckpoint(
         phase="started",
@@ -525,6 +530,8 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             session, checkpoint.background_workers
         )
         checkpoint.truncation_attempts = _truncation_attempts
+        checkpoint.truncation_prefix = _truncation_prefix
+        checkpoint.pending_truncation_feedback = _pending_truncation_feedback
         await store.save_checkpoint(run_id, checkpoint, status=status)
 
     async def _handle_prompt_block(block_reason: str) -> AsyncIterator[Event]:
@@ -795,6 +802,34 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             yield event
         _final_result = outcome.result
 
+    def _assembly_with_truncation_prefix(assembly: AssistantAssembly) -> AssistantAssembly:
+        if not _truncation_prefix:
+            return assembly
+        text = final_text(assembly.message)
+        if text is None:
+            return assembly
+        merged = Message(
+            role="assistant",
+            content=[TextBlock(text=f"{_truncation_prefix}{text}")],
+            provider_metadata=assembly.message.provider_metadata,
+        )
+        return AssistantAssembly(
+            message=merged, stop_reason=assembly.stop_reason, usage=assembly.usage
+        )
+
+    def _last_user_message_is_feedback(feedback: str) -> bool:
+        from ..skills.system_reminder import wrap_in_system_reminder
+
+        if not session.provider_view:
+            return False
+        message = session.provider_view[-1]
+        if message.role != "user":
+            return False
+        expected = wrap_in_system_reminder(feedback)
+        return any(
+            isinstance(block, TextBlock) and block.text == expected for block in message.content
+        )
+
     start_turn = checkpoint.turn_index
     if resume_checkpoint is not None and checkpoint.phase in {
         "tool_results_appended",
@@ -868,6 +903,16 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             async for align_event in _drain_alignment(session, run_id, _dispatch_user_prompt):
                 yield align_event
             await _start_turn(turn_index)
+            if _pending_truncation_feedback is not None:
+                feedback = _pending_truncation_feedback
+                if not _last_user_message_is_feedback(feedback):
+                    async for event in _gate_retry_tail(session, run_id=run_id, feedback=feedback):
+                        yield event
+                _pending_truncation_feedback = None
+                await _end_active_turn()
+                await _save_checkpoint("turn_complete", turn_index=turn_index)
+                continue
+
             # Captured before _force_final_pending is reset below: a guard-
             # forced final answer must bypass the verification gates.
             _forced_final_turn = _force_final_pending
@@ -1153,18 +1198,33 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                     and not _forced_final_turn
                     and _truncation_attempts < _truncation_recovery.max_attempts
                 ):
+                    text = final_text(assembly.message)
+                    if text is not None:
+                        _truncation_prefix = f"{_truncation_prefix}{text}"
                     _truncation_attempts += 1
+                    _pending_truncation_feedback = _truncation_recovery.feedback
+                    await _save_checkpoint(
+                        "assistant_appended",
+                        turn_index=turn_index,
+                        assistant_message=assembly.message,
+                        assistant_stop_reason=assembly.stop_reason,
+                    )
                     async for event in _gate_retry_tail(
                         session, run_id=run_id, feedback=_truncation_recovery.feedback
                     ):
                         yield event
+                    _pending_truncation_feedback = None
                     await _end_active_turn()
                     await _save_checkpoint("turn_complete", turn_index=turn_index)
                     continue
-                async for event in _finalize_text_answer(turn_index, assembly):
+                async for event in _finalize_text_answer(
+                    turn_index, _assembly_with_truncation_prefix(assembly)
+                ):
                     yield event
                 if _final_result is not None:
                     return
+                _truncation_prefix = ""
+                _pending_truncation_feedback = None
                 continue
 
             tool_blocks = [b for b in assembly.message.content if isinstance(b, ToolUseBlock)]

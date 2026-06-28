@@ -31,6 +31,12 @@ from typing import Any
 from linch import MailboxMessage
 from linch.testing import assert_mailbox_contract
 
+_DRAIN_SCRIPT = """
+local values = redis.call('LRANGE', KEYS[1], 0, -1)
+redis.call('DEL', KEYS[1])
+return values
+"""
+
 
 def _encode(message: MailboxMessage) -> str:
     return json.dumps(
@@ -44,7 +50,9 @@ def _encode(message: MailboxMessage) -> str:
     )
 
 
-def _decode(raw: str) -> MailboxMessage:
+def _decode(raw: str | bytes) -> MailboxMessage:
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8")
     data = json.loads(raw)
     return MailboxMessage(
         sender=data["sender"],
@@ -78,13 +86,32 @@ class _FakeRedis:
             return self._data.pop(key, [])
 
 
+class _RedisListClient:
+    """Adapter for a plain ``redis.asyncio.Redis`` client.
+
+    ``redis.asyncio.Redis`` does not expose ``drain_atomic`` itself, so the
+    adapter uses Redis Lua scripting for the atomic read-and-delete operation.
+    """
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+        self._drain_script = client.register_script(_DRAIN_SCRIPT)
+
+    async def rpush(self, key: str, value: str) -> int:
+        return await self._client.rpush(key, value)
+
+    async def drain_atomic(self, key: str) -> list[str | bytes]:
+        result = await self._drain_script(keys=[key])
+        return list(result or [])
+
+
 class RedisMailbox:
     """A :class:`linch.MailboxMessage` mailbox backed by Redis lists."""
 
     name = "redis"
 
     def __init__(self, client: Any, *, prefix: str = "linch:mailbox:") -> None:
-        self._client = client
+        self._client = client if hasattr(client, "drain_atomic") else _RedisListClient(client)
         self._prefix = prefix
 
     def _key(self, recipient: str) -> str:

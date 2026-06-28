@@ -61,6 +61,8 @@ class RunCheckpoint:
     permission_decisions: dict[str, dict] = field(default_factory=dict)
     background_workers: dict[str, dict[str, object]] = field(default_factory=dict)
     truncation_attempts: int = 0
+    truncation_prefix: str = ""
+    pending_truncation_feedback: str | None = None
 
 
 @dataclass(slots=True)
@@ -138,6 +140,8 @@ def checkpoint_to_dict(checkpoint: RunCheckpoint) -> dict[str, Any]:
         "permission_decisions": checkpoint.permission_decisions,
         "background_workers": checkpoint.background_workers,
         "truncation_attempts": checkpoint.truncation_attempts,
+        "truncation_prefix": checkpoint.truncation_prefix,
+        "pending_truncation_feedback": checkpoint.pending_truncation_feedback,
     }
 
 
@@ -197,6 +201,16 @@ def checkpoint_from_dict(raw: dict[str, Any]) -> RunCheckpoint:
             else {}
         ),
         truncation_attempts=max(0, int(raw.get("truncation_attempts", 0) or 0)),
+        truncation_prefix=(
+            str(raw.get("truncation_prefix"))
+            if isinstance(raw.get("truncation_prefix"), str)
+            else ""
+        ),
+        pending_truncation_feedback=(
+            str(raw.get("pending_truncation_feedback"))
+            if isinstance(raw.get("pending_truncation_feedback"), str)
+            else None
+        ),
     )
 
 
