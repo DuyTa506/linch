@@ -178,6 +178,7 @@ def test_run_report_ranks_top_slowest_tools_deterministically():
         "fast",
         "fifth",
     ]
+    assert report.summary["tools"]["slowest_tool"]["tool_use_id"] == "slow-a"
 
 
 def test_run_report_summarizes_failed_tools_by_name_and_event_order():
@@ -266,6 +267,26 @@ def test_context_utilization_maps_to_pressure_labels(budget, pressure):
     )
 
     assert report.summary["context"]["pressure"] == pressure
+
+
+def test_context_pressure_uses_raw_utilization_before_rounding():
+    from linch import build_run_report
+    from linch.events import ContextBuildEvent
+
+    report = build_run_report(
+        [
+            ContextBuildEvent(
+                system_blocks=1,
+                messages=1,
+                selected_tools=[],
+                budget={"max_tokens": 100_000, "used_tokens": 74_995},
+                metadata={},
+            )
+        ]
+    )
+
+    assert report.summary["context"]["max_utilization"] == 0.75
+    assert report.summary["context"]["pressure"] == "none"
 
 
 def test_non_finite_budget_value_does_not_crash_report_building():

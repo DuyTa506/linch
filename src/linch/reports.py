@@ -497,8 +497,8 @@ def _report_summary(
         if duration is not None
     ]
     failed_tools = sum(1 for call in tool_calls if call.get("is_error") is True)
-    slowest_tool = _slowest_tool(tool_calls)
     top_slowest = _top_slowest_tools(tool_calls)
+    slowest_tool = top_slowest[0] if top_slowest else _slowest_tool(tool_calls)
     top_failures = _top_failed_tools(tool_calls)
     usage_source = _usage_source(usage=usage, final=final)
     context_summary = _context_summary(context_builds, long_run)
@@ -722,6 +722,7 @@ def _context_summary(
     long_run: dict[str, Any],
 ) -> dict[str, Any]:
     max_utilization: float | None = None
+    max_utilization_raw: float | None = None
     max_used_tokens: int | None = None
     max_tokens_seen: int | None = None
 
@@ -736,7 +737,11 @@ def _context_summary(
         if maximum is not None:
             max_tokens_seen = maximum if max_tokens_seen is None else max(max_tokens_seen, maximum)
         if used is not None and maximum and maximum > 0:
-            ratio = round(used / maximum, 4)
+            raw_ratio = used / maximum
+            max_utilization_raw = (
+                raw_ratio if max_utilization_raw is None else max(max_utilization_raw, raw_ratio)
+            )
+            ratio = round(raw_ratio, 4)
             max_utilization = ratio if max_utilization is None else max(max_utilization, ratio)
 
     context = long_run.get("context", {})
@@ -746,7 +751,7 @@ def _context_summary(
         "max_used_tokens": max_used_tokens,
         "max_tokens_seen": max_tokens_seen,
         "max_utilization": max_utilization,
-        "pressure": _context_pressure(max_utilization),
+        "pressure": _context_pressure(max_utilization_raw),
     }
 
 

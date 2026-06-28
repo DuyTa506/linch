@@ -77,7 +77,7 @@ async def test_recovery_continues_after_truncation() -> None:
     result = events[-1]
     assert result.subtype == "success"
     assert result.stop_reason == "end_turn"
-    assert result.final_text == "part two"
+    assert result.final_text == "part onepart two"
     assert provider._index == 2  # one recovery turn was spent
     # A continuation nudge was injected as a user turn.
     assert any(
@@ -106,7 +106,7 @@ async def test_recovery_is_bounded_by_max_attempts() -> None:
     result = events[-1]
     assert result.subtype == "success"
     assert result.stop_reason == "max_tokens"  # gave up gracefully
-    assert result.final_text == "chunk two"
+    assert result.final_text == "chunk onechunk two"
     assert provider._index == 2  # one attempt only
 
 
@@ -222,6 +222,7 @@ async def test_recovery_attempts_are_restored_on_resume() -> None:
     assert run is not None
     assert run.checkpoint is not None
     assert run.checkpoint.truncation_attempts == 1
+    assert run.checkpoint.truncation_prefix == "chunk one"
 
     restarted = Agent(
         model="test-model",
@@ -239,8 +240,70 @@ async def test_recovery_attempts_are_restored_on_resume() -> None:
     result = events[-1]
     assert result.type == "result"
     assert result.stop_reason == "max_tokens"
-    assert result.final_text == "chunk two"
+    assert result.final_text == "chunk onechunk two"
     assert provider._index == 2
+
+
+@pytest.mark.asyncio
+async def test_pending_recovery_feedback_is_appended_on_resume() -> None:
+    from linch import Agent, TruncationRecovery
+    from linch.config import FeatureFlags
+    from linch.evals import ScriptedProvider, TextTurn
+    from linch.events import ResultEvent, UserEvent
+    from linch.run_store import InMemoryRunStore, RunCheckpoint
+    from linch.sessions import InMemorySessionStore
+    from linch.types import Message, TextBlock, Usage
+
+    session_store = InMemorySessionStore()
+    await session_store.create(id="s1")
+    assistant = Message(role="assistant", content=[TextBlock(text="chunk one")])
+    await session_store.append_messages(
+        "s1",
+        [
+            Message(role="user", content=[TextBlock(text="go")]),
+            assistant,
+        ],
+    )
+    run_store = InMemoryRunStore()
+    await run_store.create_run("s1", id="run-1")
+    await run_store.save_checkpoint(
+        "run-1",
+        RunCheckpoint(
+            phase="assistant_appended",
+            prompt="go",
+            turn_index=0,
+            total_usage=Usage(),
+            assistant_message=assistant,
+            assistant_stop_reason="max_tokens",
+            truncation_attempts=1,
+            truncation_prefix="chunk one",
+            pending_truncation_feedback="continue",
+        ),
+    )
+    provider = ScriptedProvider([TextTurn(text="done", stop_reason="end_turn")])
+    agent = Agent(
+        model="test-model",
+        provider=provider,
+        permissions={"mode": "skip-dangerous"},
+        session_store=session_store,
+        run_store=run_store,
+        features=FeatureFlags(skills=False, subagents=False, mcp=False),
+        result_offload=None,
+        truncation_recovery=TruncationRecovery(max_attempts=2),
+    )
+    session = await agent.session(id="s1")
+
+    events = [event async for event in session.resume("run-1")]
+
+    assert sum(isinstance(event, UserEvent) for event in events) == 1
+    result = events[-1]
+    assert isinstance(result, ResultEvent)
+    assert result.final_text == "chunk onedone"
+    assert provider._index == 1
+    run = await run_store.load_run("run-1")
+    assert run is not None
+    assert run.checkpoint is not None
+    assert run.checkpoint.pending_truncation_feedback is None
 
 
 def test_truncation_recovery_is_public() -> None:
