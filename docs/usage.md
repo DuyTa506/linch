@@ -4,10 +4,12 @@
 > [**`docs/usage/`**](./usage/README.md) so you can jump straight to what you
 > need instead of scrolling one long file.
 
-Start at the [usage guide index](./usage/README.md), or go directly to a topic:
+Start with the [quickstart](./usage/quickstart.md) if you are new to Linch, then
+use the [usage guide index](./usage/README.md) or jump directly to a topic:
 
 | Page | What it covers |
 |---|---|
+| [Quickstart](./usage/quickstart.md) | Install, offline smoke test, live provider, first tool, persistence |
 | [Agent & session](./usage/agent.md) | Session stores, feature flags, system prompt, compaction, run budgets |
 | [Providers](./usage/providers.md) | Choosing a provider, model catalog, capabilities, thinking events |
 | [Events](./usage/events.md) | Event stream, cost fields, run reports, long-run eval scorers |
