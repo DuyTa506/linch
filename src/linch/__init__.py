@@ -111,6 +111,9 @@ from .hooks import (
     PreToolUseContext,
     ReadBeforeWriteConfig,
     ReadBeforeWriteHook,
+    RedactionConfig,
+    RedactionHook,
+    RedactionRule,
     RunTelemetryHook,
     StopContext,
     StopPredicateHook,
@@ -209,6 +212,7 @@ from .providers import (
     list_provider_models,
 )
 from .providers.retry import RetryOptions
+from .recovery import TruncationRecovery
 from .reports import RunReport, build_run_report, load_run_report
 from .run_store import (
     SCHEMA_VERSION as RUN_SCHEMA_VERSION,
@@ -229,6 +233,14 @@ from .subagents import (
     generate_subagent_definition,
     render_subagent_markdown,
     write_subagent_definition,
+)
+from .testing import (
+    assert_file_backend_contract,
+    assert_isolation_backend_contract,
+    assert_mailbox_contract,
+    assert_memory_store_contract,
+    assert_schedule_store_contract,
+    assert_tool_contract,
 )
 from .tools import (
     AskUserHandler,
@@ -292,6 +304,7 @@ __all__ = [
     "LinchError",
     "AgentOptions",
     "RunBudget",
+    "TruncationRecovery",
     "BudgetEvent",
     "is_budget_event",
     "WorkflowContext",
@@ -369,6 +382,9 @@ __all__ = [
     "MemoryExtractionHook",
     "ReadBeforeWriteHook",
     "ReadBeforeWriteConfig",
+    "RedactionHook",
+    "RedactionConfig",
+    "RedactionRule",
     "ToolCacheHook",
     "ToolCacheConfig",
     "normalize_hooks",
@@ -436,6 +452,12 @@ __all__ = [
     "ToolResult",
     "ToolUseBlock",
     "tool",
+    "assert_file_backend_contract",
+    "assert_isolation_backend_contract",
+    "assert_mailbox_contract",
+    "assert_memory_store_contract",
+    "assert_schedule_store_contract",
+    "assert_tool_contract",
     "Usage",
     "UsageEvent",
     "UserEvent",

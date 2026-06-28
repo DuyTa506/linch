@@ -128,6 +128,7 @@ core ones are also re-exported from `linch`).
 | `RunTelemetryHook(observers)` | one or more `RunObserver`s | `observers=` |
 | `ToolCacheHook(config)` | per-run memoization of read-scope tool calls | `tool_cache=` — see [tool-cache.md](./tool-cache.md) |
 | `ReadBeforeWriteHook(config)` | read-before-edit gate for the virtual filesystem | `read_before_write=` (default `True`) |
+| `RedactionHook(config)` | host-supplied regex scrubbing of tool results, the final answer, and (opt-in) the prompt | add to `hooks=[...]` |
 
 ```python
 from linch.hooks import (
@@ -169,6 +170,14 @@ Notes:
   default — that is their purpose — but a host can opt into overwrite-gating of
   *existing* files via `ReadBeforeWriteConfig(overwrite_tools=...)`. A windowed
   (`offset`/`limit`) read does not unlock edits to the unseen parts of a file.
+- **`RedactionHook`** is a **policy-free governance seam**: it applies
+  caller-supplied `RedactionRule(pattern, replacement)` regexes to tool-result
+  text (`PostToolUse`), the final answer (`BeforeFinalAnswer`), and — opt-in via
+  `RedactionConfig(redact_user_prompt=True)` — the user prompt. Linch ships **no
+  default patterns**, so the policy (what counts as sensitive) stays with the
+  embedder and an empty rule set is a no-op. A bad regex raises at construction,
+  not mid-run. See [`examples/core/governance_redaction.py`](../../examples/core/governance_redaction.py).
+  For richer, stateful transforms use `ToolMiddlewareHook` instead.
 - **`RunTelemetryHook`** translates loop events into the `RunObserver` protocol
   (`on_run_start/end`, `on_turn_*`, `on_provider_call_*`, `on_tool_*`,
   `on_event`). It also forwards `aclose()`/`close()` to the wrapped observers on

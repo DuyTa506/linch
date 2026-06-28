@@ -1,759 +1,214 @@
 # Linch SDK Roadmap
 
-This file is a lightweight roadmap/status page **and** the implementation plan for
-Linch as a **pure-mechanism, embeddable agent runtime SDK**.
+This file is the live roadmap for Linch as a **pure-mechanism, embeddable agent
+runtime SDK**. It should guide what to build next and, just as importantly, what
+not to build into core.
 
 ---
 
-## North star
+## North Star
 
-Linch ships the **harness**, not the agent. It provides **mechanisms, protocols, seams,
-and primitives** — never policy, prompts, domain tools, or product UX. A coding agent is
-*one* application an embedder builds on Linch; a support agent, a research agent, and a
-data agent are equally first-class. If a capability only makes sense for one domain, it
-belongs in the embedder's app, not in Linch.
+Linch ships the **harness**, not the agent. It provides **mechanisms, protocols,
+seams, and primitives**: loop control, tools, permissions, memory, context,
+events, durability, scheduling, subagents, hooks, evaluation, and observability.
 
-**The discriminating rule for every line of this roadmap:**
+A coding agent is one application an embedder builds on Linch. A support agent,
+research agent, data agent, operations agent, or product-specific assistant
+should be equally first-class.
 
-> Is it a *mechanism* every embedded agent needs regardless of domain, or a
-> *behavior/policy* specific to one kind of agent? Mechanism → SDK. Behavior → out.
+The discriminating rule for every roadmap item:
 
-When a useful capability is domain-flavored, the SDK ships the **generic seam** and lets
-the embedder supply the domain piece — exactly how `execution.py` exposes an
-`ExecutionBackend` protocol (`LocalBackend`/`DockerBackend`) rather than hardcoding one
-runner.
+> Is it a mechanism every embedded agent can use, or behavior/policy specific to
+> one kind of agent? Mechanism goes in Linch. Policy stays with the embedder.
 
-**Hard constraint:** every item is opt-in and additive. With defaults unchanged, the loop
-stays byte-identical — the discipline already used for `loop_guard`, `compaction_ladder`,
-verification gates, and `result_offload`.
+When a useful capability is domain-flavored, Linch should expose the generic
+seam and let the embedder supply the domain piece. For example,
+`ExecutionBackend` is a Linch seam; a git-worktree coding runner is an embedder
+implementation.
+
+Hard constraints:
+
+- Every new capability is opt-in and additive.
+- With defaults unchanged, the loop stays byte-identical unless the change is a
+  domain-neutral safety fix.
+- The core dependency graph stays small; heavy integrations belong in examples,
+  extras, or separate packages.
+- Linch must remain easy to embed inside a host service. It should not become a
+  daemon, dashboard, marketplace, or agent product.
 
 ---
 
-## Two loops on one axis: open ↔ closed
+## Open And Closed Loops
 
-Every agent runs the same cycle — **Discovery → Planning → Execution → Verification →
-Iteration** — alone or fanned out across an orchestrator + specialists. What decides
-*which you can afford to run* is a single axis, **open ↔ closed**, defined by **who
-authors the path**:
+Every agent runs some version of **Discovery -> Planning -> Execution ->
+Verification -> Iteration**. The key axis is **open vs closed**, defined by who
+authors the path.
 
-| | **Closed loop** | **Open loop** |
+| | Closed loop | Open loop |
 |---|---|---|
-| Path author | **human** writes it first | **model** discovers it at runtime |
-| Shape | bounded, set steps, eval at each step | wide, exploratory, roams and builds new |
-| Cost | cheap, repeatable, improves every run | burns tokens, needs a large budget |
-| Honesty | the standard keeps it honest | loose standard = a fast slop machine |
-| **Linch surface** | **`run_workflow`** (core mechanism) | **`create_deep_agent`** (experimental preset) |
+| Path author | Human or host code writes it first | Model discovers it at runtime |
+| Shape | Bounded, journaled, repeatable | Exploratory, adaptive, higher variance |
+| Cost | Predictable | Needs strict budget controls |
+| Quality control | Eval each step | Guardrails, verifiers, loop limits |
+| Linch surface | `run_workflow` | `create_deep_agent` / custom orchestration |
 
-`run_workflow` is the closed loop: a deterministic, journaled, resumable fleet script the
-embedder authors. `create_deep_agent` is the open loop: a coordinator that owns the goal
-and lets the model author the path. *Single-vs-fleet is an independent axis* — both
-surfaces fan out; the line that separates them is open-vs-closed.
+Linch should provide the shared control surface for both modes:
 
-**The SDK's job is the control surface that lets an embedder dial any agent along this
-axis** — and Linch already owns both knobs:
+- **Budget** via `RunBudget`, shared across an agent tree.
+- **Verification** via verifiers, hooks, and eval scorers.
+- **Durability** via session stores, run stores, checkpoints, and workflow journals.
+- **Observability** via typed events, run reports, and observers.
+- **Blast-radius controls** via permissions, loop guards, timeouts, retries, and
+  isolation seams.
 
-- **Budget (`RunBudget`)** — the *cost line*. Propagates across the whole subagent tree by
-  reference; `wf.budget` shares it. This is the "normal vs unlimited budget" control.
-- **Verification + evals (`verification.py`, `ScorerVerifier`, `evals/`)** — the *standard
-  that keeps it honest*. It stops an open loop from becoming a slop machine and makes a
-  closed loop improve each run.
-
-**Design consequence (pure-mechanism):** Linch ships the *mechanism* for each cycle stage
-(Discovery → `ContextBuilder`/`memory`; Planning → task DAG; Execution → tools;
-Verification → `verification.py`; Iteration → the loop + verifier retry) and the two
-control knobs — but it must **never** bake the DPEVI cycle in as policy. The cycle is
-assembled by a preset (`deep_agent`) or the embedder, not the core loop.
-
-**Roadmap implications:**
-
-1. **Unify the control surface across both loops.** Budget and verification must apply
-   *identically* to `run_workflow`, `create_deep_agent`, and any hand-rolled loop. Confirm
-   `wf` exposes per-step verification (not just budget) so a closed loop can eval at each
-   step (panel 3's "eval at each step"); confirm a workflow step can run a `Verifier`/
-   `ScorerVerifier`. *Verify:* a workflow step failing its scorer surfaces a typed failure;
-   a deep-agent run and a workflow run charge the same shared `RunBudget`.
-2. **Graduate the open loop from "experimental."** `create_deep_agent` is open by nature,
-   so its safety rails are the difference between "runnable" and "slop machine." But a
-   *default budget number* is an arbitrary cost guess and a *default verifier* is a domain
-   quality standard — both are policy a pure-mechanism SDK must not own (and forcing them
-   would break "default byte-identical"). So instead of fabricating defaults, make the
-   rails **first-class and discoverable**: `loop_guard` stays on by default (a domain-
-   agnostic mechanism); `budget=`, `verifiers=` (auto-wrapped into the hooks layer),
-   `max_verification_retries=`, and `max_turns=` are explicit, documented parameters on
-   `create_deep_agent`, with an "Open-loop safety rails" docstring telling the embedder to
-   set them. *(Done — `deep_agent/factory.py`.)*
-3. **Keep `run_workflow` the closed-loop reference.** Its journaling/resume + deterministic
-   replay are the "cheap, repeatable, gets better every run" guarantees — protect them as a
-   versioned contract (ties into Phase 5 serialization hardening).
-4. **Label the presets honestly.** `run_workflow` = supported core mechanism (closed loop);
-   `create_deep_agent` = experimental open-loop preset/example, not a product direction —
-   consistent with the pure-mechanism stance.
+The SDK should not bake the DPEVI cycle in as mandatory policy. It can ship
+presets and examples, but the host decides the workflow.
 
 ---
 
-## Where Linch already leads
+## Current Baseline
 
-This roadmap is derived from a section-by-section study of the `learn-claude-code`
-harness curriculum (s01–s20), **filtered to mechanism only** and measured against Linch's
-actual code. Linch already matches or exceeds the reference on the core runtime:
+Linch already has the main runtime substrate for a strong embedding kit:
 
-- **Loop core** — `loop/` split, loop guard, max-turns, budgets, verification gates;
-  continuation keys off tool-use *block presence*, not a `stop_reason` string.
-- **Tool scheduling** — `scheduler._partition_batches` already does order-preserving
-  consecutive-batch partitioning with `ResourceAccess` conflict detection, concurrency
-  caps, retry, timeouts, `result_offload`.
-- **Permissions** — `PermissionEngine` + **durable HITL decisions in the run checkpoint**.
-- **Hooks** — unified `HookDispatcher` with typed `HookResult`/`HookContext` + adapters.
-- **Memory storage** — `MemoryStore` protocol, Sqlite/Postgres/keyword/tiered stores.
-- **Compaction** — ladder (COW `micro_compact` + forced-compaction circuit breaker).
-- **Task model** — `Task`/`TaskPatch` already carry the full dependency graph
-  (`owner`, `blocks`, `blocked_by`, edge mutation, `active_form`).
-- **Subagents** — child sessions, retain+continue, background workers with notification
-  drain, `WorkerHandle` registry, budget inheritance.
-- **Provider-agnostic** — OpenAI/Anthropic/Gemini/llama.cpp behind one interface +
-  capability downgrade.
-- **Embedder testing** — `ScriptedProvider`, `evals/`, deterministic harness.
-- **Durable resume** — `RunCheckpoint`/`SqliteRunStore`.
+- Event-driven `Agent` / `Session` loop with typed event streaming.
+- Provider abstraction for OpenAI, Anthropic, Gemini, llama.cpp, vLLM, SGLang,
+  and OpenAI-compatible APIs.
+- Tool protocol, built-in tools, MCP tool wrapping, execution backends, scheduler,
+  resource conflict handling, retries, timeouts, and background tools.
+- Permission engine, durable HITL decisions, path/bash/tool rules, read-before-write,
+  and MCP destructive-tool prompting.
+- Memory stores, context builders, compaction, virtual filesystem, result offload,
+  and memory lifecycle hooks.
+- Subagents, retained worker sessions, background workers, mailbox coordination,
+  scheduling primitives, and a host-called `LoopRunner`.
+- Workflow journaling, run checkpoints, run reports, OpenTelemetry observer, and
+  deterministic eval harness.
+- Extension templates and usage docs for the main seams.
 
-The gaps below are domain-agnostic runtime mechanisms layered on these primitives.
+This baseline is enough. The next work should harden and clarify it rather than
+add broad new agentic abstractions.
 
 ---
 
-## Out of scope (deliberately left to embedders)
+## What Linch Actually Needs Now
 
-These appear in the reference curriculum but are **coding-product policy**, not SDK
-mechanism. Linch will *not* ship them; an embedder builds them on the primitives below:
+Linch should stay **thin**: an embedding kit for developers building agent
+products, not the product itself. "Strong" now means the SDK makes the hard
+runtime parts reliable, observable, testable, and easy to embed while refusing
+to accumulate domain policy.
 
-- Git **worktree** provisioning — coding/VCS-specific. The SDK ships a generic
-  filesystem-isolation seam (2.2); git-worktree is one embedder implementation.
-- **Background bash** as a special case — the SDK ships background-*any-tool* (2.3); Bash
-  is just one caller.
-- **TodoWrite** UX and planning-drift nudges — assistant ergonomics.
-- Coding **system prompts**, git-aware behaviors, and an assumed Read/Edit/Write coding
-  toolset as the *default* agent. (The built-in fs/shell tools remain as domain-neutral
-  primitives and `deep_agent` remains an optional example — neither is extended as a
-  product direction.)
-- **Autonomous coding fleets** and **scheduled coding tasks** — choreography/policy the
-  embedder composes from the coordination + scheduling primitives (2.x, 3.3).
+The roadmap should optimize for four developer outcomes:
 
----
+1. **Confidence to embed.** A host app can wire Linch into an async service, run
+   many tenants, stream events, pause for HITL, resume after a restart, and shut
+   down without leaked work.
+2. **Confidence to extend.** A developer can add a provider, tool package,
+   memory backend, filesystem backend, permission policy, hook, mailbox,
+   schedule store, or isolation backend without reading loop internals.
+3. **Confidence to operate.** A run produces enough structured evidence to debug
+   cost, latency, context pressure, permissions, failed tools, compaction,
+   fallback, and verifier retries without parsing raw transcripts.
+4. **Confidence to control blast radius.** Budgets, loop guards, permissions,
+   isolation, retries, timeouts, and verifiers remain first-class controls, but
+   their policy is supplied by the embedder.
 
-## Implementation plan (phased)
+### Active Roadmap
 
-Each item lists **why**, **where** (modules), **approach**, and **verify** (the success
-check to loop against, per the repo's TDD rules).
+All eight Active Roadmap priorities are now shipped (status below). New roadmap
+items should pass the acceptance test further down before being added here.
 
----
-
-## Current hardening priorities
-
-Linch is already feature-rich for an embeddable SDK. The next tranche should
-optimize stability, cost visibility, and developer experience before adding large new
-agentic abstractions.
-
-| Priority | Area | Status | Next action |
+| Priority | Need | Status | Shape |
 |---|---|---|---|
-| 1 | CI / test reliability | **Done.** GitHub Actions now runs the same local check script as developers. The suite is guarded with `pytest-timeout`, dependency pins were tightened for `pytest>=8`, and the subprocess execution-backend tests run in their own phase to avoid order-dependent hangs. | Keep CI as the merge gate. Investigate the execution-backend order dependency separately so the split can eventually be removed. |
-| 2 | Lint hygiene | **Done.** Ruff issues in the Colab provider scripts were fixed and `scripts/check.sh` includes `ruff check .` plus `ruff format --check .`. | Treat any new lint failure as a PR blocker. |
-| 3 | Core orchestration complexity | **Ongoing.** The loop already has many mechanisms: budgets, verification, compaction, subagents, background tools, scheduling, mailbox. New runtime work should stay opt-in and tightly measured. | Prefer targeted simplification and regression tests over new orchestration surfaces. |
-| 4 | Cost / context efficiency measurement | **Done for the current pass.** `RunReport.long_run` tracks context/memory/recovery signals, and `RunReport.summary` now adds event counts, duration, token/cost totals, cache-read ratio, tool latency/error rate, context utilization, compaction/fallback/retry/offload counters, and risk counters. | Use real run reports to decide which cost/context optimizations are worth implementing next. |
-| 5 | Provider resilience | **Mostly done.** Model fallback is shipped and emits a typed event. Output-truncation recovery remains intentionally deferred because automatically raising `max_output_tokens` is policy-sensitive. | Revisit only as an explicit opt-in, e.g. `truncation_recovery=...`, once a real provider/use case needs it. |
-
-### Completed in the current hardening pass
-
-- **CI/dev health command:** added `.github/workflows/ci.yml` and
-  `scripts/check.sh`; local and CI checks now run the same Ruff, format, Pyright, and split
-  pytest sequence.
-- **Persistence/test reliability:** fixed blocking/off-loop behavior around SQLite-backed
-  helpers so the test suite no longer hangs under the current pytest/runtime environment.
-- **Lint cleanup:** fixed existing Ruff violations in the Colab vLLM/SGLang scripts.
-- **Observability/reporting baseline:** added the compact `RunReport.summary` payload and
-  surfaced it in Markdown/docs so hosts can read per-run health without parsing the full
-  timeline. The summary now includes explicit cache-read, compaction, model fallback,
-  verifier/hook retry, and result-offload counters.
-- **Runtime report viewer baseline:** added `scripts/run_report.py` to render a concise
-  summary, Markdown, or JSON export from a durable `SqliteRunStore` by `run_id`.
-
-### Next feature candidates, in practical order
-
-1. **Runtime metrics/report viewer.** A first local viewer now exists as
-   `scripts/run_report.py` (`summary` / `markdown` / `json` output from `SqliteRunStore`).
-   The report summary now exposes explicit cache-read, fallback/retry, compaction, and
-   offload counters without requiring callers to parse the raw timeline. Next improvements
-   should be driven by real run data, for example trend snapshots, top slow tools, or export
-   formats for CI artifacts.
-2. **Outer loop primitive V0.** **Done.** `LoopSpec` + `LoopRunner.run_once()` provide a
-   deterministic one-shot harness that a host can call from cron, CI, webhooks,
-   `SchedulerLoop`, or another agent. It creates a fresh session per tick, writes
-   file-backed `domains/<loop_id>/` artifacts, emits Markdown/JSON `RunReport`s, and leaves
-   trigger ownership and daemon lifecycle to the embedder. V1 adds optional
-   `LoopLeaseStore` support (`InMemoryLoopLeaseStore`, `FileLoopLeaseStore`) for
-   multi-process overlap protection.
-3. **Durable coordination backends.** **Mostly done.** `SqliteMailbox` now provides a
-   durable peer-message adapter with transactional destructive drain for cross-process
-   teams and restart survival. `SqliteScheduleStore` now supports atomic due claims so
-   multiple scheduler workers sharing one database do not double-fire the same tick.
-   Distributed queue/lease backends remain future work.
-4. **Eval/benchmark harness as first-class API/CLI.** **Done for V0.**
-   `EvalSuite`, `EvalBenchmarkTarget`, and `run_eval_benchmark()` provide the library
-   surface for comparing one suite across targets, while `scripts/eval_benchmark.py`
-   runs JSON/YAML suites against deterministic `ScriptedProvider` targets with
-   summary/Markdown/JSON output and CI pass-rate exits. Future benchmark suites can layer
-   in live-provider comparison, concurrency measurements, compaction, fallback behavior,
-   and memory retrieval checks without changing the harness contract.
-5. **Extension templates.** **Done for V0.** `examples/extensions/` now ships
-   copyable, dependency-free templates for provider, memory store, virtual filesystem
-   backend, tool package, and hook package. The tool package leads with `@tool` for the
-   common case and includes a class-shaped advanced example for custom validation/resources.
-   The templates are importable and smoke-tested so they track public protocol names.
-6. **Memory/RAG adapters.** **Done for docs/examples V0.** No new core abstraction was
-   added: vector stores adapt to the existing `MemoryStore` shape. Docs now cover the
-   `MemoryItem` / `MemorySearchResult` mapping and wiring through `MemoryContextBuilder`,
-   `MemorySearchTool`, `MemoryUpsertTool`, and `Agent(deps=...)`. Example recipes cover
-   FAISS, pgvector, and Qdrant with optional dependencies kept outside core.
-
-### Proposed: outer autonomous harness loop
-
-The `/loop` skill pattern is valuable, but it belongs in Linch as a host-runner mechanism,
-not as shell-sentinel behavior in core. `create_deep_agent` is the **inner open loop**: the
-model authors a path inside one run using tasks, tools, subagents, memory, budgets, and
-verification. An autonomous harness loop is the **outer loop**: the host decides when to
-wake the agent and submit another prompt/run.
-
-- **Status (V0/V1 done):** `LoopSpec`, `LoopTrigger`, `LoopTickResult`,
-  `LoopArtifactStore`, `FileLoopArtifactStore`, `LoopLeaseStore`,
-  `InMemoryLoopLeaseStore`, `FileLoopLeaseStore`, and `LoopRunner.run_once()` ship the
-  library primitive. It is deterministic and host-called: fresh session per tick,
-  file-backed `domains/<loop_id>/` layout, caller-supplied verification/done predicates,
-  per-run Markdown/JSON reports, append-only `LOG.md`, an in-process per-loop overlap
-  guard, and optional durable leases with TTL-based stale-lock recovery.
-- **Future mechanism:** daemon lifecycle, webhook adapters, fixed-interval helpers,
-  heartbeat/backoff policy, and stronger distributed lease backends can wrap `run_once()`
-  later without changing the artifact/report contract.
-- **Integration:** `ScheduleStore` / `SchedulerLoop` can decide when a schedule is due, but
-  the host still calls `LoopRunner.run_once()`; scheduler does not own execution.
-- **Out of scope for core:** shell `while true` sentinels, OS cron ownership, domain-specific
-  watcher implementations, and policy for what makes the next tick worth running. Those
-  remain skills/examples/embedder code on top of the runner.
+| 1 | **Embedding quality gates** | ✅ shipped | Expanded regression coverage: hook-failure isolation across lifecycle chokepoints, mid-tool cooperative abort → aborted terminal, 3-level budget inheritance. Existing coverage already strong for resume, concurrency, permission replay, checkpoint compatibility. |
+| 2 | **Extension contract tests** | ✅ shipped | `linch.testing` ships `assert_*_contract` helpers for tools, file backends, isolation backends, mailboxes, memory stores, and schedule stores. |
+| 3 | **Run diagnostics V1** | ✅ shipped | `RunReport` + `scripts/run_report.py` surface top slow / top failing tools, context-pressure tier, per-tool error counts, retry/fallback/offload counters, and total cost. |
+| 4 | **Security/governance seams** | ✅ shipped | `RedactionHook` (policy-free regex scrubbing of tool results / final answer / prompt) + `examples/core/governance_redaction.py`. No default PII/PHI classifiers in core. |
+| 5 | **Packaging and docs polish** | ✅ shipped | Small, opt-in extras with explicit `pip install 'linch[...]'` errors; `docs/usage/production.md` minimal production-wiring checklist; examples index refreshed. |
+| 6 | **Explicit recovery knobs** | ✅ shipped | `Agent(truncation_recovery=TruncationRecovery(...))` — opt-in, bounded continuation on `max_tokens` truncation; never escalates the output cap implicitly; default byte-identical. |
+| 7 | **Host-owned runner recipes** | ✅ shipped | `examples/recipes/runner_recipes.py` wraps `LoopRunner.run_once()` for cron, webhook, fixed-interval, and CI-gate triggers; lifecycle stays host-owned. |
+| 8 | **External adapter examples** | ✅ shipped | `examples/integrations/redis_mailbox.py` implements the `Mailbox` protocol over Redis lists and is validated by `assert_mailbox_contract`. Adapters stay out of core. |
 
 ---
 
-### Phase 1 — Runtime resilience & cost
+## What Linch Does Not Need Now
 
-Pure runtime mechanisms; no new subsystems. Highest leverage, fully self-contained.
+These items are useful for products built on Linch, but they do not belong in
+core now. Add them only when a concrete, domain-neutral mechanism emerges.
 
-#### 1.1 Fork-mode subagents (prompt-cache sharing) — *mechanism*
-- **Why:** every child gets fresh context today — correct for isolation, expensive for
-  fan-out. A cache-friendly forked prefix makes any parallel agent tree cheaper.
-- **Where:** `subagents/` (`SubagentTool`, `RunSubagentArgs`, `_drive_child`),
-  `AnthropicProvider` (already supports `prompt_cache=True`).
-- **Approach:** `mode="fork"` builds a byte-identical cache prefix from the parent
-  `provider_view` (system + tools + model + message prefix + thinking config identical);
-  clone the parent `file_read_tracker` into the child `ToolContext`.
-- **Verify:** a forked child over a long parent context yields cache-read tokens > 0 on a
-  stub caching provider; `mode="normal"` still produces a fresh prefix.
-- **Status: done.** `RunSubagentArgs(fork=True)` (and `wf.agent(..., fork=True)`) seeds the
-  child with the parent's `provider_view`, system blocks, tools, and `file_read_tracker`,
-  so the request prefix is cache-identical; default (`fork=False`) stays isolated. Exposed
-  as a boolean rather than `mode="fork"` (KISS). 2 tests assert the seeded prefix + cloned
-  tracker structurally (a live cache-read count depends on the provider).
+| Not needed now | Why not | Where it should live |
+|---|---|---|
+| **Coding-agent product UX** | Todo lists, plan nudges, git conventions, PR behavior, and coding prompts are product policy. | Host app, project skill, or coding-agent package. |
+| **Git worktree management in core** | Git is not universal. Linch already has the isolation seam. | External `IsolationBackend` implementation or coding example. |
+| **Daemon supervisor** | Process lifetime, restart policy, backoff, deployment target, and locks are host concerns. | Host service, systemd, cron, Kubernetes, Celery, Temporal, or a small example wrapper. |
+| **Hosted dashboard or web UI** | UI and storage opinions would turn the SDK into a product. | Separate app consuming events, run reports, and OTel traces. |
+| **Marketplace for skills/tools** | Distribution, trust, signing, ranking, and updates are product/ecosystem policy. | External registry or package manager integration. |
+| **Default PII/PHI/security classifier** | Classifiers and thresholds are compliance policy and can create false confidence. | Hook examples, verifier examples, or app-specific governance package. |
+| **Large built-in tool bundles** | GitHub, Slack, kubectl, browser, DB, cloud, and SaaS SDKs would bloat dependencies. | Optional packages implementing `Tool` or MCP servers. |
+| **Domain memory formats as core defaults** | `MEMORY.md`, Obsidian, AgentBrain, CRM notes, and ticket histories have different semantics. | Memory adapters over `MemoryStore` or `ContextBuilder`. |
+| **Distributed queue/lease backend in core** | Redis, SQS, Postgres advisory locks, and cloud queues are deployment choices. | Optional store packages behind existing protocols. |
+| **Automatic output-token escalation** | Raising caps changes cost and latency without the embedder's policy decision. | Explicit opt-in recovery option. |
+| **Prompt/policy presets as defaults** | Defaults would make Linch opinionated toward one agent type. | `create_*_agent` factories, examples, or host configuration. |
+| **Vendor-specific observability integrations** | OTel already gives the neutral bridge. | Vendor configuration or thin external observer package. |
+| **OAuth/PKCE for every integration** | Auth flows are integration-specific and easy to overfit. | MCP/tool adapter packages unless a small common seam becomes obvious. |
+| **Bounded event queues by default** | The async generator's natural backpressure is the current contract. | Optional wrapper if a host needs buffering/drop policy. |
+| **Generated API reference site** | Useful polish, not a runtime need. | Documentation pass after the public surface stabilizes further. |
 
-#### 1.2 Compaction fidelity: post-recovery + LLM-free rungs — *mechanism*
-- **Why:** forced compaction is summary-only and lossy for in-flight work.
-- **Where:** `compaction.py`, `CompactionLadder`, `memory/`.
-- **Approach:** three additive rungs, all domain-agnostic —
-  1. **Post-compaction recovery:** after summarizing, re-attach the most recent *tool
-     results* and any caller-pinned context (generalized from the reference's
-     "re-read files" — Linch keys off `file_read_tracker`/recent `ToolResultBlock`s, not a
-     coding assumption).
-  2. **`sessionMemoryCompact`:** try an LLM-free summary from `MemoryStore` before paying
-     for the LLM summary.
-  3. **Snip rung:** COW middle-message elision (keep head + recent tail) between
-     `micro_compact` and forced compaction.
-  Switch the proactive trigger to a token threshold
-  (`provider.context_window(model) − max_output_tokens − buffer`); add summary-prompt
-  guardrails (`TEXT ONLY, no tools`, `<analysis>`/`<summary>` tags).
-- **Verify:** after a forced compaction, recent tool results survive in `provider_view`;
-  the memory rung makes zero provider calls when memory suffices.
-- **Status: done (scoped to the one real gap).** Audited against the existing ladder and
-  found most of this sub-item already shipped, so — per YAGNI/KISS — only the genuine gap
-  was built:
-  - **Post-compaction read-tracker reset (new).** A compaction (micro elision *or* forced
-    summary) can remove a file's contents from `provider_view` while
-    `session.file_read_tracker` still records it as read; the `Edit` tool gates on
-    `has_read`, so a stale entry would permit a *blind* edit on content the model can no
-    longer see. `reset_read_tracker_after_compaction` (`compaction.py`) clears the tracker
-    after a compaction, gated on `CompactionLadder(reset_read_tracker=True)` (ladder
-    default). Wired at the proactive (`loop/runner.py`) and reactive (`loop/streaming.py`
-    ladder path) chokepoints; the legacy non-ladder path is intentionally left untouched so
-    defaults stay byte-identical. This is the domain-agnostic generalization of the
-    reference's "re-read files after compaction" — keyed off the core `file_read_tracker`,
-    not a coding assumption. (3 unit + 3 integration tests.)
-  - **Already present (not rebuilt):** recent tool results already survive forced
-    compaction (`DefaultCompaction`/`DetailedCompaction` keep the last *N* turns verbatim);
-    the proactive trigger is already a token threshold (`estimate + reserve ≥ 0.8·limit`);
-    the detailed-summary guardrails (`TEXT ONLY`, `<analysis>`/`<summary>`) already live in
-    `_DETAILED_SUMMARY_PROMPT`.
-  - **Deferred as speculative (YAGNI):** the `sessionMemoryCompact` rung (an LLM-free
-    summary sourced from `MemoryStore`) and a separate COW "snip" rung — `micro_compact`
-    already covers LLM-free tool-result reduction, and a memory-sourced summary needs a
-    concrete embedder use case before it earns its complexity. Revisit if a real need
-    surfaces.
+### Reopen Triggers
 
-#### 1.3 Output-truncation & model-fallback recovery — *mechanism*
-- **Why:** `loop/streaming.py` recovers from `context_length_error` but not output
-  truncation or provider overload.
-- **Where:** `loop/streaming.py`, `providers/with_retry`, loop State/checkpoint.
-- **Approach:** **`max_tokens` escalation** — on a truncated finish, retry the identical
-  request with a raised cap (8K→64K) *without* appending the truncated block; only then
-  append + inject a continuation system-reminder, capped at 3 with a `<500`-token
-  diminishing-returns stop. **Model fallback** — `Agent(fallback_models=[...])`: after K
-  consecutive overload errors, swap the active model for the run and emit an event.
-- **Verify:** a provider that truncates once then completes drives exactly one escalated
-  retry with no duplicated output; K overloads trigger one model swap + event.
-- **Status: model fallback done; truncation escalation deferred.**
-  - **Model fallback (new, shipped).** `Agent(fallback_models=[...])` — there was *no*
-    overload resilience in the loop (`with_retry` exists but is unwired, so a `ProviderError`
-    killed the run). On a retryable `ProviderError` (overload, e.g. 529) the recovery path
-    swaps the active model to the next fallback **for the rest of the run** and retries,
-    emitting a `ModelFallbackEvent`. The swap is run-level: persisted on
-    `session.active_model` (read in `loop/request.py`) and reset at run start, with
-    `session.fallback_index` tracking consumption (robust to duplicate model names). Wired
-    into both streaming attempt-loops (`_stream_turn_with_ladder` + the legacy retry path,
-    now a fallback while-loop); with `fallback_models` unset both stay byte-identical.
-    Overload raises *before* any token streams, so there is no duplicated output. Simplified
-    from the roadmap's "after K consecutive overloads" to "swap on overload" (KISS — backoff
-    is `with_retry`'s job, not the fallback's). (4 tests: fallback, no-fallback byte-identical,
-    run-level persistence across turns, exhaustion → error.)
-  - **Truncation `max_tokens` escalation/continuation — deferred (YAGNI/policy).** Auto-raising
-    the output cap past the embedder's configured `max_output_tokens` is policy a
-    pure-mechanism SDK should expose as an explicit opt-in, and the continuation half
-    (append-truncated + diminishing-returns `<500`-token stop) entangles with
-    partial-event duplication for streaming UIs. Lower real-world frequency than overload
-    (a misconfigured cap is embedder-fixable). Revisit as a focused opt-in
-    (`Agent(truncation_recovery=...)`) when a concrete need surfaces.
+Deferred ideas can come back when one of these is true:
 
-#### 1.4 Task coordination primitives: claim / ready / release — *mechanism*
-- **Why:** the DAG **model** already exists; the *coordination verbs* don't. These are
-  store-level primitives any multi-agent embedder needs — not a choreography.
-- **Where:** `sessions/store.py` (protocol), `sessions/sqlite.py`, `sessions/postgres.py`.
-- **Approach:** add to `SessionStore`:
-  - `claim_task(session_id, task_id, owner)` — atomic, owner-guarded (SQL conditional
-    `UPDATE … WHERE owner IS NULL` in a transaction; TOCTOU-safe, no lockfile).
-  - `ready_tasks(session_id)` — `pending AND owner IS NULL AND all blocked_by completed`.
-  - On complete, surface newly-unblocked downstream ids.
-  - **Release-on-failure:** when an owning worker aborts
-    (`_cancel_background_workers`/`agent.close()`), clear `owner` + reset `status→pending`.
-  The SDK ships these verbs; *how* an embedder distributes work over them is the
-  embedder's choreography.
-- **Verify:** two concurrent claims on one task → exactly one wins; completing an upstream
-  task moves dependents into `ready_tasks`; killing an owner releases its tasks.
-- **Status:** the store *verbs* (`claim_task`/`ready_tasks`/`release_task`) are **done**
-  across all three `SessionStore` backends + protocol (7 parametrized tests). The
-  *auto-release-on-worker-death wiring* is deferred to Phase 2.3 — it needs the
-  `owner == worker_id` convention the autonomous board establishes; wiring it before then
-  would be dead code (nothing claims tasks by worker id yet).
+- Two or more unrelated embedders need the same mechanism and cannot implement it cleanly
+  through an existing seam.
+- The feature can be expressed as a small protocol, hook, event, report field, or opt-in
+  config without adding policy.
+- The feature reduces core complexity or risk rather than adding another orchestration layer.
+- The feature can be tested deterministically without live services.
+- The feature keeps default behavior unchanged.
+
+If a proposal fails these triggers, keep it outside core.
 
 ---
 
-### Phase 2 — Coordination & isolation primitives
+## Acceptance Test For New Roadmap Items
 
-The SDK ships the **substrate**; the embedder writes the choreography (autonomous loops,
-team protocols, coding fleets). No domain policy in core.
+A roadmap item belongs here only if the answer is "yes" to all of these:
 
-#### 2.1 Mailbox substrate + protocol-correlation seam — *mechanism*
-- **Why:** workers report only *up* to the parent today; there is no peer-addressable
-  inbox or shared coordination space. This is the substrate under any multi-agent pattern.
-- **Where:** new `mailbox/` module; reuse `WorkerHandle`/`session.workers`.
-- **Approach:** a `Mailbox` protocol with `SqliteMailbox` (reuse `sessions/` infra) and an
-  optional lock-guarded `FileMailbox`. A `send_message(to, content, type)` function-tool
-  for parent and workers; on a worker's next `_drive_child` turn, drain its mailbox into
-  `provider_view` exactly like `pending_notifications`. Provide a neutral
-  **request/response correlation helper** (`request_id` + `pending → resolved` FSM) as a
-  primitive — *not* specific protocols (shutdown/plan-approval are embedder choreography).
-- **Verify:** worker A → worker B message is visible on B's next turn; concurrent writes to
-  one inbox don't drop messages; the correlation helper matches a response to its request.
-- **Status:** done (in-process + SQLite substrate). `mailbox/` ships `Mailbox` protocol +
-  `InMemoryMailbox` (per-recipient FIFO, async-lock guarded so concurrent sends never drop;
-  destructive/atomic `drain`), `SqliteMailbox` (durable, per-recipient FIFO, restart-safe,
-  transactional destructive drain), `MailboxMessage` (neutral `type` + `request_id`/`in_reply_to`),
-  and a non-blocking `Correlator` (pending→resolved FSM — a turn-based agent polls across
-  turns rather than blocking its turn). `Agent(mailbox=...)` auto-registers the
-  `send_message` tool; the loop drains a session's `mailbox_address` into `provider_view`
-  each turn at the same chokepoint as `pending_notifications` (so parent and workers are
-  served uniformly — workers default `mailbox_address` to their display_name). Opt-in:
-  no mailbox → no tool, no drain (byte-identical). **Deferred:** `FileMailbox` and
-  distributed queue adapters; Redis/SQS/etc. remain embedders' implementations behind the
-  same protocol.
+1. Does it help many kinds of embedded agents, not just coding agents?
+2. Can it be expressed as a protocol, hook, store, event, report, example, or opt-in
+   factory rather than a default behavior?
+3. Does it keep `Agent()` defaults byte-identical or observably safer in a
+   domain-neutral way?
+4. Can an embedder replace or disable it without forking Linch?
+5. Can it be verified with deterministic tests, usually without a live provider?
 
-#### 2.2 Generic filesystem isolation backend — *seam (generalizes worktrees)*
-- **Why:** parallel subagents share one cwd — real-disk edit collisions are unaddressed.
-  The SDK must not hardcode `git`; it exposes the *isolation seam*.
-- **Where:** new `IsolationBackend` protocol alongside `tools/execution.py`;
-  `run_subagent`, `workflow/`.
-- **Approach:** `IsolationBackend.acquire() -> cwd` / `release(cwd, keep=False)`. Add
-  `isolation=<backend>` to `run_subagent` and `wf.agent(...)`, running the child with
-  `ToolContext.cwd` overridden to the acquired path. Ship a trivial `TempDirIsolation`
-  (copy/scratch dir). **Git-worktree is an embedder implementation of the protocol**, not
-  shipped in core. Document two tiers: `ResourceAccess` (cheap, serialize same-resource
-  writes) vs isolation backend (strong, parallel branches).
-- **Verify:** two parallel subagents writing the same relative path under
-  `TempDirIsolation` don't collide; `keep=False` cleans up; a custom backend slots in via
-  the protocol.
-- **Status:** done for `run_subagent`. `tools/isolation.py` ships the `IsolationBackend`
-  protocol + `TempDirIsolation` (fresh scratch dir per `acquire`, optional `source` seed
-  copy, blocking fs work off-loop via `asyncio.to_thread`). `RunSubagentArgs` gains
-  `isolation` + `isolation_keep`; the child runs under an acquired cwd via the new
-  `Session.cwd_override`, released in the `finally` (leak-safe — acquired inside the try).
-  The scheduler routes execution **and** permission path-rule matching through
-  `_effective_cwd(session, agent)` (override → `agent.cwd`), so isolation is honored at all
-  three cwd sites. Git-worktree stays an embedder impl of the protocol; the two-tier
-  guidance (`ResourceAccess` vs isolation) is in the module docstring. Opt-in: no
-  `isolation` → child uses `agent.cwd` (byte-identical). `wf.agent(isolation=, isolation_keep=)`
-  threads the backend through to `run_subagent`, so workflow fan-outs get per-branch cwds too.
-
-#### 2.3 Background-any-tool — *mechanism (generalizes background bash)*
-- **Why:** background execution is hard-wired to the subagent path; the substrate
-  (detached task + notification drain) is general but unexposed for arbitrary tools.
-- **Where:** `scheduler.py`, `tools/` (a `run_in_background` call hint), `loop/runner.py`.
-- **Approach:** let the scheduler background *any* tool call carrying a `run_in_background`
-  hint — detached `asyncio` task, output streamed to the virtual `FileBackend`
-  (reuse `result_offload`), completion delivered through the existing
-  `pending_notifications` chokepoint, tracked via a `WorkerHandle`-like record. Bash gains
-  nothing special — it's just one tool that may set the hint.
-- **Verify:** a backgrounded long-running tool returns an immediate ack, its completion
-  notification arrives on a later turn, and `session.abort()` cancels it.
-- **Status:** done (core mechanism). `Agent(enable_background_tools=True)` lets the scheduler
-  background **any** allowed tool call carrying a `run_in_background` hint: the hint is
-  stripped before validation (so no tool needs to declare it), the call is detached as an
-  `asyncio` task tracked in `session.background_tasks`, an immediate ack becomes its
-  tool-result block, and completion is posted as a `<task-notification>` through the existing
-  `pending_notifications` chokepoint (drained next turn). `session.abort()` (and the loop's
-  abort cleanup) cancel the detached tasks. Denied / errored / hook-blocked calls fall
-  through to normal foreground handling. Opt-in: with the flag off the hint is passed through
-  untouched and the tool runs inline (byte-identical). Bash gets no special path — it's just
-  one tool that may set the hint. **Deferred (YAGNI):** streaming live tool output to the
-  virtual `FileBackend` via `result_offload` — the completion notification already carries the
-  result; live-tail streaming is an enhancement to add when a concrete long-output need appears.
+If an idea fails this test, it should live in an example, external package, host
+app, or project skill instead of the SDK core.
 
 ---
 
-### Phase 3 — Context, memory & scheduling mechanisms
+## Sequencing
 
-#### 3.1 Memory lifecycle hooks: extraction + consolidation — *mechanism*
-- **Why:** retrieval is strong, but memory only accumulates on explicit writes. The
-  extract→consolidate *loop* is the missing mechanism — the embedder supplies the
-  extraction prompt/policy; the SDK supplies the wiring.
-- **Where:** `hooks/` (a `MemoryExtractionHook` seam), `memory/` (add `consolidate()`).
-- **Approach:** a hook on terminal turns that runs a caller-provided side-query over the
-  pre-compaction `full_history` tail, dedups against existing entries, and `upsert`s —
-  skipped if the agent already wrote memory this turn. A `consolidate()` store capability
-  gated like the reference (time + change-count + lock). The *prompt* and *what counts as
-  a memory* are embedder-supplied; Linch ships the lifecycle seam.
-- **Verify:** with a stub extractor, a durable fact stated across turns is upserted once
-  without an explicit tool call and isn't duplicated on re-run.
-- **Status (done):** `MemoryExtractionHook` (`hooks/memory.py`) fires on the `Stop` hook of a
-  successful terminal turn, runs a caller-supplied extractor over the `full_history` tail
-  (`MemoryExtractionContext`), content-dedups each candidate against the store
-  (`search` score ≥ `dedup_threshold`), and `upsert`s the survivors. It sits out turns where
-  the agent already called a memory-write tool (`memory_write_tools`, default `UpsertMemory`)
-  and never alters the answer (always returns `None`; the dispatcher isolates a raising
-  extractor). Consolidation is a neutral `ConsolidationGate` (`memory/lifecycle.py`) — time +
-  change-count + an in-process `asyncio.Lock` single-flight — running an embedder-supplied
-  `consolidator(store, ctx)` thunk only when gated. The extractor/consolidator (the LLM
-  side-query, the prompt, what counts as a memory) are embedder policy; Linch ships only the
-  wiring. Opt-in via `Agent(hooks=[MemoryExtractionHook(...)])`; with no such hook the loop is
-  byte-identical. **YAGNI deferrals:** no `consolidate()` method was added to the `MemoryStore`
-  protocol (the gate + thunk keeps stores untouched and the capability optional); a
-  multi-process consolidation lock (a store lock row) is left to durable store adapters.
+The practical order is:
 
-#### 3.2 System-prompt section assembly + cache boundary — *mechanism*
-- **Why:** the prompt is one config string; any dynamic block (memory/MCP) risks
-  invalidating the whole cached prefix.
-- **Where:** new `SystemPromptBuilder` (mirror `ContextBuilder`), `loop/request.py`.
-- **Approach:** an ordered registry of named sections, each `static`/`dynamic` with a
-  `condition(state)` predicate; `Agent(system_prompt=...)` becomes one section. Emit
-  `(static_block, dynamic_block)` and wire a cache boundary in
-  `apply_provider_capabilities` so caching providers cache only the static prefix. Move
-  volatile facts to a prepended `<system-reminder>` user message.
-- **Verify:** changing a dynamic section leaves the cached static prefix intact
-  (cache-read tokens unchanged on a stub caching provider).
-- **Status (done):** the section-assembly half already shipped — `SystemPromptConfig`
-  carries ordered named `SystemPromptSection`s (`placement` ∈ before_defaults / after_defaults
-  / after_env) each with a `cacheable` flag, and every block is a `SystemBlock(cacheable=...)`.
-  The real gap was the **cache boundary**: `_translate_system` ignored `cacheable` and always
-  marked the *literal last* system block, so a volatile trailing section thrashed the whole
-  cached prefix. Fixed by placing the Anthropic cache breakpoint at the end of the leading
-  contiguous static (`cacheable=True`) run (`_cache_breakpoint_index`); a `cacheable=False`
-  block ends the cached prefix and is re-sent uncached each turn. Because the agent's built-in
-  prompt blocks are all `cacheable=True`, the breakpoint stays on the last block — byte-identical
-  for real prompts; the change only takes effect once a caller introduces a dynamic block (a
-  `SystemPromptSection(cacheable=False)` or a `ContextBuilder` system block, which already
-  defaults to `cacheable=False`). Volatile per-turn facts are already a *user* message:
-  `build_user_message` prepends `<env>` (today's date) and `MemoryContextBuilder` injects recall
-  as a user message, both outside the system prefix. **YAGNI deferrals:** no separate
-  `SystemPromptBuilder` registry was added — `SystemPromptConfig.sections` (static, with
-  `cacheable`) plus the existing per-turn `ContextBuilder` system-block seam already cover ordered
-  static-prefix + dynamic-suffix assembly, so a parallel builder with `condition(state)`
-  predicates would duplicate that seam without unlocking a new capability. Multi-breakpoint
-  caching (Anthropic allows up to 4) is left unused; one breakpoint at the static/dynamic boundary
-  is sufficient.
+1. **Protect the current runtime.** Regression tests, cleanup, compatibility,
+   cancellation, resume, and concurrency guarantees.
+2. **Make extension safer.** Compliance helpers, templates, and clearer docs for
+   implementers.
+3. **Improve diagnostics.** Reports and summaries that make production failures
+   explainable.
+4. **Add only opt-in recovery.** Recovery features that change cost, duration, or
+   model behavior require explicit knobs.
+5. **Keep adapters outside core.** Use examples and optional packages to prove
+   protocols without bloating `linch`.
 
-#### 3.3 Scheduling primitive — *mechanism*
-- **Why:** no time-trigger exists. A neutral scheduler is a mechanism; *what* gets
-  scheduled is embedder policy.
-- **Where:** new `scheduler/` module (distinct from the tool `scheduler.py`); persist via
-  `SqliteRunStore`.
-- **Approach:** a `Schedule` abstraction (interval + a neutral `cron_matches`/
-  `validate_cron` utility), an async `SchedulerLoop` (`asyncio.create_task`, 1s tick — not
-  a thread), and a `ScheduleStore` protocol for durability + atomic due claims. On
-  fire, enqueue into `session.pending_notifications` (reuse the existing drain). Expose
-  register/list/cancel as `@tool` functions, auto-registered when a `ScheduleStore` is
-  configured. Emit a `ScheduleEvent`. The firing *payload/policy* is the embedder's.
-- **Verify:** a `* * * * *` schedule fires once/minute as a UserEvent; durable schedules
-  survive a store reload; an invalid expression is rejected at register time.
-- **Status (done):** shipped as a new `scheduling/` package (named to avoid the tool
-  `scheduler.py` clash). `cron.py` is a dependency-free 5-field cron utility
-  (`validate_cron` / `cron_matches` / `next_cron_time`, `*` `a-b` `a,b` `*/n`, UTC,
-  Sun=0). `Schedule` (cron *or* interval, exactly one) validates the cron in
-  `__post_init__` and computes its own `next_run`. `ScheduleStore` is a protocol with two
-  adapters — `InMemoryScheduleStore` and a durable `SqliteScheduleStore`
-  (`SqliteExecutor`-backed, survives a reopen, and implements transactional
-  `claim_due(now)`). `SchedulerLoop` is an `asyncio` task with a pure, testable `tick()`
-  core (1s cadence = `tick` + `asyncio.sleep`): stores that implement
-  `ClaimingScheduleStore` atomically advance due rows before firing, so two processes
-  sharing a SQLite database cannot both fire the same schedule tick. Each claimed schedule
-  fires into `session.pending_notifications` as a `<scheduled-task>` message — the same
-  drain background workers use, so it surfaces as a `UserEvent` next turn — and a
-  `ScheduleEvent(status="fired")` is emitted. `schedule_tools(store)` exposes
-  `CreateSchedule` / `ListSchedules` / `CancelSchedule` (cron validated at register time),
-  auto-registered by `Agent(schedule_store=...)`; off by default (byte-identical). The
-  firing payload is embedder policy. **YAGNI deferrals:** distributed scheduler backends /
-  external leader-election services remain embedder implementations; persisting *via*
-  `SqliteRunStore` was set aside in favor of a dedicated `schedules` table/store (cleaner
-  separation than overloading the run-checkpoint store); cron DOM/DOW use simple AND (not
-  the legacy OR) semantics; the `Agent` does not own the loop lifecycle (the embedder
-  starts/stops a `SchedulerLoop` bound to a session), keeping the timer explicit rather
-  than an implicit background thread inside `Agent`.
-
----
-
-### Phase 4 — Extension-surface hardening
-
-Small, high-confidence additions that complete the pure-SDK extension contract.
-
-#### 4.1 Hook contract: input mutation, allow-invariant, more events
-- **Where:** `hooks/`, `scheduler.py`, `subagents/runner.py`, `compaction.py`,
-  `loop/terminals.py`.
-- **Approach:** confirm/add **`updated_input`** on `HookResult` (a `PRE_TOOL_USE` hook
-  rewrites tool input before execution, wired through validate→execute); enforce the
-  **allow-invariant** (a hook `allow` cannot bypass a configured deny/ask rule — add a
-  regression test at the hook↔permission seam); add `SUBAGENT_START/STOP`,
-  `PRE_COMPACT/POST_COMPACT`, `POST_TOOL_USE_FAILURE` events; add a final-answer
-  **re-entry guard** so a blocking hook can't loop.
-- **Verify:** a pre-tool hook's `updated_input` reaches `execute`; hook-allow + config-deny
-  → denied; a blocking final-answer hook fires once.
-- **Status (done):** `PRE_TOOL_USE` input rewrite was already wired end-to-end
-  (`HookResult.input` → `PermissionDecision.updated_input` → `_effective_input` →
-  validate→execute; covered by `test_tool_hooks_rewrite_input_block_and_result`), so this
-  item only *confirmed* it. `SUBAGENT_START/STOP` were already dispatched in
-  `subagents/runner.py`. New work: (1) the **allow-invariant** is structural — PreToolUse
-  hooks run only over already-`allow`ed calls (`scheduler.py` skips any non-allow decision)
-  and there is no `allow` `HookAction`, so a hook cannot resurrect a denied call; added a
-  regression test proving a `ToolRule` deny wins and the hook never even fires. (2) Three new
-  observational events — `POST_TOOL_USE_FAILURE` (dispatched in `_dispatch_post_tool_use`
-  only when the final, post-mutation result `is_error`; gated on `dispatcher.active` for
-  zero overhead) and `PRE_COMPACT`/`POST_COMPACT` (dispatched at the single real-compaction
-  chokepoint `compaction._run_compaction_impl`, so both proactive *and* forced/ladder-rung-2
-  compaction notify). (3) A **re-entry guard** (`_MAX_FINAL_ANSWER_REENTRIES = 1`,
-  per-run counter in `loop/runner.py`) caps `BeforeFinalAnswer`-induced retries: the retry is
-  honored once, then ignored so the answer is accepted — bounding a perpetually-blocking
-  hook without skipping the dispatch (which would break legitimate retry-then-mutate flows).
-  Default-off / byte-identical: with no hooks every dispatcher is inactive and the guard
-  counter never moves. Deferrals (YAGNI): `PRE_COMPACT`/`POST_COMPACT` are **observational
-  notifications** (no mutate/abort of the compaction) — a mutating compaction hook is added
-  only if an embedder needs it; micro-elision (ladder rung 1) is a cache optimization, not a
-  summarizing compaction, so it intentionally does not emit these; the re-entry cap is a
-  module constant, not an `Agent` knob, until a caller needs >1 honored retry; the STOP
-  hook's `force_continue` remains bounded by `max_turns` rather than the new guard (separate
-  seam, not "the final-answer hook").
-
-#### 4.2 Permissions: layered sources, passthrough, subagent bubbling
-- **Where:** `permissions/`, `subagents/`.
-- **Approach:** a `PermissionRuleSet` merging ordered sources
-  (defaults < project < local < runtime/session) with policy-wins semantics; a
-  `passthrough` decision; **bubble** a subagent's `PermissionRequestEvent` to the parent's
-  event stream/HITL instead of auto-denying.
-- **Verify:** a project deny overrides a runtime allow; a subagent permission request
-  surfaces to the parent caller.
-- **Status (done):** Layered sources ship as `permissions/ruleset.py`:
-  `PermissionRuleSet([PermissionLayer(name, rules), ...])` evaluates each layer as an
-  independent first-match flat list (reusing the extracted `engine.evaluate_rule_list`,
-  which the legacy flat path now also delegates to — DRY) and combines them with
-  **deny-override / policy-wins**: a `deny` from *any* layer is final (fail-closed),
-  otherwise the highest-precedence (last) non-abstaining layer wins; `None` when all
-  abstain. A new `passthrough` `RuleDecision` lets a matched rule abstain (scanning
-  continues past it), so a layer can carve out exceptions that defer to the next source.
-  `PermissionEngine(rule_set=...)` is the opt-in seam: when set, the layered combiner runs
-  before the flat rules + mode default; default `rule_set=None` is byte-identical.
-  Subagent bubbling: child sessions already share the parent's permission engine + responder
-  (so they were never auto-denied when a callback exists), but their events — including a
-  child `PermissionRequestEvent` — only landed in `session.pending_child_events`, a buffer
-  for host UIs. New `_drain_child_events` yields that buffer into the parent's event stream
-  at the same top-of-turn chokepoint as the notification/mailbox drains, so a child's
-  permission request now surfaces to the parent caller's iterator. Deferrals (YAGNI): the
-  `Agent`/permissions-config layer does not yet auto-assemble the four named sources
-  (defaults/project/local/runtime) — `PermissionRuleSet` is constructed by the embedder; no
-  cross-session *durable* HITL for a paused child (resolution stays inline via the shared
-  responder); child events bubble at top of the next parent turn (one turn after a
-  foreground child), not mid-tool-execution, which is sufficient for surfacing.
-
-#### 4.3 MCP: mid-run registration + annotation→permission bridge
-- **Where:** `mcp/`, `loop/request.py`, `permissions/`.
-- **Approach:** support connecting a server **during a run** so its tools appear next turn
-  (request assembly already rebuilds per turn — ensure registry mutation is picked up and
-  stale cache dropped); map server `readOnly`/`destructive` annotations to `ToolRule`
-  tiers. Defer OAuth/PKCE and reverse channels (YAGNI).
-- **Verify:** a server connected mid-run is callable next turn; a `destructive` MCP tool
-  triggers a permission prompt.
-- **Status (done):** Mid-run registration needed no cache-busting — `loop/request.py`'s
-  `_select_context_tools` already rebuilds the tool list from `session.tools_override or
-  agent.tools` every turn, so tools added to the live registry appear on the next turn. New
-  `Agent.add_mcp_servers(servers)` connects additional servers during a run and routes
-  through the extracted `Agent._attach_mcp_tools(connection)` helper (shared with the
-  configured-connect path — DRY), which registers the tools, applies the permission bridge,
-  refreshes system blocks, and tracks the connection so `close()` shuts it down too.
-  Annotation→permission bridge: `make_mcp_tool` already mapped `readOnlyHint` → read scope
-  (auto-allow + parallel); it now also stamps a `destructive` flag from `destructiveHint`.
-  The mcp-free `mcp/permission_bridge.py::mcp_permission_rules(tools)` maps each destructive
-  tool to a `ToolRule(name, "ask")`, which (evaluated before mode default) forces a prompt
-  even under `skip-dangerous`/`acceptEdits`, where a plain write tool would auto-allow.
-  Default byte-identical: MCP is opt-in, and a destructive tool was already write-scoped
-  (so it asked under the default mode anyway); the bridge only adds the prompt under
-  permissive modes. Deferrals (YAGNI): OAuth/PKCE and reverse channels not implemented;
-  read-only tools get no explicit `allow` rule (their read scope already auto-allows — a
-  redundant rule would be noise); the `Agent`/permissions config still does not auto-merge
-  named permission sources (see 4.2 deferral).
-
-#### 4.4 Input-aware concurrency seam *(Low)*
-- **Where:** tool protocol, `scheduler._tool_parallel`.
-- **Approach:** let `parallel` be a callable `parallel(input) -> bool` so a tool can decide
-  concurrency-safety per call (a generic seam; any tool, not just Bash, can use it).
-  Ordering/safety already handled by `_partition_batches`.
-- **Verify:** a tool returning `parallel(input)=True` for read-only inputs runs those
-  concurrently while mutating inputs serialize; ordering preserved.
-- **Status (done):** `scheduler._tool_parallel` now treats a **callable** `parallel` as an
-  input-aware predicate: `parallel(input) -> bool`, consulted for *any* scope (so an
-  exec/write tool can opt safe inputs into concurrency, not just read tools), and **fail-closed**
-  — a predicate that raises serializes. A plain-bool `parallel`/`parallel_safe` attribute keeps
-  the legacy scope-gated path, so the default is byte-identical (no built-in tool ships a
-  callable `parallel`). `_partition_batches` passes the permission/hook-rewritten *effective*
-  input to the predicate (same input resources and execution see) and is otherwise unchanged:
-  it still greedily groups consecutive parallel-safe calls front-to-back under the
-  resource-conflict and `max_concurrency` guards, so ordering is preserved. Deferral (YAGNI):
-  no per-input cost/priority hinting on the same seam — concurrency-safety is the only
-  per-call decision exposed for now.
-
----
-
-### Phase 5 — SDK-grade hardening
-
-The reference curriculum is a *product* tutorial, so it never teaches these — yet they are
-exactly what separates an embeddable SDK from an app. Several Linch already does well;
-this track makes them explicit guarantees.
-
-- **Curated public API + semver** — an explicit `__all__`/public-surface contract and a
-  versioning policy embedders can pin to; mark internal modules clearly.
-  - **Status (done):** `tests/test_public_api.py` locks the surface — every `__all__` name
-    resolves, no duplicates, and no public (non-underscore) attribute leaks onto the package
-    undeclared (submodules excluded). `get_version` promoted into `__all__`. `docs/versioning.md`
-    is the semver contract: public = `linch.__all__` (top-level imports only), submodule
-    paths/underscore names are private, wire formats version independently via
-    `RUN_SCHEMA_VERSION`, plus MAJOR/MINOR/PATCH rules for protocols and a deprecation policy.
-    YAGNI-deferred: no per-name `@public`/`@internal` decorators or a generated API-reference
-    site (the `__all__` snapshot + guard test is the contract).
-- **No global state / multi-tenancy / cancellation** — audit for process-global state so N
-  agents run in one host process safely; verify `session.abort()`/`agent.close()` fully
-  drain tasks (the `_cancel_background_workers` guarantees) under concurrency.
-  - **Status (done):** audit found no process-global mutable state — every `Agent` builds its
-    own tool registry, sessions dict, permission engine, and extension state; the one
-    module-level singleton (`default_compaction`) is immutable. `tests/test_multitenancy.py`
-    pins it: three agents run concurrently with disjoint sessions and no cross-talk. The
-    audit also surfaced a real **cancellation leak** — `agent.close()` cancelled subagent
-    workers but not detached background-*tool* tasks (`session.background_tasks`); now fixed
-    to mirror `session.abort()`, and the test proves closing agent A drains A's worker while
-    agent B's stays live. YAGNI-deferred: no tenant-id namespacing or per-tenant quota (the
-    embedder owns multi-tenant routing; Linch just stays isolated).
-- **Versioned serialization/resume** — treat `RunCheckpoint`/stored-event formats as a
-  stable, versioned contract with forward-compat handling.
-  - **Status (done):** `run_store.SCHEMA_VERSION` (exported as `linch.RUN_SCHEMA_VERSION`)
-    stamps every serialized checkpoint (`checkpoint_to_dict` → `"schema_version"`).
-    `checkpoint_from_dict` already reads field-by-field with defaults, so a checkpoint from
-    a *newer* binary (higher version, unknown future keys) round-trips its known fields
-    without crashing. `load_events` now wraps `event_from_dict` and **skips** any row it
-    cannot decode (a future event type) instead of aborting the whole resume — the
-    checkpoint, not the event log, drives resume. YAGNI-deferred: no migration registry or
-    down-conversion (single live version); `RunCheckpoint` gains no in-memory `version`
-    field (a wire concern, kept off the dataclass).
-- **Streaming/backpressure ergonomics** — confirm the event `AsyncIterator` applies
-  backpressure correctly to a slow host consumer; document the contract.
-  - **Status (done):** `session.run()` is a plain async-generator chain (`run_loop` →
-    `session.run`), suspended at each `yield` until the consumer pulls — no unbounded
-    internal queue. `tests/test_backpressure.py` proves it: a consumer that pulls one event
-    then pauses leaves the tool *unexecuted* (the producer is parked, not racing ahead).
-    Documented in [usage/events.md](usage/events.md#backpressure): slow-consumer throttling,
-    drain/abort discipline, one-active-run-per-session, and background tasks as the explicit
-    non-blocking exception. YAGNI-deferred: no bounded-queue buffering mode or
-    drop-oldest/lossy stream option (the generator's natural backpressure is the contract).
-- **Domain-agnostic proof** — ship a **non-coding** recipe (e.g. support or research agent)
-  under `examples/` to prove the SDK isn't coding-shaped and to exercise the seams above.
-  - **Status (done):** `examples/recipes/research_desk.py` — a literature-research analyst that
-    never touches a file or shell. Domain function tools (`search_library`/`read_article`/
-    `record_citation`) over a `ctx.deps` corpus + citation ledger, an `OutputSchema` brief, and
-    a closed-loop `CitedSourcesVerifier` (via `FinalAnswerVerifierHook`) that bounces an uncited
-    answer. Built by a `build_research_desk(provider=...)` factory so
-    `tests/test_example_research_desk.py` drives it offline with a `ScriptedProvider` and proves
-    the verifier-retry → cite → accept loop. Listed in [usage/examples.md](usage/examples.md).
-- **Embedder docs for every seam** — each protocol added above (`IsolationBackend`,
-  `Mailbox`, `ScheduleStore`, `SystemPromptBuilder`, memory lifecycle) ships with a "how to
-  implement your own" doc, matching the existing `ExecutionBackend`/`MemoryStore` pattern.
-  - **Status (done):** [docs/usage/extending.md](usage/extending.md) is the consolidated
-    "implement your own seam" reference, linked from the usage index — one section each for
-    `IsolationBackend` (acquire/release), `Mailbox` (send/drain + the destructive-drain /
-    no-drop invariants), `ScheduleStore` (add/update/remove/get/list + the multi-process lock
-    note), system-prompt assembly, and the memory lifecycle (`MemoryExtractor` callable +
-    `ConsolidationGate`), each with the protocol signature and a minimal implementation. The
-    "SystemPromptBuilder" row is documented honestly as the two existing seams that fill that
-    role (`SystemPromptSection` with `cacheable` + per-turn `ContextBuilder` system blocks) —
-    no such builder was ever added (3.2 YAGNI). `ExecutionBackend`/`Tool`/`MemoryStore`/
-    `ContextBuilder`/provider/hook seams keep their existing per-page docs; this page
-    cross-links them.
-
----
-
-## Sequencing summary
-
-| Phase | Theme | Items | Gate |
-|---|---|---|---|
-| 1 | Runtime resilience & cost | fork subagents · compaction fidelity · output/fallback recovery · task claim/ready/release | none — start here |
-| 2 | Coordination & isolation | mailbox substrate · isolation backend · background-any-tool | needs 1.4 for multi-agent |
-| 3 | Context/memory/scheduling | memory lifecycle hooks · prompt assembly · scheduling primitive | independent |
-| 4 | Extension surface | hook contract · permission layering · MCP · concurrency seam | independent |
-| 5 | SDK-grade hardening | API/semver · multitenancy · serialization · backpressure · non-coding recipe · seam docs | continuous |
-
-Everything is a **mechanism or seam**: an embedder assembles a coding agent — or any other
-agent — on top, and Linch never ships the domain policy.
-
-**Mapped to the open↔closed axis:** Phase 1 (resilience/cost) + Phase 2 (coordination)
-harden the **open loop** (`create_deep_agent`) so it can roam without becoming a slop
-machine; the budget + verification control surface and Phase 5's serialization contract
-keep the **closed loop** (`run_workflow`) cheap, honest, and repeatable. Both loops draw
-from the same primitives — the axis is a dial, not two codebases.
+This keeps Linch strong where an embedding kit must be strong: runtime
+correctness, extension seams, operational evidence, and blast-radius controls.
 
 ---
 
 ## Docs
 
-Topic-split usage guide under `docs/usage/` (agent, providers, events, tools,
-structured-output, hooks, context-and-memory, filesystem, workflows, deep-agent,
-skills, examples); `docs/usage.md` retained as a redirect index.
+Topic-split usage guide under `docs/usage/` covers agent configuration,
+providers, events, tools, structured output, hooks, context and memory,
+filesystem, workflows, deep-agent, coordination, loop runner, skills, extending,
+and examples. `docs/usage.md` is retained as a redirect index.
