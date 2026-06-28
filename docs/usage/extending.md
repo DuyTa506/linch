@@ -12,6 +12,56 @@ A protocol is satisfied structurally: implement the listed methods with matching
 signatures and pass your object where the built-in adapter would go. The runtime
 probes optional methods with `getattr`/`hasattr`, so adding extra methods is harmless.
 
+Reusable contract checks are available for seams with non-obvious async store
+invariants:
+
+```python
+import pytest
+from linch import (
+    assert_file_backend_contract,
+    assert_isolation_backend_contract,
+    assert_mailbox_contract,
+    assert_memory_store_contract,
+    assert_schedule_store_contract,
+    assert_tool_contract,
+)
+
+@pytest.mark.asyncio
+async def test_my_file_backend_contract(tmp_path):
+    await assert_file_backend_contract(lambda: MyFileBackend(tmp_path / "files.db"))
+
+@pytest.mark.asyncio
+async def test_my_isolation_backend_contract(tmp_path):
+    await assert_isolation_backend_contract(lambda: MyIsolationBackend(root=tmp_path))
+
+@pytest.mark.asyncio
+async def test_my_mailbox_contract(tmp_path):
+    await assert_mailbox_contract(lambda: MyMailbox(tmp_path / "mailbox.db"))
+
+@pytest.mark.asyncio
+async def test_my_memory_store_contract(tmp_path):
+    await assert_memory_store_contract(lambda: MyMemoryStore(tmp_path / "memory.db"))
+
+@pytest.mark.asyncio
+async def test_my_schedule_store_contract(tmp_path):
+    await assert_schedule_store_contract(lambda: MyScheduleStore(tmp_path / "schedules.db"))
+
+@pytest.mark.asyncio
+async def test_my_tool_contract():
+    await assert_tool_contract(
+        MyTool(),
+        valid_input={"query": "contract smoke"},
+        invalid_input={},
+    )
+```
+
+The helpers expect a factory that returns a fresh, empty adapter. They exercise
+the same behavioral guarantees Linch's built-in adapters rely on: file backend
+CRUD/list/edit semantics, distinct writable isolation workspaces, destructive
+mailbox drains, no dropped concurrent sends, memory upsert/search/filter
+behavior, schedule add/update/remove/list, atomic `claim_due` when the store
+implements it, and custom tool metadata/validation/execution/resource shape.
+
 Copyable starter files live in
 [`examples/extensions/`](../../examples/extensions/): provider, memory store,
 virtual filesystem backend, tool package, and hook package templates. They are

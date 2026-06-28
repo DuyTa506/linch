@@ -100,6 +100,7 @@ class RunReport:
                     f"- tool error rate: {tools.get('error_rate', 0)}",
                     f"- cache read ratio: {usage.get('cache_read_ratio', 0)}",
                     f"- max context utilization: {context.get('max_utilization')}",
+                    f"- context pressure: {context.get('pressure', 'none')}",
                 ]
             )
             if isinstance(slowest, dict):
@@ -109,6 +110,51 @@ class RunReport:
                         duration=slowest.get("duration_ms", 0),
                     )
                 )
+            top_slowest = tools.get("top_slowest")
+            if isinstance(top_slowest, list) and top_slowest:
+                lines.extend(
+                    [
+                        "",
+                        "## Top Slow Tools",
+                        "",
+                        "| Tool | Summary | Error | Duration ms |",
+                        "|---|---|---:|---:|",
+                    ]
+                )
+                for call in top_slowest:
+                    if not isinstance(call, dict):
+                        continue
+                    lines.append(
+                        "| {tool} | {summary} | {error} | {duration} |".format(
+                            tool=_markdown_cell(call.get("tool_name", "")),
+                            summary=_markdown_cell(call.get("summary", "")),
+                            error=call.get("is_error", False),
+                            duration=call.get("duration_ms", 0),
+                        )
+                    )
+            top_failures = tools.get("top_failures")
+            if isinstance(top_failures, list) and top_failures:
+                lines.extend(
+                    [
+                        "",
+                        "## Failing Tools",
+                        "",
+                        "| Tool | Summary | Duration ms | Detail |",
+                        "|---|---|---:|---|",
+                    ]
+                )
+                for call in top_failures:
+                    if not isinstance(call, dict):
+                        continue
+                    detail = call.get("error") or call.get("result") or ""
+                    lines.append(
+                        "| {tool} | {summary} | {duration} | {detail} |".format(
+                            tool=_markdown_cell(call.get("tool_name", "")),
+                            summary=_markdown_cell(call.get("summary", "")),
+                            duration=call.get("duration_ms"),
+                            detail=_markdown_cell(detail),
+                        )
+                    )
         if self.long_run:
             context = self.long_run.get("context", {})
             memory = self.long_run.get("memory", {})
@@ -452,6 +498,8 @@ def _report_summary(
     ]
     failed_tools = sum(1 for call in tool_calls if call.get("is_error") is True)
     slowest_tool = _slowest_tool(tool_calls)
+    top_slowest = _top_slowest_tools(tool_calls)
+    top_failures = _top_failed_tools(tool_calls)
     usage_source = _usage_source(usage=usage, final=final)
     context_summary = _context_summary(context_builds, long_run)
     recovery_summary = _recovery_summary(timeline, tool_calls)
@@ -480,7 +528,10 @@ def _report_summary(
             else 0,
             "max_duration_ms": max(tool_durations) if tool_durations else 0,
             "slowest_tool": slowest_tool,
+            "top_slowest": top_slowest,
+            "top_failures": top_failures,
             "by_name": _tool_counts(tool_calls),
+            "by_name_errors": _tool_error_counts(tool_calls),
         },
         "context": context_summary,
         "recovery": recovery_summary,
@@ -603,9 +654,63 @@ def _slowest_tool(tool_calls: list[dict[str, Any]]) -> dict[str, Any] | None:
     return slowest
 
 
+def _top_slowest_tools(tool_calls: list[dict[str, Any]], *, limit: int = 5) -> list[dict[str, Any]]:
+    ranked: list[tuple[int, int, dict[str, Any]]] = []
+    for index, call in enumerate(tool_calls):
+        duration = _maybe_int(call.get("duration_ms"))
+        if duration is None:
+            continue
+        ranked.append(
+            (
+                -duration,
+                index,
+                {
+                    "tool_use_id": call.get("tool_use_id", ""),
+                    "tool_name": call.get("tool_name", ""),
+                    "summary": call.get("summary", ""),
+                    "duration_ms": duration,
+                    "is_error": call.get("is_error", False),
+                },
+            )
+        )
+    return [item for _, _, item in sorted(ranked)[:limit]]
+
+
+def _top_failed_tools(tool_calls: list[dict[str, Any]], *, limit: int = 5) -> list[dict[str, Any]]:
+    failures: list[dict[str, Any]] = []
+    for call in tool_calls:
+        if call.get("is_error") is not True:
+            continue
+        result = _compact_tool_text(call)
+        failure = {
+            "tool_use_id": call.get("tool_use_id", ""),
+            "tool_name": call.get("tool_name", ""),
+            "summary": call.get("summary", ""),
+            "duration_ms": _maybe_int(call.get("duration_ms")),
+        }
+        if result:
+            failure["result"] = result
+            failure["error"] = result
+        failures.append(failure)
+        if len(failures) >= limit:
+            break
+    return failures
+
+
 def _tool_counts(tool_calls: list[dict[str, Any]]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for call in tool_calls:
+        tool_name = call.get("tool_name")
+        if isinstance(tool_name, str):
+            counts[tool_name] = counts.get(tool_name, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _tool_error_counts(tool_calls: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for call in tool_calls:
+        if call.get("is_error") is not True:
+            continue
         tool_name = call.get("tool_name")
         if isinstance(tool_name, str):
             counts[tool_name] = counts.get(tool_name, 0) + 1
@@ -641,7 +746,45 @@ def _context_summary(
         "max_used_tokens": max_used_tokens,
         "max_tokens_seen": max_tokens_seen,
         "max_utilization": max_utilization,
+        "pressure": _context_pressure(max_utilization),
     }
+
+
+def _context_pressure(max_utilization: float | None) -> str:
+    if max_utilization is None:
+        return "none"
+    if max_utilization > 1.0:
+        return "over"
+    if max_utilization >= 0.9:
+        return "high"
+    if max_utilization >= 0.75:
+        return "moderate"
+    return "none"
+
+
+def _compact_tool_text(call: dict[str, Any], *, limit: int = 160) -> str:
+    result = call.get("result")
+    if isinstance(result, str) and result:
+        return _compact_text(result, limit=limit)
+    tool_result = call.get("tool_result")
+    if not isinstance(tool_result, dict):
+        return ""
+    for key in ("summary", "recovery_hint", "content"):
+        value = tool_result.get(key)
+        if isinstance(value, str) and value:
+            return _compact_text(value, limit=limit)
+    return ""
+
+
+def _compact_text(value: str, *, limit: int) -> str:
+    text = " ".join(value.split())
+    if len(text) <= limit:
+        return text
+    return f"{text[: limit - 3]}..."
+
+
+def _markdown_cell(value: Any) -> str:
+    return str(value).replace("|", "\\|").replace("\n", " ")
 
 
 def _maybe_int(value: Any) -> int | None:

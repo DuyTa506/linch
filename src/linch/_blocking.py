@@ -5,8 +5,9 @@ loop thread. ``asyncio.to_thread`` uses the default executor, whose non-daemon
 workers can keep the interpreter alive at teardown in the managed test sandbox.
 
 ``run_blocking`` starts a daemon worker and resumes the awaiter via a future
-woken with ``loop.call_soon_threadsafe`` — an event-driven wakeup with no
-polling, so a waiting call adds no latency and never spins the event loop.
+woken with ``loop.call_soon_threadsafe``.  A slow fallback wake loop guards
+against runtimes where a thread-safe wakeup is lost after SQLite work in the
+daemon thread; the fast path still returns as soon as the callback is delivered.
 """
 
 from __future__ import annotations
@@ -64,4 +65,10 @@ async def run_blocking(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
         threading.Thread(target=_target, name="linch-blocking", daemon=True).start()
         # If the awaiter is cancelled, the daemon thread still runs to completion;
         # its later call_soon_threadsafe is a no-op on the already-cancelled future.
-        return await fut
+        # Some managed runtimes have been observed to lose the selector wakeup
+        # after SQLite work in the daemon thread.  The timeout keeps those calls
+        # from hanging forever while remaining dormant on the normal fast path.
+        while True:
+            done, _ = await asyncio.wait({fut}, timeout=0.1)
+            if done:
+                return fut.result()

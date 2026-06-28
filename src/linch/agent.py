@@ -12,6 +12,7 @@ from .errors import ConfigError
 from .openai_responses import OpenAIOptions, OpenAIReasoning
 from .permissions import BashRule, CanUseTool, PathRule, PermissionEngine, PermissionRule, ToolRule
 from .providers import BaseProvider, OpenAIResponsesProvider, OpenAIResponsesProviderOptions
+from .recovery import TruncationRecovery
 from .sessions import SessionStore, SqliteSessionStore
 from .tools import ToolRegistry, default_tools
 from .types import InvokedSkillRecord, PermissionMode, SystemBlock
@@ -344,6 +345,7 @@ class AgentOptions:
     mcp_servers: dict[str, Any] | None = None
     compaction: Any = None
     compaction_ladder: Any = None  # CompactionLadder | None
+    truncation_recovery: TruncationRecovery | None = None
     token_estimator: Any = None
     budget: Any = None  # RunBudget | None
     features: FeatureFlags | None = None
@@ -402,6 +404,7 @@ class Agent:
         mcpServers: dict[str, Any] | None = None,
         compaction: Any = None,
         compaction_ladder: Any = None,
+        truncation_recovery: TruncationRecovery | None = None,
         token_estimator: Any = None,
         fallback_models: list[str] | None = None,
         budget: Any = None,
@@ -453,6 +456,10 @@ class Agent:
             raise ConfigError("Agent requires a model")
         if max_retries < 0:
             raise ConfigError("max_retries must be non-negative")
+        if truncation_recovery is not None and not isinstance(
+            truncation_recovery, TruncationRecovery
+        ):
+            raise ConfigError("truncation_recovery must be TruncationRecovery or None")
 
         openai = _normalize_openai_options(
             openai,
@@ -513,6 +520,10 @@ class Agent:
         # Opt-in micro/reactive compaction rungs (CompactionLadder | None).
         # None keeps the legacy single-retry behavior byte-identical.
         self.compaction_ladder: Any = compaction_ladder
+        # Opt-in output-truncation recovery (TruncationRecovery | None). None
+        # keeps the default behavior (truncated text becomes the final answer)
+        # byte-identical; Linch never escalates the output cap implicitly.
+        self.truncation_recovery: TruncationRecovery | None = truncation_recovery
         self.token_estimator = token_estimator
         # Ordered alternate models tried, in turn, when the active model
         # overloads mid-run (ProviderError(retryable=True)). None/[] = disabled

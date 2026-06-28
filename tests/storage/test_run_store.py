@@ -21,6 +21,7 @@ async def _exercise_store(store) -> None:
         },
         loop_guard_state={"call_counts": {"Search:{}": 1}, "consecutive_failures": 0},
         current_turn_allowed_tools=["Search"],
+        truncation_attempts=2,
         background_workers={
             "worker-1": {
                 "worker_id": "worker-1",
@@ -52,6 +53,7 @@ async def _exercise_store(store) -> None:
     assert loaded.checkpoint.pending_tool_blocks[0].name == "Search"
     assert loaded.checkpoint.completed_tool_results["call-1"].content == "ok"
     assert loaded.checkpoint.total_usage.output_tokens == 4
+    assert loaded.checkpoint.truncation_attempts == 2
     assert loaded.checkpoint.background_workers["worker-1"]["status"] == "running"
 
     events = await store.load_events("run-1")

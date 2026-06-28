@@ -22,6 +22,7 @@ Runnable example code lives in the `examples/` directory, organized by subsystem
 | `core/multi_session.py` | Web-app pattern: one Agent, many users, shared deps |
 | `core/loop_guard_agent.py` | LoopGuard — identical-call and failure-streak detection |
 | `core/interactive_cli.py` | Interactive REPL |
+| `core/governance_redaction.py` | `RedactionHook` — host-supplied regex rules scrub tool results and the final answer (policy-free governance seam) |
 | `core/deep_agent_resume.py` | `create_deep_agent` — 4 demos: planning + /memories, background worker + notification, fork/continue, coordinator mode |
 
 ---
@@ -85,6 +86,7 @@ Runnable example code lives in the `examples/` directory, organized by subsystem
 |------|---------------|
 | `integrations/subagent_coordinator.py` | Agent definition files, tool-filtered subagents, SubagentEvent |
 | `integrations/multi_agent_isolation.py` | Context isolation: child work never enters parent context; sequential pipeline; parallel analysts; subagent + filesystem offload (*runs offline*) |
+| `integrations/redis_mailbox.py` | External `Mailbox` adapter backed by Redis lists (atomic drain), kept honest with `assert_mailbox_contract`. Adapters live outside core; runs offline with a fake client |
 
 ## `extensions/` — *templates*
 
@@ -102,6 +104,7 @@ Runnable example code lives in the `examples/` directory, organized by subsystem
 |------|---------------|
 | `recipes/research_desk.py` | A **non-coding** agent (literature analyst): domain tools (`search_library`/`read_article`/`record_citation`), `ctx.deps` corpus + citation ledger, an `OutputSchema` brief, and a closed-loop `Verifier` that bounces an uncited answer — proof the SDK isn't coding-shaped. Built via a factory so it runs offline under a `ScriptedProvider` |
 | `recipes/loop_runner.py` | `LoopSpec` + `LoopRunner.run_once()` as the SDK-native outer-loop primitive. Loads project `.env` (`API_KEY`/`BASE_URL`/`model`, or explicit provider keys), writes `domains/<loop_id>/README.md`, `LOG.md`, and per-run report artifacts |
+| `recipes/runner_recipes.py` | Host-owned lifecycle wrappers over `LoopRunner.run_once()` — cron, webhook, fixed-interval, and CI-gate triggers. Runs offline under a fake provider |
 | `recipes/ralph_loop.py` | The **Ralph loop** for long-horizon work: an outer loop where each pass gets a *fresh* `session` (no compaction — discard and restart), reads the same spec, and carries state only through the virtual filesystem (`StateFileBackend`), looping until a done-predicate. A harness pattern composed from existing seams; `max_iterations` bounds the spend |
 
 ## `coordination/` — *local demos available*

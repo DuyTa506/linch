@@ -32,6 +32,7 @@ def _checkpoint() -> RunCheckpoint:
         turn_index=2,
         total_usage=Usage(input_tokens=3, output_tokens=4),
         pending_tool_blocks=[ToolUseBlock(id="call-1", name="Search", input={"q": "x"})],
+        truncation_attempts=1,
     )
 
 
@@ -52,6 +53,16 @@ def test_checkpoint_from_dict_tolerates_future_version_and_unknown_keys() -> Non
     assert restored.turn_index == 2
     assert restored.pending_tool_blocks[0].name == "Search"
     assert restored.total_usage.output_tokens == 4
+    assert restored.truncation_attempts == 1
+
+
+def test_checkpoint_from_dict_defaults_missing_truncation_attempts() -> None:
+    data = checkpoint_to_dict(_checkpoint())
+    data.pop("truncation_attempts")
+
+    restored = checkpoint_from_dict(data)
+
+    assert restored.truncation_attempts == 0
 
 
 async def test_load_events_skips_undecodable_future_events(tmp_path) -> None:
