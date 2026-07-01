@@ -55,6 +55,8 @@ class LoopTickResult:
     done: bool
     final_text: str | None
     report: RunReport
+    structured_output: dict[str, Any] | None = None
+    structured_error: str | None = None
     artifact_paths: list[str] = field(default_factory=list)
 
 
@@ -502,7 +504,8 @@ class LoopRunner:
         run_id = report.run_id or _run_id_from_events(events)
         report.run_id = run_id
         report.session_id = report.session_id or session.id
-        final_text = _final_text(events)
+        final_event = _final_result(events)
+        final_text = final_event.final_text if final_event is not None else None
         status = report.status
         result = LoopTickResult(
             loop_id=spec.id,
@@ -512,6 +515,8 @@ class LoopRunner:
             done=False,
             final_text=final_text,
             report=report,
+            structured_output=(final_event.structured_output if final_event is not None else None),
+            structured_error=final_event.structured_error if final_event is not None else None,
             artifact_paths=[],
         )
 
@@ -695,9 +700,14 @@ def _run_id_from_events(events: Sequence[Event]) -> str:
 
 
 def _final_text(events: Sequence[Event]) -> str | None:
+    result = _final_result(events)
+    return result.final_text if result is not None else None
+
+
+def _final_result(events: Sequence[Event]) -> ResultEvent | None:
     for event in reversed(events):
         if isinstance(event, ResultEvent):
-            return event.final_text
+            return event
     return None
 
 

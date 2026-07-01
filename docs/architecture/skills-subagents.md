@@ -85,8 +85,9 @@ subagents via `wf.agent` / `wf.parallel` / `wf.pipeline` / `wf.phase`, with
   `WorkflowEvent(kind="agent_end")`. Re-invoking with the same `run_id` folds
   the stored events back into a `WorkflowJournal` and replays the unchanged
   call prefix (`kind="agent_replayed"`, no provider call). Calls are keyed by
-  `sha256(subagent_type, prompt)` + per-key occurrence counter, so parallel
-  fan-out replays safely and an edited prompt invalidates only that call.
+  `sha256(subagent_type, prompt, run_options)` + per-key occurrence counter, so
+  parallel fan-out replays safely and an edited prompt or structured-output
+  option invalidates only that call.
 - The workflow function must be deterministic (no random/time-based
   branching) for resume replay to be correct.
 
@@ -113,8 +114,8 @@ subagents via `wf.agent` / `wf.parallel` / `wf.pipeline` / `wf.phase`, with
   from the parent forces delegation: the coordinator orchestrates, workers execute.
   That separation is a safety rail, not a limitation.
 - **Workflows must be deterministic so resume can replay by content.** The journal keys
-  each call by `sha256(subagent_type, prompt)`; nondeterministic branching would replay
-  the wrong prefix, so determinism is the price of cheap, correct resume.
+  each call by `sha256(subagent_type, prompt, run_options)`; nondeterministic branching
+  would replay the wrong prefix, so determinism is the price of cheap, correct resume.
 
 ---
 

@@ -43,6 +43,28 @@ class _TextProvider:
         yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
 
 
+class _FinalToolProvider:
+    """Returns a terminal tool-use response with no assistant text."""
+
+    id = "final-tool"
+
+    def context_window(self, model: str) -> int:
+        return 100_000
+
+    async def stream(self, req: Any) -> AsyncIterator[dict[str, object]]:
+        from linch.types import Usage
+
+        yield {"type": "message_start", "model": req.model}
+        yield {"type": "tool_use_start", "id": "t1", "name": "emit_answer"}
+        yield {
+            "type": "tool_use_input_delta",
+            "id": "t1",
+            "json_delta": '{"answer":42}',
+        }
+        yield {"type": "tool_use_end", "id": "t1"}
+        yield {"type": "message_end", "stop_reason": "tool_use", "usage": Usage()}
+
+
 def _make_ctx(session: Any) -> Any:
     from linch.tools.base import ToolContext
 
@@ -154,6 +176,31 @@ async def test_subagent_tool_result_includes_worker_id(tmp_path: Any) -> None:
 
     worker_id = next(iter(session.workers))
     assert worker_id in result.content
+
+
+async def test_subagent_tool_returns_structured_output_as_json_text(tmp_path: Any) -> None:
+    from linch import create_deep_agent
+    from linch.sessions import InMemorySessionStore
+
+    agent = create_deep_agent(
+        model="gpt-5",
+        provider=_FinalToolProvider(),
+        final_tool_name="emit_answer",
+        session_store=InMemorySessionStore(),
+        permissions={"mode": "skip-dangerous"},
+        cwd=str(tmp_path),
+        durable=False,
+    )
+    session = await agent.session(id="s1")
+    subagent_tool = agent.tools.get("Subagent")
+    ctx = _make_ctx(session)
+
+    result = await subagent_tool.execute({"description": "test", "prompt": "hello"}, ctx)
+
+    assert not result.is_error
+    assert result.content.startswith('{"answer":42}')
+    worker_id = next(iter(session.workers))
+    assert session.workers[worker_id].last_result_text == '{"answer":42}'
 
 
 async def test_subagent_continue_tool_exists_and_is_registered(tmp_path: Any) -> None:

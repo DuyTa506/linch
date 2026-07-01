@@ -50,7 +50,7 @@ The keyword arguments to `run_workflow` control budget, journaling, and observat
 
 The `wf` argument is a `linch.workflow.WorkflowContext`. It exposes a small, fixed surface — you compose your orchestration out of these primitives rather than calling the loop directly:
 
-- `await wf.agent(prompt, *, name=None, label=None, tools=None) -> str` — run a subagent (a named definition from the subagent registry, or the built-in general-purpose one) and return its final text. A failed child raises `WorkflowError`.
+- `await wf.agent(prompt, *, name=None, label=None, tools=None, run_options=None, output_schema=None, final_tool_name=None) -> str` — run a subagent (a named definition from the subagent registry, or the built-in general-purpose one) and return its final text. When the child produces `structured_output`, the returned string is compact JSON. A failed child raises `WorkflowError`.
 - `await wf.parallel(thunks) -> list` — run thunks concurrently, capped by `max_concurrency` (default 4); results keep input order.
 - `await wf.pipeline(items, *stages) -> list` — run each item through all stages independently, with no barrier between stages.
 - `await wf.phase(title)` — emit a progress phase marker.
@@ -66,7 +66,7 @@ A few practical notes:
 
 ## Journal and resume
 
-With `run_id` and a `run_store`, each `wf.agent` call's result is persisted as a `WorkflowEvent(kind="agent_end")` in the run's event log. Re-invoking `run_workflow` with the same `run_id` replays the unchanged call prefix from that journal — `kind="agent_replayed"` events fire instead of provider calls. Calls are keyed by a content hash of `(subagent_type, prompt)` plus an occurrence counter, so identical parallel calls replay safely and an edited prompt invalidates only that call.
+With `run_id` and a `run_store`, each `wf.agent` call's result is persisted as a `WorkflowEvent(kind="agent_end")` in the run's event log. Re-invoking `run_workflow` with the same `run_id` replays the unchanged call prefix from that journal — `kind="agent_replayed"` events fire instead of provider calls. Calls are keyed by a content hash of `(subagent_type, prompt, run_options)` plus an occurrence counter, so identical parallel calls replay safely and an edited prompt or structured-output option invalidates only that call.
 
 The `WorkflowEvent` kinds you will see on the `on_event` stream are:
 
