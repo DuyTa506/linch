@@ -3,6 +3,7 @@ ContextLengthError recovery (legacy single retry or compaction ladder)."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from typing import Any, cast
@@ -16,6 +17,7 @@ from ..compaction import (
 from ..context import context_budget_to_dict
 from ..errors import ContextLengthError, ProviderError
 from ..events import ContextBuildEvent, ModelFallbackEvent, PartialAssistantEvent
+from ..providers.retry import RetryOptions, _delay_for_error
 from ..session import RunOptions, Session
 from ..types import (
     AssistantAssembly,
@@ -36,6 +38,35 @@ from .request import (
     _re_inject_skill_context,
     apply_provider_capabilities,
 )
+
+# Transport/stream-parsing hiccups (a malformed mid-stream tool-call delta, a
+# dropped connection) are typically resolved by an immediate re-request, unlike
+# rate-limit backoff which needs multi-second waits — so this path uses a much
+# shorter base delay than providers.retry's RetryOptions() default (1s-30s,
+# tuned for RateLimitError). Still exponential-with-jitter so a run of failures
+# doesn't hammer the server.
+_SAME_MODEL_RETRY_OPTIONS = RetryOptions(base_delay_ms=100, max_delay_ms=2000, jitter=0.2)
+
+
+async def _retry_same_model(exc: Exception, attempts: list[int], agent: Any) -> bool:
+    """Back off and report "retry" for a *retryable* ``ProviderError`` when no
+    fallback model is configured (or fallbacks are exhausted).
+
+    ``agent.provider.stream()`` can throw a retryable, transport-level
+    ``ProviderError`` mid-stream — e.g. an OpenAI-compatible server (llama.cpp,
+    vLLM, SGLang) emitting a malformed tool-call delta under concurrent load.
+    Before this helper, ``_apply_model_fallback`` returning ``None`` (no
+    fallback_models configured) meant the error was always re-raised, even
+    though ``agent.max_retries`` promises retry budget and the error is
+    explicitly marked ``retryable``. Bounded by ``agent.max_retries`` (same
+    knob already threaded to ``ProviderRequest.max_retries``)."""
+    if attempts[0] >= agent.max_retries:
+        return False
+    attempts[0] += 1
+    delay_ms = _delay_for_error(exc, attempts[0] - 1, _SAME_MODEL_RETRY_OPTIONS)
+    if delay_ms > 0:
+        await asyncio.sleep(delay_ms / 1000.0)
+    return True
 
 
 def _apply_model_fallback(
@@ -92,6 +123,7 @@ async def _stream_turn_with_ladder(
     ``ContextLengthError`` surfaces.
     """
     micro_tried_this_turn = False
+    same_model_retries = [0]
     while True:
         await save_checkpoint("provider_pending", turn_index=turn_index)
         await start_provider_call(turn_index, req.model)
@@ -106,10 +138,16 @@ async def _stream_turn_with_ladder(
                 raise
             await end_provider_call(stop_reason="error")
             fallback_event = _apply_model_fallback(session, agent, req, exc)
-            if fallback_event is None:
-                raise
-            yield fallback_event
-            continue
+            if fallback_event is not None:
+                yield fallback_event
+                continue
+            # No fallback model configured/left: retry the SAME model/request
+            # (bounded by agent.max_retries) instead of surfacing immediately —
+            # covers transport-level hiccups (e.g. a malformed mid-stream
+            # tool-call diff from an OpenAI-compatible server).
+            if await _retry_same_model(exc, same_model_retries, agent):
+                continue
+            raise
         except ContextLengthError:
             await end_provider_call(stop_reason="context_length_error")
             recovered = False
@@ -157,9 +195,11 @@ async def _stream_turn_with_compaction_retry(
     caller persists every non-assembly item.  Behavior is identical to the
     pre-ladder inline code (pinned by tests/loop/test_compaction_ladder.py).
     """
-    # The outer loop only re-iterates on a successful model-fallback swap
-    # (overload recovery); with no fallback_models configured it runs exactly
-    # once, keeping the legacy single-compaction-retry behavior byte-identical.
+    # The outer loop re-iterates on a successful model-fallback swap (overload
+    # recovery) or a same-model retry (see _retry_same_model); with neither
+    # configured/available it runs exactly once, keeping the legacy
+    # single-compaction-retry behavior byte-identical.
+    same_model_retries = [0]
     while True:
         await save_checkpoint("provider_pending", turn_index=turn_index)
         await start_provider_call(turn_index, req.model)
@@ -195,10 +235,12 @@ async def _stream_turn_with_compaction_retry(
                 raise
             await end_provider_call(stop_reason="error")
             fallback_event = _apply_model_fallback(session, agent, req, exc)
-            if fallback_event is None:
-                raise
-            yield fallback_event
-            continue
+            if fallback_event is not None:
+                yield fallback_event
+                continue
+            if await _retry_same_model(exc, same_model_retries, agent):
+                continue
+            raise
         return
 
 
