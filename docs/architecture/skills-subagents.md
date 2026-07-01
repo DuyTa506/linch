@@ -114,8 +114,8 @@ subagents via `wf.agent` / `wf.parallel` / `wf.pipeline` / `wf.phase`, with
   from the parent forces delegation: the coordinator orchestrates, workers execute.
   That separation is a safety rail, not a limitation.
 - **Workflows must be deterministic so resume can replay by content.** The journal keys
-  each call by `sha256(subagent_type, prompt)`; nondeterministic branching would replay
-  the wrong prefix, so determinism is the price of cheap, correct resume.
+  each call by `sha256(subagent_type, prompt, run_options)`; nondeterministic branching
+  would replay the wrong prefix, so determinism is the price of cheap, correct resume.
 
 ---
 
