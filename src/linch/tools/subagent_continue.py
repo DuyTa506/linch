@@ -64,7 +64,11 @@ class SubagentContinueTool:
         return f"Continue worker: {input.get('to', '?')}"
 
     async def execute(self, input: dict[str, object], ctx: ToolContext) -> ToolResult:
-        from ..subagents.runner import ContinueSubagentArgs, continue_subagent
+        from ..subagents.runner import (
+            ContinueSubagentArgs,
+            continue_subagent,
+            result_text_for_caller,
+        )
 
         target = str(input["to"]).strip()
         message = str(input["message"])
@@ -114,12 +118,13 @@ class SubagentContinueTool:
                 emit=emit_fn,
             )
         )
+        result_text = result_text_for_caller(result)
 
         if result.aborted:
             return ToolResult(
                 content=(
-                    f"Worker aborted. Partial output: {result.final_text}"
-                    if result.final_text
+                    f"Worker aborted. Partial output: {result_text}"
+                    if result_text
                     else "Worker aborted before producing output."
                 ),
                 summary=self.summarize(input),
@@ -133,20 +138,20 @@ class SubagentContinueTool:
                 content=" ".join(
                     [
                         f"Worker encountered an error{f': {error_text}' if error_text else ''}.",
-                        *([f"Partial output: {result.final_text}"] if result.final_text else []),
+                        *([f"Partial output: {result_text}"] if result_text else []),
                     ]
                 ),
                 summary=self.summarize(input),
                 is_error=True,
             )
-        if result.final_text == "":
+        if result_text == "":
             return ToolResult(
                 content="Worker produced no text output.",
                 summary=self.summarize(input),
                 is_error=True,
             )
         return ToolResult(
-            content=result.final_text,
+            content=result_text,
             summary=self.summarize(input),
             is_error=False,
         )

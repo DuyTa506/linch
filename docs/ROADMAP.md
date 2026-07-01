@@ -112,21 +112,61 @@ The roadmap should optimize for four developer outcomes:
    isolation, retries, timeouts, and verifiers remain first-class controls, but
    their policy is supplied by the embedder.
 
-### Active Roadmap
+### Next Roadmap Questions
 
-All eight Active Roadmap priorities are now shipped (status below). New roadmap
-items should pass the acceptance test further down before being added here.
+The previous roadmap slice is shipped. Do not keep completed work in this file
+as an active roadmap. The next roadmap should be driven by evidence: benchmark
+real workloads, find the bottleneck, then add the smallest mechanism that
+improves it without making Linch a product or policy layer.
 
-| Priority | Need | Status | Shape |
+| Question | Default answer | What would change the answer | Likely shape |
 |---|---|---|---|
-| 1 | **Embedding quality gates** | ✅ shipped | Expanded regression coverage: hook-failure isolation across lifecycle chokepoints, mid-tool cooperative abort → aborted terminal, 3-level budget inheritance. Existing coverage already strong for resume, concurrency, permission replay, checkpoint compatibility. |
-| 2 | **Extension contract tests** | ✅ shipped | `linch.testing` ships `assert_*_contract` helpers for tools, file backends, isolation backends, mailboxes, memory stores, and schedule stores. |
-| 3 | **Run diagnostics V1** | ✅ shipped | `RunReport` + `scripts/run_report.py` surface top slow / top failing tools, context-pressure tier, per-tool error counts, retry/fallback/offload counters, and total cost. |
-| 4 | **Security/governance seams** | ✅ shipped | `RedactionHook` (policy-free regex scrubbing of tool results / final answer / prompt) + `examples/core/governance_redaction.py`. No default PII/PHI classifiers in core. |
-| 5 | **Packaging and docs polish** | ✅ shipped | Small, opt-in extras with explicit `pip install 'linch[...]'` errors; `docs/usage/production.md` minimal production-wiring checklist; examples index refreshed. |
-| 6 | **Explicit recovery knobs** | ✅ shipped | `Agent(truncation_recovery=TruncationRecovery(...))` — opt-in, bounded continuation on `max_tokens` truncation; never escalates the output cap implicitly; default byte-identical. |
-| 7 | **Host-owned runner recipes** | ✅ shipped | `examples/recipes/runner_recipes.py` wraps `LoopRunner.run_once()` for cron, webhook, fixed-interval, and CI-gate triggers; lifecycle stays host-owned. |
-| 8 | **External adapter examples** | ✅ shipped | `examples/integrations/redis_mailbox.py` implements the `Mailbox` protocol over Redis lists and is validated by `assert_mailbox_contract`. Adapters stay out of core. |
+| **Should Linch port core runtime pieces to Rust?** | No full port now. Keep Python-first. | Profiling shows a narrow, repeatable CPU or memory hotspot that Python cannot reasonably fix; or embedders need a non-Python host ABI. | Optional native extension behind the same Python API, not a rewrite. Candidate areas: token/context estimation, event-log indexing, diff/patch/search primitives, large-content normalization. |
+| **Where is speed actually lost?** | Probably provider/tool I/O, not Python orchestration. Measure before optimizing. | Benchmarks show loop overhead, scheduler batching, context building, serialization, or report generation is significant relative to model/tool latency. | Add a small benchmark suite and regression thresholds for hot paths before changing internals. |
+| **Can caching reduce repeated work?** | Yes, but cache policy must stay host-owned. | Repeated context builders, memory searches, tool schema generation, provider model metadata, or report reads show measurable duplicate work. | Opt-in caches with explicit keys, TTL/invalidation, and observability counters; never cache write/exec effects by default. |
+| **Can the harness itself get faster and easier to operate?** | Yes, by making the harness more measurable, not by adding agent policy. | Hosts need lower per-run overhead, clearer lifecycle controls, or cheaper test/eval execution. | Harness benchmarks, lighter offline fake providers, faster contract checks, clearer run/report fixtures, and batchable eval/report utilities. |
+
+### Optimization Backlog
+
+These are investigation tracks, not commitments to implementation.
+
+1. **Benchmark harness.**
+   Add repeatable local benchmarks for the neutral runtime paths:
+   scheduler batching, context build assembly, session/run-store serialization,
+   run-report generation, tool-result offload, memory keyword search, and
+   eval-harness execution. Benchmarks should run without live provider calls.
+   Start with focused probes such as `scripts/benchmark_prompt_cache.py`, which
+   measures request-shape cacheability across a mock provider tool loop before
+   any live provider diagnostics, and `scripts/benchmark_live_prompt_cache.py`,
+   which measures real `Usage.cache_read_tokens` / `cache_creation_tokens` for
+   configured provider endpoints in both direct-call and real agent tool-loop
+   modes.
+
+2. **Speed optimization.**
+   Use benchmark output to target Python-level fixes first: fewer repeated
+   conversions, cheaper event serialization, less copying of message/content
+   lists, faster report aggregation, and clearer async backpressure boundaries.
+   Only consider native code after a benchmark proves a persistent CPU hotspot.
+
+3. **Caching optimization.**
+   Audit where Linch recomputes stable data inside a run or process:
+   provider capability lookups, tool schema exports, static system sections,
+   selected-tool views, context-builder outputs, memory query results, and
+   report summaries. Any cache must be opt-in or trivially invalidated, expose
+   hit/miss counters, and avoid caching side-effecting tool behavior.
+
+4. **Harness optimization.**
+   Make the SDK easier to validate and embed: faster fake providers, reusable
+   run fixtures, tighter contract helper coverage, deterministic stress tests
+   for cancellation/resume/concurrency, and small CLI scripts for running the
+   benchmark/report/eval loops locally and in CI.
+
+5. **Rust-port decision gate.**
+   Revisit Rust only after the benchmark harness identifies a narrow hot path.
+   The decision record must state: measured baseline, target improvement,
+   Python alternatives attempted, packaging impact, extension impact, and the
+   fallback plan if native wheels are unavailable. A full runtime rewrite is
+   out of scope unless Linch deliberately stops being Python-first.
 
 ---
 

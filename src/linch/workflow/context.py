@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import json
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 from uuid import uuid4
 
 from ..errors import ConfigError, WorkflowError
 from ..events import Event, WorkflowEvent
+from ..session import RunOptions
 from .journal import WorkflowJournal, call_key
 
 
@@ -66,6 +69,9 @@ class WorkflowContext:
         name: str | None = None,
         label: str | None = None,
         tools: list[str] | None = None,
+        run_options: RunOptions | None = None,
+        output_schema: Any = None,
+        final_tool_name: str | None = None,
         fork: bool = False,
         isolation: Any = None,
         isolation_keep: bool = False,
@@ -89,7 +95,7 @@ class WorkflowContext:
         preserves that directory after the branch finishes (e.g. to merge it).
         """
         from ..subagents.default_agent import DEFAULT_AGENT
-        from ..subagents.runner import RunSubagentArgs, run_subagent
+        from ..subagents.runner import RunSubagentArgs, result_text_for_caller, run_subagent
 
         definition = None
         if name is None:
@@ -102,11 +108,17 @@ class WorkflowContext:
                 raise ConfigError(f"unknown subagent type for wf.agent(): {name!r}")
 
         subagent_type = definition.frontmatter.name
-        key = call_key(subagent_type, prompt)
+        effective_run_options = _merge_run_options(
+            run_options,
+            output_schema=output_schema,
+            final_tool_name=final_tool_name,
+        )
+        options_fingerprint = _run_options_fingerprint(effective_run_options)
+        key = call_key(subagent_type, prompt, options_fingerprint)
         occurrence = self._journal.next_occurrence(key)
         display_name = label or name or "agent"
 
-        cached = self._journal.lookup(key, occurrence)
+        cached = self._journal.lookup_record(key, occurrence)
         if cached is not None:
             await self._emit(
                 WorkflowEvent(
@@ -115,10 +127,12 @@ class WorkflowContext:
                     call_key=key,
                     occurrence=occurrence,
                     subagent_type=subagent_type,
-                    result_text=cached,
+                    result_text=cached.result_text,
+                    structured_output=cached.structured_output,
+                    structured_error=cached.structured_error,
                 )
             )
-            return cached
+            return cached.result_text
 
         await self._emit(
             WorkflowEvent(
@@ -139,6 +153,7 @@ class WorkflowContext:
                 display_name=display_name,
                 subagent_run_id=f"wf_{uuid4().hex[:8]}",
                 tools_filter=tools,
+                run_options=effective_run_options,
                 emit=self._emit_sync,
                 fork=fork,
                 isolation=isolation,
@@ -153,7 +168,14 @@ class WorkflowContext:
                 error=error,
             )
 
-        self._journal.record(key, occurrence, result.final_text)
+        result_text = result_text_for_caller(result)
+        self._journal.record(
+            key,
+            occurrence,
+            result_text,
+            structured_output=result.structured_output,
+            structured_error=result.structured_error,
+        )
         await self._emit(
             WorkflowEvent(
                 kind="agent_end",
@@ -161,10 +183,12 @@ class WorkflowContext:
                 call_key=key,
                 occurrence=occurrence,
                 subagent_type=subagent_type,
-                result_text=result.final_text,
+                result_text=result_text,
+                structured_output=result.structured_output,
+                structured_error=result.structured_error,
             )
         )
-        return result.final_text
+        return result_text
 
     async def parallel(self, thunks: Sequence[Callable[[], Awaitable[Any]]]) -> list[Any]:
         """Run *thunks* concurrently (capped by ``max_concurrency``).
@@ -197,3 +221,50 @@ class WorkflowContext:
             return chain
 
         return await self.parallel([make_chain(item) for item in items])
+
+
+def _merge_run_options(
+    run_options: RunOptions | None,
+    *,
+    output_schema: Any = None,
+    final_tool_name: str | None = None,
+) -> RunOptions | None:
+    if output_schema is None and final_tool_name is None:
+        return run_options
+    opts = run_options or RunOptions()
+    updates: dict[str, Any] = {}
+    if output_schema is not None:
+        updates["output_schema"] = output_schema
+    if final_tool_name is not None:
+        updates["final_tool_name"] = final_tool_name
+    return dataclasses.replace(opts, **updates)
+
+
+def _run_options_fingerprint(run_options: RunOptions | None) -> str:
+    if run_options is None:
+        return ""
+    payload: dict[str, Any] = {}
+    for field in dataclasses.fields(run_options):
+        if field.name in {"signal", "budget"}:
+            continue
+        value = getattr(run_options, field.name)
+        if value is not None:
+            payload[field.name] = _fingerprint_value(value)
+    if not payload:
+        return ""
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _fingerprint_value(value: Any) -> Any:
+    if dataclasses.is_dataclass(value):
+        return {
+            field.name: _fingerprint_value(getattr(value, field.name))
+            for field in dataclasses.fields(value)
+        }
+    if isinstance(value, dict):
+        return {str(k): _fingerprint_value(v) for k, v in sorted(value.items(), key=str)}
+    if isinstance(value, (list, tuple)):
+        return [_fingerprint_value(v) for v in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return f"{value.__class__.__module__}.{value.__class__.__qualname__}:{value!r}"

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 
 def test_call_key_stable_and_prompt_sensitive() -> None:
+    import hashlib
+
     from linch.workflow import call_key
 
     a = call_key("researcher", "find the bug")
@@ -19,6 +21,8 @@ def test_call_key_stable_and_prompt_sensitive() -> None:
     assert a != c
     assert a != d
     assert len(a) == 64  # sha256 hexdigest
+    assert a == hashlib.sha256(b"researcher\x00find the bug").hexdigest()
+    assert a != call_key("researcher", "find the bug", "schema=v2")
 
 
 def test_occurrence_counter_per_key() -> None:
@@ -75,6 +79,7 @@ def test_from_stored_events_rebuilds_lookup() -> None:
                 occurrence=0,
                 subagent_type="researcher",
                 result_text="finding one",
+                structured_output={"finding": 1},
             ),
         ),
         StoredRunEvent(
@@ -96,3 +101,22 @@ def test_from_stored_events_rebuilds_lookup() -> None:
     assert journal.lookup(key, 0) == "finding one"
     assert journal.lookup(key, 1) == "finding two"
     assert journal.lookup(key, 2) is None
+    assert journal.lookup_record(key, 0).structured_output == {"finding": 1}
+
+
+def test_workflow_event_round_trips_structured_output() -> None:
+    from linch.events import WorkflowEvent, event_from_dict, event_to_dict
+
+    event = WorkflowEvent(
+        kind="agent_end",
+        call_key="key",
+        occurrence=0,
+        subagent_type="researcher",
+        result_text='{"answer":42}',
+        structured_output={"answer": 42},
+        structured_error=None,
+    )
+
+    restored = event_from_dict(event_to_dict(event))
+
+    assert restored == event

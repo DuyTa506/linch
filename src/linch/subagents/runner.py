@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, cast
 
 from ..abort import AbortContext, any_signal, throw_if_aborted
@@ -36,6 +37,9 @@ class RunSubagentArgs:
     display_name: str
     subagent_run_id: str
     tools_filter: list[str] | None = None
+    run_options: RunOptions | None = None
+    """Per-child run options. The runner always overrides ``signal`` with the
+    merged parent/child abort signal before calling ``Session.run``."""
     signal: AbortContext | None = None
     emit: Any = None
     retain: bool = False
@@ -69,6 +73,9 @@ class ContinueSubagentArgs:
     handle: WorkerHandle
     message: str
     subagent_run_id: str
+    run_options: RunOptions | None = None
+    """Per-continuation run options. The runner always overrides ``signal`` with
+    the merged parent/child abort signal before calling ``Session.run``."""
     signal: AbortContext | None = None
     emit: Any = None
 
@@ -79,6 +86,8 @@ class RunSubagentResult:
     final_text: str
     aborted: bool
     errored: bool
+    structured_output: dict[str, Any] | None = None
+    structured_error: str | None = None
     error: dict[str, str] | None = None
 
 
@@ -108,6 +117,15 @@ def _last_assistant_text(message: Any) -> str:
     return "".join(parts)
 
 
+def result_text_for_caller(result: RunSubagentResult) -> str:
+    """Return the text contract exposed by legacy subagent callers."""
+    if result.structured_output is not None:
+        return json.dumps(result.structured_output, sort_keys=True, separators=(",", ":"))
+    if result.final_text:
+        return result.final_text
+    return result.final_text
+
+
 async def _drive_child(
     child_session: Session,
     prompt: str,
@@ -118,6 +136,7 @@ async def _drive_child(
     display_name: str = "",
     parent_session_id: str = "",
     signal: AbortContext | None = None,
+    run_options: RunOptions | None = None,
 ) -> RunSubagentResult:
     """Drive *child_session* with *prompt* and collect the final result.
 
@@ -127,9 +146,12 @@ async def _drive_child(
     errored = False
     last_error: dict[str, str] | None = None
     last_assistant_text = ""
+    structured_output: dict[str, Any] | None = None
+    structured_error: str | None = None
 
     try:
-        child_events = child_session.run(prompt, RunOptions(signal=signal))
+        child_opts = replace(run_options or RunOptions(), signal=signal)
+        child_events = child_session.run(prompt, child_opts)
         async for event in child_events:
             if emit is not None and callable(emit):
                 emit(
@@ -145,6 +167,15 @@ async def _drive_child(
                 last_assistant_text = _last_assistant_text(event.message)
             elif isinstance(event, ResultEvent) and event.subtype == "aborted":
                 aborted = True
+                if event.final_text is not None:
+                    last_assistant_text = event.final_text
+                structured_output = event.structured_output
+                structured_error = event.structured_error
+            elif isinstance(event, ResultEvent):
+                if event.final_text is not None:
+                    last_assistant_text = event.final_text
+                structured_output = event.structured_output
+                structured_error = event.structured_error
             elif isinstance(event, ErrorEvent):
                 errored = True
                 last_error = {
@@ -163,6 +194,8 @@ async def _drive_child(
         final_text=last_assistant_text,
         aborted=aborted,
         errored=errored,
+        structured_output=structured_output,
+        structured_error=structured_error,
         error=last_error,
     )
 
@@ -279,6 +312,7 @@ async def run_subagent(args: RunSubagentArgs) -> RunSubagentResult:
             display_name=args.display_name,
             parent_session_id=args.parent_session.id,
             signal=merged_signal,
+            run_options=args.run_options,
         )
     finally:
         # Release the isolation cwd (unless kept) before other cleanup.
@@ -372,6 +406,7 @@ async def continue_subagent(args: ContinueSubagentArgs) -> RunSubagentResult:
             display_name=handle.display_name,
             parent_session_id=args.parent_session.id,
             signal=merged_signal,
+            run_options=args.run_options,
         )
     finally:
         # Always release the merged-signal watcher task and dispatch
@@ -394,6 +429,6 @@ async def continue_subagent(args: ContinueSubagentArgs) -> RunSubagentResult:
             )
 
     assert result is not None  # _drive_child succeeded if we reach here
-    handle.last_result_text = result.final_text
+    handle.last_result_text = result_text_for_caller(result)
     handle.status = "failed" if result.errored else "completed"
     return result

@@ -118,7 +118,7 @@ class SubagentTool:
         import asyncio
 
         from ..subagents.default_agent import DEFAULT_AGENT_TYPE
-        from ..subagents.runner import RunSubagentArgs, run_subagent
+        from ..subagents.runner import RunSubagentArgs, result_text_for_caller, run_subagent
         from ..subagents.workers import WorkerHandle
 
         requested = str(input.get("subagent_type", "")).strip()
@@ -215,8 +215,9 @@ class SubagentTool:
                     if handle.status != "killed":
                         handle.status = "killed"
                     raise
+                result_text = result_text_for_caller(result)
                 handle.child_session_id = result.child_session_id
-                handle.last_result_text = result.final_text
+                handle.last_result_text = result_text
                 handle.status = "failed" if result.errored or result.aborted else "completed"
                 # Append a <task-notification> message for the next turn to drain.
                 # Use the session captured at spawn time, not a fresh _get_session lookup,
@@ -239,7 +240,7 @@ class SubagentTool:
                     f"<task-id>{escape(worker_id)}</task-id>"
                     f"<status>{escape(status_str)}</status>"
                     f"<summary>Worker '{escape(display_name)}' finished.</summary>"
-                    f"<result>{escape(result.final_text)}</result>"
+                    f"<result>{escape(result_text)}</result>"
                     f"{error_line}"
                     f"</task-notification>"
                 )
@@ -268,6 +269,7 @@ class SubagentTool:
 
         # Foreground (blocking) execution
         result = await run_subagent(runner_args)
+        result_text = result_text_for_caller(result)
 
         if self._retain_subagents:
             # Store worker handle so SubagentContinue can address it by id.
@@ -277,15 +279,15 @@ class SubagentTool:
                 display_name=display_name,
                 definition=definition,
                 status="failed" if result.errored else "completed",
-                last_result_text=result.final_text,
+                last_result_text=result_text,
             )
             session.workers[worker_id] = handle
 
         if result.aborted:
             return ToolResult(
                 content=(
-                    f"Subagent aborted. Partial output: {result.final_text}"
-                    if result.final_text
+                    f"Subagent aborted. Partial output: {result_text}"
+                    if result_text
                     else "Subagent aborted before producing output."
                 ),
                 summary=self.summarize(input),
@@ -299,13 +301,13 @@ class SubagentTool:
                 content=" ".join(
                     [
                         f"Subagent encountered an error{f': {error_text}' if error_text else ''}.",
-                        *([f"Partial output: {result.final_text}"] if result.final_text else []),
+                        *([f"Partial output: {result_text}"] if result_text else []),
                     ]
                 ),
                 summary=self.summarize(input),
                 is_error=True,
             )
-        if result.final_text == "":
+        if result_text == "":
             return ToolResult(
                 content="Subagent produced no text output.",
                 summary=self.summarize(input),
@@ -314,7 +316,7 @@ class SubagentTool:
         # Include worker_id in retained results so the model can address this worker later.
         suffix = f"\n\n[Worker ID: {worker_id}]" if self._retain_subagents else ""
         return ToolResult(
-            content=result.final_text + suffix,
+            content=result_text + suffix,
             summary=self.summarize(input),
             is_error=False,
         )
