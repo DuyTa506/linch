@@ -331,6 +331,66 @@ Regardless of mechanism, a cache **hit** is surfaced uniformly as
 `Usage.cache_read_tokens`, which rolls up into `RunReport`'s cache-read ratio —
 that is the observable proof the cache is working.
 
+For a live check of the provider's current prompt-cache behavior, run:
+
+```bash
+python scripts/benchmark_live_prompt_cache.py
+```
+
+This reads DeepSeek-style `.env` keys (`API_KEY`, `model`, `BASE_URL`,
+`ANTHROPIC_BASE_URL`) and reports real `Usage.cache_read_tokens` /
+`Usage.cache_creation_tokens` across repeated calls with a stable prefix. Use
+`--prefix-salt "$(date +%s)"` when you want a fresh prefix instead of reusing a
+provider cache warmed by an earlier benchmark run. Provider comparisons are
+isolated by default: the script includes the provider name in the stable prefix.
+Pass `--shared-prefix` only when you intentionally want to test whether two
+endpoints share the same backend prompt cache.
+
+The benchmark normalizes prompt-cache percentages across provider accounting:
+OpenAI-compatible usage reports cached prompt tokens inside `input_tokens`,
+while Anthropic-compatible usage reports cached input separately. Use the
+per-call `cache_read` columns when in doubt; warm calls near the full prompt size
+mean the cache is working.
+
+To measure cache behavior through the real Linch agent loop and tool-result
+turns, use:
+
+```bash
+python scripts/benchmark_live_prompt_cache.py --mode tool-loop --tool-turns 3
+```
+
+To run the cache-case suite — baseline tool loop, stable/volatile injected
+context, rotating tool selection, compaction, and model steering — use:
+
+```bash
+python scripts/benchmark_live_prompt_cache.py \
+  --mode tool-loop \
+  --scenario all \
+  --tool-turns 3 \
+  --prefix-salt "$(date +%s)"
+```
+
+For model steering, pass an alternate model explicitly:
+
+```bash
+python scripts/benchmark_live_prompt_cache.py \
+  --mode tool-loop \
+  --scenario model-steering \
+  --steering-model deepseek-chat
+```
+
+For an offline check of request-shape cacheability, run:
+
+```bash
+python scripts/benchmark_prompt_cache.py
+```
+
+The offline benchmark uses a mock provider to simulate prefix-cache reads and writes across a
+tool loop. It is useful for comparing stable tools, volatile context, and
+per-turn tool selection without live API calls. It does **not** prove real
+server-side cache behavior; use provider usage (`cache_read_tokens`) or the
+Colab diagnostics scripts for that.
+
 ### Keeping the cached prefix stable (what produces hits)
 
 A hit requires the **leading bytes of the request to be identical** to a prior
