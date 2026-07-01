@@ -285,6 +285,8 @@ class WorkflowEvent:
     occurrence: int = 0
     subagent_type: str = ""
     result_text: str | None = None
+    structured_output: dict[str, Any] | None = None
+    structured_error: str | None = None
     type: Literal["workflow"] = "workflow"
 
 
@@ -677,7 +679,7 @@ def event_to_dict(event: Event) -> dict[str, Any]:
             "reason": event.reason,
         }
     if isinstance(event, WorkflowEvent):
-        return {
+        d = {
             "type": event.type,
             "kind": event.kind,
             "title": event.title,
@@ -686,6 +688,11 @@ def event_to_dict(event: Event) -> dict[str, Any]:
             "subagent_type": event.subagent_type,
             "result_text": event.result_text,
         }
+        if event.structured_output is not None:
+            d["structured_output"] = event.structured_output
+        if event.structured_error is not None:
+            d["structured_error"] = event.structured_error
+        return d
     raise ValueError(f"unknown event type: {getattr(event, 'type', '<missing>')}")
 
 
@@ -882,6 +889,16 @@ def event_from_dict(raw: dict[str, Any]) -> Event:
             subagent_type=str(raw.get("subagent_type", "")),
             result_text=(
                 raw.get("result_text") if isinstance(raw.get("result_text"), str) else None
+            ),
+            structured_output=(
+                dict(raw["structured_output"])
+                if isinstance(raw.get("structured_output"), dict)
+                else None
+            ),
+            structured_error=(
+                raw.get("structured_error")
+                if isinstance(raw.get("structured_error"), str)
+                else None
             ),
         )
     raise ValueError(f"unknown event type: {typ!r}")
