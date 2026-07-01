@@ -389,7 +389,7 @@ The offline benchmark uses a mock provider to simulate prefix-cache reads and wr
 tool loop. It is useful for comparing stable tools, volatile context, and
 per-turn tool selection without live API calls. It does **not** prove real
 server-side cache behavior; use provider usage (`cache_read_tokens`) or the
-Colab diagnostics scripts for that.
+live benchmark script (`scripts/benchmark_live_prompt_cache.py`) for that.
 
 ### Keeping the cached prefix stable (what produces hits)
 
