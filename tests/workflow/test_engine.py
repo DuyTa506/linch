@@ -7,6 +7,7 @@ level) because tests/loop/test_hardening.py pops all ``linch*`` modules from
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,33 @@ class CountingTextProvider:
             "type": "message_end",
             "stop_reason": "end_turn",
             "usage": Usage(input_tokens=self.tokens_per_turn),
+        }
+
+
+class SchemaNameProvider:
+    """Returns JSON derived from the requested output schema name."""
+
+    id = "fake"
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.schema_names: list[str | None] = []
+
+    def context_window(self, model: str) -> int:
+        return 10_000_000
+
+    async def stream(self, req: Any) -> AsyncIterator[dict[str, object]]:
+        from linch.types import Usage
+
+        self.calls += 1
+        schema_name = req.output_schema.name if req.output_schema is not None else None
+        self.schema_names.append(schema_name)
+        yield {"type": "message_start", "model": req.model}
+        yield {"type": "text_delta", "text": json.dumps({"schema": schema_name})}
+        yield {
+            "type": "message_end",
+            "stop_reason": "end_turn",
+            "usage": Usage(input_tokens=10),
         }
 
 
@@ -85,6 +113,82 @@ async def test_wf_agent_runs_subagent_and_returns_final_text() -> None:
     end = [e for e in seen if e.type == "workflow" and e.kind == "agent_end"][0]
     assert end.result_text == "result-1"
     assert end.title == "summarizer"
+
+
+async def test_wf_agent_returns_json_string_for_structured_output() -> None:
+    from linch import OutputSchema
+
+    provider = SchemaNameProvider()
+    agent = _make_agent(provider)
+    seen: list[Any] = []
+    schema = OutputSchema(
+        name="alpha",
+        schema={
+            "type": "object",
+            "properties": {"schema": {"type": "string"}},
+            "required": ["schema"],
+        },
+    )
+
+    async def flow(wf: Any) -> str:
+        return await wf.agent("extract", output_schema=schema)
+
+    result = await agent.run_workflow(flow, on_event=seen.append)
+
+    assert json.loads(result) == {"schema": "alpha"}
+    end = [e for e in seen if e.type == "workflow" and e.kind == "agent_end"][0]
+    assert end.result_text == '{"schema":"alpha"}'
+    assert end.structured_output == {"schema": "alpha"}
+
+
+async def test_wf_agent_structured_output_replays_from_journal() -> None:
+    from linch import InMemoryRunStore, OutputSchema
+
+    provider = SchemaNameProvider()
+    agent = _make_agent(provider, run_store=InMemoryRunStore())
+    seen: list[Any] = []
+    schema = OutputSchema(
+        name="alpha",
+        schema={
+            "type": "object",
+            "properties": {"schema": {"type": "string"}},
+            "required": ["schema"],
+        },
+    )
+
+    async def flow(wf: Any) -> str:
+        return await wf.agent("extract", output_schema=schema)
+
+    first = await agent.run_workflow(flow, run_id="wf-structured", on_event=seen.append)
+    second = await agent.run_workflow(flow, run_id="wf-structured", on_event=seen.append)
+
+    assert first == second == '{"schema":"alpha"}'
+    assert provider.calls == 1
+    replay = [e for e in seen if e.type == "workflow" and e.kind == "agent_replayed"][0]
+    assert replay.result_text == '{"schema":"alpha"}'
+    assert replay.structured_output == {"schema": "alpha"}
+
+
+async def test_wf_agent_run_options_are_part_of_replay_key() -> None:
+    from linch import InMemoryRunStore, OutputSchema
+
+    provider = SchemaNameProvider()
+    agent = _make_agent(provider, run_store=InMemoryRunStore())
+    schema_a = OutputSchema(name="alpha", schema={"type": "object"})
+    schema_b = OutputSchema(name="beta", schema={"type": "object"})
+
+    async def flow_a(wf: Any) -> str:
+        return await wf.agent("same prompt", output_schema=schema_a)
+
+    async def flow_b(wf: Any) -> str:
+        return await wf.agent("same prompt", output_schema=schema_b)
+
+    first = await agent.run_workflow(flow_a, run_id="wf-key")
+    second = await agent.run_workflow(flow_b, run_id="wf-key")
+
+    assert json.loads(first) == {"schema": "alpha"}
+    assert json.loads(second) == {"schema": "beta"}
+    assert provider.calls == 2
 
 
 async def test_wf_agent_passes_isolation_to_subagent() -> None:

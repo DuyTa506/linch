@@ -16,6 +16,8 @@ from linch import (
     LoopSpec,
     LoopTickResult,
     LoopTrigger,
+    OutputSchema,
+    RunOptions,
 )
 from linch.evals import ScriptedProvider, TextTurn
 from linch.sessions import InMemorySessionStore
@@ -78,6 +80,27 @@ async def test_run_once_uses_fresh_session_each_tick(tmp_path) -> None:
     log = (tmp_path / "domains" / spec.id / "LOG.md").read_text(encoding="utf-8")
     assert "Tick 1" in log
     assert "Tick 2" in log
+
+
+async def test_run_once_exposes_structured_output(tmp_path) -> None:
+    schema = OutputSchema(
+        name="tick",
+        schema={
+            "type": "object",
+            "properties": {"done": {"type": "boolean"}},
+            "required": ["done"],
+        },
+    )
+    provider = ScriptedProvider([TextTurn(text='{"done":true}')])
+    runner = LoopRunner(_agent(provider, tmp_path))
+    spec = _spec(tmp_path)
+    spec.run_options = RunOptions(output_schema=schema)
+
+    result = await runner.run_once(spec)
+
+    assert result.final_text == '{"done":true}'
+    assert result.structured_output == {"done": True}
+    assert result.structured_error is None
 
 
 async def test_predicates_can_mark_done_from_report_summary(tmp_path) -> None:
