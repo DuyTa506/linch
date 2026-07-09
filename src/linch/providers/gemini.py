@@ -33,7 +33,7 @@ from ..types import (
     ToolUseBlock,
     Usage,
 )
-from .base import BaseProvider, ProviderCapabilities
+from .base import BaseProvider, ProviderCapabilities, full_capabilities
 
 _KNOWN_CONTEXT: dict[str, int] = {
     "gemini-2.5-pro": 1_048_576,
@@ -146,13 +146,7 @@ class GeminiProvider(BaseProvider):
         return _KNOWN_CONTEXT.get(model, _DEFAULT_CONTEXT)
 
     def capabilities(self, model: ModelId) -> ProviderCapabilities:
-        return ProviderCapabilities(
-            context_window=self.context_window(model),
-            parallel_tool_calls=True,
-            structured_output=True,
-            tool_choice=True,
-            prompt_cache=True,
-        )
+        return full_capabilities(self.context_window(model))
 
     def _get_genai(self) -> Any:
         try:

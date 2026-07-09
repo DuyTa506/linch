@@ -10,7 +10,7 @@ from linch.openai_responses import (
     context_window,
     map_wire_events,
 )
-from linch.providers.base import BaseProvider, ProviderCapabilities
+from linch.providers.base import BaseProvider, ProviderCapabilities, full_capabilities
 from linch.types import ModelId, ProviderRequest
 
 
@@ -40,13 +40,7 @@ class OpenAIResponsesProvider(BaseProvider):
         return context_window(model)
 
     def capabilities(self, model: ModelId) -> ProviderCapabilities:
-        return ProviderCapabilities(
-            context_window=self.context_window(model),
-            parallel_tool_calls=True,
-            structured_output=True,
-            tool_choice=True,
-            prompt_cache=True,
-        )
+        return full_capabilities(self.context_window(model))
 
     async def stream(self, req: ProviderRequest) -> AsyncIterator[dict[str, object]]:
         wire = self._client.stream(req)

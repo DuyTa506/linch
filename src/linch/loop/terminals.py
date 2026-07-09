@@ -7,6 +7,7 @@ verification gates evaluated on a would-be-final answer."""
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -33,17 +34,26 @@ from ..types import (
 from .checkpoint import _persist_event
 from .request import final_text
 
+_FENCED_JSON_RE = re.compile(r"```(?:json)?\s*\n?(.*?)```", re.DOTALL | re.IGNORECASE)
+
 
 def _parse_structured_output(text: str, schema: object) -> tuple[dict | None, str | None]:
     """Try to parse *text* as JSON and optionally validate against *schema*.
 
+    Models — especially local/small ones — often wrap their final JSON answer
+    in a ```json ... ``` fence, sometimes with leading prose. Try the raw text
+    first, then fall back to the contents of a fenced code block if present.
+
     Returns ``(parsed_dict, None)`` on success or ``(None, error_message)``
     on failure.
     """
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError as exc:
-        return None, f"JSON parse error: {exc}"
+    parsed, error = _try_json_loads(text)
+    if error is not None:
+        match = _FENCED_JSON_RE.search(text)
+        if match is not None:
+            parsed, error = _try_json_loads(match.group(1))
+    if error is not None:
+        return None, error
 
     if not isinstance(parsed, dict):
         return None, f"Expected a JSON object, got {type(parsed).__name__}"
@@ -53,6 +63,13 @@ def _parse_structured_output(text: str, schema: object) -> tuple[dict | None, st
         return None, validation_error
 
     return parsed, None
+
+
+def _try_json_loads(text: str) -> tuple[Any, str | None]:
+    try:
+        return json.loads(text), None
+    except json.JSONDecodeError as exc:
+        return None, f"JSON parse error: {exc}"
 
 
 def _validate_structured_output(value: dict[str, Any], schema: object) -> str | None:

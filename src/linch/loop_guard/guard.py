@@ -82,25 +82,17 @@ def evaluate_loop_guard(
     Modifies *state* in place to track cumulative call counts and the
     consecutive-failure streak.
 
-    Parameters
-    ----------
-    guard:
-        The guard configuration.
-    state:
-        Per-run mutable state updated by this call.
-    tool_blocks:
-        The :class:`~linch.types.ToolUseBlock` instances that were
-        requested this turn.
-    result_blocks:
-        The :class:`~linch.types.ToolResultBlock` instances produced
-        this turn (same length/order as *tool_blocks*).
+    Args:
+        guard: The guard configuration.
+        state: Per-run mutable state updated by this call.
+        tool_blocks: The ToolUseBlock instances requested this turn.
+        result_blocks: The ToolResultBlock instances produced this turn
+            (same length/order as tool_blocks).
 
-    Returns
-    -------
-    LoopGuardDecision
-        ``action="continue"`` if no threshold was crossed, otherwise
-        ``"stop"`` or ``"force_final"`` depending on
-        :attr:`LoopGuard.force_final_answer`.
+    Returns:
+        A decision with action="continue" if no threshold was crossed,
+        otherwise "stop" or "force_final" depending on
+        LoopGuard.force_final_answer.
     """
     # ── Repeated identical tool-call check ────────────────────────────────
     if guard.max_identical_tool_calls > 0:

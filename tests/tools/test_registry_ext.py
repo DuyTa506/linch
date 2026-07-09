@@ -125,6 +125,33 @@ def test_register_duplicate_raises():
         r.register(FakeTool("X"))
 
 
+def test_register_rejects_tool_missing_summarize():
+    class NoSummarizeTool(FakeTool):
+        summarize = None  # type: ignore[assignment]
+
+    r = ToolRegistry()
+    with pytest.raises(Exception, match="summarize"):
+        r.register(NoSummarizeTool("Incomplete"))
+
+
+def test_register_rejects_tool_missing_validate():
+    class NoValidateTool(FakeTool):
+        validate = None  # type: ignore[assignment]
+
+    r = ToolRegistry()
+    with pytest.raises(Exception, match="validate"):
+        r.register(NoValidateTool("Incomplete"))
+
+
+def test_replace_rejects_malformed_tool():
+    class NoSummarizeTool(FakeTool):
+        summarize = None  # type: ignore[assignment]
+
+    r = ToolRegistry()
+    with pytest.raises(Exception, match="summarize"):
+        r.replace(NoSummarizeTool("Incomplete"))
+
+
 def test_add_and_remove_aliases():
     r = ToolRegistry()
     tool = FakeTool("RuntimeTool")
