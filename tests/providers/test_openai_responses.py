@@ -1,3 +1,8 @@
+import asyncio
+from types import SimpleNamespace
+
+import pytest
+
 from linch.openai_responses import OpenAIReasoning, build_payload, map_wire_events
 from linch.types import Message, ProviderRequest, SystemBlock, TextBlock, ToolResultBlock, Usage
 
@@ -145,3 +150,78 @@ def test_build_usage_surfaces_cache_read_tokens() -> None:
     # No cache details / no usage → 0, never raises.
     assert build_usage({"input_tokens": 10, "output_tokens": 2}).cache_read_tokens == 0
     assert build_usage(None).cache_read_tokens == 0
+
+
+def _client_stream_returns(coro_factory) -> SimpleNamespace:
+    async def create(**payload):
+        return coro_factory()
+
+    return SimpleNamespace(responses=SimpleNamespace(create=create))
+
+
+async def test_stream_maps_aborted_mid_stream_failure_to_abort_error() -> None:
+    from linch.abort import AbortContext
+    from linch.errors import AbortError
+    from linch.openai_responses import OpenAIResponsesClient
+
+    class _BrokenStream:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise RuntimeError("connection closed")
+
+    signal = AbortContext()
+    signal.abort()
+    client = OpenAIResponsesClient()
+    client.client = _client_stream_returns(lambda: _BrokenStream())
+
+    with pytest.raises(AbortError):
+        async for _ in client.stream(
+            ProviderRequest(model="gpt-5", system=[], tools=[], messages=[], signal=signal)
+        ):
+            pass
+
+
+async def test_stream_reraises_cancelled_error_without_abort_signal() -> None:
+    from linch.openai_responses import OpenAIResponsesClient
+
+    class _CancelledStream:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise asyncio.CancelledError()
+
+    client = OpenAIResponsesClient()
+    client.client = _client_stream_returns(lambda: _CancelledStream())
+
+    with pytest.raises(asyncio.CancelledError):
+        async for _ in client.stream(
+            ProviderRequest(model="gpt-5", system=[], tools=[], messages=[])
+        ):
+            pass
+
+
+async def test_stream_propagates_wait_for_timeout_instead_of_swallowing_it() -> None:
+    from linch.openai_responses import OpenAIResponsesClient
+
+    class _HangingStream:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await asyncio.sleep(10)
+            raise StopAsyncIteration
+
+    client = OpenAIResponsesClient()
+    client.client = _client_stream_returns(lambda: _HangingStream())
+
+    async def consume() -> None:
+        async for _ in client.stream(
+            ProviderRequest(model="gpt-5", system=[], tools=[], messages=[])
+        ):
+            pass
+
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(consume(), timeout=0.05)

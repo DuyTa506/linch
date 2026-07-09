@@ -130,3 +130,47 @@ async def test_abort_during_foreground_tool_emits_aborted_result() -> None:
     assert result.subtype == "aborted"
     assert saw_abort.is_set()  # tool actually saw the abort, then unwound
     assert provider._index == 1  # the second turn never ran
+
+
+@pytest.mark.asyncio
+async def test_external_cancel_of_session_run_propagates_as_timeout() -> None:
+    """An external asyncio.wait_for(session.run(...), timeout=N) firing must raise
+    TimeoutError, not get absorbed as a graceful ``aborted`` ResultEvent.
+
+    session.abort() was never called and no signal was ever set — this is a plain
+    external cancellation of the enclosing task, which must propagate as
+    CancelledError all the way out through the provider, the loop, and
+    session.run()'s async generator so wait_for sees it and raises TimeoutError.
+    """
+    from collections.abc import AsyncIterator
+    from typing import Any
+
+    from linch import Agent
+    from linch.providers.base import BaseProvider
+    from linch.sessions import InMemorySessionStore
+
+    class HangingProvider(BaseProvider):
+        id = "hanging"
+
+        def context_window(self, model: str) -> int:
+            return 128_000
+
+        async def stream(self, req: Any) -> AsyncIterator[dict[str, Any]]:
+            yield {"type": "message_start", "model": req.model}
+            await asyncio.sleep(10)
+            yield {"type": "text_delta", "text": "never"}  # pragma: no cover
+
+    agent = Agent(
+        model="m",
+        provider=HangingProvider(),
+        session_store=InMemorySessionStore(),
+        permissions={"mode": "skip-dangerous"},
+        cwd=".",
+    )
+    session = await agent.session()
+
+    async def _drive() -> list:
+        return [event async for event in session.run("go")]
+
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(_drive(), timeout=0.05)
