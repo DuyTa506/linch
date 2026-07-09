@@ -197,7 +197,13 @@ class OpenAIChatCompletionsProvider(BaseProvider):
                 elif finish_reason == "stop":
                     stop_reason = "end_turn"
         except asyncio.CancelledError as exc:
-            raise AbortError("aborted") from exc
+            # Only a cooperative `signal.abort()` maps to AbortError. A CancelledError
+            # with no matching signal comes from an external cancel (e.g. the caller's
+            # `asyncio.wait_for(session.run(...), timeout=N)` firing) and must propagate
+            # unchanged, or `wait_for` silently swallows the timeout instead of raising.
+            if getattr(req.signal, "aborted", False):
+                raise AbortError("aborted") from exc
+            raise
         except Exception as exc:
             if getattr(req.signal, "aborted", False):
                 raise AbortError("aborted") from exc
