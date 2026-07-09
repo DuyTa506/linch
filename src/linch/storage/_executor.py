@@ -98,12 +98,7 @@ class SqliteExecutor:
     # ── async public interface ───────────────────────────────────────────────
 
     async def run(self, fn: Callable[[sqlite3.Connection], T]) -> T:
-        """Run *fn(conn)* on a bounded daemon thread under the executor lock.
-
-        The blocking SQLite work is kept off the event loop via ``run_blocking``;
-        the lock still guarantees only one operation touches the connection at a
-        time.
-        """
+        """Run *fn(conn)* on a bounded daemon thread under the executor lock."""
         if self._closed:
             raise RuntimeError("SqliteExecutor is closed")
         from .._blocking import run_blocking

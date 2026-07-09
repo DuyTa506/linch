@@ -8,6 +8,27 @@ from .base import Tool
 from .builtin import BashTool, EditTool, GlobTool, GrepTool, ReadTool, WriteTool
 from .tasks import TaskCreateTool, TaskGetTool, TaskListTool, TaskUpdateTool
 
+_REQUIRED_METHODS = ("validate", "execute", "summarize")
+
+
+def _check_tool_shape(tool: Any) -> None:
+    """Fail fast with a clear message when a tool doesn't fulfil the Tool protocol.
+
+    The scheduler and permission engine call ``validate``/``summarize``
+    unconditionally with no fallback, so a hand-rolled class tool missing one
+    silently fails at call time with a cryptic AttributeError or a "tool is
+    invalid" permission denial instead of a clear registration-time error.
+    """
+    name = getattr(tool, "name", None)
+    if not isinstance(name, str) or not name:
+        raise ConfigError("tool.name must be a non-empty string")
+    scope = getattr(tool, "scope", None)
+    if scope not in {"read", "write", "exec"}:
+        raise ConfigError(f"tool {name!r}.scope must be 'read', 'write', or 'exec', got {scope!r}")
+    for method in _REQUIRED_METHODS:
+        if not callable(getattr(tool, method, None)):
+            raise ConfigError(f"tool {name!r} is missing a callable {method!r} method")
+
 
 class ToolRegistry:
     def __init__(self) -> None:
@@ -18,6 +39,7 @@ class ToolRegistry:
 
     def register(self, tool: Tool) -> None:
         """Register a new tool.  Raises :exc:`ConfigError` if the name is taken."""
+        _check_tool_shape(tool)
         if tool.name in self._tools:
             raise ConfigError(f"tool {tool.name!r} already registered")
         self._tools[tool.name] = tool
@@ -41,6 +63,7 @@ class ToolRegistry:
         Unlike :meth:`register` this does **not** raise if the name exists;
         use it to hot-swap a built-in with a custom implementation.
         """
+        _check_tool_shape(tool)
         self._tools[tool.name] = tool
 
     def copy(self) -> ToolRegistry:

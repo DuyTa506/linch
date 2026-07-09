@@ -99,12 +99,11 @@ class PostgresSessionStore:
     The schema is created automatically on first use (``CREATE TABLE IF NOT
     EXISTS``).  No migration tool is required; simply point at an empty DB.
 
-    :param dsn: PostgreSQL connection string
-        (e.g. ``"postgresql://user:pw@host/dbname"``).
-    :param pool: Pass a pre-created ``asyncpg.Pool`` to reuse an existing pool.
-        When provided, *dsn* is ignored.
-    :param min_size: Minimum pool connections (default 1).
-    :param max_size: Maximum pool connections (default 10).
+    Args:
+        dsn: PostgreSQL connection string (e.g. "postgresql://user:pw@host/dbname").
+        pool: Pre-created asyncpg.Pool to reuse; when set, dsn is ignored.
+        min_size: Minimum pool connections.
+        max_size: Maximum pool connections.
     """
 
     def __init__(

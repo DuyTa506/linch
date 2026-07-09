@@ -245,6 +245,19 @@ async def summarize_with_provider(
     The provider's ``stream()`` already yields normalized wire events
     (``text_delta``, ``message_end``, …) so we consume them directly without
     wrapping through any provider-specific translator.
+
+    Args:
+        provider: Provider to stream the summarization request through.
+        model: Model identifier passed to the provider.
+        older: Messages being summarized (typically the compaction window
+            being dropped from provider_view).
+        signal: Abort context forwarded to the provider request.
+        prompt: System prompt instructing how to summarize; defaults to the
+            built-in coding-oriented summary prompt.
+        max_output_tokens: Cap forwarded to the provider request.
+
+    Returns:
+        The summary text, stripped of leading/trailing whitespace.
     """
     from .types import ProviderRequest
 
@@ -495,7 +508,17 @@ async def maybe_compact(
     length_before = len(session.provider_view)
     head_before = session.provider_view[0] if session.provider_view else None
 
-    await _run_compaction_impl(session, agent, signal, strategy)
+    try:
+        await _run_compaction_impl(session, agent, signal, strategy)
+    except Exception:
+        # Micro-compaction already mutated provider_view in place above; if the
+        # follow-up summarization now fails (and the caller degrades instead of
+        # crashing, e.g. maybe_compact_resilient), the read tracker must still
+        # be reset here or a file whose contents were just elided keeps passing
+        # the Edit tool's has_read gate.
+        if micro_info is not None:
+            reset_read_tracker_after_compaction(session, agent)
+        raise
 
     if len(session.provider_view) == length_before:
         if session.provider_view and head_before is session.provider_view[0]:

@@ -149,6 +149,85 @@ async def test_structured_output_from_json_text():
 
 
 @pytest.mark.asyncio
+async def test_structured_output_from_fenced_json_text():
+    from linch import Agent
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import empty_tools
+    from linch.types import OutputSchema
+
+    payload = {"answer": "42", "confidence": 0.9}
+    provider = _text_provider(f"```json\n{json.dumps(payload)}\n```")
+
+    schema = OutputSchema(
+        name="test_schema",
+        schema={
+            "type": "object",
+            "properties": {
+                "answer": {"type": "string"},
+                "confidence": {"type": "number"},
+            },
+        },
+    )
+    agent = Agent(
+        model="gpt-5",
+        provider=provider,
+        tools=empty_tools(),
+        permissions={"mode": "skip-dangerous"},
+        session_store=InMemorySessionStore(),
+        output_schema=schema,
+    )
+    session = await agent.session()
+    result = None
+    async for event in session.run("go"):
+        if event.type == "result":
+            result = event
+
+    assert result is not None
+    assert result.structured_output == payload
+    assert result.structured_error is None
+
+
+@pytest.mark.asyncio
+async def test_structured_output_from_prose_and_fenced_json_text():
+    from linch import Agent
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import empty_tools
+    from linch.types import OutputSchema
+
+    payload = {"answer": "42", "confidence": 0.9}
+    text = f"**Here you go:**\n\n```json\n{json.dumps(payload)}\n```"
+    provider = _text_provider(text)
+
+    schema = OutputSchema(
+        name="test_schema",
+        schema={
+            "type": "object",
+            "properties": {
+                "answer": {"type": "string"},
+                "confidence": {"type": "number"},
+            },
+        },
+    )
+    agent = Agent(
+        model="gpt-5",
+        provider=provider,
+        tools=empty_tools(),
+        permissions={"mode": "skip-dangerous"},
+        session_store=InMemorySessionStore(),
+        output_schema=schema,
+    )
+    session = await agent.session()
+    result = None
+    async for event in session.run("go"):
+        if event.type == "result":
+            result = event
+
+    assert result is not None
+    assert result.structured_output == payload
+    assert result.structured_error is None
+
+
+@pytest.mark.asyncio
 async def test_structured_output_malformed_json():
     from linch import Agent
     from linch.sessions import InMemorySessionStore
@@ -176,6 +255,39 @@ async def test_structured_output_malformed_json():
     assert result.structured_output is None
     assert result.structured_error is not None
     assert "JSON" in result.structured_error
+
+
+@pytest.mark.asyncio
+async def test_structured_output_literal_null():
+    """A literal JSON `null` response must be reported as a schema error, not silently
+    accepted — `null` parses successfully to Python None, which must not be confused
+    with the "raw text failed to parse" sentinel."""
+    from linch import Agent
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import empty_tools
+    from linch.types import OutputSchema
+
+    provider = _text_provider("null")
+
+    schema = OutputSchema(name="s", schema={"type": "object"})
+    agent = Agent(
+        model="gpt-5",
+        provider=provider,
+        tools=empty_tools(),
+        permissions={"mode": "skip-dangerous"},
+        session_store=InMemorySessionStore(),
+        output_schema=schema,
+    )
+    session = await agent.session()
+    result = None
+    async for event in session.run("go"):
+        if event.type == "result":
+            result = event
+
+    assert result is not None
+    assert result.structured_output is None
+    assert result.structured_error is not None
+    assert "NoneType" in result.structured_error
 
 
 @pytest.mark.asyncio

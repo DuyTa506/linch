@@ -23,7 +23,7 @@ from linch.errors import (
     ProviderError,
     RateLimitError,
 )
-from linch.providers.base import BaseProvider, ProviderCapabilities
+from linch.providers.base import BaseProvider, ProviderCapabilities, full_capabilities
 from linch.types import (
     ImageBlock,
     Message,
@@ -69,13 +69,8 @@ class AnthropicProvider(BaseProvider):
         return _KNOWN_CONTEXT.get(model, 200_000)
 
     def capabilities(self, model: ModelId) -> ProviderCapabilities:
-        return ProviderCapabilities(
-            context_window=self.context_window(model),
-            parallel_tool_calls=True,
-            structured_output=True,  # forced-tool method (Feature A)
-            tool_choice=True,
-            prompt_cache=True,
-        )
+        # structured_output=True via the forced-tool method (Feature A)
+        return full_capabilities(self.context_window(model))
 
     async def _get_client(self) -> Any:
         if self._client is not None:
