@@ -11,6 +11,7 @@ from typing import Any, cast
 from ..compaction import (
     apply_micro_compaction,
     build_compaction_event,
+    maybe_compact,
     reset_read_tracker_after_compaction,
     run_forced_compaction,
 )
@@ -67,6 +68,31 @@ async def _retry_same_model(exc: Exception, attempts: list[int], agent: Any) -> 
     if delay_ms > 0:
         await asyncio.sleep(delay_ms / 1000.0)
     return True
+
+
+async def maybe_compact_resilient(session: Session, agent: Any, signal: Any) -> bool:
+    """Run proactive (pre-limit) compaction with the same transient-failure
+    backoff the turn loop gets, then degrade gracefully instead of crashing.
+
+    ``maybe_compact`` makes its own provider call (summarization) outside the
+    turn's retry ladder, so a transient ``ProviderError`` (rate limit, 5xx)
+    used to propagate straight out of the run loop even though the identical
+    failure is retried when raised from the main turn call. Since this call
+    fires *before* the hard context limit is hit, a persistent failure here is
+    not fatal: skip compaction for this turn and let the run proceed — the
+    reactive ``ContextLengthError`` ladder in ``_stream_turn_with_ladder``
+    still has its own compaction+retry path if the turn call runs out of room.
+    """
+    attempts = [0]
+    while True:
+        try:
+            return await maybe_compact(session, agent, signal)
+        except ProviderError as exc:
+            if not getattr(exc, "retryable", False):
+                return False
+            if await _retry_same_model(exc, attempts, agent):
+                continue
+            return False
 
 
 def _apply_model_fallback(

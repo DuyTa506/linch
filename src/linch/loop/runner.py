@@ -12,7 +12,6 @@ from uuid import uuid4
 
 from ..compaction import (
     build_compaction_event,
-    maybe_compact,
     reset_read_tracker_after_compaction,
 )
 from ..context import context_budget_to_dict
@@ -97,7 +96,11 @@ from .request import (
     build_user_message,
     final_text,
 )
-from .streaming import _stream_turn_with_compaction_retry, _stream_turn_with_ladder
+from .streaming import (
+    _stream_turn_with_compaction_retry,
+    _stream_turn_with_ladder,
+    maybe_compact_resilient,
+)
 from .terminals import (
     _budget_exhausted_tail,
     _error_result_tail,
@@ -963,7 +966,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 )
                 resumed_assistant = True
 
-            if not resumed_assistant and await maybe_compact(session, agent, signal):
+            if not resumed_assistant and await maybe_compact_resilient(session, agent, signal):
                 reset_read_tracker_after_compaction(session, agent)
                 event = build_compaction_event(session)
                 await _persist_event(session, run_id, event)

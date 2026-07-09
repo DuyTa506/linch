@@ -260,6 +260,145 @@ async def test_maybe_compact_uses_provider_context_window():
     assert len(fake_provider._stream_calls) >= 1  # provider.stream was used for summarization
 
 
+class _FakeAgent:
+    model = "model-x"
+    max_retries = 5
+    max_output_tokens = None
+    compaction = None
+    compaction_ladder = None
+    token_estimator = None
+
+    def __init__(self, provider):
+        self.provider = provider
+
+
+class _FakeSession:
+    def __init__(self, n_messages: int = 40):
+        self.provider_view = _make_messages(n_messages)
+        self.last_usage = object()  # non-None so maybe_compact proceeds
+        self.last_compaction_info = None
+        self.compaction_retry_used_this_turn = False
+
+    def mark_compaction_used(self):
+        self.compaction_retry_used_this_turn = True
+
+
+class _FlakyThenOkProvider(_FakeNonOpenAIProvider):
+    """Fails with a retryable ProviderError on the first N stream() calls."""
+
+    def __init__(self, fail_times: int) -> None:
+        super().__init__()
+        self._fail_times = fail_times
+        self._call_count = 0
+
+    async def stream(self, req):
+        from linch.errors import ProviderError
+
+        self._call_count += 1
+        if self._call_count <= self._fail_times:
+            raise ProviderError("rate limited", retryable=True)
+        async for ev in super().stream(req):
+            yield ev
+
+
+class _AlwaysFailsProvider(_FakeNonOpenAIProvider):
+    async def stream(self, req):
+        from linch.errors import ProviderError
+
+        raise ProviderError("rate limited", retryable=True)
+        yield {}  # pragma: no cover - unreachable, keeps this an async generator
+
+
+@pytest.mark.asyncio
+async def test_maybe_compact_resilient_retries_transient_provider_error():
+    """A transient retryable ProviderError during proactive-compaction
+    summarization must not crash the run — it should retry like the main
+    turn loop does, and still compact once the provider recovers."""
+    from linch.loop.streaming import maybe_compact_resilient
+
+    provider = _FlakyThenOkProvider(fail_times=2)
+    agent = _FakeAgent(provider)
+    session = _FakeSession()
+    signal = AbortContext()
+
+    fired = await maybe_compact_resilient(session, agent, signal)
+
+    assert fired is True
+    assert provider._call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_maybe_compact_resilient_skips_compaction_when_exhausted():
+    """When every retry is exhausted, proactive compaction is skipped (not
+    raised) so the run can proceed to the turn call instead of crashing."""
+    from linch.loop.streaming import maybe_compact_resilient
+
+    provider = _AlwaysFailsProvider()
+    agent = _FakeAgent(provider)
+    agent.max_retries = 2  # keep the test fast
+    session = _FakeSession()
+    original_view = list(session.provider_view)
+    signal = AbortContext()
+
+    fired = await maybe_compact_resilient(session, agent, signal)
+
+    assert fired is False
+    assert session.provider_view == original_view  # untouched, no partial mutation
+
+
+@pytest.mark.asyncio
+async def test_maybe_compact_resilient_resets_read_tracker_after_partial_micro_elision():
+    """If micro-compaction mutates provider_view but the follow-up summarization
+    exhausts retries and maybe_compact_resilient degrades to False, the read
+    tracker must still be reset -- otherwise the Edit tool's has_read gate would
+    let the model blind-edit content micro-compaction already elided."""
+    from linch.compaction import CompactionLadder
+    from linch.loop.streaming import maybe_compact_resilient
+    from linch.types import Message, TextBlock, ToolResultBlock, ToolUseBlock
+
+    def _history_with_tool_results(turns: int, result_size: int) -> list[Message]:
+        messages: list[Message] = [Message(role="user", content=[TextBlock(text="go")])]
+        for i in range(turns):
+            messages.append(
+                Message(
+                    role="assistant",
+                    content=[ToolUseBlock(id=f"call_{i}", name="BigTool", input={})],
+                )
+            )
+            messages.append(
+                Message(
+                    role="user",
+                    content=[ToolResultBlock(tool_use_id=f"call_{i}", content="x" * result_size)],
+                )
+            )
+        return messages
+
+    class _FakeTracker:
+        def __init__(self):
+            self.cleared = False
+
+        def clear(self):
+            self.cleared = True
+
+    provider = _AlwaysFailsProvider()
+    agent = _FakeAgent(provider)
+    agent.max_retries = 1  # keep the test fast
+    agent.compaction_ladder = CompactionLadder(keep_recent_turns=2)
+
+    session = _FakeSession()
+    # 12 turns, keep_recent_turns=2 -> 10 old tool results elided but the 2 kept
+    # (2000 chars each) still push the projection back over the 0.8*1024 limit,
+    # so maybe_compact falls through to the (always-failing) summarization call.
+    session.provider_view = _history_with_tool_results(12, result_size=2000)
+    session.file_read_tracker = _FakeTracker()
+    signal = AbortContext()
+
+    fired = await maybe_compact_resilient(session, agent, signal)
+
+    assert fired is False
+    assert session.file_read_tracker.cleared is True
+
+
 def test_compaction_module_has_no_openai_responses_import():
     """Verify compaction.py no longer imports openai_responses at module level."""
     import ast

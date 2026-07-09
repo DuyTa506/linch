@@ -10,7 +10,7 @@ from typing import Any
 from linch._prompt_cache import openai_cached_tokens
 from linch.errors import AbortError, ProviderError
 from linch.openai_responses import map_openai_error
-from linch.providers.base import BaseProvider, ProviderCapabilities
+from linch.providers.base import BaseProvider, ProviderCapabilities, full_capabilities
 from linch.types import (
     ImageBlock,
     ModelId,
@@ -69,12 +69,9 @@ class OpenAIChatCompletionsProvider(BaseProvider):
         return _KNOWN_CONTEXT.get(model, 128_000)
 
     def capabilities(self, model: ModelId) -> ProviderCapabilities:
-        return ProviderCapabilities(
-            context_window=self.context_window(model),
+        return full_capabilities(
+            self.context_window(model),
             parallel_tool_calls=self._options.parallel_tool_calls is not False,
-            structured_output=True,
-            tool_choice=True,
-            prompt_cache=True,
         )
 
     async def _get_client(self) -> Any:

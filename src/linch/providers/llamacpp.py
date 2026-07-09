@@ -7,7 +7,6 @@ from urllib import error, request
 from urllib.parse import urlsplit, urlunsplit
 
 from linch._prompt_cache import LLAMACPP_PROMPT_CACHE, apply_extra_body_cache
-from linch.providers.base import ProviderCapabilities
 from linch.providers.openai_chat import (
     OpenAIChatCompletionsProvider,
     OpenAIChatProviderOptions,
@@ -52,6 +51,7 @@ class LlamaCppProvider(OpenAIChatCompletionsProvider):
                 base_url=opts.base_url,
                 default_headers=opts.default_headers,
                 json_mode=False,
+                parallel_tool_calls=opts.parallel_tool_calls,
             )
         )
 
@@ -66,15 +66,6 @@ class LlamaCppProvider(OpenAIChatCompletionsProvider):
                 return detected
         self._context_window_cache = opts.context_window
         return opts.context_window
-
-    def capabilities(self, model: ModelId) -> ProviderCapabilities:
-        return ProviderCapabilities(
-            context_window=self.context_window(model),
-            parallel_tool_calls=self._llamacpp_options.parallel_tool_calls is not False,
-            structured_output=True,
-            tool_choice=True,
-            prompt_cache=True,
-        )
 
     def _build_payload(self, req: ProviderRequest) -> dict[str, Any]:
         return _build_llamacpp_payload(req, self._llamacpp_options)
