@@ -398,3 +398,28 @@ def test_context_window_falls_back_when_props_unavailable(monkeypatch) -> None:
     )
 
     assert provider.context_window("local-tool-model") == 32_768
+
+
+def test_context_window_probes_synchronously_and_caches(monkeypatch) -> None:
+    """context_window() resolves the real server value synchronously (bounded by
+    context_window_timeout) so callers that only get one synchronous chance to
+    read it — Agent.__init__'s offload-threshold sizing, proactive compaction's
+    first-turn limit check — never silently see the unprobed default."""
+    import linch.providers.llamacpp as module
+
+    calls = []
+
+    def fake_fetch(opts):
+        calls.append(opts.base_url)
+        return 65_536
+
+    monkeypatch.setattr(module, "_fetch_llamacpp_context_window", fake_fetch)
+
+    provider = LlamaCppProvider(
+        LlamaCppProviderOptions(base_url="https://example.test/v1", context_window=32_768)
+    )
+
+    assert provider.context_window("local-tool-model") == 65_536
+    # Cached: a second call must not re-fetch.
+    assert provider.context_window("local-tool-model") == 65_536
+    assert calls == ["https://example.test/v1"]

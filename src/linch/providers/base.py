@@ -45,6 +45,27 @@ class ProviderCapabilities:
     prompt_cache: bool = False
 
 
+def full_capabilities(
+    context_window: int, *, parallel_tool_calls: bool = True
+) -> ProviderCapabilities:
+    """``ProviderCapabilities`` for providers with schema-native, prompt-cache-aware
+    APIs (Anthropic, OpenAI Chat/Responses, Gemini, and OpenAI-compatible local
+    servers). These providers all declare the same feature set and only differ in
+    ``context_window`` and, for options-driven providers, ``parallel_tool_calls`` —
+    this factors out the otherwise-duplicated ``ProviderCapabilities(...)`` literal.
+
+    Not a ``BaseProvider.capabilities()`` default: the base class stays
+    conservative (``prompt_cache=False``) for providers that don't opt in.
+    """
+    return ProviderCapabilities(
+        context_window=context_window,
+        parallel_tool_calls=parallel_tool_calls,
+        structured_output=True,
+        tool_choice=True,
+        prompt_cache=True,
+    )
+
+
 @dataclass(slots=True)
 class ThinkingDisabled:
     type: Literal["disabled"] = "disabled"
@@ -78,10 +99,5 @@ class BaseProvider(ABC):
         raise NotImplementedError
 
     def capabilities(self, model: ModelId) -> ProviderCapabilities:
-        """Return the capability set for *model* on this provider.
-
-        The base implementation returns conservative defaults, deriving
-        ``context_window`` from :meth:`context_window`.  Subclasses should
-        override to declare their actual feature support.
-        """
+        """Conservative default capability set; subclasses override to declare real support."""
         return ProviderCapabilities(context_window=self.context_window(model))

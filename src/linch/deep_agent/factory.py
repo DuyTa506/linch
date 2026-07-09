@@ -75,6 +75,33 @@ def create_deep_agent(
     - ``verifiers=[...]`` — the standard checked before the final answer; wired
       into the hooks layer for you (``max_verification_retries`` bounds retries).
     - ``max_turns=N`` — a hard length cap.
+
+    Args:
+        model: Model identifier passed through to Agent.
+        durable: Whether to wire durable session/run storage by default.
+        coordinator: Whether to configure this agent as a pure orchestrator
+            (heavy tools removed, coordinator system prompt, background-worker
+            default pattern).
+        cwd: Working directory root for the virtual filesystem; defaults to ".".
+        system_prompt: Extra system prompt text merged with the deep-agent defaults.
+        tools: Existing tool registry to extend, or None for the default set.
+        permissions: Permission config passed through to Agent.
+        session_store: Session store override; ignored when durable=False.
+        run_store: Run store override; ignored when durable=False.
+        features: Feature flags; coordinator=True requires features.subagents=True.
+        system_prompt_config: System prompt section config to merge with system_prompt.
+        memory_store: Memory backend; when set, wires context injection and
+            memory tools under memory_namespace.
+        memory_namespace: Namespace passed to memory_store and its tools.
+        budget: RunBudget cap applied to this agent and its subagent tree.
+        max_turns: Hard turn-count cap; None leaves the loop unbounded.
+        verifiers: Verifiers checked before the final answer is accepted.
+        max_verification_retries: Retry cap for failed verifiers.
+        **agent_kwargs: Forwarded verbatim to Agent.
+
+    Returns:
+        A configured Agent with deep-agent tools, prompt, and (optionally)
+        durable storage wired in.
     """
 
     if coordinator and features is not None and not getattr(features, "subagents", True):

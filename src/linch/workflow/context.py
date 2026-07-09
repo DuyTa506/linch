@@ -78,21 +78,32 @@ class WorkflowContext:
     ) -> str:
         """Run a subagent and return its final text.
 
-        ``name`` selects a subagent definition from the agent's registry
-        (default: the built-in general-purpose subagent).  Results are
-        journaled; on resume an unchanged call returns its cached result
-        without a provider call.
+        Results are journaled; on resume an unchanged call returns its cached
+        result without a provider call.
 
-        ``fork=True`` runs the subagent as a *continuation* of the workflow
-        host's context (shared conversation prefix, system blocks, tools, and
-        read-file tracker) so a caching provider reuses the cached prefix — a
-        cost win for fans over a large shared context. Default ``False`` keeps
-        each subagent isolated.
+        Args:
+            prompt: The prompt handed to the subagent.
+            name: Subagent definition to select from the agent's registry;
+                None uses the built-in general-purpose subagent.
+            label: Display name for progress/events; defaults to name or "agent".
+            tools: Tool names available to the subagent; None uses its default set.
+            run_options: Run options forwarded to the subagent call.
+            output_schema: Structured-output schema, merged into run_options.
+            final_tool_name: Final-tool name override, merged into run_options.
+            fork: Whether to run as a continuation of the workflow host's context
+                (shared conversation prefix, system blocks, tools, read-file
+                tracker) so a caching provider reuses the cached prefix — a cost
+                win for fan-outs over a large shared context. False isolates
+                each subagent.
+            isolation: An IsolationBackend that runs the subagent in its own
+                acquired working directory, so parallel branches editing the
+                same relative path don't collide.
+            isolation_keep: Whether to preserve the isolated working directory
+                after the branch finishes (e.g. to merge it); only meaningful
+                with isolation set.
 
-        ``isolation`` (an :class:`~linch.tools.isolation.IsolationBackend`) runs
-        the subagent in its own acquired working directory, so parallel branches
-        editing the same relative path don't collide; ``isolation_keep=True``
-        preserves that directory after the branch finishes (e.g. to merge it).
+        Returns:
+            The subagent's final text.
         """
         from ..subagents.default_agent import DEFAULT_AGENT
         from ..subagents.runner import RunSubagentArgs, result_text_for_caller, run_subagent

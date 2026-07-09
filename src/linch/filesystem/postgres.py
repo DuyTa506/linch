@@ -45,10 +45,11 @@ class PostgresFileBackend:
     implemented.  Connection pooling via ``asyncpg`` means concurrent
     read/write operations truly run in parallel.
 
-    :param dsn: PostgreSQL connection string.
-    :param pool: Pass a pre-created ``asyncpg.Pool``.
-    :param min_size: Minimum pool connections (default 1).
-    :param max_size: Maximum pool connections (default 10).
+    Args:
+        dsn: PostgreSQL connection string.
+        pool: Pre-created asyncpg.Pool to reuse; when set, dsn is ignored.
+        min_size: Minimum pool connections.
+        max_size: Maximum pool connections.
     """
 
     def __init__(
