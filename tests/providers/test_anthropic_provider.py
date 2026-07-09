@@ -7,6 +7,7 @@ ANTHROPIC_API_KEY in the environment.
 
 from __future__ import annotations
 
+import asyncio
 import os
 
 import pytest
@@ -737,6 +738,118 @@ def test_stream_cache_tokens_not_double_counted():
     assert usage.cache_creation_tokens == cache_creation
     assert usage.input_tokens == 100
     assert usage.output_tokens == 42
+
+
+async def test_stream_maps_aborted_mid_stream_cancel_to_abort_error() -> None:
+    from types import SimpleNamespace
+
+    from linch.abort import AbortContext
+    from linch.errors import AbortError
+    from linch.providers.anthropic import AnthropicProvider
+    from linch.types import Message, ProviderRequest, TextBlock
+
+    class _CancelledStream:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise asyncio.CancelledError()
+
+    class _FakeMessages:
+        async def create(self, **payload):
+            return _CancelledStream()
+
+    signal = AbortContext()
+    signal.abort()
+    provider = AnthropicProvider()
+    provider._client = SimpleNamespace(messages=_FakeMessages())
+
+    req = ProviderRequest(
+        model="claude-sonnet-4-6",
+        system=[],
+        tools=[],
+        messages=[Message(role="user", content=[TextBlock(text="hi")])],
+        signal=signal,
+    )
+
+    with pytest.raises(AbortError):
+        async for _ in provider.stream(req):
+            pass
+
+
+async def test_stream_reraises_cancelled_error_without_abort_signal() -> None:
+    # A CancelledError with no signal set (or signal not aborted) is an external
+    # cancellation, not a cooperative session.abort() — it must propagate as
+    # CancelledError, not get reshaped into a plain-Exception AbortError.
+    from types import SimpleNamespace
+
+    from linch.providers.anthropic import AnthropicProvider
+    from linch.types import Message, ProviderRequest, TextBlock
+
+    class _CancelledStream:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise asyncio.CancelledError()
+
+    class _FakeMessages:
+        async def create(self, **payload):
+            return _CancelledStream()
+
+    provider = AnthropicProvider()
+    provider._client = SimpleNamespace(messages=_FakeMessages())
+
+    req = ProviderRequest(
+        model="claude-sonnet-4-6",
+        system=[],
+        tools=[],
+        messages=[Message(role="user", content=[TextBlock(text="hi")])],
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        async for _ in provider.stream(req):
+            pass
+
+
+async def test_stream_propagates_wait_for_timeout_instead_of_swallowing_it() -> None:
+    # Reproduces the reported bug: without the fix, wait_for's internal
+    # task.cancel() got reshaped into AbortError inside the provider, so
+    # asyncio.wait_for never saw a CancelledError and returned normally
+    # instead of raising TimeoutError.
+    from types import SimpleNamespace
+
+    from linch.providers.anthropic import AnthropicProvider
+    from linch.types import Message, ProviderRequest, TextBlock
+
+    class _HangingStream:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await asyncio.sleep(10)
+            raise StopAsyncIteration
+
+    class _FakeMessages:
+        async def create(self, **payload):
+            return _HangingStream()
+
+    provider = AnthropicProvider()
+    provider._client = SimpleNamespace(messages=_FakeMessages())
+
+    req = ProviderRequest(
+        model="claude-sonnet-4-6",
+        system=[],
+        tools=[],
+        messages=[Message(role="user", content=[TextBlock(text="hi")])],
+    )
+
+    async def consume() -> None:
+        async for _ in provider.stream(req):
+            pass
+
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(consume(), timeout=0.05)
 
 
 # ---------------------------------------------------------------------------
