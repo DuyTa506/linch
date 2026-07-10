@@ -286,7 +286,13 @@ class OpenAIResponsesClient:
             async for event in stream:
                 yield event.model_dump() if hasattr(event, "model_dump") else dict(event)
         except asyncio.CancelledError as exc:
-            raise AbortError("aborted") from exc
+            # Only a cooperative `signal.abort()` maps to AbortError. A CancelledError
+            # with no matching signal comes from an external cancel (e.g. the caller's
+            # `asyncio.wait_for(session.run(...), timeout=N)` firing) and must propagate
+            # unchanged, or `wait_for` silently swallows the timeout instead of raising.
+            if getattr(req.signal, "aborted", False):
+                raise AbortError("aborted") from exc
+            raise
         except Exception as exc:
             if getattr(req.signal, "aborted", False):
                 raise AbortError("aborted") from exc

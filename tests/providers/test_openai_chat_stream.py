@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -220,3 +221,62 @@ async def test_stream_maps_aborted_mid_stream_failure_to_abort_error() -> None:
             ProviderRequest(model="gpt-4o", system=[], tools=[], messages=[], signal=signal)
         ):
             pass
+
+
+async def test_stream_reraises_cancelled_error_without_abort_signal() -> None:
+    # A CancelledError with no signal set (or signal not aborted) is an external
+    # cancellation, not a cooperative session.abort() — it must propagate as
+    # CancelledError, not get reshaped into a plain-Exception AbortError.
+    class _CancelledStream:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise asyncio.CancelledError()
+
+    class _CancelledCompletions:
+        async def create(self, **payload):
+            return _CancelledStream()
+
+    provider = OpenAIChatCompletionsProvider()
+    provider._client = SimpleNamespace(
+        chat=SimpleNamespace(completions=_CancelledCompletions()),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        async for _ in provider.stream(
+            ProviderRequest(model="gpt-4o", system=[], tools=[], messages=[])
+        ):
+            pass
+
+
+async def test_stream_propagates_wait_for_timeout_instead_of_swallowing_it() -> None:
+    # Reproduces the reported bug: without the fix, wait_for's internal
+    # task.cancel() got reshaped into AbortError inside the provider, so
+    # asyncio.wait_for never saw a CancelledError and returned normally
+    # instead of raising TimeoutError.
+    class _HangingStream:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await asyncio.sleep(10)
+            raise StopAsyncIteration
+
+    class _HangingCompletions:
+        async def create(self, **payload):
+            return _HangingStream()
+
+    provider = OpenAIChatCompletionsProvider()
+    provider._client = SimpleNamespace(
+        chat=SimpleNamespace(completions=_HangingCompletions()),
+    )
+
+    async def consume() -> None:
+        async for _ in provider.stream(
+            ProviderRequest(model="gpt-4o", system=[], tools=[], messages=[])
+        ):
+            pass
+
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(consume(), timeout=0.05)
