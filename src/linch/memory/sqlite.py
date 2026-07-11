@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ..storage._executor import SqliteExecutor
-from .keyword import _metadata_matches, _tokenize
+from .keyword import _score_rows, _tokenize
 from .types import MemoryItem, MemorySearchResult
 
 
@@ -82,39 +82,13 @@ class SqliteMemoryStore:
         if not query_terms or limit <= 0:
             return []
 
-        # Fetch rows off the event loop; score in Python on the event loop.
-        raw_rows: list[dict[str, Any]] = await self._exec.run(
-            lambda conn: _fetch_all(conn, namespace)
+        # Fetch AND score on the worker thread so parsing/tokenizing/ranking a
+        # large namespace never blocks the event loop.
+        return await self._exec.run(
+            lambda conn: _score_rows(
+                _fetch_all(conn, namespace), query_terms, metadata_filter, limit
+            )
         )
-
-        results: list[MemorySearchResult] = []
-        for row in raw_rows:
-            metadata = json.loads(row["metadata"] or "{}")
-            if metadata_filter and not _metadata_matches(metadata, metadata_filter):
-                continue
-            item = MemoryItem(
-                id=row["id"],
-                content=row["content"],
-                metadata=metadata,
-                namespace=row["namespace"] or None,
-                created_at=row["created_at"],
-                updated_at=row["updated_at"],
-            )
-            item_terms = _tokenize(item.content)
-            overlap = query_terms & item_terms
-            if not overlap:
-                continue
-            score = len(overlap) / len(query_terms)
-            results.append(
-                MemorySearchResult(
-                    item=item,
-                    score=score,
-                    metadata={"matched_terms": sorted(overlap)},
-                )
-            )
-
-        results.sort(key=lambda r: (r.score or 0.0, r.item.id), reverse=True)
-        return results[:limit]
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 

@@ -40,6 +40,32 @@ on the same `Session` to continue the thread — history persists in the session
 store. When you are done, `await agent.close()` cancels any live background
 workers, flushes stores, and closes hooks that expose `close`/`aclose`.
 
+### Releasing a single session
+
+`agent.close()` tears down the whole agent. To release just one long-lived
+conversation — free its in-memory registration and drain its owned background
+work — without closing the agent or deleting durable history, use the
+per-session lifecycle APIs:
+
+```python
+# Release by instance or id (idempotent; unknown/already-released is a no-op).
+await agent.release_session(session)
+await agent.release_session("user-42")
+
+# Or from the session itself.
+await session.aclose()
+
+# Session is also an async context manager (aclose(force=True) on exit).
+async with await agent.session(id="user-42") as session:
+    async for event in session.run("hello"):
+        ...
+```
+
+Releasing a session with an **active run** raises unless you pass `force=True`.
+A forced release aborts the run, drains owned background work so finalizers run,
+and recursively releases retained child sessions. Durable history in the session
+store is always preserved — a released session can be reattached later by id.
+
 ---
 
 ## Session store

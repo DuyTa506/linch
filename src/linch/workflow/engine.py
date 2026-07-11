@@ -84,4 +84,4 @@ async def run_workflow(
             )
         return result
     finally:
-        agent._sessions.pop(host.id, None)
+        await agent.release_session(host.id, force=True)

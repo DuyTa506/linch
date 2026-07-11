@@ -4,12 +4,14 @@ execution, guards, gates, budgets, and durable checkpoints."""
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from functools import partial
 from typing import Any, cast
 from uuid import uuid4
 
+from .._prompt_cache import prompt_cache_advisories, tool_signature
 from ..compaction import (
     build_compaction_event,
     reset_read_tracker_after_compaction,
@@ -24,6 +26,7 @@ from ..events import (
     Event,
     LoopGuardEvent,
     PermissionRequestEvent,
+    PromptCacheAdvisoryEvent,
     ResultEvent,
     SkillsLoadedEvent,
     SystemEvent,
@@ -59,7 +62,9 @@ from ..types import (
     Usage,
 )
 from .checkpoint import (
+    RunEventBuffer,
     _background_workers_to_dict,
+    _flush_events,
     _interrupted_tool_result_block,
     _last_message_has_tool_results,
     _last_message_matches,
@@ -241,20 +246,56 @@ async def _drain_child_events(session: Session, run_id: str) -> AsyncIterator[Ev
 
 
 async def _cancel_background_workers(session: Session) -> None:
-    """Cancel any running asyncio.Tasks in session.workers (abort cleanup)."""
+    """Cancel and await this run's worker/background tasks so their finalizers
+    complete before the run's teardown proceeds (abort/error cleanup)."""
     import asyncio
 
+    tasks: list[asyncio.Task[Any]] = []
     workers = getattr(session, "workers", None)
     for handle in (workers or {}).values():
         task = getattr(handle, "task", None)
-        if task is not None and isinstance(task, asyncio.Task) and not task.done():
-            task.cancel()
+        if isinstance(task, asyncio.Task):
+            tasks.append(task)
     for task in getattr(session, "background_tasks", None) or []:
-        if isinstance(task, asyncio.Task) and not task.done():
+        if isinstance(task, asyncio.Task):
+            tasks.append(task)
+    for task in tasks:
+        if not task.done():
             task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _maybe_save_provider_snapshot(session: Session) -> None:
+    """Persist the just-compacted ``provider_view`` when the store supports it.
+
+    Best-effort (Phase 3.3): a snapshot only accelerates the next reload, so a
+    persistence failure is logged and swallowed rather than aborting the run. The
+    watermark is the highest stored-message ``seq`` observed (``session._last_seq``),
+    which tolerates gaps. Caching is skipped when the store returned non-increasing
+    seqs (``_seq_cacheable`` false), since the watermark can no longer be trusted.
+    """
+    saver = getattr(session.store, "save_provider_snapshot", None)
+    if saver is None:
+        return
+    if not getattr(session, "_seq_cacheable", True):
+        return
+    from ..sessions.store import ProviderViewSnapshot
+
+    snapshot = ProviderViewSnapshot(
+        provider_view=list(session.provider_view),
+        covers_seq=getattr(session, "_last_seq", len(session.full_history)),
+    )
+    try:
+        await saver(session.id, snapshot)
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "Failed to persist provider-view snapshot for session %s: %s", session.id, exc
+        )
 
 
 async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIterator[Event]:
+    await session.agent._ensure_provider_prepared()
     store = session.agent.run_store
     run_record = await store.create_run(session.id) if store is not None else None
     run_id = run_record.id if run_record is not None else str(uuid4())
@@ -270,6 +311,7 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
 
 
 async def resume_loop(session: Session, run_id: str, opts: RunOptions) -> AsyncIterator[Event]:
+    await session.agent._ensure_provider_prepared()
     store = session.agent.run_store
     if store is None:
         raise RuntimeError("Agent has no run_store configured")
@@ -393,6 +435,9 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
 ) -> AsyncIterator[Event]:
     agent = session.agent
     session.active_run_id = run_id
+    # Per-run event buffer: observational events batch between flush points; the
+    # runner flushes tool start/end per-event to keep them durable at the yield.
+    session._event_journal = RunEventBuffer(agent.run_store, run_id)
     # Reset run-level model-fallback state so each run starts on the primary model.
     session.active_model = None
     session.fallback_index = 0
@@ -503,6 +548,9 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         store = agent.run_store
         if run_record is None or store is None:
             return
+        # Every buffered event preceding this checkpoint must be durable before
+        # the checkpoint that accounts for it.
+        await _flush_events(session)
         nonlocal checkpoint
         checkpoint.phase = phase  # type: ignore[assignment]
         if turn_index is not None:
@@ -535,6 +583,15 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         checkpoint.truncation_attempts = _truncation_attempts
         checkpoint.truncation_prefix = _truncation_prefix
         checkpoint.pending_truncation_feedback = _pending_truncation_feedback
+        # Tool-batch event cursor: capture the watermark just before this turn's
+        # tool starts at tool_batch_pending; permission_pending/tool_executing
+        # inherit it (they are saved before any start is emitted); reset it
+        # otherwise so recovery only bounds-scans a genuine tool batch.
+        _buf = session._event_journal
+        if phase == "tool_batch_pending":
+            checkpoint.tool_batch_event_after_seq = _buf.last_seq if _buf is not None else None
+        elif phase not in ("permission_pending", "tool_executing"):
+            checkpoint.tool_batch_event_after_seq = None
         await store.save_checkpoint(run_id, checkpoint, status=status)
 
     async def _handle_prompt_block(block_reason: str) -> AsyncIterator[Event]:
@@ -900,6 +957,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 store = agent.run_store
                 if run_record is not None and store is not None:
                     checkpoint.total_usage = total
+                    await _flush_events(session)
                     await store.mark_completed(run_id, checkpoint)
                 yield event
                 return
@@ -968,6 +1026,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
 
             if not resumed_assistant and await maybe_compact_resilient(session, agent, signal):
                 reset_read_tracker_after_compaction(session, agent)
+                await _maybe_save_provider_snapshot(session)
                 event = build_compaction_event(session)
                 await _persist_event(session, run_id, event)
                 yield event
@@ -1056,6 +1115,23 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 )
             else:
                 assert req is not None
+                # Prompt-cache advisory: compare this request's final tool set and
+                # model against the previous provider call on this session and warn
+                # (observationally) when the cached prefix was invalidated. Computed
+                # after force_final/hook mutations so it reflects what is actually
+                # sent. No baseline on the first call → no advisory.
+                _sig = tool_signature(req.tools)
+                for _reason, _detail in prompt_cache_advisories(
+                    prev_model=session._last_prompt_cache_model,
+                    prev_signature=session._last_prompt_cache_tool_sig,
+                    model=req.model,
+                    signature=_sig,
+                ):
+                    _adv: Event = PromptCacheAdvisoryEvent(reason=_reason, detail=_detail)
+                    await _persist_event(session, run_id, _adv)
+                    yield _adv
+                session._last_prompt_cache_model = req.model
+                session._last_prompt_cache_tool_sig = _sig
                 _ladder = getattr(agent, "compaction_ladder", None)
                 if _ladder is None:
                     # Legacy path: one forced-compaction retry per turn.
@@ -1231,12 +1307,19 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 continue
 
             tool_blocks = [b for b in assembly.message.content if isinstance(b, ToolUseBlock)]
-            completed_tool_results = await _recover_completed_tool_results(
-                session,
-                run_id,
-                checkpoint.completed_tool_results
+            # Only the interrupted turn needs event-log recovery; a fresh turn has
+            # no prior tool results, so skip the whole-log scan on the happy path.
+            completed_tool_results: dict[str, ToolResultBlock] = (
+                await _recover_completed_tool_results(
+                    session,
+                    run_id,
+                    checkpoint.completed_tool_results,
+                    tool_blocks,
+                    after_seq=checkpoint.tool_batch_event_after_seq,
+                    assistant_message=checkpoint.assistant_message,
+                )
                 if resume_checkpoint is not None and turn_index == checkpoint.turn_index
-                else {},
+                else {}
             )
             _recovery_hints: dict[str, str] = {}
             missing_tool_blocks = [
@@ -1250,14 +1333,42 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 pending_tool_blocks=tool_blocks,
                 completed_tool_results=completed_tool_results,
             )
+
+            async def _checkpoint_tool_executing(
+                _assembly: AssistantAssembly = assembly,
+                _tool_blocks: list[ToolUseBlock] = tool_blocks,
+                _completed: dict[str, ToolResultBlock] = completed_tool_results,
+                _turn_index: int = turn_index,
+            ) -> None:
+                # Once-per-batch durability seam (fired by the scheduler after
+                # permissions resolve, before any tool runs): persist the resolved
+                # permission decisions and the tool_executing phase a single time.
+                # Per-tool start/end checkpoint saves are gone; the durable event
+                # log is the recovery source for tool execution instead. Loop
+                # variables are bound as defaults so the callback snapshots this
+                # turn's state (and satisfies flake8-bugbear B023).
+                await _save_checkpoint(
+                    "tool_executing",
+                    turn_index=_turn_index,
+                    assistant_message=_assembly.message,
+                    assistant_stop_reason=_assembly.stop_reason,
+                    pending_tool_blocks=_tool_blocks,
+                    completed_tool_results=_completed,
+                )
+
             async for event in execute_tool_calls(
                 missing_tool_blocks,
                 agent,
                 session,
                 signal,
                 turn_index=turn_index,
+                on_permissions_resolved=_checkpoint_tool_executing,
             ):
                 await _persist_event(session, run_id, event)
+                if isinstance(event, (ToolCallStartEvent, ToolCallEndEvent)):
+                    # Recovery-critical: keep tool start/end durable at the yield
+                    # boundary (a consumer can crash at the yield below).
+                    await _flush_events(session)
                 if isinstance(event, PermissionRequestEvent):
                     await _save_checkpoint(
                         "permission_pending",
@@ -1269,21 +1380,13 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                         status="waiting_permission",
                     )
                 elif isinstance(event, ToolCallStartEvent):
-                    # Persist a placeholder result the moment a tool starts (after
-                    # resolve() has fired, Seam B) so a started-but-unfinished tool
-                    # is not blindly re-run on resume and the permission_decisions
-                    # survive a crash in this window.
+                    # The start event is now durable in the event log (persisted
+                    # above); a started-but-unfinished tool is recovered as
+                    # interrupted from the log on resume. This in-memory placeholder
+                    # only keeps result_blocks total if no end event ever arrives.
                     completed_tool_results.setdefault(
                         event.tool_use_id,
                         _interrupted_tool_result_block(event),
-                    )
-                    await _save_checkpoint(
-                        "tool_executing",
-                        turn_index=turn_index,
-                        assistant_message=assembly.message,
-                        assistant_stop_reason=assembly.stop_reason,
-                        pending_tool_blocks=tool_blocks,
-                        completed_tool_results=completed_tool_results,
                     )
                 elif isinstance(event, ToolCallEndEvent):
                     block = _tool_result_block_from_end(event)
@@ -1294,14 +1397,6 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                         and event.tool_result.recovery_hint
                     ):
                         _recovery_hints[event.tool_use_id] = event.tool_result.recovery_hint
-                    await _save_checkpoint(
-                        "tool_executing",
-                        turn_index=turn_index,
-                        assistant_message=assembly.message,
-                        assistant_stop_reason=assembly.stop_reason,
-                        pending_tool_blocks=tool_blocks,
-                        completed_tool_results=completed_tool_results,
-                    )
                 yield event
                 if isinstance(event, ToolCallStartEvent):
                     await _dispatch_lifecycle(
@@ -1446,6 +1541,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         if run_record is not None and store is not None:
             checkpoint.phase = "aborted"
             checkpoint.total_usage = total
+            await _flush_events(session)
             await store.save_checkpoint(run_id, checkpoint, status="aborted")
         yield event
     except Exception as exc:
@@ -1475,9 +1571,17 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         store = agent.run_store
         if run_record is not None and store is not None:
             checkpoint.total_usage = total
+            await _flush_events(session)
             await store.mark_failed(run_id, checkpoint, error=_err_dict)
         yield event
     finally:
+        # Flush any events still buffered (best-effort) and drop the buffer so it
+        # never leaks into a later run on this session.
+        try:
+            await _flush_events(session)
+        except Exception:
+            pass
+        session._event_journal = None
         # Release the merged-signal watcher when this run created one
         # (opts.signal merged with the session controller); a plain session
         # controller has no watcher and close() is a no-op.

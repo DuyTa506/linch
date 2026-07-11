@@ -37,3 +37,7 @@ Recent history uses short imperative commit subjects, sometimes with a conventio
 ## Security & Configuration Tips
 
 Never commit `.env`, API keys, local caches, or generated private state. Keep provider-specific wire formats inside `src/linch/providers/`; shared loop code should consume normalized provider events only.
+
+## Orchestration workflow
+
+You are the orchestrator. Plan, decompose, and synthesize. Delegate reasoning-heavy phases to `deep-reasoner` and mechanical work to `fast-worker`. For high-stakes decisions, run `deep-reasoner` twice with slightly different framings and synthesize the best of both. Keep your own context lean and delegate rather than doing mechanical work yourself. The orchestrator is the only role responsible for the overall plan, delegation, and final synthesis.

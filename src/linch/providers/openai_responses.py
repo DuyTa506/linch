@@ -46,3 +46,6 @@ class OpenAIResponsesProvider(BaseProvider):
         wire = self._client.stream(req)
         async for event in map_wire_events(wire, req.model):
             yield event
+
+    async def aclose(self) -> None:
+        await self._client.aclose()

@@ -173,11 +173,10 @@ async def run_eval(
             error = str(exc)
         finally:
             # Release this case's session so _sessions (and any spawned
-            # background workers) don't accumulate across the suite. There is no
-            # per-session close; pop from the registry and abort to cancel any
-            # background worker tasks. Never let teardown mask a case error.
-            agent._sessions.pop(session.id, None)
-            session.abort()
+            # background workers) don't accumulate across the suite. Forced
+            # release aborts any active run, drains owned background work, and
+            # unregisters the session. Never let teardown mask a case error.
+            await agent.release_session(session.id, force=True)
 
         scores: dict[str, bool | None] = {}
         for scorer in scorers:

@@ -63,6 +63,36 @@ byte-identical.
   path (no ladder) keeps its original single-retry-per-turn semantics in
   `_stream_turn_with_compaction_retry`.
 
+### Durable compacted views (opt-in, store-detected)
+
+Compaction shrinks `provider_view` in memory, but on a fresh process the view is
+rebuilt from `full_history` — so a reloaded session would re-pay the compaction.
+A `SessionStore` **may** persist the compacted view so a reload skips that work:
+
+```python
+class ProviderViewSnapshotStore(Protocol):
+    async def save_provider_snapshot(self, id: str, snapshot: ProviderViewSnapshot) -> None: ...
+    async def load_provider_snapshot(self, id: str) -> ProviderViewSnapshot | None: ...
+```
+
+`ProviderViewSnapshot` pairs the compacted `provider_view` with `covers_seq` —
+the message sequence number it accounts for. The loop saves a snapshot at the
+compaction seam; on load, the agent restores the snapshot and appends only the
+messages written *after* `covers_seq`, reproducing the live view exactly.
+
+Both methods are optional and detected at runtime with `getattr`. The built-in
+in-memory, SQLite, and Postgres stores implement them; a custom store that omits
+them keeps reconstructing the view from full history (byte-identical to before).
+The snapshot payload is schema-versioned and read best-effort, so an older store
+file stays forward-tolerant. Because the snapshot is only a cache, the load path
+validates it and silently falls back to rebuilding from `full_history` whenever
+it cannot be trusted — a loader error, a malformed payload, or a `covers_seq`
+that is negative, ahead of the newest stored message, or inconsistent with a
+non-monotonic message log. Message-sequence gaps are legal and preserved;
+out-of-order sequences simply disable snapshot caching for that session.
+Compaction never mutates or removes the append-only `full_history` — the
+snapshot is a cache of a derived view, never a source of truth.
+
 ## Design rationale
 
 - **Only `provider_view` shrinks; `full_history` is sacred.** The model only ever

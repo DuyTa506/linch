@@ -32,7 +32,13 @@ from typing import Any
 from uuid import uuid4
 
 from linch.sessions.memory import now_iso
-from linch.sessions.store import SessionRecord, StoredMessage
+from linch.sessions.store import (
+    ProviderViewSnapshot,
+    SessionRecord,
+    StoredMessage,
+    snapshot_from_dict,
+    snapshot_to_dict,
+)
 from linch.sessions.tasks import CreateTaskInput, Task, TaskPatch
 from linch.types import Message, message_from_dict, message_to_dict
 
@@ -82,6 +88,12 @@ CREATE TABLE IF NOT EXISTS task_edges (
     to_task_id   TEXT NOT NULL,
     kind         TEXT NOT NULL DEFAULT 'blocks',
     PRIMARY KEY (session_id, from_task_id, to_task_id)
+);
+
+CREATE TABLE IF NOT EXISTS session_snapshots (
+    session_id  TEXT PRIMARY KEY,
+    snapshot    TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
 );
 """
 
@@ -233,6 +245,30 @@ class PostgresSessionStore:
                 await conn.execute("UPDATE sessions SET updated_at = $1 WHERE id = $2", ts, id)
         return stored
 
+    async def save_provider_snapshot(self, id: str, snapshot: ProviderViewSnapshot) -> None:
+        pool = await self._ensure()
+        payload = json.dumps(snapshot_to_dict(snapshot))
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO session_snapshots (session_id, snapshot, updated_at)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (session_id) DO UPDATE
+                    SET snapshot = EXCLUDED.snapshot, updated_at = EXCLUDED.updated_at
+                """,
+                id,
+                payload,
+                now_iso(),
+            )
+
+    async def load_provider_snapshot(self, id: str) -> ProviderViewSnapshot | None:
+        pool = await self._ensure()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT snapshot FROM session_snapshots WHERE session_id = $1", id
+            )
+        return snapshot_from_dict(json.loads(row["snapshot"])) if row is not None else None
+
     async def update_meta(self, id: str, meta: dict[str, object]) -> SessionRecord:
         pool = await self._ensure()
         async with pool.acquire() as conn:
@@ -295,6 +331,7 @@ class PostgresSessionStore:
                 await conn.execute("DELETE FROM task_edges WHERE session_id = $1", id)
                 await conn.execute("DELETE FROM tasks WHERE session_id = $1", id)
                 await conn.execute("DELETE FROM task_counters WHERE session_id = $1", id)
+                await conn.execute("DELETE FROM session_snapshots WHERE session_id = $1", id)
                 await conn.execute("DELETE FROM messages WHERE session_id = $1", id)
                 await conn.execute("DELETE FROM sessions WHERE id = $1", id)
 

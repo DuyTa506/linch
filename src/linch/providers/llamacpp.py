@@ -56,16 +56,32 @@ class LlamaCppProvider(OpenAIChatCompletionsProvider):
         )
 
     def context_window(self, model: ModelId) -> int:
-        opts = self._llamacpp_options
+        # Immediate, non-blocking lookup: the detected value (populated by
+        # prepare()) or the configured default. Never performs network I/O — the
+        # /props probe runs off the event loop in prepare() instead.
         if self._context_window_cache is not None:
             return self._context_window_cache
-        if opts.auto_context_window and opts.base_url:
-            detected = _fetch_llamacpp_context_window(opts)
-            if detected is not None:
-                self._context_window_cache = detected
-                return detected
-        self._context_window_cache = opts.context_window
-        return opts.context_window
+        return self._llamacpp_options.context_window
+
+    async def prepare(self) -> None:
+        """Discover the server's context window off the event loop and cache it.
+
+        Coalesced and awaited once before the first run by the agent. Runs the
+        blocking ``/props`` probe on the shared blocking bridge so the event loop
+        is never stalled. A failed or timed-out probe leaves the cache unset, so
+        ``context_window()`` falls back to the configured value. Explicit
+        configuration (``auto_context_window=False``) skips the probe entirely.
+        """
+        opts = self._llamacpp_options
+        if self._context_window_cache is not None:
+            return
+        if not (opts.auto_context_window and opts.base_url):
+            return
+        from linch._blocking import run_blocking
+
+        detected = await run_blocking(_fetch_llamacpp_context_window, opts)
+        if detected is not None:
+            self._context_window_cache = detected
 
     def _build_payload(self, req: ProviderRequest) -> dict[str, Any]:
         return _build_llamacpp_payload(req, self._llamacpp_options)

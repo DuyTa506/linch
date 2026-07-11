@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -297,6 +298,18 @@ class OpenAIResponsesClient:
             if getattr(req.signal, "aborted", False):
                 raise AbortError("aborted") from exc
             raise map_openai_error(exc) from exc
+
+    async def aclose(self) -> None:
+        client = self.client
+        self.client = None
+        if client is None:
+            return
+        closer = getattr(client, "aclose", None) or getattr(client, "close", None)
+        if closer is None:
+            return
+        result = closer()
+        if inspect.isawaitable(result):
+            await result
 
 
 async def map_wire_events(
