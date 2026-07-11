@@ -184,6 +184,34 @@ Notes:
   `Agent.close()`, so exporters get flushed. Vendor backends (Langfuse,
   LangSmith, Honeycomb, Datadog) are reached through the OpenTelemetry observer.
 
+### GenAI semantic conventions
+
+`OpenTelemetryObserver` emits the OTel **GenAI semantic-convention** attributes
+alongside the stable `linch.*` attributes (which are unchanged), so semconv-aware
+backends group Linch traces without custom mapping:
+
+| Span | GenAI attributes |
+|---|---|
+| `agent.run` | `gen_ai.operation.name="invoke_agent"`, `gen_ai.conversation.id` (session id), `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.usage.input_tokens`/`output_tokens` |
+| `gen_ai.chat` | `gen_ai.operation.name="chat"`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.response.finish_reasons` (string array), `gen_ai.usage.input_tokens`/`output_tokens`, `gen_ai.usage.cache_read_input_tokens`/`cache_creation_input_tokens` (only when non-zero) |
+| `execute_tool` | `gen_ai.operation.name="execute_tool"`, `gen_ai.tool.name`, `gen_ai.tool.call.id` |
+
+Notes:
+
+- `gen_ai.provider.name` maps provider ids to semconv well-known values:
+  `openai-chat`/`openai-responses` → `openai` (same vendor, two API shapes),
+  `gemini` → `gcp.gemini`. Self-hosted runtimes (`vllm`, `sglang`, `llamacpp`)
+  pass through with their own distinct names — they are never merged. Caveat: an
+  OpenAI-compatible provider pointed at a non-OpenAI endpoint (custom
+  `base_url`) still reports `openai`, because the client identifies the API
+  shape, not the backend.
+- `gen_ai.response.finish_reasons` is a **string array** per semconv (it was a
+  plain string before); dashboards doing string equality should switch to
+  membership.
+- The cache-token attribute names follow the emerging convention and may be
+  renamed if the semconv stabilizes different ones; such a rename will be a
+  documented migration.
+
 ---
 
 ## Telemetry: `HookEventRecord`

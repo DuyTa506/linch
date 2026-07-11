@@ -16,6 +16,7 @@ class RunInfo:
     model: str
     prompt: str
     tools: tuple[str, ...] = ()
+    provider_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +34,7 @@ class ProviderCallInfo:
     run_id: str
     turn_index: int
     model: str
+    provider_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +47,7 @@ class ProviderCallResult:
     stop_reason: str
     usage: Usage
     duration_ms: int
+    provider_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)

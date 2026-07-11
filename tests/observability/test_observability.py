@@ -680,3 +680,215 @@ def test_otel_run_end_detaches_leftover_turn_tokens():
         assert leftover_token in detached
     finally:
         _ctx.detach = orig_detach  # type: ignore[assignment]
+
+
+# ---------------------------------------------------------------------------
+# GenAI semantic conventions — provider_id threading + gen_ai.* attributes
+# ---------------------------------------------------------------------------
+
+
+def test_protocol_infos_default_provider_id():
+    """provider_id is additive with a default so existing constructions keep working."""
+    from linch.observability import ProviderCallInfo, ProviderCallResult, RunInfo
+    from linch.types import Usage
+
+    run = RunInfo(run_id="r", session_id="s", model="m", prompt="p")
+    call = ProviderCallInfo(run_id="r", turn_index=0, model="m")
+    result = ProviderCallResult(
+        run_id="r", turn_index=0, model="m", stop_reason="end_turn", usage=Usage(), duration_ms=1
+    )
+    assert run.provider_id == ""
+    assert call.provider_id == ""
+    assert result.provider_id == ""
+
+    run_x = RunInfo(run_id="r", session_id="s", model="m", prompt="p", provider_id="x")
+    assert run_x.provider_id == "x"
+    call_x = ProviderCallInfo(run_id="r", turn_index=0, model="m", provider_id="x")
+    assert call_x.provider_id == "x"
+
+
+@pytest.mark.asyncio
+async def test_run_telemetry_hook_threads_provider_id():
+    """RunTelemetryHook sources provider_id from the session's agent provider."""
+    from linch.observability import BaseObserver
+
+    class _CaptureObserver(BaseObserver):
+        def __init__(self):
+            self.run_infos = []
+            self.call_infos = []
+            self.call_results = []
+
+        def on_run_start(self, info):
+            self.run_infos.append(info)
+
+        def on_provider_call_start(self, info):
+            self.call_infos.append(info)
+
+        def on_provider_call_end(self, info):
+            self.call_results.append(info)
+
+    obs = _CaptureObserver()
+    agent = _make_agent(_make_tool_provider(), hooks=_observe([obs]))
+    session = await agent.session()
+    await _collect(session)
+
+    assert obs.run_infos and all(i.provider_id == "fake-tool" for i in obs.run_infos)
+    assert obs.call_infos and all(i.provider_id == "fake-tool" for i in obs.call_infos)
+    assert obs.call_results and all(i.provider_id == "fake-tool" for i in obs.call_results)
+
+
+def _make_otel_exporter():
+    from opentelemetry.sdk.trace import TracerProvider  # type: ignore[import]
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor  # type: ignore[import]
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (  # type: ignore[import]
+        InMemorySpanExporter,
+    )
+
+    exporter = InMemorySpanExporter()
+    tp = TracerProvider()
+    tp.add_span_processor(SimpleSpanProcessor(exporter))
+    return exporter, tp.get_tracer("test")
+
+
+@pytest.mark.asyncio
+async def test_otel_semconv_attributes_per_span_kind():
+    """Every span kind carries the GenAI semconv attributes alongside linch.*."""
+    pytest.importorskip("opentelemetry")
+    from linch.observability import OpenTelemetryObserver
+
+    exporter, tracer = _make_otel_exporter()
+    obs = OpenTelemetryObserver(tracer=tracer)
+    provider = _make_tool_provider(tool_name="Echo")
+    agent = _make_agent(provider, hooks=_observe([obs]), tool_name="Echo")
+    session = await agent.session()
+    await _collect(session)
+
+    spans = exporter.get_finished_spans()
+
+    run_span = next(s for s in spans if s.name == "agent.run")
+    assert run_span.attributes.get("gen_ai.operation.name") == "invoke_agent"
+    assert run_span.attributes.get("gen_ai.conversation.id") == session.id
+    assert run_span.attributes.get("gen_ai.provider.name") == "fake-tool"
+    # linch.* attributes unchanged.
+    assert run_span.attributes.get("linch.run_id")
+    assert run_span.attributes.get("linch.session_id") == session.id
+
+    chat_spans = [s for s in spans if s.name == "gen_ai.chat"]
+    assert chat_spans
+    finish_reasons = []
+    for chat in chat_spans:
+        assert chat.attributes.get("gen_ai.operation.name") == "chat"
+        assert chat.attributes.get("gen_ai.provider.name") == "fake-tool"
+        reasons = chat.attributes.get("gen_ai.response.finish_reasons")
+        assert isinstance(reasons, (list, tuple)), f"finish_reasons must be a sequence: {reasons!r}"
+        finish_reasons.extend(reasons)
+    assert "tool_use" in finish_reasons and "end_turn" in finish_reasons
+
+    tool_span = next(s for s in spans if s.name == "execute_tool")
+    assert tool_span.attributes.get("gen_ai.operation.name") == "execute_tool"
+    assert tool_span.attributes.get("gen_ai.tool.name") == "Echo"
+    assert tool_span.attributes.get("gen_ai.tool.call.id") == "t1"
+    # linch.tool.* attributes unchanged.
+    assert tool_span.attributes.get("linch.tool.name") == "Echo"
+    assert tool_span.attributes.get("linch.tool.use_id") == "t1"
+
+
+@pytest.mark.asyncio
+async def test_otel_cache_token_attributes():
+    """Cache token usage is emitted only when non-zero."""
+    pytest.importorskip("opentelemetry")
+    from linch.observability import OpenTelemetryObserver
+    from linch.types import Usage
+
+    class CacheProvider:
+        id = "fake-cache"
+
+        def context_window(self, model):
+            return 128_000
+
+        async def stream(self, req):
+            yield {"type": "message_start", "model": req.model}
+            yield {"type": "text_delta", "text": "pong"}
+            yield {
+                "type": "message_end",
+                "stop_reason": "end_turn",
+                "usage": Usage(
+                    input_tokens=10,
+                    output_tokens=5,
+                    cache_read_tokens=7,
+                    cache_creation_tokens=3,
+                ),
+            }
+
+    exporter, tracer = _make_otel_exporter()
+    obs = OpenTelemetryObserver(tracer=tracer)
+    agent = _make_agent(CacheProvider(), hooks=_observe([obs]))
+    session = await agent.session()
+    await _collect(session)
+
+    chat = next(s for s in exporter.get_finished_spans() if s.name == "gen_ai.chat")
+    assert chat.attributes.get("gen_ai.usage.cache_read_input_tokens") == 7
+    assert chat.attributes.get("gen_ai.usage.cache_creation_input_tokens") == 3
+
+    # Zero-cache run: the cache attributes are absent, not zero.
+    exporter2, tracer2 = _make_otel_exporter()
+    obs2 = OpenTelemetryObserver(tracer=tracer2)
+    agent2 = _make_agent(_make_text_provider(), hooks=_observe([obs2]))
+    session2 = await agent2.session()
+    await _collect(session2)
+
+    chat2 = next(s for s in exporter2.get_finished_spans() if s.name == "gen_ai.chat")
+    assert "gen_ai.usage.cache_read_input_tokens" not in chat2.attributes
+    assert "gen_ai.usage.cache_creation_input_tokens" not in chat2.attributes
+
+
+def test_otel_provider_name_well_known_mapping():
+    """Provider ids map to semconv well-known values; unknown ids pass through."""
+    pytest.importorskip("opentelemetry")
+    from linch.observability import OpenTelemetryObserver, ProviderCallInfo, ProviderCallResult
+    from linch.types import Usage
+
+    expected = {
+        "anthropic": "anthropic",
+        "openai-chat": "openai",
+        "openai-responses": "openai",
+        "gemini": "gcp.gemini",
+        "vllm": "vllm",  # self-hosted runtimes pass through, never merged
+        "sglang": "sglang",
+        "llamacpp": "llamacpp",
+    }
+
+    exporter, tracer = _make_otel_exporter()
+    obs = OpenTelemetryObserver(tracer=tracer)
+    for turn, provider_id in enumerate(expected):
+        obs.on_provider_call_start(
+            ProviderCallInfo(run_id="r", turn_index=turn, model="m", provider_id=provider_id)
+        )
+        obs.on_provider_call_end(
+            ProviderCallResult(
+                run_id="r",
+                turn_index=turn,
+                model="m",
+                stop_reason="end_turn",
+                usage=Usage(),
+                duration_ms=1,
+            )
+        )
+    # Empty provider_id → attribute absent.
+    obs.on_provider_call_start(ProviderCallInfo(run_id="r", turn_index=99, model="m"))
+    obs.on_provider_call_end(
+        ProviderCallResult(
+            run_id="r",
+            turn_index=99,
+            model="m",
+            stop_reason="end_turn",
+            usage=Usage(),
+            duration_ms=1,
+        )
+    )
+
+    spans = {s.attributes.get("linch.turn_index"): s for s in exporter.get_finished_spans()}
+    for turn, provider_id in enumerate(expected):
+        actual = spans[turn].attributes.get("gen_ai.provider.name")
+        assert actual == expected[provider_id], provider_id
+    assert "gen_ai.provider.name" not in spans[99].attributes
