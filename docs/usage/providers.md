@@ -409,6 +409,32 @@ re-cache:
   cached prefix, so it invalidates the whole cache every turn. Keep the tool set
   stable across turns if you rely on caching.
 
+Two guarantees back this up. First, per-turn context `system_blocks` are always
+forced to `cacheable=False` on the wire request — a `ContextBuilder` cannot move
+the Anthropic cache breakpoint onto volatile RAG text even by mistake. Second,
+equivalent tool selections are order-stable: `selected_tools={"A", "B"}` and
+`{"B", "A"}` produce byte-identical tool schemas (selection follows the parent
+registry's insertion order, not set iteration), so an unordered set never
+silently reshuffles the prefix.
+
+### The `prompt_cache_advisory` event
+
+When the tool set or the model changes between provider calls on the same
+session, Linch emits an observational
+[`PromptCacheAdvisoryEvent`](./events.md) (`type == "prompt_cache_advisory"`)
+with `reason` of `"tool_set_changed"` or `"model_changed"` and a human-readable
+`detail`. It is a **warning, not a rewrite** — Linch never mutates
+`selected_tools` for you (that is policy, not mechanism); it just tells you the
+cached prefix was invalidated so you can decide whether the churn is intended.
+The advisory count and reasons also roll up into `RunReport`'s `prompt_cache`
+summary block (`advisory_count`, `reasons`, `tool_selection_changes`) alongside
+the `cache_read_ratio`.
+
+Checklist for reliable hits: **stable tools** (don't rotate `selected_tools`),
+**static system prompt**, **RAG/ephemeral content after the static prefix**, and
+for Anthropic a prompt large enough to meet the minimum cacheable token size,
+optionally with `Agent(cache_ttl="1h")` for a longer breakpoint TTL.
+
 ---
 
 ## Reading thinking events

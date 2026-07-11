@@ -4,6 +4,7 @@ capability downgrades, and the :class:`ProviderRequest` builder."""
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 from typing import Any, Literal, cast
 
 from ..context import ContextBuildResult, apply_context_budget
@@ -163,7 +164,15 @@ def _build_turn_request(
 
     base_system = list(session.system_blocks_override or agent.system_blocks)
     if context and context.system_blocks:
-        base_system = base_system + list(context.system_blocks)
+        # Per-turn context blocks (RAG, dates, retrieved snippets) are ephemeral
+        # and volatile, so force them out of the cacheable prefix: a ContextBuilder
+        # must never be able to move the Anthropic cache breakpoint onto text that
+        # changes every turn. The static agent/session system blocks keep their
+        # own cacheable flags.
+        base_system = base_system + [
+            replace(block, cacheable=False) if getattr(block, "cacheable", False) else block
+            for block in context.system_blocks
+        ]
 
     messages = list(session.provider_view)
     if context and context.messages:

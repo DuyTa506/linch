@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Any
 from uuid import uuid4
 
 from linch.sessions.tasks import CreateTaskInput, Task, TaskPatch
 from linch.types import Message
 
-from .store import SessionRecord, StoredMessage
+from .store import (
+    ProviderViewSnapshot,
+    SessionRecord,
+    StoredMessage,
+    snapshot_from_dict,
+    snapshot_to_dict,
+)
 
 
 def now_iso() -> str:
@@ -17,6 +24,7 @@ class InMemorySessionStore:
     def __init__(self) -> None:
         self._sessions: dict[str, SessionRecord] = {}
         self._messages: dict[str, list[StoredMessage]] = {}
+        self._snapshots: dict[str, dict[str, Any]] = {}
         self._tasks: dict[str, dict[str, Task]] = {}
         self._task_counter: dict[str, int] = {}
 
@@ -55,6 +63,14 @@ class InMemorySessionStore:
         rec.updated_at = ts
         return stored
 
+    async def save_provider_snapshot(self, id: str, snapshot: ProviderViewSnapshot) -> None:
+        # Round-trip through the wire form so behavior matches the persisted stores.
+        self._snapshots[id] = snapshot_to_dict(snapshot)
+
+    async def load_provider_snapshot(self, id: str) -> ProviderViewSnapshot | None:
+        raw = self._snapshots.get(id)
+        return snapshot_from_dict(raw) if raw is not None else None
+
     async def update_meta(self, id: str, meta: dict[str, object]) -> SessionRecord:
         rec = self._sessions[id]
         rec.meta.update(meta)
@@ -77,6 +93,7 @@ class InMemorySessionStore:
     async def delete(self, id: str) -> None:
         self._sessions.pop(id, None)
         self._messages.pop(id, None)
+        self._snapshots.pop(id, None)
         self._tasks.pop(id, None)
         self._task_counter.pop(id, None)
 

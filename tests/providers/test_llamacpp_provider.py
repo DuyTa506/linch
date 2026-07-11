@@ -368,7 +368,7 @@ def test_extract_n_ctx_from_props() -> None:
     assert _extract_n_ctx({"default_generation_settings": {"n_ctx": 0}}) is None
 
 
-def test_context_window_detects_and_caches_props(monkeypatch) -> None:
+async def test_prepare_detects_and_caches_props(monkeypatch) -> None:
     import linch.providers.llamacpp as module
 
     calls = []
@@ -380,15 +380,21 @@ def test_context_window_detects_and_caches_props(monkeypatch) -> None:
     monkeypatch.setattr(module, "_fetch_llamacpp_context_window", fake_fetch)
 
     provider = LlamaCppProvider(
-        LlamaCppProviderOptions(base_url="https://example.test/v1", context_window=65_536)
+        LlamaCppProviderOptions(base_url="https://example.test/v1", context_window=8_192)
     )
 
+    # Before prepare(): the configured default, with no probe.
+    assert provider.context_window("local-tool-model") == 8_192
+    assert calls == []
+
+    await provider.prepare()
+
+    assert calls == ["https://example.test/v1"]
     assert provider.context_window("local-tool-model") == 65_536
     assert provider.capabilities("local-tool-model").context_window == 65_536
-    # assert calls == ["https://example.test/v1"]
 
 
-def test_context_window_falls_back_when_props_unavailable(monkeypatch) -> None:
+async def test_prepare_falls_back_to_configured_when_props_unavailable(monkeypatch) -> None:
     import linch.providers.llamacpp as module
 
     monkeypatch.setattr(module, "_fetch_llamacpp_context_window", lambda opts: None)
@@ -397,14 +403,30 @@ def test_context_window_falls_back_when_props_unavailable(monkeypatch) -> None:
         LlamaCppProviderOptions(base_url="https://example.test/v1", context_window=32_768)
     )
 
+    await provider.prepare()
     assert provider.context_window("local-tool-model") == 32_768
 
 
-def test_context_window_probes_synchronously_and_caches(monkeypatch) -> None:
-    """context_window() resolves the real server value synchronously (bounded by
-    context_window_timeout) so callers that only get one synchronous chance to
-    read it — Agent.__init__'s offload-threshold sizing, proactive compaction's
-    first-turn limit check — never silently see the unprobed default."""
+def test_context_window_never_probes_on_the_event_loop(monkeypatch) -> None:
+    """context_window() is an immediate cached/configured lookup — it must never
+    perform the /props network probe (that runs off-loop in prepare())."""
+    import linch.providers.llamacpp as module
+
+    def boom(opts):
+        raise AssertionError("context_window() must not perform network I/O")
+
+    monkeypatch.setattr(module, "_fetch_llamacpp_context_window", boom)
+
+    provider = LlamaCppProvider(
+        LlamaCppProviderOptions(base_url="https://example.test/v1", context_window=32_768)
+    )
+
+    assert provider.context_window("local-tool-model") == 32_768
+    # A second call is still just the configured default, still no probe.
+    assert provider.context_window("local-tool-model") == 32_768
+
+
+async def test_prepare_is_idempotent_and_caches(monkeypatch) -> None:
     import linch.providers.llamacpp as module
 
     calls = []
@@ -418,8 +440,7 @@ def test_context_window_probes_synchronously_and_caches(monkeypatch) -> None:
     provider = LlamaCppProvider(
         LlamaCppProviderOptions(base_url="https://example.test/v1", context_window=32_768)
     )
-
+    await provider.prepare()
+    await provider.prepare()
+    assert calls == ["https://example.test/v1"]  # probed once
     assert provider.context_window("local-tool-model") == 65_536
-    # Cached: a second call must not re-fetch.
-    assert provider.context_window("local-tool-model") == 65_536
-    assert calls == ["https://example.test/v1"]

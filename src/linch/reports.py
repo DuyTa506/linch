@@ -73,6 +73,7 @@ class RunReport:
         usage = self.summary.get("usage", {})
         tools = self.summary.get("tools", {})
         context = self.summary.get("context", {})
+        prompt_cache = self.summary.get("prompt_cache", {})
         lines = [
             f"# Linch Run Report: {self.run_id or '<unknown>'}",
             "",
@@ -99,6 +100,8 @@ class RunReport:
                     f"max={tools.get('max_duration_ms', 0)}",
                     f"- tool error rate: {tools.get('error_rate', 0)}",
                     f"- cache read ratio: {usage.get('cache_read_ratio', 0)}",
+                    f"- prompt cache advisories: {prompt_cache.get('advisory_count', 0)} "
+                    f"(tool changes={prompt_cache.get('tool_selection_changes', 0)})",
                     f"- max context utilization: {context.get('max_utilization')}",
                     f"- context pressure: {context.get('pressure', 'none')}",
                 ]
@@ -535,6 +538,7 @@ def _report_summary(
         },
         "context": context_summary,
         "recovery": recovery_summary,
+        "prompt_cache": _prompt_cache_summary(timeline, usage_source),
         "risk": {
             "permission_requests": len(permission_requests),
             "loop_guards": len(loop_guards),
@@ -565,6 +569,25 @@ def _total_tokens(usage: dict[str, Any]) -> int:
             "cache_creation_tokens",
         )
     )
+
+
+def _prompt_cache_summary(
+    timeline: list[dict[str, Any]], usage_source: dict[str, Any]
+) -> dict[str, Any]:
+    """Fold prompt-cache advisories from the timeline into a diagnostics block."""
+    reasons: dict[str, int] = {}
+    for item in timeline:
+        if item.get("type") != "prompt_cache_advisory":
+            continue
+        reason = item.get("event", {}).get("reason")
+        if isinstance(reason, str):
+            reasons[reason] = reasons.get(reason, 0) + 1
+    return {
+        "cache_read_ratio": _cache_read_ratio(usage_source),
+        "advisory_count": sum(reasons.values()),
+        "reasons": dict(sorted(reasons.items())),
+        "tool_selection_changes": reasons.get("tool_set_changed", 0),
+    }
 
 
 def _cache_read_ratio(usage: dict[str, Any]) -> float:

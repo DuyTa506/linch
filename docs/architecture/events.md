@@ -30,6 +30,7 @@ graph LR
         LGE["LoopGuardEvent\ntype=loop_guard\nreason · detail · action"]
         UGE["UsageEvent\ntype=usage · usage · cumulative"]
         BE["BudgetEvent\ntype=budget · kind = warning | exceeded\nspent/max tokens · spent/max USD"]
+        PCA["PromptCacheAdvisoryEvent\ntype=prompt_cache_advisory\nreason = tool_set_changed | model_changed · detail"]
     end
 
     subgraph Skill["Skills & Subagents"]
@@ -44,6 +45,8 @@ graph LR
 ```
 
 `BackgroundWorkerEvent` is emitted when a background worker task completes (success or failure); it carries `worker_id`, `status`, and `display_name`.
+
+`PromptCacheAdvisoryEvent` is emitted (observationally, never mutating the request) when the tool set or model changes between provider calls on the same session and invalidates the cached request prefix — see [prompt caching](../usage/providers.md#the-prompt_cache_advisory-event).
 
 `event_to_dict` and `event_from_dict` in `events.py` provide full round-trip serialization for all event types.
 

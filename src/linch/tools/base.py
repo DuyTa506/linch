@@ -46,6 +46,15 @@ class ToolContext:
     tools read and write through this, and the scheduler offloads oversized
     results here.  ``None`` when the subsystem is off."""
 
+    idempotency_key: str = ""
+    """Stable key for this ``(run, tool call)`` pair, ``f"{run_id}:{tool_use_id}"``.
+    Both parts survive a crash and are reused on resume, so a tool whose external
+    side effect ran *before* its completion record became durable can key on this
+    to deduplicate or reconcile the interrupted intent when it re-executes.
+    Durable execution is at-least-once, not exactly-once — Linch supplies the
+    stable key; the integration owns the deduplication.  Empty string when the
+    context is built outside the loop (e.g. direct unit tests)."""
+
     @property
     def sessionId(self) -> str:
         return self.session_id
@@ -61,6 +70,10 @@ class ToolContext:
     @property
     def fileReadTracker(self) -> Any:
         return self.file_read_tracker
+
+    @property
+    def idempotencyKey(self) -> str:
+        return self.idempotency_key
 
 
 @dataclass(slots=True)

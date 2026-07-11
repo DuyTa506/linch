@@ -6,6 +6,7 @@ from typing import Any
 
 import yaml  # type: ignore[reportMissingModuleSource]
 
+from .._blocking import run_blocking
 from .types import AgentDefinition, AgentFrontmatter, LoadAgentsResult, SkippedAgent
 
 FRONTMATTER_RE = re.compile(r"^---\r?\n([\s\S]*?)\r?\n---\r?\n?")
@@ -30,6 +31,11 @@ def normalize_tools(v: Any) -> list[str] | None:
 
 
 async def load_agents_from_dir(config_dir: str) -> LoadAgentsResult:
+    # Disk scan + frontmatter parsing is blocking I/O; keep it off the loop.
+    return await run_blocking(_load_agents_from_dir_sync, config_dir)
+
+
+def _load_agents_from_dir_sync(config_dir: str) -> LoadAgentsResult:
     agents_root = Path(config_dir) / "agents"
     if not agents_root.is_dir():
         return LoadAgentsResult(agents=[], skipped=[])

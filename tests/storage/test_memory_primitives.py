@@ -116,7 +116,10 @@ async def test_keyword_memory_store_work_does_not_block_event_loop(monkeypatch) 
     assert not upsert_task.done()
     await upsert_task
 
-    store._token_cache.clear()
+    # Search now yields once per bounded chunk (Phase 2.3), not per item; shrink
+    # the chunk so this small corpus still crosses a yield boundary mid-scan.
+    monkeypatch.setattr(keyword_mod, "_YIELD_CHUNK", 2)
+    store._token_partitions.clear()  # force re-tokenize (slow) during the scan
     search_task = asyncio.create_task(store.search("alpha", namespace="docs"))
     await asyncio.sleep(0.03)
     assert not search_task.done()

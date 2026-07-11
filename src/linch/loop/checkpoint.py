@@ -7,6 +7,7 @@ from html import escape
 from typing import Any, cast
 
 from ..events import (
+    AssistantEvent,
     BackgroundWorkerEvent,
     Event,
     ToolCallEndEvent,
@@ -23,9 +24,64 @@ from ..types import (
 )
 
 
+class RunEventBuffer:
+    """Per-run event buffer.
+
+    Observational events are appended and flushed in batches (fewer store round
+    trips); recovery-critical tool start/end events are flushed immediately by
+    the runner so they stay durable at the yield boundary. Per-run (attached to
+    the session for one run), never process-global.
+    """
+
+    __slots__ = ("store", "run_id", "_pending", "_last_seq")
+
+    def __init__(self, store: Any, run_id: str) -> None:
+        self.store = store
+        self.run_id = run_id
+        self._pending: list[Event] = []
+        self._last_seq = 0
+
+    @property
+    def last_seq(self) -> int:
+        """Highest durable event seq flushed so far (the tool-batch cursor base)."""
+        return self._last_seq
+
+    async def append(self, event: Event) -> None:
+        if self.store is not None:
+            self._pending.append(event)
+
+    async def flush(self) -> int:
+        if self.store is None or not self._pending:
+            return self._last_seq
+        pending = self._pending
+        self._pending = []
+        appender = getattr(self.store, "append_events", None)
+        if appender is not None:
+            seqs = await appender(self.run_id, pending)
+        else:
+            seqs = [await self.store.append_event(self.run_id, event) for event in pending]
+        if seqs:
+            # max (not seqs[-1]): a test store may return 0 for a dropped event;
+            # keep the watermark monotonic.
+            self._last_seq = max(self._last_seq, *seqs)
+        return self._last_seq
+
+
 async def _persist_event(session: Session, run_id: str, event: Event) -> None:
-    if session.agent.run_store is not None:
-        await session.agent.run_store.append_event(run_id, event)
+    buf = getattr(session, "_event_journal", None)
+    if buf is not None and buf.run_id == run_id:
+        await buf.append(event)
+        return
+    store = session.agent.run_store
+    if store is not None:
+        await store.append_event(run_id, event)
+
+
+async def _flush_events(session: Session) -> None:
+    """Flush the run's buffered events to the store (no-op without a buffer)."""
+    buf = getattr(session, "_event_journal", None)
+    if buf is not None:
+        await buf.flush()
 
 
 def _background_workers_to_dict(
@@ -181,16 +237,88 @@ def _last_message_has_tool_results(session: Session, tool_blocks: list[ToolUseBl
     return {block.tool_use_id for block in results} == {block.id for block in tool_blocks}
 
 
+async def _legacy_batch_boundary_seq(
+    store: Any,
+    run_id: str,
+    assistant_message: Message | None,
+) -> int | None:
+    """Bound a legacy (cursor-less) recovery scan to this turn's tool batch.
+
+    Locates the latest ``AssistantEvent`` matching the checkpoint's assistant
+    message; the batch's tool events are strictly after it. Returns ``None`` when
+    no unambiguous boundary exists (so recovery trusts the checkpoint only rather
+    than scanning the whole run by id — which would mis-attribute a tool-use id
+    that recurs across turns)."""
+    if assistant_message is None:
+        return None
+    target = message_to_dict(assistant_message)
+    boundary: int | None = None
+    for stored in await store.load_events(run_id):
+        event = stored.event
+        if isinstance(event, AssistantEvent) and message_to_dict(event.message) == target:
+            boundary = stored.seq  # latest match wins
+    return boundary
+
+
 async def _recover_completed_tool_results(
     session: Session,
     run_id: str,
     completed: dict[str, ToolResultBlock],
+    tool_blocks: list[ToolUseBlock],
+    *,
+    after_seq: int | None,
+    assistant_message: Message | None = None,
 ) -> dict[str, ToolResultBlock]:
+    """Reconstruct a resumed turn's completed tool results from durable state.
+
+    The event log is the recovery source for tool execution: a ``ToolCallEndEvent``
+    contributes its recorded result, and a ``ToolCallStartEvent`` with no matching
+    end becomes the interrupted-before-result placeholder so a started-but-
+    unfinished tool is not blindly re-run on resume. Results already carried by the
+    checkpoint (older stores, or the ``tool_results_appended`` checkpoint) are kept
+    and never downgraded to a placeholder.
+
+    The scan is bounded to events after ``after_seq`` (the checkpoint's tool-batch
+    cursor) and restricted to tool-use ids/names in ``tool_blocks`` with a valid
+    start→end ordering, so a tool-use id that recurs across turns is unambiguous.
+
+    Args:
+        completed: Results already present on the resumed checkpoint.
+        tool_blocks: The current turn's tool-use blocks (the membership set).
+        after_seq: Event-seq cursor from the checkpoint; ``None`` triggers the
+            legacy assistant-boundary fallback.
+        assistant_message: The checkpoint's assistant message (legacy boundary).
+
+    Returns:
+        The tool_use_id → result-block map for the current tool batch, merging the
+        checkpoint results with everything recoverable from the event log.
+    """
     store = session.agent.run_store
     if store is None:
         return dict(completed)
+    if after_seq is None:
+        after_seq = await _legacy_batch_boundary_seq(store, run_id, assistant_message)
+        if after_seq is None:
+            return dict(completed)
+    membership = {block.id: block.name for block in tool_blocks}
     recovered = dict(completed)
-    for stored in await store.load_events(run_id):
-        if isinstance(stored.event, ToolCallEndEvent):
-            recovered[stored.event.tool_use_id] = _tool_result_block_from_end(stored.event)
+    started: dict[str, ToolCallStartEvent] = {}
+    ended: set[str] = set()
+    for stored in await store.load_events(run_id, after_seq=after_seq):
+        event = stored.event
+        if (
+            isinstance(event, ToolCallStartEvent)
+            and membership.get(event.tool_use_id) == event.tool_name
+        ):
+            started[event.tool_use_id] = event
+        elif (
+            isinstance(event, ToolCallEndEvent)
+            and membership.get(event.tool_use_id) == event.tool_name
+            and event.tool_use_id in started  # valid start→end ordering
+        ):
+            ended.add(event.tool_use_id)
+            recovered[event.tool_use_id] = _tool_result_block_from_end(event)
+    for tool_use_id, start_event in started.items():
+        if tool_use_id not in ended:
+            recovered.setdefault(tool_use_id, _interrupted_tool_result_block(start_event))
     return recovered

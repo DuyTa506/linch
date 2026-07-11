@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 
 from linch.sessions.tasks import CreateTaskInput, Task, TaskPatch
-from linch.types import Message
+from linch.types import Message, message_from_dict, message_to_dict
+
+# Snapshot wire version. Bumped only on a breaking shape change; readers are
+# best-effort and ignore unknown future keys (mirrors run_store.SCHEMA_VERSION).
+SNAPSHOT_SCHEMA_VERSION = 1
 
 
 @dataclass(slots=True)
@@ -21,6 +25,36 @@ class StoredMessage:
     seq: int
     appended_at: str
     message: Message
+
+
+@dataclass(slots=True)
+class ProviderViewSnapshot:
+    """A durable compacted ``provider_view`` and the message watermark it covers.
+
+    ``covers_seq`` is the highest stored message ``seq`` the compacted view
+    accounts for; on reload the view is restored and messages with a greater
+    ``seq`` are appended. Persisting this is an optional store capability
+    (Phase 3.3) — it never mutates or replaces the append-only message history.
+    """
+
+    provider_view: list[Message]
+    covers_seq: int
+
+
+def snapshot_to_dict(snapshot: ProviderViewSnapshot) -> dict[str, Any]:
+    return {
+        "schema_version": SNAPSHOT_SCHEMA_VERSION,
+        "covers_seq": snapshot.covers_seq,
+        "provider_view": [message_to_dict(message) for message in snapshot.provider_view],
+    }
+
+
+def snapshot_from_dict(raw: dict[str, Any]) -> ProviderViewSnapshot:
+    # Version-tolerant: unknown future keys are ignored, missing keys default.
+    return ProviderViewSnapshot(
+        provider_view=[message_from_dict(message) for message in raw.get("provider_view", [])],
+        covers_seq=int(raw.get("covers_seq", 0)),
+    )
 
 
 class SessionStore(Protocol):
@@ -72,3 +106,17 @@ class SessionStore(Protocol):
     async def release_task(self, session_id: str, task_id: str) -> Task | None: ...
 
     async def close(self) -> None: ...
+
+
+class ProviderViewSnapshotStore(Protocol):
+    """Optional ``SessionStore`` capability: persist/restore a compacted view.
+
+    Detected at runtime with ``getattr(store, "load_provider_snapshot", None)``;
+    it is not part of the required ``SessionStore`` contract. A store that
+    implements both methods lets a reloaded session restore its compacted
+    ``provider_view`` instead of rebuilding it from the full message history.
+    """
+
+    async def save_provider_snapshot(self, id: str, snapshot: ProviderViewSnapshot) -> None: ...
+
+    async def load_provider_snapshot(self, id: str) -> ProviderViewSnapshot | None: ...

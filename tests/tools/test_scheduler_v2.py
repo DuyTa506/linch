@@ -363,3 +363,65 @@ async def test_immediate_validation_and_permission_errors_have_tool_result() -> 
     assert denied_end.tool_result is not None
     assert denied_end.tool_result.is_error is True
     assert "Permission denied" in denied_end.tool_result.content
+
+
+@pytest.mark.asyncio
+async def test_fast_first_tool_end_emits_before_slow_second_completes() -> None:
+    """No full-batch barrier: a fast provider-first tool's end emits while a slow
+    later tool is still running (Phase 2.4)."""
+    gate = asyncio.Event()
+
+    class _Gated:
+        input_schema = {"type": "object", "properties": {}}
+        scope: ToolScope = "read"
+        parallel = True
+
+        def __init__(self, name: str, *, wait: bool) -> None:
+            self.name = name
+            self.description = "d"
+            self._wait = wait
+
+        def validate(self, raw: dict[str, Any]) -> dict[str, Any]:
+            return raw
+
+        def summarize(self, input: dict[str, Any]) -> str:
+            return self.name
+
+        def resources(self, input: dict[str, Any]) -> list[ResourceAccess]:
+            return []
+
+        async def execute(self, input: dict[str, Any], ctx: ToolContext) -> ToolResult:
+            if self._wait:
+                await gate.wait()
+            return ToolResult(content=self.name)
+
+    registry = ToolRegistry()
+    registry.add(_Gated("Fast", wait=False))
+    registry.add(_Gated("Slow", wait=True))
+
+    iterator = execute_tool_calls(
+        [
+            ToolUseBlock(id="fast", name="Fast", input={}),
+            ToolUseBlock(id="slow", name="Slow", input={}),
+        ],
+        make_agent(registry),
+        make_session(),
+        AbortContext(),
+    ).__aiter__()
+
+    seen: list[tuple[str, str | None]] = []
+    while True:
+        event = await asyncio.wait_for(iterator.__anext__(), timeout=1.0)
+        seen.append((event.type, getattr(event, "tool_use_id", None)))
+        if event.type == "tool_call_end" and getattr(event, "tool_use_id", None) == "fast":
+            break
+
+    # Fast's end arrived without the slow tool being released — no barrier.
+    assert not gate.is_set()
+    assert ("tool_call_end", "slow") not in seen
+
+    gate.set()
+    rest = [event async for event in iterator]
+    assert any(
+        e.type == "tool_call_end" and getattr(e, "tool_use_id", None) == "slow" for e in rest
+    )
