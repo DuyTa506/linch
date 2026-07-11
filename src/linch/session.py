@@ -151,36 +151,9 @@ class Session:
         self.interrupt_requested = False
         self._abort_controller = AbortContext()
 
-        async def iterator() -> AsyncIterator[Event]:
-            from .hooks import EventEmitContext, HookDispatcher, HookEvent
-            from .loop import run_loop
+        from .loop import run_loop
 
-            _hooks = HookDispatcher(getattr(self.agent, "hooks", None))
-            inner = run_loop(self, prompt, opts or RunOptions())
-            try:
-                async for event in inner:
-                    yield event
-                    if _hooks.active:
-                        await _hooks.dispatch(
-                            HookEvent.EVENT_EMIT,
-                            EventEmitContext(
-                                session=self,
-                                run_id=self.active_run_id or "",
-                                turn_index=None,
-                                deps=getattr(self, "run_deps", None),
-                                event=event,
-                            ),
-                        )
-            finally:
-                await _aclose_quietly(inner)
-                self._active_gen = None
-                self._reject_pending_alignment(
-                    ConfigError("run ended before alignment was applied")
-                )
-                self._active = False
-                self.active_run_id = None
-
-        it = iterator()
+        it = self._iterate(run_loop(self, prompt, opts or RunOptions()), "")
         self._active_gen = it
         return it
 
@@ -195,38 +168,40 @@ class Session:
         self.interrupt_requested = False
         self._abort_controller = AbortContext()
 
-        async def iterator() -> AsyncIterator[Event]:
-            from .hooks import EventEmitContext, HookDispatcher, HookEvent
-            from .loop import resume_loop
+        from .loop import resume_loop
 
-            _hooks = HookDispatcher(getattr(self.agent, "hooks", None))
-            inner = resume_loop(self, run_id, opts or RunOptions())
-            try:
-                async for event in inner:
-                    yield event
-                    if _hooks.active:
-                        await _hooks.dispatch(
-                            HookEvent.EVENT_EMIT,
-                            EventEmitContext(
-                                session=self,
-                                run_id=self.active_run_id or run_id,
-                                turn_index=None,
-                                deps=getattr(self, "run_deps", None),
-                                event=event,
-                            ),
-                        )
-            finally:
-                await _aclose_quietly(inner)
-                self._active_gen = None
-                self._reject_pending_alignment(
-                    ConfigError("run ended before alignment was applied")
-                )
-                self._active = False
-                self.active_run_id = None
-
-        it = iterator()
+        it = self._iterate(resume_loop(self, run_id, opts or RunOptions()), run_id)
         self._active_gen = it
         return it
+
+    async def _iterate(
+        self,
+        inner: AsyncIterator[Event],
+        run_id_fallback: str,
+    ) -> AsyncIterator[Event]:
+        from .hooks import EventEmitContext, HookDispatcher, HookEvent
+
+        hooks = HookDispatcher(getattr(self.agent, "hooks", None))
+        try:
+            async for event in inner:
+                yield event
+                if hooks.active:
+                    await hooks.dispatch(
+                        HookEvent.EVENT_EMIT,
+                        EventEmitContext(
+                            session=self,
+                            run_id=self.active_run_id or run_id_fallback,
+                            turn_index=None,
+                            deps=getattr(self, "run_deps", None),
+                            event=event,
+                        ),
+                    )
+        finally:
+            await _aclose_quietly(inner)
+            self._active_gen = None
+            self._reject_pending_alignment(ConfigError("run ended before alignment was applied"))
+            self._active = False
+            self.active_run_id = None
 
     async def align(
         self,
@@ -385,5 +360,5 @@ async def _aclose_quietly(gen: Any) -> None:
         return
     try:
         await aclose()
-    except (RuntimeError, StopAsyncIteration):
+    except Exception:
         pass

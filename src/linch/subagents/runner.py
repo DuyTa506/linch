@@ -336,9 +336,8 @@ async def run_subagent(args: RunSubagentArgs) -> RunSubagentResult:
                     result=result,
                 ),
             )
-
-    if not args.retain:
-        await agent.release_session(child_record.id, force=True)
+        if not args.retain:
+            await agent.release_session(child_record.id, force=True)
 
     assert result is not None  # _drive_child succeeded if we reach here
     return result

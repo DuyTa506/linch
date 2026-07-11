@@ -196,6 +196,35 @@ class _FakeAsyncClient:
         self._closed.append("closed")
 
 
+class _FakeDualCloseClient:
+    def __init__(self, closed: list[str]) -> None:
+        self._closed = closed
+
+    async def aclose(self) -> None:
+        self._closed.append("async")
+
+    def close(self) -> None:
+        self._closed.append("sync")
+
+
+async def test_aclose_client_prefers_async_close() -> None:
+    from linch._client_lifecycle import aclose_client
+
+    closed: list[str] = []
+    await aclose_client(_FakeDualCloseClient(closed))
+
+    assert closed == ["async"]
+
+
+async def test_aclose_client_supports_sync_close() -> None:
+    from linch._client_lifecycle import aclose_client
+
+    closed: list[str] = []
+    await aclose_client(type("SyncClient", (), {"close": lambda self: closed.append("sync")})())
+
+    assert closed == ["sync"]
+
+
 async def test_anthropic_aclose_closes_client_and_is_idempotent() -> None:
     from linch.providers.anthropic import AnthropicProvider
 

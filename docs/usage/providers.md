@@ -430,10 +430,13 @@ The advisory count and reasons also roll up into `RunReport`'s `prompt_cache`
 summary block (`advisory_count`, `reasons`, `tool_selection_changes`) alongside
 the `cache_read_ratio`.
 
-Checklist for reliable hits: **stable tools** (don't rotate `selected_tools`),
-**static system prompt**, **RAG/ephemeral content after the static prefix**, and
-for Anthropic a prompt large enough to meet the minimum cacheable token size,
-optionally with `Agent(cache_ttl="1h")` for a longer breakpoint TTL.
+Checklist for reliable hits:
+
+- **Stable tools** (don't rotate `selected_tools`).
+- **Static system prompt**.
+- **RAG/ephemeral content after the static prefix**.
+- For Anthropic, use a prompt large enough to meet the minimum cacheable token size.
+- Optionally use `Agent(cache_ttl="1h")` for a longer breakpoint TTL.
 
 ---
 
