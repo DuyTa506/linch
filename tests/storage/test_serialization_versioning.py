@@ -73,6 +73,36 @@ def test_checkpoint_from_dict_defaults_missing_truncation_attempts() -> None:
     assert restored.pending_truncation_feedback is None
 
 
+def test_checkpoint_round_trips_pending_alignment_with_images() -> None:
+    checkpoint = _checkpoint()
+    checkpoint.pending_alignment = [
+        {"prompt": "steer north", "images": [{"url": "http://x/img.png"}]},
+        {"prompt": "then east", "images": [{"media_type": "image/png", "data": "abc"}]},
+        {"prompt": "plain", "images": None},
+    ]
+
+    data = json.loads(json.dumps(checkpoint_to_dict(checkpoint)))
+    restored = checkpoint_from_dict(data)
+
+    assert restored.pending_alignment == checkpoint.pending_alignment
+
+
+def test_checkpoint_from_dict_defaults_missing_pending_alignment() -> None:
+    data = checkpoint_to_dict(_checkpoint())
+    data.pop("pending_alignment")
+    assert checkpoint_from_dict(data).pending_alignment == []
+
+    # Malformed entries are skipped or normalized, never crash the resume.
+    data["pending_alignment"] = [
+        "not-a-dict",
+        {"prompt": ""},
+        {"no_prompt": 1},
+        {"prompt": "ok", "images": "bad"},
+    ]
+    restored = checkpoint_from_dict(data)
+    assert restored.pending_alignment == [{"prompt": "ok", "images": None}]
+
+
 async def test_load_events_skips_undecodable_future_events(tmp_path) -> None:
     store = SqliteRunStore(tmp_path / "runs.db")
     try:
