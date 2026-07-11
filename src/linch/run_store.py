@@ -68,6 +68,12 @@ class RunCheckpoint:
     events. On resume, tool-result recovery scans only events after this cursor.
     ``None`` (legacy checkpoints / non-tool phases) triggers the boundary
     fallback in ``_recover_completed_tool_results``."""
+    pending_alignment: list[dict[str, Any]] = field(default_factory=list)
+    """Undrained ``session.align()`` entries (``{"prompt", "images"}``) at the
+    time of this save, restored on resume so steering intent survives a crash.
+    Best-effort at-least-once: an entry enqueued after the last save is lost on
+    crash; an entry drained just before a crash may be injected once more on
+    resume."""
 
 
 @dataclass(slots=True)
@@ -159,11 +165,32 @@ def checkpoint_to_dict(checkpoint: RunCheckpoint) -> dict[str, Any]:
         "truncation_prefix": checkpoint.truncation_prefix,
         "pending_truncation_feedback": checkpoint.pending_truncation_feedback,
         "tool_batch_event_after_seq": checkpoint.tool_batch_event_after_seq,
+        "pending_alignment": checkpoint.pending_alignment,
     }
 
 
 def _dict_or_none(value: Any) -> dict[str, object] | None:
     return {str(key): item for key, item in value.items()} if isinstance(value, dict) else None
+
+
+def _pending_alignment_from_raw(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    entries: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        prompt = str(item.get("prompt", "") or "")
+        if not prompt:
+            continue
+        images_raw = item.get("images")
+        images = (
+            [dict(image) for image in images_raw if isinstance(image, dict)]
+            if isinstance(images_raw, list)
+            else None
+        )
+        entries.append({"prompt": prompt, "images": images})
+    return entries
 
 
 def checkpoint_from_dict(raw: dict[str, Any]) -> RunCheckpoint:
@@ -233,6 +260,7 @@ def checkpoint_from_dict(raw: dict[str, Any]) -> RunCheckpoint:
             if isinstance(raw.get("tool_batch_event_after_seq"), int)
             else None
         ),
+        pending_alignment=_pending_alignment_from_raw(raw.get("pending_alignment")),
     )
 
 

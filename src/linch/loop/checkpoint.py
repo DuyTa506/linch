@@ -3,6 +3,7 @@ resume recovery, and message-identity checks used on resume."""
 
 from __future__ import annotations
 
+import asyncio
 from html import escape
 from typing import Any, cast
 
@@ -202,6 +203,29 @@ def _skill_overlay_from_dict(raw: dict[str, object] | None) -> Any:
             str(raw.get("model_override")) if isinstance(raw.get("model_override"), str) else None
         ),
     )
+
+
+def _alignment_queue_to_dicts(session: Session) -> list[dict[str, Any]]:
+    return [
+        {"prompt": entry.prompt, "images": entry.images}
+        for entry in getattr(session, "alignment_queue", []) or []
+    ]
+
+
+def _alignment_entries_from_checkpoint(raw: list[dict[str, Any]]) -> list[Any]:
+    from ..session import AlignmentEntry
+
+    entries: list[Any] = []
+    for item in raw:
+        future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        # Nobody awaits a restored entry's future; pre-cancel it so every
+        # set_result/set_exception guard (drain, abort, run-end rejection) is a
+        # silent no-op and GC never logs "exception was never retrieved".
+        future.cancel()
+        entries.append(
+            AlignmentEntry(prompt=item["prompt"], images=item.get("images"), future=future)
+        )
+    return entries
 
 
 def _tool_result_block_from_end(event: ToolCallEndEvent) -> ToolResultBlock:

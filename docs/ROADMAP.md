@@ -12,7 +12,8 @@ it with the next evidence-backed priority.
 guardrails, runtime reliability, lifecycle and scalability, provider parity, and
 durable context — has shipped. Its durable contracts now live in the
 architecture and usage docs (see [Recently shipped](#recently-shipped) below).
-There is no active phase queued; new work enters through the
+There is no active phase queued; ranked prospects live in
+[Next candidates](#next-candidates) and enter active work through the
 [acceptance gate](#roadmap-item-acceptance-gate) when evidence justifies it.
 
 ---
@@ -116,6 +117,8 @@ work.
 | Durable compacted views | Optional store-detected `save_provider_snapshot`/`load_provider_snapshot`; reload restores the view and appends newer messages | [architecture/compaction.md](./architecture/compaction.md#durable-compacted-views-opt-in-store-detected) |
 | Idempotent integration seam | Stable `ToolContext.idempotency_key` (run id + tool-use id) for at-least-once reconciliation | [architecture/tool-protocol.md](./architecture/tool-protocol.md) |
 | Off-loop discovery | Skill and subagent disk discovery run on the blocking bridge, off the event loop | [architecture/skills-subagents.md](./architecture/skills-subagents.md) |
+| Durable steering | `session.align()` queue snapshotted into every run checkpoint and restored on resume: in-order, at-least-once delivery across crash/resume; mid-turn resumes defer the drain past the re-executed tool batch | [usage/agent.md](./usage/agent.md#steering-an-in-flight-run) |
+| GenAI semconv traces | `OpenTelemetryObserver` emits `gen_ai.*` semantic-convention attributes (operation, provider, conversation, cache tokens, tool call) alongside unchanged `linch.*` names | [usage/hooks.md](./usage/hooks.md#genai-semantic-conventions) |
 
 ### Deferred: central-loop structural split
 
@@ -133,6 +136,58 @@ closures share run-scoped mutable state. A mechanical split would thread that
 state through a new interface for zero behavior change — and "smaller files alone
 are not success." Reopen only when a concrete maintainability failure (not line
 count) justifies it; the characterization net makes that safe when it does.
+
+---
+
+## Next candidates
+
+Ranked prospects for the next slice, filtered through the
+[acceptance gate](#roadmap-item-acceptance-gate). None is an active phase yet;
+an item enters active work only with its evidence and completion criteria
+pinned. Checked against the current tree before listing: thinking and
+redacted-thinking blocks, image input, subagent context forking, durable
+approvals, and budget/pricing already exist and do not belong here.
+
+### Tier 1 — evidence-backed, ready to enter
+
+**Gemini explicit context caching (`CachedContent`).**
+Explicitly deferred from the prompt-cache slice. Anthropic/OpenAI implicit
+prefix caching is instrumented and live-validated; Gemini is the one major
+provider with no cache benefit. Mechanism: opt-in provider option that pins the
+stable prefix as a `CachedContent` handle and reuses it across turns; the
+advisory and report plumbing already exists. Compatibility: provider-scoped,
+off by default. Completion: fake-backed tests for create/reuse/expiry plus a
+live benchmark scenario mirroring the existing suite. Enters when a
+Gemini-using embedder justifies it.
+
+Two former Tier-1 items shipped and moved to
+[Recently shipped](#recently-shipped): **durable steering** (mid-run steering
+already existed as `session.align()`; the slice hardened it with checkpointed,
+resume-safe, in-order at-least-once delivery) and **OTel GenAI
+semantic-convention alignment** (additive `gen_ai.*` attributes on every span).
+
+### Tier 2 — real value, needs design or a second embedder
+
+- **Public session forking** — `agent.fork_session(session, at_seq=...)` for
+  best-of-N sampling, A/B eval runs, and speculative exploration. The fork
+  mechanics exist for subagents; the open design question is store semantics
+  for the forked history (shared prefix vs. copy).
+- **Proactive rate-limit seam** — an optional duck-typed limiter protocol on
+  `Agent` so N concurrent sessions do not stampede a provider and then rely on
+  reactive retry. The limiter policy (per-tenant limits) stays in the host;
+  only the seam enters core.
+- **Anthropic cache-breakpoint tuning** — explicit `cache_control` placement at
+  the last stable message to shrink the re-billed span after compaction
+  (live-measured at ~79% warm versus ~99% baseline). Pure win with no behavior
+  tradeoff, but a smaller audience than Tier 1.
+
+### Considered and not queued
+
+Batch-API eval mode (job polling drags deployment concerns into core),
+streaming tool-argument deltas (a UI nicety with a thin audience), MCP
+elicitation (the spec is still moving; wait for a reopen trigger), and the
+central-loop structural split (deferred above; the characterization net is in
+place for when a concrete maintainability failure appears).
 
 ---
 

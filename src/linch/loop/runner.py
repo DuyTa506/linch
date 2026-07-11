@@ -63,6 +63,8 @@ from ..types import (
 )
 from .checkpoint import (
     RunEventBuffer,
+    _alignment_entries_from_checkpoint,
+    _alignment_queue_to_dicts,
     _background_workers_to_dict,
     _flush_events,
     _interrupted_tool_result_block,
@@ -508,6 +510,11 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
     _truncation_prefix = ""
     _pending_truncation_feedback: str | None = None
     _force_final_pending = False
+    # Turn whose top-of-turn alignment drain must be skipped: a mid-turn resume
+    # re-processes its pending tool batch first, and draining before that would
+    # inject a user message between assistant(tool_use) and the tool-results
+    # message — breaking provider-order. Deferred entries drain next turn.
+    _align_defer_turn: int | None = None
     if resume_checkpoint is not None:
         total = resume_checkpoint.total_usage
         # Restore running_cost from the restored usage so the resumed run's cost
@@ -527,6 +534,18 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         _truncation_attempts = resume_checkpoint.truncation_attempts
         _truncation_prefix = resume_checkpoint.truncation_prefix
         _pending_truncation_feedback = resume_checkpoint.pending_truncation_feedback
+        if resume_checkpoint.pending_alignment:
+            session.alignment_queue.extend(
+                _alignment_entries_from_checkpoint(resume_checkpoint.pending_alignment)
+            )
+        if resume_checkpoint.phase in (
+            "provider_pending",
+            "assistant_appended",
+            "permission_pending",
+            "tool_batch_pending",
+            "tool_executing",
+        ):
+            _align_defer_turn = resume_checkpoint.turn_index
 
     checkpoint = resume_checkpoint or RunCheckpoint(
         phase="started",
@@ -583,6 +602,9 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         checkpoint.truncation_attempts = _truncation_attempts
         checkpoint.truncation_prefix = _truncation_prefix
         checkpoint.pending_truncation_feedback = _pending_truncation_feedback
+        # Snapshot undrained align() entries so steering intent survives a crash
+        # (restored on resume; empty again after the drain).
+        checkpoint.pending_alignment = _alignment_queue_to_dicts(session)
         # Tool-batch event cursor: capture the watermark just before this turn's
         # tool starts at tool_batch_pending; permission_pending/tool_executing
         # inherit it (they are saved before any start is emitted); reset it
@@ -961,8 +983,12 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                     await store.mark_completed(run_id, checkpoint)
                 yield event
                 return
-            async for align_event in _drain_alignment(session, run_id, _dispatch_user_prompt):
-                yield align_event
+            if turn_index != _align_defer_turn:
+                # Skipped only on the mid-turn-resumed turn itself: draining
+                # there would put a user message between assistant(tool_use)
+                # and its tool results. Entries drain at the next turn instead.
+                async for align_event in _drain_alignment(session, run_id, _dispatch_user_prompt):
+                    yield align_event
             await _start_turn(turn_index)
             if _pending_truncation_feedback is not None:
                 feedback = _pending_truncation_feedback
