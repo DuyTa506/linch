@@ -37,9 +37,18 @@ class MyTool:
     def summarize(self, input: dict) -> str: ...   # one-line for logs
 ```
 
-`ToolContext` carries: `cwd`, `session_id`, `run_id`, `session_store`, `signal` (abort), `file_read_tracker`, `deps`, `filesystem`.
+`ToolContext` carries: `cwd`, `session_id`, `run_id`, `session_store`, `signal` (abort), `file_read_tracker`, `deps`, `filesystem`, `idempotency_key`.
 
 `deps` is threaded from `Agent(deps=...)` or overridden per-run with `RunOptions(deps=...)`. Use it to inject app state into tools without globals.
+
+`idempotency_key` is a stable string derived from the run id and tool-use id
+(`f"{run_id}:{call.id}"`). Durable tool execution is **at-least-once** — a side
+effect that happens before its completion record is durable can replay on
+resume. A mutating integration can pass this key to an external system (or key
+its own dedup table on it) to deduplicate or reconcile an interrupted intent.
+The key is stable across resume for the same tool call; Linch does not itself
+promise exactly-once execution across separate session stores, run stores, and
+external systems.
 
 `BashTool` delegates command execution to a backend. `LocalBackend` preserves
 the default local subprocess behavior with timeout cleanup; `DockerBackend`

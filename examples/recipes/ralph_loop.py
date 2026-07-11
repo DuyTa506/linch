@@ -123,11 +123,10 @@ async def run_ralph_loop(
                 if event.type == "result":
                     final_text = event.final_text or ""
         finally:
-            # Drop the finished session so a long loop doesn't accumulate one per
-            # pass. There is no public per-session dispose yet (agent.close() ends
-            # the whole agent), so this mirrors the SDK's own internal pattern
-            # (workflow/engine.py, evals/harness.py). Safe: nothing else holds it.
-            agent._sessions.pop(session.id, None)
+            # Dispose the finished session so a long loop doesn't accumulate one
+            # per pass. release_session() aborts any in-flight work, finalizes the
+            # session, and unregisters exactly this instance from the agent.
+            await agent.release_session(session, force=True)
 
         if on_iteration is not None:
             on_iteration(i, final_text)

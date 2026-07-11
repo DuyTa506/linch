@@ -17,6 +17,7 @@ pytest.mark.asyncio decorators are needed.
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 
 import pytest
@@ -199,3 +200,78 @@ async def test_executor_surfaces_bad_path_error() -> None:
         exec_ = SqliteExecutor("/", init=lambda _: None)  # root dir, not writable
         await exec_.run(lambda conn: conn.execute("select 1").fetchone())
         await exec_.close()
+
+
+async def test_executor_async_close_does_not_block_event_loop() -> None:
+    from linch.storage._executor import SqliteExecutor
+
+    exec_ = SqliteExecutor(":memory:", init=lambda conn: None)
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_operation(conn) -> int:
+        started.set()
+        release.wait(timeout=1.0)
+        return conn.execute("select 1").fetchone()[0]
+
+    operation = asyncio.create_task(exec_.run(slow_operation))
+    assert await asyncio.to_thread(started.wait, 1.0)
+
+    close_one = asyncio.create_task(exec_.close())
+    close_two = asyncio.create_task(exec_.close())
+    await asyncio.sleep(0.02)
+    assert not close_one.done()
+    assert not close_two.done()
+
+    release.set()
+    assert await asyncio.wait_for(operation, timeout=1.0) == 1
+    await asyncio.wait_for(asyncio.gather(close_one, close_two), timeout=1.0)
+
+
+async def test_executor_cancelled_close_caller_does_not_cancel_physical_close() -> None:
+    from linch.storage._executor import SqliteExecutor
+
+    exec_ = SqliteExecutor(":memory:", init=lambda conn: None)
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_operation(conn) -> None:
+        started.set()
+        release.wait(timeout=1.0)
+        conn.execute("select 1").fetchone()
+
+    operation = asyncio.create_task(exec_.run(slow_operation))
+    assert await asyncio.to_thread(started.wait, 1.0)
+
+    first_close = asyncio.create_task(exec_.close())
+    await asyncio.sleep(0)
+    first_close.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first_close
+
+    release.set()
+    await operation
+    await asyncio.wait_for(exec_.close(), timeout=1.0)
+    assert exec_._conn is None
+
+
+# ── 5. Durable WAL pragma (fsync tax removed without weakening crash-resume) ──
+
+
+async def test_wal_executor_uses_synchronous_normal(tmp_path) -> None:
+    """A file-backed WAL executor runs in journal_mode=wal + synchronous=NORMAL.
+
+    NORMAL keeps every commit durable across a process crash (the resume
+    contract) while removing FULL's per-commit fsync — the dominant cost of a
+    durable tool run. This pins the setting so it cannot silently regress.
+    """
+    from linch.storage._executor import SqliteExecutor
+
+    exec_ = SqliteExecutor(tmp_path / "wal.db", init=lambda conn: None, wal=True)
+    try:
+        journal = await exec_.run(lambda c: c.execute("pragma journal_mode").fetchone()[0])
+        sync = await exec_.run(lambda c: c.execute("pragma synchronous").fetchone()[0])
+    finally:
+        await exec_.close()
+    assert str(journal).lower() == "wal"
+    assert int(sync) == 1  # 1 == NORMAL, 2 == FULL

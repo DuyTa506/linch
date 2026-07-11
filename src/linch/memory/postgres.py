@@ -26,8 +26,9 @@ import json
 import time
 from typing import Any
 
+from .._blocking import run_blocking
 from ..storage._pg import _import_asyncpg
-from .keyword import _metadata_matches, _tokenize
+from .keyword import _score_rows, _tokenize
 from .types import MemoryItem, MemorySearchResult
 
 _SCHEMA = """
@@ -152,34 +153,10 @@ class PostgresMemoryStore:
                     namespace or "",
                 )
 
-        results: list[MemorySearchResult] = []
-        for row in rows:
-            metadata = json.loads(row["metadata"] or "{}")
-            if metadata_filter and not _metadata_matches(metadata, metadata_filter):
-                continue
-            item = MemoryItem(
-                id=row["id"],
-                content=row["content"],
-                metadata=metadata,
-                namespace=row["namespace"] or None,
-                created_at=row["created_at"],
-                updated_at=row["updated_at"],
-            )
-            item_terms = _tokenize(item.content)
-            overlap = query_terms & item_terms
-            if not overlap:
-                continue
-            score = len(overlap) / len(query_terms)
-            results.append(
-                MemorySearchResult(
-                    item=item,
-                    score=score,
-                    metadata={"matched_terms": sorted(overlap)},
-                )
-            )
-
-        results.sort(key=lambda r: (r.score or 0.0, r.item.id), reverse=True)
-        return results[:limit]
+        # Records are self-contained (no live connection ref), so parsing,
+        # tokenizing, scoring, and ranking can run on the blocking bridge and
+        # keep a large namespace off the event loop.
+        return await run_blocking(_score_rows, rows, query_terms, metadata_filter, limit)
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 

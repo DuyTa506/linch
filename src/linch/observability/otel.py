@@ -28,6 +28,20 @@ from .protocol import (
 
 _log = logging.getLogger(__name__)
 
+# GenAI semconv well-known values for gen_ai.provider.name. Both OpenAI API
+# shapes are the same vendor; self-hosted runtimes (vllm/sglang/llamacpp) and
+# unknown ids pass through unchanged — merging them would misattribute.
+_PROVIDER_NAME_MAP = {
+    "anthropic": "anthropic",
+    "openai-chat": "openai",
+    "openai-responses": "openai",
+    "gemini": "gcp.gemini",
+}
+
+
+def _provider_name(provider_id: str) -> str:
+    return _PROVIDER_NAME_MAP.get(provider_id, provider_id)
+
 
 class OpenTelemetryObserver(BaseObserver):
     """Maps Linch lifecycle hooks to OpenTelemetry spans.
@@ -91,6 +105,10 @@ class OpenTelemetryObserver(BaseObserver):
         span.set_attribute("linch.run_id", info.run_id)
         span.set_attribute("linch.session_id", info.session_id)
         span.set_attribute("gen_ai.request.model", info.model)
+        span.set_attribute("gen_ai.operation.name", "invoke_agent")
+        span.set_attribute("gen_ai.conversation.id", info.session_id)
+        if info.provider_id:
+            span.set_attribute("gen_ai.provider.name", _provider_name(info.provider_id))
         ctx = self._trace.set_span_in_context(span)
         token = _ctx.attach(ctx)
         self._run_spans[info.run_id] = span
@@ -179,6 +197,9 @@ class OpenTelemetryObserver(BaseObserver):
         span.set_attribute("linch.run_id", info.run_id)
         span.set_attribute("linch.turn_index", info.turn_index)
         span.set_attribute("gen_ai.request.model", info.model)
+        span.set_attribute("gen_ai.operation.name", "chat")
+        if info.provider_id:
+            span.set_attribute("gen_ai.provider.name", _provider_name(info.provider_id))
         self._provider_spans[(info.run_id, info.turn_index)] = span
 
     def on_provider_call_end(self, info: ProviderCallResult) -> None:
@@ -186,9 +207,18 @@ class OpenTelemetryObserver(BaseObserver):
         span = self._provider_spans.pop((info.run_id, info.turn_index), None)
         if span is None:
             return
-        span.set_attribute("gen_ai.response.finish_reasons", info.stop_reason)
+        # Semconv: finish_reasons is a string array.
+        span.set_attribute("gen_ai.response.finish_reasons", [info.stop_reason])
         span.set_attribute("gen_ai.usage.input_tokens", info.usage.input_tokens or 0)
         span.set_attribute("gen_ai.usage.output_tokens", info.usage.output_tokens or 0)
+        # Cache tokens only when non-zero: providers without a cache concept
+        # report 0, and asserting "0 cached" there would be misleading.
+        if info.usage.cache_read_tokens:
+            span.set_attribute("gen_ai.usage.cache_read_input_tokens", info.usage.cache_read_tokens)
+        if info.usage.cache_creation_tokens:
+            span.set_attribute(
+                "gen_ai.usage.cache_creation_input_tokens", info.usage.cache_creation_tokens
+            )
         span.set_attribute("linch.duration_ms", info.duration_ms)
         span.end()
 
@@ -204,6 +234,9 @@ class OpenTelemetryObserver(BaseObserver):
         span.set_attribute("linch.turn_index", info.turn_index)
         span.set_attribute("linch.tool.name", info.tool_name)
         span.set_attribute("linch.tool.use_id", info.tool_use_id)
+        span.set_attribute("gen_ai.operation.name", "execute_tool")
+        span.set_attribute("gen_ai.tool.name", info.tool_name)
+        span.set_attribute("gen_ai.tool.call.id", info.tool_use_id)
         self._tool_spans[info.tool_use_id] = span
 
     def on_tool_end(self, info: ToolResultInfo) -> None:

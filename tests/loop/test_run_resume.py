@@ -343,6 +343,10 @@ async def test_tool_batch_checkpoint_is_not_saved_after_each_tool_end() -> None:
     assert events[-1].type == "result"
     assert counts == {"A": 1, "B": 1}
     assert run_store.saved_phases.count("tool_batch_pending") == 1
+    # Write-amplification guard: the tool_executing checkpoint is saved once per
+    # batch (by the permissions-resolved callback), NOT once per tool start/end.
+    # Two tools previously produced four tool_executing saves.
+    assert run_store.saved_phases.count("tool_executing") == 1
 
 
 async def test_permission_pending_resume_reemits_before_tool_execution() -> None:
@@ -548,7 +552,7 @@ async def test_loop_abort_cancels_background_worker_tasks() -> None:
     assert task.cancelled() or task.done(), "Background task should be cancelled on abort"
 
 
-async def test_tool_start_checkpoint_records_interrupted_placeholder() -> None:
+async def test_started_tool_recovered_as_interrupted_from_event_log() -> None:
     session_store = _memory_session_store()
     run_store = _memory_run_store()
     counts: dict[str, int] = {}
@@ -571,10 +575,15 @@ async def test_tool_start_checkpoint_records_interrupted_placeholder() -> None:
     run = await run_store.load_run(run_id)
     assert run is not None
     assert run.checkpoint is not None
+    # The permissions-resolved callback saves the tool_executing checkpoint once,
+    # before execution — per-tool checkpoint saves are gone, so the interrupted
+    # placeholder is NOT written into the checkpoint anymore.
     assert run.checkpoint.phase == "tool_executing"
-    placeholder = run.checkpoint.completed_tool_results["call-1"]
-    assert placeholder.is_error is True
-    assert "interrupted before a result" in str(placeholder.content)
+    assert "call-1" not in run.checkpoint.completed_tool_results
+    # Event-log durability is the recovery source: a start with no matching end.
+    stored = await run_store.load_events(run_id)
+    assert [s.event.tool_use_id for s in stored if s.event.type == "tool_call_start"] == ["call-1"]
+    assert [s for s in stored if s.event.type == "tool_call_end"] == []
 
     restarted = _agent(
         model="gpt-5",
@@ -588,8 +597,127 @@ async def test_tool_start_checkpoint_records_interrupted_placeholder() -> None:
     resumed = await restarted.session(id="s1")
     resume_events = await _collect(resumed.resume(run_id))
 
+    # A started-but-unfinished tool is recovered as interrupted from the event
+    # log and is not blindly re-run on resume.
     assert counts == {}
     assert any(event.type == "user" for event in resume_events)
+    assert resume_events[-1].type == "result"
+
+
+async def test_crash_between_permission_checkpoint_and_start_event_reruns_tool() -> None:
+    """Crash after the tool_executing checkpoint but before the start event is
+    durable: the resolved permission decision was persisted by the callback, so
+    resume replays it (no re-prompt) and runs the tool exactly once.
+
+    Injects the crash by dropping the ToolCallStartEvent append — simulating a
+    process death after the checkpoint commit but before the event-log write.
+    """
+    from linch.run_store import InMemoryRunStore
+
+    class DropStartAppendStore(InMemoryRunStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.drop_starts = True
+
+        async def append_event(self, run_id, event):
+            if self.drop_starts and getattr(event, "type", None) == "tool_call_start":
+                # Pretend the event log write never committed.
+                return 0
+            return await super().append_event(run_id, event)
+
+    session_store = _memory_session_store()
+    run_store = DropStartAppendStore()
+    counts: dict[str, int] = {}
+    callback_calls: list[Any] = []
+
+    def allow_callback(request: Any) -> dict[str, str]:
+        callback_calls.append(request)
+        return {"behavior": "allow"}
+
+    agent = _agent(
+        model="gpt-5",
+        provider=ScriptProvider(tool_names=["WriteThing"]),
+        tools=_registry(counts, "WriteThing", scope="write"),
+        permissions={"mode": "default", "canUseTool": allow_callback},
+        session_store=session_store,
+        run_store=run_store,
+        cwd=".",
+    )
+    session = await agent.session(id="s1")
+    run_id, _ = await _run_until(session, "write", lambda e: e.type == "tool_call_start")
+    assert len(callback_calls) == 1
+    assert counts == {}  # stopped before the tool executed
+
+    # The start event was dropped; the checkpoint still carries the allow decision.
+    run = await run_store.load_run(run_id)
+    assert run is not None and run.checkpoint is not None
+    assert run.checkpoint.phase == "tool_executing"
+    stored = await run_store.load_events(run_id)
+    assert [s for s in stored if s.event.type == "tool_call_start"] == []
+
+    run_store.drop_starts = False  # "restart" — the event log commits normally now
+    restarted = _agent(
+        model="gpt-5",
+        provider=ScriptProvider(tool_names=["WriteThing"]),
+        tools=_registry(counts, "WriteThing", scope="write"),
+        permissions={"mode": "default", "canUseTool": allow_callback},
+        session_store=session_store,
+        run_store=run_store,
+        cwd=".",
+    )
+    resumed = await restarted.session(id="s1")
+    resume_events = await _collect(resumed.resume(run_id))
+
+    # No re-prompt: the resolved allow decision was durable via the callback.
+    assert not any(e.type == "permission_request" for e in resume_events)
+    assert len(callback_calls) == 1
+    # Tool had not started (no durable start event) → it runs exactly once now.
+    assert counts == {"WriteThing": 1}
+    assert resume_events[-1].type == "result"
+
+
+async def test_completed_tool_recovered_from_event_log_when_checkpoint_lacks_result() -> None:
+    """Crash after the end event is durable but before the tool_result message is
+    appended: the result is recovered from the event log (not the checkpoint) and
+    the tool is not re-run."""
+    session_store = _memory_session_store()
+    run_store = _memory_run_store()
+    counts: dict[str, int] = {}
+    agent = _agent(
+        model="gpt-5",
+        provider=ScriptProvider(tool_names=["A"]),
+        tools=_registry(counts, "A"),
+        permissions={"mode": "skip-dangerous"},
+        session_store=session_store,
+        run_store=run_store,
+        cwd=".",
+    )
+    session = await agent.session(id="s1")
+    run_id, _ = await _run_until(session, "use tool", lambda e: e.type == "tool_call_end")
+    assert counts == {"A": 1}
+
+    run = await run_store.load_run(run_id)
+    assert run is not None and run.checkpoint is not None
+    # The result is durable in the event log; the checkpoint was not re-saved for
+    # the end event.
+    assert "call-1" not in run.checkpoint.completed_tool_results
+    stored = await run_store.load_events(run_id)
+    assert [s.event.tool_use_id for s in stored if s.event.type == "tool_call_end"] == ["call-1"]
+
+    restarted = _agent(
+        model="gpt-5",
+        provider=ScriptProvider(fail_on_call=False),
+        tools=_registry(counts, "A"),
+        permissions={"mode": "skip-dangerous"},
+        session_store=session_store,
+        run_store=run_store,
+        cwd=".",
+    )
+    resumed = await restarted.session(id="s1")
+    resume_events = await _collect(resumed.resume(run_id))
+
+    # Tool result recovered from the event log — not re-run.
+    assert counts == {"A": 1}
     assert resume_events[-1].type == "result"
 
 

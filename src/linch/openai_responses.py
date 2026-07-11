@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from ._client_lifecycle import aclose_client
 from ._http_errors import (
     error_message,
     error_status,
@@ -297,6 +298,13 @@ class OpenAIResponsesClient:
             if getattr(req.signal, "aborted", False):
                 raise AbortError("aborted") from exc
             raise map_openai_error(exc) from exc
+
+    async def aclose(self) -> None:
+        client = self.client
+        self.client = None
+        if client is None:
+            return
+        await aclose_client(client)
 
 
 async def map_wire_events(

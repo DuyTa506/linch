@@ -290,6 +290,27 @@ class WorkflowEvent:
     type: Literal["workflow"] = "workflow"
 
 
+@dataclass(slots=True)
+class PromptCacheAdvisoryEvent:
+    """Advisory that a prefix-breaking change was detected between provider calls.
+
+    Providers cache the leading identical bytes of each request (``tools`` →
+    ``system`` → ``messages``). When the tool set or model changes across turns
+    of the same session, that cached prefix is invalidated and the next request
+    starts cold. This event is observational only — Linch reports the risk but
+    never rewrites the request; keeping the prefix stable is the embedder's call.
+
+    Attributes:
+        reason: ``"tool_set_changed"`` (the tools leading the prefix changed) or
+            ``"model_changed"`` (the cache is keyed per model).
+        detail: Human-readable description of what changed and why it matters.
+    """
+
+    reason: Literal["tool_set_changed", "model_changed"]
+    detail: str
+    type: Literal["prompt_cache_advisory"] = "prompt_cache_advisory"
+
+
 Event: TypeAlias = (
     SystemEvent
     | UserEvent
@@ -315,6 +336,7 @@ Event: TypeAlias = (
     | HookEventRecord
     | ScheduleEvent
     | WorkflowEvent
+    | PromptCacheAdvisoryEvent
 )
 
 
@@ -678,6 +700,12 @@ def event_to_dict(event: Event) -> dict[str, Any]:
             "action": event.action,
             "reason": event.reason,
         }
+    if isinstance(event, PromptCacheAdvisoryEvent):
+        return {
+            "type": event.type,
+            "reason": event.reason,
+            "detail": event.detail,
+        }
     if isinstance(event, WorkflowEvent):
         d = {
             "type": event.type,
@@ -876,6 +904,14 @@ def event_from_dict(raw: dict[str, Any]) -> Event:
             hook=str(raw.get("hook", "")),
             action=str(raw.get("action", "")),
             reason=str(raw.get("reason", "")),
+        )
+    if typ == "prompt_cache_advisory":
+        _reason = raw.get("reason")
+        if _reason not in ("tool_set_changed", "model_changed"):
+            _reason = "tool_set_changed"
+        return PromptCacheAdvisoryEvent(
+            reason=cast(Any, _reason),
+            detail=str(raw.get("detail", "")),
         )
     if typ == "workflow":
         _kind = raw.get("kind")

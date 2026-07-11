@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import platform
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from ._blocking import run_blocking
 from ._version import get_version
 from .config import FeatureFlags, SystemPromptConfig
 from .errors import ConfigError
@@ -15,7 +17,7 @@ from .providers import BaseProvider, OpenAIResponsesProvider, OpenAIResponsesPro
 from .recovery import TruncationRecovery
 from .sessions import SessionStore, SqliteSessionStore
 from .tools import ToolRegistry, default_tools
-from .types import InvokedSkillRecord, PermissionMode, SystemBlock
+from .types import InvokedSkillRecord, Message, PermissionMode, SystemBlock
 
 if TYPE_CHECKING:
     from .run_store import RunStore
@@ -147,6 +149,21 @@ def _resolve_runtime_limits(
         max_tool_concurrency=max(1, int(max_tool_concurrency)),
         tool_timeout_ms=timeout,
     )
+
+
+def _offload_threshold_was_auto(result_offload: Any) -> bool:
+    """Whether the offload threshold will be auto-derived from the context window.
+
+    True for the default config and any ``OffloadConfig`` left with
+    ``threshold_tokens=None``; False when offloading is disabled or the threshold
+    is set explicitly. Used to decide whether ``provider.prepare()`` may refresh
+    it.
+    """
+    if result_offload is _DEFAULT_OFFLOAD:
+        return True
+    if result_offload is None:
+        return False
+    return getattr(result_offload, "threshold_tokens", None) is None
 
 
 def _resolve_result_offload(result_offload: Any, provider: BaseProvider, model: str) -> Any:
@@ -338,6 +355,7 @@ class AgentOptions:
     include_partial_messages: bool = False
     max_turns: int | None = None
     max_tool_concurrency: int | None = None
+    tool_batching_strategy: str = "greedy"
     tool_timeout_ms: float | None = None
     tool_retry: Any = None  # RetryOptions | None
     cache_ttl: str | None = None
@@ -393,6 +411,8 @@ class Agent:
         maxTurns: int | None = None,
         max_tool_concurrency: int | None = None,
         maxToolConcurrency: int | None = None,
+        tool_batching_strategy: str = "greedy",
+        toolBatchingStrategy: str | None = None,
         tool_timeout_ms: float | None = None,
         toolTimeoutMs: float | None = None,
         tool_retry: Any = None,
@@ -443,6 +463,10 @@ class Agent:
             max_turns = maxTurns
         if maxToolConcurrency is not None:
             max_tool_concurrency = maxToolConcurrency
+        if toolBatchingStrategy is not None:
+            tool_batching_strategy = toolBatchingStrategy
+        if tool_batching_strategy not in ("greedy", "maximal"):
+            raise ConfigError('tool_batching_strategy must be "greedy" or "maximal"')
         if toolTimeoutMs is not None:
             tool_timeout_ms = toolTimeoutMs
         if cacheTtl is not None:
@@ -503,6 +527,7 @@ class Agent:
         self._mcp_servers = mcp_servers
         self.max_tool_concurrency = runtime_limits.max_tool_concurrency
         self.tool_concurrency = self.max_tool_concurrency
+        self.tool_batching_strategy = tool_batching_strategy
         self.tool_timeout_ms: float | None = runtime_limits.tool_timeout_ms
 
         # Optional tool retry config (RetryOptions | None; None = no retry by default).
@@ -620,8 +645,23 @@ class Agent:
         # still call their close/aclose methods and avoid resource leaks.
         self._replaced_hooks: list[Any] = []
 
+        # One-time, coalesced provider preparation (e.g. llama.cpp /props probe)
+        # awaited before the first run. The lock is created lazily inside the
+        # running loop so N agents never share loop-bound state.
+        self._provider_prepared: bool = False
+        self._prepare_lock: asyncio.Lock | None = None
+
+        # Coalesced, cancellation-safe agent teardown. The lock is created lazily
+        # (loop-bound state stays per-agent); a second close() is a no-op.
+        self._closed: bool = False
+        self._close_lock: asyncio.Lock | None = None
+
     def _configure_filesystem(self, filesystem: Any, result_offload: Any) -> None:
         self._filesystem_default: Any = filesystem
+        # An auto-derived offload threshold (a fraction of the context window) is
+        # refreshed after a successful provider.prepare(); an explicit
+        # threshold_tokens is left untouched.
+        self._offload_threshold_auto: bool = _offload_threshold_was_auto(result_offload)
         self.result_offload: Any = _resolve_result_offload(
             result_offload,
             self.provider,
@@ -730,6 +770,53 @@ class Agent:
     def context_window(self) -> int:
         return self.provider.context_window(self.model)
 
+    async def _ensure_provider_prepared(self) -> None:
+        """Run the provider's optional one-time ``prepare()`` before the first run.
+
+        Duck-typed and coalesced: providers without ``prepare()`` are skipped, the
+        hook runs at most once across concurrent first-runs, and a failing probe
+        never aborts the run. After a successful prepare, offload thresholds
+        derived from the context window are refreshed.
+        """
+        if self._provider_prepared:
+            return
+        prepare = getattr(self._provider, "prepare", None)
+        if prepare is None:
+            self._provider_prepared = True
+            return
+        if self._prepare_lock is None:
+            self._prepare_lock = asyncio.Lock()
+        async with self._prepare_lock:
+            if self._provider_prepared:
+                return
+            try:
+                await prepare()
+            except Exception as exc:
+                import logging as _logging
+
+                _logging.getLogger(__name__).warning(
+                    "provider.prepare() failed; using configured defaults: %s", exc
+                )
+            else:
+                self._refresh_context_window_derived()
+            finally:
+                self._provider_prepared = True
+
+    def _refresh_context_window_derived(self) -> None:
+        """Recompute values derived from the context window after preparation."""
+        if not getattr(self, "_offload_threshold_auto", False) or self.result_offload is None:
+            return
+        import dataclasses as _dc
+
+        try:
+            ctx_window = self.provider.context_window(self.model)
+        except Exception:
+            return
+        fraction = getattr(self.result_offload, "threshold_fraction", 0.1)
+        self.result_offload = _dc.replace(
+            self.result_offload, threshold_tokens=max(1_000, int(ctx_window * fraction))
+        )
+
     @property
     def provider(self) -> BaseProvider:
         return self._provider
@@ -737,6 +824,7 @@ class Agent:
     @provider.setter
     def provider(self, value: BaseProvider) -> None:
         self._provider = value
+        self._reset_provider_prepared()
 
     @property
     def openai(self) -> BaseProvider:
@@ -746,6 +834,16 @@ class Agent:
     @openai.setter
     def openai(self, value: BaseProvider) -> None:
         self._provider = value
+        self._reset_provider_prepared()
+
+    def _reset_provider_prepared(self) -> None:
+        """Reset one-time prepare-state after the provider is reassigned so the
+        replacement provider's ``prepare()`` runs before the next run and its
+        context-window-derived values are re-derived."""
+        self._provider_prepared = False
+        self._prepare_lock = None
+        if getattr(self, "result_offload", None) is not None:
+            self._refresh_context_window_derived()
 
     def _build_system_blocks(self, tool_names: list[str]) -> list[SystemBlock]:
         names = ", ".join(sorted(tool_names))
@@ -870,7 +968,10 @@ class Agent:
             from .tools.skill import SkillTool
 
             builtin_names = {t.name for t in self.tools.list()}
-            disk_skills, _ = load_skills_from_dir(self._config_dir, builtin_names)
+            # Disk scan + frontmatter parsing is blocking I/O; keep it off the loop.
+            disk_skills, _ = await run_blocking(
+                load_skills_from_dir, self._config_dir, builtin_names
+            )
             loaded = merge_builtin_skills(disk_skills)
             for s in loaded:
                 self.skills[s.name] = s
@@ -1032,9 +1133,28 @@ class Agent:
         if self.features.subagents:
             await self.connect_subagents()
 
+        # One live Session per (agent, id): re-attaching a live id returns the
+        # registered instance rather than overwriting it (which would orphan the
+        # first Session and its in-flight work).
+        if id is not None:
+            existing = self._sessions.get(id)
+            if existing is not None and not existing._closed:
+                return existing
+
         store = self._get_store()
         record = await store.create(id=id, meta=meta)
         messages = await store.load_messages(record.id) if id else []
+        full_history = [row.message for row in messages]
+
+        # Optional store capability (Phase 3.3): if a durable compacted snapshot
+        # exists, restore that provider_view plus every message appended after the
+        # sequence it covers, instead of rebuilding the view from full history.
+        provider_view = list(full_history)
+        snapshot_loader = getattr(store, "load_provider_snapshot", None)
+        if id and snapshot_loader is not None:
+            provider_view = await _restore_provider_view(
+                snapshot_loader, record.id, messages, full_history
+            )
 
         session = Session(
             id=record.id,
@@ -1042,8 +1162,15 @@ class Agent:
             meta=record.meta,
             agent=self,
             store=store,
-            provider_view=[row.message for row in messages],
-            full_history=[row.message for row in messages],
+            provider_view=provider_view,
+            full_history=full_history,
+        )
+        # Seed the snapshot watermark from the loaded messages; disable snapshot
+        # caching if their seqs are not strictly increasing (can't trust a split).
+        _loaded_seqs = [row.seq for row in messages]
+        session._last_seq = max(_loaded_seqs, default=0)
+        session._seq_cacheable = all(
+            b > a for a, b in zip(_loaded_seqs, _loaded_seqs[1:], strict=False)
         )
         # Attach a per-session filesystem backend when the subsystem is active.
         if self._filesystem_active():
@@ -1104,21 +1231,70 @@ class Agent:
             on_event=on_event,
         )
 
+    async def release_session(self, session_or_id: Session | str, force: bool = False) -> None:
+        """Release a single session's live registration and drain its owned work.
+
+        Idempotent: releasing an unknown or already-released session is a no-op.
+        Durable history in the session store is preserved. A session with an
+        active run is rejected unless *force* is set.
+
+        Args:
+            session_or_id: The session instance or its id.
+            force: Whether to abort an active run and drain its work rather than
+                raise. See :meth:`Session.aclose`.
+        """
+        from .session import Session
+
+        if isinstance(session_or_id, Session):
+            if session_or_id.agent is not self:
+                raise ConfigError("session belongs to a different agent")
+            sid = session_or_id.id
+            registered = self._sessions.get(sid)
+            # A stale/orphaned instance whose id now maps to a different object
+            # (or nothing) must not release the replacement — no-op.
+            if registered is None or registered is not session_or_id:
+                return
+            await registered.aclose(force=force)
+            return
+
+        sid = str(session_or_id)
+        session = self._sessions.get(sid)
+        if session is None:
+            return
+        await session.aclose(force=force)
+
+    def _unregister_session(self, sid: str, session: Session | None = None) -> None:
+        """Remove a session from the live registry (does not touch durable history).
+
+        When *session* is given, only unregister if it is the currently-registered
+        instance, so a stale object never pops a re-registered replacement.
+        """
+        if session is not None and self._sessions.get(sid) is not session:
+            return
+        self._sessions.pop(sid, None)
+
     async def close(self) -> None:
-        import asyncio
+        """Tear down the agent's shared resources. Coalesced and idempotent: a
+        second call is a no-op, and a cancellation mid-teardown still finishes
+        releasing the store/provider/hooks (the teardown is shielded)."""
+        if self._closed:
+            return
+        if self._close_lock is None:
+            self._close_lock = asyncio.Lock()
+        async with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+            await asyncio.shield(self._close_impl())
+
+    async def _close_impl(self) -> None:
         import inspect as _inspect
 
-        # Cancel background worker tasks and release retained child sessions.
+        # Drain and release every live session — cancel owned worker/background
+        # tasks and await their finalizers — before closing shared resources, so
+        # a finalizer never touches an already-closed store/provider/filesystem.
         for sess in list(self._sessions.values()):
-            for handle in getattr(sess, "workers", {}).values():
-                task = getattr(handle, "task", None)
-                if task is not None and isinstance(task, asyncio.Task) and not task.done():
-                    task.cancel()
-            # Cancel detached background-tool tasks too (mirrors session.abort),
-            # so closing the agent never orphans an in-flight background tool.
-            for task in getattr(sess, "background_tasks", []):
-                if isinstance(task, asyncio.Task) and not task.done():
-                    task.cancel()
+            await sess.aclose(force=True)
         self._sessions.clear()
 
         if self._mcp_connection is not None:
@@ -1184,6 +1360,46 @@ class Agent:
                     await result
             except Exception:
                 pass
+
+
+async def _restore_provider_view(
+    snapshot_loader: Any,
+    sid: str,
+    messages: list[Any],
+    full_history: list[Message],
+) -> list[Message]:
+    """Rebuild ``provider_view`` from a durable snapshot, treating it strictly as
+    a cache: any load error, an out-of-range watermark, or non-monotonic message
+    seqs falls back to the full history (which is always correct)."""
+    import logging as _logging
+
+    fallback = list(full_history)
+    try:
+        snapshot = await snapshot_loader(sid)
+    except Exception as exc:
+        _logging.getLogger(__name__).warning(
+            "provider snapshot load failed; rebuilding from full history: %s", exc
+        )
+        return fallback
+    if snapshot is None:
+        return fallback
+    max_seq = max((row.seq for row in messages), default=0)
+    covers = snapshot.covers_seq
+    if not isinstance(covers, int) or covers < 0 or covers > max_seq:
+        _logging.getLogger(__name__).warning(
+            "provider snapshot watermark %r out of range (0..%d); rebuilding from full history",
+            covers,
+            max_seq,
+        )
+        return fallback
+    seqs = [row.seq for row in messages]
+    if any(b <= a for a, b in zip(seqs, seqs[1:], strict=False)):
+        _logging.getLogger(__name__).warning(
+            "provider snapshot: message seqs not monotonic; rebuilding from full history"
+        )
+        return fallback
+    tail = [row.message for row in messages if row.seq > covers]
+    return list(snapshot.provider_view) + tail
 
 
 def _normalize_permission_mode(raw: object) -> PermissionMode:

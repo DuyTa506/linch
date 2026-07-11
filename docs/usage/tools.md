@@ -152,6 +152,25 @@ resource are serialized. Use it when distinct tools share an underlying
 resource the scope alone cannot express — a search tool and a re-index tool on
 the same vector store, for example.
 
+### Batching strategy
+
+`Agent(tool_batching_strategy=...)` (alias `toolBatchingStrategy`, default
+`"greedy"`) controls how parallel-safe calls in one turn are grouped into
+batches:
+
+- **`"greedy"`** — each batch is the contiguous prefix of compatible calls; the
+  batch ends at the first resource conflict, non-parallel call, or the
+  concurrency cap. This is the historical behavior and is unchanged.
+- **`"maximal"`** — within each run of parallel-safe calls, admit *every*
+  currently-compatible call (in provider order, up to the cap) and defer only
+  the conflicting ones to a later batch, so a single conflict no longer stalls
+  unrelated calls behind it. Non-parallel calls remain hard barriers, and the
+  two strategies produce identical batches when no two calls conflict.
+
+Either way the tool-result blocks returned to the model stay in the model's
+original tool-call order; only the concurrency of execution changes. `"greedy"`
+and `"maximal"` are the values of the public `ToolBatchingStrategy` type.
+
 Very large tool results can be offloaded to a virtual filesystem so they do not
 flood the model's context — see [result offloading](./filesystem.md).
 

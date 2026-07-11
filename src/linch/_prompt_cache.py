@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from .types import ProviderRequest, SystemBlock
+
+# A per-tool identity used to detect cache-prefix-breaking changes across turns:
+# the wire-ordered ``(name, canonical-JSON of the schema)`` pairs of ``req.tools``.
+ToolSignature = tuple[tuple[str, str], ...]
+PromptCacheReason = Literal["tool_set_changed", "model_changed"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,3 +124,62 @@ def openai_responses_cached_tokens(raw_usage: dict[str, Any] | None) -> int:
 
 def gemini_cached_tokens(usage_metadata: Any) -> int:
     return int(getattr(usage_metadata, "cached_content_token_count", 0) or 0)
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def tool_signature(tools: list[dict[str, Any]]) -> ToolSignature:
+    """Stable identity of a request's tool list, in wire order.
+
+    Each entry is ``(name, canonical-JSON of the whole schema)`` so a reorder, a
+    renamed tool, or an edited input schema all change the signature — anything
+    that would move or invalidate the cached request prefix.
+    """
+    signature: list[tuple[str, str]] = []
+    for schema in tools:
+        name = str(schema.get("name", "")) if isinstance(schema, dict) else ""
+        signature.append((name, _canonical_json(schema)))
+    return tuple(signature)
+
+
+def prompt_cache_advisories(
+    *,
+    prev_model: str | None,
+    prev_signature: ToolSignature | None,
+    model: str,
+    signature: ToolSignature,
+) -> list[tuple[PromptCacheReason, str]]:
+    """Return ``(reason, detail)`` advisories for prefix-breaking changes.
+
+    Empty on the first provider call of a session (no baseline yet) and whenever
+    the cached prefix is stable. ``prev_*`` are the previous call's model and
+    tool signature; ``None`` means "no prior call, nothing to compare".
+    """
+    advisories: list[tuple[PromptCacheReason, str]] = []
+    if prev_model is not None and model != prev_model:
+        advisories.append(
+            (
+                "model_changed",
+                f"model changed from {prev_model!r} to {model!r}; the prompt cache is "
+                "keyed per model, so the next request starts from a cold prefix.",
+            )
+        )
+    if prev_signature is not None and signature != prev_signature:
+        prev_names = [name for name, _ in prev_signature]
+        names = [name for name, _ in signature]
+        prev_set, cur_set = set(prev_names), set(names)
+        added = [name for name in names if name not in prev_set]
+        removed = [name for name in prev_names if name not in cur_set]
+        if added or removed:
+            detail = f"tool set changed (added={added}, removed={removed})"
+        else:
+            detail = "tool order or input schemas changed"
+        advisories.append(
+            (
+                "tool_set_changed",
+                f"{detail}; tools lead the cached request prefix, so this invalidates it.",
+            )
+        )
+    return advisories

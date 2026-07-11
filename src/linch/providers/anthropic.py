@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, cast
 
+from linch._client_lifecycle import aclose_client
 from linch._http_errors import (
     error_message,
     error_status,
@@ -91,6 +92,13 @@ class AnthropicProvider(BaseProvider):
             kwargs["default_headers"] = self._options.default_headers
         self._client = AsyncAnthropic(**kwargs)
         return self._client
+
+    async def aclose(self) -> None:
+        client = self._client
+        self._client = None
+        if client is None:
+            return
+        await aclose_client(client)
 
     async def stream(self, req: ProviderRequest) -> AsyncIterator[dict[str, object]]:
         client = await self._get_client()

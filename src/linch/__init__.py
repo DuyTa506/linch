@@ -1,296 +1,665 @@
-"""Public API for linch."""
+"""Public API for linch.
 
+``linch.__all__`` is the supported, semver-governed public API. Every name in it
+is resolved lazily (PEP 562 ``__getattr__``): the submodule that defines a name
+is imported only the first time that name is accessed. This keeps ``import
+linch`` from eagerly pulling optional/heavy integrations (MCP and its
+Starlette/Uvicorn transports, provider SDKs, asyncpg, OpenTelemetry) into a
+process that never uses them.
+
+Submodule attribute names (``linch.agent``, ``linch.providers``, ...) are import
+artifacts, not part of the public contract — depend on names in ``__all__``.
+"""
+
+from __future__ import annotations
+
+import importlib
+from typing import TYPE_CHECKING, Any
+
+# Kept eager: cheap (importlib.metadata / pyproject regex) and commonly read at
+# import time, so ``linch.__version__`` and ``linch.get_version`` never route
+# through ``__getattr__``.
 from ._version import get_version
-from .agent import Agent, AgentOptions
-from .budget import RunBudget
-from .compaction import (
-    GENERAL_SUMMARY_PROMPT,
-    CompactionLadder,
-    DefaultCompaction,
-    DetailedCompaction,
-)
-from .config import FeatureFlags, SystemPromptConfig, SystemPromptSection
-from .context import (
-    ContextBudget,
-    ContextBuilder,
-    ContextBuilderChain,
-    ContextBuildResult,
-    ContextBuildTurn,
-)
-from .coordination.mailbox import (
-    Correlator,
-    InMemoryMailbox,
-    Mailbox,
-    MailboxMessage,
-    SqliteMailbox,
-)
-from .coordination.scheduling import (
-    ClaimingScheduleStore,
-    InMemoryScheduleStore,
-    Schedule,
-    SchedulerLoop,
-    ScheduleStore,
-    SqliteScheduleStore,
-    cron_matches,
-    next_cron_time,
-    schedule_tools,
-    validate_cron,
-)
-from .deep_agent import DEEP_AGENT_SYSTEM_PROMPT, create_deep_agent
-from .errors import (
-    AbortError,
-    AuthError,
-    ConfigError,
-    ContextLengthError,
-    LinchError,
-    PermissionDeniedError,
-    ProviderError,
-    RateLimitError,
-    SkillError,
-    ToolExecutionError,
-    ToolTimeoutError,
-)
-from .events import (
-    AssistantEvent,
-    BudgetEvent,
-    CompactionEvent,
-    ContextBuildEvent,
-    ErrorEvent,
-    Event,
-    HookEventRecord,
-    LoopGuardEvent,
-    ModelFallbackEvent,
-    PartialAssistantEvent,
-    PermissionRequestEvent,
-    ResultEvent,
-    ScheduleEvent,
-    SkillCompletedEvent,
-    SkillInvokedEvent,
-    SkillsLoadedEvent,
-    SubagentEvent,
-    SystemEvent,
-    ToolCallEndEvent,
-    ToolCallStartEvent,
-    UsageEvent,
-    UserEvent,
-    VerificationEvent,
-    WorkflowEvent,
-    is_budget_event,
-    is_context_build_event,
-    is_hook_event,
-    is_loop_guard_event,
-    is_subagent_event,
-    is_verification_event,
-    is_workflow_event,
-)
-from .filesystem import (
-    CompositeFileBackend,
-    DiskFileBackend,
-    FileBackend,
-    OffloadConfig,
-    SqliteFileBackend,
-    StateFileBackend,
-    filesystem_tools,
-)
-from .hooks import (
-    AfterProviderCallContext,
-    BeforeFinalAnswerContext,
-    BeforeProviderCallContext,
-    ContextInjectionHook,
-    FinalAnswerVerifierHook,
-    HookContext,
-    HookDispatcher,
-    HookDispatchResult,
-    HookEvent,
-    HookResult,
-    MemoryExtractionHook,
-    PostCompactContext,
-    PostToolUseContext,
-    PostToolUseFailureContext,
-    PreCompactContext,
-    PreToolUseContext,
-    ReadBeforeWriteConfig,
-    ReadBeforeWriteHook,
-    RedactionConfig,
-    RedactionHook,
-    RedactionRule,
-    RunTelemetryHook,
-    StopContext,
-    StopPredicateHook,
-    SubagentStartContext,
-    SubagentStopContext,
-    ToolCacheConfig,
-    ToolCacheHook,
-    ToolMiddlewareHook,
-    UserPromptSubmitContext,
-    normalize_hooks,
-)
-from .loop import apply_provider_capabilities
-from .loop_guard import (
-    LoopGuard,
-    LoopGuardDecision,
-    LoopGuardState,
-    evaluate_loop_guard,
-    normalize_loop_guard,
-)
-from .loop_runner import (
-    FileLoopArtifactStore,
-    FileLoopLeaseStore,
-    InMemoryLoopLeaseStore,
-    LoopArtifactStore,
-    LoopLease,
-    LoopLeaseStore,
-    LoopRunner,
-    LoopSpec,
-    LoopTickResult,
-    LoopTrigger,
-)
-from .mcp import (
-    McpHttpServerConfig,
-    McpServerConfig,
-    McpStdioServerConfig,
-    connect_mcp_servers,
-)
-from .memory import (
-    ConsolidationGate,
-    InMemoryKeywordMemoryStore,
-    MemoryContextBuilder,
-    MemoryExtractionContext,
-    MemoryExtractor,
-    MemoryItem,
-    MemorySearchResult,
-    MemorySearchTool,
-    MemoryStore,
-    MemoryUpsertTool,
-    PostgresMemoryStore,
-    SqliteMemoryStore,
-    TieredMemoryStore,
-)
-from .middleware import (
-    AgentMiddleware,
-    MiddlewareContext,
-    ToolCallMiddlewareInput,
-    ToolCallMiddlewareResult,
-)
-from .observability import (
-    BaseObserver,
-    LoggingObserver,
-    ObserverDispatcher,
-    OpenTelemetryObserver,
-    ProviderCallInfo,
-    ProviderCallResult,
-    RunInfo,
-    RunObserver,
-    RunResultInfo,
-    Span,
-    SpanCollector,
-    ToolInfo,
-    ToolResultInfo,
-    TurnInfo,
-    normalize_observers,
-)
-from .openai_responses import OpenAIOptions, OpenAIReasoning
-from .providers import (
-    AnthropicProvider,
-    AnthropicProviderOptions,
-    BaseProvider,
-    GeminiProvider,
-    GeminiProviderOptions,
-    LlamaCppProvider,
-    LlamaCppProviderOptions,
-    OpenAIChatCompletionsProvider,
-    OpenAIChatProviderOptions,
-    OpenAIResponsesProvider,
-    OpenAIResponsesProviderOptions,
-    ProviderCapabilities,
-    ProviderModelInfo,
-    SGLangProvider,
-    SGLangProviderOptions,
-    VLLMProvider,
-    VLLMProviderOptions,
-    get_provider_model_info,
-    list_provider_models,
-)
-from .providers.retry import RetryOptions
-from .recovery import TruncationRecovery
-from .reports import RunReport, build_run_report, load_run_report
-from .run_store import (
-    SCHEMA_VERSION as RUN_SCHEMA_VERSION,
-)
-from .run_store import (
-    InMemoryRunStore,
-    RunCheckpoint,
-    RunRecord,
-    RunStore,
-    SqliteRunStore,
-    StoredRunEvent,
-)
-from .session import RunOptions, Session
-from .subagents import (
-    CreatedSubagentDefinition,
-    GeneratedSubagentDefinition,
-    create_subagent_definition,
-    generate_subagent_definition,
-    render_subagent_markdown,
-    write_subagent_definition,
-)
-from .testing import (
-    assert_file_backend_contract,
-    assert_isolation_backend_contract,
-    assert_mailbox_contract,
-    assert_memory_store_contract,
-    assert_schedule_store_contract,
-    assert_tool_contract,
-)
-from .tools import (
-    AskUserHandler,
-    AskUserOption,
-    AskUserQuestion,
-    AskUserRequest,
-    AskUserResponse,
-    AskUserTool,
-    Citation,
-    FileReadTracker,
-    FunctionTool,
-    ResourceAccess,
-    ResourceMode,
-    Tool,
-    ToolContext,
-    ToolRegistry,
-    ToolResult,
-    default_tools,
-    tool,
-)
-from .tools.isolation import IsolationBackend, TempDirIsolation
-from .tools.registry import empty_tools, tools_from_defaults
-from .types import (
-    ContentBlock,
-    ImageBlock,
-    Message,
-    ModelId,
-    OutputSchema,
-    PermissionMode,
-    RedactedThinkingBlock,
-    StopReason,
-    TextBlock,
-    ThinkingBlock,
-    ToolChoice,
-    ToolResultBlock,
-    ToolUseBlock,
-    Usage,
-)
-from .verification import (
-    ScorerVerifier,
-    Verdict,
-    VerificationContext,
-    Verifier,
-    evaluate_verifiers,
-    normalize_verifiers,
-)
-from .workflow import WorkflowContext, WorkflowError, WorkflowJournal
 
-defaultTools = default_tools
 __version__ = get_version()
+
+if TYPE_CHECKING:
+    # Eager imports for static analysis and IDE autocomplete only. This block is
+    # skipped at runtime (TYPE_CHECKING is False), so `import linch` stays lazy —
+    # the runtime resolution path is `__getattr__` below. Keep it in sync with
+    # `_EXPORTS`/`_ALIASES`; drift surfaces as pyright/ruff errors.
+    from .agent import Agent, AgentOptions
+    from .budget import RunBudget
+    from .compaction import (
+        GENERAL_SUMMARY_PROMPT,
+        CompactionLadder,
+        DefaultCompaction,
+        DetailedCompaction,
+    )
+    from .config import FeatureFlags, SystemPromptConfig, SystemPromptSection
+    from .context import (
+        ContextBudget,
+        ContextBuilder,
+        ContextBuilderChain,
+        ContextBuildResult,
+        ContextBuildTurn,
+    )
+    from .coordination.mailbox import (
+        Correlator,
+        InMemoryMailbox,
+        Mailbox,
+        MailboxMessage,
+        SqliteMailbox,
+    )
+    from .coordination.scheduling import (
+        ClaimingScheduleStore,
+        InMemoryScheduleStore,
+        Schedule,
+        SchedulerLoop,
+        ScheduleStore,
+        SqliteScheduleStore,
+        cron_matches,
+        next_cron_time,
+        schedule_tools,
+        validate_cron,
+    )
+    from .deep_agent import DEEP_AGENT_SYSTEM_PROMPT, create_deep_agent
+    from .errors import (
+        AbortError,
+        AuthError,
+        ConfigError,
+        ContextLengthError,
+        LinchError,
+        PermissionDeniedError,
+        ProviderError,
+        RateLimitError,
+        SkillError,
+        ToolExecutionError,
+        ToolTimeoutError,
+    )
+    from .events import (
+        AssistantEvent,
+        BudgetEvent,
+        CompactionEvent,
+        ContextBuildEvent,
+        ErrorEvent,
+        Event,
+        HookEventRecord,
+        LoopGuardEvent,
+        ModelFallbackEvent,
+        PartialAssistantEvent,
+        PermissionRequestEvent,
+        PromptCacheAdvisoryEvent,
+        ResultEvent,
+        ScheduleEvent,
+        SkillCompletedEvent,
+        SkillInvokedEvent,
+        SkillsLoadedEvent,
+        SubagentEvent,
+        SystemEvent,
+        ToolCallEndEvent,
+        ToolCallStartEvent,
+        UsageEvent,
+        UserEvent,
+        VerificationEvent,
+        WorkflowEvent,
+        is_budget_event,
+        is_context_build_event,
+        is_hook_event,
+        is_loop_guard_event,
+        is_subagent_event,
+        is_verification_event,
+        is_workflow_event,
+    )
+    from .filesystem import (
+        CompositeFileBackend,
+        DiskFileBackend,
+        FileBackend,
+        OffloadConfig,
+        SqliteFileBackend,
+        StateFileBackend,
+        filesystem_tools,
+    )
+    from .hooks import (
+        AfterProviderCallContext,
+        BeforeFinalAnswerContext,
+        BeforeProviderCallContext,
+        ContextInjectionHook,
+        FinalAnswerVerifierHook,
+        HookContext,
+        HookDispatcher,
+        HookDispatchResult,
+        HookEvent,
+        HookResult,
+        MemoryExtractionHook,
+        PostCompactContext,
+        PostToolUseContext,
+        PostToolUseFailureContext,
+        PreCompactContext,
+        PreToolUseContext,
+        ReadBeforeWriteConfig,
+        ReadBeforeWriteHook,
+        RedactionConfig,
+        RedactionHook,
+        RedactionRule,
+        RunTelemetryHook,
+        StopContext,
+        StopPredicateHook,
+        SubagentStartContext,
+        SubagentStopContext,
+        ToolCacheConfig,
+        ToolCacheHook,
+        ToolMiddlewareHook,
+        UserPromptSubmitContext,
+        normalize_hooks,
+    )
+    from .loop import apply_provider_capabilities
+    from .loop_guard import (
+        LoopGuard,
+        LoopGuardDecision,
+        LoopGuardState,
+        evaluate_loop_guard,
+        normalize_loop_guard,
+    )
+    from .loop_runner import (
+        FileLoopArtifactStore,
+        FileLoopLeaseStore,
+        InMemoryLoopLeaseStore,
+        LoopArtifactStore,
+        LoopLease,
+        LoopLeaseStore,
+        LoopRunner,
+        LoopSpec,
+        LoopTickResult,
+        LoopTrigger,
+    )
+    from .mcp import (
+        McpHttpServerConfig,
+        McpServerConfig,
+        McpStdioServerConfig,
+        connect_mcp_servers,
+    )
+    from .memory import (
+        ConsolidationGate,
+        InMemoryKeywordMemoryStore,
+        MemoryContextBuilder,
+        MemoryExtractionContext,
+        MemoryExtractor,
+        MemoryItem,
+        MemorySearchResult,
+        MemorySearchTool,
+        MemoryStore,
+        MemoryUpsertTool,
+        PostgresMemoryStore,
+        SqliteMemoryStore,
+        TieredMemoryStore,
+    )
+    from .middleware import (
+        AgentMiddleware,
+        MiddlewareContext,
+        ToolCallMiddlewareInput,
+        ToolCallMiddlewareResult,
+    )
+    from .observability import (
+        BaseObserver,
+        LoggingObserver,
+        ObserverDispatcher,
+        OpenTelemetryObserver,
+        ProviderCallInfo,
+        ProviderCallResult,
+        RunInfo,
+        RunObserver,
+        RunResultInfo,
+        Span,
+        SpanCollector,
+        ToolInfo,
+        ToolResultInfo,
+        TurnInfo,
+        normalize_observers,
+    )
+    from .openai_responses import OpenAIOptions, OpenAIReasoning
+    from .providers import (
+        AnthropicProvider,
+        AnthropicProviderOptions,
+        BaseProvider,
+        GeminiProvider,
+        GeminiProviderOptions,
+        LlamaCppProvider,
+        LlamaCppProviderOptions,
+        OpenAIChatCompletionsProvider,
+        OpenAIChatProviderOptions,
+        OpenAIResponsesProvider,
+        OpenAIResponsesProviderOptions,
+        ProviderCapabilities,
+        ProviderModelInfo,
+        SGLangProvider,
+        SGLangProviderOptions,
+        VLLMProvider,
+        VLLMProviderOptions,
+        get_provider_model_info,
+        list_provider_models,
+    )
+    from .providers.retry import RetryOptions
+    from .recovery import TruncationRecovery
+    from .reports import RunReport, build_run_report, load_run_report
+    from .run_store import (
+        SCHEMA_VERSION as RUN_SCHEMA_VERSION,
+    )
+    from .run_store import (
+        InMemoryRunStore,
+        RunCheckpoint,
+        RunEventBatchStore,
+        RunRecord,
+        RunStore,
+        SqliteRunStore,
+        StoredRunEvent,
+    )
+    from .scheduler import ToolBatchingStrategy
+    from .session import RunOptions, Session
+    from .sessions import (
+        InMemorySessionStore,
+        ProviderViewSnapshot,
+        ProviderViewSnapshotStore,
+        SessionRecord,
+        SessionStore,
+        SqliteSessionStore,
+        StoredMessage,
+    )
+    from .subagents import (
+        CreatedSubagentDefinition,
+        GeneratedSubagentDefinition,
+        create_subagent_definition,
+        generate_subagent_definition,
+        render_subagent_markdown,
+        write_subagent_definition,
+    )
+    from .testing import (
+        assert_file_backend_contract,
+        assert_isolation_backend_contract,
+        assert_mailbox_contract,
+        assert_memory_store_contract,
+        assert_provider_contract,
+        assert_schedule_store_contract,
+        assert_tool_contract,
+    )
+    from .tools import (
+        AskUserHandler,
+        AskUserOption,
+        AskUserQuestion,
+        AskUserRequest,
+        AskUserResponse,
+        AskUserTool,
+        Citation,
+        FileReadTracker,
+        FunctionTool,
+        ResourceAccess,
+        ResourceMode,
+        Tool,
+        ToolContext,
+        ToolRegistry,
+        ToolResult,
+        default_tools,
+        tool,
+    )
+    from .tools.isolation import IsolationBackend, TempDirIsolation
+    from .tools.registry import empty_tools, tools_from_defaults
+    from .types import (
+        ContentBlock,
+        ImageBlock,
+        Message,
+        ModelId,
+        OutputSchema,
+        PermissionMode,
+        RedactedThinkingBlock,
+        StopReason,
+        TextBlock,
+        ThinkingBlock,
+        ToolChoice,
+        ToolResultBlock,
+        ToolUseBlock,
+        Usage,
+    )
+    from .verification import (
+        ScorerVerifier,
+        Verdict,
+        VerificationContext,
+        Verifier,
+        evaluate_verifiers,
+        normalize_verifiers,
+    )
+    from .workflow import WorkflowContext, WorkflowError, WorkflowJournal
+
+    defaultTools = default_tools
+
+# public name -> relative submodule that defines it (attribute name == public
+# name). Flattened into ``_LAZY`` below; ``_ALIASES`` covers the few names whose
+# source attribute differs from the exported name.
+_EXPORTS: dict[str, tuple[str, ...]] = {
+    ".agent": ("Agent", "AgentOptions"),
+    ".budget": ("RunBudget",),
+    ".compaction": (
+        "GENERAL_SUMMARY_PROMPT",
+        "CompactionLadder",
+        "DefaultCompaction",
+        "DetailedCompaction",
+    ),
+    ".config": ("FeatureFlags", "SystemPromptConfig", "SystemPromptSection"),
+    ".context": (
+        "ContextBudget",
+        "ContextBuilder",
+        "ContextBuilderChain",
+        "ContextBuildResult",
+        "ContextBuildTurn",
+    ),
+    ".coordination.mailbox": (
+        "Correlator",
+        "InMemoryMailbox",
+        "Mailbox",
+        "MailboxMessage",
+        "SqliteMailbox",
+    ),
+    ".coordination.scheduling": (
+        "ClaimingScheduleStore",
+        "InMemoryScheduleStore",
+        "Schedule",
+        "SchedulerLoop",
+        "ScheduleStore",
+        "SqliteScheduleStore",
+        "cron_matches",
+        "next_cron_time",
+        "schedule_tools",
+        "validate_cron",
+    ),
+    ".deep_agent": ("DEEP_AGENT_SYSTEM_PROMPT", "create_deep_agent"),
+    ".errors": (
+        "AbortError",
+        "AuthError",
+        "ConfigError",
+        "ContextLengthError",
+        "LinchError",
+        "PermissionDeniedError",
+        "ProviderError",
+        "RateLimitError",
+        "SkillError",
+        "ToolExecutionError",
+        "ToolTimeoutError",
+    ),
+    ".events": (
+        "AssistantEvent",
+        "BudgetEvent",
+        "CompactionEvent",
+        "ContextBuildEvent",
+        "ErrorEvent",
+        "Event",
+        "HookEventRecord",
+        "LoopGuardEvent",
+        "ModelFallbackEvent",
+        "PartialAssistantEvent",
+        "PermissionRequestEvent",
+        "PromptCacheAdvisoryEvent",
+        "ResultEvent",
+        "ScheduleEvent",
+        "SkillCompletedEvent",
+        "SkillInvokedEvent",
+        "SkillsLoadedEvent",
+        "SubagentEvent",
+        "SystemEvent",
+        "ToolCallEndEvent",
+        "ToolCallStartEvent",
+        "UsageEvent",
+        "UserEvent",
+        "VerificationEvent",
+        "WorkflowEvent",
+        "is_budget_event",
+        "is_context_build_event",
+        "is_hook_event",
+        "is_loop_guard_event",
+        "is_subagent_event",
+        "is_verification_event",
+        "is_workflow_event",
+    ),
+    ".filesystem": (
+        "CompositeFileBackend",
+        "DiskFileBackend",
+        "FileBackend",
+        "OffloadConfig",
+        "SqliteFileBackend",
+        "StateFileBackend",
+        "filesystem_tools",
+    ),
+    ".hooks": (
+        "AfterProviderCallContext",
+        "BeforeFinalAnswerContext",
+        "BeforeProviderCallContext",
+        "ContextInjectionHook",
+        "FinalAnswerVerifierHook",
+        "HookContext",
+        "HookDispatcher",
+        "HookDispatchResult",
+        "HookEvent",
+        "HookResult",
+        "MemoryExtractionHook",
+        "PostCompactContext",
+        "PostToolUseContext",
+        "PostToolUseFailureContext",
+        "PreCompactContext",
+        "PreToolUseContext",
+        "ReadBeforeWriteConfig",
+        "ReadBeforeWriteHook",
+        "RedactionConfig",
+        "RedactionHook",
+        "RedactionRule",
+        "RunTelemetryHook",
+        "StopContext",
+        "StopPredicateHook",
+        "SubagentStartContext",
+        "SubagentStopContext",
+        "ToolCacheConfig",
+        "ToolCacheHook",
+        "ToolMiddlewareHook",
+        "UserPromptSubmitContext",
+        "normalize_hooks",
+    ),
+    ".loop": ("apply_provider_capabilities",),
+    ".loop_guard": (
+        "LoopGuard",
+        "LoopGuardDecision",
+        "LoopGuardState",
+        "evaluate_loop_guard",
+        "normalize_loop_guard",
+    ),
+    ".loop_runner": (
+        "FileLoopArtifactStore",
+        "FileLoopLeaseStore",
+        "InMemoryLoopLeaseStore",
+        "LoopArtifactStore",
+        "LoopLease",
+        "LoopLeaseStore",
+        "LoopRunner",
+        "LoopSpec",
+        "LoopTickResult",
+        "LoopTrigger",
+    ),
+    ".mcp": (
+        "McpHttpServerConfig",
+        "McpServerConfig",
+        "McpStdioServerConfig",
+        "connect_mcp_servers",
+    ),
+    ".memory": (
+        "ConsolidationGate",
+        "InMemoryKeywordMemoryStore",
+        "MemoryContextBuilder",
+        "MemoryExtractionContext",
+        "MemoryExtractor",
+        "MemoryItem",
+        "MemorySearchResult",
+        "MemorySearchTool",
+        "MemoryStore",
+        "MemoryUpsertTool",
+        "PostgresMemoryStore",
+        "SqliteMemoryStore",
+        "TieredMemoryStore",
+    ),
+    ".middleware": (
+        "AgentMiddleware",
+        "MiddlewareContext",
+        "ToolCallMiddlewareInput",
+        "ToolCallMiddlewareResult",
+    ),
+    ".observability": (
+        "BaseObserver",
+        "LoggingObserver",
+        "ObserverDispatcher",
+        "OpenTelemetryObserver",
+        "ProviderCallInfo",
+        "ProviderCallResult",
+        "RunInfo",
+        "RunObserver",
+        "RunResultInfo",
+        "Span",
+        "SpanCollector",
+        "ToolInfo",
+        "ToolResultInfo",
+        "TurnInfo",
+        "normalize_observers",
+    ),
+    ".openai_responses": ("OpenAIOptions", "OpenAIReasoning"),
+    ".providers": (
+        "AnthropicProvider",
+        "AnthropicProviderOptions",
+        "BaseProvider",
+        "GeminiProvider",
+        "GeminiProviderOptions",
+        "LlamaCppProvider",
+        "LlamaCppProviderOptions",
+        "OpenAIChatCompletionsProvider",
+        "OpenAIChatProviderOptions",
+        "OpenAIResponsesProvider",
+        "OpenAIResponsesProviderOptions",
+        "ProviderCapabilities",
+        "ProviderModelInfo",
+        "SGLangProvider",
+        "SGLangProviderOptions",
+        "VLLMProvider",
+        "VLLMProviderOptions",
+        "get_provider_model_info",
+        "list_provider_models",
+    ),
+    ".providers.retry": ("RetryOptions",),
+    ".recovery": ("TruncationRecovery",),
+    ".reports": ("RunReport", "build_run_report", "load_run_report"),
+    ".run_store": (
+        "InMemoryRunStore",
+        "RunCheckpoint",
+        "RunEventBatchStore",
+        "RunRecord",
+        "RunStore",
+        "SqliteRunStore",
+        "StoredRunEvent",
+    ),
+    ".scheduler": ("ToolBatchingStrategy",),
+    ".session": ("RunOptions", "Session"),
+    ".sessions": (
+        "InMemorySessionStore",
+        "ProviderViewSnapshot",
+        "ProviderViewSnapshotStore",
+        "SessionRecord",
+        "SessionStore",
+        "SqliteSessionStore",
+        "StoredMessage",
+    ),
+    ".subagents": (
+        "CreatedSubagentDefinition",
+        "GeneratedSubagentDefinition",
+        "create_subagent_definition",
+        "generate_subagent_definition",
+        "render_subagent_markdown",
+        "write_subagent_definition",
+    ),
+    ".testing": (
+        "assert_file_backend_contract",
+        "assert_isolation_backend_contract",
+        "assert_mailbox_contract",
+        "assert_memory_store_contract",
+        "assert_provider_contract",
+        "assert_schedule_store_contract",
+        "assert_tool_contract",
+    ),
+    ".tools": (
+        "AskUserHandler",
+        "AskUserOption",
+        "AskUserQuestion",
+        "AskUserRequest",
+        "AskUserResponse",
+        "AskUserTool",
+        "Citation",
+        "FileReadTracker",
+        "FunctionTool",
+        "ResourceAccess",
+        "ResourceMode",
+        "Tool",
+        "ToolContext",
+        "ToolRegistry",
+        "ToolResult",
+        "default_tools",
+        "tool",
+    ),
+    ".tools.isolation": ("IsolationBackend", "TempDirIsolation"),
+    ".tools.registry": ("empty_tools", "tools_from_defaults"),
+    ".types": (
+        "ContentBlock",
+        "ImageBlock",
+        "Message",
+        "ModelId",
+        "OutputSchema",
+        "PermissionMode",
+        "RedactedThinkingBlock",
+        "StopReason",
+        "TextBlock",
+        "ThinkingBlock",
+        "ToolChoice",
+        "ToolResultBlock",
+        "ToolUseBlock",
+        "Usage",
+    ),
+    ".verification": (
+        "ScorerVerifier",
+        "Verdict",
+        "VerificationContext",
+        "Verifier",
+        "evaluate_verifiers",
+        "normalize_verifiers",
+    ),
+    ".workflow": ("WorkflowContext", "WorkflowError", "WorkflowJournal"),
+}
+
+# Public name -> (submodule, source attribute) where the exported name differs
+# from the attribute defined in the module.
+_ALIASES: dict[str, tuple[str, str]] = {
+    "RUN_SCHEMA_VERSION": (".run_store", "SCHEMA_VERSION"),
+    "defaultTools": (".tools", "default_tools"),
+}
+
+_LAZY: dict[str, tuple[str, str]] = {
+    name: (module, name) for module, names in _EXPORTS.items() for name in names
+}
+_LAZY.update(_ALIASES)
+
+
+def __getattr__(name: str) -> Any:
+    target = _LAZY.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module_suffix, attr = target
+    value = getattr(importlib.import_module(module_suffix, __name__), attr)
+    globals()[name] = value  # cache so repeat access skips __getattr__
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(__all__)
+
 
 __all__ = [
     "AbortError",
@@ -419,6 +788,7 @@ __all__ = [
     "PermissionMode",
     "PermissionDeniedError",
     "PermissionRequestEvent",
+    "PromptCacheAdvisoryEvent",
     "ProviderError",
     "PostgresMemoryStore",
     "RateLimitError",
@@ -551,4 +921,20 @@ __all__ = [
     "normalize_observers",
     "render_subagent_markdown",
     "write_subagent_definition",
+    # Session-store types (Phase 3.2): let canonical examples import the concrete
+    # stores from the top-level package instead of the linch.sessions submodule.
+    "InMemorySessionStore",
+    "SqliteSessionStore",
+    # Provider conformance helper (Phase 3.1), alongside the other assert_*.
+    "assert_provider_contract",
+    # Store protocol + record types (WS4): let embedders type their own
+    # SessionStore/snapshot implementations against the public contract.
+    "SessionStore",
+    "SessionRecord",
+    "StoredMessage",
+    "ProviderViewSnapshot",
+    "ProviderViewSnapshotStore",
+    # Durable batch-append capability (WS2) + tool-batching strategy (WS3).
+    "RunEventBatchStore",
+    "ToolBatchingStrategy",
 ]

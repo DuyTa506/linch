@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, replace
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import uuid4
 from xml.sax.saxutils import escape
 
@@ -31,6 +31,13 @@ from .permissions.keys import permission_decision_key as _permission_key
 from .providers.retry import RetryOptions, _delay_for_error
 from .tools import ResourceAccess, ToolContext, ToolResult
 from .types import ToolResultBlock, ToolUseBlock
+
+# How parallel-safe tool calls in one assistant turn are packed into batches.
+# "greedy": break each batch at the first conflict/cap (contiguous prefix).
+# "maximal": pack every currently-compatible call into each batch, skipping
+# conflicts and admitting them in a later batch — non-parallel calls stay hard
+# barriers. Result blocks/hooks remain provider-ordered either way.
+ToolBatchingStrategy = Literal["greedy", "maximal"]
 
 
 @dataclass(slots=True)
@@ -305,15 +312,19 @@ async def _execute_one(
     started = time.perf_counter()
     last_exc: Exception | None = None
 
+    run_id = session.active_run_id or "unknown"
     ctx = ToolContext(
         cwd=_effective_cwd(session, agent),
         session_id=session.id,
-        run_id=session.active_run_id or "unknown",
+        run_id=run_id,
         session_store=session.store,
         signal=signal,
         file_read_tracker=getattr(session, "file_read_tracker", None),
         deps=getattr(session, "run_deps", None),
         filesystem=getattr(session, "filesystem", None),
+        # Stable across resume: run_id is reused by resume_loop and call.id comes
+        # from the persisted provider_view, so a re-executed tool sees the same key.
+        idempotency_key=f"{run_id}:{call.id}",
     )
 
     for attempt in range(max_attempts):
@@ -646,6 +657,7 @@ def _partition_batches(
     decisions: list[PermissionDecision],
     *,
     max_concurrency: int,
+    strategy: ToolBatchingStrategy = "greedy",
 ) -> list[dict[str, Any]]:
     pending = [
         {
@@ -657,17 +669,28 @@ def _partition_batches(
         }
         for i, call in enumerate(resolved)
     ]
-    batches: list[dict[str, Any]] = []
+    if strategy == "maximal":
+        return _partition_maximal(pending, max_concurrency=max_concurrency)
+    return _partition_greedy(pending, max_concurrency=max_concurrency)
 
+
+def _batch(selected: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "parallel": len(selected) > 1,
+        "calls": [(item["call"], item["idx"], item["decision"]) for item in selected],
+    }
+
+
+def _partition_greedy(
+    pending: list[dict[str, Any]], *, max_concurrency: int
+) -> list[dict[str, Any]]:
+    """Contiguous-prefix batching: each parallel batch stops at the first
+    conflict, non-parallel call, or the concurrency cap."""
+    batches: list[dict[str, Any]] = []
     while pending:
         first = pending[0]
         if not first["parallel"]:
-            batches.append(
-                {
-                    "parallel": False,
-                    "calls": [(first["call"], first["idx"], first["decision"])],
-                }
-            )
+            batches.append(_batch([first]))
             pending = pending[1:]
             continue
 
@@ -684,14 +707,63 @@ def _partition_batches(
             selected.append(item)
             selected_resources.extend(resources)
 
-        batches.append(
-            {
-                "parallel": len(selected) > 1,
-                "calls": [(item["call"], item["idx"], item["decision"]) for item in selected],
-            }
-        )
+        batches.append(_batch(selected))
         pending = pending[len(selected) :]
     return batches
+
+
+def _partition_maximal(
+    pending: list[dict[str, Any]], *, max_concurrency: int
+) -> list[dict[str, Any]]:
+    """Maximal packing: within each run of consecutive parallel-safe calls, admit
+    every currently-compatible call (in provider order, up to the cap) into a
+    batch, deferring conflicting calls to a later batch instead of ending the
+    batch at the first conflict. Non-parallel calls stay hard barriers.
+
+    Equivalent to greedy when no two parallel calls conflict; only conflicting
+    inputs pack differently. Provider-order of result blocks is preserved by the
+    runner's per-id reassembly, independent of admission order.
+    """
+    batches: list[dict[str, Any]] = []
+    i = 0
+    n = len(pending)
+    while i < n:
+        item = pending[i]
+        if not item["parallel"]:
+            batches.append(_batch([item]))
+            i += 1
+            continue
+
+        # Consecutive run of parallel-safe calls, bounded by the next barrier.
+        j = i
+        while j < n and pending[j]["parallel"]:
+            j += 1
+        remaining = pending[i:j]
+        i = j
+
+        # Bin-pack the run: each pass admits non-conflicting calls in provider
+        # order; the first call always fits (empty batch never conflicts and the
+        # cap is >= 1), so remaining strictly shrinks.
+        while remaining:
+            selected: list[dict[str, Any]] = []
+            selected_resources: list[ResourceAccess] = []
+            leftover: list[dict[str, Any]] = []
+            for member in remaining:
+                if len(selected) >= max_concurrency or _resources_conflict(
+                    selected_resources, member["resources"]
+                ):
+                    leftover.append(member)
+                    continue
+                selected.append(member)
+                selected_resources.extend(member["resources"])
+            batches.append(_batch(selected))
+            remaining = leftover
+    return batches
+
+
+def _batching_strategy(agent: Any) -> ToolBatchingStrategy:
+    """Resolve the tool-batching strategy off *agent*; unset/unknown → greedy."""
+    return "maximal" if getattr(agent, "tool_batching_strategy", None) == "maximal" else "greedy"
 
 
 def _strip_background_hints(
@@ -927,67 +999,64 @@ async def _run_parallel_batch(
         for call, _idx, decision in batch["calls"]
     ]
 
-    started_ids: set[str] = set()
-    id_to_call: dict[str, ResolvedCall] = {}
-    for call, *_ in batch["calls"]:
-        started_ids.add(call.id)
-        id_to_call[call.id] = call
-
+    # Await each call in provider order and emit its end as soon as that prefix
+    # completes — no full-batch barrier. All tasks run concurrently (started
+    # above), so total time is unchanged, but a fast provider-first tool no
+    # longer waits behind a slow later one before its end event is emitted.
+    # Provider order holds because tasks[i] is awaited before tasks[i + 1].
+    emitted_ids: set[str] = set()
     try:
-        results = await asyncio.gather(*tasks)
+        for (call, _idx, decision), task in zip(batch["calls"], tasks, strict=True):
+            outcome = await task
+            input = _effective_input(call, decision)
+            outcome, hook_events = await _dispatch_post_tool_use(
+                hook_dispatcher,
+                call,
+                input,
+                outcome,
+                session,
+                agent=agent,
+                turn_index=turn_index,
+            )
+            for hook_event in hook_events:
+                yield hook_event
+            yield ToolCallEndEvent(
+                tool_use_id=call.id,
+                tool_name=_tool_name(call),
+                result=str(outcome.block.content),
+                is_error=outcome.block.is_error,
+                duration_ms=outcome.duration_ms,
+                tool_result=outcome.tool_result,
+            )
+            emitted_ids.add(call.id)
+            sn = skill_names.get(call.id)
+            if sn is not None:
+                yield SkillCompletedEvent(name=sn, is_error=outcome.block.is_error)
     except (AbortError, asyncio.CancelledError):
         for t in tasks:
             t.cancel()
-        # Orphan-bracket synthesis
-        finished_ids: set[str] = set()
-        for t in tasks:
-            if t.done() and not t.cancelled():
-                try:
-                    outcome = t.result()
-                    finished_ids.add(outcome.block.tool_use_id)
-                except Exception:
-                    pass
-        for tid in started_ids:
-            if tid not in finished_ids:
-                orphan_call = id_to_call.get(tid)
-                tool_result = _tool_result_error("aborted")
-                yield ToolCallEndEvent(
-                    tool_use_id=tid,
-                    tool_name=(_tool_name(orphan_call) if orphan_call else "unknown"),
-                    result=tool_result.content,
-                    is_error=tool_result.is_error,
-                    duration_ms=tool_result.duration_ms,
-                    tool_result=tool_result,
-                )
-                sn = skill_names.get(tid)
-                if sn is not None:
-                    yield SkillCompletedEvent(name=sn, is_error=True)
+        # Await the cancelled tool tasks so their finalizers run before we
+        # synthesize aborted ends and re-raise.
+        await asyncio.gather(*tasks, return_exceptions=True)
+        # Orphan-bracket synthesis: every started call that has not already
+        # emitted a real end gets exactly one synthetic aborted end, in provider
+        # order, so cancellation still closes every start/end bracket.
+        for call, _idx, _decision in batch["calls"]:
+            if call.id in emitted_ids:
+                continue
+            tool_result = _tool_result_error("aborted")
+            yield ToolCallEndEvent(
+                tool_use_id=call.id,
+                tool_name=_tool_name(call),
+                result=tool_result.content,
+                is_error=tool_result.is_error,
+                duration_ms=tool_result.duration_ms,
+                tool_result=tool_result,
+            )
+            sn = skill_names.get(call.id)
+            if sn is not None:
+                yield SkillCompletedEvent(name=sn, is_error=True)
         raise
-
-    for (call, _idx, decision), outcome in zip(batch["calls"], results, strict=True):
-        input = _effective_input(call, decision)
-        outcome, hook_events = await _dispatch_post_tool_use(
-            hook_dispatcher,
-            call,
-            input,
-            outcome,
-            session,
-            agent=agent,
-            turn_index=turn_index,
-        )
-        for hook_event in hook_events:
-            yield hook_event
-        yield ToolCallEndEvent(
-            tool_use_id=call.id,
-            tool_name=_tool_name(call),
-            result=str(outcome.block.content),
-            is_error=outcome.block.is_error,
-            duration_ms=outcome.duration_ms,
-            tool_result=outcome.tool_result,
-        )
-        sn = skill_names.get(call.id)
-        if sn is not None:
-            yield SkillCompletedEvent(name=sn, is_error=outcome.block.is_error)
 
 
 async def execute_tool_calls(
@@ -997,6 +1066,7 @@ async def execute_tool_calls(
     signal: AbortContext,
     *,
     turn_index: int | None = None,
+    on_permissions_resolved: Callable[[], Awaitable[None]] | None = None,
 ) -> AsyncIterator[Event]:
     if not blocks:
         return
@@ -1062,6 +1132,15 @@ async def execute_tool_calls(
             if blocked_reason is not None:
                 middleware_errors[call.id] = blocked_reason
 
+    # Permissions are resolved and PreToolUse middleware has settled. Fire the
+    # once-per-batch durability callback so the caller can persist the resolved
+    # permission decisions and the tool_executing phase before any tool — the
+    # foreground batches or the detached background calls below — runs. A crash
+    # after this point recovers tool state from the durable event log instead of
+    # a per-tool checkpoint.
+    if on_permissions_resolved is not None:
+        await on_permissions_resolved()
+
     # Dispatch backgrounded tool calls: detach them, return an immediate ack as
     # their tool result, and exclude them from the foreground batches. Denied /
     # errored / hook-blocked calls fall through to normal foreground handling so
@@ -1122,6 +1201,7 @@ async def execute_tool_calls(
         fg_resolved,
         fg_decisions,
         max_concurrency=_max_concurrency(agent),
+        strategy=_batching_strategy(agent),
     )
 
     # Execute batches in order; each batch runs on its serial or parallel lane.

@@ -65,6 +65,15 @@ Returning an empty `ContextBuildResult()` (as the early-return above does) is th
 right move when there is nothing relevant — you skip the injection entirely
 rather than pad the request.
 
+**Prompt-cache note.** Context is *ephemeral* by design, so it must sit outside
+the cached request prefix: `system_blocks` you return here are always forced to
+`cacheable=False` on the wire, and `messages` land after the static prefix.
+Rotating `selected_tools` per turn, however, changes the tools array — which
+leads the prefix — and invalidates the cache; Linch emits a
+`prompt_cache_advisory` event when it detects that churn. Keep the tool set
+stable across turns if you rely on caching. See
+[Prompt caching](./providers.md#keeping-the-cached-prefix-stable-what-produces-hits).
+
 ### Wiring via a hook
 
 Context builders are attached through the **hooks** layer, not a dedicated
