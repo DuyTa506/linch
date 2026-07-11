@@ -10,7 +10,13 @@ from linch.sessions.tasks import CreateTaskInput, Task, TaskPatch
 from linch.types import Message, message_from_dict, message_to_dict
 
 from ..storage._executor import SqliteExecutor
-from .store import SessionRecord, StoredMessage
+from .store import (
+    ProviderViewSnapshot,
+    SessionRecord,
+    StoredMessage,
+    snapshot_from_dict,
+    snapshot_to_dict,
+)
 
 # ── DDL ─────────────────────────────────────────────────────────────────────
 
@@ -55,6 +61,11 @@ def _init_schema(conn: sqlite3.Connection) -> None:
           to_task_id text not null,
           kind text not null default 'blocks',
           primary key (session_id, from_task_id, to_task_id)
+        );
+        create table if not exists session_snapshots (
+          session_id text primary key,
+          snapshot text not null,
+          updated_at text not null
         );
         """
     )
@@ -248,6 +259,14 @@ class SqliteSessionStore:
     async def append_messages(self, id: str, messages: list[Message]) -> list[StoredMessage]:
         return await self._exec.run(lambda c: _append_messages(c, id, messages))
 
+    async def save_provider_snapshot(self, id: str, snapshot: ProviderViewSnapshot) -> None:
+        payload = json.dumps(snapshot_to_dict(snapshot))
+        await self._exec.run(lambda c: _save_snapshot(c, id, payload))
+
+    async def load_provider_snapshot(self, id: str) -> ProviderViewSnapshot | None:
+        raw = await self._exec.run(lambda c: _load_snapshot(c, id))
+        return snapshot_from_dict(json.loads(raw)) if raw is not None else None
+
     async def update_meta(self, id: str, meta: dict[str, object]) -> SessionRecord:
         return await self._exec.run(lambda c: _update_meta(c, id, meta))
 
@@ -414,10 +433,31 @@ def _list(conn: sqlite3.Connection, limit: int | None, offset: int) -> list[Sess
     return [_record(row) for row in rows]
 
 
+def _save_snapshot(conn: sqlite3.Connection, id: str, payload: str) -> None:
+    conn.execute(
+        """
+        insert into session_snapshots (session_id, snapshot, updated_at)
+        values (?, ?, ?)
+        on conflict(session_id) do update set snapshot = excluded.snapshot,
+            updated_at = excluded.updated_at
+        """,
+        (id, payload, now_iso()),
+    )
+    conn.commit()
+
+
+def _load_snapshot(conn: sqlite3.Connection, id: str) -> str | None:
+    row = conn.execute(
+        "select snapshot from session_snapshots where session_id = ?", (id,)
+    ).fetchone()
+    return row[0] if row else None
+
+
 def _delete(conn: sqlite3.Connection, id: str) -> None:
     conn.execute("delete from task_edges where session_id = ?", (id,))
     conn.execute("delete from tasks where session_id = ?", (id,))
     conn.execute("delete from task_counters where session_id = ?", (id,))
+    conn.execute("delete from session_snapshots where session_id = ?", (id,))
     conn.execute("delete from messages where session_id = ?", (id,))
     conn.execute("delete from sessions where id = ?", (id,))
     conn.commit()

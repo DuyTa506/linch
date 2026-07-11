@@ -40,6 +40,57 @@ on the same `Session` to continue the thread — history persists in the session
 store. When you are done, `await agent.close()` cancels any live background
 workers, flushes stores, and closes hooks that expose `close`/`aclose`.
 
+### Releasing a single session
+
+`agent.close()` tears down the whole agent. To release just one long-lived
+conversation — free its in-memory registration and drain its owned background
+work — without closing the agent or deleting durable history, use the
+per-session lifecycle APIs:
+
+```python
+# Release by instance or id (idempotent; unknown/already-released is a no-op).
+await agent.release_session(session)
+await agent.release_session("user-42")
+
+# Or from the session itself.
+await session.aclose()
+
+# Session is also an async context manager (aclose(force=True) on exit).
+async with await agent.session(id="user-42") as session:
+    async for event in session.run("hello"):
+        ...
+```
+
+Releasing a session with an **active run** raises unless you pass `force=True`.
+A forced release aborts the run, drains owned background work so finalizers run,
+and recursively releases retained child sessions. Durable history in the session
+store is always preserved — a released session can be reattached later by id.
+
+### Steering an in-flight run
+
+`session.align(prompt, images=..., timeout_s=...)` injects a user message into a
+**running** session without aborting it. The message is queued and drained at
+the next turn boundary — after the current turn's tool results, before the next
+provider call — emitting a `UserEvent(subtype="alignment")` and resolving the
+awaited `align()` call once injected. Calling `align()` on an idle session
+raises `ConfigError`.
+
+```python
+run_task = asyncio.create_task(consume(session.run("start the migration")))
+# ... user types while the agent works:
+await session.align("skip the staging environment, go straight to prod checks")
+```
+
+**Durability.** With a `RunStore` configured, undrained alignment entries are
+snapshotted into every run checkpoint (`RunCheckpoint.pending_alignment`) and
+restored on `resume()`, so steering intent survives a crash. Delivery is
+in-order and **at-least-once**: an entry enqueued after the last checkpoint save
+is lost with the crash, and an entry drained just before a crash may be injected
+once more on resume. A resume that lands *mid-turn* (pending tool batch) defers
+the drain past the re-executed tools so the injected message never breaks the
+assistant→tool-results provider order; a resumed turn that finalizes without
+another provider call drops restored entries silently.
+
 ---
 
 ## Session store

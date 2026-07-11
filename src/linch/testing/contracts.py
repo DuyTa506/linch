@@ -400,6 +400,58 @@ async def assert_tool_contract(
     return result
 
 
+async def assert_provider_contract(
+    factory: Callable[[], Any | Awaitable[Any]],
+    *,
+    model: str,
+) -> None:
+    """Assert the uniform lifecycle/declarative contract for a provider.
+
+    Covers the parts every provider must satisfy without a live transport: a
+    non-empty ``id``, a positive ``context_window(model)``, a well-formed
+    ``ProviderCapabilities`` whose ``context_window`` agrees with
+    ``context_window(model)``, an optional ``prepare()`` that is callable, and an
+    optional transport close (``aclose``/``close``) that is idempotent and never
+    raises when the provider never streamed.
+
+    It deliberately does not drive ``stream()`` — event bracketing, cancellation,
+    and vendor request-shape (tool choice, structured output, prompt caching)
+    depend on a live or faked backend and belong in provider-specific tests.
+
+    Args:
+        factory: Zero-arg callable (sync or async) returning the provider.
+        model: A model id the provider recognizes, used for the window/capability
+            probes.
+    """
+    provider = await _call_factory(factory)
+    try:
+        assert _non_empty_str(getattr(provider, "id", None)), "provider.id must be a non-empty str"
+
+        window = provider.context_window(model)
+        assert isinstance(window, int) and window > 0, (
+            "context_window(model) must be a positive int"
+        )
+
+        caps = provider.capabilities(model)
+        for name in ("parallel_tool_calls", "structured_output", "tool_choice", "prompt_cache"):
+            assert isinstance(getattr(caps, name), bool), f"capabilities.{name} must be a bool"
+        assert isinstance(caps.context_window, int) and caps.context_window > 0, (
+            "capabilities.context_window must be a positive int"
+        )
+        assert caps.context_window == window, (
+            "capabilities.context_window must match context_window(model)"
+        )
+
+        prepare = getattr(provider, "prepare", None)
+        assert prepare is None or callable(prepare), "provider.prepare must be callable if present"
+
+        # Close is optional and must be idempotent (and safe before any stream()).
+        await _maybe_close(provider)
+        await _maybe_close(provider)
+    finally:
+        await _maybe_close(provider)
+
+
 async def _call_factory(factory: Callable[[], T | Awaitable[T]]) -> T:
     value = factory()
     if inspect.isawaitable(value):

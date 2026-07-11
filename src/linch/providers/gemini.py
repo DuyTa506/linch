@@ -124,6 +124,28 @@ def _translate_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return result
 
 
+def _translate_tool_choice(tool_choice: Any) -> dict[str, Any] | None:
+    """Map a Linch ``tool_choice`` to a Gemini ``function_calling_config``.
+
+    Returns ``None`` to leave Gemini at its default (AUTO) behavior — used when
+    the caller did not constrain tool choice. A dict ``{"name": ...}`` forces
+    that single function; ``"required"``/``"any"`` force some function; ``"none"``
+    forbids calls; ``"auto"`` lets the model decide.
+    """
+    if tool_choice is None:
+        return None
+    if isinstance(tool_choice, dict):
+        config: dict[str, Any] = {"mode": "ANY"}
+        name = tool_choice.get("name", "")
+        if name:
+            config["allowed_function_names"] = [name]
+        return {"function_calling_config": config}
+    mode = {"auto": "AUTO", "none": "NONE", "required": "ANY", "any": "ANY"}.get(
+        str(tool_choice), "AUTO"
+    )
+    return {"function_calling_config": {"mode": mode}}
+
+
 class GeminiProvider(BaseProvider):
     """Provider implementation for Google Gemini models.
 
@@ -190,6 +212,11 @@ class GeminiProvider(BaseProvider):
                 model_kwargs["system_instruction"] = system_text
             if tool_declarations:
                 model_kwargs["tools"] = tool_declarations
+                # tool_choice only has meaning alongside tools; a
+                # function_calling_config with no tools is rejected by Gemini.
+                tool_config = _translate_tool_choice(req.tool_choice)
+                if tool_config is not None:
+                    model_kwargs["tool_config"] = tool_config
             if gen_config:
                 model_kwargs["generation_config"] = gen_config
 

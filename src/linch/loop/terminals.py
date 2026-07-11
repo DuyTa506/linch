@@ -31,7 +31,7 @@ from ..types import (
     ToolUseBlock,
     Usage,
 )
-from .checkpoint import _persist_event
+from .checkpoint import _flush_events, _persist_event
 from .request import final_text
 
 _FENCED_JSON_RE = re.compile(r"```(?:json)?\s*\n?(.*?)```", re.DOTALL | re.IGNORECASE)
@@ -140,6 +140,7 @@ async def _budget_exhausted_tail(
     store = agent.run_store
     if run_record is not None and store is not None:
         checkpoint.total_usage = total
+        await _flush_events(session)
         await store.mark_failed(run_id, checkpoint, error=budget_error)
     yield event
 
@@ -168,6 +169,7 @@ async def _stop_when_tail(
     store = agent.run_store
     if run_record is not None and store is not None:
         checkpoint.total_usage = total
+        await _flush_events(session)
         await store.mark_completed(run_id, checkpoint)
     yield event
 
@@ -199,6 +201,7 @@ async def _error_result_tail(
     store = agent.run_store
     if run_record is not None and store is not None:
         checkpoint.total_usage = total
+        await _flush_events(session)
         await store.mark_failed(run_id, checkpoint)
     yield event
 
@@ -235,6 +238,7 @@ async def _success_result_tail(
     store = agent.run_store
     if run_record is not None and store is not None:
         checkpoint.total_usage = total
+        await _flush_events(session)
         await store.mark_completed(run_id, checkpoint)
     yield event
 
@@ -278,6 +282,7 @@ async def _max_turns_tail(
     store = agent.run_store
     if run_record is not None and store is not None:
         checkpoint.total_usage = total
+        await _flush_events(session)
         await store.mark_failed(run_id, checkpoint, error=turn_error)
     yield event
 

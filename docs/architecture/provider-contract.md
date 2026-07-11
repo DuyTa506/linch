@@ -31,6 +31,37 @@ class BaseProvider(ABC):
 
 The loop assembles these — it never imports any provider's raw types. Adding a new provider means implementing this dict contract only.
 
+## Optional lifecycle hooks
+
+Beyond the three core methods, providers **may** expose two optional,
+duck-typed lifecycle methods. Both are detected with `getattr`/`hasattr`, so a
+provider that omits them keeps its current behavior — neither is required on
+`BaseProvider`.
+
+- **`async def prepare(self) -> None`** — coalesced and awaited once before the
+  first run, for one-time async warm-up that must not run on the construction
+  path. The llama.cpp provider uses it to probe `/props` off the event loop and
+  cache the discovered context window; its `context_window()` stays a pure
+  cached/configured lookup and never performs network I/O. Probe failure falls
+  back to the configured value.
+- **`async def aclose(self) -> None`** — closes an owned HTTP transport.
+  Implemented by the Anthropic and OpenAI Responses providers so agent teardown
+  releases sockets deterministically. Must be idempotent.
+
+Conformance is exercised network-free by `assert_provider_contract` from
+`linch.testing`:
+
+```python
+from linch.testing import assert_provider_contract
+
+assert_provider_contract(lambda: MyProvider(), model="my-model")
+```
+
+It checks the provider id, a positive context window, the capability shape
+(including `caps.context_window == context_window(model)`), that `prepare()` is
+callable when present, and that closing twice is idempotent. A provider must not
+advertise a capability its request builder ignores.
+
 ## Design rationale
 
 - **Three methods, nothing more.** A provider only has to answer "how big is the

@@ -59,7 +59,28 @@ class Session:
     provider_view: list[Message] = field(default_factory=list)
     full_history: list[Message] = field(default_factory=list)
     _active: bool = False
+    _closed: bool = False
     active_run_id: str | None = None
+    _active_gen: Any = None
+    """The async generator driving the in-flight ``run``/``resume`` iterator.
+    Captured so a forced ``aclose`` can finalize an abandoned run generator
+    (running its ``finally``) instead of leaving ``_active`` stuck true."""
+    _event_journal: Any = None
+    """Per-run ``RunEventBuffer`` (loop/checkpoint.py) that batches observational
+    events between flush points. Set by the runner at run start, cleared in its
+    finally. ``None`` outside an active durable run."""
+    _last_seq: int = 0
+    """Highest stored-message ``seq`` observed (the provider-view snapshot
+    watermark). Tracks the real seq returned by the store, so gaps are tolerated."""
+    _seq_cacheable: bool = True
+    """Whether stored-message seqs have stayed strictly increasing. Non-increasing
+    or non-int seqs disable provider-view snapshot caching for this session."""
+    _last_prompt_cache_model: str | None = None
+    """Model of the previous provider call; compared each turn to flag a
+    cache-prefix-breaking model change (``PromptCacheAdvisoryEvent``)."""
+    _last_prompt_cache_tool_sig: Any = None
+    """Tool signature (`_prompt_cache.tool_signature`) of the previous provider
+    call; compared each turn to flag a cache-prefix-breaking tool-set change."""
     alignment_queue: list[AlignmentEntry] = field(default_factory=list)
     interrupt_requested: bool = False
     last_usage: Usage | None = None
@@ -122,41 +143,23 @@ class Session:
         return len(self.provider_view)
 
     def run(self, prompt: str, opts: RunOptions | None = None) -> AsyncIterator[Event]:
+        if self._closed:
+            raise ConfigError("session is closed")
         if self._active:
             raise ConfigError("Session already has an active run")
         self._active = True
         self.interrupt_requested = False
         self._abort_controller = AbortContext()
 
-        async def iterator() -> AsyncIterator[Event]:
-            from .hooks import EventEmitContext, HookDispatcher, HookEvent
-            from .loop import run_loop
+        from .loop import run_loop
 
-            _hooks = HookDispatcher(getattr(self.agent, "hooks", None))
-            try:
-                async for event in run_loop(self, prompt, opts or RunOptions()):
-                    yield event
-                    if _hooks.active:
-                        await _hooks.dispatch(
-                            HookEvent.EVENT_EMIT,
-                            EventEmitContext(
-                                session=self,
-                                run_id=self.active_run_id or "",
-                                turn_index=None,
-                                deps=getattr(self, "run_deps", None),
-                                event=event,
-                            ),
-                        )
-            finally:
-                self._reject_pending_alignment(
-                    ConfigError("run ended before alignment was applied")
-                )
-                self._active = False
-                self.active_run_id = None
-
-        return iterator()
+        it = self._iterate(run_loop(self, prompt, opts or RunOptions()), "")
+        self._active_gen = it
+        return it
 
     def resume(self, run_id: str, opts: RunOptions | None = None) -> AsyncIterator[Event]:
+        if self._closed:
+            raise ConfigError("session is closed")
         if self._active:
             raise ConfigError("Session already has an active run")
         if self.agent.run_store is None:
@@ -165,33 +168,40 @@ class Session:
         self.interrupt_requested = False
         self._abort_controller = AbortContext()
 
-        async def iterator() -> AsyncIterator[Event]:
-            from .hooks import EventEmitContext, HookDispatcher, HookEvent
-            from .loop import resume_loop
+        from .loop import resume_loop
 
-            _hooks = HookDispatcher(getattr(self.agent, "hooks", None))
-            try:
-                async for event in resume_loop(self, run_id, opts or RunOptions()):
-                    yield event
-                    if _hooks.active:
-                        await _hooks.dispatch(
-                            HookEvent.EVENT_EMIT,
-                            EventEmitContext(
-                                session=self,
-                                run_id=self.active_run_id or run_id,
-                                turn_index=None,
-                                deps=getattr(self, "run_deps", None),
-                                event=event,
-                            ),
-                        )
-            finally:
-                self._reject_pending_alignment(
-                    ConfigError("run ended before alignment was applied")
-                )
-                self._active = False
-                self.active_run_id = None
+        it = self._iterate(resume_loop(self, run_id, opts or RunOptions()), run_id)
+        self._active_gen = it
+        return it
 
-        return iterator()
+    async def _iterate(
+        self,
+        inner: AsyncIterator[Event],
+        run_id_fallback: str,
+    ) -> AsyncIterator[Event]:
+        from .hooks import EventEmitContext, HookDispatcher, HookEvent
+
+        hooks = HookDispatcher(getattr(self.agent, "hooks", None))
+        try:
+            async for event in inner:
+                yield event
+                if hooks.active:
+                    await hooks.dispatch(
+                        HookEvent.EVENT_EMIT,
+                        EventEmitContext(
+                            session=self,
+                            run_id=self.active_run_id or run_id_fallback,
+                            turn_index=None,
+                            deps=getattr(self, "run_deps", None),
+                            event=event,
+                        ),
+                    )
+        finally:
+            await _aclose_quietly(inner)
+            self._active_gen = None
+            self._reject_pending_alignment(ConfigError("run ended before alignment was applied"))
+            self._active = False
+            self.active_run_id = None
 
     async def align(
         self,
@@ -247,14 +257,108 @@ class Session:
             if not entry.future.done():
                 entry.future.set_exception(exc)
 
+    async def _drain_owned_work(self) -> None:
+        """Cancel this session's owned worker/background tasks and await them so
+        their finalizers run before any resource they touch is closed."""
+        tasks: list[asyncio.Task[Any]] = []
+        for handle in self.workers.values():
+            task = getattr(handle, "task", None)
+            if isinstance(task, asyncio.Task):
+                tasks.append(task)
+        for task in self.background_tasks:
+            if isinstance(task, asyncio.Task):
+                tasks.append(task)
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self.background_tasks.clear()
+
+    async def aclose(self, force: bool = False) -> None:
+        """Release this session's live resources and unregister it from the agent.
+
+        Idempotent. Removes the in-memory registration without deleting durable
+        history in the session store. Rejects a session with an active run unless
+        *force* is set; a forced release aborts the run, drains owned background
+        work so finalizers run, and recursively releases retained child sessions.
+
+        Args:
+            force: Whether to abort an active run and drain its work instead of
+                raising. Required to release a session whose run has not ended.
+        """
+        if self._closed:
+            return
+        if self._active and not force:
+            raise ConfigError(
+                "session has an active run; call aclose(force=True) to abort and release it"
+            )
+        if self._active:
+            self.abort()
+            # Finalize an abandoned run generator so its finally runs (resetting
+            # ``_active``). If a consumer is actively iterating it in another task
+            # aclose() raises RuntimeError — swallow it; the abort signal ends the
+            # run and the consumer's own iteration runs the finally.
+            gen = self._active_gen
+            if gen is not None:
+                await _aclose_quietly(gen)
+        await self._drain_owned_work()
+        # Recursively release retained child sessions owned by this session
+        # (snapshot ids first — release mutates the agent's registry).
+        child_ids = [
+            cid
+            for handle in self.workers.values()
+            if isinstance((cid := getattr(handle, "child_session_id", None)), str) and cid
+        ]
+        self.workers.clear()
+        for child_id in child_ids:
+            await self.agent.release_session(child_id, force=True)
+        self._closed = True
+        self.agent._unregister_session(self.id, self)
+
+    async def __aenter__(self) -> Session:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        await self.aclose(force=True)
+
     def mark_compaction_used(self) -> None:
         self.compaction_retry_used_this_turn = True
 
     async def append(self, messages: list[Message]) -> None:
-        await self.store.append_messages(self.id, messages)
+        if self._closed:
+            raise ConfigError("session is closed")
+        stored = await self.store.append_messages(self.id, messages)
+        self._track_seqs(stored)
         self.provider_view.extend(messages)
         self.full_history.extend(messages)
 
+    def _track_seqs(self, stored: list[Any]) -> None:
+        for row in stored:
+            seq = getattr(row, "seq", None)
+            if isinstance(seq, int) and seq > self._last_seq:
+                self._last_seq = seq  # gaps (a forward jump) are fine
+            else:
+                # Non-increasing or non-int seq: the snapshot watermark can no
+                # longer be trusted, so disable caching for this session.
+                self._seq_cacheable = False
+                if isinstance(seq, int):
+                    self._last_seq = max(self._last_seq, seq)
+
     async def update_meta(self, patch: dict[str, object]) -> None:
+        if self._closed:
+            raise ConfigError("session is closed")
         updated = await self.store.update_meta(self.id, patch)
         self.meta.update(updated.meta)
+
+
+async def _aclose_quietly(gen: Any) -> None:
+    """Finalize an async generator, swallowing the RuntimeError raised when it is
+    already running in another task and any error from its own teardown."""
+    aclose = getattr(gen, "aclose", None)
+    if aclose is None:
+        return
+    try:
+        await aclose()
+    except Exception:
+        pass

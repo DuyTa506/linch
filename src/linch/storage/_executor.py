@@ -23,6 +23,7 @@ executor can be used from async code (``await close()``) and from sync
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from collections.abc import Callable
 from pathlib import Path
@@ -49,6 +50,7 @@ class SqliteExecutor:
         self._conn: sqlite3.Connection | None = None
         self._closed = False
         self._lock = Lock()
+        self._close_task: asyncio.Task[None] | None = None
 
     # ── worker-thread internals ──────────────────────────────────────────────
 
@@ -67,6 +69,13 @@ class SqliteExecutor:
             conn.execute("pragma busy_timeout=5000")
             if self._wal and self._path not in (":memory:", ""):
                 conn.execute("pragma journal_mode=wal")
+                # WAL + NORMAL is the standard durable setting: every commit is
+                # still durable across a process/application crash (the resume
+                # contract), the database is never corrupted, and only the last
+                # transaction(s) can be lost on a hard OS/power failure. FULL's
+                # per-commit fsync is the dominant cost of a durable tool run, so
+                # NORMAL removes that fsync tax without weakening crash-resume.
+                conn.execute("pragma synchronous=NORMAL")
                 conn.commit()
             self._init(conn)
             conn.commit()
@@ -109,11 +118,22 @@ class SqliteExecutor:
         return await run_blocking(_call)
 
     async def close(self) -> None:
-        """Close the connection (async path)."""
-        if self._closed:
-            return
-        self._closed = True
+        """Close without blocking the event loop behind an active DB operation."""
+        task = self._close_task
+        if task is None:
+            if self._closed and self._conn is None:
+                return
+            # Reject new work before queueing the physical close. An operation
+            # already holding `_lock` is allowed to finish first.
+            self._closed = True
+            from .._blocking import run_blocking
 
+            task = asyncio.create_task(run_blocking(self._close_connection))
+            self._close_task = task
+        # One caller being cancelled must not cancel the shared physical close.
+        await asyncio.shield(task)
+
+    def _close_connection(self) -> None:
         with self._lock:
             conn = self._conn
             if conn is not None:
@@ -122,11 +142,7 @@ class SqliteExecutor:
 
     def close_sync(self) -> None:
         """Close from a non-async context (``__exit__`` / sync ``close()``)."""
-        if self._closed:
+        if self._closed and self._conn is None:
             return
         self._closed = True
-
-        with self._lock:
-            if self._conn is not None:
-                self._conn.close()
-                self._conn = None
+        self._close_connection()

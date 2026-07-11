@@ -63,6 +63,17 @@ class RunCheckpoint:
     truncation_attempts: int = 0
     truncation_prefix: str = ""
     pending_truncation_feedback: str | None = None
+    tool_batch_event_after_seq: int | None = None
+    """Event-log watermark: the seq just before this turn's tool-batch start
+    events. On resume, tool-result recovery scans only events after this cursor.
+    ``None`` (legacy checkpoints / non-tool phases) triggers the boundary
+    fallback in ``_recover_completed_tool_results``."""
+    pending_alignment: list[dict[str, Any]] = field(default_factory=list)
+    """Undrained ``session.align()`` entries (``{"prompt", "images"}``) at the
+    time of this save, restored on resume so steering intent survives a crash.
+    Best-effort at-least-once: an entry enqueued after the last save is lost on
+    crash; an entry drained just before a crash may be injected once more on
+    resume."""
 
 
 @dataclass(slots=True)
@@ -116,6 +127,17 @@ class RunStore(Protocol):
     ) -> RunRecord: ...
 
 
+class RunEventBatchStore(Protocol):
+    """Optional run-store capability: append several events atomically.
+
+    Detected at runtime with ``getattr`` (a store implementing only ``RunStore``
+    keeps working via per-event ``append_event``). Returns the 1-based seq
+    assigned to each event, in order — parallel to ``append_event -> int``.
+    """
+
+    async def append_events(self, run_id: str, events: list[Event]) -> list[int]: ...
+
+
 def checkpoint_to_dict(checkpoint: RunCheckpoint) -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
@@ -142,11 +164,33 @@ def checkpoint_to_dict(checkpoint: RunCheckpoint) -> dict[str, Any]:
         "truncation_attempts": checkpoint.truncation_attempts,
         "truncation_prefix": checkpoint.truncation_prefix,
         "pending_truncation_feedback": checkpoint.pending_truncation_feedback,
+        "tool_batch_event_after_seq": checkpoint.tool_batch_event_after_seq,
+        "pending_alignment": checkpoint.pending_alignment,
     }
 
 
 def _dict_or_none(value: Any) -> dict[str, object] | None:
     return {str(key): item for key, item in value.items()} if isinstance(value, dict) else None
+
+
+def _pending_alignment_from_raw(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    entries: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        prompt = str(item.get("prompt", "") or "")
+        if not prompt:
+            continue
+        images_raw = item.get("images")
+        images = (
+            [dict(image) for image in images_raw if isinstance(image, dict)]
+            if isinstance(images_raw, list)
+            else None
+        )
+        entries.append({"prompt": prompt, "images": images})
+    return entries
 
 
 def checkpoint_from_dict(raw: dict[str, Any]) -> RunCheckpoint:
@@ -211,6 +255,12 @@ def checkpoint_from_dict(raw: dict[str, Any]) -> RunCheckpoint:
             if isinstance(raw.get("pending_truncation_feedback"), str)
             else None
         ),
+        tool_batch_event_after_seq=(
+            int(raw["tool_batch_event_after_seq"])
+            if isinstance(raw.get("tool_batch_event_after_seq"), int)
+            else None
+        ),
+        pending_alignment=_pending_alignment_from_raw(raw.get("pending_alignment")),
     )
 
 
@@ -266,6 +316,11 @@ class InMemoryRunStore:
         seq = len(bucket) + 1
         bucket.append(StoredRunEvent(seq=seq, appended_at=now_iso(), event=event))
         return seq
+
+    async def append_events(self, run_id: str, events: list[Event]) -> list[int]:
+        # Delegate to append_event so subclass overrides (test doubles that drop a
+        # start event) are honored through the batch path.
+        return [await self.append_event(run_id, event) for event in events]
 
     async def load_events(self, run_id: str, *, after_seq: int = 0) -> list[StoredRunEvent]:
         return [row for row in self._events.get(run_id, []) if row.seq > after_seq]
@@ -362,6 +417,11 @@ class SqliteRunStore:
 
     async def append_event(self, run_id: str, event: Event) -> int:
         return await self._exec.run(lambda c: _append_event(c, run_id, event))
+
+    async def append_events(self, run_id: str, events: list[Event]) -> list[int]:
+        if not events:
+            return []
+        return await self._exec.run(lambda c: _append_events(c, run_id, events))
 
     async def load_events(self, run_id: str, *, after_seq: int = 0) -> list[StoredRunEvent]:
         return await self._exec.run(lambda c: _load_events(c, run_id, after_seq))
@@ -474,6 +534,27 @@ def _append_event(conn: sqlite3.Connection, run_id: str, event: Event) -> int:
     )
     conn.commit()
     return seq
+
+
+def _append_events(conn: sqlite3.Connection, run_id: str, events: list[Event]) -> list[int]:
+    # One MAX lookup + executemany + one commit, amortizing the per-event round
+    # trip. The executor's locked call rolls back on error, so it is all-or-nothing.
+    base = int(
+        conn.execute(
+            "select coalesce(max(seq), 0) from run_events where run_id = ?", (run_id,)
+        ).fetchone()[0]
+    )
+    ts = now_iso()
+    rows = [
+        (run_id, base + i, ts, json.dumps(event_to_dict(event)))
+        for i, event in enumerate(events, start=1)
+    ]
+    conn.executemany(
+        "insert into run_events (run_id, seq, appended_at, event) values (?, ?, ?, ?)",
+        rows,
+    )
+    conn.commit()
+    return [base + i for i in range(1, len(events) + 1)]
 
 
 def _load_events(

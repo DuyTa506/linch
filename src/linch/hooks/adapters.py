@@ -253,6 +253,13 @@ class StopPredicateHook:
         return None
 
 
+def _provider_id(ctx: Any) -> str:
+    # Provider id for gen_ai.provider.name; "" when unresolvable (e.g. tests
+    # driving hooks with bare contexts).
+    provider = getattr(getattr(getattr(ctx, "session", None), "agent", None), "provider", None)
+    return str(getattr(provider, "id", "") or "")
+
+
 class RunTelemetryHook:
     name = "observers"
 
@@ -275,6 +282,7 @@ class RunTelemetryHook:
                 model=ctx.model,
                 prompt=ctx.prompt,
                 tools=ctx.tools,
+                provider_id=_provider_id(ctx),
             ),
         )
 
@@ -306,6 +314,7 @@ class RunTelemetryHook:
                 run_id=ctx.run_id,
                 turn_index=int(ctx.turn_index or 0),
                 model=ctx.model,
+                provider_id=_provider_id(ctx),
             ),
         )
 
@@ -322,6 +331,7 @@ class RunTelemetryHook:
                 stop_reason=ctx.stop_reason,
                 usage=ctx.usage or Usage(),
                 duration_ms=ctx.duration_ms,
+                provider_id=_provider_id(ctx),
             ),
         )
 

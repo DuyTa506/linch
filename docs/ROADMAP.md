@@ -1,254 +1,269 @@
 # Linch SDK Roadmap
 
-This file is the live roadmap for Linch as a **pure-mechanism, embeddable agent
-runtime SDK**. It should guide what to build next and, just as importantly, what
-not to build into core.
+This is the active roadmap for Linch as a **pure-mechanism, embeddable agent
+runtime SDK**. It records the next work, its evidence, the compatibility rules
+that constrain it, and the measurements that define completion.
+
+Completed roadmap slices do not remain here as active work. When a phase ships,
+move its durable contracts into architecture or usage documentation and replace
+it with the next evidence-backed priority.
+
+**Status (July 2026):** the audit-driven hardening program — measurement
+guardrails, runtime reliability, lifecycle and scalability, provider parity, and
+durable context — has shipped. Its durable contracts now live in the
+architecture and usage docs (see [Recently shipped](#recently-shipped) below).
+There is no active phase queued; ranked prospects live in
+[Next candidates](#next-candidates) and enter active work through the
+[acceptance gate](#roadmap-item-acceptance-gate) when evidence justifies it.
 
 ---
 
 ## North Star
 
-Linch ships the **harness**, not the agent. It provides **mechanisms, protocols,
-seams, and primitives**: loop control, tools, permissions, memory, context,
+Linch ships the **harness**, not the agent. It provides mechanisms, protocols,
+seams, and primitives: loop control, tools, permissions, memory, context,
 events, durability, scheduling, subagents, hooks, evaluation, and observability.
 
-A coding agent is one application an embedder builds on Linch. A support agent,
-research agent, data agent, operations agent, or product-specific assistant
-should be equally first-class.
+A coding agent is one application an embedder builds on Linch. Support,
+research, data, operations, and product-specific agents must remain equally
+first-class.
 
-The discriminating rule for every roadmap item:
+The discriminating rule for every roadmap item is:
 
-> Is it a mechanism every embedded agent can use, or behavior/policy specific to
-> one kind of agent? Mechanism goes in Linch. Policy stays with the embedder.
+> Is it a mechanism many embedded agents can use, or behavior and policy for one
+> kind of agent? Mechanism goes in Linch. Policy stays with the embedder.
 
-When a useful capability is domain-flavored, Linch should expose the generic
-seam and let the embedder supply the domain piece. For example,
-`ExecutionBackend` is a Linch seam; a git-worktree coding runner is an embedder
-implementation.
+When a useful capability is domain-flavored, Linch exposes the generic seam and
+the embedder supplies the domain implementation. For example,
+`ExecutionBackend` belongs in Linch; a git-worktree coding runner does not.
 
-Hard constraints:
+### Hard constraints
 
-- Every new capability is opt-in and additive.
-- With defaults unchanged, the loop stays byte-identical unless the change is a
-  domain-neutral safety fix.
-- The core dependency graph stays small; heavy integrations belong in examples,
-  extras, or separate packages.
-- Linch must remain easy to embed inside a host service. It should not become a
-  daemon, dashboard, marketplace, or agent product.
+- New capabilities are additive and opt-in unless they are domain-neutral
+  correctness, security, lifecycle, or performance fixes.
+- Defaults preserve event order, provider-order tool results, checkpoint
+  semantics, and observable loop behavior.
+- The public surface remains exactly `linch.__all__`; changes are deliberate and
+  follow `docs/versioning.md`.
+- Duck-typed protocols do not gain required methods in a minor release. New
+  protocol capabilities are detected with `getattr` or `hasattr` and have a
+  compatibility fallback.
+- Persisted wire formats remain forward-tolerant. Breaking shapes require an
+  explicit schema-version migration.
+- Python 3.10 remains supported. Do not use newer runtime primitives without a
+  compatible implementation or backport.
+- The core dependency graph stays small. Heavy integrations belong in extras,
+  examples, or separate packages.
+- Linch remains embeddable inside a host service. It does not become a daemon,
+  dashboard, marketplace, or hosted agent product.
 
 ---
 
-## Open And Closed Loops
+## Current Runtime Baseline
 
-Every agent runs some version of **Discovery -> Planning -> Execution ->
-Verification -> Iteration**. The key axis is **open vs closed**, defined by who
-authors the path.
+Linch already contains the main runtime substrate:
 
-| | Closed loop | Open loop |
+- Event-driven `Agent` / `Session` execution with typed streaming events.
+- OpenAI, Anthropic, Gemini, llama.cpp, vLLM, SGLang, and OpenAI-compatible
+  providers.
+- Tools, MCP wrapping, permissions, retries, timeouts, resource-aware
+  scheduling, isolation, and background execution.
+- Context builders, compaction, memory stores, virtual filesystems, and result
+  offload.
+- Durable sessions, run checkpoints, workflow journals, run reports, and resume.
+- Subagents, retained workers, workflows, mailbox coordination, and scheduling.
+- Hooks, OpenTelemetry integration, deterministic evals, and extension contract
+  helpers.
+
+The baseline is broad enough. The roadmap prioritizes runtime reliability,
+lifecycle ownership, measured scalability, provider parity, and internal
+simplicity rather than adding new orchestration layers.
+
+### Measurement discipline
+
+Performance work is gated by the offline benchmark suite
+(`scripts/benchmark_runtime.py`): two warmups and at least ten measured samples
+per case, reporting median and p95 latency, event-loop heartbeat lag, and
+cold-import RSS alongside a correctness oracle. Absolute timing thresholds live
+in a dedicated fixed-runner or nightly job; normal CI asserts correctness,
+bounded work, event ordering, and algorithmic complexity without fragile
+wall-clock limits. The July 2026 audit baselines (blocking-bridge tail latency,
+quadratic context trimming, memory-search heartbeat stalls, eager cold import,
+full-batch scheduler barrier, unreleased sessions, synchronous provider I/O)
+were regressions to fix, not universal hardware claims; the outcomes below
+resolved them and the suite guards against their return.
+
+---
+
+## Recently shipped
+
+The hardening program landed as additive, opt-in mechanisms. Each item's durable
+contract now lives in the docs linked below; this table is a pointer, not active
+work.
+
+| Area | Outcome | Contract lives in |
 |---|---|---|
-| Path author | Human or host code writes it first | Model discovers it at runtime |
-| Shape | Bounded, journaled, repeatable | Exploratory, adaptive, higher variance |
-| Cost | Predictable | Needs strict budget controls |
-| Quality control | Eval each step | Guardrails, verifiers, loop limits |
-| Linch surface | `run_workflow` | `create_deep_agent` / custom orchestration |
+| Measurement guardrails | Offline benchmark suite with warmups, samples, p50/p95, heartbeat lag, cold-import RSS, and correctness oracles | `scripts/benchmark_runtime.py` |
+| Blocking-bridge latency | `run_blocking` is callback-driven with a dormant timer fallback (no polling tail) | [architecture/invariants.md](./architecture/invariants.md) |
+| Durable write amplification | Event log is the tool-execution recovery source; checkpoints saved once per batch, not per tool start/end | [architecture/turn-lifecycle.md](./architecture/turn-lifecycle.md) |
+| Ordered teardown | `Agent.close()`, session release, abort, and scheduler cancellation drain owned work before closing resources | [usage/agent.md](./usage/agent.md) |
+| Provider warm-up | Optional duck-typed `provider.prepare()` coalesced once before the first run; llama.cpp context discovery leaves the event loop | [architecture/provider-contract.md](./architecture/provider-contract.md) |
+| Session lifecycle | `agent.release_session(...)`, `session.aclose(force=...)`, and `Session` as an async context manager | [usage/agent.md](./usage/agent.md#releasing-a-single-session) |
+| Linear context trimming | Trimming is linear over message count; retained messages, order, estimator calls, and `ContextBudget` fields unchanged | [architecture/compaction.md](./architecture/compaction.md) |
+| Scalable reference memory | Namespace-partitioned in-memory store, chunked cooperative yields, bounded top-k, off-loop SQLite/Postgres scoring | [usage/context-and-memory.md](./usage/context-and-memory.md) |
+| Scheduler parallelism | Provider-order results without the full-batch barrier; opt-in maximal-compatible batching, greedy default unchanged | [architecture/tool-protocol.md](./architecture/tool-protocol.md) |
+| Provider conformance | `assert_provider_contract` (`linch.testing`), transport `aclose()` on Anthropic/OpenAI Responses, Gemini tool-choice mapping | [architecture/provider-contract.md](./architecture/provider-contract.md) |
+| Lazy public exports | PEP 562 lazy export map keeps `import linch` off MCP/Uvicorn/unused provider SDKs; `linch.__all__` and star imports unchanged | `docs/versioning.md` |
+| Durable compacted views | Optional store-detected `save_provider_snapshot`/`load_provider_snapshot`; reload restores the view and appends newer messages | [architecture/compaction.md](./architecture/compaction.md#durable-compacted-views-opt-in-store-detected) |
+| Idempotent integration seam | Stable `ToolContext.idempotency_key` (run id + tool-use id) for at-least-once reconciliation | [architecture/tool-protocol.md](./architecture/tool-protocol.md) |
+| Off-loop discovery | Skill and subagent disk discovery run on the blocking bridge, off the event loop | [architecture/skills-subagents.md](./architecture/skills-subagents.md) |
+| Durable steering | `session.align()` queue snapshotted into every run checkpoint and restored on resume: in-order, at-least-once delivery across crash/resume; mid-turn resumes defer the drain past the re-executed tool batch | [usage/agent.md](./usage/agent.md#steering-an-in-flight-run) |
+| GenAI semconv traces | `OpenTelemetryObserver` emits `gen_ai.*` semantic-convention attributes (operation, provider, conversation, cache tokens, tool call) alongside unchanged `linch.*` names | [usage/hooks.md](./usage/hooks.md#genai-semantic-conventions) |
 
-Linch should provide the shared control surface for both modes:
+### Deferred: central-loop structural split
 
-- **Budget** via `RunBudget`, shared across an agent tree.
-- **Verification** via verifiers, hooks, and eval scorers.
-- **Durability** via session stores, run stores, checkpoints, and workflow journals.
-- **Observability** via typed events, run reports, and observers.
-- **Blast-radius controls** via permissions, loop guards, timeouts, retries, and
-  isolation seams.
+The characterization tests that pin the loop's externally-observable order —
+full event-type trace and full checkpoint-phase sequence per turn, alongside the
+existing resume, hook-order, and terminal-result coverage — are in place
+(`tests/loop/test_loop_trace_characterization.py`, `tests/loop/test_run_resume.py`,
+`tests/test_hooks.py`). They are the prerequisite safety net for any future
+refactor of `_run_loop_impl`.
 
-The SDK should not bake the DPEVI cycle in as mandatory policy. It can ship
-presets and examples, but the host decides the workflow.
-
----
-
-## Current Baseline
-
-Linch already has the main runtime substrate for a strong embedding kit:
-
-- Event-driven `Agent` / `Session` loop with typed event streaming.
-- Provider abstraction for OpenAI, Anthropic, Gemini, llama.cpp, vLLM, SGLang,
-  and OpenAI-compatible APIs.
-- Tool protocol, built-in tools, MCP tool wrapping, execution backends, scheduler,
-  resource conflict handling, retries, timeouts, and background tools.
-- Permission engine, durable HITL decisions, path/bash/tool rules, read-before-write,
-  and MCP destructive-tool prompting.
-- Memory stores, context builders, compaction, virtual filesystem, result offload,
-  and memory lifecycle hooks.
-- Subagents, retained worker sessions, background workers, mailbox coordination,
-  scheduling primitives, and a host-called `LoopRunner`.
-- Workflow journaling, run checkpoints, run reports, OpenTelemetry observer, and
-  deterministic eval harness.
-- Extension templates and usage docs for the main seams.
-
-This baseline is enough. The next work should harden and clarify it rather than
-add broad new agentic abstractions.
+The split itself is **deferred**. The naturally-separable pieces (`_drain_*`
+helpers, `_SpanLifecycle`, `dispatch_*`, provider-snapshot save, worker recovery)
+are already extracted; what remains is one state-coupled generator whose nested
+closures share run-scoped mutable state. A mechanical split would thread that
+state through a new interface for zero behavior change — and "smaller files alone
+are not success." Reopen only when a concrete maintainability failure (not line
+count) justifies it; the characterization net makes that safe when it does.
 
 ---
 
-## What Linch Actually Needs Now
+## Next candidates
 
-Linch should stay **thin**: an embedding kit for developers building agent
-products, not the product itself. "Strong" now means the SDK makes the hard
-runtime parts reliable, observable, testable, and easy to embed while refusing
-to accumulate domain policy.
+Ranked prospects for the next slice, filtered through the
+[acceptance gate](#roadmap-item-acceptance-gate). None is an active phase yet;
+an item enters active work only with its evidence and completion criteria
+pinned. Checked against the current tree before listing: thinking and
+redacted-thinking blocks, image input, subagent context forking, durable
+approvals, and budget/pricing already exist and do not belong here.
 
-The roadmap should optimize for four developer outcomes:
+### Tier 1 — evidence-backed, ready to enter
 
-1. **Confidence to embed.** A host app can wire Linch into an async service, run
-   many tenants, stream events, pause for HITL, resume after a restart, and shut
-   down without leaked work.
-2. **Confidence to extend.** A developer can add a provider, tool package,
-   memory backend, filesystem backend, permission policy, hook, mailbox,
-   schedule store, or isolation backend without reading loop internals.
-3. **Confidence to operate.** A run produces enough structured evidence to debug
-   cost, latency, context pressure, permissions, failed tools, compaction,
-   fallback, and verifier retries without parsing raw transcripts.
-4. **Confidence to control blast radius.** Budgets, loop guards, permissions,
-   isolation, retries, timeouts, and verifiers remain first-class controls, but
-   their policy is supplied by the embedder.
+**Gemini explicit context caching (`CachedContent`).**
+Explicitly deferred from the prompt-cache slice. Anthropic/OpenAI implicit
+prefix caching is instrumented and live-validated; Gemini is the one major
+provider with no cache benefit. Mechanism: opt-in provider option that pins the
+stable prefix as a `CachedContent` handle and reuses it across turns; the
+advisory and report plumbing already exists. Compatibility: provider-scoped,
+off by default. Completion: fake-backed tests for create/reuse/expiry plus a
+live benchmark scenario mirroring the existing suite. Enters when a
+Gemini-using embedder justifies it.
 
-### Next Roadmap Questions
+Two former Tier-1 items shipped and moved to
+[Recently shipped](#recently-shipped): **durable steering** (mid-run steering
+already existed as `session.align()`; the slice hardened it with checkpointed,
+resume-safe, in-order at-least-once delivery) and **OTel GenAI
+semantic-convention alignment** (additive `gen_ai.*` attributes on every span).
 
-The previous roadmap slice is shipped. Do not keep completed work in this file
-as an active roadmap. The next roadmap should be driven by evidence: benchmark
-real workloads, find the bottleneck, then add the smallest mechanism that
-improves it without making Linch a product or policy layer.
+### Tier 2 — real value, needs design or a second embedder
 
-| Question | Default answer | What would change the answer | Likely shape |
-|---|---|---|---|
-| **Should Linch port core runtime pieces to Rust?** | No full port now. Keep Python-first. | Profiling shows a narrow, repeatable CPU or memory hotspot that Python cannot reasonably fix; or embedders need a non-Python host ABI. | Optional native extension behind the same Python API, not a rewrite. Candidate areas: token/context estimation, event-log indexing, diff/patch/search primitives, large-content normalization. |
-| **Where is speed actually lost?** | Probably provider/tool I/O, not Python orchestration. Measure before optimizing. | Benchmarks show loop overhead, scheduler batching, context building, serialization, or report generation is significant relative to model/tool latency. | Add a small benchmark suite and regression thresholds for hot paths before changing internals. |
-| **Can caching reduce repeated work?** | Yes, but cache policy must stay host-owned. | Repeated context builders, memory searches, tool schema generation, provider model metadata, or report reads show measurable duplicate work. | Opt-in caches with explicit keys, TTL/invalidation, and observability counters; never cache write/exec effects by default. |
-| **Can the harness itself get faster and easier to operate?** | Yes, by making the harness more measurable, not by adding agent policy. | Hosts need lower per-run overhead, clearer lifecycle controls, or cheaper test/eval execution. | Harness benchmarks, lighter offline fake providers, faster contract checks, clearer run/report fixtures, and batchable eval/report utilities. |
+- **Public session forking** — `agent.fork_session(session, at_seq=...)` for
+  best-of-N sampling, A/B eval runs, and speculative exploration. The fork
+  mechanics exist for subagents; the open design question is store semantics
+  for the forked history (shared prefix vs. copy).
+- **Proactive rate-limit seam** — an optional duck-typed limiter protocol on
+  `Agent` so N concurrent sessions do not stampede a provider and then rely on
+  reactive retry. The limiter policy (per-tenant limits) stays in the host;
+  only the seam enters core.
+- **Anthropic cache-breakpoint tuning** — explicit `cache_control` placement at
+  the last stable message to shrink the re-billed span after compaction
+  (live-measured at ~79% warm versus ~99% baseline). Pure win with no behavior
+  tradeoff, but a smaller audience than Tier 1.
 
-### Optimization Backlog
+### Considered and not queued
 
-These are investigation tracks, not commitments to implementation.
+Batch-API eval mode (job polling drags deployment concerns into core),
+streaming tool-argument deltas (a UI nicety with a thin audience), MCP
+elicitation (the spec is still moving; wait for a reopen trigger), and the
+central-loop structural split (deferred above; the characterization net is in
+place for when a concrete maintainability failure appears).
 
-1. **Benchmark harness.**
-   Add repeatable local benchmarks for the neutral runtime paths:
-   scheduler batching, context build assembly, session/run-store serialization,
-   run-report generation, tool-result offload, memory keyword search, and
-   eval-harness execution. Benchmarks should run without live provider calls.
-   Start with focused probes such as `scripts/benchmark_prompt_cache.py`, which
-   measures request-shape cacheability across a mock provider tool loop before
-   any live provider diagnostics, and `scripts/benchmark_live_prompt_cache.py`,
-   which measures real `Usage.cache_read_tokens` / `cache_creation_tokens` for
-   configured provider endpoints in both direct-call and real agent tool-loop
-   modes.
+---
 
-2. **Speed optimization.**
-   Use benchmark output to target Python-level fixes first: fewer repeated
-   conversions, cheaper event serialization, less copying of message/content
-   lists, faster report aggregation, and clearer async backpressure boundaries.
-   Only consider native code after a benchmark proves a persistent CPU hotspot.
+## Cross-Cutting Verification
 
-3. **Caching optimization.**
-   Audit where Linch recomputes stable data inside a run or process:
-   provider capability lookups, tool schema exports, static system sections,
-   selected-tool views, context-builder outputs, memory query results, and
-   report summaries. Any cache must be opt-in or trivially invalidated, expose
-   hit/miss counters, and avoid caching side-effecting tool behavior.
+Every change runs the standard quality gates:
 
-4. **Harness optimization.**
-   Make the SDK easier to validate and embed: faster fake providers, reusable
-   run fixtures, tighter contract helper coverage, deterministic stress tests
-   for cancellation/resume/concurrency, and small CLI scripts for running the
-   benchmark/report/eval loops locally and in CI.
+```bash
+pytest
+ruff check . && ruff format --check .
+pyright
+```
 
-5. **Rust-port decision gate.**
-   Revisit Rust only after the benchmark harness identifies a narrow hot path.
-   The decision record must state: measured baseline, target improvement,
-   Python alternatives attempted, packaging impact, extension impact, and the
-   fallback plan if native wheels are unavailable. A full runtime rewrite is
-   out of scope unless Linch deliberately stops being Python-first.
+CI expands to:
+
+- Correctness on Python 3.10, 3.11, 3.12, and 3.13.
+- A minimal-core installation that proves optional integrations remain lazy.
+- An all-extras smoke installation for MCP, Anthropic, Gemini, Postgres, and
+  OpenTelemetry.
+- Deterministic stress tests for concurrency, cancellation, resume, shutdown,
+  close races, and crash boundaries.
+- A fixed-runner performance job that records benchmark JSON and fails only on
+  stable, agreed regression thresholds.
+
+Each optimization must include a correctness oracle, not only a timing result.
+Ranking, filtering, event ordering, checkpoint semantics, and cleanup are
+verified independently from speed.
 
 ---
 
 ## What Linch Does Not Need Now
 
-These items are useful for products built on Linch, but they do not belong in
-core now. Add them only when a concrete, domain-neutral mechanism emerges.
+| Not in core | Boundary |
+|---|---|
+| Rust or a full native rewrite | Reopen only for a measured hotspot that survives Python optimization. |
+| Coding-agent product UX or git workflow policy | Host app, project skill, coding-agent package, or external `IsolationBackend`. |
+| Hosted dashboard, daemon, or supervisor | Host service, deployment platform, or separate event/report consumer. |
+| Skill/tool marketplace | External registry or package manager with its own trust policy. |
+| Large SaaS, cloud, browser, database, or shell tool bundles | Optional tool packages or MCP servers. |
+| Vector database and embedding SDK dependencies | External `MemoryStore` adapters; examples may demonstrate the seam. |
+| Domain-specific memory formats and prompts | Host-owned memory adapters, context builders, or presets. |
+| Distributed queue, lease, or retry policy | Deployment-specific implementations behind existing protocols. |
+| Default PII, PHI, or security classifier | Host governance hooks and verifiers. |
+| Vendor-specific observability and authentication bundles | OpenTelemetry or external integration packages. |
+| Bounded event queues by default | The async generator's natural backpressure remains the core contract. |
 
-| Not needed now | Why not | Where it should live |
-|---|---|---|
-| **Coding-agent product UX** | Todo lists, plan nudges, git conventions, PR behavior, and coding prompts are product policy. | Host app, project skill, or coding-agent package. |
-| **Git worktree management in core** | Git is not universal. Linch already has the isolation seam. | External `IsolationBackend` implementation or coding example. |
-| **Daemon supervisor** | Process lifetime, restart policy, backoff, deployment target, and locks are host concerns. | Host service, systemd, cron, Kubernetes, Celery, Temporal, or a small example wrapper. |
-| **Hosted dashboard or web UI** | UI and storage opinions would turn the SDK into a product. | Separate app consuming events, run reports, and OTel traces. |
-| **Marketplace for skills/tools** | Distribution, trust, signing, ranking, and updates are product/ecosystem policy. | External registry or package manager integration. |
-| **Default PII/PHI/security classifier** | Classifiers and thresholds are compliance policy and can create false confidence. | Hook examples, verifier examples, or app-specific governance package. |
-| **Large built-in tool bundles** | GitHub, Slack, kubectl, browser, DB, cloud, and SaaS SDKs would bloat dependencies. | Optional packages implementing `Tool` or MCP servers. |
-| **Domain memory formats as core defaults** | `MEMORY.md`, Obsidian, AgentBrain, CRM notes, and ticket histories have different semantics. | Memory adapters over `MemoryStore` or `ContextBuilder`. |
-| **Distributed queue/lease backend in core** | Redis, SQS, Postgres advisory locks, and cloud queues are deployment choices. | Optional store packages behind existing protocols. |
-| **Automatic output-token escalation** | Raising caps changes cost and latency without the embedder's policy decision. | Explicit opt-in recovery option. |
-| **Prompt/policy presets as defaults** | Defaults would make Linch opinionated toward one agent type. | `create_*_agent` factories, examples, or host configuration. |
-| **Vendor-specific observability integrations** | OTel already gives the neutral bridge. | Vendor configuration or thin external observer package. |
-| **OAuth/PKCE for every integration** | Auth flows are integration-specific and easy to overfit. | MCP/tool adapter packages unless a small common seam becomes obvious. |
-| **Bounded event queues by default** | The async generator's natural backpressure is the current contract. | Optional wrapper if a host needs buffering/drop policy. |
-| **Generated API reference site** | Useful polish, not a runtime need. | Documentation pass after the public surface stabilizes further. |
+`deep_agent` remains an opt-in preset and distribution layer. Add behavior to it
+only when the underlying capability is a reusable, domain-neutral mechanism.
 
-### Reopen Triggers
+### Reopen triggers
 
-Deferred ideas can come back when one of these is true:
+A deferred capability may return when at least one of these is true:
 
-- Two or more unrelated embedders need the same mechanism and cannot implement it cleanly
-  through an existing seam.
-- The feature can be expressed as a small protocol, hook, event, report field, or opt-in
-  config without adding policy.
-- The feature reduces core complexity or risk rather than adding another orchestration layer.
-- The feature can be tested deterministically without live services.
-- The feature keeps default behavior unchanged.
-
-If a proposal fails these triggers, keep it outside core.
+- Two unrelated embedders need the same mechanism and existing seams cannot
+  express it cleanly.
+- It can be a small protocol, optional method, hook, event, report field, or
+  additive configuration rather than policy.
+- It reduces core complexity or risk.
+- It can be tested deterministically without a live service.
+- Default behavior and replaceability remain intact.
 
 ---
 
-## Acceptance Test For New Roadmap Items
+## Roadmap Item Acceptance Gate
 
-A roadmap item belongs here only if the answer is "yes" to all of these:
+An item belongs in the active roadmap only when all answers are yes:
 
-1. Does it help many kinds of embedded agents, not just coding agents?
-2. Can it be expressed as a protocol, hook, store, event, report, example, or opt-in
-   factory rather than a default behavior?
-3. Does it keep `Agent()` defaults byte-identical or observably safer in a
-   domain-neutral way?
-4. Can an embedder replace or disable it without forking Linch?
-5. Can it be verified with deterministic tests, usually without a live provider?
+1. Does it help multiple kinds of embedded agents?
+2. Is there repository evidence, a reproducible failure, or a benchmark that
+   justifies it?
+3. Is its compatibility behavior explicit for public APIs, protocols, events,
+   defaults, and persisted data?
+4. Can an embedder replace, disable, or ignore it without forking Linch?
+5. Does it have deterministic correctness tests and measurable completion
+   criteria?
+6. Does it keep product policy and heavy vendor dependencies outside core?
 
-If an idea fails this test, it should live in an example, external package, host
-app, or project skill instead of the SDK core.
-
----
-
-## Sequencing
-
-The practical order is:
-
-1. **Protect the current runtime.** Regression tests, cleanup, compatibility,
-   cancellation, resume, and concurrency guarantees.
-2. **Make extension safer.** Compliance helpers, templates, and clearer docs for
-   implementers.
-3. **Improve diagnostics.** Reports and summaries that make production failures
-   explainable.
-4. **Add only opt-in recovery.** Recovery features that change cost, duration, or
-   model behavior require explicit knobs.
-5. **Keep adapters outside core.** Use examples and optional packages to prove
-   protocols without bloating `linch`.
-
-This keeps Linch strong where an embedding kit must be strong: runtime
-correctness, extension seams, operational evidence, and blast-radius controls.
-
----
-
-## Docs
-
-Topic-split usage guide under `docs/usage/` covers agent configuration,
-providers, events, tools, structured output, hooks, context and memory,
-filesystem, workflows, deep-agent, coordination, loop runner, skills, extending,
-and examples. `docs/usage.md` is retained as a redirect index.
+When a phase meets its completion criteria, remove it from this active roadmap
+and preserve its lasting contract in `docs/architecture/` or `docs/usage/`.
