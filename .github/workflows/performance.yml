@@ -41,12 +41,14 @@ jobs:
           python -m pip install -e ".[dev,mcp,anthropic,gemini]"
 
       - name: Run benchmark (record only)
+        env:
+          BENCHMARK_SAMPLES: ${{ github.event.inputs.samples || '20' }}
         run: |
           python scripts/benchmark_runtime.py \
             --json \
-            --samples "${{ github.event.inputs.samples || '20' }}" \
+            --samples "$BENCHMARK_SAMPLES" \
             > benchmark-runtime.json
-          python scripts/benchmark_runtime.py --samples "${{ github.event.inputs.samples || '20' }}"
+          python scripts/benchmark_runtime.py --samples "$BENCHMARK_SAMPLES"
 
       - name: Upload benchmark JSON
         uses: actions/upload-artifact@v4

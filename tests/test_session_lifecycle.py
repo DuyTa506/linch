@@ -85,6 +85,23 @@ async def test_force_release_aborts_and_unregisters_active_session() -> None:
     assert session._abort_controller.aborted
 
 
+async def test_force_release_continues_after_generator_teardown_error() -> None:
+    agent = _agent()
+    session = await agent.session(id="s1")
+
+    class FailingGenerator:
+        async def aclose(self) -> None:
+            raise ValueError("teardown failed")
+
+    session._active = True
+    session._active_gen = FailingGenerator()
+
+    await agent.release_session(session, force=True)
+
+    assert session._closed
+    assert "s1" not in agent._sessions
+
+
 async def test_async_context_manager_releases_on_exit() -> None:
     agent = _agent()
     session = await agent.session(id="s1")

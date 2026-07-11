@@ -126,7 +126,7 @@ async def run_ralph_loop(
             # Dispose the finished session so a long loop doesn't accumulate one
             # per pass. release_session() aborts any in-flight work, finalizes the
             # session, and unregisters exactly this instance from the agent.
-            await agent.release_session(session)
+            await agent.release_session(session, force=True)
 
         if on_iteration is not None:
             on_iteration(i, final_text)

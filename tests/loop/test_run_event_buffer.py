@@ -12,6 +12,8 @@ from typing import Any
 
 from test_run_resume import ScriptProvider, _agent, _memory_session_store, _registry
 
+from linch.events import PartialAssistantEvent
+from linch.loop.checkpoint import RunEventBuffer
 from linch.run_store import InMemoryRunStore
 
 
@@ -25,6 +27,69 @@ class _RecordingRunStore(InMemoryRunStore):
     async def append_events(self, run_id: str, events: list[Any]) -> list[int]:
         self.batches.append([event.type for event in events])
         return await super().append_events(run_id, events)
+
+
+class _FailOnceBatchStore:
+    def __init__(self) -> None:
+        self.fail = True
+        self.events: list[Any] = []
+
+    async def append_events(self, run_id: str, events: list[Any]) -> list[int]:
+        if self.fail:
+            self.fail = False
+            raise OSError("temporary batch failure")
+        self.events.extend(events)
+        return list(range(1, len(events) + 1))
+
+
+class _FailOnceSingleStore:
+    def __init__(self) -> None:
+        self.fail = True
+        self.events: list[Any] = []
+
+    async def append_event(self, run_id: str, event: Any) -> int:
+        if self.fail:
+            self.fail = False
+            raise OSError("temporary append failure")
+        self.events.append(event)
+        return len(self.events)
+
+
+async def test_failed_batch_flush_restores_pending_events_for_retry() -> None:
+    store = _FailOnceBatchStore()
+    buffer = RunEventBuffer(store, "r1")
+    events = [PartialAssistantEvent(delta={"text": text}) for text in ("a", "b")]
+    for event in events:
+        await buffer.append(event)
+
+    try:
+        await buffer.flush()
+        raise AssertionError("expected first flush to fail")
+    except OSError:
+        pass
+
+    assert buffer.last_seq == 0
+    assert buffer._pending == events
+    assert await buffer.flush() == 2
+    assert store.events == events
+
+
+async def test_failed_single_event_flush_restores_pending_events_for_retry() -> None:
+    store = _FailOnceSingleStore()
+    buffer = RunEventBuffer(store, "r1")
+    event = PartialAssistantEvent(delta={"text": "a"})
+    await buffer.append(event)
+
+    try:
+        await buffer.flush()
+        raise AssertionError("expected first flush to fail")
+    except OSError:
+        pass
+
+    assert buffer.last_seq == 0
+    assert buffer._pending == [event]
+    assert await buffer.flush() == 1
+    assert store.events == [event]
 
 
 async def test_observational_events_batch_and_tool_events_flush_per_event() -> None:

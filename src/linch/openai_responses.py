@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from ._client_lifecycle import aclose_client
 from ._http_errors import (
     error_message,
     error_status,
@@ -304,12 +304,7 @@ class OpenAIResponsesClient:
         self.client = None
         if client is None:
             return
-        closer = getattr(client, "aclose", None) or getattr(client, "close", None)
-        if closer is None:
-            return
-        result = closer()
-        if inspect.isawaitable(result):
-            await result
+        await aclose_client(client)
 
 
 async def map_wire_events(

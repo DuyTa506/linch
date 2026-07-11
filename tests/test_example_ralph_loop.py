@@ -10,6 +10,9 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
 
@@ -73,3 +76,28 @@ async def test_ralph_loop_is_bounded_when_it_never_converges() -> None:
 
     # max_iterations is the fallibility backstop — the loop gives up, doesn't hang.
     assert result == {"iterations": 3, "done": False}
+
+
+async def test_ralph_loop_forces_cleanup_without_replacing_run_error() -> None:
+    recipe = _load()
+    released: list[tuple[Any, bool]] = []
+
+    class FailingSession:
+        async def run(self, _prompt: str):
+            yield type("Event", (), {"type": "message"})()
+            raise ValueError("pass failed")
+
+    class FakeAgent:
+        async def session(self) -> FailingSession:
+            return FailingSession()
+
+        async def release_session(self, session: Any, force: bool = False) -> None:
+            released.append((session, force))
+            if not force:
+                raise RuntimeError("active run")
+
+    with pytest.raises(ValueError, match="pass failed"):
+        await recipe.run_ralph_loop(FakeAgent(), object(), max_iterations=1)
+
+    assert len(released) == 1
+    assert released[0][1] is True
