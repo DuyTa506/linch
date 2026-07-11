@@ -56,15 +56,23 @@ class RunEventBuffer:
             return self._last_seq
         pending = self._pending
         self._pending = []
-        try:
-            appender = getattr(self.store, "append_events", None)
-            if appender is not None:
+        appender = getattr(self.store, "append_events", None)
+        if appender is not None:
+            try:
                 seqs = await appender(self.run_id, pending)
-            else:
-                seqs = [await self.store.append_event(self.run_id, event) for event in pending]
-        except BaseException:
-            self._pending = pending + self._pending
-            raise
+            except BaseException:
+                self._pending = pending + self._pending
+                raise
+        else:
+            seqs = []
+            for index, event in enumerate(pending):
+                try:
+                    seq = await self.store.append_event(self.run_id, event)
+                except BaseException:
+                    self._pending = pending[index:] + self._pending
+                    raise
+                seqs.append(seq)
+                self._last_seq = max(self._last_seq, seq)
         if seqs:
             # max (not seqs[-1]): a test store may return 0 for a dropped event;
             # keep the watermark monotonic.

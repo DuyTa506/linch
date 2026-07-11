@@ -42,14 +42,18 @@ class _FailOnceBatchStore:
         return list(range(1, len(events) + 1))
 
 
-class _FailOnceSingleStore:
+class _FailSecondSingleStore:
     def __init__(self) -> None:
-        self.fail = True
+        self.calls = 0
         self.events: list[Any] = []
+        self.buffer: RunEventBuffer | None = None
+        self.concurrent_event = PartialAssistantEvent(delta={"text": "concurrent"})
 
     async def append_event(self, run_id: str, event: Any) -> int:
-        if self.fail:
-            self.fail = False
+        self.calls += 1
+        if self.calls == 2:
+            assert self.buffer is not None
+            await self.buffer.append(self.concurrent_event)
             raise OSError("temporary append failure")
         self.events.append(event)
         return len(self.events)
@@ -74,11 +78,13 @@ async def test_failed_batch_flush_restores_pending_events_for_retry() -> None:
     assert store.events == events
 
 
-async def test_failed_single_event_flush_restores_pending_events_for_retry() -> None:
-    store = _FailOnceSingleStore()
+async def test_failed_single_event_flush_preserves_progress_and_requeues_unattempted() -> None:
+    store = _FailSecondSingleStore()
     buffer = RunEventBuffer(store, "r1")
-    event = PartialAssistantEvent(delta={"text": "a"})
-    await buffer.append(event)
+    store.buffer = buffer
+    events = [PartialAssistantEvent(delta={"text": text}) for text in ("a", "b", "c")]
+    for event in events:
+        await buffer.append(event)
 
     try:
         await buffer.flush()
@@ -86,10 +92,12 @@ async def test_failed_single_event_flush_restores_pending_events_for_retry() -> 
     except OSError:
         pass
 
-    assert buffer.last_seq == 0
-    assert buffer._pending == [event]
-    assert await buffer.flush() == 1
-    assert store.events == [event]
+    assert buffer.last_seq == 1
+    assert buffer._pending == [events[1], events[2], store.concurrent_event]
+    assert store.events == [events[0]]
+
+    assert await buffer.flush() == 4
+    assert store.events == [*events, store.concurrent_event]
 
 
 async def test_observational_events_batch_and_tool_events_flush_per_event() -> None:
