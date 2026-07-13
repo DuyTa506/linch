@@ -119,6 +119,7 @@ work.
 | Off-loop discovery | Skill and subagent disk discovery run on the blocking bridge, off the event loop | [architecture/skills-subagents.md](./architecture/skills-subagents.md) |
 | Durable steering | `session.align()` queue snapshotted into every run checkpoint and restored on resume: in-order, at-least-once delivery across crash/resume; mid-turn resumes defer the drain past the re-executed tool batch | [usage/agent.md](./usage/agent.md#steering-an-in-flight-run) |
 | GenAI semconv traces | `OpenTelemetryObserver` emits `gen_ai.*` semantic-convention attributes (operation, provider, conversation, cache tokens, tool call) alongside unchanged `linch.*` names | [usage/hooks.md](./usage/hooks.md#genai-semantic-conventions) |
+| Scaffolding CLI | Stdlib-only `linch new` / `linch add tool` console script; generated projects run and test offline; core import graph untouched | [usage/cli.md](./usage/cli.md) |
 
 ### Deferred: central-loop structural split
 

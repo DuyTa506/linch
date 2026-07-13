@@ -23,6 +23,10 @@ pip install -e '.[dev,mcp,anthropic,gemini]'
 Linch targets Python 3.10+. Optional extras are intentionally split by feature;
 you only need provider extras when you use those providers.
 
+Prefer a ready-made project? `linch new my-agent` scaffolds a runnable,
+offline-testable agent project — see the [Scaffolding CLI](./cli.md). The rest
+of this page builds the same shapes by hand.
+
 ## 2. Run an offline smoke test
 
 This verifies the SDK shape without an API key or network call.
