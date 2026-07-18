@@ -217,7 +217,10 @@ async def run_subagent(args: RunSubagentArgs) -> RunSubagentResult:
     if tools_filter is None:
         tools_filter = args.definition.frontmatter.tools
 
-    effective_tools = args.parent_session.tools_override or agent.tools
+    effective_tools = args.parent_session.tools_override
+    if effective_tools is None:
+        worker_catalog = getattr(agent, "_subagent_tool_registry", None)
+        effective_tools = worker_catalog if worker_catalog is not None else agent.tools
 
     if args.fork:
         # Fork: reuse the parent's tools and system blocks verbatim (and seed the

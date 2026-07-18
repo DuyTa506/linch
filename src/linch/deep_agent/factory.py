@@ -108,13 +108,16 @@ def create_deep_agent(
         raise ConfigError("create_deep_agent(coordinator=True) requires features.subagents=True")
 
     root = Path(cwd or ".").resolve()
-    registry = _deep_agent_tools(
+    worker_registry = _deep_agent_tools(
         tools,
         memory_store=memory_store,
         namespace=memory_namespace,
-        coordinator=coordinator,
         features=features,
     )
+    registry = worker_registry.copy() if coordinator else worker_registry
+    if coordinator:
+        for name in _COORDINATOR_EXCLUDED_TOOLS:
+            registry.unregister(name)
     prompt_config = _merge_deep_agent_prompt(
         system_prompt_config, system_prompt, coordinator=coordinator
     )
@@ -148,7 +151,7 @@ def create_deep_agent(
                 routes={"/memories": SqliteFileBackend(store_root / "memories.db")},
             )
 
-    return Agent(
+    agent = Agent(
         model=model,
         cwd=str(root),
         tools=registry,
@@ -163,6 +166,9 @@ def create_deep_agent(
         extra_subagents=DEEP_AGENT_SUBAGENTS,
         **agent_kwargs,
     )
+    if coordinator:
+        agent._set_subagent_tool_registry(worker_registry)
+    return agent
 
 
 def _deep_agent_tools(
@@ -170,7 +176,6 @@ def _deep_agent_tools(
     *,
     memory_store: MemoryStore | None,
     namespace: str | None,
-    coordinator: bool = False,
     features: FeatureFlags | None = None,
 ) -> ToolRegistry:
     registry = tools.copy() if tools is not None else default_tools()
@@ -184,12 +189,6 @@ def _deep_agent_tools(
         ):
             if registry.get(tool.name) is None:
                 registry.register(cast("Tool", tool))
-    if coordinator:
-        # Strip heavy tools from the coordinator parent.
-        # Workers receive full access through SubagentTool → build_child_tools.
-        for name in list(_COORDINATOR_EXCLUDED_TOOLS):
-            if registry.get(name) is not None:
-                registry.unregister(name)
     return registry
 
 
