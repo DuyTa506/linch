@@ -67,19 +67,19 @@ is simply asked to emit a JSON object as its final answer.
 
 ### Native final-tool capture
 
-When the provider declares `structured_output` in its `ProviderCapabilities`
-(for example `AnthropicProvider`, which uses a forced-tool method), the loop
+When a provider declares `structured_output_terminal_tool` in its
+`ProviderCapabilities` (the explicit Anthropic-compatible fallback), the loop
 wires your schema's `name` as a **terminal tool**. The model "calls" that tool
 with arguments matching the schema, and the loop captures `final_block.input` as
-`structured_output` directly — without executing a real tool. This is more
-reliable than parsing JSON out of prose because the provider constrains the tool
-arguments to your schema.
+`structured_output` directly — without executing a real tool. Native Claude,
+OpenAI, Gemini, and DeepSeek instead return JSON text in their own response
+formats and use the normal parse-and-validate final-answer path.
 
 You can also force this path explicitly with `final_tool_name`
 (`Agent(final_tool_name=...)` or `RunOptions(final_tool_name=...)`); an explicit
 value wins over the capability-driven auto-wiring. The resolution order is:
 `RunOptions.final_tool_name` → `Agent.final_tool_name` → schema name when the
-provider supports native structured output.
+provider explicitly declares terminal-tool structured output.
 
 ### OpenAI-compatible endpoints: `json_mode` (DeepSeek and friends)
 
@@ -113,8 +113,9 @@ provider = OpenAIChatCompletionsProvider(
 
 With `json_object`, the API only guarantees valid JSON — Linch then **text-parses
 and validates** it against your `OutputSchema.schema` (the JSON-text path above),
-so you still get a checked `structured_output`. `AnthropicProvider` is unaffected:
-it has no `response_format` and uses the forced-tool method regardless.
+so you still get a checked `structured_output`. Native `AnthropicProvider` uses
+`output_config.format` JSON schema. Its explicit `api_mode="compatible"` fallback
+uses a generated terminal tool only for endpoints that lack that native format.
 
 ---
 

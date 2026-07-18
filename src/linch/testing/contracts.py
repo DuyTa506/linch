@@ -433,7 +433,13 @@ async def assert_provider_contract(
         )
 
         caps = provider.capabilities(model)
-        for name in ("parallel_tool_calls", "structured_output", "tool_choice", "prompt_cache"):
+        for name in (
+            "parallel_tool_calls",
+            "structured_output",
+            "structured_output_terminal_tool",
+            "tool_choice",
+            "prompt_cache",
+        ):
             assert isinstance(getattr(caps, name), bool), f"capabilities.{name} must be a bool"
         assert isinstance(caps.context_window, int) and caps.context_window > 0, (
             "capabilities.context_window must be a positive int"

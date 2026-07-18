@@ -9,6 +9,7 @@ from .base import (
     ThinkingEnabled,
 )
 from .catalog import ProviderModelInfo, get_provider_model_info, list_provider_models
+from .deepseek import DeepSeekProvider, DeepSeekProviderOptions
 from .gemini import GeminiProvider, GeminiProviderOptions
 from .llamacpp import LlamaCppProvider, LlamaCppProviderOptions
 from .openai_chat import OpenAIChatCompletionsProvider, OpenAIChatProviderOptions
@@ -21,6 +22,8 @@ __all__ = [
     "AnthropicProvider",
     "AnthropicProviderOptions",
     "BaseProvider",
+    "DeepSeekProvider",
+    "DeepSeekProviderOptions",
     "EffortLevel",
     "GeminiProvider",
     "GeminiProviderOptions",

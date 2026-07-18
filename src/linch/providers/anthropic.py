@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, Literal, cast
+from urllib.parse import urlparse
 
 from linch._client_lifecycle import aclose_client
 from linch._http_errors import (
@@ -49,13 +50,25 @@ _KNOWN_CONTEXT = {
 # Anthropic requires max_tokens; use this when the caller doesn't set one.
 _DEFAULT_MAX_TOKENS = 8096
 
+AnthropicAPIMode = Literal["auto", "native", "compatible"]
+
 
 @dataclass(slots=True)
 class AnthropicProviderOptions:
     api_key: str | None = None
     base_url: str | None = None
     default_headers: dict[str, str] | None = None
-    thinking: object | None = None
+    # Native Messages API configuration, for example
+    # {"type": "enabled", "budget_tokens": 4096}, {"type": "adaptive"},
+    # or {"type": "disabled"}. ``None`` deliberately preserves the model's
+    # provider-default thinking behavior.
+    thinking: dict[str, Any] | None = None
+    # ``native`` uses Claude Messages features such as
+    # ``output_config.format``. ``compatible`` retains the generated final
+    # schema-tool fallback for Anthropic-shaped third-party APIs. ``auto`` is
+    # native only for the direct Anthropic endpoint (or its SDK default), which
+    # keeps unknown proxies on the conservative compatible path.
+    api_mode: AnthropicAPIMode = "auto"
     effort: str | None = None
 
 
@@ -70,8 +83,10 @@ class AnthropicProvider(BaseProvider):
         return _KNOWN_CONTEXT.get(model, 200_000)
 
     def capabilities(self, model: ModelId) -> ProviderCapabilities:
-        # structured_output=True via the forced-tool method (Feature A)
-        return full_capabilities(self.context_window(model))
+        return full_capabilities(
+            self.context_window(model),
+            structured_output_terminal_tool=_effective_api_mode(self._options) == "compatible",
+        )
 
     async def _get_client(self) -> Any:
         if self._client is not None:
@@ -211,6 +226,10 @@ class AnthropicProvider(BaseProvider):
 
 def _build_payload(req: ProviderRequest, opts: AnthropicProviderOptions) -> dict[str, Any]:
     """Translate a :class:`ProviderRequest` into an Anthropic API payload dict."""
+    api_mode = _effective_api_mode(opts)
+    # Resolve this before structured-output handling: compatible APIs cannot
+    # combine a forced ``tool_choice`` with active extended/adaptive thinking.
+    thinking_cfg = _effective_thinking(req, opts)
     payload: dict[str, Any] = {
         "model": req.model,
         "max_tokens": req.max_output_tokens or _DEFAULT_MAX_TOKENS,
@@ -235,16 +254,30 @@ def _build_payload(req: ProviderRequest, opts: AnthropicProviderOptions) -> dict
     if req.stop_sequences:
         payload["stop_sequences"] = req.stop_sequences
 
+    # Native Claude JSON output and provider effort share ``output_config``.
+    # DeepSeek's Anthropic-compatible API supports only ``effort`` here, so it
+    # must never receive the native ``format`` object.
+    output_config: dict[str, Any] = {}
+    effort = _effective_effort(req, opts)
+    if effort is not None:
+        output_config["effort"] = effort
+    if req.output_schema is not None and api_mode == "native":
+        output_config["format"] = {
+            "type": "json_schema",
+            "schema": req.output_schema.schema,
+        }
+    if output_config:
+        payload["output_config"] = output_config
+
     # ── Tool choice ───────────────────────────────────────────────────────
     if req.tool_choice is not None:
         payload["tool_choice"] = _translate_tool_choice(req.tool_choice)
 
-    # ── Output schema (Anthropic forced-tool method) ──────────────────────
-    # Anthropic has no response_format; structured output is achieved by
-    # synthesising a tool whose input_schema matches the caller's schema and
-    # forcing the model to call it.  The loop terminal-tool path then captures
-    # final_block.input as structured_output without executing a real tool.
-    if req.output_schema is not None:
+    # ── Output schema (conservative compatible fallback) ─────────────────
+    # Native Claude uses ``output_config.format`` above. A third-party API that
+    # only accepts Anthropic-shaped messages may not implement it, so retain
+    # the generated terminal-tool fallback in explicitly compatible mode.
+    if req.output_schema is not None and api_mode == "compatible":
         schema_tool: dict[str, Any] = {
             "name": req.output_schema.name,
             "description": req.output_schema.description or "",
@@ -252,19 +285,62 @@ def _build_payload(req: ProviderRequest, opts: AnthropicProviderOptions) -> dict
         }
         existing_tools = list(payload.get("tools", []))
         payload["tools"] = existing_tools + [schema_tool]
-        # Force the schema tool only when it is the sole tool available so the
-        # model cannot bypass it.  When real tools are also present use "auto"
-        # so the model can call them first and invoke the schema tool when ready.
-        if not existing_tools:
-            payload["tool_choice"] = {"type": "tool", "name": req.output_schema.name}
+        # Force the schema tool only when it is the sole tool available and
+        # thinking is disabled. Anthropic only permits ``auto`` or ``none``
+        # tool choice with active extended/adaptive thinking. An explicit
+        # caller choice always wins.
+        if not existing_tools and req.tool_choice is None:
+            if _thinking_is_active(thinking_cfg):
+                payload["tool_choice"] = {"type": "auto"}
+            else:
+                payload["tool_choice"] = {"type": "tool", "name": req.output_schema.name}
 
     # ── Thinking ──────────────────────────────────────────────────────────
-    # req.thinking wins over constructor-level options.thinking.
-    thinking_cfg = req.thinking or (opts.thinking if isinstance(opts.thinking, dict) else None)
-    if thinking_cfg:
+    if thinking_cfg is not None:
         payload["thinking"] = thinking_cfg
 
     return payload
+
+
+def _effective_thinking(
+    req: ProviderRequest,
+    opts: AnthropicProviderOptions,
+) -> dict[str, Any] | None:
+    """Return a copied native thinking config, with a per-run override winning."""
+
+    configured = req.thinking if req.thinking is not None else opts.thinking
+    return dict(configured) if configured else None
+
+
+def _effective_effort(req: ProviderRequest, opts: AnthropicProviderOptions) -> str | None:
+    """Return a run-level effort override or the provider default."""
+
+    return req.effort if req.effort is not None else opts.effort
+
+
+def _effective_api_mode(opts: AnthropicProviderOptions) -> Literal["native", "compatible"]:
+    """Select native Claude features only for the direct Messages endpoint.
+
+    Anthropic-compatible endpoints intentionally default to the conservative
+    path: sharing a request shape does not imply support for Claude's newer
+    JSON-schema or thinking semantics. Callers that own a compatible proxy can
+    opt into ``api_mode=\"native\"`` explicitly after verifying it.
+    """
+
+    if opts.api_mode == "native":
+        return "native"
+    if opts.api_mode == "compatible":
+        return "compatible"
+    if opts.base_url is None:
+        return "native"
+    host = (urlparse(opts.base_url).hostname or "").lower()
+    return "native" if host == "api.anthropic.com" else "compatible"
+
+
+def _thinking_is_active(thinking: dict[str, Any] | None) -> bool:
+    """Whether Anthropic's tool-choice restrictions apply to this request."""
+
+    return thinking is not None and thinking.get("type") != "disabled"
 
 
 def _translate_system(
@@ -333,26 +409,24 @@ def _translate_messages(
             if content:
                 result.append({"role": "assistant", "content": content})
         else:
-            # user messages may interleave text, images, and tool results
-            text_parts: list[dict[str, Any]] = []
+            # Anthropic requires every result for one assistant tool-use turn
+            # in the immediately following *single* user message. In particular,
+            # splitting parallel results into one user message each leaves the
+            # later tool-use IDs unmatched and the API rejects the request.
+            # Tool-result blocks must lead a mixed user message, so keep their
+            # order and place any ordinary user content after them.
+            tool_result_parts: list[dict[str, Any]] = []
+            content_parts: list[dict[str, Any]] = []
             for block in msg.content:
                 if isinstance(block, ToolResultBlock):
-                    # Flush accumulated text parts before emitting tool result
-                    if text_parts:
-                        emitted_for_message.append({"role": "user", "content": text_parts})
-                        text_parts = []
-                    emitted_for_message.append(
-                        {
-                            "role": "user",
-                            "content": [_translate_tool_result(block)],
-                        }
-                    )
+                    tool_result_parts.append(_translate_tool_result(block))
                 elif isinstance(block, TextBlock):
-                    text_parts.append({"type": "text", "text": block.text})
+                    content_parts.append({"type": "text", "text": block.text})
                 elif isinstance(block, ImageBlock):
-                    text_parts.append(_translate_image(block))
-            if text_parts:
-                emitted_for_message.append({"role": "user", "content": text_parts})
+                    content_parts.append(_translate_image(block))
+            content = tool_result_parts + content_parts
+            if content:
+                emitted_for_message.append({"role": "user", "content": content})
             if cache and index == last_user_index:
                 mark_last_cacheable_message_content(
                     emitted_for_message,
