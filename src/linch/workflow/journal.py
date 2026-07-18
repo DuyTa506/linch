@@ -1,10 +1,11 @@
 """Content-addressed journal for workflow resume.
 
 Each ``wf.agent`` call is keyed by ``sha256(subagent_type, prompt,
-run_options)`` plus a per-key occurrence counter, so identical calls issued in
-parallel replay deterministically regardless of completion order, and an
-edited prompt or structured-output option produces a new key (cache miss)
-without disturbing the rest of the prefix.
+call_options)`` plus a per-key occurrence counter. ``call_options`` includes
+both the tool filter and replay-relevant run options, so a changed tool policy
+cannot reuse a result produced under different capabilities. Identical calls
+issued in parallel still replay deterministically regardless of completion
+order.
 
 There is no journal table: persisted ``WorkflowEvent`` records in the run
 store's event log *are* the journal — :meth:`WorkflowJournal.from_stored_events`

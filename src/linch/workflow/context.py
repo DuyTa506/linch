@@ -124,7 +124,11 @@ class WorkflowContext:
             output_schema=output_schema,
             final_tool_name=final_tool_name,
         )
-        options_fingerprint = _run_options_fingerprint(effective_run_options)
+        effective_tools_filter = tools if tools is not None else definition.frontmatter.tools
+        options_fingerprint = _call_options_fingerprint(
+            tools=effective_tools_filter,
+            run_options=effective_run_options,
+        )
         key = call_key(subagent_type, prompt, options_fingerprint)
         occurrence = self._journal.next_occurrence(key)
         display_name = label or name or "agent"
@@ -263,6 +267,20 @@ def _run_options_fingerprint(run_options: RunOptions | None) -> str:
             payload[field.name] = _fingerprint_value(value)
     if not payload:
         return ""
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _call_options_fingerprint(
+    *,
+    tools: list[str] | None,
+    run_options: RunOptions | None,
+) -> str:
+    run_options_fingerprint = _run_options_fingerprint(run_options)
+    if tools is None:
+        return run_options_fingerprint
+    payload: dict[str, Any] = {"tools": tools}
+    if run_options_fingerprint:
+        payload["run_options"] = json.loads(run_options_fingerprint)
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
