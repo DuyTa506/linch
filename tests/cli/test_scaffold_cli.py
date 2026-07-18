@@ -34,6 +34,20 @@ def _load_module(path: Path, name: str):
     return module
 
 
+def _assert_only_top_level_linch_imports(path: Path) -> None:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    imported_modules: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("linch"):
+            imported_modules.append(node.module)
+        elif isinstance(node, ast.Import):
+            imported_modules.extend(
+                alias.name for alias in node.names if alias.name.startswith("linch")
+            )
+    assert imported_modules
+    assert set(imported_modules) == {"linch"}
+
+
 async def _final_text(agent) -> str:
     session = await agent.session()
     final = ""
@@ -116,6 +130,14 @@ def test_new_generated_python_parses(tmp_path):
         ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
 
 
+def test_new_generated_python_uses_only_top_level_linch_imports(tmp_path):
+    proj = _new_project(tmp_path)
+    linch_consumers = [path for path in proj.rglob("*.py") if "from linch" in path.read_text()]
+    assert linch_consumers
+    for path in linch_consumers:
+        _assert_only_top_level_linch_imports(path)
+
+
 def test_new_kebab_maps_to_snake(tmp_path):
     proj = _new_project(tmp_path)
     text = (proj / "pyproject.toml").read_text(encoding="utf-8")
@@ -148,7 +170,7 @@ def test_new_allows_empty_existing_dir(tmp_path):
 
 
 async def test_generated_greet_tool_passes_contract(tmp_path):
-    from linch.testing import assert_tool_contract
+    from linch import assert_tool_contract
 
     proj = _new_project(tmp_path)
     module = _load_module(proj / "src" / "my_agent" / "tools" / "greet.py", "generated_greet")
@@ -157,7 +179,7 @@ async def test_generated_greet_tool_passes_contract(tmp_path):
 
 
 async def test_generated_agent_runs_offline(tmp_path, monkeypatch):
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch import ScriptedProvider, TextTurn
 
     proj = _new_project(tmp_path, "offline-proof")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -176,7 +198,7 @@ async def test_generated_agent_runs_offline(tmp_path, monkeypatch):
 
 
 async def test_generated_agent_tool_wiring(tmp_path, monkeypatch):
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch import ScriptedProvider, TextTurn, ToolUseTurn
 
     proj = _new_project(tmp_path, "wiring-proof")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -199,7 +221,7 @@ async def test_generated_agent_tool_wiring(tmp_path, monkeypatch):
 
 
 async def test_add_tool_creates_stub_and_test(tmp_path):
-    from linch.testing import assert_tool_contract
+    from linch import assert_tool_contract
 
     proj = _new_project(tmp_path)
     assert main(["add", "tool", "web-search", "--dir", str(proj)]) == 0
@@ -209,6 +231,8 @@ async def test_add_tool_creates_stub_and_test(tmp_path):
     assert test_path.is_file()
     ast.parse(tool_path.read_text(encoding="utf-8"))
     ast.parse(test_path.read_text(encoding="utf-8"))
+    _assert_only_top_level_linch_imports(tool_path)
+    _assert_only_top_level_linch_imports(test_path)
     module = _load_module(tool_path, "generated_web_search")
     result = await assert_tool_contract(
         module.web_search, valid_input={"query": "example"}, invalid_input={}

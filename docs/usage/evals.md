@@ -9,18 +9,18 @@ changes without building a separate test runner.
 ```python
 import asyncio
 
-from linch import Agent
-from linch.evals import (
+from linch import (
+    Agent,
     EvalBenchmarkTarget,
     EvalCase,
     EvalSuite,
+    InMemorySessionStore,
     ScriptedProvider,
     TextTurn,
+    empty_tools,
     run_eval_benchmark,
     text_contains,
 )
-from linch.sessions import InMemorySessionStore
-from linch.tools.registry import empty_tools
 
 
 def agent_for(*answers: str) -> Agent:
@@ -128,7 +128,7 @@ scorers:
     budget_usd: 0.05
 ```
 
-Supported scorer types map to the built-in `linch.evals` scorers:
+Supported scorer types map to the built-in scorers exported from `linch`:
 
 | Type | Fields |
 |---|---|
@@ -142,6 +142,11 @@ Supported scorer types map to the built-in `linch.evals` scorers:
 | `memory_recalled` | `id` or `ids` |
 | `recovery_succeeded` | optional `tool` |
 | `run_completed` | none |
+
+`schema_valid` requires the optional `jsonschema` package. It fails closed
+(returns `False`) when that validator is unavailable, so an unchecked output
+cannot silently pass an eval. The development extra installs it; minimal runtime
+environments that use this scorer should install `jsonschema` explicitly.
 
 Scripted turn files may be JSON or YAML and can either be a list or an object
 with a `turns` list. A text turn is:

@@ -12,6 +12,14 @@ A protocol is satisfied structurally: implement the listed methods with matching
 signatures and pass your object where the built-in adapter would go. The runtime
 probes optional methods with `getattr`/`hasattr`, so adding extra methods is harmless.
 
+Import supported extension contracts and policy primitives from the top-level package.
+For example, custom permission policies can construct their ordered rules without
+depending on a private module path:
+
+```python
+from linch import BashRule, PathRule, ToolRule
+```
+
 Reusable contract checks are available for seams with non-obvious async store
 invariants:
 
@@ -222,8 +230,7 @@ supply over neutral wiring in `memory/lifecycle.py`.
 propose what to persist:
 
 ```python
-from linch.memory.lifecycle import MemoryExtractionContext
-from linch import MemoryItem
+from linch import MemoryExtractionContext, MemoryItem
 
 async def my_extractor(ctx: MemoryExtractionContext) -> list[MemoryItem]:
     # ctx.history is the pre-trim full_history tail (the complete record, not the
@@ -240,7 +247,7 @@ the terminal-turn chokepoint and upserts what it returns.
 + an in-process single-flight lock:
 
 ```python
-from linch.memory.lifecycle import ConsolidationGate
+from linch import ConsolidationGate
 
 gate = ConsolidationGate(min_interval_s=300, min_changes=20)
 gate.record(n)                       # note n memories changed
