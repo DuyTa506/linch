@@ -191,6 +191,60 @@ async def test_wf_agent_run_options_are_part_of_replay_key() -> None:
     assert provider.calls == 2
 
 
+async def test_wf_agent_tool_filter_is_part_of_replay_key() -> None:
+    from linch import InMemoryRunStore
+
+    provider = CountingTextProvider()
+    agent = _make_agent(provider, run_store=InMemoryRunStore())
+
+    async def flow_with_defaults(wf: Any) -> str:
+        return await wf.agent("same prompt")
+
+    async def flow_with_no_tools(wf: Any) -> str:
+        return await wf.agent("same prompt", tools=[])
+
+    first = await agent.run_workflow(flow_with_defaults, run_id="wf-tool-key")
+    second = await agent.run_workflow(flow_with_no_tools, run_id="wf-tool-key")
+    replay = await agent.run_workflow(flow_with_no_tools, run_id="wf-tool-key")
+
+    assert first == "result-1"
+    assert second == replay == "result-2"
+    assert provider.calls == 2
+
+
+async def test_wf_agent_inherited_subagent_tool_filter_is_part_of_replay_key() -> None:
+    from linch import InMemoryRunStore
+    from linch.subagents.registry import AgentRegistry
+    from linch.subagents.types import AgentDefinition, AgentFrontmatter
+
+    provider = CountingTextProvider()
+    agent = _make_agent(provider, run_store=InMemoryRunStore())
+    definition = AgentDefinition(
+        name="reviewer",
+        file_path="<test>",
+        source="disk",
+        frontmatter=AgentFrontmatter(
+            name="reviewer",
+            description="Review the result.",
+            tools=["Read"],
+        ),
+        body="Review the result.",
+    )
+    agent.subagent_registry = AgentRegistry([definition])
+    agent._subagents_loaded = True
+
+    async def flow(wf: Any) -> str:
+        return await wf.agent("same prompt", name="reviewer")
+
+    first = await agent.run_workflow(flow, run_id="wf-inherited-tool-key")
+    definition.frontmatter.tools = ["Grep"]
+    second = await agent.run_workflow(flow, run_id="wf-inherited-tool-key")
+
+    assert first == "result-1"
+    assert second == "result-2"
+    assert provider.calls == 2
+
+
 async def test_wf_agent_passes_isolation_to_subagent() -> None:
     from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.tools import ToolRegistry, tool

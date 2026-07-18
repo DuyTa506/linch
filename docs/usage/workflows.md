@@ -1,10 +1,10 @@
-# Workflows (deterministic fleet loops)
+# Directed workflows (replayable fleet orchestration)
 
 [← Usage guide](./README.md)
 
-`agent.run_workflow(fn)` runs a plain async Python function that orchestrates subagents deterministically — your script owns the control flow, subagents do the work. This is the "closed loop" counterpart to the LLM-driven coordinator mode: cheap, repeatable, and resumable.
+`agent.run_workflow(fn)` runs a plain async Python function that orchestrates subagents — your code owns the directed control flow, while subagents do the model-directed work. The journal makes an unchanged call prefix replayable and resumable. It is not called closed-loop: that term is reserved for a verifier whose feedback actually decides retry or stop.
 
-Use a workflow when you already know the shape of the orchestration (fan out, verify, aggregate) and want guarantees that the same `run_id` replays identically. If instead you want the model itself to decide which subagents to spawn and when, use [coordinator mode](./deep-agent.md) — a workflow trades that flexibility for determinism and resumability.
+Use a directed workflow when you already know the shape of the orchestration (fan out, verify, aggregate) and want the same `run_id` to replay an unchanged prefix. If instead you want the model itself to decide which subagents to spawn and when, use [coordinator mode](./deep-agent.md) — a workflow trades that flexibility for code-owned planning and resumability.
 
 ---
 
@@ -66,7 +66,7 @@ A few practical notes:
 
 ## Journal and resume
 
-With `run_id` and a `run_store`, each `wf.agent` call's result is persisted as a `WorkflowEvent(kind="agent_end")` in the run's event log. Re-invoking `run_workflow` with the same `run_id` replays the unchanged call prefix from that journal — `kind="agent_replayed"` events fire instead of provider calls. Calls are keyed by a content hash of `(subagent_type, prompt, run_options)` plus an occurrence counter, so identical parallel calls replay safely and an edited prompt or structured-output option invalidates only that call.
+With `run_id` and a `run_store`, each `wf.agent` call's result is persisted as a `WorkflowEvent(kind="agent_end")` in the run's event log. Re-invoking `run_workflow` with the same `run_id` replays the unchanged call prefix from that journal — `kind="agent_replayed"` events fire instead of provider calls. Calls are keyed by a content hash of `(subagent_type, prompt, tools, run_options)` plus an occurrence counter, so identical parallel calls replay safely. Editing a prompt, structured-output option, or tool filter invalidates that call rather than reusing a result produced under a different tool policy.
 
 The `WorkflowEvent` kinds you will see on the `on_event` stream are:
 
@@ -81,9 +81,9 @@ Because the journal is keyed by content hash, resume is precise: editing one pro
 
 ---
 
-## Determinism rule
+## Replay rule
 
-The workflow function must be deterministic — no `random`, wall-clock, or environment-dependent branching — for resume to replay the unchanged prefix correctly.
+The workflow function must keep its control flow deterministic — no `random`, wall-clock, or environment-dependent branching — for resume to replay the unchanged prefix correctly.
 
 If your control flow branches on something non-deterministic (a random sample, the current time, an external API result not captured in a subagent prompt), a resumed run can diverge from the original and the journaled prefix will no longer line up with the calls being made. Keep all variability inside the subagent prompts, where the content hash can track it.
 
