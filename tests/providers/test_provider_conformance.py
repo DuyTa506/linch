@@ -8,8 +8,11 @@ Two layers:
 - Per-provider request-shape checks enforce the rule that *a provider must not
   advertise a capability its request builder ignores*: every provider that
   declares ``tool_choice`` must actually map a forced tool choice into its
-  outgoing request. Transport closers for Anthropic and OpenAI Responses (added
-  in this phase) are checked for effect and idempotency.
+  outgoing request where that wire combination is supported. DeepSeek thinking
+  explicitly disallows forced selection, so its mapping check uses thinking
+  disabled; its native constraint is tested separately. Transport closers for
+  Anthropic and OpenAI Responses (added in this phase) are checked for effect
+  and idempotency.
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ pytestmark = pytest.mark.asyncio
 
 def _all_providers() -> list[tuple[str, Any, str]]:
     from linch.providers.anthropic import AnthropicProvider
+    from linch.providers.deepseek import DeepSeekProvider
     from linch.providers.gemini import GeminiProvider
     from linch.providers.llamacpp import LlamaCppProvider
     from linch.providers.openai_chat import OpenAIChatCompletionsProvider
@@ -37,6 +41,7 @@ def _all_providers() -> list[tuple[str, Any, str]]:
 
     return [
         ("anthropic", AnthropicProvider, "claude-sonnet-4-5"),
+        ("deepseek", DeepSeekProvider, "deepseek-v4-flash"),
         ("openai-chat", OpenAIChatCompletionsProvider, "gpt-4o"),
         ("openai-responses", OpenAIResponsesProvider, "gpt-4o"),
         ("gemini", GeminiProvider, "gemini-2.0-flash"),
@@ -91,9 +96,11 @@ async def test_openai_responses_builder_maps_forced_tool_choice() -> None:
         "LlamaCppProvider",
         "VLLMProvider",
         "SGLangProvider",
+        "DeepSeekProvider",
     ],
 )
 async def test_openai_compatible_builders_map_forced_tool_choice(cls: str) -> None:
+    import linch.providers.deepseek as deepseek
     import linch.providers.llamacpp as llamacpp
     import linch.providers.openai_chat as openai_chat
     import linch.providers.sglang as sglang
@@ -104,8 +111,12 @@ async def test_openai_compatible_builders_map_forced_tool_choice(cls: str) -> No
         "LlamaCppProvider": llamacpp.LlamaCppProvider,
         "VLLMProvider": vllm.VLLMProvider,
         "SGLangProvider": sglang.SGLangProvider,
+        "DeepSeekProvider": deepseek.DeepSeekProvider,
     }
-    provider = lookup[cls]()
+    if cls == "DeepSeekProvider":
+        provider = lookup[cls](deepseek.DeepSeekProviderOptions(thinking="disabled"))
+    else:
+        provider = lookup[cls]()
     payload = provider._build_payload(_req_forcing("Weather"))
     assert payload["tool_choice"] == {"type": "function", "function": {"name": "Weather"}}
 

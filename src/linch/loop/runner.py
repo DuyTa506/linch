@@ -485,16 +485,16 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
     # Resolve final_tool_name: RunOptions wins over Agent
     effective_final_tool = opts.final_tool_name or getattr(agent, "final_tool_name", None)
 
-    # Feature A — when the provider supports native structured output via the
-    # forced-tool method (e.g. AnthropicProvider), wire the output schema name
-    # as the terminal tool so the loop captures final_block.input as
-    # structured_output without executing a real tool.  Explicit final_tool_name
-    # wins if already set.
+    # Providers that synthesize a final schema tool (rather than returning JSON
+    # directly) declare that distinct transport detail in capabilities. Wire the
+    # schema name as terminal only for that mode; native JSON-schema and
+    # JSON-object providers finish through the normal text/JSON parser path.
+    # An explicit final_tool_name still wins.
     if effective_final_tool is None:
         _schema = opts.output_schema or getattr(agent, "output_schema", None)
         if _schema is not None and hasattr(agent.provider, "capabilities"):
             _provider_caps = agent.provider.capabilities(agent.model)
-            if getattr(_provider_caps, "structured_output", False):
+            if getattr(_provider_caps, "structured_output_terminal_tool", False):
                 effective_final_tool = _schema.name
 
     # Loop guard — detects repeated identical tool calls and consecutive

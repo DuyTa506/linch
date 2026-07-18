@@ -74,6 +74,11 @@ advertise a capability its request builder ignores.
   loop.** Providers *declare* what they support; `apply_provider_capabilities` strips
   unsupported fields before each call. The loop has no `if provider == "openai"`
   branches — feature differences are data, handled in one place.
+- **Structured-output transport is explicit.** `structured_output` says a
+  provider can return a checked JSON result; `structured_output_terminal_tool`
+  is true only when that result is represented by a synthetic final tool call.
+  Native JSON-schema and JSON-object providers finish through normal response
+  parsing, avoiding accidental tool-name collisions.
 - **Capability default is conservative.** The base `capabilities()` derives only the
   context window; a provider must opt in to advertising parallel tool calls / structured
   output / caching. A provider that forgets to override under-promises (safe) rather than

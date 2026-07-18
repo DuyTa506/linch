@@ -20,6 +20,7 @@ def test_capabilities_defaults():
     assert caps.context_window == 128_000
     assert caps.parallel_tool_calls is True
     assert caps.structured_output is True
+    assert caps.structured_output_terminal_tool is False
     assert caps.tool_choice is True
     assert caps.prompt_cache is False
 
@@ -98,8 +99,16 @@ def test_anthropic_capabilities():
 
     assert caps.context_window == 200_000
     assert caps.prompt_cache is True
-    assert caps.structured_output is True  # forced-tool method (Feature A)
+    assert caps.structured_output is True
+    assert caps.structured_output_terminal_tool is False
     assert caps.tool_choice is True
+
+    from linch.providers import AnthropicProviderOptions
+
+    compatible = AnthropicProvider(
+        AnthropicProviderOptions(base_url="https://api.deepseek.com/anthropic")
+    ).capabilities("deepseek-v4-flash")
+    assert compatible.structured_output_terminal_tool is True
 
 
 def test_base_provider_default_capabilities():

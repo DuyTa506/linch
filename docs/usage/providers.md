@@ -16,8 +16,9 @@ talking to.
 |---|---|
 | OpenAI reasoning-native models (`o1`, `o3`, `gpt-5`) with effort/summary controls and stateful `previous_response_id` | `OpenAIResponsesProvider` |
 | Standard OpenAI Chat Completions (`gpt-4o`, `gpt-5-nano`) | `OpenAIChatCompletionsProvider` |
-| Any OpenAI-compatible endpoint (Azure, Groq, Together, DeepSeek) | `OpenAIChatCompletionsProvider(base_url=...)` |
-| Anthropic Claude — extended thinking, prompt caching, thinking signatures | `AnthropicProvider` |
+| Any OpenAI-compatible endpoint (Azure, Groq, Together) | `OpenAIChatCompletionsProvider(base_url=...)` |
+| DeepSeek native API — thinking controls, tool-loop reasoning, JSON-object output | `DeepSeekProvider` |
+| Anthropic Claude — adaptive thinking, prompt caching, signed thinking blocks | `AnthropicProvider` |
 | Google Gemini — large context windows, Google tool semantics | `GeminiProvider` (`[gemini]` extra) |
 | A self-hosted `llama.cpp` server | `LlamaCppProvider` |
 | A self-hosted vLLM server | `VLLMProvider` |
@@ -84,8 +85,8 @@ agent = Agent(
 )
 
 # ── Anthropic Claude ─────────────────────────────────────────────────────────
-# Supports extended thinking (budget_tokens), prompt caching, tool use, and
-# structured output through a generated final schema tool.
+# Current Claude models use adaptive thinking + effort, prompt caching, tool
+# use, and native output_config.format JSON schema.
 # include_partial_messages=True streams ThinkingBlock deltas as kind="thinking" events.
 from linch.providers.anthropic import AnthropicProvider, AnthropicProviderOptions
 
@@ -94,11 +95,21 @@ agent = Agent(
     provider=AnthropicProvider(
         AnthropicProviderOptions(
             api_key=os.environ["ANTHROPIC_API_KEY"],
-            thinking={"type": "enabled", "budget_tokens": 5000},
+            thinking={"type": "adaptive"},
+            effort="high",
         )
     ),
     session_store=InMemorySessionStore(),
     include_partial_messages=True,
+)
+
+# ``None`` leaves thinking at the model/provider default. To turn it off on a
+# model that supports disabling it, send the native mode explicitly:
+provider = AnthropicProvider(
+    AnthropicProviderOptions(
+        api_key=os.environ["ANTHROPIC_API_KEY"],
+        thinking={"type": "disabled"},
+    )
 )
 
 # ── Google Gemini ────────────────────────────────────────────────────────────
@@ -114,16 +125,23 @@ agent = Agent(
     session_store=InMemorySessionStore(),
 )
 
-# ── DeepSeek (OpenAI-compatible endpoint) ────────────────────────────────────
+# ── DeepSeek native endpoint ────────────────────────────────────────────────
 # deepseek-v4-flash / deepseek-v4-pro are reasoning models that emit
 # reasoning_content — Linch round-trips it automatically so multi-turn tool
-# loops work without 400 errors.
+# loops work without 400 errors. DeepSeekProvider sends its documented thinking
+# toggle and uses JSON-object mode for OutputSchema.
+# With thinking enabled, DeepSeek accepts automatic/none tool selection only:
+# disable thinking before using a required or named tool_choice.
+from linch.providers import DeepSeekProvider, DeepSeekProviderOptions
+
 agent = Agent(
     model="deepseek-v4-flash",
-    provider=OpenAIChatCompletionsProvider(
-        OpenAIChatProviderOptions(
+    provider=DeepSeekProvider(
+        DeepSeekProviderOptions(
             api_key=os.environ["DEEPSEEK_API_KEY"],
             base_url="https://api.deepseek.com",
+            thinking="enabled",  # use "disabled" for no reasoning
+            effort="high",
         )
     ),
     session_store=InMemorySessionStore(),
@@ -193,13 +211,14 @@ agent = Agent(
     include_partial_messages=True,
 )
 
-# ── DeepSeek via Anthropic-compatible endpoint ───────────────────────────────
+# ── DeepSeek via Anthropic-compatible endpoint (limited compatibility) ───────
 agent = Agent(
     model="deepseek-v4-flash",
     provider=AnthropicProvider(
         AnthropicProviderOptions(
             api_key=os.environ["DEEPSEEK_API_KEY"],
             base_url="https://api.deepseek.com/anthropic",
+            api_mode="compatible",
         )
     ),
     session_store=InMemorySessionStore(),
@@ -212,11 +231,14 @@ A few practical notes on the snippets above:
   `PartialAssistantEvent`s (text *and* thinking deltas). Leave it off and you
   still get the full `AssistantEvent` at the end of each turn — set it when you
   want to render tokens as they arrive in a UI.
-- **DeepSeek is not a separate provider.** It is reached either through the
-  OpenAI Chat Completions path (`base_url="https://api.deepseek.com"`) or, if you
-  prefer Anthropic semantics, through `AnthropicProvider` with the
-  `/anthropic` base URL. The reasoning model's `reasoning_content` is preserved
-  across turns automatically, which is why tool loops don't 400.
+- **Use `DeepSeekProvider` for the native DeepSeek endpoint.** It preserves
+  `reasoning_content` across turns, sends the provider's on/off thinking toggle,
+  and uses the JSON-object format DeepSeek supports. The `/anthropic` route is a
+  compatibility API: it ignores `budget_tokens` and does not support Claude's
+  `output_config.format` JSON schema, so it is unsuitable for strict structured
+  support-agent final answers. While native DeepSeek thinking is enabled, use
+  automatic tool selection; required or named `tool_choice` is rejected by the
+  endpoint, so Linch raises a clear local error instead of sending a 400.
 - **`llama.cpp`** resolves its model name and context window from the running
   server (`/v1/props` or `/props`), so you supply whatever model id the server
   reports. Set `chat_template_kwargs={"enable_thinking": False}` to suppress
@@ -232,10 +254,10 @@ markers and Claude thinking signatures, Gemini for Google model/tool semantics, 
 llama.cpp, vLLM, or SGLang for self-hosted local servers.
 
 Use `OpenAIChatCompletionsProvider(base_url=...)` when a service implements the
-OpenAI Chat Completions protocol. This is the recommended path for DeepSeek,
-Azure, Groq, Together, and similar OpenAI-compatible endpoints. DeepSeek is not
-a separate runtime provider in Linch; configure it with `base_url` and the
-DeepSeek model id.
+OpenAI Chat Completions protocol. This is the recommended path for Azure, Groq,
+Together, and similar OpenAI-compatible endpoints. Use `DeepSeekProvider` for
+the native DeepSeek API, where it owns DeepSeek-specific thinking and
+JSON-object semantics.
 
 llama.cpp, vLLM, and SGLang model names and context windows are deployment
 configuration. `LlamaCppProvider` can auto-detect `n_ctx` from the server when
@@ -278,7 +300,7 @@ rather than a fixed table.
 | `llamacpp` | `LlamaCppProvider` | No, dynamic/self-hosted | `None` unless you pass custom pricing |
 | `vllm` | `VLLMProvider` | No, deployment-specific | `None` unless you pass custom pricing |
 | `sglang` | `SGLangProvider` | No, deployment-specific | `None` unless you pass custom pricing |
-| DeepSeek | OpenAI-compatible `base_url` | No separate provider | `None` unless you pass custom pricing |
+| `deepseek` | `DeepSeekProvider` | No, deployment-specific | `None` unless you pass custom pricing |
 
 Only known Claude models carry pricing out of the box. For every other provider,
 cost fields on usage/result events report `None` until you supply a custom
@@ -300,6 +322,7 @@ backends.
 |---|---:|---:|---:|
 | `openai-responses` | Yes | Yes | Yes |
 | `openai-chat` | Yes | Yes | Yes |
+| `deepseek` | Yes (`json_object` + local validation) | Yes | Yes |
 | `anthropic` | Yes | Yes | Yes |
 | `gemini` | Yes | Yes | Yes |
 | `llamacpp` | Yes | Yes | Yes |
@@ -307,8 +330,9 @@ backends.
 | `sglang` | Yes | Yes | Yes |
 
 Structured output is supported on every direct provider but reached differently
-per backend (Anthropic, for instance, uses a generated final-schema tool). The
-mechanics — and how schema-repair retries work — live in
+per backend (native Claude uses `output_config.format`; the explicit Anthropic
+compatibility mode uses a generated final-schema tool). The mechanics — and how
+schema-repair retries work — live in
 [Structured output](./structured-output.md).
 
 ---
