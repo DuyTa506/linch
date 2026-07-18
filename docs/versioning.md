@@ -9,8 +9,20 @@ The supported public API is exactly the names exported from the top-level packag
 `linch.__all__`. Import from the top level:
 
 ```python
-from linch import Agent, RunBudget, tool   # supported
+from linch import (
+    Agent,
+    EvalCase,
+    RunBudget,
+    ScriptedProvider,
+    ToolRule,
+    run_eval,
+    tool,
+)
 ```
+
+Evaluation harness types/scorers and permission rules are part of that same
+top-level contract; callers do not need to depend on the `linch.evals` or
+`linch.permissions` module paths.
 
 Everything else is an implementation detail:
 

@@ -47,7 +47,9 @@ def tool_called(tool_name: str) -> Callable[..., bool | None]:
 def schema_valid(schema: dict[str, Any]) -> Callable[..., bool | None]:
     """Pass when the output is valid JSON that satisfies *schema*.
 
-    Falls back gracefully when ``jsonschema`` is not installed — returns None.
+    Returns False when ``jsonschema`` is not installed. Schema validation is a
+    pass/fail assertion, so treating an unavailable validator as unknown would
+    let the eval harness silently pass an unchecked output.
     """
 
     def _score(output: str = "", **_: Any) -> bool | None:
@@ -57,13 +59,13 @@ def schema_valid(schema: dict[str, Any]) -> Callable[..., bool | None]:
             return False
         try:
             import jsonschema  # type: ignore[import]
-
+        except ImportError:
+            return False
+        try:
             jsonschema.validate(data, schema)
             return True
-        except jsonschema.ValidationError:
+        except (jsonschema.SchemaError, jsonschema.ValidationError):
             return False
-        except ImportError:
-            return None
 
     _score.__name__ = "schema_valid"
     return _score

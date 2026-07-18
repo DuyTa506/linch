@@ -61,7 +61,7 @@ exist.
     pytest
 
 Tests run offline: the agent is driven by a scripted provider and the tools are
-checked with `linch.testing.assert_tool_contract`.
+checked with the top-level `linch.assert_tool_contract` export.
 
 ## Go live
 
@@ -102,11 +102,14 @@ Linch's default OpenAI provider takes over.
 import asyncio
 import os
 
-from linch import Agent
-from linch.config import FeatureFlags
-from linch.evals import ScriptedProvider, TextTurn
-from linch.sessions import InMemorySessionStore
-from linch.tools.registry import empty_tools
+from linch import (
+    Agent,
+    FeatureFlags,
+    InMemorySessionStore,
+    ScriptedProvider,
+    TextTurn,
+    empty_tools,
+)
 
 from ${package}.tools.greet import greet
 
@@ -170,7 +173,7 @@ TEST_AGENT = Template(
     '''\
 """Offline agent tests — no API key or network required."""
 
-from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+from linch import ScriptedProvider, TextTurn, ToolUseTurn
 
 from ${package}.agent import build_agent
 
@@ -207,7 +210,7 @@ TEST_GREET = Template(
     '''\
 """Contract test for the greet tool."""
 
-from linch.testing import assert_tool_contract
+from linch import assert_tool_contract
 
 from ${package}.tools.greet import greet
 
@@ -240,7 +243,7 @@ TOOL_TEST_STUB = Template(
     '''\
 """Contract test for the ${tool} tool."""
 
-from linch.testing import assert_tool_contract
+from linch import assert_tool_contract
 
 from ${package}.tools.${tool} import ${tool}
 
