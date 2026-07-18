@@ -134,6 +134,16 @@ def test_base_provider_default_capabilities():
     assert caps.structured_output is True
 
 
+def test_scripted_provider_uses_terminal_tool_for_structured_output():
+    """The canonical fake represents a structured result as ``ToolUseTurn``."""
+    from linch.evals import ScriptedProvider
+
+    caps = ScriptedProvider([]).capabilities("test-model")
+
+    assert caps.structured_output is True
+    assert caps.structured_output_terminal_tool is True
+
+
 # ---------------------------------------------------------------------------
 # apply_provider_capabilities downgrade helper
 # ---------------------------------------------------------------------------
