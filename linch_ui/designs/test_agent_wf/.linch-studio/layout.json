@@ -1,0 +1,37 @@
+{
+  "nodes": [
+    {
+      "height": null,
+      "id": "primary_agent",
+      "width": null,
+      "x": -673.0,
+      "y": -404.0
+    },
+    {
+      "height": null,
+      "id": "subagent_subagent",
+      "width": null,
+      "x": -357.0,
+      "y": -447.0
+    },
+    {
+      "height": null,
+      "id": "subagent_subagent_2",
+      "width": null,
+      "x": 280.0,
+      "y": 240.0
+    },
+    {
+      "height": null,
+      "id": "tool_tool",
+      "width": null,
+      "x": -341.0,
+      "y": -457.0
+    }
+  ],
+  "viewport": {
+    "x": 0.0,
+    "y": 0.0,
+    "zoom": 1.0
+  }
+}
