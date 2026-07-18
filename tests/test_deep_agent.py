@@ -461,6 +461,112 @@ async def test_coordinator_mode_restricts_parent_tools(tmp_path: Path) -> None:
     assert "TaskStop" in names
 
 
+async def test_coordinator_worker_retains_heavy_tools(tmp_path: Path) -> None:
+    """The coordinator's parent filter must not narrow an implementer child."""
+    from linch import create_deep_agent
+    from linch.sessions import InMemorySessionStore
+    from linch.tools import ToolContext
+
+    class RecordingProvider(FakeProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.tool_sets: list[set[str]] = []
+
+        async def stream(self, req: Any) -> AsyncIterator[dict[str, object]]:
+            self.tool_sets.append({str(tool["name"]) for tool in req.tools})
+            async for event in super().stream(req):
+                yield event
+
+    provider = RecordingProvider()
+    agent = create_deep_agent(
+        model="gpt-5",
+        provider=provider,
+        cwd=str(tmp_path),
+        coordinator=True,
+        durable=False,
+        session_store=InMemorySessionStore(),
+        permissions={"mode": "skip-dangerous"},
+    )
+    session = await agent.session(id="s1")
+    subagent = agent.tools.get("Subagent")
+    assert subagent is not None
+
+    result = await subagent.execute(
+        {
+            "description": "implementation",
+            "prompt": "Inspect the project and report what should change.",
+            "subagent_type": "implementer",
+        },
+        ToolContext(
+            cwd=agent.cwd,
+            session_id=session.id,
+            run_id="test-run",
+            session_store=session.store,
+            file_read_tracker=session.file_read_tracker,
+            filesystem=session.filesystem,
+        ),
+    )
+
+    assert result.is_error is False
+    parent_tools = {tool.name for tool in agent.tools.list()}
+    assert {"Read", "Write", "Edit", "Bash", "Glob", "Grep"}.isdisjoint(parent_tools)
+    assert provider.tool_sets
+    assert {"Read", "Write", "Edit", "Bash", "Glob", "Grep"} <= provider.tool_sets[0]
+
+
+async def test_coordinator_worker_preserves_custom_registry_semantics(tmp_path: Path) -> None:
+    """A custom registry stays custom; coordinator mode must not add SWE defaults."""
+    from linch import create_deep_agent
+    from linch.sessions import InMemorySessionStore
+    from linch.tools import ToolContext
+    from linch.tools.registry import empty_tools
+
+    class RecordingProvider(FakeProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.tool_sets: list[set[str]] = []
+
+        async def stream(self, req: Any) -> AsyncIterator[dict[str, object]]:
+            self.tool_sets.append({str(tool["name"]) for tool in req.tools})
+            async for event in super().stream(req):
+                yield event
+
+    provider = RecordingProvider()
+    original = empty_tools(FakeTool("SearchDocs"))
+    agent = create_deep_agent(
+        model="gpt-5",
+        provider=provider,
+        cwd=str(tmp_path),
+        tools=original,
+        coordinator=True,
+        durable=False,
+        session_store=InMemorySessionStore(),
+        permissions={"mode": "skip-dangerous"},
+        result_offload=None,
+    )
+    session = await agent.session(id="s1")
+    subagent = agent.tools.get("Subagent")
+    assert subagent is not None
+
+    result = await subagent.execute(
+        {"description": "search", "prompt": "Search the configured corpus."},
+        ToolContext(
+            cwd=agent.cwd,
+            session_id=session.id,
+            run_id="test-run",
+            session_store=session.store,
+            file_read_tracker=session.file_read_tracker,
+            filesystem=session.filesystem,
+        ),
+    )
+
+    assert result.is_error is False
+    assert {tool.name for tool in original.list()} == {"SearchDocs"}
+    assert provider.tool_sets
+    assert "SearchDocs" in provider.tool_sets[0]
+    assert {"Read", "Write", "Edit", "Bash", "Glob", "Grep"}.isdisjoint(provider.tool_sets[0])
+
+
 async def test_coordinator_mode_task_stop_registered(tmp_path: Path) -> None:
     from linch import create_deep_agent
     from linch.sessions import InMemorySessionStore
@@ -539,6 +645,7 @@ async def test_task_stop_cancels_background_worker(tmp_path: Path) -> None:
     session.workers["agent-stop-test"] = handle
 
     task_stop = agent.tools.get("TaskStop")
+    assert task_stop is not None
     ctx = ToolContext(
         cwd=agent.cwd,
         session_id=session.id,
