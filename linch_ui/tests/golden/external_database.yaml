@@ -1,0 +1,67 @@
+apiVersion: studio.linch.dev/v1alpha1
+kind: LinchProject
+metadata:
+  name: inventory_assistant
+  title: Inventory Assistant
+  description: Read and write inventory through an explicit database seam.
+spec:
+  package: inventory_assistant
+  provider:
+    kind: openai_chat
+    model: gpt-5
+    apiKeyEnv: OPENAI_API_KEY
+  primaryAgent:
+    maxTurns: 8
+    budget:
+      maxTokens: 50000
+  tools:
+    - kind: database
+      id: inventory_lookup
+      displayName: Inventory Lookup
+      description: Look up one inventory item.
+      scope: read
+      operation: read
+      inputSchema:
+        type: object
+        properties:
+          sku:
+            type: string
+        required: [sku]
+        additionalProperties: false
+      resources:
+        - resource: inventory
+          mode: read
+    - kind: database
+      id: inventory_update
+      displayName: Inventory Update
+      description: Update inventory with an idempotent request key.
+      scope: write
+      parallel: false
+      operation: write
+      idempotencyArgument: idempotency_key
+      inputSchema:
+        type: object
+        properties:
+          sku:
+            type: string
+          quantity:
+            type: integer
+          idempotency_key:
+            type: string
+        required: [sku, quantity, idempotency_key]
+        additionalProperties: false
+      resources:
+        - resource: inventory
+          mode: write
+  capabilities:
+    permissions:
+      mode: interactive
+      rules:
+        - kind: tool
+          tool: inventory_update
+          decision: ask
+    externalDatabase:
+      enabled: true
+      dsnEnv: DATABASE_URL
+      adapterTemplates: [memory_store, file_backend, schedule_store, mailbox]
+      vectorGuidance: [faiss, pgvector, qdrant]

@@ -1,0 +1,30 @@
+apiVersion: studio.linch.dev/v1alpha1
+kind: LinchProject
+metadata:
+  name: research_coordinator
+  title: Research Coordinator
+  description: A bounded coordinator that delegates to explicit workers.
+spec:
+  package: research_coordinator
+  provider:
+    kind: gemini
+    model: gemini-2.5-pro
+    apiKeyEnv: GOOGLE_API_KEY
+  primaryAgent:
+    mode: coordinator
+    maxTurns: 12
+    budget:
+      maxTokens: 120000
+  subagents:
+    - id: evidence_worker
+      displayName: Evidence Worker
+      description: Collect and assess evidence.
+      instructions: Work only on the delegated evidence task and report sources.
+      maxTurns: 6
+      budget:
+        maxTokens: 30000
+  capabilities:
+    persistence:
+      sessionStore: sqlite
+      runStore: sqlite
+      durableResume: true
