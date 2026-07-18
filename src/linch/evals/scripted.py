@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..providers.base import BaseProvider
+from ..providers.base import BaseProvider, ProviderCapabilities
 from ..types import Usage
 
 
@@ -60,6 +60,20 @@ class ScriptedProvider(BaseProvider):
 
     def context_window(self, model: str) -> int:
         return 128_000
+
+    def capabilities(self, model: str) -> ProviderCapabilities:
+        """Preserve the fake's historical terminal-schema-tool behaviour.
+
+        ``ToolUseTurn`` is how the fake represents a final structured response
+        in loop and eval tests. It must therefore opt into the terminal-tool
+        transport explicitly now that real JSON-schema/JSON-object providers
+        are distinguished from providers which encode a result as a tool call.
+        """
+
+        return ProviderCapabilities(
+            context_window=self.context_window(model),
+            structured_output_terminal_tool=True,
+        )
 
     async def stream(self, req) -> AsyncIterator[dict[str, Any]]:
         if self._index >= len(self._turns):
