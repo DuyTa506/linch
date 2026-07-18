@@ -4,9 +4,10 @@ Linch Studio is a local-first visual blueprint editor and deterministic skeleton
 [Linch](../README.md). It runs on `127.0.0.1`, stores projects as YAML plus a separate layout
 file, and never runs or deploys generated workflows.
 
-The manual editor is fully offline. Optional AI authoring uses credentials supplied through
-`LINCH_STUDIO_*` environment variables and can only propose a complete candidate blueprint;
-it cannot write project state directly.
+The manual editor is fully offline. The optional Support surface uses credentials supplied through
+`LINCH_STUDIO_*` environment variables for documentation-grounded answers and static
+implementation recipes. Pipeline creation is confirmation-gated and can only create a reviewable
+candidate Blueprint; it cannot change project state until the user explicitly accepts it.
 
 ## Development
 
