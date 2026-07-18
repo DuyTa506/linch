@@ -1,0 +1,3 @@
+# The support corpus is copied byte-for-byte from the SDK docs and examples.
+# Preserve source EOF whitespace so the snapshot-staleness test remains exact.
+src/linch_studio/authoring/knowledge/** -whitespace
