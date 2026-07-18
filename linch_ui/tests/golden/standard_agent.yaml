@@ -1,0 +1,18 @@
+apiVersion: studio.linch.dev/v1alpha1
+kind: LinchProject
+metadata:
+  name: support_assistant
+  title: Support Assistant
+  description: Answer support questions with a bounded standard agent.
+spec:
+  package: support_assistant
+  provider:
+    kind: openai_responses
+    model: gpt-5
+    apiKeyEnv: OPENAI_API_KEY
+  primaryAgent:
+    mode: standard_agent
+    instructions: Be concise and cite uncertainty.
+    maxTurns: 8
+    budget:
+      maxTokens: 20000
