@@ -118,12 +118,12 @@ is complete only when its generated code or visible TODO seam and its acceptance
 
 ## Last verified release gate — 2026-07-18
 
-- Studio: 202 pytest tests; Ruff check/format and Pyright all clean.
+- Studio: 225 pytest tests; Ruff check/format and Pyright all clean.
 - Generated projects: all 11 golden Blueprints pass Ruff check/format, `compileall`, pytest, and
   Pyright after export to fresh directories.
 - Web: 106 Vitest tests and 28 Playwright tests pass; OpenAPI drift, TypeScript, and production build
   are clean. `npm run docs:capture` re-captures 3 screenshots and 6 clips from real Studio flows.
-- Linch SDK: 1,082 pytest tests pass and 19 skip; Ruff check/format and Pyright are clean for
+- Linch SDK: 1,100 pytest tests pass and 19 skip; Ruff check/format and Pyright are clean for
   `src/` and `tests/`.
 
 LocalBackend/BashTool tests spawn real shell processes and therefore need a subprocess-enabled test
