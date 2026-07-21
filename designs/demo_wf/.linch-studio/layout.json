@@ -1,0 +1,30 @@
+{
+  "nodes": [
+    {
+      "height": null,
+      "id": "primary_agent",
+      "width": null,
+      "x": -6.0,
+      "y": -40.0
+    },
+    {
+      "height": null,
+      "id": "subagent_subagent",
+      "width": null,
+      "x": 71.0,
+      "y": 50.0
+    },
+    {
+      "height": null,
+      "id": "wf_workflow_step_1",
+      "width": null,
+      "x": 376.0,
+      "y": -45.0
+    }
+  ],
+  "viewport": {
+    "x": 0.0,
+    "y": 0.0,
+    "zoom": 1.0
+  }
+}

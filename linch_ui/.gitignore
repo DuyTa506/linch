@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.pyright/
+*.egg-info/
+web/node_modules/
+web/dist/
+web/test-results/
+web/playwright-report/
+test-results/
+
+# Vite build output. `emptyOutDir` wipes this on every build, so it cannot hold a
+# tracked .gitkeep; the server 404s cleanly when it is absent. Wheels still ship
+# it via [tool.hatch.build] artifacts.
+src/linch_studio/static/
