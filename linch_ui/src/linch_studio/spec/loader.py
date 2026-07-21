@@ -23,7 +23,7 @@ from yaml.tokens import (  # type: ignore[reportMissingModuleSource]
     TagToken,
 )
 
-from .diagnostics import Diagnostic, has_errors, json_path, sort_diagnostics
+from .diagnostics import Diagnostic, Severity, has_errors, json_path, sort_diagnostics
 from .migrations import (
     DEFAULT_MIGRATIONS,
     MigrationError,
@@ -97,7 +97,7 @@ def _diagnostic(
     remediation: str,
     *,
     path: str = "/",
-    severity: str = "error",
+    severity: Severity = "error",
 ) -> Diagnostic:
     return Diagnostic(
         code=code,
