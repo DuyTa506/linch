@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from typing import Any
 
 from ..contributions import FileContribution
@@ -23,16 +24,17 @@ class ToolPack:
                 "tools.validation",
             )
         ]
+        symbols = _tool_symbols(ir.tools)
         imports: list[str] = []
         instances: list[str] = []
         for tool in ir.tools:
-            symbol = f"{class_name(tool.id)}Tool"
+            symbol = symbols[tool.id]
             imports.append(f"from .{tool.id} import {symbol}")
             instances.append(f"{symbol}()")
             files.append(
                 file(
                     f"src/{ir.package}/tools/{tool.id}.py",
-                    _tool_module(tool),
+                    _tool_module(tool, symbol),
                     f"tool.{tool.id}.skeleton",
                 )
             )
@@ -43,12 +45,28 @@ class ToolPack:
                 "tools.registry",
             )
         )
-        files.append(file("tests/test_tools.py", _tests(ir), "tests.tool_contracts"))
+        files.append(file("tests/test_tools.py", _tests(ir, symbols), "tests.tool_contracts"))
         return tuple(files)
 
 
-def _tool_module(tool: ToolIR) -> str:
-    symbol = f"{class_name(tool.id)}Tool"
+def _tool_symbols(tools: tuple[ToolIR, ...]) -> dict[str, str]:
+    """Map each tool id to a collision-free ``<Name>Tool`` class symbol.
+
+    ``class_name`` drops underscores, so distinct ids can render to the same
+    text (``tool_1`` and ``tool1`` both become ``Tool1``). An id that collides
+    with another falls back to capitalizing the raw id instead, which stays
+    unique because ids are already validated unique project-wide.
+    """
+
+    names = {tool.id: class_name(tool.id) for tool in tools}
+    counts = Counter(names.values())
+    return {
+        tool_id: (f"{name}Tool" if counts[name] == 1 else f"{tool_id[0].upper()}{tool_id[1:]}Tool")
+        for tool_id, name in names.items()
+    }
+
+
+def _tool_module(tool: ToolIR, symbol: str) -> str:
     schema = json.loads(tool.input_schema_json)
     rendered_schema = py(schema).replace("\n", "\n    ")
     resources = ", ".join(
@@ -190,11 +208,11 @@ def _init_module(imports: list[str], instances: list[str]) -> str:
     )
 
 
-def _tests(ir: CompilerIR) -> str:
+def _tests(ir: CompilerIR, symbols: dict[str, str]) -> str:
     imports: list[str] = []
     tests: list[str] = []
     for tool in ir.tools:
-        symbol = f"{class_name(tool.id)}Tool"
+        symbol = symbols[tool.id]
         imports.append(f"from {ir.package}.tools.{tool.id} import {symbol}")
         schema = json.loads(tool.input_schema_json)
         valid = _example(schema)

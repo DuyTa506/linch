@@ -873,17 +873,12 @@ def _validate_capabilities(blueprint: Blueprint, diagnostics: list[Diagnostic]) 
     capabilities = blueprint.spec.capabilities
     base = ("spec", "capabilities")
 
-    if capabilities.extensions.live_mcp_discovery:
-        diagnostics.append(
-            _finding(
-                "semantic.unsupported_capability",
-                (*base, "extensions", "liveMcpDiscovery"),
-                "Live MCP discovery is unsupported in v1alpha2.",
-                "Configure explicit MCP servers or disable live discovery.",
-            )
-        )
-
     skeletons: list[tuple[bool, tuple[PathPart, ...], str]] = [
+        (
+            capabilities.extensions.live_mcp_discovery,
+            (*base, "extensions", "liveMcpDiscovery"),
+            "Live MCP discovery is generated as a TODO.",
+        ),
         (
             capabilities.prompt.custom_dynamic_policy,
             (*base, "prompt", "customDynamicPolicy"),

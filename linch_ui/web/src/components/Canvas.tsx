@@ -278,6 +278,11 @@ function Inner({ studio, scope }: { studio: Studio; scope: CanvasScope }) {
   const onNodeDragStop = useCallback(
     (_event: MouseEvent | TouchEvent, dragged: FlowNode) => {
       if (!blueprint) return;
+      // Capture and release this drag's own origin synchronously — a second
+      // drag can start (and overwrite the shared ref) before this drag's
+      // async connect settles, so the rollback below must not re-read it.
+      const origin = dragOrigin.current;
+      dragOrigin.current = null;
       const positioned = nodesWithDraggedPosition(dragged);
       const connection = findMagneticConnection(
         blueprint,
@@ -297,7 +302,6 @@ function Inner({ studio, scope }: { studio: Studio; scope: CanvasScope }) {
         persist(snapped);
         void actions.connectNodes(connection.source, connection.target).then((saved) => {
           if (!saved) {
-            const origin = dragOrigin.current;
             if (origin?.id === dragged.id) {
               const rolledBack = nodesRef.current.map((node) =>
                 node.id === dragged.id ? { ...node, position: origin.position } : node,
@@ -309,7 +313,6 @@ function Inner({ studio, scope }: { studio: Studio; scope: CanvasScope }) {
             setInvalidDrop(true);
             window.setTimeout(() => setInvalidDrop(false), 260);
           }
-          dragOrigin.current = null;
         });
         return;
       }
@@ -323,7 +326,6 @@ function Inner({ studio, scope }: { studio: Studio; scope: CanvasScope }) {
           )
         : false;
       if (nearby && !alreadyConnected) rejectNearbyDrop(dragged, nearby);
-      dragOrigin.current = null;
     },
     [
       actions,

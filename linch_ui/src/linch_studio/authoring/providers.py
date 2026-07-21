@@ -93,7 +93,10 @@ def create_authoring_provider(config: AuthoringConfig) -> Any:
                 api_key=config.api_key,
                 base_url=config.base_url,
                 thinking=_anthropic_thinking(config),
-                api_mode="native",
+                # Leave api_mode at its "auto" default: only the direct Anthropic
+                # endpoint (or no base_url) should get native-only features.
+                # Studio has not verified that an arbitrary configured base_url
+                # is a proxy that actually supports them.
                 effort=None if config.reasoning == "off" else config.reasoning,
             )
         )

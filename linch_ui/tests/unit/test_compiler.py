@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from linch_studio.catalog import badges_for_selection
 from linch_studio.compiler import CompilerError, compile_file, compile_source, project_fingerprint
 from linch_studio.spec import default_blueprint
 
@@ -54,6 +55,26 @@ def test_manifest_records_every_non_manifest_file_without_hashing_itself() -> No
     assert len(records) == len(project.files) - 1
     for record in records:
         assert record["sha256"] == project.file(record["path"]).sha256
+
+
+@pytest.mark.parametrize("blueprint_path", GOLDENS, ids=lambda path: path.stem)
+def test_selected_capabilities_are_all_known_to_the_catalog(blueprint_path: Path) -> None:
+    """The manifest must never claim a capability id the catalog cannot badge."""
+    project = compile_file(blueprint_path)
+    badges_for_selection(project.selected_capabilities)  # raises KeyError on drift
+
+
+def test_selected_capabilities_reflect_the_compaction_ladder() -> None:
+    """The ladder is independent of ``strategy`` and must be tagged whenever enabled."""
+    document = default_blueprint("ladder_project").model_dump(by_alias=True, mode="json")
+    document["spec"]["runtime"]["provider"] = {"kind": "openai_responses", "model": "gpt-5"}
+    document["spec"]["capabilities"]["compaction"]["ladder"] = {"enabled": True}
+
+    project = compile_source(json.dumps(document))
+
+    assert "compaction.ladder" in project.selected_capabilities
+    assert "CompactionLadder(" in project.file("src/ladder_project/reliability.py").content
+    badges_for_selection(project.selected_capabilities)
 
 
 def test_development_guide_links_the_sdk_docs_for_selected_capabilities() -> None:
@@ -179,3 +200,38 @@ def test_workflow_tool_filter_preserves_defaults_unless_explicitly_set() -> None
 
     assert "tools=None" in inherited_module
     assert 'tools=["inspect_repo"]' in explicit_module
+
+
+def test_tool_class_names_stay_unique_when_class_name_would_collide() -> None:
+    """``tool_1`` and ``tool1`` both render to ``Tool1`` under the naive PascalCase split."""
+    document = default_blueprint("colliding_tools").model_dump(by_alias=True, mode="json")
+    document["spec"]["runtime"]["provider"] = {"kind": "openai_responses", "model": "gpt-5"}
+    document["spec"]["tools"] = [
+        {
+            "kind": "function",
+            "id": identifier,
+            "displayName": identifier.title(),
+            "description": f"The {identifier} tool.",
+        }
+        for identifier in ("tool_1", "tool1")
+    ]
+
+    project = compile_source(json.dumps(document))
+
+    init_tree = ast.parse(project.file("src/colliding_tools/tools/__init__.py").content)
+    imports = [node for node in ast.walk(init_tree) if isinstance(node, ast.ImportFrom)]
+    imported_symbols = [alias.asname or alias.name for node in imports for alias in node.names]
+    assert len(imported_symbols) == len(set(imported_symbols)) == 2
+
+    for identifier in ("tool_1", "tool1"):
+        module_tree = ast.parse(project.file(f"src/colliding_tools/tools/{identifier}.py").content)
+        defined_classes = {
+            node.name for node in ast.walk(module_tree) if isinstance(node, ast.ClassDef)
+        }
+        imported_symbol = next(
+            alias.asname or alias.name
+            for node in imports
+            if node.module == identifier
+            for alias in node.names
+        )
+        assert imported_symbol in defined_classes

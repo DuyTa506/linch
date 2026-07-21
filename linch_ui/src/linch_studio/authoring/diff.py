@@ -20,7 +20,19 @@ def semantic_diff(before: Blueprint, after: Blueprint) -> tuple[SemanticDiffEntr
 
     changes: list[SemanticDiffEntry] = []
     _compare(canonical_data(before), canonical_data(after), (), changes)
-    return tuple(sorted(changes, key=lambda item: (item.path, item.operation)))
+    return tuple(sorted(changes, key=lambda item: (_path_sort_key(item.path), item.operation)))
+
+
+def _path_sort_key(path: str) -> tuple[tuple[int, int | str], ...]:
+    """Order JSON-pointer segments numerically so list indices stay in list order.
+
+    Plain string sorting would place ``/spec/tools/10`` before
+    ``/spec/tools/2`` (lexicographic comparison of the digit ``1`` vs ``2``).
+    """
+
+    return tuple(
+        (0, int(segment)) if segment.isdigit() else (1, segment) for segment in path.split("/")
+    )
 
 
 def _compare(

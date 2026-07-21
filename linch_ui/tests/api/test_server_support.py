@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 from pathlib import Path
 
 import httpx
+import pytest
 
 from linch_studio.server import create_app
 from linch_studio.support import Evidence, SupportTurn
@@ -27,6 +29,14 @@ class DocsSupport:
             ],
             coverage="documented",
         )
+
+
+class RawCrashSupport:
+    """Raises a bare, untyped exception, as an unhandled bug would."""
+
+    async def turn(self, *, messages, mode, current_blueprint=None, on_tool_call=None):
+        del messages, mode, current_blueprint, on_tool_call
+        raise RuntimeError("boom, a raw unhandled crash")
 
 
 class Client:
@@ -159,3 +169,24 @@ def test_pipeline_gate_ignores_an_earlier_unrelated_documentation_question(tmp_p
     assert response.status_code == 200
     assert response.json()["kind"] == "plan"
     assert "host-owned cron" in response.json()["plan"]
+
+
+def test_support_turn_raw_crash_logs_the_exception_class_without_leaking_its_message(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    client = Client(create_app(tmp_path / "workspace", support_service=RawCrashSupport()))
+
+    with caplog.at_level(logging.WARNING, logger="linch_studio.server"):
+        response = client.post(
+            "/api/v1/support/turns",
+            {
+                "messages": [{"role": "user", "content": "How do workflows work?"}],
+                "requestedMode": "documentation",
+            },
+        )
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "support.failed"
+    record = next(item for item in caplog.records if "unexpected RuntimeError" in item.getMessage())
+    assert "support failed" in record.getMessage()
+    assert "boom" not in caplog.text

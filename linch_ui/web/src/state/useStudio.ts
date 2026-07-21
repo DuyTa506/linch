@@ -528,10 +528,16 @@ export function useStudio(api: StudioApi) {
    * every request — the server keeps no conversation state. Chat-stage turns
    * come back as questions or a plan; the build stage delivers the proposal.
    */
+  const turnTokenRef = useRef(0);
   const runTurn = useCallback(
     async (message: string, stage: "chat" | "build"): Promise<boolean> => {
       const doc = state.doc;
       if (!doc) return false;
+      // Guards every setState below against two races: a newer runTurn call
+      // superseding this one, and the user switching projects mid-flight.
+      const myTurn = ++turnTokenRef.current;
+      const isCurrent = (current: StudioState) =>
+        turnTokenRef.current === myTurn && current.doc?.id === doc.id;
       const userEntry: TranscriptEntry = { role: "user", kind: "text", content: message };
       const outgoing = [...state.transcript, userEntry].map((entry) => ({
         role: entry.role === "user" ? ("user" as const) : ("assistant" as const),
@@ -547,13 +553,13 @@ export function useStudio(api: StudioApi) {
         const turn = await api.converseStream(doc.id, outgoing, stage, {
           onThinking: (text) =>
             setState((current) =>
-              current.streamingThinking === null
+              !isCurrent(current) || current.streamingThinking === null
                 ? current
                 : { ...current, streamingThinking: current.streamingThinking + text },
             ),
           onToolCallStart: (update) =>
             setState((current) =>
-              current.streamingToolCalls === null
+              !isCurrent(current) || current.streamingToolCalls === null
                 ? current
                 : {
                     ...current,
@@ -570,7 +576,7 @@ export function useStudio(api: StudioApi) {
             ),
           onToolCallEnd: (update) =>
             setState((current) =>
-              current.streamingToolCalls === null
+              !isCurrent(current) || current.streamingToolCalls === null
                 ? current
                 : {
                     ...current,
@@ -609,7 +615,11 @@ export function useStudio(api: StudioApi) {
             thinking: turn.thinking ?? null,
             toolCalls,
           };
-          setState((current) => ({ ...current, transcript: [...current.transcript, entry] }));
+          setState((current) =>
+            isCurrent(current)
+              ? { ...current, transcript: [...current.transcript, entry] }
+              : current,
+          );
           return true;
         }
         if (turn.kind === "plan") {
@@ -623,7 +633,11 @@ export function useStudio(api: StudioApi) {
             thinking: turn.thinking ?? null,
             toolCalls,
           };
-          setState((current) => ({ ...current, transcript: [...current.transcript, entry] }));
+          setState((current) =>
+            isCurrent(current)
+              ? { ...current, transcript: [...current.transcript, entry] }
+              : current,
+          );
           return true;
         }
         const proposal = turn.proposal;
@@ -637,11 +651,15 @@ export function useStudio(api: StudioApi) {
           toolCalls,
           proposalId: proposal.id,
         };
-        setState((current) => ({
-          ...current,
-          transcript: [...current.transcript, entry],
-          proposals: [...current.proposals, proposal],
-        }));
+        setState((current) =>
+          isCurrent(current)
+            ? {
+                ...current,
+                transcript: [...current.transcript, entry],
+                proposals: [...current.proposals, proposal],
+              }
+            : current,
+        );
         return true;
       } catch (error) {
         // The echoed user message stays visible so nothing typed is lost.
@@ -653,7 +671,8 @@ export function useStudio(api: StudioApi) {
         return false;
       } finally {
         setState((current) =>
-          current.streamingThinking === null && current.streamingToolCalls === null
+          turnTokenRef.current !== myTurn ||
+          (current.streamingThinking === null && current.streamingToolCalls === null)
             ? current
             : { ...current, streamingThinking: null, streamingToolCalls: null },
         );

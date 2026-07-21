@@ -189,6 +189,38 @@ def test_deepseek_config_requires_native_base_url_and_factory_uses_native_provid
     assert isinstance(create_authoring_provider(config), DeepSeekProvider)
 
 
+def test_anthropic_provider_lets_the_sdk_auto_detect_api_mode_from_base_url() -> None:
+    """Studio must not force api_mode="native": an unverified Anthropic-compatible
+    base_url should stay on the SDK's conservative auto-detected path, not be
+    treated as if every proxy has been confirmed to support native Claude
+    features."""
+
+    from linch import AnthropicProvider
+
+    from linch_studio.authoring.providers import create_authoring_provider
+
+    direct = create_authoring_provider(
+        AuthoringConfig(
+            provider="anthropic",
+            model="claude-sonnet-4-6",
+            api_key="offline-test-key",
+        )
+    )
+    assert isinstance(direct, AnthropicProvider)
+    assert direct._options.api_mode == "auto"
+
+    proxied = create_authoring_provider(
+        AuthoringConfig(
+            provider="anthropic",
+            model="claude-sonnet-4-6",
+            api_key="offline-test-key",
+            base_url="https://llm-gateway.example.internal/anthropic",
+        )
+    )
+    assert isinstance(proxied, AnthropicProvider)
+    assert proxied._options.api_mode == "auto"
+
+
 def test_json_mode_flag_parses_and_reaches_the_chat_provider_options() -> None:
     from linch_studio.authoring.providers import _chat_options
 
@@ -234,6 +266,29 @@ def test_semantic_diff_uses_normalized_json_paths() -> None:
         ("replace", "/metadata/title"),
         ("add", "/spec/tools/0"),
     ]
+
+
+def test_semantic_diff_orders_list_indices_numerically_not_lexicographically() -> None:
+    current = _blueprint()
+    candidate = _blueprint(
+        {
+            "spec": {
+                "tools": [
+                    {
+                        "kind": "function",
+                        "id": f"tool_{index}",
+                        "displayName": f"Tool {index}",
+                        "description": "A tool.",
+                    }
+                    for index in range(11)
+                ]
+            }
+        }
+    )
+
+    changes = semantic_diff(current, candidate)
+
+    assert [item.path for item in changes] == [f"/spec/tools/{index}" for index in range(11)]
 
 
 def test_manual_only_guard_covers_redaction_mcp_and_dangerous_permissions() -> None:

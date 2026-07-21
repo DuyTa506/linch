@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -85,7 +86,15 @@ class StoredProposal:
 
 
 class FileProjectStore:
-    """Local project state with canonical YAML, independent layout, and CAS writes."""
+    """Local project state with canonical YAML, independent layout, and CAS writes.
+
+    Every public method does blocking disk I/O under a process-local
+    ``threading.RLock`` and runs it on a worker thread via ``asyncio.to_thread``
+    so callers (the FastAPI server) never block the event loop — a save's
+    ``os.fsync`` no longer stalls concurrent requests, including SSE streams.
+    The lock is a real OS-thread lock, so moving execution onto worker threads
+    does not change the existing concurrency-safety guarantees.
+    """
 
     def __init__(self, workspace: str | Path) -> None:
         requested = Path(workspace)
@@ -97,7 +106,10 @@ class FileProjectStore:
         self.workspace = requested.resolve(strict=True)
         self._lock = threading.RLock()
 
-    def list_projects(self) -> tuple[ProjectSnapshot, ...]:
+    async def list_projects(self) -> tuple[ProjectSnapshot, ...]:
+        return await asyncio.to_thread(self._list_projects_sync)
+
+    def _list_projects_sync(self) -> tuple[ProjectSnapshot, ...]:
         with self._lock:
             snapshots: list[ProjectSnapshot] = []
             for entry in sorted(self.workspace.iterdir(), key=lambda item: item.name):
@@ -113,7 +125,18 @@ class FileProjectStore:
                 snapshots.append(self._open_locked(entry.name))
             return tuple(snapshots)
 
-    def create_project(
+    async def create_project(
+        self,
+        project_id: str,
+        *,
+        title: str | None = None,
+        template: str = "agent",
+    ) -> ProjectSnapshot:
+        return await asyncio.to_thread(
+            self._create_project_sync, project_id, title=title, template=template
+        )
+
+    def _create_project_sync(
         self,
         project_id: str,
         *,
@@ -140,11 +163,25 @@ class FileProjectStore:
                 _remove_empty_project(root)
                 raise
 
-    def open_project(self, project_id: str) -> ProjectSnapshot:
+    async def open_project(self, project_id: str) -> ProjectSnapshot:
+        return await asyncio.to_thread(self._open_project_sync, project_id)
+
+    def _open_project_sync(self, project_id: str) -> ProjectSnapshot:
         with self._lock:
             return self._open_locked(project_id)
 
-    def save_blueprint(
+    async def save_blueprint(
+        self,
+        project_id: str,
+        source: str,
+        *,
+        base_digest: str,
+    ) -> ProjectSnapshot:
+        return await asyncio.to_thread(
+            self._save_blueprint_sync, project_id, source, base_digest=base_digest
+        )
+
+    def _save_blueprint_sync(
         self,
         project_id: str,
         source: str,
@@ -155,7 +192,10 @@ class FileProjectStore:
             root = self._project_root(project_id)
             return self._save_blueprint_locked(root, project_id, source, base_digest)
 
-    def load_layout(self, project_id: str) -> dict[str, Any]:
+    async def load_layout(self, project_id: str) -> dict[str, Any]:
+        return await asyncio.to_thread(self._load_layout_sync, project_id)
+
+    def _load_layout_sync(self, project_id: str) -> dict[str, Any]:
         with self._lock:
             root = self._project_root(project_id)
             state = self._state_directory(root, create=False)
@@ -173,7 +213,10 @@ class FileProjectStore:
                 raise CorruptProject
             return value
 
-    def save_layout(self, project_id: str, layout: dict[str, Any]) -> dict[str, Any]:
+    async def save_layout(self, project_id: str, layout: dict[str, Any]) -> dict[str, Any]:
+        return await asyncio.to_thread(self._save_layout_sync, project_id, layout)
+
+    def _save_layout_sync(self, project_id: str, layout: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
             root = self._project_root(project_id)
             state = self._state_directory(root, create=True)
@@ -196,7 +239,25 @@ class FileProjectStore:
             self._atomic_write(state / LAYOUT_FILENAME, data)
             return json.loads(data)
 
-    def save_proposal(
+    async def save_proposal(
+        self,
+        project_id: str,
+        *,
+        base_digest: str,
+        candidate: Blueprint,
+        semantic_diff: tuple[dict[str, JsonValue], ...],
+        summary: str | None = None,
+    ) -> StoredProposal:
+        return await asyncio.to_thread(
+            self._save_proposal_sync,
+            project_id,
+            base_digest=base_digest,
+            candidate=candidate,
+            semantic_diff=semantic_diff,
+            summary=summary,
+        )
+
+    def _save_proposal_sync(
         self,
         project_id: str,
         *,
@@ -237,7 +298,10 @@ class FileProjectStore:
             self._atomic_write(directory / f"{proposal_id}.json", encoded)
             return self._get_proposal_locked(root, project_id, proposal_id)
 
-    def list_proposals(self, project_id: str) -> tuple[StoredProposal, ...]:
+    async def list_proposals(self, project_id: str) -> tuple[StoredProposal, ...]:
+        return await asyncio.to_thread(self._list_proposals_sync, project_id)
+
+    def _list_proposals_sync(self, project_id: str) -> tuple[StoredProposal, ...]:
         with self._lock:
             root = self._project_root(project_id)
             directory = self._proposal_directory(root, create=False)
@@ -250,12 +314,18 @@ class FileProjectStore:
                 proposals.append(self._get_proposal_locked(root, project_id, path.stem))
             return tuple(proposals)
 
-    def get_proposal(self, project_id: str, proposal_id: str) -> StoredProposal:
+    async def get_proposal(self, project_id: str, proposal_id: str) -> StoredProposal:
+        return await asyncio.to_thread(self._get_proposal_sync, project_id, proposal_id)
+
+    def _get_proposal_sync(self, project_id: str, proposal_id: str) -> StoredProposal:
         with self._lock:
             root = self._project_root(project_id)
             return self._get_proposal_locked(root, project_id, proposal_id)
 
-    def delete_proposal(self, project_id: str, proposal_id: str) -> None:
+    async def delete_proposal(self, project_id: str, proposal_id: str) -> None:
+        await asyncio.to_thread(self._delete_proposal_sync, project_id, proposal_id)
+
+    def _delete_proposal_sync(self, project_id: str, proposal_id: str) -> None:
         validate_proposal_id(proposal_id)
         with self._lock:
             root = self._project_root(project_id)
@@ -270,7 +340,10 @@ class FileProjectStore:
             except FileNotFoundError:
                 raise ProposalNotFound from None
 
-    def accept_proposal(self, project_id: str, proposal_id: str) -> ProjectSnapshot:
+    async def accept_proposal(self, project_id: str, proposal_id: str) -> ProjectSnapshot:
+        return await asyncio.to_thread(self._accept_proposal_sync, project_id, proposal_id)
+
+    def _accept_proposal_sync(self, project_id: str, proposal_id: str) -> ProjectSnapshot:
         """Atomically compare the proposal base, save the whole candidate, and delete it."""
 
         with self._lock:

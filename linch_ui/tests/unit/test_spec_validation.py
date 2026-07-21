@@ -515,12 +515,11 @@ def test_webhook_signature_reference_is_required() -> None:
     assert "semantic.webhook_signing_secret_required" in _codes(blueprint)
 
 
-def test_unsupported_and_inconsistent_capabilities_block_export() -> None:
+def test_inconsistent_capabilities_block_export() -> None:
     blueprint = _blueprint(
         {
             "spec": {
                 "capabilities": {
-                    "extensions": {"liveMcpDiscovery": True},
                     "context": {"memoryRecall": True},
                     "structuredOutput": {"enabled": False, "repairRetries": 1},
                     "externalDatabase": {
@@ -536,7 +535,6 @@ def test_unsupported_and_inconsistent_capabilities_block_export() -> None:
         "semantic.external_database_disabled",
         "semantic.memory_backend_required",
         "semantic.structured_output_disabled",
-        "semantic.unsupported_capability",
     }
 
 
@@ -548,6 +546,7 @@ def test_skeleton_capabilities_warn_but_do_not_become_unsupported() -> None:
                 "capabilities": {
                     "prompt": {"customDynamicPolicy": True},
                     "memory": {"backend": "qdrant"},
+                    "extensions": {"liveMcpDiscovery": True},
                 },
             }
         }
@@ -555,7 +554,8 @@ def test_skeleton_capabilities_warn_but_do_not_become_unsupported() -> None:
     diagnostics = validate_blueprint(blueprint)
 
     skeletons = [item for item in diagnostics if item.code == "semantic.skeleton_todo"]
-    assert len(skeletons) == 3
+    assert len(skeletons) == 4
+    assert any(item.path.endswith("liveMcpDiscovery") for item in skeletons)
     assert all(item.severity == "warning" for item in skeletons)
     assert not any(item.code == "semantic.unsupported_capability" for item in diagnostics)
 
