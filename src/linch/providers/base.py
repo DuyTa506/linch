@@ -28,6 +28,11 @@ class ProviderCapabilities:
             JSON output via ``output_schema``.  When ``False``,
             ``req.output_schema`` is cleared and the loop falls back to
             text-parsing the response.
+        structured_output_terminal_tool: Whether the provider implements
+            ``output_schema`` by synthesising a terminal tool call.  This is
+            separate from native JSON-schema and JSON-object response formats:
+            only terminal-tool providers should cause the loop to treat a tool
+            named after the schema as the final answer.
         tool_choice: Whether the provider honours ``tool_choice`` hints.
             When ``False``, ``req.tool_choice`` is cleared.
         prompt_cache: Whether the provider is cache-aware and should receive
@@ -41,18 +46,23 @@ class ProviderCapabilities:
     context_window: int = 128_000
     parallel_tool_calls: bool = True
     structured_output: bool = True
+    structured_output_terminal_tool: bool = False
     tool_choice: bool = True
     prompt_cache: bool = False
 
 
 def full_capabilities(
-    context_window: int, *, parallel_tool_calls: bool = True
+    context_window: int,
+    *,
+    parallel_tool_calls: bool = True,
+    structured_output_terminal_tool: bool = False,
 ) -> ProviderCapabilities:
     """``ProviderCapabilities`` for providers with schema-native, prompt-cache-aware
     APIs (Anthropic, OpenAI Chat/Responses, Gemini, and OpenAI-compatible local
     servers). These providers all declare the same feature set and only differ in
-    ``context_window`` and, for options-driven providers, ``parallel_tool_calls`` —
-    this factors out the otherwise-duplicated ``ProviderCapabilities(...)`` literal.
+    ``context_window``, optional parallel-tool support, and whether their
+    structured response is represented as a terminal tool call — this factors out
+    the otherwise-duplicated ``ProviderCapabilities(...)`` literal.
 
     Not a ``BaseProvider.capabilities()`` default: the base class stays
     conservative (``prompt_cache=False``) for providers that don't opt in.
@@ -61,6 +71,7 @@ def full_capabilities(
         context_window=context_window,
         parallel_tool_calls=parallel_tool_calls,
         structured_output=True,
+        structured_output_terminal_tool=structured_output_terminal_tool,
         tool_choice=True,
         prompt_cache=True,
     )

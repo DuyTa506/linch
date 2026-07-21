@@ -1,0 +1,61 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "linch-studio"
+version = "0.1.0"
+description = "Local-first visual blueprint editor and skeleton exporter for Linch."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "linch>=1.1,<2",
+  "pydantic>=2.8,<3",
+  "PyYAML>=6.0",
+  "rich>=13.9,<15",
+  "uvicorn>=0.30,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx>=0.27,<1",
+  "pytest>=8.0,<9.0",
+  "pytest-asyncio>=0.23,<1.0",
+  "pytest-timeout>=2.3",
+  "ruff>=0.5",
+  "pyright>=1.1",
+]
+
+[project.scripts]
+linch-studio = "linch_studio.cli:main"
+
+[tool.hatch.build]
+# The built frontend is gitignored, so hatchling's VCS file selection would skip
+# it. Run `npm run build` in web/ before building a distribution.
+artifacts = ["src/linch_studio/static/**"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/linch_studio"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/linch_studio", "tests", "README.md", "pyproject.toml"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src", "../src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pyright]
+include = ["src"]
+pythonVersion = "3.10"
+typeCheckingMode = "basic"
+reportMissingImports = false

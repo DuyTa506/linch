@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, cast
 
 from ..errors import ConfigError
 from ..events import Event
 from .context import WorkflowContext
-from .journal import WorkflowJournal
+from .journal import CURRENT_FINGERPRINT_VERSION, WorkflowJournal
 
 
 async def run_workflow(
@@ -42,9 +42,17 @@ async def run_workflow(
     if store is not None and run_id is not None:
         existing = await store.load_run(run_id)
         if existing is not None:
-            journal = WorkflowJournal.from_stored_events(await store.load_events(run_id))
+            fingerprint_version = existing.meta.get("journal_fingerprint_version", 1)
+            journal = WorkflowJournal.from_stored_events(
+                await store.load_events(run_id),
+                fingerprint_version=cast(int, fingerprint_version),
+            )
         else:
-            await store.create_run(host.id, id=run_id)
+            await store.create_run(
+                host.id,
+                id=run_id,
+                meta={"journal_fingerprint_version": CURRENT_FINGERPRINT_VERSION},
+            )
 
     resolved_budget = budget if budget is not None else getattr(agent, "budget", None)
     # Subagent children inherit the budget from the host session's

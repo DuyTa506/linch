@@ -123,8 +123,7 @@ smoke test that runs without an API key.
 import asyncio
 import os
 
-from linch import Agent
-from linch.sessions import InMemorySessionStore
+from linch import Agent, InMemorySessionStore
 
 agent = Agent(
     model="gpt-5",
@@ -215,9 +214,7 @@ For simple tools, use `@tool`; it creates the same Tool-compatible object that
 the registry and scheduler already understand:
 
 ```python
-from linch import Agent, ToolContext, tool
-from linch.sessions import InMemorySessionStore
-from linch.tools.registry import empty_tools
+from linch import Agent, InMemorySessionStore, ToolContext, empty_tools, tool
 
 @tool(description="Look up an internal document.")
 async def search_docs(query: str, ctx: ToolContext) -> str:
@@ -249,7 +246,7 @@ The permission engine controls dangerous actions at the runtime layer. You can d
 
 ### Providers
 
-linch separates the agent runtime from the model provider. Built-in providers include OpenAI Responses, OpenAI Chat Completions, Anthropic, Gemini, and llama.cpp. Use OpenAI Chat Completions with `base_url` for OpenAI-compatible endpoints like DeepSeek, and inspect known direct-provider models with `list_provider_models()`.
+linch separates the agent runtime from the model provider. Built-in providers include OpenAI Responses, OpenAI Chat Completions, DeepSeek, Anthropic, Gemini, and llama.cpp. Use `DeepSeekProvider` for the native DeepSeek API, or OpenAI Chat Completions with `base_url` for generic compatible endpoints, and inspect known direct-provider models with `list_provider_models()`.
 
 ---
 
@@ -353,21 +350,26 @@ Examples are organized by subsystem under `examples/`.
 
 ## Public API
 
-- `linch`: `Agent`, `Session`, `create_deep_agent`, `create_subagent_definition`, `generate_subagent_definition`, events (including `BackgroundWorkerEvent`), types, errors, `DetailedCompaction`, `RetryOptions`, `ToolTimeoutError`, `tool`, `FunctionTool`, `empty_tools`, `tools_from_defaults`, run reports, provider catalog helpers
-- `linch.config`: `FeatureFlags`, `SystemPromptConfig`, `SystemPromptSection`
-- `linch.context`: `ContextBuilder`, `ContextBuildResult`, `ContextBudget`
-- `linch.deep_agent`: `create_deep_agent`, `DEEP_AGENT_SYSTEM_PROMPT`, `COORDINATOR_SYSTEM_PROMPT`, `DEEP_AGENT_SUBAGENTS`
-- `linch.skills`: built-in and project `SKILL.md` workflows, including `verify`
-- `linch.memory`: `MemoryStore`, `MemoryItem`, `MemoryContextBuilder`, `MemorySearchTool`, `MemoryUpsertTool`, `TieredMemoryStore`, reference stores
-- `linch.evals`: `ScriptedProvider`, `EvalCase`, `run_eval`, built-in scorers for text, tools, schema, cost, context, memory, and recovery
-- `linch.pricing`: `ModelPricing`, `cost_usd`
-- `linch.types`: `OutputSchema`, `ToolChoice`, `Message`, `ProviderRequest`
-- `linch.providers`: `OpenAIResponsesProvider`, `OpenAIChatCompletionsProvider`, `AnthropicProvider`, `GeminiProvider`, `LlamaCppProvider`, `ProviderModelInfo`, `list_provider_models`, `get_provider_model_info`
-- `linch.tools`: `@tool`, `FunctionTool`, duck-typed tool protocol, `ResourceAccess`, `Citation`, `ToolResult`, `ToolRegistry`, built-in tools, `SubagentContinueTool`, `TaskStopTool`
-- `linch.subagents`: `WorkerHandle`, `RunSubagentArgs`, `ContinueSubagentArgs`, `RunSubagentResult`, disk-backed subagent generation helpers
-- `linch.sessions`: `InMemorySessionStore`, `SqliteSessionStore`
-- `linch.filesystem`: `FileBackend`, `StateFileBackend`, `DiskFileBackend`, `SqliteFileBackend`, `CompositeFileBackend`, `OffloadConfig`, `filesystem_tools`
-- `linch.permissions`: `PermissionEngine`, `ToolRule`, `PathRule`, `BashRule`
+The supported, semver-governed API is exactly `linch.__all__`. Import supported names
+from the top-level package:
+
+```python
+from linch import (
+    Agent,
+    BashRule,
+    EvalCase,
+    PathRule,
+    ScriptedProvider,
+    ToolRule,
+    run_eval,
+)
+```
+
+This surface includes the core agent/session runtime, provider adapters, typed events,
+tools and extension contracts, workflow/deep-agent/loop primitives, permission rules,
+and the complete deterministic eval harness and built-in scorers. Submodule paths are
+implementation details rather than compatibility promises. See
+[`docs/versioning.md`](docs/versioning.md) for the contract and pinning policy.
 
 ---
 

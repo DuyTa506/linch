@@ -324,12 +324,12 @@ def test_translate_redacted_thinking_round_trip():
 
 
 # ---------------------------------------------------------------------------
-# Feature A — output_schema synthesises a forced tool (RED until impl)
+# Structured output — native Claude JSON schema and compatible fallback
 # ---------------------------------------------------------------------------
 
 
-def test_build_payload_output_schema_synthesizes_forced_tool():
-    """_build_payload must append a forced tool and set tool_choice when output_schema is set."""
+def test_build_payload_output_schema_uses_native_json_format():
+    """Direct Claude returns a JSON response instead of a synthetic final tool."""
     from linch.providers.anthropic import AnthropicProviderOptions, _build_payload
     from linch.types import OutputSchema
 
@@ -345,15 +345,12 @@ def test_build_payload_output_schema_synthesizes_forced_tool():
     req = _make_req(output_schema=schema)
     payload = _build_payload(req, AnthropicProviderOptions())
 
-    # Must synthesise the output schema as a forced tool
-    assert "tools" in payload
-    tool = next((t for t in payload["tools"] if t["name"] == "get_weather"), None)
-    assert tool is not None, "expected 'get_weather' tool in payload"
-    assert tool["description"] == "Get weather for a city."
-    assert tool["input_schema"]["properties"]["city"]["type"] == "string"
-
-    # Must force tool_choice to that exact tool
-    assert payload["tool_choice"] == {"type": "tool", "name": "get_weather"}
+    assert "tools" not in payload
+    assert "tool_choice" not in payload
+    assert payload["output_config"]["format"] == {
+        "type": "json_schema",
+        "schema": schema.schema,
+    }
 
 
 def test_build_payload_output_schema_appends_to_existing_tools():
@@ -368,7 +365,7 @@ def test_build_payload_output_schema_appends_to_existing_tools():
     }
     schema = OutputSchema(name="final_answer", schema={"type": "object", "properties": {}})
     req = _make_req(tools=[real_tool], output_schema=schema)
-    payload = _build_payload(req, AnthropicProviderOptions())
+    payload = _build_payload(req, AnthropicProviderOptions(api_mode="compatible"))
 
     names = [t["name"] for t in payload["tools"]]
     assert "search" in names
@@ -385,9 +382,113 @@ def test_build_payload_output_schema_sole_tool_forces_choice():
 
     schema = OutputSchema(name="get_answer", schema={"type": "object", "properties": {}})
     req = _make_req(tools=[], output_schema=schema)
-    payload = _build_payload(req, AnthropicProviderOptions())
+    payload = _build_payload(req, AnthropicProviderOptions(api_mode="compatible"))
 
     assert payload["tool_choice"] == {"type": "tool", "name": "get_answer"}
+
+
+def test_build_payload_output_schema_honors_an_explicit_auto_choice():
+    """Thinking-compatible callers can opt out of the forced schema tool."""
+    from linch.providers.anthropic import AnthropicProviderOptions, _build_payload
+    from linch.types import OutputSchema
+
+    schema = OutputSchema(name="get_answer", schema={"type": "object", "properties": {}})
+    req = _make_req(tools=[], output_schema=schema, tool_choice="auto")
+    payload = _build_payload(req, AnthropicProviderOptions())
+
+    assert payload["tool_choice"] == {"type": "auto"}
+
+
+def test_build_payload_disabled_thinking_is_sent_and_keeps_forced_schema_tool():
+    """An explicit off mode must not silently fall back to model-default thinking."""
+    from linch.providers.anthropic import AnthropicProviderOptions, _build_payload
+    from linch.types import OutputSchema
+
+    schema = OutputSchema(name="get_answer", schema={"type": "object", "properties": {}})
+    req = _make_req(tools=[], output_schema=schema)
+    payload = _build_payload(
+        req,
+        AnthropicProviderOptions(
+            api_mode="compatible",
+            thinking={"type": "disabled"},
+        ),
+    )
+
+    assert payload["thinking"] == {"type": "disabled"}
+    assert payload["tool_choice"] == {"type": "tool", "name": "get_answer"}
+
+
+def test_build_payload_active_thinking_uses_auto_schema_tool_choice():
+    """Extended/adaptive thinking cannot be combined with a forced tool choice."""
+    from linch.providers.anthropic import AnthropicProviderOptions, _build_payload
+    from linch.types import OutputSchema
+
+    schema = OutputSchema(name="get_answer", schema={"type": "object", "properties": {}})
+    req = _make_req(tools=[], output_schema=schema)
+    payload = _build_payload(
+        req,
+        AnthropicProviderOptions(
+            api_mode="compatible",
+            thinking={"type": "enabled", "budget_tokens": 2_048},
+        ),
+    )
+
+    assert payload["thinking"] == {"type": "enabled", "budget_tokens": 2_048}
+    assert payload["tool_choice"] == {"type": "auto"}
+
+
+def test_build_payload_run_thinking_overrides_provider_default():
+    from linch.providers.anthropic import AnthropicProviderOptions, _build_payload
+
+    req = _make_req(thinking={"type": "disabled"})
+    payload = _build_payload(
+        req,
+        AnthropicProviderOptions(thinking={"type": "enabled", "budget_tokens": 2_048}),
+    )
+
+    assert payload["thinking"] == {"type": "disabled"}
+
+
+def test_build_payload_native_merges_adaptive_effort_and_schema_format():
+    from linch.providers.anthropic import AnthropicProviderOptions, _build_payload
+    from linch.types import OutputSchema
+
+    schema = OutputSchema(name="answer", schema={"type": "object", "properties": {}})
+    req = _make_req(
+        output_schema=schema,
+        thinking={"type": "adaptive"},
+        effort="medium",
+    )
+
+    payload = _build_payload(req, AnthropicProviderOptions(api_mode="native", effort="high"))
+
+    assert payload["thinking"] == {"type": "adaptive"}
+    assert payload["output_config"] == {
+        "effort": "medium",
+        "format": {"type": "json_schema", "schema": schema.schema},
+    }
+    assert "tools" not in payload
+
+
+def test_build_payload_deepseek_compatible_sends_effort_without_native_format():
+    from linch.providers.anthropic import AnthropicProviderOptions, _build_payload
+    from linch.types import OutputSchema
+
+    schema = OutputSchema(name="answer", schema={"type": "object", "properties": {}})
+    req = _make_req(output_schema=schema)
+
+    payload = _build_payload(
+        req,
+        AnthropicProviderOptions(
+            base_url="https://api.deepseek.com/anthropic",
+            thinking={"type": "enabled"},
+            effort="high",
+        ),
+    )
+
+    assert payload["output_config"] == {"effort": "high"}
+    assert "format" not in payload["output_config"]
+    assert payload["tool_choice"] == {"type": "auto"}
 
 
 def test_build_payload_no_output_schema_no_extra_tool():
@@ -395,7 +496,7 @@ def test_build_payload_no_output_schema_no_extra_tool():
     from linch.providers.anthropic import AnthropicProviderOptions, _build_payload
 
     req = _make_req(tools=[])
-    payload = _build_payload(req, AnthropicProviderOptions())
+    payload = _build_payload(req, AnthropicProviderOptions(api_mode="compatible"))
 
     assert "tools" not in payload
     assert "tool_choice" not in payload
@@ -408,7 +509,7 @@ def test_build_payload_output_schema_no_description():
 
     schema = OutputSchema(name="bare_schema", schema={"type": "object"}, description=None)
     req = _make_req(output_schema=schema)
-    payload = _build_payload(req, AnthropicProviderOptions())
+    payload = _build_payload(req, AnthropicProviderOptions(api_mode="compatible"))
 
     tool = next(t for t in payload["tools"] if t["name"] == "bare_schema")
     assert tool["description"] == ""
@@ -505,6 +606,35 @@ def test_translate_messages_tool_result_error():
     assert tr["is_error"] is True
 
 
+def test_translate_messages_keeps_parallel_tool_results_in_one_user_message():
+    """Anthropic needs every parallel result directly after its tool-use turn."""
+    from linch.providers.anthropic import _translate_messages
+    from linch.types import Message, ToolResultBlock, ToolUseBlock
+
+    messages = [
+        Message(
+            role="assistant",
+            content=[
+                ToolUseBlock(id="tu_1", name="Search", input={"q": "one"}),
+                ToolUseBlock(id="tu_2", name="Search", input={"q": "two"}),
+            ],
+        ),
+        Message(
+            role="user",
+            content=[
+                ToolResultBlock(tool_use_id="tu_1", content="first"),
+                ToolResultBlock(tool_use_id="tu_2", content="second"),
+            ],
+        ),
+    ]
+
+    translated = _translate_messages(messages)
+
+    assert len(translated) == 2
+    assert translated[1]["role"] == "user"
+    assert [part["tool_use_id"] for part in translated[1]["content"]] == ["tu_1", "tu_2"]
+
+
 def test_translate_messages_thinking_block_roundtrip():
     """Thinking blocks must carry signature on subsequent turns."""
     from linch.providers.anthropic import _translate_messages
@@ -521,6 +651,25 @@ def test_translate_messages_thinking_block_roundtrip():
     assert tb["type"] == "thinking"
     assert tb["thinking"] == "I thought..."
     assert tb["signature"] == "sig_abc"
+
+
+def test_translate_messages_preserves_an_omitted_signed_thinking_block():
+    """Modern Claude can omit text while still requiring the signature back."""
+    from linch.providers.anthropic import _translate_messages
+    from linch.types import Message, ThinkingBlock
+
+    translated = _translate_messages(
+        [
+            Message(
+                role="assistant",
+                content=[ThinkingBlock(thinking="", signature="opaque-signature")],
+            )
+        ]
+    )
+
+    assert translated[0]["content"] == [
+        {"type": "thinking", "thinking": "", "signature": "opaque-signature"}
+    ]
 
 
 def test_translate_image_url():
