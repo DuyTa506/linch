@@ -1,0 +1,33 @@
+apiVersion: studio.linch.dev/v1alpha2
+kind: LinchProject
+metadata:
+  name: json_verified
+  title: JSON verified
+  description: A bounded root-only JSON Schema completion example.
+spec:
+  package: json_verified
+  runtime:
+    provider:
+      kind: openai_responses
+      model: gpt-5
+    agent:
+      preset: standard_agent
+      instructions: Return a structured completion object.
+      maxTurns: 4
+      budget:
+        maxTokens: 10000
+      completion:
+        mode: verifier_gated
+        maxRetries: 1
+        verifiers:
+          - kind: json_schema
+            id: require_status
+            schema:
+              type: object
+              properties:
+                status:
+                  type: string
+              required:
+                - status
+              additionalProperties: false
+            feedback: Return JSON with a string status field.

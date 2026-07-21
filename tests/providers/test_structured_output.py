@@ -501,16 +501,16 @@ def test_responses_effort_from_reasoning_when_no_req_effort():
     assert payload["reasoning"]["effort"] == "medium"
 
 
-# ── Feature A — Anthropic-native structured output (forced-tool loop path) ────
+# ── Terminal-tool structured output ─────────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_anthropic_native_structured_output_via_forced_tool():
+async def test_terminal_tool_structured_output_via_forced_tool():
     """Loop captures forced-tool response as structured_output without executing the tool.
 
-    This provider mimics what AnthropicProvider will do after Feature A: it
-    declares structured_output=True and returns a tool_use block named after
-    the output schema.  The loop must route final_block.input into
+    This provider mimics an Anthropic-compatible fallback: it declares a
+    terminal structured-output tool and returns a tool_use block named after
+    the output schema. The loop must route final_block.input into
     structured_output via the terminal-tool path, NOT attempt to execute the
     tool and NOT emit a tool_call_end event.
     """
@@ -534,6 +534,7 @@ async def test_anthropic_native_structured_output_via_forced_tool():
             return ProviderCapabilities(
                 context_window=200_000,
                 structured_output=True,
+                structured_output_terminal_tool=True,
                 tool_choice=True,
                 prompt_cache=True,
             )

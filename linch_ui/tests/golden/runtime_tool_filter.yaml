@@ -1,0 +1,30 @@
+apiVersion: studio.linch.dev/v1alpha2
+kind: LinchProject
+metadata:
+  name: runtime_tool_filter
+  title: Runtime Tool Filter
+  description: Attach one declared project tool to the primary runtime.
+spec:
+  package: runtime_tool_filter
+  runtime:
+    provider:
+      kind: openai_responses
+      model: gpt-5
+    agent:
+      preset: standard_agent
+      tools:
+        - repository_search
+      maxTurns: 8
+      budget:
+        maxTokens: 20000
+  tools:
+    - kind: function
+      id: repository_search
+      displayName: Repository Search
+      description: Search the repository without making changes.
+      scope: read
+    - kind: function
+      id: edit_file
+      displayName: Edit File
+      description: Apply a bounded edit to a project file.
+      scope: write

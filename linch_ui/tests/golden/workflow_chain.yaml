@@ -1,0 +1,38 @@
+apiVersion: studio.linch.dev/v1alpha1
+kind: LinchProject
+metadata:
+  name: review_chain
+  title: Review Chain
+  description: Run an A to B to C deterministic review.
+spec:
+  package: review_chain
+  provider:
+    kind: openai_chat
+    model: gpt-5
+    apiKeyEnv: OPENAI_API_KEY
+  primaryAgent:
+    maxTurns: 8
+    budget:
+      maxTokens: 50000
+  workflows:
+    - id: review_flow
+      displayName: Review Flow
+      output: publish
+      nodes:
+        - type: agent_call
+          id: collect
+          label: Collect
+          prompt: Collect the relevant facts.
+          phase: Collect
+        - type: agent_call
+          id: verify
+          label: Verify
+          prompt: Verify the predecessor result.
+          dependsOn: [collect]
+          phase: Verify
+        - type: agent_call
+          id: publish
+          label: Publish
+          prompt: Produce the final review.
+          dependsOn: [verify]
+          phase: Publish

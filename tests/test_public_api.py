@@ -15,10 +15,81 @@ of the contract: embedders import from the top-level `linch` namespace only.
 
 from __future__ import annotations
 
+import importlib
+import subprocess
+import sys
 import types
 from collections import Counter
+from pathlib import Path
 
 import linch
+
+PROMOTED_EVAL_NAMES = frozenset(
+    {
+        "CaseResult",
+        "EvalBenchmarkResult",
+        "EvalBenchmarkTarget",
+        "EvalCase",
+        "EvalResult",
+        "EvalSuite",
+        "EvalTargetResult",
+        "ScriptedProvider",
+        "TextTurn",
+        "ToolUseTurn",
+        "context_metadata_contains",
+        "context_not_trimmed",
+        "context_selected_tool",
+        "cost_under",
+        "load_eval_suite",
+        "load_scripted_turns",
+        "memory_recalled",
+        "recovery_succeeded",
+        "run_completed",
+        "run_eval",
+        "run_eval_benchmark",
+        "schema_valid",
+        "text_contains",
+        "tool_called",
+    }
+)
+PROMOTED_PERMISSION_NAMES = frozenset({"BashRule", "PathRule", "ToolRule"})
+
+
+def test_studio_prerequisite_names_are_promoted() -> None:
+    evals = importlib.import_module("linch.evals")
+    permissions = importlib.import_module("linch.permissions")
+
+    assert set(evals.__all__) == PROMOTED_EVAL_NAMES
+    expected = PROMOTED_EVAL_NAMES | PROMOTED_PERMISSION_NAMES
+    assert expected <= set(linch.__all__)
+    for name in PROMOTED_EVAL_NAMES:
+        assert getattr(linch, name) is getattr(evals, name)
+    for name in PROMOTED_PERMISSION_NAMES:
+        assert getattr(linch, name) is getattr(permissions, name)
+
+
+def test_studio_prerequisite_modules_remain_lazy() -> None:
+    root = Path(__file__).resolve().parents[1]
+    script = f"""
+import sys
+sys.path.insert(0, {str(root / "src")!r})
+import linch
+assert "linch.evals" not in sys.modules
+assert "linch.permissions" not in sys.modules
+_ = linch.EvalCase
+assert "linch.evals" in sys.modules
+assert "linch.permissions" not in sys.modules
+_ = linch.ToolRule
+assert "linch.permissions" in sys.modules
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_all_names_resolve() -> None:

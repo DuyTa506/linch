@@ -63,3 +63,39 @@ async def test_agent_loop_runs_tool_and_finishes() -> None:
 async def test_public_api_has_provider_module() -> None:
     module = __import__("linch.providers")
     assert module is not None
+
+
+async def test_stream_turn_retains_an_omitted_claude_thinking_signature() -> None:
+    """A signature-only thinking block must survive until a tool result round-trip."""
+    from linch.loop.streaming import stream_turn
+    from linch.types import ProviderRequest, ThinkingBlock
+
+    class _SignatureOnlyProvider(BaseProvider):
+        id = "signature-only"
+
+        def context_window(self, model: str) -> int:
+            return 100_000
+
+        async def stream(self, req):
+            yield {"type": "message_start", "model": req.model}
+            yield {"type": "thinking_delta", "text": "", "signature": "opaque-signature"}
+            yield {"type": "tool_use_start", "id": "call_1", "name": "Read"}
+            yield {"type": "tool_use_input_delta", "id": "call_1", "json_delta": "{}"}
+            yield {"type": "tool_use_end", "id": "call_1"}
+            yield {"type": "message_end", "stop_reason": "tool_use", "usage": Usage()}
+
+    agent = Agent(
+        model="claude-opus-4-8",
+        provider=_SignatureOnlyProvider(),
+        session_store=InMemorySessionStore(),
+        permissions={"mode": "skip-dangerous"},
+    )
+    session = await agent.session()
+    req = ProviderRequest(model=agent.model, system=[], tools=[], messages=[])
+
+    items = [item async for item in stream_turn(session, req)]
+    assembly = items[-1]
+    thinking = next(block for block in assembly.message.content if isinstance(block, ThinkingBlock))
+
+    assert thinking.thinking == ""
+    assert thinking.signature == "opaque-signature"

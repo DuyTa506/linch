@@ -191,6 +191,60 @@ async def test_wf_agent_run_options_are_part_of_replay_key() -> None:
     assert provider.calls == 2
 
 
+async def test_wf_agent_tool_filter_is_part_of_replay_key() -> None:
+    from linch import InMemoryRunStore
+
+    provider = CountingTextProvider()
+    agent = _make_agent(provider, run_store=InMemoryRunStore())
+
+    async def flow_with_defaults(wf: Any) -> str:
+        return await wf.agent("same prompt")
+
+    async def flow_with_no_tools(wf: Any) -> str:
+        return await wf.agent("same prompt", tools=[])
+
+    first = await agent.run_workflow(flow_with_defaults, run_id="wf-tool-key")
+    second = await agent.run_workflow(flow_with_no_tools, run_id="wf-tool-key")
+    replay = await agent.run_workflow(flow_with_no_tools, run_id="wf-tool-key")
+
+    assert first == "result-1"
+    assert second == replay == "result-2"
+    assert provider.calls == 2
+
+
+async def test_wf_agent_inherited_subagent_tool_filter_is_part_of_replay_key() -> None:
+    from linch import InMemoryRunStore
+    from linch.subagents.registry import AgentRegistry
+    from linch.subagents.types import AgentDefinition, AgentFrontmatter
+
+    provider = CountingTextProvider()
+    agent = _make_agent(provider, run_store=InMemoryRunStore())
+    definition = AgentDefinition(
+        name="reviewer",
+        file_path="<test>",
+        source="disk",
+        frontmatter=AgentFrontmatter(
+            name="reviewer",
+            description="Review the result.",
+            tools=["Read"],
+        ),
+        body="Review the result.",
+    )
+    agent.subagent_registry = AgentRegistry([definition])
+    agent._subagents_loaded = True
+
+    async def flow(wf: Any) -> str:
+        return await wf.agent("same prompt", name="reviewer")
+
+    first = await agent.run_workflow(flow, run_id="wf-inherited-tool-key")
+    definition.frontmatter.tools = ["Grep"]
+    second = await agent.run_workflow(flow, run_id="wf-inherited-tool-key")
+
+    assert first == "result-1"
+    assert second == "result-2"
+    assert provider.calls == 2
+
+
 async def test_wf_agent_passes_isolation_to_subagent() -> None:
     from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.tools import ToolRegistry, tool
@@ -318,6 +372,58 @@ async def test_changed_prompt_invalidates_cache(tmp_path: Path) -> None:
 
     assert provider2.calls == 1
     assert result == ["result-1", "result-1"]
+
+
+async def test_resume_replays_prefix_predating_tool_aware_fingerprint(tmp_path: Path) -> None:
+    """A run persisted before the tools-aware fingerprint (no fingerprint version
+    stamped in its meta) must still replay its unchanged prefix on resume, not
+    silently re-execute it under the new, differently-keyed formula."""
+    from linch import SqliteRunStore
+    from linch.events import WorkflowEvent
+    from linch.subagents.registry import AgentRegistry
+    from linch.subagents.types import AgentDefinition, AgentFrontmatter
+    from linch.workflow.context import _run_options_fingerprint
+    from linch.workflow.journal import call_key
+
+    store_path = str(tmp_path / "runs.db")
+    store = SqliteRunStore(store_path)
+
+    # Simulate a run persisted by pre-upgrade code: create_run() never stamped a
+    # fingerprint version, and the "reviewer" subagent's tools frontmatter was
+    # never folded into the key (the legacy formula only fingerprints run_options).
+    run = await store.create_run("host-session", id="wf-legacy-resume")
+    assert "journal_fingerprint_version" not in run.meta
+    legacy_key = call_key("reviewer", "same prompt", _run_options_fingerprint(None))
+    await store.append_event(
+        "wf-legacy-resume",
+        WorkflowEvent(
+            kind="agent_end",
+            title="agent",
+            call_key=legacy_key,
+            occurrence=0,
+            result_text="result-1",
+        ),
+    )
+
+    definition = AgentDefinition(
+        name="reviewer",
+        file_path="<test>",
+        source="disk",
+        frontmatter=AgentFrontmatter(name="reviewer", description="Review.", tools=["Read"]),
+        body="Review the result.",
+    )
+    provider = CountingTextProvider()
+    agent = _make_agent(provider, run_store=store)
+    agent.subagent_registry = AgentRegistry([definition])
+    agent._subagents_loaded = True
+
+    async def flow(wf: Any) -> str:
+        return await wf.agent("same prompt", name="reviewer")
+
+    result = await agent.run_workflow(flow, run_id="wf-legacy-resume")
+
+    assert provider.calls == 0
+    assert result == "result-1"
 
 
 async def test_run_id_without_run_store_raises_config_error() -> None:

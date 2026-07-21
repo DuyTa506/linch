@@ -606,11 +606,37 @@ class Agent:
         self._skills_loaded: bool = False
         self._subagents_connect: Any = None
         self._subagents_loaded: bool = False
+        # Coordinator mode can expose a restricted registry to the parent while
+        # retaining a fuller catalog for workers.  ``None`` preserves the
+        # historical behavior: children derive tools directly from
+        # ``self.tools`` (or their parent session's narrower override).
+        self._subagent_tool_registry: ToolRegistry | None = None
         self._mcp_connect: Any = None
         self._mcp_connection: Any = None
         # Additional MCP connections attached mid-run (closed alongside the
         # primary connection in close()).
         self._extra_mcp_connections: list[Any] = []
+
+    def _set_subagent_tool_registry(self, registry: ToolRegistry) -> None:
+        """Install a worker-only tool catalog without changing parent tools.
+
+        This private seam is used by coordinator mode.  The caller-supplied
+        registry is copied so later parent registration (Subagent,
+        SubagentContinue, TaskStop) cannot leak orchestration tools into child
+        sessions.  Tools configured by ``Agent.__init__`` — virtual filesystem,
+        mailbox, schedule, AskUser, and similar additions — are merged into the
+        worker catalog before the first child can run.
+        """
+
+        worker_tools = registry.copy()
+        if self.execution_backend is not None and worker_tools.get("Bash") is not None:
+            from .tools.builtin import BashTool
+
+            worker_tools.replace(BashTool(backend=self.execution_backend))
+        for tool in self.tools.list():
+            if worker_tools.get(tool.name) is None:
+                worker_tools.register(tool)
+        self._subagent_tool_registry = worker_tools
 
     def _configure_loop_guard(self, loop_guard: Any, loop_guard_alias: Any) -> None:
         from .loop_guard import LoopGuard as _LoopGuard
@@ -983,6 +1009,11 @@ class Agent:
                     get_session_model=lambda _sid: self.model,
                 )
                 self.tools.register(cast("Tool", skill_tool))
+                if (
+                    self._subagent_tool_registry is not None
+                    and self._subagent_tool_registry.get(skill_tool.name) is None
+                ):
+                    self._subagent_tool_registry.register(cast("Tool", skill_tool))
                 self._refresh_system_blocks()
 
                 for s in loaded:
@@ -1038,10 +1069,25 @@ class Agent:
                 enable_background_subagents=self.enable_background_subagents,
             )
             self.tools.register(cast("Tool", subagent_tool))
+            # SubagentTool itself is deliberately excluded from the worker registry:
+            # build_child_tools() strips it from every child regardless, so workers
+            # cannot recursively spawn their own sub-subagents by default.
             if self.enable_worker_tools:
-                self.tools.register(cast("Tool", SubagentContinueTool(get_session=get_session)))
+                continue_tool = SubagentContinueTool(get_session=get_session)
+                self.tools.register(cast("Tool", continue_tool))
+                if (
+                    self._subagent_tool_registry is not None
+                    and self._subagent_tool_registry.get(continue_tool.name) is None
+                ):
+                    self._subagent_tool_registry.register(cast("Tool", continue_tool))
             if self.enable_task_stop:
-                self.tools.register(cast("Tool", TaskStopTool(get_session=get_session)))
+                stop_tool = TaskStopTool(get_session=get_session)
+                self.tools.register(cast("Tool", stop_tool))
+                if (
+                    self._subagent_tool_registry is not None
+                    and self._subagent_tool_registry.get(stop_tool.name) is None
+                ):
+                    self._subagent_tool_registry.register(cast("Tool", stop_tool))
             self._refresh_system_blocks()
 
         self._subagents_connect = _load()
@@ -1106,6 +1152,11 @@ class Agent:
 
         for tool in connection.tools:
             self.tools.register(cast("Tool", tool))
+            if (
+                self._subagent_tool_registry is not None
+                and self._subagent_tool_registry.get(tool.name) is None
+            ):
+                self._subagent_tool_registry.register(cast("Tool", tool))
         self.permission_engine.rules.extend(mcp_permission_rules(connection.tools))
         self._refresh_system_blocks()
 

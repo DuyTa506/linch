@@ -9,6 +9,8 @@ Tests cover:
 
 from __future__ import annotations
 
+import builtins
+
 import pytest
 
 # ---------------------------------------------------------------------------
@@ -210,6 +212,29 @@ def test_schema_valid_scorer_fail_not_json():
 
     scorer = schema_valid({"type": "object"})
     assert scorer("not json at all") is False
+
+
+def test_schema_valid_scorer_fails_closed_without_jsonschema(monkeypatch):
+    from linch.evals import schema_valid
+
+    real_import = builtins.__import__
+
+    def import_without_jsonschema(name, *args, **kwargs):
+        if name == "jsonschema":
+            raise ImportError("jsonschema intentionally unavailable")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_jsonschema)
+
+    scorer = schema_valid({"type": "object"})
+    assert scorer('{"capital": "Paris"}') is False
+
+
+def test_schema_valid_scorer_rejects_invalid_schema():
+    from linch.evals import schema_valid
+
+    scorer = schema_valid({"type": "not-a-json-schema-type"})
+    assert scorer('{"capital": "Paris"}') is False
 
 
 def test_cost_under_scorer_pass():
