@@ -125,10 +125,17 @@ class WorkflowContext:
             final_tool_name=final_tool_name,
         )
         effective_tools_filter = tools if tools is not None else definition.frontmatter.tools
-        options_fingerprint = _call_options_fingerprint(
-            tools=effective_tools_filter,
-            run_options=effective_run_options,
-        )
+        if self._journal.fingerprint_version >= 2:
+            options_fingerprint = _call_options_fingerprint(
+                tools=effective_tools_filter,
+                run_options=effective_run_options,
+            )
+        else:
+            # This run's journal predates the tools-aware fingerprint (version 1,
+            # see CURRENT_FINGERPRINT_VERSION); keep computing keys the original
+            # way for this run's whole lifetime so its existing call_keys keep
+            # matching and resume replays instead of silently re-executing.
+            options_fingerprint = _run_options_fingerprint(effective_run_options)
         key = call_key(subagent_type, prompt, options_fingerprint)
         occurrence = self._journal.next_occurrence(key)
         display_name = label or name or "agent"

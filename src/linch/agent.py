@@ -1009,6 +1009,11 @@ class Agent:
                     get_session_model=lambda _sid: self.model,
                 )
                 self.tools.register(cast("Tool", skill_tool))
+                if (
+                    self._subagent_tool_registry is not None
+                    and self._subagent_tool_registry.get(skill_tool.name) is None
+                ):
+                    self._subagent_tool_registry.register(cast("Tool", skill_tool))
                 self._refresh_system_blocks()
 
                 for s in loaded:
@@ -1064,10 +1069,25 @@ class Agent:
                 enable_background_subagents=self.enable_background_subagents,
             )
             self.tools.register(cast("Tool", subagent_tool))
+            # SubagentTool itself is deliberately excluded from the worker registry:
+            # build_child_tools() strips it from every child regardless, so workers
+            # cannot recursively spawn their own sub-subagents by default.
             if self.enable_worker_tools:
-                self.tools.register(cast("Tool", SubagentContinueTool(get_session=get_session)))
+                continue_tool = SubagentContinueTool(get_session=get_session)
+                self.tools.register(cast("Tool", continue_tool))
+                if (
+                    self._subagent_tool_registry is not None
+                    and self._subagent_tool_registry.get(continue_tool.name) is None
+                ):
+                    self._subagent_tool_registry.register(cast("Tool", continue_tool))
             if self.enable_task_stop:
-                self.tools.register(cast("Tool", TaskStopTool(get_session=get_session)))
+                stop_tool = TaskStopTool(get_session=get_session)
+                self.tools.register(cast("Tool", stop_tool))
+                if (
+                    self._subagent_tool_registry is not None
+                    and self._subagent_tool_registry.get(stop_tool.name) is None
+                ):
+                    self._subagent_tool_registry.register(cast("Tool", stop_tool))
             self._refresh_system_blocks()
 
         self._subagents_connect = _load()
