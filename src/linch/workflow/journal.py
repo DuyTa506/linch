@@ -23,6 +23,15 @@ from ..events import WorkflowEvent
 if TYPE_CHECKING:
     from ..run_store import StoredRunEvent
 
+# Bump only when the call-options fingerprint formula changes (i.e. a change
+# that alters call_key for existing calls). A run's version is stamped once,
+# in its RunStore meta, at creation (see workflow/engine.py) and then reused
+# for that run's entire lifetime — including every resume — so an SDK upgrade
+# never invalidates a call_key computed under an earlier formula. Runs
+# persisted before this field existed have no version in their meta and
+# default to 1 (the original run_options-only formula).
+CURRENT_FINGERPRINT_VERSION = 2
+
 
 def call_key(subagent_type: str, prompt: str, options_fingerprint: str = "") -> str:
     """Stable content hash identifying one workflow subagent call."""
@@ -43,9 +52,10 @@ class WorkflowJournalRecord:
 class WorkflowJournal:
     """In-memory result cache keyed by ``(call_key, occurrence)``."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, fingerprint_version: int = CURRENT_FINGERPRINT_VERSION) -> None:
         self._results: dict[tuple[str, int], WorkflowJournalRecord] = {}
         self._counters: dict[str, int] = {}
+        self.fingerprint_version = fingerprint_version
 
     def next_occurrence(self, key: str) -> int:
         """Return this key's next occurrence index (0-based, monotonic)."""
@@ -76,13 +86,20 @@ class WorkflowJournal:
         )
 
     @classmethod
-    def from_stored_events(cls, events: list[StoredRunEvent]) -> WorkflowJournal:
+    def from_stored_events(
+        cls, events: list[StoredRunEvent], *, fingerprint_version: int = 1
+    ) -> WorkflowJournal:
         """Rebuild the journal from a run's persisted event log.
 
         Both ``agent_end`` (live run) and ``agent_replayed`` (a prior resume)
         records fold in, so repeated resumes keep the full prefix cached.
+
+        Args:
+            fingerprint_version: The formula this run's stored call_keys were
+                computed under (from the run's meta; defaults to 1, the
+                original formula, for runs persisted before versioning).
         """
-        journal = cls()
+        journal = cls(fingerprint_version=fingerprint_version)
         for stored in events:
             event = stored.event
             if not isinstance(event, WorkflowEvent):

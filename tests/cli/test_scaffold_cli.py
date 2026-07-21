@@ -61,7 +61,7 @@ async def _final_text(agent) -> str:
 def _bare_project(tmp_path: Path, name: str, packages: list[str]) -> Path:
     root = tmp_path / "proj"
     (root / "src").mkdir(parents=True)
-    (root / "pyproject.toml").write_text(f'[project]\nname = "{name}"\n')
+    (root / "pyproject.toml").write_text(f'[project]\nname = "{name}"\ndependencies = ["linch"]\n')
     for pkg in packages:
         (root / "src" / pkg).mkdir()
         (root / "src" / pkg / "__init__.py").write_text("")
@@ -253,6 +253,34 @@ def test_add_tool_refuses_existing(tmp_path, capsys):
 def test_add_tool_outside_project(tmp_path, capsys):
     assert main(["add", "tool", "lookup", "--dir", str(tmp_path)]) == 1
     assert "pyproject.toml" in capsys.readouterr().err
+
+
+def test_add_tool_rejects_unrelated_ancestor_pyproject(tmp_path, capsys):
+    """An ancestor pyproject.toml that doesn't depend on linch must not be
+    mistaken for a scaffolded project, even with a matching src/<pkg> layout."""
+    root = tmp_path / "unrelated"
+    (root / "src" / "unrelated_pkg").mkdir(parents=True)
+    (root / "src" / "unrelated_pkg" / "__init__.py").write_text("")
+    (root / "pyproject.toml").write_text('[project]\nname = "unrelated"\n')
+    subdir = root / "nested" / "deep"
+    subdir.mkdir(parents=True)
+
+    assert main(["add", "tool", "lookup", "--dir", str(subdir)]) == 1
+    assert "pyproject.toml" in capsys.readouterr().err
+    assert not (root / "src" / "unrelated_pkg" / "tools").exists()
+
+
+def test_add_tool_skips_unrelated_ancestor_and_finds_linch_project(tmp_path):
+    """Walking upward must keep going past a closer, non-linch pyproject.toml
+    (e.g. a nested vendored subproject) to reach the actual linch project root
+    further up, rather than stopping at the first pyproject.toml found."""
+    proj = _new_project(tmp_path)
+    nested = proj / "vendor" / "example"
+    nested.mkdir(parents=True)
+    (proj / "vendor" / "pyproject.toml").write_text('[project]\nname = "vendor-example"\n')
+
+    assert main(["add", "tool", "lookup", "--dir", str(nested)]) == 0
+    assert (proj / "src" / "my_agent" / "tools" / "lookup.py").is_file()
 
 
 def test_add_tool_picks_package_matching_project_name(tmp_path):

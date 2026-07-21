@@ -514,6 +514,66 @@ async def test_coordinator_worker_retains_heavy_tools(tmp_path: Path) -> None:
     assert {"Read", "Write", "Edit", "Bash", "Glob", "Grep"} <= provider.tool_sets[0]
 
 
+async def test_coordinator_worker_receives_skill_tool(tmp_path: Path) -> None:
+    """Skills and subagent-orchestration tools connect (in session()) after the
+    worker registry is frozen (in the factory); workers must still see them,
+    mirroring the existing MCP re-sync."""
+    from linch import create_deep_agent
+    from linch.sessions import InMemorySessionStore
+    from linch.tools import ToolContext
+
+    class RecordingProvider(FakeProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.tool_sets: list[set[str]] = []
+
+        async def stream(self, req: Any) -> AsyncIterator[dict[str, object]]:
+            self.tool_sets.append({str(tool["name"]) for tool in req.tools})
+            async for event in super().stream(req):
+                yield event
+
+    provider = RecordingProvider()
+    agent = create_deep_agent(
+        model="gpt-5",
+        provider=provider,
+        cwd=str(tmp_path),
+        coordinator=True,
+        durable=False,
+        session_store=InMemorySessionStore(),
+        permissions={"mode": "skip-dangerous"},
+    )
+    session = await agent.session(id="s1")
+    subagent = agent.tools.get("Subagent")
+    assert subagent is not None
+
+    result = await subagent.execute(
+        {
+            # Omitting subagent_type spawns the built-in general-purpose worker,
+            # whose frontmatter has tools=None ("inherit everything") — unlike
+            # named types (e.g. "implementer"), which pin their own allowlist and
+            # so wouldn't expose a frozen-registry gap regardless of this bug.
+            "description": "implementation",
+            "prompt": "Inspect the project and report what should change.",
+        },
+        ToolContext(
+            cwd=agent.cwd,
+            session_id=session.id,
+            run_id="test-run",
+            session_store=session.store,
+            file_read_tracker=session.file_read_tracker,
+            filesystem=session.filesystem,
+        ),
+    )
+
+    assert result.is_error is False
+    assert provider.tool_sets
+    assert "Skill" in provider.tool_sets[0]
+    # SubagentContinue/TaskStop are gated by enable_worker_tools/enable_task_stop,
+    # which default to True precisely so workers (not just the parent) get them.
+    assert "SubagentContinue" in provider.tool_sets[0]
+    assert "TaskStop" in provider.tool_sets[0]
+
+
 async def test_coordinator_worker_preserves_custom_registry_semantics(tmp_path: Path) -> None:
     """A custom registry stays custom; coordinator mode must not add SWE defaults."""
     from linch import create_deep_agent

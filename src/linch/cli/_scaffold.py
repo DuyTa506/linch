@@ -116,11 +116,72 @@ def add_tool(name: str, start: Path) -> list[Path]:
 def _find_project_root(start: Path) -> Path:
     current = start.resolve()
     for candidate in (current, *current.parents):
-        if (candidate / "pyproject.toml").is_file():
+        pyproject = candidate / "pyproject.toml"
+        if pyproject.is_file() and _depends_on_linch(pyproject):
             return candidate
     raise ScaffoldError(
-        f"no pyproject.toml found from {start} upward (run inside a project created by 'linch new')"
+        f"no linch project found from {start} upward (run inside a project created "
+        "by 'linch new'; its pyproject.toml must declare a 'linch' dependency)"
     )
+
+
+def _depends_on_linch(pyproject: Path) -> bool:
+    """Whether *pyproject*'s ``[project].dependencies`` names ``linch``.
+
+    Guards against silently adopting an unrelated ancestor's pyproject.toml
+    (e.g. this SDK's own repo, or a nested vendored subproject) as the target
+    for ``linch add tool`` just because it happens to be the nearest one.
+    """
+    text = pyproject.read_text(encoding="utf-8")
+    try:
+        import tomllib
+    except ImportError:  # Python 3.10 — tomllib is 3.11+
+        return _depends_on_linch_line_scan(text)
+    try:
+        data = tomllib.loads(text)
+    except Exception:
+        return _depends_on_linch_line_scan(text)
+    dependencies = data.get("project", {}).get("dependencies")
+    if not isinstance(dependencies, list):
+        return False
+    return any(_requirement_name(dep) == "linch" for dep in dependencies if isinstance(dep, str))
+
+
+def _depends_on_linch_line_scan(text: str) -> bool:
+    in_project = False
+    in_dependencies = False
+    for raw_line in text.splitlines():
+        stripped = raw_line.strip()
+        if not in_dependencies and stripped.startswith("["):
+            in_project = stripped == "[project]"
+            continue
+        if not in_project:
+            continue
+        if not in_dependencies:
+            match = re.match(r"dependencies\s*=\s*\[", stripped)
+            if not match:
+                continue
+            in_dependencies = True
+            stripped = stripped[match.end() :]
+        closed = "]" in stripped
+        body = stripped.split("]", 1)[0] if closed else stripped
+        for value in re.findall(r"""["']([^"']+)["']""", body):
+            if _requirement_name(value) == "linch":
+                return True
+        if closed:
+            in_dependencies = False
+    return False
+
+
+_REQUIREMENT_NAME_RE = re.compile(r"^\s*([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)")
+
+
+def _requirement_name(requirement: str) -> str | None:
+    """Extract and PEP 503-normalize a PEP 508 requirement string's package name."""
+    match = _REQUIREMENT_NAME_RE.match(requirement)
+    if not match:
+        return None
+    return match.group(1).lower().replace("_", "-").replace(".", "-")
 
 
 def _find_package_dir(root: Path) -> Path:
