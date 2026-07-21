@@ -1,0 +1,47 @@
+{
+  "name": "linch-studio-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "npm run typecheck && vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "e2e": "playwright test",
+    "docs:capture": "npm run build && node scripts/capture_documentation.mjs",
+    "fixtures:emit": "vite-node scripts/emit_fixtures.ts",
+    "api:dump": "python ../scripts/dump_openapi.py",
+    "api:generate": "openapi-typescript openapi.json -o src/api/schema.ts",
+    "api:check": "python ../scripts/dump_openapi.py --check && openapi-typescript openapi.json -o node_modules/.api-check.ts && git diff --no-index --exit-code node_modules/.api-check.ts src/api/schema.ts"
+  },
+  "dependencies": {
+    "@codemirror/lang-yaml": "^6.1.2",
+    "@codemirror/state": "^6.5.2",
+    "@codemirror/view": "^6.36.2",
+    "@fontsource/jetbrains-mono": "^5.1.2",
+    "@xyflow/react": "^12.8.6",
+    "codemirror": "^6.0.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "yaml": "^2.7.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.50.0",
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.1.0",
+    "@testing-library/user-event": "^14.5.2",
+    "@types/node": "^26.1.1",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "@vitest/coverage-v8": "^3.2.7",
+    "jsdom": "^25.0.1",
+    "openapi-typescript": "^7.6.1",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.7",
+    "vitest": "^3.2.7"
+  }
+}
