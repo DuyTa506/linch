@@ -89,6 +89,24 @@ class UnsafeAuthoringService:
         return ProposalDraft(candidate=current.model_copy(update={"spec": spec}))
 
 
+class RawCrashAuthoringService:
+    """Raises a bare, untyped exception — not an AuthoringError subclass.
+
+    Simulates a genuine unhandled bug (as opposed to a typed provider/model
+    failure) to exercise the server's catch-all logging path.
+    """
+
+    async def propose(
+        self,
+        *,
+        current: Blueprint,
+        base_digest: str,
+        instruction: str,
+    ) -> ProposalDraft:
+        del current, base_digest, instruction
+        raise RuntimeError("boom, a raw unhandled crash")
+
+
 class LocalApiClient:
     """Small synchronous facade over httpx's native ASGI transport.
 
@@ -1220,6 +1238,25 @@ def test_authoring_turn_crash_logs_the_exception_class_as_a_diagnostic_lead(
     )
     logged = record.getMessage()
     assert "cause=RuntimeError" in logged
+
+
+def test_proposal_raw_crash_logs_the_exception_class_without_leaking_its_message(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    client = _client(tmp_path, authoring_service=RawCrashAuthoringService())
+    _create(client)
+
+    with caplog.at_level(logging.WARNING, logger="linch_studio.server"):
+        response = client.post(
+            "/api/v1/projects/demo/proposals",
+            json={"instruction": "add a greeting tool"},
+        )
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "authoring.failed"
+    record = next(item for item in caplog.records if "unexpected RuntimeError" in item.getMessage())
+    assert "authoring failed" in record.getMessage()
+    assert "boom" not in caplog.text
 
 
 def test_proposal_instruction_cap_matches_the_service_cap(tmp_path: Path) -> None:

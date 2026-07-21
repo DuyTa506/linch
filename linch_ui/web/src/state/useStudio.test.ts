@@ -554,4 +554,112 @@ describe("conversational authoring", () => {
     expect(transcript[1]).toMatchObject({ kind: "plan" });
     expect(hook.result.current.state.toast?.marker).toBe("[xx]");
   });
+
+  it("drops a stale turn's transcript entry and proposal when the project switches mid-flight", async () => {
+    const { api } = conversationalApi(WORKFLOW_BLUEPRINT);
+    const otherDoc: ProjectDocument = { ...docFor(WORKFLOW_BLUEPRINT), id: "other" };
+    (api as { openProject: unknown }).openProject = vi
+      .fn()
+      .mockResolvedValueOnce(docFor(WORKFLOW_BLUEPRINT))
+      .mockResolvedValueOnce(otherDoc);
+    let release: (turn: TurnResponse) => void = () => undefined;
+    (api as { converseStream: unknown }).converseStream = vi.fn(
+      () =>
+        new Promise<TurnResponse>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const hook = renderHook(() => useStudio(api));
+    await waitFor(() => expect(hook.result.current.state.ready).toBe(true));
+    await act(async () => {
+      await hook.result.current.actions.openProject("demo");
+    });
+
+    let pending: Promise<void> = Promise.resolve();
+    act(() => {
+      pending = hook.result.current.actions.converse("build me a reviewer");
+    });
+
+    // The user abandons the turn and switches to a different project while
+    // the first project's turn is still streaming.
+    await act(async () => {
+      await hook.result.current.actions.openProject("other");
+    });
+    expect(hook.result.current.state.doc?.id).toBe("other");
+    expect(hook.result.current.state.transcript).toEqual([]);
+
+    await act(async () => {
+      release({
+        kind: "proposal",
+        questions: [],
+        plan: null,
+        planNote: null,
+        proposal: proposalFor(WORKFLOW_BLUEPRINT),
+        thinking: null,
+      });
+      await pending;
+    });
+
+    // The abandoned turn's result must not land on the project the user is
+    // now looking at.
+    expect(hook.result.current.state.doc?.id).toBe("other");
+    expect(hook.result.current.state.transcript).toEqual([]);
+    expect(hook.result.current.state.proposals).toEqual([]);
+  });
+
+  it("does not let a superseded turn's completion clear a newer turn's live streaming state", async () => {
+    const { hook, converse } = await conversationalStudio(WORKFLOW_BLUEPRINT);
+    const releases: Array<(turn: TurnResponse) => void> = [];
+    converse.mockImplementation(
+      () =>
+        new Promise<TurnResponse>((resolve) => {
+          releases.push(resolve);
+        }),
+    );
+
+    let pendingFirst: Promise<void> = Promise.resolve();
+    act(() => {
+      pendingFirst = hook.result.current.actions.converse("first message");
+    });
+    expect(hook.result.current.state.streamingThinking).toBe("");
+
+    let pendingSecond: Promise<void> = Promise.resolve();
+    act(() => {
+      pendingSecond = hook.result.current.actions.converse("second message");
+    });
+    expect(hook.result.current.state.streamingThinking).toBe("");
+
+    // The superseded (first) turn lands while the second turn is still
+    // streaming; it must not clear the second turn's live state.
+    await act(async () => {
+      releases[0]({
+        kind: "questions",
+        questions: [],
+        plan: null,
+        planNote: null,
+        proposal: null,
+        thinking: null,
+      });
+      await pendingFirst;
+    });
+    expect(hook.result.current.state.streamingThinking).toBe("");
+
+    await act(async () => {
+      releases[1]({
+        kind: "questions",
+        questions: [PROVIDER_QUESTION],
+        plan: null,
+        planNote: null,
+        proposal: null,
+        thinking: null,
+      });
+      await pendingSecond;
+    });
+
+    expect(hook.result.current.state.streamingThinking).toBeNull();
+    expect(hook.result.current.state.transcript.at(-1)).toMatchObject({
+      kind: "questions",
+      questions: [PROVIDER_QUESTION],
+    });
+  });
 });

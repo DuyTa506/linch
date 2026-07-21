@@ -79,6 +79,8 @@ The `WorkflowEvent` kinds you will see on the `on_event` stream are:
 
 Because the journal is keyed by content hash, resume is precise: editing one prompt in the middle of a workflow invalidates only that call and everything after it, while earlier calls still replay from the journal.
 
+The call-key formula itself is versioned and pinned per run at creation (stored in the run's meta), so upgrading the linch SDK never changes how an already-in-flight run's existing calls are keyed — a resumed run keeps replaying its unchanged prefix under whichever formula it started with, rather than silently re-executing it under a newer one.
+
 ---
 
 ## Replay rule

@@ -8,6 +8,7 @@ Studio project; only the explicit pipeline bridge enters the authoring lifecycle
 from __future__ import annotations
 
 from collections.abc import Sequence
+from pathlib import PureWindowsPath
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -79,7 +80,14 @@ class RecipeFile(SupportModel):
     @classmethod
     def _safe_relative_path(cls, value: str) -> str:
         normalized = value.replace("\\", "/")
-        if normalized.startswith("/") or ".." in normalized.split("/") or "//" in normalized:
+        if (
+            normalized.startswith("/")
+            or ".." in normalized.split("/")
+            or "//" in normalized
+            # Catches both "C:/foo" (absolute) and "C:foo" (drive-relative) —
+            # either would discard a joined base directory on Windows.
+            or PureWindowsPath(normalized).drive
+        ):
             raise ValueError("recipe file paths must be safe relative paths")
         return normalized
 

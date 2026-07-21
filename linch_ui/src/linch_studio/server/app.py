@@ -152,6 +152,16 @@ def _support_failure(error: AuthoringError) -> SupportFailed:
     return SupportFailed(diagnostics=error.diagnostics)
 
 
+def _log_unexpected_failure(context: str, error: BaseException) -> None:
+    """Log a lead for a crash the service integration did not itself type.
+
+    Same safety rule as ``_authoring_failure``/``_support_failure``: only the
+    exception's class name is logged, never its free-form message.
+    """
+
+    _logger.warning("%s failed: unexpected %s", context, type(error).__name__)
+
+
 def _sse_event(event: str, payload: dict[str, JsonValue]) -> str:
     data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     return f"event: {event}\ndata: {data}\n\n"
@@ -300,7 +310,7 @@ def create_app(
 
     @app.get("/api/v1/projects", response_model=ProjectListResponse)
     async def list_projects() -> ProjectListResponse:
-        snapshots = store.list_projects()
+        snapshots = await store.list_projects()
         return ProjectListResponse(projects=[_project_summary(snapshot) for snapshot in snapshots])
 
     @app.post(
@@ -309,37 +319,37 @@ def create_app(
         status_code=status.HTTP_201_CREATED,
     )
     async def create_project(request: ProjectCreateRequest) -> ProjectDocument:
-        def create_document() -> ProjectDocument:
-            return _project_document(
+        async def create_document() -> ProjectDocument:
+            return await _project_document(
                 store,
-                store.create_project(
+                await store.create_project(
                     request.project_id,
                     title=request.title,
                     template=request.template,
                 ),
             )
 
-        return create_document()
+        return await create_document()
 
     @app.get("/api/v1/projects/{project_id}", response_model=ProjectDocument)
     async def open_project(project_id: str) -> ProjectDocument:
-        return _project_document(store, store.open_project(project_id))
+        return await _project_document(store, await store.open_project(project_id))
 
     @app.put("/api/v1/projects/{project_id}/blueprint", response_model=ProjectDocument)
     async def save_blueprint(project_id: str, request: SaveBlueprintRequest) -> ProjectDocument:
-        def save_document() -> ProjectDocument:
-            snapshot = store.save_blueprint(
+        async def save_document() -> ProjectDocument:
+            snapshot = await store.save_blueprint(
                 project_id,
                 request.yaml,
                 base_digest=request.base_digest,
             )
-            return _project_document(store, snapshot)
+            return await _project_document(store, snapshot)
 
-        return save_document()
+        return await save_document()
 
     @app.post("/api/v1/projects/{project_id}/validate", response_model=ValidationResponse)
     async def validate_project(project_id: str) -> ValidationResponse:
-        snapshot = store.open_project(project_id)
+        snapshot = await store.open_project(project_id)
         return ValidationResponse(
             structurally_valid=True,
             export_ready=snapshot.export_ready,
@@ -353,7 +363,7 @@ def create_app(
         response_model_exclude_none=True,
     )
     async def load_layout(project_id: str) -> LayoutResponse:
-        layout = store.load_layout(project_id)
+        layout = await store.load_layout(project_id)
         return LayoutResponse(
             id=project_id,
             layout=_validated_layout(layout),
@@ -365,7 +375,7 @@ def create_app(
         response_model_exclude_none=True,
     )
     async def save_layout(project_id: str, layout: LayoutDocument) -> LayoutResponse:
-        saved = store.save_layout(project_id, layout.model_dump(mode="json", by_alias=True))
+        saved = await store.save_layout(project_id, layout.model_dump(mode="json", by_alias=True))
         return LayoutResponse(id=project_id, layout=_validated_layout(saved))
 
     @app.post(
@@ -373,7 +383,7 @@ def create_app(
         response_model=ExportPreviewResponse,
     )
     async def preview_export(project_id: str) -> ExportPreviewResponse:
-        project = _compile_project(store.open_project(project_id))
+        project = _compile_project(await store.open_project(project_id))
         return ExportPreviewResponse(
             blueprint_digest=project.blueprint_digest,
             files=[GeneratedFilePreview.model_validate(item) for item in project.preview()],
@@ -381,7 +391,7 @@ def create_app(
 
     @app.post("/api/v1/projects/{project_id}/export/zip")
     async def download_export(project_id: str) -> Response:
-        project = _compile_project(store.open_project(project_id))
+        project = _compile_project(await store.open_project(project_id))
         archive = deterministic_zip_bytes(project)
         return Response(
             content=archive,
@@ -401,7 +411,7 @@ def create_app(
         request: DirectoryExportRequest,
     ) -> DirectoryExportResponse:
         try:
-            project = _compile_project(store.open_project(project_id))
+            project = _compile_project(await store.open_project(project_id))
             target = export_directory(project, request.target)
         except (ExportError, OSError):
             raise ExportConflict from None
@@ -415,7 +425,7 @@ def create_app(
         response_model=ProposalListResponse,
     )
     async def list_proposals(project_id: str) -> ProposalListResponse:
-        proposals = store.list_proposals(project_id)
+        proposals = await store.list_proposals(project_id)
         return ProposalListResponse(proposals=[_proposal_response(item) for item in proposals])
 
     @app.post(
@@ -427,7 +437,7 @@ def create_app(
         project_id: str,
         request: ProposalRequest,
     ) -> ProposalResponse:
-        current = store.open_project(project_id)
+        current = await store.open_project(project_id)
         try:
             draft = await authoring.propose(
                 current=current.blueprint,
@@ -438,11 +448,12 @@ def create_app(
             raise
         except AuthoringError as error:
             raise _authoring_failure(error) from None
-        except Exception:
+        except Exception as error:
+            _log_unexpected_failure("authoring", error)
             raise AuthoringFailed from None
         if not isinstance(draft, ProposalDraft):
             raise AuthoringFailed
-        return _proposal_response(_persist_draft(store, project_id, current, draft))
+        return _proposal_response(await _persist_draft(store, project_id, current, draft))
 
     async def _converse_turn(
         project_id: str,
@@ -450,7 +461,7 @@ def create_app(
         on_thinking: Callable[[str], None] | None = None,
         on_tool_call: Callable[[ToolCallUpdate], None] | None = None,
     ) -> TurnResponse:
-        current = store.open_project(project_id)
+        current = await store.open_project(project_id)
         messages = [
             AuthoringMessage(role=item.role, content=item.content) for item in request.messages
         ]
@@ -467,7 +478,8 @@ def create_app(
             raise
         except AuthoringError as error:
             raise _authoring_failure(error) from None
-        except Exception:
+        except Exception as error:
+            _log_unexpected_failure("authoring", error)
             raise AuthoringFailed from None
         if not isinstance(turn, TurnDraft):
             raise AuthoringFailed
@@ -504,7 +516,7 @@ def create_app(
             )
         if turn.proposal is None:
             raise AuthoringFailed
-        proposal = _persist_draft(store, project_id, current, turn.proposal)
+        proposal = await _persist_draft(store, project_id, current, turn.proposal)
         return TurnResponse(
             kind="proposal",
             plan_note=turn.note,
@@ -545,7 +557,7 @@ def create_app(
         # before any stream bytes; only the running turn reports through events.
         if not authoring_available:
             raise AuthoringUnavailable
-        store.open_project(project_id)
+        await store.open_project(project_id)
         queue: asyncio.Queue[tuple[str, dict[str, JsonValue]]] = asyncio.Queue()
         TERMINAL_KINDS = ("turn", "error")
 
@@ -562,7 +574,8 @@ def create_app(
                 queue.put_nowait(("turn", response.model_dump(mode="json", by_alias=True)))
             except StudioServerError as error:
                 queue.put_nowait(("error", _stream_error_payload(error)))
-            except Exception:
+            except Exception as error:
+                _log_unexpected_failure("authoring", error)
                 queue.put_nowait(("error", _stream_error_payload(AuthoringFailed())))
 
         async def events() -> AsyncIterator[str]:
@@ -680,7 +693,7 @@ def create_app(
     async def _support_turn(request: SupportTurnRequest) -> SupportTurnResponse:
         instruction = _pipeline_instruction(request)
         mode = resolve_mode(request.requested_mode, instruction)
-        current = store.open_project(request.project_id) if request.project_id else None
+        current = await store.open_project(request.project_id) if request.project_id else None
 
         if mode == "pipeline":
             intent = pipeline_intent(instruction)
@@ -760,7 +773,7 @@ def create_app(
                         + " Blueprint draft. Review configuration and handoff TODOs before use."
                     ),
                 )
-                proposal = _persist_draft(store, request.project_id or "", current, draft)
+                proposal = await _persist_draft(store, request.project_id or "", current, draft)
                 return SupportTurnResponse(
                     kind="proposal",
                     mode="pipeline",
@@ -798,7 +811,8 @@ def create_app(
                 raise
             except AuthoringError as error:
                 raise _authoring_failure(error) from None
-            except Exception:
+            except Exception as error:
+                _log_unexpected_failure("authoring", error)
                 raise AuthoringFailed from None
             if not isinstance(authored, TurnDraft):
                 raise AuthoringFailed
@@ -821,7 +835,9 @@ def create_app(
                 )
             if authored.proposal is None:
                 raise AuthoringFailed
-            proposal = _persist_draft(store, request.project_id or "", current, authored.proposal)
+            proposal = await _persist_draft(
+                store, request.project_id or "", current, authored.proposal
+            )
             return SupportTurnResponse(
                 kind="proposal",
                 mode="pipeline",
@@ -843,7 +859,8 @@ def create_app(
             raise
         except AuthoringError as error:
             raise _support_failure(error) from None
-        except Exception:
+        except Exception as error:
+            _log_unexpected_failure("support", error)
             raise SupportFailed from None
         if not isinstance(turn, SupportTurn):
             raise SupportFailed
@@ -874,7 +891,8 @@ def create_app(
                 queue.put_nowait(("turn", response.model_dump(mode="json", by_alias=True)))
             except StudioServerError as error:
                 queue.put_nowait(("error", _stream_error_payload(error)))
-            except Exception:
+            except Exception as error:
+                _log_unexpected_failure("support", error)
                 queue.put_nowait(("error", _stream_error_payload(SupportFailed())))
 
         async def events() -> AsyncIterator[str]:
@@ -894,18 +912,18 @@ def create_app(
         response_model=ProjectDocument,
     )
     async def accept_proposal(project_id: str, proposal_id: str) -> ProjectDocument:
-        current = store.open_project(project_id)
-        proposal = store.get_proposal(project_id, proposal_id)
-        snapshot = store.accept_proposal(project_id, proposal_id)
-        _place_new_workflow_nodes(store, project_id, current.blueprint, proposal.candidate)
-        return _project_document(store, snapshot)
+        current = await store.open_project(project_id)
+        proposal = await store.get_proposal(project_id, proposal_id)
+        snapshot = await store.accept_proposal(project_id, proposal_id)
+        await _place_new_workflow_nodes(store, project_id, current.blueprint, proposal.candidate)
+        return await _project_document(store, snapshot)
 
     @app.delete(
         "/api/v1/projects/{project_id}/proposals/{proposal_id}",
         status_code=status.HTTP_204_NO_CONTENT,
     )
     async def delete_proposal(project_id: str, proposal_id: str) -> Response:
-        store.delete_proposal(project_id, proposal_id)
+        await store.delete_proposal(project_id, proposal_id)
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @app.post(
@@ -913,7 +931,7 @@ def create_app(
         status_code=status.HTTP_204_NO_CONTENT,
     )
     async def reject_proposal(project_id: str, proposal_id: str) -> Response:
-        store.delete_proposal(project_id, proposal_id)
+        await store.delete_proposal(project_id, proposal_id)
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @app.get("/{full_path:path}", include_in_schema=False)
@@ -942,7 +960,7 @@ def _project_summary(snapshot: ProjectSnapshot) -> ProjectSummary:
     )
 
 
-def _project_document(store: FileProjectStore, snapshot: ProjectSnapshot) -> ProjectDocument:
+async def _project_document(store: FileProjectStore, snapshot: ProjectSnapshot) -> ProjectDocument:
     return ProjectDocument(
         id=snapshot.project_id,
         yaml=snapshot.yaml,
@@ -950,7 +968,7 @@ def _project_document(store: FileProjectStore, snapshot: ProjectSnapshot) -> Pro
         digest=snapshot.digest,
         diagnostics=list(snapshot.diagnostics),
         export_ready=snapshot.export_ready,
-        layout=_validated_layout(store.load_layout(snapshot.project_id)),
+        layout=_validated_layout(await store.load_layout(snapshot.project_id)),
         migrated_from=snapshot.migrated_from,
         migration_warnings=[
             MigrationWarningResponse.model_validate(item.to_dict())
@@ -973,7 +991,7 @@ def _compile_project(snapshot: ProjectSnapshot) -> CompiledProject:
         raise ExportBlocked(diagnostics=exc.diagnostics) from None
 
 
-def _persist_draft(
+async def _persist_draft(
     store: FileProjectStore,
     project_id: str,
     current: ProjectSnapshot,
@@ -991,7 +1009,7 @@ def _persist_draft(
         )
         for item in semantic_diff(current.blueprint, draft.candidate)
     )
-    return store.save_proposal(
+    return await store.save_proposal(
         project_id,
         base_digest=current.digest,
         candidate=draft.candidate,
@@ -1000,7 +1018,7 @@ def _persist_draft(
     )
 
 
-def _place_new_workflow_nodes(
+async def _place_new_workflow_nodes(
     store: FileProjectStore,
     project_id: str,
     current: Blueprint,
@@ -1016,7 +1034,7 @@ def _place_new_workflow_nodes(
     if not candidate.spec.workflows:
         return
     try:
-        layout = store.load_layout(project_id)
+        layout = await store.load_layout(project_id)
         nodes = layout.get("nodes")
         if not isinstance(nodes, list):
             return
@@ -1032,7 +1050,7 @@ def _place_new_workflow_nodes(
             nodes.append({"id": key, "x": entry["x"], "y": entry["y"]})
             added = True
         if added:
-            store.save_layout(project_id, layout)
+            await store.save_layout(project_id, layout)
     except CorruptProject:
         return
 

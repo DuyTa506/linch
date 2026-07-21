@@ -416,6 +416,8 @@ def _selected_capabilities(blueprint: Blueprint) -> tuple[str, ...]:
             if caps.compaction.strategy == "custom"
             else f"compaction.{caps.compaction.strategy}"
         )
+    if caps.compaction.ladder.enabled:
+        selected.add("compaction.ladder")
     if caps.structured_output.enabled:
         selected.add("structured_output.json_schema")
     if caps.context.memory_recall:

@@ -1,4 +1,4 @@
-import { Fragment, useMemo, useState } from "react";
+import { Fragment, useMemo, useRef, useState } from "react";
 
 import { useT } from "../i18n";
 import { FIELDS, PROJECT_FIELDS, type FieldSpec } from "../model/fields";
@@ -46,20 +46,32 @@ function FieldList({
   const { blueprint, actions } = studio;
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  // Always read the latest saved Blueprint, not the one closed over when a
+  // commit was queued — a second field's edit must build on the first's.
+  const blueprintRef = useRef(blueprint);
+  blueprintRef.current = blueprint;
+  // Serializes commits: a second field committed while the first is still
+  // saving waits for it, so it never overwrites that landed edit.
+  const commitQueue = useRef(Promise.resolve());
 
   if (!blueprint) return null;
 
-  const commit = async (spec: FieldSpec, raw: string) => {
+  const commit = (spec: FieldSpec, raw: string) => {
     const pointer = `${base}/${spec.key}`;
     setDraft((current) => ({ ...current, [pointer]: raw }));
-    try {
-      const next = setAtPointer(blueprint, pointer, toValue(spec, raw));
-      setFieldErrors((current) => ({ ...current, [pointer]: "" }));
-      const saved = await actions.applyBlueprint(next);
-      if (saved) onSaved?.();
-    } catch {
-      setFieldErrors((current) => ({ ...current, [pointer]: "Enter valid JSON." }));
-    }
+    commitQueue.current = commitQueue.current.then(async () => {
+      const current = blueprintRef.current;
+      if (!current) return;
+      try {
+        const next = setAtPointer(current, pointer, toValue(spec, raw));
+        setFieldErrors((prev) => ({ ...prev, [pointer]: "" }));
+        const saved = await actions.applyBlueprint(next);
+        if (saved) onSaved?.();
+      } catch {
+        setFieldErrors((prev) => ({ ...prev, [pointer]: "Enter valid JSON." }));
+      }
+    });
+    return commitQueue.current;
   };
 
   return (
