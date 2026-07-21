@@ -8,7 +8,7 @@ from collections import defaultdict
 from collections.abc import Sequence
 from typing import Any
 
-from .diagnostics import Diagnostic, PathPart, json_path, sort_diagnostics
+from .diagnostics import Diagnostic, PathPart, Severity, json_path, sort_diagnostics
 from .models import (
     AgentCallNodeSpec,
     AgentTickRoutineSpec,
@@ -78,7 +78,7 @@ def _finding(
     message: str,
     remediation: str,
     *,
-    severity: str = "error",
+    severity: Severity = "error",
 ) -> Diagnostic:
     return Diagnostic(
         code=code,
