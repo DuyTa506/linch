@@ -4,10 +4,24 @@ Linch Studio is a local-first visual blueprint editor and deterministic skeleton
 [Linch](../README.md). It runs on `127.0.0.1`, stores projects as YAML plus a separate layout
 file, and never runs or deploys generated workflows.
 
-The manual editor is fully offline. The optional Support surface uses credentials supplied through
-`LINCH_STUDIO_*` environment variables for documentation-grounded answers and static
-implementation recipes. Pipeline creation is confirmation-gated and can only create a reviewable
-candidate Blueprint; it cannot change project state until the user explicitly accepts it.
+The manual editor is fully offline. With `LINCH_STUDIO_*` configuration, the optional Support
+surface gives documentation-grounded answers and static implementation recipes. During a
+provider-backed documentation or implementation turn, the drawer shows bounded retrieval activity
+and a provisional answer preview, then replaces it with the validated response and evidence.
+Provider thinking and raw structured JSON are never rendered. Pipeline creation is
+confirmation-gated and can only create a reviewable candidate Blueprint; it cannot change project
+state until the user explicitly accepts it.
+
+## Live Support streaming
+
+This recording shows the real drawer while it retrieves documentation and drafts a grounded answer.
+The progress view is provisional: only the validated final Support response is kept in the
+conversation.
+
+[![Live Support streaming demo](artifacts/live-demo/support-streaming-live.png)](artifacts/live-demo/support-streaming-live.webm)
+
+[Watch the WebM recording](artifacts/live-demo/support-streaming-live.webm) if the preview does
+not open video playback in your Markdown viewer.
 
 ## Development
 

@@ -146,7 +146,10 @@ The global **Support** drawer is always visible. Without
 `LINCH_STUDIO_*` configuration, it explains that documentation-grounded answers
 and implementation recipes need a provider; known deterministic pipeline motifs
 can still enter their confirmation-and-plan flow. No semantic Blueprint changes
-until a reviewed proposal is explicitly accepted.
+until a reviewed proposal is explicitly accepted. For provider-backed
+documentation and implementation turns, the drawer immediately shows bounded
+read-only retrieval activity and a provisional answer preview, then replaces it
+with the validated final response.
 
 See [`../README.md`](../README.md) for the frontend build, dev-server, and
 `api:check` commands.
@@ -196,6 +199,18 @@ whether the recipe is fully documented, partially documented with host-owned
 TODOs, or not covered by the corpus. It cannot run code, alter files, call MCP,
 or create a project.
 
+### Live Support progress
+
+The browser sends those provider-backed documentation and implementation turns
+to `POST /api/v1/support/turns/stream`. The server emits `tool_call_start` and
+`tool_call_end` events for the bounded read-only corpus calls, followed by
+`response_delta` fragments from the model's final structured response and one
+terminal `turn` or `error` event. The drawer shows the compact tool progress and
+extracts only a direct answer or recipe title/overview for its in-flight preview;
+it never renders the raw structured JSON. That preview is deliberately
+provisional. Studio replaces it with the strict-schema, evidence-validated
+`SupportTurnResponse` only after the turn completes.
+
 Pipeline creation is intentionally different. An explicit build/create request
 first returns a confirmation; opening a project and confirming again starts a
 reviewable plan. Common CI-review, scheduled-team, and release-readiness
@@ -221,10 +236,13 @@ configuration prevents startup and never exposes supplied values.
 the default, or `high`). It maps to OpenAI reasoning effort, Claude adaptive
 thinking plus native effort, and DeepSeek thinking/effort; the native DeepSeek
 provider preserves `reasoning_content` through tool loops. Support intentionally
-does not stream or retain provider reasoning. Its per-run token budget is also
-disabled so cache/reasoning accounting differences cannot abort a valid
-retrieval loop; `LINCH_STUDIO_TOKEN_BUDGET` remains relevant only to the staged
-authoring service.
+does not stream or retain provider reasoning. It streams only bounded retrieval
+progress and non-thinking final-response fragments for the provisional preview;
+the raw structured response stays hidden, while Studio renders only its
+validated final result. Its per-run token budget is also disabled so
+cache/reasoning accounting differences cannot abort a valid retrieval loop;
+`LINCH_STUDIO_TOKEN_BUDGET` remains relevant only to the staged authoring
+service.
 
 After editing the SDK's `docs/` pages, refresh the Support corpus with
 `python scripts/sync_knowledge.py` (from `linch_ui/`); a unit test fails while
