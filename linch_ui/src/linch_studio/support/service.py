@@ -25,6 +25,7 @@ from linch import (
     FinalAnswerVerifierHook,
     InMemorySessionStore,
     OutputSchema,
+    PartialAssistantEvent,
     ResultEvent,
     SystemPromptConfig,
     ToolCallEndEvent,
@@ -240,7 +241,9 @@ def create_support_agent(request: SupportAgentBuildRequest) -> Agent:
         # disabled for now: compatible providers can account cached/reasoning
         # tokens differently, which otherwise aborts a valid retrieval loop.
         budget=None,
-        include_partial_messages=False,
+        # The service forwards only final-response text fragments to the
+        # Studio stream. Thinking and tool-input deltas remain internal.
+        include_partial_messages=True,
         features=FeatureFlags(skills=False, subagents=False, mcp=False, filesystem=False),
         output_schema=request.output_schema,
         # The SDK selects a thinking-compatible tool choice from the effective
@@ -400,6 +403,7 @@ class SupportService(Protocol):
         messages: Sequence[SupportMessage],
         mode: ResolvedSupportMode,
         current_blueprint: Blueprint | None = None,
+        on_response_delta: Callable[[str], None] | None = None,
         on_tool_call: Callable[[ToolCallUpdate], None] | None = None,
     ) -> SupportTurn: ...
 
@@ -411,9 +415,10 @@ class UnavailableSupportService:
         messages: Sequence[SupportMessage],
         mode: ResolvedSupportMode,
         current_blueprint: Blueprint | None = None,
+        on_response_delta: Callable[[str], None] | None = None,
         on_tool_call: Callable[[ToolCallUpdate], None] | None = None,
     ) -> SupportTurn:
-        del messages, mode, current_blueprint, on_tool_call
+        del messages, mode, current_blueprint, on_response_delta, on_tool_call
         from linch_studio.server.errors import SupportUnavailable
 
         raise SupportUnavailable
@@ -447,6 +452,7 @@ class LinchSupportService:
         messages: Sequence[SupportMessage],
         mode: ResolvedSupportMode,
         current_blueprint: Blueprint | None = None,
+        on_response_delta: Callable[[str], None] | None = None,
         on_tool_call: Callable[[ToolCallUpdate], None] | None = None,
     ) -> SupportTurn:
         bounded = validate_messages(messages)
@@ -479,7 +485,7 @@ class LinchSupportService:
             if inspect.isawaitable(agent):
                 agent = await agent
             await asyncio.wait_for(
-                _run_once(agent, prompt, capture, on_tool_call),
+                _run_once(agent, prompt, capture, on_response_delta, on_tool_call),
                 self.config.timeout_seconds,
             )
             elapsed = _elapsed_ms(started)
@@ -578,6 +584,7 @@ async def _run_once(
     agent: Any,
     prompt: str,
     capture: _Capture,
+    on_response_delta: Callable[[str], None] | None,
     on_tool_call: Callable[[ToolCallUpdate], None] | None,
 ) -> None:
     session = await agent.session()
@@ -588,6 +595,14 @@ async def _run_once(
                 capture.usage = event.cumulative
             elif isinstance(event, BudgetEvent) and event.kind == "exceeded":
                 capture.budget_exceeded = True
+            elif isinstance(event, PartialAssistantEvent):
+                # The structured response is still validated before it becomes
+                # a completed SupportTurn. These fragments only drive a
+                # provisional UI preview, and must never carry thinking.
+                if on_response_delta is not None and event.delta.get("kind") == "text":
+                    text = event.delta.get("text")
+                    if isinstance(text, str) and text:
+                        on_response_delta(text)
             elif isinstance(event, ToolCallStartEvent):
                 starts[event.tool_use_id] = event
                 if on_tool_call is not None:

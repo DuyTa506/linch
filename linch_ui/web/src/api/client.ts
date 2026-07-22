@@ -112,6 +112,95 @@ export function createStudioApi(options: ClientOptions = {}) {
         body: JSON.stringify(body),
       }),
 
+    /**
+     * A global Support turn over SSE. The server sends only safe final-response
+     * text fragments — never provider reasoning — plus retrieval tool activity,
+     * then one validated SupportTurnResponse.
+     */
+    supportTurnStream: async (
+      body: SupportTurnRequest,
+      handlers: {
+        onResponseDelta?: (text: string) => void;
+        onToolCallStart?: (update: ToolCallStreamUpdate) => void;
+        onToolCallEnd?: (update: ToolCallStreamUpdate) => void;
+      } = {},
+    ): Promise<SupportTurnResponse> => {
+      const response = await fetchImpl(`${baseUrl}/api/v1/support/turns/stream`, {
+        method: "POST",
+        headers: { Accept: "text/event-stream", "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!response.ok) {
+        await raise(response);
+      }
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new StudioApiError(502, FALLBACK_ERROR);
+      }
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let final: SupportTurnResponse | null = null;
+
+      const handleBlock = (block: string) => {
+        let event = "";
+        let data = "";
+        for (const line of block.split("\n")) {
+          if (line.startsWith("event: ")) event = line.slice("event: ".length);
+          else if (line.startsWith("data: ")) data = line.slice("data: ".length);
+        }
+        if (!event || !data) return;
+        let payload: unknown;
+        try {
+          payload = JSON.parse(data) as unknown;
+        } catch {
+          throw new StudioApiError(502, FALLBACK_ERROR);
+        }
+        if (event === "response_delta") {
+          const text = (payload as { text?: unknown }).text;
+          if (typeof text === "string") handlers.onResponseDelta?.(text);
+          return;
+        }
+        if (event === "tool_call_start") {
+          handlers.onToolCallStart?.(payload as ToolCallStreamUpdate);
+          return;
+        }
+        if (event === "tool_call_end") {
+          handlers.onToolCallEnd?.(payload as ToolCallStreamUpdate);
+          return;
+        }
+        if (event === "turn") {
+          final = payload as SupportTurnResponse;
+          return;
+        }
+        if (event === "error") {
+          const body = payload as { status?: number; error?: ErrorBody };
+          throw new StudioApiError(body.status ?? 502, body.error ?? FALLBACK_ERROR);
+        }
+      };
+
+      try {
+        while (final === null) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let boundary = buffer.indexOf("\n\n");
+          while (boundary >= 0) {
+            const block = buffer.slice(0, boundary);
+            buffer = buffer.slice(boundary + 2);
+            handleBlock(block);
+            boundary = buffer.indexOf("\n\n");
+          }
+        }
+      } finally {
+        // Releasing the stream aborts the server-side run on early exits.
+        void reader.cancel().catch(() => undefined);
+      }
+      if (final === null) {
+        throw new StudioApiError(502, FALLBACK_ERROR);
+      }
+      return final;
+    },
+
     listProjects: async (): Promise<ProjectSummary[]> =>
       (await request<{ projects: ProjectSummary[] }>("/api/v1/projects")).projects,
 

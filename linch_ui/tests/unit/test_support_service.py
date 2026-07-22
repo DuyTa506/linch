@@ -17,6 +17,7 @@ from linch_studio.support.service import (
     LinchSupportService,
     _support_output_schema_instruction,
     _SupportRetrievalLimit,
+    create_support_agent,
 )
 
 
@@ -125,6 +126,16 @@ def _recipe(*, invalid_python: bool = False, omit_tests: bool = False) -> str:
     )
 
 
+class ThinkingThenTextProvider(ScriptedProvider):
+    """Exercises partial-event filtering without changing the final scripted output."""
+
+    async def stream(self, req):
+        async for event in super().stream(req):
+            if event["type"] == "text_delta":
+                yield {"type": "thinking_delta", "text": "private provider reasoning"}
+            yield event
+
+
 def test_support_prompt_caps_iterative_retrieval_before_a_final_answer() -> None:
     assert "at most four documentation-tool calls" in SUPPORT_SYSTEM_PROMPT
     assert "stop retrieving and return the final JSON" in SUPPORT_SYSTEM_PROMPT
@@ -168,6 +179,33 @@ async def test_documentation_turn_returns_valid_evidence_without_project_mutatio
     assert turn.answer is not None
     assert turn.coverage == "documented"
     assert [item.anchor for item in turn.evidence] == ["usage/workflows.md#run_workflow-fn"]
+
+
+async def test_support_forwards_only_text_partials_before_its_validated_final_answer() -> None:
+    provider = ThinkingThenTextProvider([TextTurn(_answer())])
+    created_agents = []
+
+    def agent_factory(request):
+        agent = create_support_agent(request)
+        created_agents.append(agent)
+        return agent
+
+    service = LinchSupportService(
+        _config(),
+        provider_factory=lambda _: provider,
+        agent_factory=agent_factory,
+    )
+    response_deltas: list[str] = []
+
+    turn = await service.turn(
+        messages=[SupportMessage(role="user", content="How does a directed workflow run?")],
+        mode="documentation",
+        on_response_delta=response_deltas.append,
+    )
+
+    assert created_agents[0].include_partial_messages is True
+    assert response_deltas == [_answer()]
+    assert turn.answer == "Use `run_workflow()` for a deterministic directed workflow."
 
 
 async def test_implementation_recipe_is_static_checked_and_carries_handoff() -> None:
