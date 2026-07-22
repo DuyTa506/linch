@@ -83,17 +83,26 @@ CPU-bound component can be replaced without changing the editor contract.
 
 ## Support retrieval and pipeline authoring
 
-The global Support drawer posts a client-held transcript to
-`POST /api/v1/support/turns`. For documentation and implementation requests it
-constructs a per-turn `linch.Agent` over the committed SDK-documentation
-snapshot, audited examples, live catalog, and (when a project is open) a
-bounded read-only Blueprint view. The agent can search or read the corpus
-iteratively, but has a small retrieval cap and no mutation tools. A strict
-response schema separates a direct answer from a static implementation recipe;
-each keeps compact corpus evidence, reports whether the request is fully
-documented, and leaves host-owned seams as TODOs rather than inventing runtime
-behavior. Provider reasoning, system prompts, and raw tool traces are never
-returned by Support.
+The global Support drawer sends its client-held transcript to
+`POST /api/v1/support/turns/stream` (the JSON `POST /api/v1/support/turns`
+endpoint remains available for non-streaming clients). For documentation and
+implementation requests it constructs a per-turn `linch.Agent` over the
+committed SDK-documentation snapshot, audited examples, live catalog, and (when
+a project is open) a bounded read-only Blueprint view. The agent can search or
+read the corpus iteratively, but has a small retrieval cap and no mutation
+tools.
+
+The stream emits compact `tool_call_start`/`tool_call_end` progress, final
+structured-response `response_delta` fragments, then exactly one terminal
+`turn` or `error`. The drawer treats each delta as untrusted, provisional input:
+it extracts only an answer or recipe title/overview and never renders raw JSON.
+It replaces that preview only when the terminal `SupportTurnResponse` has passed
+the strict schema and evidence checks. Tool activity is bounded display data for
+the read-only corpus calls; provider reasoning and system prompts are never
+returned or retained in the transcript. A strict response schema separates a
+direct answer from a static implementation recipe; each keeps compact corpus
+evidence, reports whether the request is fully documented, and leaves host-owned
+seams as TODOs rather than inventing runtime behavior.
 
 Pipeline creation is a separate, explicit mode. Routing requires an explicit
 creation intent (or a user-selected mode), then the server returns a
