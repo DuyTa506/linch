@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { ProposalResponse, SupportEvidence, SupportRecipe, SupportRecipeFile } from "../api/types";
-import type { Support } from "../state/useSupport";
+import type { StreamingSupportToolCall, Support } from "../state/useSupport";
 import type { Studio } from "../state/useStudio";
 
 const EXAMPLES = [
@@ -9,6 +9,113 @@ const EXAMPLES = [
   "Show me how to implement a scheduled multi-agent review with a host cron job.",
   "Build a CI code-review pipeline with security, performance, and style reviewers.",
 ];
+
+/**
+ * Pull a possibly incomplete JSON string value without ever rendering the raw
+ * structured-output buffer. The final response still comes from the server's
+ * validated SupportTurnResponse; this is just an in-flight preview.
+ */
+function partialJsonString(raw: string, field: string): string | null {
+  const marker = `"${field}"`;
+  let fieldStart = raw.indexOf(marker);
+  while (fieldStart >= 0) {
+    let index = fieldStart + marker.length;
+    while (index < raw.length && /\s/.test(raw[index] ?? "")) index += 1;
+    if (raw[index] !== ":") {
+      fieldStart = raw.indexOf(marker, index);
+      continue;
+    }
+    index += 1;
+    while (index < raw.length && /\s/.test(raw[index] ?? "")) index += 1;
+    if (raw[index] !== '"') return null;
+    index += 1;
+
+    let text = "";
+    while (index < raw.length) {
+      const char = raw[index] ?? "";
+      index += 1;
+      if (char === '"') return text;
+      if (char !== "\\") {
+        text += char;
+        continue;
+      }
+      if (index >= raw.length) return text;
+      const escape = raw[index] ?? "";
+      index += 1;
+      if (escape === "u") {
+        const hex = raw.slice(index, index + 4);
+        if (!/^[0-9a-fA-F]{4}$/.test(hex)) return text;
+        text += String.fromCharCode(Number.parseInt(hex, 16));
+        index += 4;
+        continue;
+      }
+      if (escape === '"' || escape === "\\" || escape === "/") text += escape;
+      else if (escape === "b") text += "\b";
+      else if (escape === "f") text += "\f";
+      else if (escape === "n") text += "\n";
+      else if (escape === "r") text += "\r";
+      else if (escape === "t") text += "\t";
+      else return text;
+    }
+    return text;
+  }
+  return null;
+}
+
+export function supportDraftPreview(raw: string): string | null {
+  const answer = partialJsonString(raw, "answer");
+  if (answer !== null) return answer;
+  const title = partialJsonString(raw, "title");
+  const overview = partialJsonString(raw, "overview");
+  if (title === null && overview === null) return null;
+  return [title, overview].filter((item): item is string => item !== null && item.length > 0).join("\n");
+}
+
+function StreamingToolCalls({ calls }: { calls: StreamingSupportToolCall[] | null }) {
+  if (!calls || calls.length === 0) return null;
+  return (
+    <div className="msg__tool-calls">
+      {calls.map((call) => {
+        const line =
+          call.status === "running" ? (
+            <><span className="blink">▪</span> {call.summary} — reading…</>
+          ) : (
+            <><b>{call.status === "error" ? "[xx]" : "[ok]"}</b> {call.summary} — {call.resultSummary ?? "completed"}</>
+          );
+        const className = call.status === "error" ? "msg__tool-call msg__tool-call--error" : "msg__tool-call";
+        if (!call.detail) return <div key={call.toolUseId} className={className}>{line}</div>;
+        return (
+          <details key={call.toolUseId} className={className}>
+            <summary>{line}</summary>
+            <div className="msg__tool-call-body">{call.detail}</div>
+          </details>
+        );
+      })}
+    </div>
+  );
+}
+
+function StreamingSupportResponse({
+  draft,
+  toolCalls,
+}: {
+  draft: string | null;
+  toolCalls: StreamingSupportToolCall[] | null;
+}) {
+  const preview = supportDraftPreview(draft ?? "");
+  const label = preview
+    ? "Drafting grounded response…"
+    : toolCalls && toolCalls.length > 0
+      ? "Reading Linch documentation…"
+      : "Preparing grounded response…";
+  return (
+    <div className="msg msg--agent msg--stream" aria-live="polite">
+      <div className="msg__stream-label"><span className="blink">▪</span> {label}</div>
+      <StreamingToolCalls calls={toolCalls} />
+      {preview && <div className="msg__stream-body">{preview}<span className="blink"> ▍</span></div>}
+    </div>
+  );
+}
 
 function Evidence({ evidence, coverage }: { evidence: SupportEvidence[]; coverage: string }) {
   return (
@@ -144,6 +251,11 @@ export function SupportDrawer({
 }) {
   const { state, actions } = support;
   const [input, setInput] = useState("");
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const body = bodyRef.current;
+    if (body) body.scrollTop = body.scrollHeight;
+  }, [state.error, state.responseDraft, state.streamingToolCalls, state.transcript]);
   const send = async () => {
     const text = input.trim();
     if (!text) return;
@@ -162,7 +274,7 @@ export function SupportDrawer({
             <button onClick={onClose} aria-label="close">✕</button>
           </span>
         </div>
-        <div className="drawer__body">
+        <div className="drawer__body" ref={bodyRef}>
           {state.transcript.length === 0 && (
             <>
               <div style={{ color: "var(--g6)", lineHeight: 1.7, fontSize: 10 }}>
@@ -208,6 +320,12 @@ export function SupportDrawer({
               </div>
             );
           })}
+          {state.busy && (
+            <StreamingSupportResponse
+              draft={state.responseDraft}
+              toolCalls={state.streamingToolCalls}
+            />
+          )}
           {state.error && <div className="msg msg--agent" style={{ color: "var(--red)" }}>[xx] {state.error}</div>}
         </div>
         <div className="drawer__foot" style={{ display: "flex", gap: 8 }}>

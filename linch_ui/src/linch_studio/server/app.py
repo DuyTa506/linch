@@ -690,7 +690,11 @@ def create_app(
         ]
         return "\n\n".join(requirements) if requirements else request.messages[-1].content
 
-    async def _support_turn(request: SupportTurnRequest) -> SupportTurnResponse:
+    async def _support_turn(
+        request: SupportTurnRequest,
+        on_response_delta: Callable[[str], None] | None = None,
+        on_tool_call: Callable[[ToolCallUpdate], None] | None = None,
+    ) -> SupportTurnResponse:
         instruction = _pipeline_instruction(request)
         mode = resolve_mode(request.requested_mode, instruction)
         current = await store.open_project(request.project_id) if request.project_id else None
@@ -806,6 +810,7 @@ def create_app(
                     base_digest=current.digest,
                     messages=messages,
                     stage=request.stage,
+                    on_tool_call=on_tool_call,
                 )
             except StudioServerError:
                 raise
@@ -849,12 +854,20 @@ def create_app(
         messages = [
             SupportMessage(role=item.role, content=item.content) for item in request.messages
         ]
+        support_kwargs: dict[str, Any] = {
+            "messages": messages,
+            "mode": mode,
+            "current_blueprint": current.blueprint if current is not None else None,
+        }
+        # Preserve the existing injection seam for ordinary JSON requests:
+        # a custom support service only needs the new callbacks when it opts
+        # into the streaming route.
+        if on_response_delta is not None:
+            support_kwargs["on_response_delta"] = on_response_delta
+        if on_tool_call is not None:
+            support_kwargs["on_tool_call"] = on_tool_call
         try:
-            turn = await support.turn(
-                messages=messages,
-                mode=mode,
-                current_blueprint=current.blueprint if current is not None else None,
-            )
+            turn = await support.turn(**support_kwargs)
         except StudioServerError:
             raise
         except AuthoringError as error:
@@ -876,7 +889,10 @@ def create_app(
         responses={
             200: {
                 "description": (
-                    "One terminal support `turn` or `error` event; reasoning is never streamed."
+                    "Server-sent events: final structured-response `response_delta` text fragments, "
+                    "`tool_call_start`/`tool_call_end` around each retrieval call, then "
+                    "exactly one terminal `turn` (a SupportTurnResponse) or `error` event. "
+                    "Clients must treat deltas as provisional; internal reasoning is never streamed."
                 ),
                 "content": {"text/event-stream": {"schema": {"type": "string"}}},
             }
@@ -884,10 +900,19 @@ def create_app(
     )
     async def stream_support_turn(request: SupportTurnRequest) -> StreamingResponse:
         queue: asyncio.Queue[tuple[str, dict[str, JsonValue]]] = asyncio.Queue()
+        terminal_kinds = ("turn", "error")
 
         async def worker() -> None:
             try:
-                response = await _support_turn(request)
+                response = await _support_turn(
+                    request,
+                    on_response_delta=lambda text: queue.put_nowait(
+                        ("response_delta", {"text": text})
+                    ),
+                    on_tool_call=lambda update: queue.put_nowait(
+                        (f"tool_call_{update.phase}", _tool_call_stream_payload(update))
+                    ),
+                )
                 queue.put_nowait(("turn", response.model_dump(mode="json", by_alias=True)))
             except StudioServerError as error:
                 queue.put_nowait(("error", _stream_error_payload(error)))
@@ -898,14 +923,22 @@ def create_app(
         async def events() -> AsyncIterator[str]:
             task = asyncio.create_task(worker())
             try:
-                kind, payload = await queue.get()
-                yield _sse_event(kind, payload)
+                while True:
+                    kind, payload = await queue.get()
+                    yield _sse_event(kind, payload)
+                    if kind in terminal_kinds:
+                        break
             finally:
+                # A closed connection cancels the underlying agent run.
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
 
-        return StreamingResponse(events(), media_type="text/event-stream")
+        return StreamingResponse(
+            events(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     @app.post(
         "/api/v1/projects/{project_id}/proposals/{proposal_id}/accept",

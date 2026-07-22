@@ -2955,7 +2955,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description One terminal support `turn` or `error` event; reasoning is never streamed. */
+            /** @description Server-sent events: final structured-response `response_delta` text fragments, `tool_call_start`/`tool_call_end` around each retrieval call, then exactly one terminal `turn` (a SupportTurnResponse) or `error` event. Clients must treat deltas as provisional; internal reasoning is never streamed. */
             200: {
                 headers: {
                     [name: string]: unknown;

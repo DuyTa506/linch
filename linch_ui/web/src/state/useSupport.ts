@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
-import { StudioApiError, type StudioApi } from "../api/client";
+import { StudioApiError, type StudioApi, type ToolCallStreamUpdate } from "../api/client";
 import type {
   ResolvedSupportMode,
   SupportMode,
@@ -14,11 +14,19 @@ export interface SupportTranscriptEntry {
   response?: SupportTurnResponse;
 }
 
+export interface StreamingSupportToolCall extends ToolCallStreamUpdate {
+  status: "running" | "completed" | "error";
+  resultSummary?: string | null;
+}
+
 export interface SupportState {
   available: boolean;
   loading: boolean;
   busy: boolean;
   transcript: SupportTranscriptEntry[];
+  /** Raw structured-output fragments; components must render an extracted preview only. */
+  responseDraft: string | null;
+  streamingToolCalls: StreamingSupportToolCall[] | null;
   error: string | null;
 }
 
@@ -39,8 +47,11 @@ export function useSupport(api: StudioApi) {
     loading: true,
     busy: false,
     transcript: [],
+    responseDraft: null,
+    streamingToolCalls: null,
     error: null,
   });
+  const turnToken = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -75,29 +86,92 @@ export function useSupport(api: StudioApi) {
         role: entry.role === "user" ? "user" : "assistant",
         content: entry.content,
       }));
-      setState((current) => ({ ...current, busy: true, error: null, transcript: [...current.transcript, user] }));
+      const token = ++turnToken.current;
+      const isCurrent = () => turnToken.current === token;
+      setState((current) => ({
+        ...current,
+        busy: true,
+        error: null,
+        transcript: [...current.transcript, user],
+        responseDraft: "",
+        streamingToolCalls: [],
+      }));
       try {
-        const response = await api.supportTurn({
-          messages,
-          requestedMode: options.requestedMode ?? "auto",
-          pipelineConfirmed: options.pipelineConfirmed ?? false,
-          projectId: options.projectId ?? null,
-          stage: options.stage ?? "chat",
-          approvedPlanDigest: options.approvedPlanDigest ?? null,
-        });
+        const response = await api.supportTurnStream(
+          {
+            messages,
+            requestedMode: options.requestedMode ?? "auto",
+            pipelineConfirmed: options.pipelineConfirmed ?? false,
+            projectId: options.projectId ?? null,
+            stage: options.stage ?? "chat",
+            approvedPlanDigest: options.approvedPlanDigest ?? null,
+          },
+          {
+            onResponseDelta: (text) => {
+              if (!isCurrent()) return;
+              setState((current) => ({
+                ...current,
+                responseDraft: (current.responseDraft ?? "") + text,
+              }));
+            },
+            onToolCallStart: (update) => {
+              if (!isCurrent()) return;
+              setState((current) => ({
+                ...current,
+                streamingToolCalls: [
+                  ...(current.streamingToolCalls ?? []),
+                  { ...update, status: "running" },
+                ],
+              }));
+            },
+            onToolCallEnd: (update) => {
+              if (!isCurrent()) return;
+              setState((current) => {
+                const calls = current.streamingToolCalls ?? [];
+                const completed: StreamingSupportToolCall = {
+                  ...update,
+                  status: update.isError ? "error" : "completed",
+                  resultSummary: update.summary,
+                };
+                const existing = calls.findIndex((item) => item.toolUseId === update.toolUseId);
+                const streamingToolCalls =
+                  existing < 0
+                    ? [...calls, completed]
+                    : calls.map((item, index) =>
+                        index === existing
+                          ? { ...completed, summary: item.summary }
+                          : item,
+                      );
+                return { ...current, streamingToolCalls };
+              });
+            },
+          },
+        );
+        if (!isCurrent()) return null;
         const assistant: SupportTranscriptEntry = {
           role: "assistant",
           content: responseContent(response),
           response,
         };
-        setState((current) => ({ ...current, transcript: [...current.transcript, assistant] }));
+        setState((current) => ({
+          ...current,
+          transcript: [...current.transcript, assistant],
+          responseDraft: null,
+          streamingToolCalls: null,
+        }));
         return response;
       } catch (error) {
+        if (!isCurrent()) return null;
         const message = error instanceof StudioApiError ? error.message : "Support could not answer this request.";
-        setState((current) => ({ ...current, error: message }));
+        setState((current) => ({
+          ...current,
+          error: message,
+          responseDraft: null,
+          streamingToolCalls: null,
+        }));
         return null;
       } finally {
-        setState((current) => ({ ...current, busy: false }));
+        if (isCurrent()) setState((current) => ({ ...current, busy: false }));
       }
     },
     [api, state.busy, state.transcript],
@@ -147,7 +221,15 @@ export function useSupport(api: StudioApi) {
   );
 
   const clear = useCallback(() => {
-    setState((current) => ({ ...current, transcript: [], error: null }));
+    turnToken.current += 1;
+    setState((current) => ({
+      ...current,
+      busy: false,
+      transcript: [],
+      responseDraft: null,
+      streamingToolCalls: null,
+      error: null,
+    }));
   }, []);
 
   return {
