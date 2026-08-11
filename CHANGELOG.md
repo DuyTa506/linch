@@ -4,7 +4,7 @@ Notable changes to `linch`. Versioning follows the contract in
 [docs/versioning.md](docs/versioning.md): the public API is exactly `linch.__all__`,
 and persisted wire formats are versioned separately via `linch.RUN_SCHEMA_VERSION`.
 
-## Unreleased
+## 1.2.0 — 2026-08-11
 
 ### Added
 
@@ -54,6 +54,14 @@ and persisted wire formats are versioned separately via `linch.RUN_SCHEMA_VERSIO
 - `WorkflowJournal.snapshot()` / `from_stored_events(snapshot=...)`, and
   `providers.retry.with_retry(retry_on=...)` for deciding retryability by predicate
   instead of the exception's `retryable` attribute.
+- **`CheckpointableHook`** — an opt-in protocol letting a hook persist and restore its own
+  state across a resume, through the new `RunCheckpoint.extension_state`: an opaque,
+  JSON-safe map of extension-owned namespaces that core preserves without interpreting.
+  It is omitted from the serialized checkpoint when empty, so a run that installs no such
+  hook writes a byte-identical payload to before.
+- **`RunOptions.stream_partials`** — suppress the raw `PartialAssistantEvent` projection
+  for one run while still consuming and assembling the provider's deltas. `None` keeps the
+  agent-level setting.
 
 `WorkflowJournal.record()` gained an optional `record_kind` argument (default `"agent"`),
 and `CURRENT_FINGERPRINT_VERSION` is deliberately **unchanged at 2** — step keys live in
