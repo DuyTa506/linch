@@ -15,3 +15,6 @@ build/
 
 # Vendored reference material (has its own git repo)
 learn-claude-code/
+
+# Linch Studio lives on the `studio` branch.
+linch_ui/
