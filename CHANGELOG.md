@@ -4,6 +4,29 @@ Notable changes to `linch`. Versioning follows the contract in
 [docs/versioning.md](docs/versioning.md): the public API is exactly `linch.__all__`,
 and persisted wire formats are versioned separately via `linch.RUN_SCHEMA_VERSION`.
 
+## Unreleased
+
+### Changed
+
+- **`linch[mcp]` now requires `mcp>=2.0.0`** and no longer supports mcp 1.x.
+  mcp 2.0 renamed `streamablehttp_client` to `streamable_http_client`, removed
+  its `headers=` kwarg in favour of a caller-supplied `httpx2.AsyncClient`,
+  changed the transport from a 3-tuple to a 2-tuple yield, and switched its
+  pydantic models to snake_case fields (`is_error`, `input_schema`,
+  `read_only_hint`, `destructive_hint`, `mime_type`). `linch.mcp` targets the
+  2.x API; pin `linch<1.3` if you are held on mcp 1.x. Server config is
+  unchanged — `McpServerConfig.headers` still works, now carried on the httpx
+  client linch builds and owns.
+
+### Fixed
+
+- **MCP tool input schemas were being discarded.** `to_input_schema` read
+  `.properties`/`.required` as attributes, but `Tool.input_schema` is a plain
+  JSON Schema dict, so every MCP tool reached the model as
+  `{"type": "object", "properties": {}}` — no arguments, no `required`. The
+  schema now passes through intact. Only the unit tests' fake `mcp` modules,
+  which supplied attribute-shaped schemas, had ever matched the old code path.
+
 ## 1.2.0 — 2026-08-11
 
 ### Added

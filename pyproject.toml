@@ -24,8 +24,11 @@ Repository = "https://github.com/DuyTa506/linch"
 linch = "linch.cli:main"
 
 [project.optional-dependencies]
+# mcp 2.0 renamed the streamable-HTTP transport, moved headers onto a
+# caller-supplied httpx client, and switched its models to snake_case.
+# linch.mcp targets that API; 1.x is not supported.
 mcp = [
-  "mcp>=1.0.0",
+  "mcp>=2.0.0",
 ]
 anthropic = [
   "anthropic>=0.30.0",
@@ -45,7 +48,10 @@ dev = [
   "pytest>=8.0,<9.0",
   "pytest-asyncio>=0.23,<1.0",
   "pytest-timeout>=2.3",
-  "ruff>=0.5",
+  # Formatter output is version-sensitive by design (0.16 began formatting
+  # Python inside Markdown), so pin it: an unpinned range turns CI red on a
+  # ruff release rather than on a change of ours. Bump deliberately.
+  "ruff>=0.15.16,<0.16",
   "pyright>=1.1",
 ]
 

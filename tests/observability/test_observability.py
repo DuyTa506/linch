@@ -595,7 +595,7 @@ def test_otel_observer_missing_dep(monkeypatch):
 @pytest.mark.asyncio
 async def test_otel_span_tree():
     """OTel spans should nest run → turn → provider/tool with expected attributes."""
-    pytest.importorskip("opentelemetry")
+    pytest.importorskip("opentelemetry.sdk")
     from opentelemetry.sdk.trace import TracerProvider  # type: ignore[import]
     from opentelemetry.sdk.trace.export import SimpleSpanProcessor  # type: ignore[import]
     from opentelemetry.sdk.trace.export.in_memory_span_exporter import (  # type: ignore[import]
@@ -633,7 +633,7 @@ def test_otel_run_end_detaches_leftover_turn_tokens():
     Regression: when a turn is aborted, on_turn_end never fires, so the entry in
     `_turn_ctx_tokens` and its attached OTel context token leaked across runs.
     """
-    pytest.importorskip("opentelemetry")
+    pytest.importorskip("opentelemetry.sdk")
     from opentelemetry.sdk.trace import TracerProvider  # type: ignore[import]
 
     from linch.observability import OpenTelemetryObserver
@@ -753,7 +753,7 @@ def _make_otel_exporter():
 @pytest.mark.asyncio
 async def test_otel_semconv_attributes_per_span_kind():
     """Every span kind carries the GenAI semconv attributes alongside linch.*."""
-    pytest.importorskip("opentelemetry")
+    pytest.importorskip("opentelemetry.sdk")
     from linch.observability import OpenTelemetryObserver
 
     exporter, tracer = _make_otel_exporter()
@@ -796,7 +796,7 @@ async def test_otel_semconv_attributes_per_span_kind():
 @pytest.mark.asyncio
 async def test_otel_cache_token_attributes():
     """Cache token usage is emitted only when non-zero."""
-    pytest.importorskip("opentelemetry")
+    pytest.importorskip("opentelemetry.sdk")
     from linch.observability import OpenTelemetryObserver
     from linch.types import Usage
 
@@ -844,7 +844,7 @@ async def test_otel_cache_token_attributes():
 
 def test_otel_provider_name_well_known_mapping():
     """Provider ids map to semconv well-known values; unknown ids pass through."""
-    pytest.importorskip("opentelemetry")
+    pytest.importorskip("opentelemetry.sdk")
     from linch.observability import OpenTelemetryObserver, ProviderCallInfo, ProviderCallResult
     from linch.types import Usage
 

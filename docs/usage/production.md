@@ -126,7 +126,7 @@ Everything else is an extra and fails with an explicit
 |---|---|
 | `linch[anthropic]` | Anthropic provider |
 | `linch[gemini]` | Gemini provider |
-| `linch[mcp]` | MCP tool servers |
+| `linch[mcp]` | MCP tool servers (requires `mcp>=2.0.0`; 1.x is not supported) |
 | `linch[otel]` | OpenTelemetry observer |
 | `linch[postgres]` | Postgres session/memory stores |
 
