@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Literal, cast
 from urllib.parse import urlparse
 
-from linch._client_lifecycle import aclose_client
+from linch._client_lifecycle import aclose_client, loop_changed, running_loop
 from linch._http_errors import (
     error_message,
     error_status,
@@ -78,6 +78,7 @@ class AnthropicProvider(BaseProvider):
     def __init__(self, options: AnthropicProviderOptions | None = None) -> None:
         self._options = options or AnthropicProviderOptions()
         self._client: Any | None = None
+        self._client_loop: Any | None = None
 
     def context_window(self, model: ModelId) -> int:
         return _KNOWN_CONTEXT.get(model, 200_000)
@@ -89,6 +90,11 @@ class AnthropicProvider(BaseProvider):
         )
 
     async def _get_client(self) -> Any:
+        if self._client is not None and loop_changed(self._client_loop):
+            # The old client's transport belongs to a loop that is gone; its
+            # close is async and cannot be awaited from here, so drop it and
+            # let GC reclaim the socket rather than raising on every call.
+            self._client = None
         if self._client is not None:
             return self._client
         try:
@@ -106,11 +112,13 @@ class AnthropicProvider(BaseProvider):
         if self._options.default_headers is not None:
             kwargs["default_headers"] = self._options.default_headers
         self._client = AsyncAnthropic(**kwargs)
+        self._client_loop = running_loop()
         return self._client
 
     async def aclose(self) -> None:
         client = self._client
         self._client = None
+        self._client_loop = None
         if client is None:
             return
         await aclose_client(client)

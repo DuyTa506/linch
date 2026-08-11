@@ -11,6 +11,7 @@ from .base import (
 from .catalog import ProviderModelInfo, get_provider_model_info, list_provider_models
 from .deepseek import DeepSeekProvider, DeepSeekProviderOptions
 from .gemini import GeminiProvider, GeminiProviderOptions
+from .limiter import Limiter
 from .llamacpp import LlamaCppProvider, LlamaCppProviderOptions
 from .openai_chat import OpenAIChatCompletionsProvider, OpenAIChatProviderOptions
 from .openai_responses import OpenAIResponsesProvider, OpenAIResponsesProviderOptions
@@ -27,6 +28,7 @@ __all__ = [
     "EffortLevel",
     "GeminiProvider",
     "GeminiProviderOptions",
+    "Limiter",
     "LlamaCppProvider",
     "LlamaCppProviderOptions",
     "OpenAIChatCompletionsProvider",
