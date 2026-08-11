@@ -33,7 +33,24 @@ async def with_retry(
     *,
     signal: object | None,
     options: RetryOptions | None = None,
+    retry_on: Callable[[Exception], bool] | None = None,
 ) -> T:
+    """Call *fn* with exponential backoff until it succeeds or attempts run out.
+
+    Args:
+        fn: Receives the zero-based attempt number.
+        signal: Abort context checked before every attempt.
+        options: Attempt count and backoff shape; defaults to ``RetryOptions()``.
+        retry_on: Decides retryability instead of the exception's own
+            ``retryable`` attribute. ``AbortError`` is never retried either way.
+
+    Returns:
+        Whatever *fn* returned on its first successful attempt.
+
+    Raises:
+        ConfigError: If ``options.max_attempts`` is below 1.
+        AbortError: If *signal* aborted before an attempt.
+    """
     opts = options or RetryOptions()
     if opts.max_attempts < 1:
         raise ConfigError("max_attempts must be >= 1")
@@ -47,7 +64,10 @@ async def with_retry(
             raise
         except Exception as exc:
             last_error = exc
-            retryable = bool(getattr(exc, "retryable", False))
+            if retry_on is not None:
+                retryable = retry_on(exc)
+            else:
+                retryable = bool(getattr(exc, "retryable", False))
             if not retryable or attempt == opts.max_attempts - 1:
                 raise
             delay_ms = _delay_for_error(exc, attempt, opts)

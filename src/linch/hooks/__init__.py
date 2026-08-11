@@ -34,10 +34,11 @@ from .memory import MemoryExtractionHook
 from .read_before_write import ReadBeforeWriteConfig, ReadBeforeWriteHook
 from .redaction import RedactionConfig, RedactionHook, RedactionRule
 from .tool_cache import ToolCacheConfig, ToolCacheHook
-from .types import HookAction, HookEvent, HookResult
+from .types import CheckpointableHook, HookAction, HookEvent, HookResult
 
 __all__ = [
     "HookAction",
+    "CheckpointableHook",
     "HookEvent",
     "HookResult",
     "HookContext",

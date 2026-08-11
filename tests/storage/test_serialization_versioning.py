@@ -87,6 +87,27 @@ def test_checkpoint_round_trips_pending_alignment_with_images() -> None:
     assert restored.pending_alignment == checkpoint.pending_alignment
 
 
+def test_checkpoint_round_trips_extension_state_and_legacy_defaults_empty() -> None:
+    checkpoint = _checkpoint()
+    checkpoint.extension_state = {
+        "example.extension": {
+            "cursor": "cursor-123",
+            "budget": {"used": 1, "remaining": 1},
+            "seen": ["Search"],
+        }
+    }
+
+    data = json.loads(json.dumps(checkpoint_to_dict(checkpoint)))
+    restored = checkpoint_from_dict(data)
+    assert restored.extension_state == checkpoint.extension_state
+
+    # A checkpoint persisted by older Linch releases has no extension namespace.
+    data.pop("extension_state")
+    assert checkpoint_from_dict(data).extension_state == {}
+
+    assert "extension_state" not in checkpoint_to_dict(_checkpoint())
+
+
 def test_checkpoint_from_dict_defaults_missing_pending_alignment() -> None:
     data = checkpoint_to_dict(_checkpoint())
     data.pop("pending_alignment")

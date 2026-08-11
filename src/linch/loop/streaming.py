@@ -274,6 +274,9 @@ async def stream_turn(
     session: Session, req: ProviderRequest
 ) -> AsyncIterator[PartialAssistantEvent | AssistantAssembly]:
     agent = session.agent
+    stream_partials = (
+        agent.include_partial_messages if req.stream_partials is None else req.stream_partials
+    )
     text_buf: list[str] = []
     thinking_buf: list[str] = []
     thinking_sig: str | None = None
@@ -303,7 +306,7 @@ async def stream_turn(
             flush_thinking()
             text = str(event["text"])
             text_buf.append(text)
-            if agent.include_partial_messages:
+            if stream_partials:
                 yield PartialAssistantEvent(delta={"kind": "text", "text": text})
         elif typ == "thinking_delta":
             flush_text()
@@ -311,7 +314,7 @@ async def stream_turn(
             thinking_buf.append(text)
             signature = event.get("signature", thinking_sig)
             thinking_sig = signature if isinstance(signature, str) else thinking_sig
-            if agent.include_partial_messages:
+            if stream_partials:
                 yield PartialAssistantEvent(delta={"kind": "thinking", "text": text})
         elif typ == "redacted_thinking":
             flush_text()
@@ -327,7 +330,7 @@ async def stream_turn(
             tool_id = str(event["id"])
             json_delta = str(event["json_delta"])
             tool_inputs.setdefault(tool_id, []).append(json_delta)
-            if agent.include_partial_messages:
+            if stream_partials:
                 yield PartialAssistantEvent(
                     delta={
                         "kind": "tool_use_input",

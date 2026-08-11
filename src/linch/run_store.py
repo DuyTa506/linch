@@ -27,7 +27,9 @@ from .types import (
 # `load_events` drops events it cannot decode, so a newer store is forward-safe.
 SCHEMA_VERSION = 1
 
-RunStatus = Literal["running", "waiting_permission", "completed", "failed", "aborted"]
+# "suspended" is a workflow parked at a wf.interrupt; distinct from
+# "waiting_permission", which belongs to the tool-permission flow.
+RunStatus = Literal["running", "waiting_permission", "suspended", "completed", "failed", "aborted"]
 RunPhase = Literal[
     "started",
     "user_appended",
@@ -38,6 +40,7 @@ RunPhase = Literal[
     "tool_executing",
     "tool_results_appended",
     "turn_complete",
+    "workflow_suspended",
     "completed",
     "failed",
     "aborted",
@@ -74,6 +77,14 @@ class RunCheckpoint:
     Best-effort at-least-once: an entry enqueued after the last save is lost on
     crash; an entry drained just before a crash may be injected once more on
     resume."""
+    extension_state: dict[str, Any] = field(default_factory=dict)
+    """Opaque, JSON-safe state owned by optional runtime extensions.
+
+    Keys are extension-owned namespaces (for example a checkpointable hook's
+    ``checkpoint_key``).  Core preserves entries it does not understand, so
+    independently installed extensions can share one durable checkpoint.  A
+    checkpoint written before this field existed restores as an empty mapping.
+    """
 
 
 @dataclass(slots=True)
@@ -139,7 +150,7 @@ class RunEventBatchStore(Protocol):
 
 
 def checkpoint_to_dict(checkpoint: RunCheckpoint) -> dict[str, Any]:
-    return {
+    data = {
         "schema_version": SCHEMA_VERSION,
         "phase": checkpoint.phase,
         "prompt": checkpoint.prompt,
@@ -167,6 +178,12 @@ def checkpoint_to_dict(checkpoint: RunCheckpoint) -> dict[str, Any]:
         "tool_batch_event_after_seq": checkpoint.tool_batch_event_after_seq,
         "pending_alignment": checkpoint.pending_alignment,
     }
+    # Additive extensions must cost nothing when unused: preserving the legacy
+    # wire shape for an empty namespace keeps harness-off checkpoint payloads
+    # byte-identical.  Readers still default a missing key to ``{}``.
+    if checkpoint.extension_state:
+        data["extension_state"] = checkpoint.extension_state
+    return data
 
 
 def _dict_or_none(value: Any) -> dict[str, object] | None:
@@ -191,6 +208,19 @@ def _pending_alignment_from_raw(value: Any) -> list[dict[str, Any]]:
         )
         entries.append({"prompt": prompt, "images": images})
     return entries
+
+
+def _extension_state_from_raw(value: Any) -> dict[str, Any]:
+    """Restore the extension namespace without making legacy reads brittle.
+
+    Checkpoints arrive from JSON-backed stores, but this parser is also public
+    and is used by host stores.  Treat a missing or malformed root as no
+    extension state; per-extension payload validation belongs to the extension
+    that owns the key when it restores its state.
+    """
+    if not isinstance(value, dict):
+        return {}
+    return {key: item for key, item in value.items() if isinstance(key, str)}
 
 
 def checkpoint_from_dict(raw: dict[str, Any]) -> RunCheckpoint:
@@ -261,6 +291,7 @@ def checkpoint_from_dict(raw: dict[str, Any]) -> RunCheckpoint:
             else None
         ),
         pending_alignment=_pending_alignment_from_raw(raw.get("pending_alignment")),
+        extension_state=_extension_state_from_raw(raw.get("extension_state")),
     )
 
 
