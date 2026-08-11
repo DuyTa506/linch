@@ -1,101 +1,45 @@
 """Regression tests for MCP connection cleanup on failed connects.
 
-These tests verify that a failed MCP connect does NOT leak the stdio
-subprocess transport or the ClientSession. Both must have ``__aexit__``
-awaited when:
+A failed MCP connect must not leak the stdio subprocess transport, the
+`ClientSession`, or — over HTTP — the httpx client linch builds to carry the
+server's headers. Each must have `__aexit__` awaited when:
 
-  (a) ``session.list_tools()`` raises after a successful connect, and
-  (b) ``session.initialize()`` raises while opening the session.
+  (a) `session.list_tools()` raises after a successful connect,
+  (b) `session.initialize()` raises while opening the session, and
+  (c) the transport itself fails to enter (HTTP only, where a resource is
+      already held by then).
 
-The real ``mcp`` package is not importable in this environment, so we inject
-fake ``mcp.*`` modules into ``sys.modules`` before importing the client module,
-then monkeypatch the module-level transport/session symbols the code uses.
+These tests monkeypatch the symbols `client.py` binds at import time. They
+deliberately do **not** fake the `mcp` package: an earlier version injected fake
+`mcp.*` modules into `sys.modules`, which hid mcp 2.0's renamed transport and
+snake_case models until CI went red. `test_mcp_api_contract.py` pins the real
+API those fakes stand in for.
 """
 
 from __future__ import annotations
 
-import sys
 import types
 
 import pytest
 
+pytest.importorskip("mcp", reason="the 'mcp' extra is not installed")
 
-def _install_fake_mcp() -> None:
-    """Install minimal fake ``mcp.*`` modules so client.py can import."""
-    if "mcp.client.session" in sys.modules:
-        return
-
-    mcp = types.ModuleType("mcp")
-    mcp.__path__ = []  # mark as a package
-    mcp_client = types.ModuleType("mcp.client")
-    mcp_client.__path__ = []
-    session_mod = types.ModuleType("mcp.client.session")
-    stdio_mod = types.ModuleType("mcp.client.stdio")
-    http_mod = types.ModuleType("mcp.client.streamable_http")
-    types_mod = types.ModuleType("mcp.types")
-
-    class ClientSession:  # placeholder; tests monkeypatch the symbol
-        def __init__(self, *a, **k) -> None: ...
-
-    class StdioServerParameters:
-        def __init__(self, *a, **k) -> None:
-            self.args = a
-            self.kwargs = k
-
-    def stdio_client(*a, **k):  # placeholder; tests monkeypatch the symbol
-        raise NotImplementedError
-
-    def streamablehttp_client(*a, **k):  # placeholder; tests monkeypatch
-        raise NotImplementedError
-
-    class CallToolResult:  # placeholder consumed by mcp.tool import
-        ...
-
-    class Tool:  # placeholder consumed by mcp.tool import
-        inputSchema = dict
-
-    class TextContent:  # placeholder consumed by mcp.result import
-        ...
-
-    session_mod.ClientSession = ClientSession
-    stdio_mod.StdioServerParameters = StdioServerParameters
-    stdio_mod.stdio_client = stdio_client
-    http_mod.streamablehttp_client = streamablehttp_client
-    types_mod.CallToolResult = CallToolResult
-    types_mod.Tool = Tool
-    types_mod.TextContent = TextContent
-
-    mcp.client = mcp_client
-    mcp_client.session = session_mod
-    mcp_client.stdio = stdio_mod
-    mcp_client.streamable_http = http_mod
-
-    sys.modules["mcp"] = mcp
-    sys.modules["mcp.client"] = mcp_client
-    sys.modules["mcp.client.session"] = session_mod
-    sys.modules["mcp.client.stdio"] = stdio_mod
-    sys.modules["mcp.client.streamable_http"] = http_mod
-    sys.modules["mcp.types"] = types_mod
-
-
-_install_fake_mcp()
-
-try:
-    from linch.mcp import client as mcp_client
-except ModuleNotFoundError:  # pragma: no cover - optional dep absent
-    pytest.skip("linch.mcp.client not importable", allow_module_level=True)
+from linch.mcp import client as mcp_client  # noqa: E402
 
 
 class FakeTransport:
     """Async-context-manager stand-in for an stdio/http transport."""
 
-    def __init__(self, *, n_yield: int) -> None:
+    def __init__(self, *, n_yield: int = 2, enter_error: bool = False) -> None:
         self._yield = tuple(object() for _ in range(n_yield))
+        self._enter_error = enter_error
         self.aenter_calls = 0
         self.aexit_calls = 0
 
     async def __aenter__(self):
         self.aenter_calls += 1
+        if self._enter_error:
+            raise RuntimeError("transport boom")
         return self._yield
 
     async def __aexit__(self, *exc) -> None:
@@ -128,86 +72,133 @@ class FakeSession:
         raise AssertionError("list_tools should not be reached in these tests")
 
 
-@pytest.mark.asyncio
+class FakeHttpClient:
+    """Stand-in for the httpx client linch builds to carry per-server headers."""
+
+    def __init__(self) -> None:
+        self.aexit_calls = 0
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        self.aexit_calls += 1
+
+
+def _patch_http(monkeypatch, transport: FakeTransport, session: FakeSession) -> FakeHttpClient:
+    """Wire the HTTP connect path to fakes and return the httpx stand-in."""
+    http_client = FakeHttpClient()
+    monkeypatch.setattr(mcp_client, "create_mcp_http_client", lambda *a, **k: http_client)
+    monkeypatch.setattr(mcp_client, "streamable_http_client", lambda *a, **k: transport)
+    monkeypatch.setattr(mcp_client, "ClientSession", lambda *a, **k: session)
+    return http_client
+
+
+def _stdio_cfg() -> types.SimpleNamespace:
+    return types.SimpleNamespace(command="echo", args=[], env=None)
+
+
+def _http_cfg(headers: dict[str, str] | None = None) -> types.SimpleNamespace:
+    return types.SimpleNamespace(type="http", url="https://example.test/mcp", headers=headers)
+
+
 async def test_list_tools_failure_cleans_up_transport_and_session(monkeypatch):
     """If list_tools() raises after a successful connect, BOTH the transport
     and the session must have __aexit__ awaited (no leak)."""
-    transport = FakeTransport(n_yield=2)
+    transport = FakeTransport()
     session = FakeSession(list_tools_error=True)
 
-    def fake_stdio_client(*a, **k):
-        return transport
-
-    monkeypatch.setattr(mcp_client, "stdio_client", fake_stdio_client)
+    monkeypatch.setattr(mcp_client, "stdio_client", lambda *a, **k: transport)
     monkeypatch.setattr(mcp_client, "ClientSession", lambda *a, **k: session)
 
-    cfg = types.SimpleNamespace(command="echo", args=[], env=None)
-
     with pytest.raises(mcp_client.ConfigError):
-        await mcp_client.connect_mcp_servers({"srv": cfg})
+        await mcp_client.connect_mcp_servers({"srv": _stdio_cfg()})
 
     assert session.aexit_calls == 1, "session __aexit__ not awaited (ClientSession leaked)"
     assert transport.aexit_calls == 1, "transport __aexit__ not awaited (subprocess leaked)"
 
 
-@pytest.mark.asyncio
 async def test_initialize_failure_cleans_up_transport_and_session(monkeypatch):
     """If initialize() raises after the session context is entered, BOTH the
     session and transport must have __aexit__ awaited (no leak)."""
-    transport = FakeTransport(n_yield=2)
+    transport = FakeTransport()
     session = FakeSession(initialize_error=True)
 
-    def fake_stdio_client(*a, **k):
-        return transport
-
-    monkeypatch.setattr(mcp_client, "stdio_client", fake_stdio_client)
+    monkeypatch.setattr(mcp_client, "stdio_client", lambda *a, **k: transport)
     monkeypatch.setattr(mcp_client, "ClientSession", lambda *a, **k: session)
 
-    cfg = types.SimpleNamespace(command="echo", args=[], env=None)
-
     with pytest.raises(mcp_client.ConfigError):
-        await mcp_client.connect_mcp_servers({"srv": cfg})
+        await mcp_client.connect_mcp_servers({"srv": _stdio_cfg()})
 
     assert session.aexit_calls == 1, "session __aexit__ not awaited (ClientSession leaked)"
     assert transport.aexit_calls == 1, "transport __aexit__ not awaited (subprocess leaked)"
 
 
-# The HTTP transport yields a 3-tuple (read, write, _) instead of stdio's 2-tuple,
-# and is selected by ``config.type == "http"``.  These mirror the stdio tests for
-# the ``_connect_http`` cleanup path.
+# The HTTP path holds a third resource — the httpx client that carries the
+# server's headers, which mcp does not close because it did not create it.
 
 
-@pytest.mark.asyncio
-async def test_http_list_tools_failure_cleans_up_transport_and_session(monkeypatch):
-    """list_tools() failure over HTTP must still close transport and session."""
-    transport = FakeTransport(n_yield=3)
+async def test_http_list_tools_failure_cleans_up_every_resource(monkeypatch):
+    """list_tools() failure over HTTP must close session, transport, and client."""
+    transport = FakeTransport()
     session = FakeSession(list_tools_error=True)
-
-    monkeypatch.setattr(mcp_client, "streamablehttp_client", lambda *a, **k: transport)
-    monkeypatch.setattr(mcp_client, "ClientSession", lambda *a, **k: session)
-
-    cfg = types.SimpleNamespace(type="http", url="https://example.test/mcp", headers=None)
+    http_client = _patch_http(monkeypatch, transport, session)
 
     with pytest.raises(mcp_client.ConfigError):
-        await mcp_client.connect_mcp_servers({"srv": cfg})
+        await mcp_client.connect_mcp_servers({"srv": _http_cfg()})
 
     assert session.aexit_calls == 1, "session __aexit__ not awaited (ClientSession leaked)"
     assert transport.aexit_calls == 1, "transport __aexit__ not awaited (HTTP transport leaked)"
+    assert http_client.aexit_calls == 1, "httpx client __aexit__ not awaited (socket leaked)"
 
 
-@pytest.mark.asyncio
-async def test_http_initialize_failure_cleans_up_transport_and_session(monkeypatch):
-    """initialize() failure over HTTP must still close transport and session."""
-    transport = FakeTransport(n_yield=3)
+async def test_http_initialize_failure_cleans_up_every_resource(monkeypatch):
+    """initialize() failure over HTTP must close session, transport, and client."""
+    transport = FakeTransport()
     session = FakeSession(initialize_error=True)
-
-    monkeypatch.setattr(mcp_client, "streamablehttp_client", lambda *a, **k: transport)
-    monkeypatch.setattr(mcp_client, "ClientSession", lambda *a, **k: session)
-
-    cfg = types.SimpleNamespace(type="http", url="https://example.test/mcp", headers=None)
+    http_client = _patch_http(monkeypatch, transport, session)
 
     with pytest.raises(mcp_client.ConfigError):
-        await mcp_client.connect_mcp_servers({"srv": cfg})
+        await mcp_client.connect_mcp_servers({"srv": _http_cfg()})
 
     assert session.aexit_calls == 1, "session __aexit__ not awaited (ClientSession leaked)"
     assert transport.aexit_calls == 1, "transport __aexit__ not awaited (HTTP transport leaked)"
+    assert http_client.aexit_calls == 1, "httpx client __aexit__ not awaited (socket leaked)"
+
+
+async def test_http_transport_enter_failure_releases_the_client(monkeypatch):
+    """A transport that never enters still leaves the httpx client to close."""
+    transport = FakeTransport(enter_error=True)
+    session = FakeSession()
+    http_client = _patch_http(monkeypatch, transport, session)
+
+    with pytest.raises(mcp_client.ConfigError):
+        await mcp_client.connect_mcp_servers({"srv": _http_cfg()})
+
+    assert http_client.aexit_calls == 1, "httpx client __aexit__ not awaited (socket leaked)"
+    assert transport.aexit_calls == 0, "a transport that never entered must not be exited"
+    assert session.aenter_calls == 0
+
+
+async def test_http_headers_are_carried_on_the_client(monkeypatch):
+    """mcp 2.x has no headers= kwarg, so they must reach the httpx client."""
+    transport = FakeTransport(enter_error=True)
+    session = FakeSession()
+    seen: list[object] = []
+
+    http_client = FakeHttpClient()
+
+    def fake_create(headers=None, *a, **k):
+        seen.append(headers)
+        return http_client
+
+    monkeypatch.setattr(mcp_client, "create_mcp_http_client", fake_create)
+    monkeypatch.setattr(mcp_client, "streamable_http_client", lambda *a, **k: transport)
+    monkeypatch.setattr(mcp_client, "ClientSession", lambda *a, **k: session)
+
+    with pytest.raises(mcp_client.ConfigError):
+        await mcp_client.connect_mcp_servers(
+            {"srv": _http_cfg(headers={"Authorization": "Bearer t"})}
+        )
+
+    assert seen == [{"Authorization": "Bearer t"}]

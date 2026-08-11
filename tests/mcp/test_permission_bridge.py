@@ -2,23 +2,23 @@
 
 A server connected mid-run must have its tools appear on the next turn (the
 per-turn request rebuilds its tool list from the live registry, so attaching
-tools mid-run is picked up). A ``destructiveHint`` annotation maps to an ``ask``
+tools mid-run is picked up). A ``destructive_hint`` annotation maps to an ``ask``
 permission rule so the tool prompts even under permissive modes.
 
 Verify: a tool registered mid-run is offered on the next turn; a destructive MCP
 tool triggers a permission prompt.
 
-The optional ``mcp`` package is not installed here; the annotation→rule logic and
-the registration path do not need it, and the one test that exercises
-``make_mcp_tool`` injects a minimal fake ``mcp.types`` module.
+The annotation→rule logic and the registration path need no server; the one
+test that exercises ``make_mcp_tool`` uses real ``mcp.types`` models and skips
+when the optional ``mcp`` extra is absent.
 """
 
 from __future__ import annotations
 
-import sys
-import types as _pytypes
 from collections.abc import AsyncIterator
 from typing import Any
+
+import pytest
 
 
 class _RecordingProvider:
@@ -89,51 +89,24 @@ def test_destructive_rule_forces_ask_under_permissive_mode() -> None:
 
 
 def test_make_mcp_tool_derives_destructive_flag() -> None:
-    injected = "mcp.types" not in sys.modules
-    orig_mcp = sys.modules.get("mcp")
-    orig_mcp_types = sys.modules.get("mcp.types")
-    if injected:
-        mcp = _pytypes.ModuleType("mcp")
-        mcp.__path__ = []  # type: ignore[attr-defined]
-        types_mod = _pytypes.ModuleType("mcp.types")
+    pytest.importorskip("mcp", reason="the 'mcp' extra is not installed")
+    from mcp.types import Tool, ToolAnnotations
 
-        class CallToolResult: ...
+    from linch.mcp.tool import make_mcp_tool
 
-        class Tool: ...
+    mcp_tool = Tool(
+        name="rm",
+        description="remove",
+        inputSchema={"type": "object", "properties": {}},
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True),
+    )
 
-        class TextContent: ...
+    async def _call(*_a: Any, **_k: Any) -> Any:  # pragma: no cover - not invoked
+        return None
 
-        types_mod.CallToolResult = CallToolResult  # type: ignore[attr-defined]
-        types_mod.Tool = Tool  # type: ignore[attr-defined]
-        types_mod.TextContent = TextContent  # type: ignore[attr-defined]
-        sys.modules["mcp"] = mcp
-        sys.modules["mcp.types"] = types_mod
-
-    try:
-        from linch.mcp.tool import make_mcp_tool
-
-        annotations = _pytypes.SimpleNamespace(readOnlyHint=False, destructiveHint=True)
-        mcp_tool = _pytypes.SimpleNamespace(
-            name="rm",
-            description="remove",
-            inputSchema=_pytypes.SimpleNamespace(properties={}, required=None),
-            annotations=annotations,
-        )
-
-        async def _call(*_a: Any, **_k: Any) -> Any:  # pragma: no cover - not invoked
-            return None
-
-        tool = make_mcp_tool("srv", mcp_tool, _call)
-        assert tool.destructive is True
-        assert tool.scope == "write"
-    finally:
-        if injected:
-            # Restore sys.modules so the injected fakes don't leak into other tests.
-            for key, orig in (("mcp", orig_mcp), ("mcp.types", orig_mcp_types)):
-                if orig is None:
-                    sys.modules.pop(key, None)
-                else:
-                    sys.modules[key] = orig
+    tool = make_mcp_tool("srv", mcp_tool, _call)
+    assert tool.destructive is True
+    assert tool.scope == "write"
 
 
 async def test_tool_attached_mid_run_appears_next_turn() -> None:
