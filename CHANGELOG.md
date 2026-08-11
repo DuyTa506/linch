@@ -6,6 +6,20 @@ and persisted wire formats are versioned separately via `linch.RUN_SCHEMA_VERSIO
 
 ## Unreleased
 
+### Added
+
+- **`Agent(limiter=...)`** — a duck-typed `Limiter` protocol
+  (`async acquire(*, model)` / `release(*, model)`) that core holds around every
+  live provider call: the turn stream and `strategy.compact(...)`. The gate sits
+  inside the turn generator, so it is released while a same-model retry backs off
+  and released deterministically when a caller abandons a run. Use it for a shared
+  budget across agents, per-model quotas, or a token bucket.
+- **`Agent(max_provider_concurrency=N)`** — shortcut that builds a
+  semaphore-backed limiter, so there is exactly one enforcement path. Passing both
+  it and `limiter=` raises `ConfigError`. Unlike a semaphore around `agent.run()`,
+  this bounds the provider calls a run fans out into: every turn, retry,
+  model-fallback swap, compaction summarization, and subagent.
+
 ### Changed
 
 - **`linch[mcp]` now requires `mcp>=2.0.0`** and no longer supports mcp 1.x.
@@ -26,6 +40,13 @@ and persisted wire formats are versioned separately via `linch.RUN_SCHEMA_VERSIO
   `{"type": "object", "properties": {}}` — no arguments, no `required`. The
   schema now passes through intact. Only the unit tests' fake `mcp` modules,
   which supplied attribute-shaped schemas, had ever matched the old code path.
+- Cached provider clients (`OpenAIChatCompletionsProvider` and its
+  vLLM/SGLang/llama.cpp/DeepSeek subclasses, `AnthropicProvider`,
+  `OpenAIResponsesClient`) are rebuilt when used from a different event loop than
+  the one they were constructed on. Reusing a provider across loops — the normal
+  shape of a Celery worker, which runs one loop per task — previously raised
+  `Event loop is closed` and forced hosts to keep their own loop-keyed provider
+  cache.
 
 ## 1.2.0 — 2026-08-11
 

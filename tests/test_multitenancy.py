@@ -13,6 +13,7 @@ second agent's in-flight worker.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from typing import Any
 
 
@@ -116,3 +117,46 @@ async def test_close_drains_own_workers_without_touching_other_agent() -> None:
     except asyncio.CancelledError:
         pass
     assert task_b.cancelled() or task_b.done()
+
+
+async def test_separate_agents_do_not_share_a_provider_budget() -> None:
+    """Two agents each capped at one in-flight provider call still overlap.
+
+    `max_provider_concurrency` builds a limiter per `Agent`, so the cap is
+    per-tenant. A process-global budget would let only one of the two through
+    and the rendezvous below would time out.
+    """
+    from linch.providers import BaseProvider
+    from linch.types import Usage
+
+    both_in_flight = asyncio.Event()
+    in_flight = 0
+
+    class RendezvousProvider(BaseProvider):
+        id = "fake"
+
+        def context_window(self, model: str) -> int:
+            return 100_000
+
+        async def stream(self, req: Any) -> AsyncIterator[dict[str, object]]:
+            nonlocal in_flight
+            yield {"type": "message_start", "model": req.model}
+            in_flight += 1
+            if in_flight == 2:
+                both_in_flight.set()
+            await asyncio.wait_for(both_in_flight.wait(), timeout=5.0)
+            in_flight -= 1
+            yield {"type": "text_delta", "text": "done"}
+            yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
+
+    agents = [_agent(RendezvousProvider(), max_provider_concurrency=1) for _ in range(2)]
+    assert agents[0].limiter is not agents[1].limiter
+
+    sessions = [await agent.session() for agent in agents]
+
+    async def _drive(session: Any) -> None:
+        async for _ in session.run("hi"):
+            pass
+
+    await asyncio.gather(*(_drive(session) for session in sessions))
+    assert in_flight == 0

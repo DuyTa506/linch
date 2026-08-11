@@ -120,6 +120,7 @@ work.
 | Durable steering | `session.align()` queue snapshotted into every run checkpoint and restored on resume: in-order, at-least-once delivery across crash/resume; mid-turn resumes defer the drain past the re-executed tool batch | [usage/agent.md](./usage/agent.md#steering-an-in-flight-run) |
 | GenAI semconv traces | `OpenTelemetryObserver` emits `gen_ai.*` semantic-convention attributes (operation, provider, conversation, cache tokens, tool call) alongside unchanged `linch.*` names | [usage/hooks.md](./usage/hooks.md#genai-semantic-conventions) |
 | Scaffolding CLI | Stdlib-only `linch new` / `linch add tool` console script; generated projects run and test offline; core import graph untouched | [usage/cli.md](./usage/cli.md) |
+| Proactive provider gate | Optional `Agent(limiter=...)` / `max_provider_concurrency=N` held around every live provider call (turn stream and compaction), released across retry backoff; cached provider clients rebuild when the event loop changes | [usage/extending.md](./usage/extending.md#limiter--gate-every-live-provider-call) |
 
 ### Deferred: central-loop structural split
 
@@ -173,10 +174,6 @@ semantic-convention alignment** (additive `gen_ai.*` attributes on every span).
   best-of-N sampling, A/B eval runs, and speculative exploration. The fork
   mechanics exist for subagents; the open design question is store semantics
   for the forked history (shared prefix vs. copy).
-- **Proactive rate-limit seam** — an optional duck-typed limiter protocol on
-  `Agent` so N concurrent sessions do not stampede a provider and then rely on
-  reactive retry. The limiter policy (per-tenant limits) stays in the host;
-  only the seam enters core.
 - **Anthropic cache-breakpoint tuning** — explicit `cache_control` placement at
   the last stable message to shrink the re-billed span after compaction
   (live-measured at ~79% warm versus ~99% baseline). Pure win with no behavior

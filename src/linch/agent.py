@@ -14,6 +14,7 @@ from .errors import ConfigError
 from .openai_responses import OpenAIOptions, OpenAIReasoning
 from .permissions import BashRule, CanUseTool, PathRule, PermissionEngine, PermissionRule, ToolRule
 from .providers import BaseProvider, OpenAIResponsesProvider, OpenAIResponsesProviderOptions
+from .providers.limiter import Limiter, _SemaphoreLimiter
 from .recovery import TruncationRecovery
 from .sessions import SessionStore, SqliteSessionStore
 from .tools import ToolRegistry, default_tools
@@ -149,6 +150,23 @@ def _resolve_runtime_limits(
         max_tool_concurrency=max(1, int(max_tool_concurrency)),
         tool_timeout_ms=timeout,
     )
+
+
+def _resolve_limiter(
+    limiter: Limiter | None,
+    max_provider_concurrency: int | None,
+) -> Limiter | None:
+    """Pick the single provider gate, or ``None`` for the zero-overhead default."""
+    if limiter is not None and max_provider_concurrency is not None:
+        raise ConfigError(
+            "pass either limiter= or max_provider_concurrency=, not both; "
+            "max_provider_concurrency is a shortcut that builds a limiter for you"
+        )
+    if limiter is not None:
+        return limiter
+    if max_provider_concurrency is None:
+        return None
+    return _SemaphoreLimiter(max(1, int(max_provider_concurrency)))
 
 
 def _offload_threshold_was_auto(result_offload: Any) -> bool:
@@ -355,6 +373,8 @@ class AgentOptions:
     include_partial_messages: bool = False
     max_turns: int | None = None
     max_tool_concurrency: int | None = None
+    limiter: Any = None  # Limiter | None
+    max_provider_concurrency: int | None = None
     tool_batching_strategy: str = "greedy"
     tool_timeout_ms: float | None = None
     tool_retry: Any = None  # RetryOptions | None
@@ -411,6 +431,8 @@ class Agent:
         maxTurns: int | None = None,
         max_tool_concurrency: int | None = None,
         maxToolConcurrency: int | None = None,
+        limiter: Limiter | None = None,
+        max_provider_concurrency: int | None = None,
         tool_batching_strategy: str = "greedy",
         toolBatchingStrategy: str | None = None,
         tool_timeout_ms: float | None = None,
@@ -527,6 +549,7 @@ class Agent:
         self._mcp_servers = mcp_servers
         self.max_tool_concurrency = runtime_limits.max_tool_concurrency
         self.tool_concurrency = self.max_tool_concurrency
+        self.limiter: Limiter | None = _resolve_limiter(limiter, max_provider_concurrency)
         self.tool_batching_strategy = tool_batching_strategy
         self.tool_timeout_ms: float | None = runtime_limits.tool_timeout_ms
 
