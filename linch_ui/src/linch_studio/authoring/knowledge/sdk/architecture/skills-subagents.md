@@ -74,22 +74,65 @@ object*, child spending is visible to the parent's next pre-call check.
 
 `agent.run_workflow(fn)` drives a deterministic "closed fleet loop": *fn* is a
 plain async function receiving a `WorkflowContext` (`wf`) and orchestrating
-subagents via `wf.agent` / `wf.parallel` / `wf.pipeline` / `wf.phase`, with
-`wf.budget` exposing the shared `RunBudget`.
+subagents via `wf.agent` / `wf.step` / `wf.interrupt` / `wf.parallel` /
+`wf.settled` / `wf.pipeline` / `wf.phase`, with `wf.budget` exposing the shared
+`RunBudget`.
 
 - A host session parents every `wf.agent` run (each is a normal
   `run_subagent` child); child `SubagentEvent`s and `WorkflowEvent`s reach the
   host via the `on_event` callback.
+- **Two journaled step kinds, one code path.** `wf.agent` runs a subagent;
+  `wf.step` runs an arbitrary sync/async callable so deterministic code and
+  side effects are replayable too. Both go through `_journaled_call`, which
+  owns occurrence assignment, journal lookup, the `*_start` / `*_end` /
+  `*_replayed` events, and recording — so the two cannot drift.
 - **Journal = the run event log.** With `Agent(run_store=...)` and a
-  `run_id`, each `wf.agent` result persists as
-  `WorkflowEvent(kind="agent_end")`. Re-invoking with the same `run_id` folds
-  the stored events back into a `WorkflowJournal` and replays the unchanged
-  call prefix (`kind="agent_replayed"`, no provider call). Calls are keyed by
-  `sha256(subagent_type, prompt, run_options)` + per-key occurrence counter, so
-  parallel fan-out replays safely and an edited prompt or structured-output
-  option invalidates only that call.
+  `run_id`, each result persists as `WorkflowEvent(kind="agent_end")` or
+  `kind="step_end"`. Re-invoking with the same `run_id` folds the stored events
+  back into a `WorkflowJournal` (see `JOURNALED_KINDS`) and replays the
+  unchanged call prefix with no provider call and no re-execution. Agent calls
+  are keyed by `sha256(subagent_type, prompt, call_options)`, steps by
+  `sha256("step", name, key)` — disjoint domains, so a step can never collide
+  with a subagent — each plus a per-key occurrence counter, so parallel fan-out
+  and loops replay safely and an edit invalidates only the call it touched.
+- A step's value crosses the journal as JSON in `result_text`; the record's
+  `record_kind` discriminates it from an agent's final text.
 - The workflow function must be deterministic (no random/time-based
-  branching) for resume replay to be correct.
+  branching) for resume replay to be correct. Branching on a *journaled* result
+  is deterministic by construction; unjournaled variability is not.
+- `wf.parallel` cancels and drains its remaining branches when one raises, and
+  gives each nesting level its own semaphore so a nested fan-out cannot
+  deadlock on slots its own caller holds. `wf.settled` is the opt-out: it lets
+  siblings finish and returns one `StepOutcome` per branch. Both re-raise
+  `CancelledError` / `WorkflowSuspended` rather than reporting them as
+  outcomes — those are control flow, not results.
+- **Failure policy is per call, applied outside the journal lookup.**
+  `_journaled_call` assigns the occurrence and consults the journal *once*,
+  then hands the work to `_call_with_policy`, which applies `timeout_ms`
+  (per attempt) and `retry` (reusing `providers/retry.with_retry` with a
+  `retry_on` predicate). A retry that burned a fresh occurrence would record
+  under the wrong slot and silently break replay. With neither policy set,
+  neither a `wait_for` nor a `with_retry` frame is constructed.
+- **`wf.interrupt` is the suspend point.** No answer means an
+  `interrupt_requested` event and a `WorkflowSuspended` — a `BaseException`, so
+  a user's `except Exception:` cannot swallow it. `run_workflow` catches it
+  *before* its `except BaseException` arm and writes a
+  `save_checkpoint(status="suspended")` instead of `mark_failed`. A `resume=`
+  mapping supplies the answer, which is journaled like any other node and
+  consumed once per key.
+- **Two independent concurrency knobs.** `max_concurrency` shapes one
+  `wf.parallel` fan-out; `max_agent_concurrency` is a lazily created second
+  semaphore held only around the live `run_subagent` call, so it caps real
+  provider pressure without gating the replay path. It cannot deadlock because
+  `wf.agent` is a leaf.
+- **The journal snapshot is an accelerator, never a source of truth.** With
+  `journal_snapshot_every=N`, every Nth record checkpoints the journal into
+  `RunCheckpoint.extension_state["linch.workflow"]` with the event-log
+  watermark it covers; a resume seeds from it and folds only later events. A
+  record is always journaled *before* its `*_end` event is appended, so
+  anything the snapshot missed is guaranteed to be in that tail. Missing,
+  oversized (`_SNAPSHOT_MAX_BYTES`) or malformed, it falls back to folding the
+  whole log.
 
 ## Design rationale
 

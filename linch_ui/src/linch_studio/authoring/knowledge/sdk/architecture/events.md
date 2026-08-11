@@ -40,7 +40,7 @@ graph LR
         SCE["SkillCompletedEvent"]
         SAE["SubagentEvent\nwraps a nested Event"]
         BWE["BackgroundWorkerEvent\nworker_id · status · display_name"]
-        WFE["WorkflowEvent\ntype=workflow\nkind = phase | agent_start | agent_end | agent_replayed"]
+        WFE["WorkflowEvent\ntype=workflow\nkind = phase | agent_start/end/replayed | step_start/end/replayed\n| interrupt_requested/resolved/replayed\n(WORKFLOW_EVENT_KINDS in events.py)"]
     end
 ```
 
