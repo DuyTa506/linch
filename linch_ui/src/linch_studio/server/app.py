@@ -889,10 +889,12 @@ def create_app(
         responses={
             200: {
                 "description": (
-                    "Server-sent events: final structured-response `response_delta` text fragments, "
+                    "Server-sent events: final structured-response `response_delta` text "
+                    "fragments, "
                     "`tool_call_start`/`tool_call_end` around each retrieval call, then "
                     "exactly one terminal `turn` (a SupportTurnResponse) or `error` event. "
-                    "Clients must treat deltas as provisional; internal reasoning is never streamed."
+                    "Clients must treat deltas as provisional; internal reasoning is never "
+                    "streamed."
                 ),
                 "content": {"text/event-stream": {"schema": {"type": "string"}}},
             }
