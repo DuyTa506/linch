@@ -270,16 +270,49 @@ class ScheduleEvent:
     type: Literal["schedule"] = "schedule"
 
 
+WORKFLOW_EVENT_KINDS: tuple[str, ...] = (
+    "phase",
+    "agent_start",
+    "agent_end",
+    "agent_replayed",
+    "step_start",
+    "step_end",
+    "step_replayed",
+    "interrupt_requested",
+    "interrupt_resolved",
+    "interrupt_replayed",
+)
+"""Every ``WorkflowEvent.kind``, in one place for the decoder to validate against.
+
+Keep in lockstep with the ``Literal`` on :class:`WorkflowEvent` below (which must
+stay a literal for the type checker) and with ``JOURNALED_KINDS`` in
+``workflow/journal.py``, which selects the subset that rebuilds the resume journal.
+"""
+
+
 @dataclass(slots=True)
 class WorkflowEvent:
     """Progress/journal event emitted by the workflow engine.
 
-    ``kind="agent_end"`` and ``kind="agent_replayed"`` records double as the
-    resume journal: persisted to the run store, they let an unchanged
-    ``wf.agent`` call prefix replay cached results on resume.
+    The ``*_end`` and ``*_replayed`` records double as the resume journal:
+    persisted to the run store, they let an unchanged ``wf.agent`` / ``wf.step``
+    call prefix replay cached results on resume.  A step's value is carried as
+    JSON in ``result_text``.
     """
 
-    kind: Literal["phase", "agent_start", "agent_end", "agent_replayed"]
+    # Keep in lockstep with WORKFLOW_EVENT_KINDS above.
+    kind: Literal[
+        "phase",
+        "agent_start",
+        "agent_end",
+        "agent_replayed",
+        "step_start",
+        "step_end",
+        "step_replayed",
+        "interrupt_requested",
+        "interrupt_resolved",
+        "interrupt_replayed",
+    ]
     title: str = ""
     call_key: str = ""
     occurrence: int = 0
@@ -915,7 +948,9 @@ def event_from_dict(raw: dict[str, Any]) -> Event:
         )
     if typ == "workflow":
         _kind = raw.get("kind")
-        if _kind not in ("phase", "agent_start", "agent_end", "agent_replayed"):
+        if _kind not in WORKFLOW_EVENT_KINDS:
+            # Forward tolerance: a kind written by a newer linch degrades to a
+            # plain progress marker rather than failing the whole resume.
             _kind = "phase"
         return WorkflowEvent(
             kind=cast(Any, _kind),

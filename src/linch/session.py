@@ -22,6 +22,13 @@ class RunOptions:
     signal: Any = None
     max_output_tokens: int | None = None
     temperature: float | None = None
+    stream_partials: bool | None = None
+    """Override partial assistant-event emission for this run.
+
+    ``None`` preserves :attr:`Agent.include_partial_messages`; ``False``
+    suppresses raw partial events while provider deltas continue to assemble
+    into the normal assistant message.
+    """
     images: list[dict[str, str]] | None = None
     thinking: dict[str, Any] | None = None
     effort: str | None = None

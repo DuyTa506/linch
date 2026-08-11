@@ -1262,14 +1262,21 @@ class Agent:
         budget: Any = None,
         run_id: str | None = None,
         max_concurrency: int = 4,
+        max_agent_concurrency: int = 0,
         on_event: Any = None,
+        step_timeout_ms: float | None = None,
+        deadline_ms: float | None = None,
+        journal_snapshot_every: int = 0,
+        signal: Any = None,
+        resume: dict[str, Any] | None = None,
     ) -> Any:
         """Run a deterministic workflow function and return its value.
 
         *fn* is ``async def flow(wf: WorkflowContext) -> Any``.  See
-        :mod:`linch.workflow` for the ``wf`` primitives (``agent``,
-        ``parallel``, ``pipeline``, ``phase``, ``budget``) and the
-        journal/resume semantics behind *run_id*.
+        :mod:`linch.workflow` for the ``wf`` primitives (``agent``, ``step``,
+        ``interrupt``, ``parallel``, ``settled``, ``pipeline``, ``phase``,
+        ``budget``) and the journal/resume semantics behind *run_id*.  *resume*
+        answers ``wf.interrupt`` calls left pending by an earlier suspend.
         """
         from .workflow.engine import run_workflow as _run_workflow
 
@@ -1279,7 +1286,13 @@ class Agent:
             budget=budget,
             run_id=run_id,
             max_concurrency=max_concurrency,
+            max_agent_concurrency=max_agent_concurrency,
             on_event=on_event,
+            step_timeout_ms=step_timeout_ms,
+            deadline_ms=deadline_ms,
+            journal_snapshot_every=journal_snapshot_every,
+            signal=signal,
+            resume=resume,
         )
 
     async def release_session(self, session_or_id: Session | str, force: bool = False) -> None:

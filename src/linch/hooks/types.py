@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Literal
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from ..tools import ToolResult
 from ..types import AssistantAssembly, ProviderRequest
@@ -41,6 +41,33 @@ HookAction = Literal[
     "force_continue",
     "resolve",
 ]
+
+
+@runtime_checkable
+class CheckpointableHook(Protocol):
+    """Optional durable-state contract for an agent hook.
+
+    The normal hook protocol remains entirely optional and event-oriented.  A
+    hook that also implements this protocol has its state captured at each
+    durable checkpoint and restored for a resumed run under its stable,
+    extension-owned ``checkpoint_key``.  Returned state must be a JSON object
+    containing only JSON-safe values; invalid state is rejected rather than
+    risking a partially durable resume.
+
+    Both methods receive the active session and run ID, so one hook instance
+    can safely serve concurrent sessions without process-global run state. They
+    are deliberately synchronous: checkpoint saves are already async at the
+    run-store boundary, and state capture must remain a small, deterministic
+    in-memory operation on that critical path.
+    """
+
+    checkpoint_key: str
+
+    def checkpoint_state(self, session: Any, run_id: str) -> dict[str, Any]: ...
+
+    def restore_checkpoint_state(
+        self, state: dict[str, Any], session: Any, run_id: str
+    ) -> None: ...
 
 
 @dataclass(slots=True)

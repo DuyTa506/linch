@@ -4,6 +4,7 @@ execution, guards, gates, budgets, and durable checkpoints."""
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -119,6 +120,101 @@ from .terminals import (
 # Max BeforeFinalAnswer-induced retries honored per run before the answer is
 # accepted as-is. Keeps a perpetually-blocking final-answer hook from looping.
 _MAX_FINAL_ANSWER_REENTRIES = 1
+
+
+def _checkpointable_hooks(hooks: list[Any]) -> dict[str, Any]:
+    """Return checkpoint-capable hooks keyed by their stable namespace.
+
+    Hooks are intentionally duck-typed.  A hook exposing either persistence
+    method opts in to this contract and must expose the complete, unambiguous
+    shape; accepting a partial implementation would make a resumed run silently
+    diverge from the checkpointed one.
+    """
+    out: dict[str, Any] = {}
+    for hook in hooks:
+        snapshot = getattr(hook, "checkpoint_state", None)
+        restore = getattr(hook, "restore_checkpoint_state", None)
+        if snapshot is None and restore is None:
+            continue
+        name = str(getattr(hook, "name", hook.__class__.__name__))
+        if not callable(snapshot) or not callable(restore):
+            raise ConfigError(
+                f"checkpointable hook {name!r} must implement both "
+                "checkpoint_state(session, run_id) and "
+                "restore_checkpoint_state(state, session, run_id)"
+            )
+        key = getattr(hook, "checkpoint_key", None)
+        if not isinstance(key, str) or not key:
+            raise ConfigError(
+                f"checkpointable hook {name!r} must define a non-empty string checkpoint_key"
+            )
+        if key in out:
+            raise ConfigError(f"duplicate checkpoint_key {key!r} on agent hooks")
+        out[key] = hook
+    return out
+
+
+def _checkpoint_extension_state(
+    checkpointable_hooks: dict[str, Any], session: Session, run_id: str
+) -> dict[str, dict[str, Any]]:
+    """Capture JSON-safe state from checkpointable hooks.
+
+    Serializing immediately both makes the in-memory store match durable stores
+    (no shared mutable state) and rejects unsupported values before a checkpoint
+    can claim to have captured them.
+    """
+    state_by_key: dict[str, dict[str, Any]] = {}
+    for key, hook in checkpointable_hooks.items():
+        try:
+            state = hook.checkpoint_state(session, run_id)
+        except Exception as exc:
+            raise RuntimeError(f"checkpointable hook {key!r} failed to save state") from exc
+        if not isinstance(state, dict) or not all(isinstance(name, str) for name in state):
+            raise ConfigError(f"checkpointable hook {key!r} must return a dict with string keys")
+        # An empty state means the extension has not established durable run
+        # state yet (for example before a hook has anything to persist at the
+        # first provider request). Omit its namespace so a resume can follow
+        # normal fresh-run initialization rather than treating `{}` as a
+        # malformed snapshot.
+        if not state:
+            continue
+        try:
+            # A JSON round-trip validates values (including NaN/Infinity) and
+            # gives InMemoryRunStore the same snapshot semantics as SQLite.
+            serialized = json.dumps(state, allow_nan=False)
+            restored = json.loads(serialized)
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(
+                f"checkpointable hook {key!r} returned non-JSON-safe checkpoint state"
+            ) from exc
+        if not isinstance(restored, dict):  # Defensive; json of a dict is always an object.
+            raise RuntimeError(f"checkpointable hook {key!r} produced invalid checkpoint state")
+        state_by_key[key] = restored
+    return state_by_key
+
+
+def _restore_checkpointable_hooks(
+    checkpointable_hooks: dict[str, Any],
+    extension_state: dict[str, Any],
+    session: Session,
+    run_id: str,
+) -> None:
+    """Restore only active hook namespaces from a checkpoint.
+
+    Unknown extension namespaces stay untouched for a later extension to use.
+    A malformed payload for an active hook is an incompatibility, not an empty
+    state: fail closed instead of continuing with an untrusted runtime profile.
+    """
+    for key, hook in checkpointable_hooks.items():
+        if key not in extension_state:
+            continue
+        state = extension_state[key]
+        if not isinstance(state, dict) or not all(isinstance(name, str) for name in state):
+            raise ConfigError(f"checkpoint state for hook {key!r} must be a dict with string keys")
+        try:
+            hook.restore_checkpoint_state(dict(state), session, run_id)
+        except Exception as exc:
+            raise RuntimeError(f"checkpointable hook {key!r} failed to restore state") from exc
 
 
 async def _drain_pending_notifications(
@@ -454,6 +550,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
     from ..observability import RunResultInfo as _RunResultInfo
 
     _hooks = list(getattr(agent, "hooks", None) or [])
+    checkpointable_hooks = _checkpointable_hooks(_hooks)
     hook_dispatcher = HookDispatcher(_hooks)
 
     # Bind the hook-dispatch wrappers (in loop/dispatch.py) to this run's
@@ -473,6 +570,13 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
 
     # Resolve per-run deps: RunOptions.deps wins over Agent.deps
     session.run_deps = opts.deps if opts.deps is not None else getattr(agent, "deps", None)
+    if resume_checkpoint is not None:
+        _restore_checkpointable_hooks(
+            checkpointable_hooks,
+            resume_checkpoint.extension_state,
+            session,
+            run_id,
+        )
 
     # Resolve the run budget: RunOptions.budget > inherited-from-parent
     # (subagent child sessions) > Agent.budget.  All runs in an agent tree
@@ -605,6 +709,15 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         # Snapshot undrained align() entries so steering intent survives a crash
         # (restored on resume; empty again after the drain).
         checkpoint.pending_alignment = _alignment_queue_to_dicts(session)
+        if checkpointable_hooks:
+            if not isinstance(checkpoint.extension_state, dict):
+                raise ConfigError("RunCheckpoint.extension_state must be a dict")
+            # Preserve namespaces owned by inactive/unknown extensions; only
+            # the active hooks replace their own durable snapshot.
+            checkpoint.extension_state = {
+                **checkpoint.extension_state,
+                **_checkpoint_extension_state(checkpointable_hooks, session, run_id),
+            }
         # Tool-batch event cursor: capture the watermark just before this turn's
         # tool starts at tool_batch_pending; permission_pending/tool_executing
         # inherit it (they are saved before any start is emitted); reset it

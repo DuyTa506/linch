@@ -71,6 +71,53 @@ async def test_abort_between_retries_stops_retrying():
 
 
 @pytest.mark.asyncio
+async def test_retry_on_predicate_overrides_the_retryable_attribute():
+    """A caller-supplied predicate decides retryability for exceptions that do
+    not carry ``retryable`` themselves."""
+    calls = 0
+
+    async def fn(attempt: int) -> str:
+        nonlocal calls
+        calls += 1
+        if attempt < 2:
+            raise ValueError("not marked retryable")
+        return "ok"
+
+    result = await with_retry(fn, signal=None, options=_FAST, retry_on=lambda _e: True)
+
+    assert result == "ok"
+    assert calls == 3
+
+
+@pytest.mark.asyncio
+async def test_retry_on_predicate_can_refuse_a_retryable_exception():
+    calls = 0
+
+    async def fn(attempt: int) -> str:
+        nonlocal calls
+        calls += 1
+        raise _Retryable("boom")
+
+    with pytest.raises(_Retryable):
+        await with_retry(fn, signal=None, options=_FAST, retry_on=lambda _e: False)
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_on_does_not_swallow_abort_error():
+    calls = 0
+
+    async def fn(attempt: int) -> str:
+        nonlocal calls
+        calls += 1
+        raise AbortError("stop")
+
+    with pytest.raises(AbortError):
+        await with_retry(fn, signal=None, options=_FAST, retry_on=lambda _e: True)
+    assert calls == 1
+
+
+@pytest.mark.asyncio
 async def test_no_signal_normal_retry_path():
     calls = 0
 

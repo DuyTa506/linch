@@ -150,6 +150,7 @@ if TYPE_CHECKING:
         AfterProviderCallContext,
         BeforeFinalAnswerContext,
         BeforeProviderCallContext,
+        CheckpointableHook,
         ContextInjectionHook,
         FinalAnswerVerifierHook,
         HookContext,
@@ -356,7 +357,14 @@ if TYPE_CHECKING:
         evaluate_verifiers,
         normalize_verifiers,
     )
-    from .workflow import WorkflowContext, WorkflowError, WorkflowJournal
+    from .workflow import (
+        StepOutcome,
+        WorkflowContext,
+        WorkflowError,
+        WorkflowJournal,
+        WorkflowSuspended,
+        WorkflowTimeoutError,
+    )
 
     defaultTools = default_tools
 
@@ -486,6 +494,7 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
         "AfterProviderCallContext",
         "BeforeFinalAnswerContext",
         "BeforeProviderCallContext",
+        "CheckpointableHook",
         "ContextInjectionHook",
         "FinalAnswerVerifierHook",
         "HookContext",
@@ -689,7 +698,14 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
         "evaluate_verifiers",
         "normalize_verifiers",
     ),
-    ".workflow": ("WorkflowContext", "WorkflowError", "WorkflowJournal"),
+    ".workflow": (
+        "StepOutcome",
+        "WorkflowContext",
+        "WorkflowError",
+        "WorkflowJournal",
+        "WorkflowSuspended",
+        "WorkflowTimeoutError",
+    ),
 }
 
 # Public name -> (submodule, source attribute) where the exported name differs
@@ -734,10 +750,13 @@ __all__ = [
     "TruncationRecovery",
     "BudgetEvent",
     "is_budget_event",
+    "StepOutcome",
     "WorkflowContext",
     "WorkflowError",
     "WorkflowEvent",
     "WorkflowJournal",
+    "WorkflowSuspended",
+    "WorkflowTimeoutError",
     "is_workflow_event",
     "ScheduleEvent",
     "Schedule",
@@ -784,6 +803,7 @@ __all__ = [
     "ErrorEvent",
     "Event",
     "HookEvent",
+    "CheckpointableHook",
     "HookEventRecord",
     "HookResult",
     "HookContext",

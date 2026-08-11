@@ -183,6 +183,10 @@ class ProviderRequest:
     effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
     output_schema: OutputSchema | None = None
     tool_choice: ToolChoice | None = None
+    # ``None`` preserves the agent-level partial-event setting. ``False`` keeps
+    # consuming and assembling provider deltas but suppresses their raw
+    # ``PartialAssistantEvent`` projection for this request.
+    stream_partials: bool | None = None
 
 
 @dataclass(slots=True)

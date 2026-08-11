@@ -189,6 +189,7 @@ def _build_turn_request(
         messages=messages,
         max_output_tokens=opts.max_output_tokens or agent.max_output_tokens,
         temperature=opts.temperature,
+        stream_partials=opts.stream_partials,
         thinking=opts.thinking,
         effort=_provider_effort(opts.effort),
         output_schema=opts.output_schema or agent.output_schema,

@@ -66,6 +66,19 @@ upgrade:
   round-trips its known fields on an older one; `load_events` skips an event row it cannot
   decode rather than aborting the resume. See [usage/workflows.md](usage/workflows.md) and
   the run-store source for details.
+- **New `WorkflowEvent` kinds are additive and do not bump `RUN_SCHEMA_VERSION`.** An older
+  binary reading a newer run's event log decodes an unknown kind as `phase`
+  (`WORKFLOW_EVENT_KINDS` in `events.py`), which the journal fold ignores — so the affected
+  call simply re-executes on resume instead of replaying. That is fail-safe, not a wrong
+  answer, so it stays a MINOR change.
+- **`RunStatus` / `RunPhase` gained `"suspended"` / `"workflow_suspended"`** for a workflow
+  parked at a `wf.interrupt`. Neither `Literal` is public API, the status column has no
+  constraint, and `checkpoint_from_dict` does not validate `phase`, so an older binary
+  reads such a run without error.
+- **`RunCheckpoint.extension_state` namespaces are opaque to core.** The workflow journal
+  snapshot lives under `"linch.workflow"`. A reader that does not understand it preserves
+  it; a reader that does treats a missing, malformed, or stale entry as "no snapshot" and
+  folds the whole event log. So it never needs a version of its own.
 
 A breaking wire-format change bumps `RUN_SCHEMA_VERSION`, independent of the package
 MAJOR/MINOR/PATCH.
