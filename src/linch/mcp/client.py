@@ -91,9 +91,15 @@ async def connect_mcp_servers(
             result = await session.list_tools()
             mcp_tools = [make_mcp_tool(name, t, _make_call_tool(session)) for t in result.tools]
             tools.extend(mcp_tools)
-        except Exception as exc:
+        except BaseException as exc:
             for s in reversed(opened):
                 await s.aclose()
+            if not isinstance(exc, Exception):
+                # Cancellation is not an Exception. Release first — a connect
+                # cancelled by a shutdown or a timeout would otherwise strand
+                # an MCP subprocess — then propagate it unchanged rather than
+                # reporting it as a configuration failure.
+                raise
             failures.append(f"{name}: {exc}")
             raise ConfigError(f"Failed to connect MCP server(s): {'; '.join(failures)}") from exc
 
@@ -128,8 +134,9 @@ async def _connect_http(name: str, config: object) -> _OpenSession:
     transport = streamable_http_client(url, http_client=http_client)
     try:
         read, write = await transport.__aenter__()
-    except Exception:
+    except BaseException:
         # The transport never entered, so only the httpx client needs releasing.
+        # BaseException so a cancelled connect does not leak the socket either.
         await opened.aclose()
         raise
     opened.transport = transport
@@ -153,7 +160,7 @@ async def _start_session(opened: _OpenSession, read: Any, write: Any) -> _OpenSe
         opened.session = await session_ctx.__aenter__()
         await opened.session.initialize()
         return opened
-    except Exception:
+    except BaseException:
         await opened.aclose()
         raise
 
