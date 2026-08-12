@@ -18,7 +18,12 @@ and persisted wire formats are versioned separately via `linch.RUN_SCHEMA_VERSIO
   semaphore-backed limiter, so there is exactly one enforcement path. Passing both
   it and `limiter=` raises `ConfigError`. Unlike a semaphore around `agent.run()`,
   this bounds the provider calls a run fans out into: every turn, retry,
-  model-fallback swap, compaction summarization, and subagent.
+  model-fallback swap, compaction summarization, and subagent. The cap survives
+  an `Agent` being reused from a second event loop: `asyncio.Semaphore` binds to
+  the loop of its first *contended* acquire, so the semaphore is rebuilt when the
+  loop changed and nothing is held. Rebuilding while slots are still outstanding
+  would give the second loop its own full budget, so that raises `ConfigError`
+  instead.
 
 ### Changed
 

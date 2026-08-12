@@ -312,6 +312,7 @@ class OpenAIResponsesClient:
     async def aclose(self) -> None:
         client = self.client
         self.client = None
+        self._client_loop = None
         if client is None:
             return
         await aclose_client(client)

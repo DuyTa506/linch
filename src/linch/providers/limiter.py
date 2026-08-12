@@ -28,6 +28,9 @@ import asyncio
 from contextlib import AbstractAsyncContextManager, nullcontext
 from typing import Any, Protocol, runtime_checkable
 
+from .._client_lifecycle import loop_changed, running_loop
+from ..errors import ConfigError
+
 __all__ = ["Limiter", "provider_slot"]
 
 
@@ -56,21 +59,41 @@ class _SemaphoreLimiter:
     The semaphore is built on first acquire, not in ``__init__``: an ``Agent``
     is routinely constructed outside a running loop, and on 3.10 a semaphore
     built there binds to the wrong one.
+
+    It also binds to the loop of its first *contended* acquire, so an idle
+    limiter reused from another loop is rebuilt — the same staleness rule the
+    provider clients follow. Without that, a host running one loop per task
+    hits ``bound to a different event loop`` only once calls start queueing,
+    which the loop reports as a per-run error rather than a crash.
     """
 
-    __slots__ = ("_cap", "_sem")
+    __slots__ = ("_cap", "_sem", "_loop", "_held")
 
     def __init__(self, cap: int) -> None:
         self._cap = cap
         self._sem: asyncio.Semaphore | None = None
+        self._loop: Any = None
+        self._held = 0
 
     async def acquire(self, *, model: str) -> None:
-        if self._sem is None:
+        if self._sem is None or loop_changed(self._loop):
+            if self._held:
+                # Rebuilding now would give the second loop its own full budget
+                # while the first still holds slots, silently doubling the cap.
+                raise ConfigError(
+                    "max_provider_concurrency binds to the event loop it is first "
+                    f"used on, and {self._held} provider call(s) are still in flight "
+                    "there. Use one Agent per event loop, or pass limiter= with an "
+                    "implementation that spans loops."
+                )
             self._sem = asyncio.Semaphore(self._cap)
+            self._loop = running_loop()
         await self._sem.acquire()
+        self._held += 1
 
     def release(self, *, model: str) -> None:
         if self._sem is not None:
+            self._held -= 1
             self._sem.release()
 
 

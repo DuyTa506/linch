@@ -200,6 +200,8 @@ class Limiter(Protocol):
 A plain concurrency cap is six lines:
 
 ```python
+import asyncio
+
 class SemaphoreLimiter:
     def __init__(self, cap: int) -> None:
         self._sem = asyncio.Semaphore(cap)
@@ -217,6 +219,15 @@ Build the semaphore lazily on first `acquire` if the `Agent` may be constructed
 outside a running loop. For that common case `Agent(max_provider_concurrency=8)`
 is the shortcut — it builds this limiter for you, and passing both raises
 `ConfigError`.
+
+**Know your loop affinity.** `asyncio.Semaphore` binds to the loop of its first
+*contended* acquire, so the sketch above breaks when an `Agent` is reused from a
+second loop — and only once calls start queueing, which makes it a load-only
+failure. `max_provider_concurrency` handles this for you: it rebuilds the
+semaphore when the loop changed and nothing is held, and raises `ConfigError`
+rather than rebuilding while slots are still outstanding, since that would hand
+the second loop its own full budget. A limiter of your own that must span
+concurrently running loops needs a primitive that is not loop-bound.
 
 `model` is passed so one limiter can keep per-model budgets: a token bucket keyed
 by model refills at that model's requests-per-minute and `acquire` waits for a
