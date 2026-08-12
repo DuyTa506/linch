@@ -305,6 +305,36 @@ unboundedly.
 
 ---
 
+## Provider concurrency
+
+`RunBudget` caps how much a run may spend; `Agent(max_provider_concurrency=N)`
+caps how many live provider calls that agent may have in flight at once.
+
+```python
+agent = Agent(model="gpt-5.5", provider=provider, max_provider_concurrency=8)
+```
+
+This bounds **provider calls, not `run()` calls** — the distinction matters
+because one `run()` fans out into many calls: every turn of the loop, every
+same-model retry, every model-fallback swap, every compaction summarization, and
+every subagent it spawns. A semaphore your host wraps around `agent.run()` caps
+none of those; this does.
+
+The cap is per-`Agent`, so two agents in one process keep separate budgets. The
+gate is held around the provider call itself and released across retry backoff,
+so a call waiting to retry re-queues instead of sitting on a slot. When unset
+there is no gate at all and no added cost.
+
+For a shared budget across several agents, per-model quotas, or a token bucket,
+pass your own [`Limiter`](./extending.md#limiter--gate-every-live-provider-call)
+instead. Passing both `limiter=` and `max_provider_concurrency=` raises
+`ConfigError`.
+
+The tool side has its own separate cap, `Agent(max_tool_concurrency=...)` — see
+[Tools](./tools.md#the-scheduler).
+
+---
+
 ## Related pages
 
 - [Providers](./providers.md) — model selection and capabilities.

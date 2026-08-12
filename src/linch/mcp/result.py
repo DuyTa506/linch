@@ -6,7 +6,7 @@ from ..tools.base import ToolResult
 
 
 def map_mcp_result(result: CallToolResult) -> ToolResult:
-    is_error = result.isError or False
+    is_error = result.is_error or False
     content_blocks: list[dict[str, object]] = []
 
     for block in result.content:
@@ -18,7 +18,7 @@ def map_mcp_result(result: CallToolResult) -> ToolResult:
                     "type": "image",
                     "source": {
                         "type": "base64",
-                        "media_type": getattr(block, "mimeType", "image/png"),
+                        "media_type": getattr(block, "mime_type", "image/png"),
                         "data": getattr(block, "data", ""),
                     },
                 }

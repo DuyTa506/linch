@@ -18,6 +18,7 @@ from ..compaction import (
 from ..context import context_budget_to_dict
 from ..errors import ContextLengthError, ProviderError
 from ..events import ContextBuildEvent, ModelFallbackEvent, PartialAssistantEvent
+from ..providers.limiter import provider_slot
 from ..providers.retry import RetryOptions, _delay_for_error
 from ..session import RunOptions, Session
 from ..types import (
@@ -271,6 +272,20 @@ async def _stream_turn_with_compaction_retry(
 
 
 async def stream_turn(
+    session: Session, req: ProviderRequest
+) -> AsyncIterator[PartialAssistantEvent | AssistantAssembly]:
+    """Stream one provider turn, holding the agent's provider slot throughout.
+
+    The gate lives here rather than around the caller so that a retry releases
+    it while ``_retry_same_model`` backs off, and so an abandoned run hands its
+    slot back: closing this generator unwinds the ``async with`` deterministically.
+    """
+    async with provider_slot(session.agent, req.model):
+        async for item in _stream_turn(session, req):
+            yield item
+
+
+async def _stream_turn(
     session: Session, req: ProviderRequest
 ) -> AsyncIterator[PartialAssistantEvent | AssistantAssembly]:
     agent = session.agent
