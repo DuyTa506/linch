@@ -1,7 +1,12 @@
 # Versioning & public API
 
-Linch follows [Semantic Versioning](https://semver.org/). This page is the contract
-an embedder can pin to.
+Linch versions `MAJOR.MINOR.PATCH` and never breaks `linch.__all__` outside a MAJOR.
+This page is the contract an embedder can pin to.
+
+It deviates from strict [Semantic Versioning](https://semver.org/) in two ways, both
+deliberate and both spelled out below: **purely additive public surface can ship in a
+PATCH**, and **an optional extra's dependency floor is not covered by the package version
+at all**. If either matters to you, pin exactly — see [Pinning](#pinning).
 
 ## What is public
 
@@ -45,16 +50,43 @@ Given `MAJOR.MINOR.PATCH`:
   removed parameter, a changed default that alters behavior, or a protocol method signature
   change. Removing a feature flag's *opt-in* default counts (the loop stops being
   byte-identical for an existing caller).
-- **MINOR** — additive, backward-compatible: a new export, a new optional `Agent(...)`
-  parameter that defaults to today's behavior, a new event type, a new opt-in seam. Existing
-  code keeps working unchanged. Every feature added in the roadmap is minor-compatible by
-  construction — defaults leave the loop byte-identical.
-- **PATCH** — bug fixes and internal changes with no public-surface effect.
+- **MINOR** — a backward-compatible release large enough to be worth announcing: a feature
+  set, a new subsystem, a notable group of additions. Existing code keeps working unchanged.
+  Every feature added in the roadmap is compatible by construction — defaults leave the loop
+  byte-identical.
+- **PATCH** — bug fixes, internal changes, and *purely additive* public surface: a new
+  export, a new optional `Agent(...)` parameter that defaults to today's behavior, a new
+  event type, a new opt-in seam. Existing code cannot observe any of these without asking
+  for them.
+
+The MINOR/PATCH line is therefore an **editorial** judgment about the size of a release, not
+a compatibility signal — both are equally safe to take. Strict SemVer would put every
+addition in MINOR; Linch does not, so **do not read "PATCH" as "nothing was added."** The
+compatibility guarantee lives entirely at the MAJOR boundary. Read `CHANGELOG.md` before
+upgrading, whichever digit moved.
 
 A duck-typed **protocol** (`Tool`, `MemoryStore`, `RunObserver`, `FileBackend`,
 `ExecutionBackend`, `Mailbox`, `IsolationBackend`, `ScheduleStore`, `Verifier`, …) is part
 of the contract: adding a *required* method or argument an embedder must implement is a
 MAJOR change. Adding an *optional* one the runtime probes with `getattr`/`hasattr` is MINOR.
+
+## Optional-extra dependencies are not covered
+
+The version contract above describes `linch.__all__`. It says nothing about what an
+**extra** (`linch[mcp]`, `linch[anthropic]`, `linch[gemini]`, `linch[otel]`,
+`linch[postgres]`) requires underneath. A third-party SDK can make a breaking release at any
+time, and keeping an adapter working may mean raising its floor — including in a PATCH.
+
+Precedent: **1.2.1 raised `linch[mcp]` to `mcp>=2.0.0` and dropped support for mcp 1.x**,
+because mcp 2.0 renamed the streamable-HTTP transport, replaced its `headers=` argument with
+a caller-supplied httpx client, and moved its models to snake_case. No name in
+`linch.__all__` changed, so by the rules above it was not a MAJOR — but an environment
+pinned to mcp 1.x will fail to resolve.
+
+Linch's own config surface is held stable across such a bump wherever possible
+(`McpServerConfig.headers` kept working unchanged), and every floor change is called out at
+the top of its `CHANGELOG.md` entry. If you cannot absorb one, pin `linch` exactly and
+upgrade deliberately.
 
 ## Wire formats are versioned separately
 
@@ -92,9 +124,26 @@ exist (`defaultTools` → `default_tools`, `tools_from_defaults`) follow this ru
 ## Pinning
 
 ```toml
-# pyproject.toml — pin to a compatible range
+# pyproject.toml — no name in `linch.__all__` will break inside this range
 dependencies = ["linch>=1.0,<2.0"]
 ```
 
-Pin the MAJOR if you depend only on `linch.__all__`. Pin MINOR as well if you implement a
-protocol and want to review new optional methods before adopting them.
+That range is the *compatibility* guarantee, and it is enough if you only call
+`linch.__all__` and can take a new export or a raised extra floor without noticing. It is
+**not** a "nothing will change" guarantee: a PATCH inside it may add a public name, and a
+PATCH may raise what `linch[...]` requires.
+
+Pin tighter when you need the release to be inert:
+
+```toml
+# review every release before taking it
+dependencies = ["linch==1.2.1"]
+```
+
+- **Implementing a protocol?** Pin the exact version, or at least the MINOR. New optional
+  methods the runtime probes with `getattr` can arrive in any release, and you will want to
+  read the changelog before adopting them.
+- **Using an extra with a pinned third-party SDK?** Pin the exact version — see
+  [Optional-extra dependencies](#optional-extra-dependencies-are-not-covered).
+- **Locking a build?** Use a lockfile (`uv.lock`, `poetry.lock`, `pip-compile`). It pins the
+  extras' transitive dependencies too, which no `linch` specifier can do.
