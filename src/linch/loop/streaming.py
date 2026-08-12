@@ -71,7 +71,13 @@ async def _retry_same_model(exc: Exception, attempts: list[int], agent: Any) -> 
     return True
 
 
-async def maybe_compact_resilient(session: Session, agent: Any, signal: Any) -> bool:
+async def maybe_compact_resilient(
+    session: Session,
+    agent: Any,
+    signal: Any,
+    *,
+    model: str | None = None,
+) -> bool:
     """Run proactive (pre-limit) compaction with the same transient-failure
     backoff the turn loop gets, then degrade gracefully instead of crashing.
 
@@ -87,7 +93,7 @@ async def maybe_compact_resilient(session: Session, agent: Any, signal: Any) -> 
     attempts = [0]
     while True:
         try:
-            return await maybe_compact(session, agent, signal)
+            return await maybe_compact(session, agent, signal, model=model)
         except ProviderError as exc:
             if not getattr(exc, "retryable", False):
                 return False
@@ -181,16 +187,22 @@ async def _stream_turn_with_ladder(
             if ladder.micro and not micro_tried_this_turn:
                 micro_tried_this_turn = True
                 recovered = apply_micro_compaction(
-                    session, agent, keep_recent_turns=ladder.keep_recent_turns
+                    session,
+                    agent,
+                    keep_recent_turns=ladder.keep_recent_turns,
+                    model=req.model,
                 )
             if not recovered:
                 if forced_used[0] >= ladder.max_forced_compactions:
                     raise
                 forced_used[0] += 1
-                await run_forced_compaction(session, agent, signal)
+                await run_forced_compaction(session, agent, signal, model=req.model)
             reset_read_tracker_after_compaction(session, agent)
-            yield build_compaction_event(session)
             _re_inject_skill_context(session)
+            # Yield only after the provider view reaches its final post-
+            # compaction shape.  The runner persists a snapshot while this
+            # generator is suspended at the event.
+            yield build_compaction_event(session)
             # Re-run context builders after compaction so fresh context lands.
             context_result = await _build_context_result(session, turn_index)
             if context_result is not None:
@@ -239,9 +251,9 @@ async def _stream_turn_with_compaction_retry(
                     raise
                 await end_provider_call(stop_reason="context_length_error")
                 session.mark_compaction_used()
-                await run_forced_compaction(session, agent, signal)
-                yield build_compaction_event(session)
+                await run_forced_compaction(session, agent, signal, model=req.model)
                 _re_inject_skill_context(session)
+                yield build_compaction_event(session)
                 # Re-run context builders after compaction so fresh context lands.
                 context_result = await _build_context_result(session, turn_index)
                 if context_result is not None:
@@ -301,6 +313,12 @@ async def _stream_turn(
     stop_reason: StopReason = "end_turn"
     usage = Usage()
     metadata: dict[str, Any] | None = None
+    message_started = False
+    message_ended = False
+    seen_tool_ids: set[str] = set()
+
+    def protocol_error(detail: str) -> ProviderError:
+        return ProviderError(f"invalid normalized provider stream: {detail}", retryable=False)
 
     def flush_text() -> None:
         nonlocal text_buf
@@ -316,16 +334,36 @@ async def _stream_turn(
             thinking_sig = None
 
     async for event in agent.provider.stream(req):
-        typ = event["type"]
+        if not isinstance(event, dict):
+            raise protocol_error(f"event must be a dict, got {type(event).__name__}")
+        typ = event.get("type")
+        if not isinstance(typ, str):
+            raise protocol_error("event.type must be a string")
+        if message_ended:
+            raise protocol_error(f"event {typ!r} appeared after message_end")
+        if typ == "message_start":
+            if message_started:
+                raise protocol_error("duplicate message_start")
+            model = event.get("model")
+            if not isinstance(model, str) or not model:
+                raise protocol_error("message_start.model must be a non-empty string")
+            message_started = True
+            continue
+        if not message_started:
+            raise protocol_error(f"first event must be message_start, got {typ!r}")
         if typ == "text_delta":
             flush_thinking()
-            text = str(event["text"])
+            if not isinstance(event.get("text"), str):
+                raise protocol_error("text_delta.text must be a string")
+            text = cast(str, event["text"])
             text_buf.append(text)
             if stream_partials:
                 yield PartialAssistantEvent(delta={"kind": "text", "text": text})
         elif typ == "thinking_delta":
             flush_text()
-            text = str(event["text"])
+            if not isinstance(event.get("text"), str):
+                raise protocol_error("thinking_delta.text must be a string")
+            text = cast(str, event["text"])
             thinking_buf.append(text)
             signature = event.get("signature", thinking_sig)
             thinking_sig = signature if isinstance(signature, str) else thinking_sig
@@ -338,13 +376,27 @@ async def _stream_turn(
         elif typ == "tool_use_start":
             flush_text()
             flush_thinking()
-            tool_id = str(event["id"])
-            tool_meta[tool_id] = (tool_id, str(event["name"]))
+            tool_id = event.get("id")
+            name = event.get("name")
+            if not isinstance(tool_id, str) or not tool_id:
+                raise protocol_error("tool_use_start.id must be a non-empty string")
+            if not isinstance(name, str) or not name:
+                raise protocol_error("tool_use_start.name must be a non-empty string")
+            if tool_id in seen_tool_ids:
+                raise protocol_error(f"duplicate tool-use id {tool_id!r}")
+            seen_tool_ids.add(tool_id)
+            tool_meta[tool_id] = (tool_id, name)
             tool_inputs[tool_id] = []
         elif typ == "tool_use_input_delta":
-            tool_id = str(event["id"])
-            json_delta = str(event["json_delta"])
-            tool_inputs.setdefault(tool_id, []).append(json_delta)
+            tool_id = event.get("id")
+            json_delta = event.get("json_delta")
+            if not isinstance(tool_id, str) or tool_id not in tool_meta:
+                raise protocol_error(
+                    f"tool_use_input_delta references unknown or closed id {tool_id!r}"
+                )
+            if not isinstance(json_delta, str):
+                raise protocol_error("tool_use_input_delta.json_delta must be a string")
+            tool_inputs[tool_id].append(json_delta)
             if stream_partials:
                 yield PartialAssistantEvent(
                     delta={
@@ -354,25 +406,60 @@ async def _stream_turn(
                     }
                 )
         elif typ == "tool_use_end":
-            tool_id = str(event["id"])
-            meta = tool_meta.pop(tool_id, None)
-            raw = "".join(tool_inputs.pop(tool_id, []))
-            if meta is not None:
-                try:
-                    parsed = json.loads(raw) if raw else {}
-                    if not isinstance(parsed, dict):
-                        parsed = {}
-                except json.JSONDecodeError:
-                    parsed = {"__invalid_json": True, "raw": raw}
-                content.append(ToolUseBlock(id=meta[0], name=meta[1], input=parsed))
+            tool_id = event.get("id")
+            if not isinstance(tool_id, str) or tool_id not in tool_meta:
+                raise protocol_error(f"tool_use_end references unknown or closed id {tool_id!r}")
+            meta = tool_meta.pop(tool_id)
+            raw = "".join(tool_inputs.pop(tool_id))
+            try:
+                parsed = json.loads(raw) if raw else {}
+            except json.JSONDecodeError as exc:
+                raise protocol_error(f"tool {tool_id!r} input is invalid JSON: {exc}") from exc
+            if not isinstance(parsed, dict):
+                raise protocol_error(f"tool {tool_id!r} input must decode to a JSON object")
+            content.append(ToolUseBlock(id=meta[0], name=meta[1], input=parsed))
         elif typ == "message_end":
+            if tool_meta:
+                raise protocol_error(
+                    "message_end arrived before tool_use_end for " + ", ".join(sorted(tool_meta))
+                )
+            raw_stop = event.get("stop_reason")
+            if raw_stop not in {
+                "end_turn",
+                "tool_use",
+                "max_tokens",
+                "stop_sequence",
+                "refusal",
+                "error",
+                "interrupted",
+            }:
+                raise protocol_error(f"invalid message_end.stop_reason {raw_stop!r}")
+            raw_usage = event.get("usage")
+            if not isinstance(raw_usage, Usage):
+                raise protocol_error("message_end.usage must be a Usage instance")
             flush_text()
             flush_thinking()
-            stop_reason = cast(StopReason, event["stop_reason"])
-            raw_usage = event["usage"]
-            usage = raw_usage if isinstance(raw_usage, Usage) else Usage()
+            stop_reason = cast(StopReason, raw_stop)
+            usage = raw_usage
             raw_metadata = event.get("provider_metadata")
-            metadata = raw_metadata if isinstance(raw_metadata, dict) else None
+            if raw_metadata is not None and not isinstance(raw_metadata, dict):
+                raise protocol_error("message_end.provider_metadata must be a dict or None")
+            metadata = raw_metadata
+            message_ended = True
+        else:
+            raise protocol_error(f"unknown event type {typ!r}")
+
+    if not message_started:
+        raise protocol_error("stream ended before message_start")
+    if not message_ended:
+        raise protocol_error("stream ended before message_end")
+    complete_tool_calls = [block for block in content if isinstance(block, ToolUseBlock)]
+    if stop_reason == "tool_use" and not complete_tool_calls:
+        raise protocol_error("stop_reason='tool_use' requires at least one complete tool call")
+    if stop_reason != "tool_use" and complete_tool_calls:
+        raise protocol_error(
+            f"stream completed tool calls but stop_reason was {stop_reason!r}, not 'tool_use'"
+        )
 
     message = Message(role="assistant", content=content, provider_metadata=metadata)
     yield AssistantAssembly(message=message, stop_reason=stop_reason, usage=usage)

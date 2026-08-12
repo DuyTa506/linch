@@ -246,6 +246,18 @@ dependency). Both backends route timeout and abort through the same path, so
 process. The backend is purely about *where and how* an approved command runs —
 **whether** it runs is decided by [permissions](#permissions).
 
+For a strict durable deployment, use an explicit trusted `docker_path` and pin
+`image` by immutable digest rather than a mutable tag. The run contract records
+the resolved backend policy and hashes configured/forwarded environment values
+so secrets are not copied into run metadata; a changed value blocks resume.
+Hashes are comparison identifiers, not a secret vault—avoid low-entropy secrets
+and protect the run store. A custom Bash backend on a durable run must expose
+`resume_policy_id`, a non-`None` JSON-safe `resume_policy_config` (use `{}` only
+when it truly has no configuration), and optionally `resume_policy_version`.
+That identity is the host's assertion: include every authority-relevant input
+and bump the version when backend behavior or remote sandbox policy changes;
+otherwise start a new run instead of resuming an old contract.
+
 ---
 
 ## Dependencies (shared app state)

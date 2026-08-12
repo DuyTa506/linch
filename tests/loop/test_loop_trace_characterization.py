@@ -120,7 +120,6 @@ async def test_text_only_run_pins_event_and_checkpoint_order() -> None:
 
     assert [event.type for event in events] == [
         "system",
-        "skills_loaded",
         "user",
         "assistant",
         "usage",
@@ -150,7 +149,6 @@ async def test_single_tool_run_pins_event_and_checkpoint_order() -> None:
 
     assert [event.type for event in events] == [
         "system",
-        "skills_loaded",
         "user",
         "assistant",
         "usage",

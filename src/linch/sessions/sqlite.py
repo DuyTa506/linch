@@ -250,6 +250,14 @@ class SqliteSessionStore:
         _meta = meta or {}
         return await self._exec.run(lambda c: _create(c, id, _meta))
 
+    async def create_if_absent(
+        self, *, id: str, meta: dict[str, object] | None = None
+    ) -> SessionRecord | None:
+        """Atomically create a specifically named session, or return ``None``."""
+
+        _meta = meta or {}
+        return await self._exec.run(lambda c: _create_if_absent(c, id, _meta))
+
     async def load(self, id: str) -> SessionRecord | None:
         return await self._exec.run(lambda c: _load(c, id))
 
@@ -342,6 +350,26 @@ def _create(conn: sqlite3.Connection, id: str | None, meta: dict[str, object]) -
     )
     conn.commit()
     return SessionRecord(id=sid, created_at=ts, updated_at=ts, meta=meta)
+
+
+def _create_if_absent(
+    conn: sqlite3.Connection, id: str, meta: dict[str, object]
+) -> SessionRecord | None:
+    ts = now_iso()
+    cur = conn.execute(
+        "insert or ignore into sessions (id, created_at, updated_at, meta, invoked_skills) "
+        "values (?, ?, ?, ?, ?)",
+        (id, ts, ts, json.dumps(meta), "[]"),
+    )
+    if cur.rowcount == 0:
+        conn.commit()
+        return None
+    conn.execute(
+        "insert into task_counters (session_id, next_id) values (?, 1)",
+        (id,),
+    )
+    conn.commit()
+    return SessionRecord(id=id, created_at=ts, updated_at=ts, meta=meta)
 
 
 def _load(conn: sqlite3.Connection, id: str) -> SessionRecord | None:

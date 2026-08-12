@@ -124,6 +124,26 @@ checkpoints (resume across process restarts, durable HITL approvals) also pass a
 `FeatureFlags` turns off subsystems you don't use so they never connect during
 `session()`. This trims startup work and the system prompt.
 
+In Linch 2.0 the SDK-safe defaults are all `False`: a bare `Agent` does not
+discover project skills/subagents, connect to ambient MCP, or enable a virtual
+filesystem. This is intentional resource trust isolation, not a coding-agent
+configuration. Opt in only for a trusted project or use an explicit preset:
+
+```python
+from linch import Agent, FeatureFlags, workspace_tools
+
+agent = Agent(
+    ...,
+    tools=workspace_tools(),
+    features=FeatureFlags(
+        skills=True,
+        subagents=True,
+        filesystem=True,
+        mcp=False,  # turn on only with configured, trusted servers
+    ),
+)
+```
+
 ```python
 from linch.config import FeatureFlags
 
@@ -144,8 +164,10 @@ disables offloading even if you pass a backend.
 
 ## System prompt control
 
-By default Linch ships a software-engineering identity prompt. You can append to
-it, replace it wholesale, or compose reusable sections.
+By default Linch ships a domain-neutral identity prompt. It mentions only the
+tools actually registered on the agent. You can append to it, replace it
+wholesale, or compose reusable sections. Coding doctrine belongs in an
+explicit workspace preset or application-owned prompt.
 
 ```python
 from linch.config import SystemPromptConfig, SystemPromptSection

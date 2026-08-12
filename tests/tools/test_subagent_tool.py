@@ -98,15 +98,18 @@ async def _make_agent_and_session(tmp_path: Any) -> tuple[Any, Any]:
 
 
 async def _make_plain_agent_and_session(tmp_path: Any) -> tuple[Any, Any]:
-    from linch import Agent
+    from linch import Agent, empty_tools
+    from linch.config import FeatureFlags
     from linch.sessions import InMemorySessionStore
 
     agent = Agent(
         model="gpt-5",
         provider=_TextProvider(),
+        tools=empty_tools(),
         session_store=InMemorySessionStore(),
         permissions={"mode": "skip-dangerous"},
         cwd=str(tmp_path),
+        features=FeatureFlags(subagents=True),
     )
     session = await agent.session(id="s1")
     return agent, session
@@ -324,6 +327,40 @@ async def test_background_worker_notification_added_to_pending(tmp_path: Any) ->
     notification = session.pending_notifications[0]
     assert "<task-notification>" in notification.content[0].text
     assert worker_id in notification.content[0].text
+
+
+async def test_background_subagent_completion_is_audited_on_origin_run(tmp_path: Any) -> None:
+    """Completion telemetry is stored on the launcher run, not a later turn."""
+    import asyncio
+
+    from linch.events import BackgroundWorkerEvent
+    from linch.run_store import InMemoryRunStore
+
+    agent, session = await _make_agent_and_session(tmp_path)
+    run_store = InMemoryRunStore()
+    agent.run_store = run_store
+    await run_store.create_run(session.id, id="test-run")
+    subagent_tool = agent.tools.get("Subagent")
+    ctx = _make_ctx(session)
+
+    await subagent_tool.execute(
+        {"description": "test", "prompt": "hello", "run_in_background": True}, ctx
+    )
+    worker_id = next(iter(session.workers))
+    await asyncio.wait_for(session.workers[worker_id].task, timeout=5.0)
+
+    stored = await run_store.load_events("test-run")
+    audit = [item.event for item in stored if isinstance(item.event, BackgroundWorkerEvent)]
+    assert len(audit) == 1
+    assert audit[0].worker_id == worker_id
+    assert audit[0].status == "completed"
+
+    # Draining the live event projection on a later parent turn must not
+    # duplicate or misattribute the origin audit record.
+    later_events = [event async for event in session.run("next")]
+    later_run_id = next(event.run_id for event in later_events if event.type == "system")
+    later_stored = await run_store.load_events(later_run_id)
+    assert not any(isinstance(item.event, BackgroundWorkerEvent) for item in later_stored)
 
 
 async def test_background_worker_notification_xml_shape(tmp_path: Any) -> None:

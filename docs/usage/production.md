@@ -73,8 +73,10 @@ section of [Agent & session](./agent.md).
 ## 4. Resume after a restart
 
 With a `run_store`, a run interrupted by a deploy or crash resumes from its last
-checkpoint. The continuation is identical (completed tool calls are not re-run,
-permission decisions replay).
+checkpoint after its 2.0 run contract is verified. Permission decisions and
+durably recorded tool completions replay; a side effect that happened before
+its completion record became durable may execute again. Tool integrations must
+use `ctx.idempotency_key` to reconcile this at-least-once boundary.
 
 ```python
 async for event in session.resume(run_id):

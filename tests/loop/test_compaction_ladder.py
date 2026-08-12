@@ -10,6 +10,8 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Any
 
+import pytest
+
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 
@@ -115,6 +117,75 @@ def test_micro_compact_noop_returns_zero() -> None:
     assert twice is once
 
 
+def test_compaction_configs_reject_zero_recent_turns() -> None:
+    from linch.compaction import CompactionLadder, DetailedCompaction, micro_compact
+
+    with pytest.raises(ValueError, match=r"compaction_ladder\.keep_recent_turns must be >= 1"):
+        CompactionLadder(keep_recent_turns=0)
+    with pytest.raises(ValueError, match=r"detailed_compaction\.keep_recent_turns must be >= 1"):
+        DetailedCompaction(keep_recent_turns=0)
+    with pytest.raises(ValueError, match=r"micro_compact\.keep_recent_turns must be >= 1"):
+        micro_compact(_history(2), keep_recent_turns=0)
+
+
+def test_boundary_defensively_keeps_pair_when_n_is_zero() -> None:
+    from linch.compaction import last_n_turn_boundaries
+    from linch.types import ToolResultBlock, ToolUseBlock
+
+    messages = _history(2)
+
+    recent = last_n_turn_boundaries(messages, 0)
+
+    assert recent is messages
+    uses = {
+        block.id
+        for message in recent
+        for block in message.content
+        if isinstance(block, ToolUseBlock)
+    }
+    results = {
+        block.tool_use_id
+        for message in recent
+        for block in message.content
+        if isinstance(block, ToolResultBlock)
+    }
+    assert results <= uses
+
+
+async def test_detailed_compaction_preserves_provider_tool_pairing() -> None:
+    from linch.abort import AbortContext
+    from linch.compaction import CompactionContext, DetailedCompaction
+    from linch.types import ToolResultBlock, ToolUseBlock, Usage
+
+    def assert_paired(messages: list[Any]) -> None:
+        seen: set[str] = set()
+        for message in messages:
+            for block in message.content:
+                if isinstance(block, ToolUseBlock):
+                    seen.add(block.id)
+                elif isinstance(block, ToolResultBlock):
+                    assert block.tool_use_id in seen
+
+    class PairCheckingProvider:
+        async def stream(self, req: Any) -> AsyncIterator[dict[str, object]]:
+            # The compaction provider request itself must not contain an orphan.
+            assert_paired(req.messages)
+            yield {"type": "text_delta", "text": "paired summary"}
+            yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
+
+    history = _history(2)
+    strategy = DetailedCompaction(keep_recent_turns=1)
+
+    compacted = await strategy.compact(
+        CompactionContext(messages=history, model="test", signal=AbortContext()),
+        PairCheckingProvider(),
+    )
+
+    # The summary + retained recent tail sent to the next provider remains
+    # paired too (assistant tool-use immediately precedes its user result).
+    assert_paired(compacted)
+
+
 # ── integration: providers and tools ─────────────────────────────────────────
 
 
@@ -124,7 +195,7 @@ class BigTool:
     name = "BigTool"
     description = "Return n filler characters."
     input_schema = {"type": "object", "properties": {"n": {"type": "integer"}}}
-    scope = "read"
+    scope: Any = "read"
     parallel = True
 
     def validate(self, raw: dict[str, object]) -> dict[str, object]:
@@ -215,10 +286,11 @@ def _make_agent(provider: Any, **kwargs: Any) -> Any:
 
     tools = ToolRegistry()
     tools.register(BigTool())
+    session_store = kwargs.pop("session_store", None) or InMemorySessionStore()
     return Agent(
         model="gpt-5",
         provider=provider,
-        session_store=InMemorySessionStore(),
+        session_store=session_store,
         permissions={"mode": "skip-dangerous"},
         cwd=".",
         tools=tools,
@@ -367,6 +439,39 @@ async def test_reactive_micro_then_forced_on_context_length_error() -> None:
     assert provider.summarize_calls == 1
     assert events[-1].type == "result"
     assert events[-1].subtype == "success"
+
+
+async def test_reactive_compaction_snapshot_restores_exact_post_compaction_view() -> None:
+    from linch import DetailedCompaction
+    from linch.compaction import CompactionLadder
+    from linch.sessions import InMemorySessionStore
+    from linch.types import message_to_dict
+
+    provider = LadderProvider(
+        [("tool", 100), ("tool", 100), ("raise_cle", 0), ("raise_cle", 0), ("text", 0)]
+    )
+    store = InMemorySessionStore()
+    agent = _make_agent(
+        provider,
+        session_store=store,
+        compaction_ladder=CompactionLadder(keep_recent_turns=1),
+        compaction=DetailedCompaction(keep_recent_turns=1),
+    )
+    session = await agent.session(id="reactive-snapshot")
+    events = [event async for event in session.run("go")]
+    assert len([event for event in events if event.type == "compaction"]) == 2
+    expected = [message_to_dict(message) for message in session.provider_view]
+
+    # A fresh Agent/Session reload must start from the derived snapshot rather
+    # than rebuilding the uncompacted full history.
+    restarted = _make_agent(
+        LadderProvider([("text", 0)]),
+        session_store=store,
+        compaction_ladder=CompactionLadder(keep_recent_turns=1),
+        compaction=DetailedCompaction(keep_recent_turns=1),
+    )
+    restored = await restarted.session(id="reactive-snapshot")
+    assert [message_to_dict(message) for message in restored.provider_view] == expected
 
 
 async def test_reactive_compaction_resets_read_tracker() -> None:

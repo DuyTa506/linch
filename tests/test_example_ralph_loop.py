@@ -33,6 +33,15 @@ def _write(content: str) -> ToolUseTurn:
     )
 
 
+def _enable_ralph_filesystem(agent: Any) -> None:
+    """Opt the recipe's neutral Agent into its virtual filesystem preset."""
+    from linch.filesystem import filesystem_tools
+
+    agent.features.filesystem = True
+    for tool in filesystem_tools():
+        agent.tools.register(tool)
+
+
 async def test_ralph_loop_converges_across_fresh_contexts() -> None:
     recipe = _load()
 
@@ -49,6 +58,7 @@ async def test_ralph_loop_converges_across_fresh_contexts() -> None:
         ]
     )
     agent, backend = recipe.build_ralph_agent(provider=provider, model="m")
+    _enable_ralph_filesystem(agent)
 
     seen: list[int] = []
     result = await recipe.run_ralph_loop(

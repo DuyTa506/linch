@@ -13,6 +13,7 @@ Two implementations ship:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import shutil
 import signal as signal_mod
@@ -34,6 +35,14 @@ class ExecResult:
 
 class LocalBackend:
     """Runs commands in a subprocess shell — identical to the original BashTool body."""
+
+    resume_policy_id = "linch.execution.local"
+    resume_policy_version = "1"
+
+    @property
+    def resume_policy_config(self) -> dict[str, object]:
+        """Stable, JSON-safe identity used by durable run contracts."""
+        return {}
 
     async def run(
         self,
@@ -118,6 +127,37 @@ class DockerBackend:
         self.env = dict(env or {})
         self.forward_env = tuple(forward_env)
         self.user = user
+
+    resume_policy_id = "linch.execution.docker"
+    resume_policy_version = "1"
+
+    @property
+    def resume_policy_config(self) -> dict[str, object]:
+        """Return replay-relevant configuration without persisting secret values.
+
+        Environment values participate through SHA-256 digests.  This makes a
+        changed environment fail resume without copying credentials into the
+        run-store metadata.  Image contents remain external state; callers who
+        need reproducible containers should configure an immutable digest.
+        """
+
+        def digest(value: str) -> str:
+            return f"sha256:{hashlib.sha256(value.encode()).hexdigest()}"
+
+        forwarded = {
+            key: digest(os.environ[key]) if key in os.environ else None for key in self.forward_env
+        }
+        return {
+            "docker_path": self._docker or shutil.which("docker"),
+            "image": self.image,
+            "network": self.network,
+            "workspace_mount": self.workspace_mount,
+            "read_only_root": self.read_only_root,
+            "tmpfs": self.tmpfs,
+            "env": {key: digest(value) for key, value in sorted(self.env.items())},
+            "forward_env": forwarded,
+            "user": self.user,
+        }
 
     async def run(
         self,

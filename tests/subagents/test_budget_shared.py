@@ -87,15 +87,18 @@ class ThreeLevelProvider:
 
 
 def _make_agent(provider: Any, **kwargs: Any) -> Any:
-    from linch import Agent
+    from linch import Agent, workspace_tools
+    from linch.config import FeatureFlags
     from linch.sessions import InMemorySessionStore
 
     return Agent(
         model="gpt-5",
         provider=provider,
+        tools=workspace_tools(),
         session_store=InMemorySessionStore(),
         permissions={"mode": "skip-dangerous"},
         cwd=".",
+        features=FeatureFlags(subagents=True),
         **kwargs,
     )
 

@@ -251,6 +251,7 @@ async def test_pending_recovery_feedback_is_appended_on_resume() -> None:
     from linch.evals import ScriptedProvider, TextTurn
     from linch.events import ResultEvent, UserEvent
     from linch.run_store import InMemoryRunStore, RunCheckpoint
+    from linch.session import RunOptions
     from linch.sessions import InMemorySessionStore
     from linch.types import Message, TextBlock, Usage
 
@@ -293,7 +294,9 @@ async def test_pending_recovery_feedback_is_appended_on_resume() -> None:
     )
     session = await agent.session(id="s1")
 
-    events = [event async for event in session.resume("run-1")]
+    events = [
+        event async for event in session.resume("run-1", RunOptions(allow_legacy_resume=True))
+    ]
 
     assert sum(isinstance(event, UserEvent) for event in events) == 1
     result = events[-1]

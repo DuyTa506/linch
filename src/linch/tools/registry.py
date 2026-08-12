@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any
 
 from linch.errors import ConfigError
@@ -33,9 +34,15 @@ def _check_tool_shape(tool: Any) -> None:
 class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
+        self._generation = 0
 
     def add(self, tool: Tool) -> None:
         self.register(tool)
+
+    @property
+    def generation(self) -> int:
+        """Monotonic structural revision used by prompt/request caches."""
+        return self._generation
 
     def register(self, tool: Tool) -> None:
         """Register a new tool.  Raises :exc:`ConfigError` if the name is taken."""
@@ -43,6 +50,7 @@ class ToolRegistry:
         if tool.name in self._tools:
             raise ConfigError(f"tool {tool.name!r} already registered")
         self._tools[tool.name] = tool
+        self._generation += 1
 
     def remove(self, name: str) -> Tool | None:
         return self.unregister(name)
@@ -55,7 +63,10 @@ class ToolRegistry:
             registry = default_tools()
             registry.unregister("Bash")
         """
-        return self._tools.pop(name, None)
+        removed = self._tools.pop(name, None)
+        if removed is not None:
+            self._generation += 1
+        return removed
 
     def replace(self, tool: Tool) -> None:
         """Register *tool*, overwriting any existing tool with the same name.
@@ -65,6 +76,7 @@ class ToolRegistry:
         """
         _check_tool_shape(tool)
         self._tools[tool.name] = tool
+        self._generation += 1
 
     def copy(self) -> ToolRegistry:
         """Return a shallow copy of this registry.
@@ -75,6 +87,7 @@ class ToolRegistry:
         new = ToolRegistry()
         for tool in self._tools.values():
             new._tools[tool.name] = tool
+        new._generation = self._generation
         return new
 
     def subset(
@@ -145,9 +158,103 @@ class ToolRegistry:
             for tool in self.list()
         ]
 
+    def system_prompt_sections(self, *, active_names: Iterable[str] | None = None) -> list[Any]:
+        """Return validated prompt sections contributed by active tools.
 
-def default_tools() -> ToolRegistry:
-    """Return a :class:`ToolRegistry` populated with all built-in tools."""
+        A tool may expose a ``system_prompt_sections`` iterable or a zero-arg
+        callable returning one.  The protocol stays optional and duck typed;
+        tools without it are unchanged.  Contributions are ordered by tool
+        name and then declaration order so registry insertion timing cannot
+        perturb the provider prefix.
+
+        Validation intentionally happens here, while the prompt is built, not
+        when a tool is registered.  An inactive tool therefore cannot break a
+        filtered request, while an active malformed contribution fails before
+        the provider is called.
+        """
+        from ..config import SystemPromptSection
+
+        selected = set(active_names) if active_names is not None else None
+        sections: list[SystemPromptSection] = []
+        seen_names: set[str] = set()
+        for tool_name in sorted(self._tools):
+            if selected is not None and tool_name not in selected:
+                continue
+            tool = self._tools[tool_name]
+            raw = getattr(tool, "system_prompt_sections", None)
+            if raw is None:
+                continue
+            if callable(raw):
+                try:
+                    raw = raw()
+                except Exception as exc:
+                    raise ConfigError(
+                        f"tool {tool_name!r}.system_prompt_sections() failed: {exc}"
+                    ) from exc
+            if isinstance(raw, (str, bytes, SystemPromptSection)) or not isinstance(raw, Iterable):
+                raise ConfigError(
+                    f"tool {tool_name!r}.system_prompt_sections must be an iterable "
+                    "of SystemPromptSection"
+                )
+            for index, section in enumerate(raw):
+                if not isinstance(section, SystemPromptSection):
+                    raise ConfigError(
+                        f"tool {tool_name!r}.system_prompt_sections[{index}] must be "
+                        "SystemPromptSection"
+                    )
+                if not isinstance(section.name, str) or not section.name.strip():
+                    raise ConfigError(
+                        f"tool {tool_name!r}.system_prompt_sections[{index}].name must be "
+                        "a non-empty string"
+                    )
+                if section.name in seen_names:
+                    raise ConfigError(
+                        f"duplicate active tool system prompt section name {section.name!r}"
+                    )
+                if not isinstance(section.text, str) or not section.text:
+                    raise ConfigError(
+                        f"tool {tool_name!r}.system_prompt_sections[{index}].text must be "
+                        "a non-empty string"
+                    )
+                if not isinstance(section.cacheable, bool):
+                    raise ConfigError(
+                        f"tool {tool_name!r}.system_prompt_sections[{index}].cacheable must be bool"
+                    )
+                if section.placement not in {
+                    "before_defaults",
+                    "after_defaults",
+                    "after_env",
+                }:
+                    raise ConfigError(
+                        f"tool {tool_name!r}.system_prompt_sections[{index}].placement is invalid"
+                    )
+                seen_names.add(section.name)
+                sections.append(section)
+        return sections
+
+    def prompt_signature(
+        self, *, active_names: Iterable[str] | None = None
+    ) -> tuple[tuple[str, str, bool, str], ...]:
+        """Stable signature of active tool prompt contributions.
+
+        This is separate from provider tool schemas: changing contribution text
+        invalidates the Agent's system-block cache even when the tool schema is
+        unchanged.
+        """
+        return tuple(
+            (section.name, section.text, section.cacheable, section.placement)
+            for section in self.system_prompt_sections(active_names=active_names)
+        )
+
+
+def workspace_tools() -> ToolRegistry:
+    """Return Linch's explicit software-workspace tool preset.
+
+    ``Agent`` no longer installs this registry implicitly.  Coding harnesses
+    should pass ``tools=workspace_tools()`` (or use a higher-level coding/deep
+    agent preset), making filesystem and shell authority visible at the call
+    site.
+    """
     registry = ToolRegistry()
     registry.register(ReadTool())
     registry.register(WriteTool())
@@ -160,6 +267,20 @@ def default_tools() -> ToolRegistry:
     registry.register(TaskGetTool())
     registry.register(TaskUpdateTool())
     return registry
+
+
+def coding_tools() -> ToolRegistry:
+    """Alias for :func:`workspace_tools` with a coding-oriented name."""
+    return workspace_tools()
+
+
+def default_tools() -> ToolRegistry:
+    """Deprecated compatibility alias for :func:`workspace_tools`.
+
+    The name is retained for source compatibility, but these are no longer the
+    defaults of :class:`linch.Agent` in Linch 2.0.
+    """
+    return workspace_tools()
 
 
 def tools_from_defaults(
@@ -180,7 +301,7 @@ def tools_from_defaults(
             extra=[MySearchTool()],
         )
     """
-    registry = default_tools().subset(exclude=exclude)
+    registry = workspace_tools().subset(exclude=exclude)
     for tool in extra or []:
         registry.register(tool)
     return registry

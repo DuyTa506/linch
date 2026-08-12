@@ -14,7 +14,7 @@ Hooks replace the older `observers=`, `middleware=`, `context_builder=`,
 built-in **adapter** you wrap in a hook (see [Built-in adapters](#built-in-adapters)).
 
 ```python
-from linch import Agent, HookResult
+from linch import Agent, HookResult, workspace_tools
 
 class GuardTools:
     def on_pre_tool_use(self, ctx):
@@ -22,7 +22,12 @@ class GuardTools:
             return HookResult.block("blocked dangerous command")
         return None
 
-agent = Agent(model="gpt-5", hooks=[GuardTools()], permissions={"mode": "skip-dangerous"})
+agent = Agent(
+    model="gpt-5",
+    tools=workspace_tools(),
+    hooks=[GuardTools()],
+    permissions={"mode": "skip-dangerous"},
+)
 ```
 
 A hook method receives a typed *context* and returns either `None` (do nothing)
@@ -45,7 +50,7 @@ hook only needs to define the methods it cares about.
 | `on_before_provider_call` | before each provider call | `request`, `context_result` | mutate request, block/stop, force_continue |
 | `on_provider_call_start` / `on_provider_call_stop` | around the provider call | `model`, `stop_reason`, `usage`, `duration_ms` | observe only |
 | `on_after_provider_call` | after the assistant turn is assembled | `assembly` | mutate assembly, block/stop, retry/force_continue |
-| `on_pre_tool_use` | after permission, before execution | `tool_name`, `input`, `tool` | mutate input, block/stop |
+| `on_pre_tool_use` | after provider validation, before final permission evaluation | `tool_name`, `input`, `tool` | mutate input, block/stop |
 | `on_tool_use_start` / `on_tool_use_stop` | around each tool | `tool_name`, `result`, `is_error`, `duration_ms` | observe only |
 | `on_post_tool_use` | after a tool result is produced | `tool_name`, `input`, `result` | mutate result, block/stop |
 | `on_before_final_answer` | before a text/structured final answer | `final_text`, `structured_output`, `structured_error`, `stop_reason` | mutate answer, block/stop, retry/force_continue |
@@ -57,6 +62,14 @@ A single object may implement any subset of these. To handle *every* event in
 one place, define `on_hook(event_value, ctx)` instead of the per-event methods
 — if present, `on_hook` is used for all events and the per-event methods are
 ignored.
+
+For durable runs, a custom policy hook must expose a host-owned
+`resume_policy_id` and may expose `resume_policy_version` and JSON-safe
+`resume_policy_config`. The same rule applies to policy-bearing adapters such
+as `ToolMiddlewareHook`, `ContextInjectionHook`, `FinalAnswerVerifierHook`, and
+`StopPredicateHook`, because their wrapped callback can change execution even
+though the adapter class is built in. A checkpointable hook's `checkpoint_key`
+only names its persisted state slot; it does not prove policy equivalence.
 
 ---
 
@@ -100,6 +113,11 @@ Which actions are honored depends on the chokepoint:
   `tool_result` becomes the outcome (success or error per its `is_error`). This is
   how a cache serves a hit — see [`ToolCacheHook`](./tool-cache.md).
 
+`PreToolUse` is the input-mutation seam. After all such mutations, Linch
+validates the canonical input again and evaluates rules and `can_use_tool` on
+that final value. Approval callbacks cannot use the removed Linch 1.x
+`updatedInput` rewrite shape.
+
 Lifecycle-only chokepoints (`agent_start/stop`, `turn_*`, `provider_call_*`,
 `tool_use_*`, `subagent_*`, `event_emit`) ignore the return value — use them for
 telemetry.
@@ -127,7 +145,7 @@ core ones are also re-exported from `linch`).
 | `StopPredicateHook(predicate)` | a `(session) -> bool` stop predicate | `RunOptions(stop_when=...)` |
 | `RunTelemetryHook(observers)` | one or more `RunObserver`s | `observers=` |
 | `ToolCacheHook(config)` | per-run memoization of read-scope tool calls | `tool_cache=` — see [tool-cache.md](./tool-cache.md) |
-| `ReadBeforeWriteHook(config)` | read-before-edit gate for the virtual filesystem | `read_before_write=` (default `True`) |
+| `ReadBeforeWriteHook(config)` | read-before-edit gate for the virtual filesystem | `read_before_write=` (opt-in) |
 | `RedactionHook(config)` | host-supplied regex scrubbing of tool results, the final answer, and (opt-in) the prompt | add to `hooks=[...]` |
 
 ```python
@@ -160,16 +178,22 @@ Notes:
   `before_tool_call` the tool is *blocked* (error result), and if it raises in
   `after_tool_result` the result becomes an error — a guard that throws never
   silently lets the tool through.
-- **`ReadBeforeWriteHook`** (installed by default, disable with
-  `Agent(read_before_write=False)`) blocks an in-place `edit_file` on the virtual
-  filesystem until that file has been read or written this session — a successful
-  `read_file`/`write_file` marks it. Workspace `Edit` is *not* covered here: the
-  builtin `Edit` tool enforces its own read-before-edit gate (single source of
-  truth, keeps its "You must Read…" message), so this flag governs only the
-  virtual gate. Whole-file overwrites (`Write`/`write_file`) are allowed by
-  default — that is their purpose — but a host can opt into overwrite-gating of
-  *existing* files via `ReadBeforeWriteConfig(overwrite_tools=...)`. A windowed
-  (`offset`/`limit`) read does not unlock edits to the unseen parts of a file.
+- **`ReadBeforeWriteHook`** is opt-in (`Agent(read_before_write=True)`) and only
+  matters when the virtual filesystem tools are explicitly enabled. It blocks
+  an in-place `edit_file` on the virtual filesystem until that file has been
+  read or written this session — a successful `read_file`/`write_file` marks it.
+  Workspace `Edit` is *not* covered here: the builtin `Edit` tool enforces its
+  own read-before-edit gate (single source of truth, keeps its "You must Read…"
+  message), so this flag governs only the virtual gate. Whole-file overwrites
+  (`Write`/`write_file`) are allowed by default — that is their purpose — but a
+  host can opt into overwrite-gating of *existing* files via
+  `ReadBeforeWriteConfig(overwrite_tools=...)`. A windowed (`offset`/`limit`)
+  read does not unlock edits to the unseen parts of a file. A bare Linch 2.0
+  `Agent` has no filesystem tools, no offload backend, and no read-before-write
+  hook unless the embedder opts into them.
+- **Tool progress is live-only.** `ToolContext.report_progress(...)` is
+  delivered to `on_event_emit` consumers as `ToolProgressEvent`, but it is not
+  added to provider history or the durable run event log.
 - **`RedactionHook`** is a **policy-free governance seam**: it applies
   caller-supplied `RedactionRule(pattern, replacement)` regexes to tool-result
   text (`PostToolUse`), the final answer (`BeforeFinalAnswer`), and — opt-in via

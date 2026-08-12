@@ -4,32 +4,32 @@
 
 | Module | Responsibility |
 |--------|---------------|
-| `agent.py` | Immutable config; system block assembly; `session()` factory |
+| `agent.py` | Neutral SDK configuration; tool-aware system-block assembly; `session()` and safe `fork_session()` factories. A bare agent has no implicit workspace tools or project-local store. |
 | `session.py` | Per-conversation state: `provider_view`, `full_history`, `run_deps`, `RunOptions` |
 | `loop/` | Turn orchestration (`runner.py`), streaming + `ContextLengthError` recovery (`streaming.py`), `ProviderRequest` assembly (`request.py`), terminal event tails + gate evaluation (`terminals.py`), event persistence + checkpoint serialization (`checkpoint.py`) |
 | `types.py` | Shared dataclasses: `Message`, `ContentBlock`, `ProviderRequest`, `OutputSchema` |
-| `events.py` | All event dataclasses + round-trip serialization (`event_to_dict` / `event_from_dict`) |
+| `events.py` | All event dataclasses + round-trip serialization (`event_to_dict` / `event_from_dict`), including stream-only `ToolProgressEvent` |
 | `config.py` | `FeatureFlags`, `SystemPromptConfig` |
 | `context/` | `ContextBuilder` protocol, `ContextBuildResult`, `ContextBudget`, `apply_context_budget`; consumed by `ContextInjectionHook` in `hooks/adapters.py` |
 | `loop_guard/` | `LoopGuard`, `LoopGuardState`, `LoopGuardDecision`, `evaluate_loop_guard`, `normalize_loop_guard` |
 | `memory/` | `MemoryStore` protocol, reference stores including `TieredMemoryStore`, `MemoryContextBuilder`, memory tools |
-| `filesystem/` | `FileBackend` protocol, `StateFileBackend`, `DiskFileBackend`, `SqliteFileBackend`, `CompositeFileBackend`, `OffloadConfig`, ls/read_file/write_file/edit_file tools |
-| `scheduler.py` | Resource-aware parallel tool execution with concurrency cap; applies `maybe_offload` at the result chokepoint |
+| `filesystem/` | Explicit `FeatureFlags(filesystem=True)` capability: `FileBackend` protocol, `StateFileBackend`, `DiskFileBackend`, `SqliteFileBackend`, `CompositeFileBackend`, `OffloadConfig`, ls/read_file/write_file/edit_file tools |
+| `scheduler.py` | Canonical tool-call security pipeline (validate → `PreToolUse` → revalidate → offered-tool boundary → final permission), resource-aware bounded execution, stream-only tool progress, and enabled-filesystem offload at the result chokepoint |
 | `compaction.py` | Context-window management; calls `agent.provider` directly; `CompactionLadder` + `micro_compact` recovery rungs |
 | `budget.py` | `RunBudget` — token/USD spending caps shared across the agent tree; charged per turn in `loop/runner.py` |
 | `workflow/` | Deterministic workflow engine: `WorkflowContext` (`context.py`), content-addressed journal (`journal.py`), `run_workflow` driver (`engine.py`) |
 | `coordination/` | Optional capabilities that advance the loop from a clock or a peer: `scheduling/` (cron/interval primitive + `CreateSchedule`/`List`/`Cancel` tools, `SchedulerLoop`), `mailbox/` (peer message bus + `Correlator`), `send_message.py`. Opt-in via `Agent(schedule_store=...)` / `Agent(mailbox=...)` |
-| `permissions/` | `PermissionEngine`: rule evaluation, event emission, loop suspension, durable permission decision keys |
+| `permissions/` | `PermissionEngine`: final canonical-input rule evaluation, event emission, loop suspension, durable same-turn permission decision keys |
 | `pricing.py` | `ModelPricing`, `_DEFAULT_PRICING`, `cost_usd()` for per-turn and cumulative cost events |
 | `evals/` | Scripted provider, eval case/result dataclasses, built-in scorers, `run_eval()` |
 | `providers/` | `BaseProvider`, `ProviderCapabilities`; implementations: `OpenAIChatCompletionsProvider` (generic OpenAI-compatible endpoint), `DeepSeekProvider` (native thinking, JSON-object output, `reasoning_content` round-trip), `OpenAIResponsesProvider` (stateful, native reasoning effort/summary), `AnthropicProvider` (adaptive/extended thinking with signature, prompt caching), `GeminiProvider`, `LlamaCppProvider`, `VLLMProvider`, `SGLangProvider`; `limiter.py` — `Limiter` protocol and the `provider_slot` gate core holds around every live provider call |
 | `tools/` | Tool protocol, `ToolContext`, `ToolRegistry`, `ToolResult`, `Citation`, built-in tools, execution backends |
-| `sessions/` | `SessionStore` protocol, `InMemorySessionStore`, `SqliteSessionStore` |
+| `sessions/` | `SessionStore` protocol, `InMemorySessionStore`, `SqliteSessionStore`, Postgres store, provider-view snapshots, and portable safe-prefix session forking |
 | `mcp/` | MCP server connection → Linch tool adapters |
 | `skills/` | `SKILL.md`-based slash-commands with argument substitution |
 | `subagents/` | Specialized agent roles from `.linch/agents.yaml`; `workers.py` — `WorkerHandle` dataclass for per-worker state tracking; wiring for `SubagentContinueTool` |
-| `run_store.py` | `SqliteRunStore`, `RunCheckpoint` — durable run-level checkpoint/resume storage; `RunCheckpoint` stores background workers and current-turn permission decisions |
-| `deep_agent/` | `create_deep_agent` factory (`factory.py`); deep prompt layers (`prompts.py`); specialist subagent roster — researcher, planner, implementer (`subagents.py`) |
+| `run_store.py` | `InMemoryRunStore`/`SqliteRunStore`, `RunCheckpoint`, and `RunContract` — durable checkpoints plus a canonical fingerprint of resume-safe execution inputs. Background completion events are status-only audit records; no durable result-delivery queue exists. |
+| `deep_agent/` | Explicit `create_deep_agent` profiles/factory (`factory.py`); deep prompt layers (`prompts.py`); specialist roster — researcher, planner, implementer, verification (`subagents.py`) |
 | `tools/subagent_continue.py` | `SubagentContinueTool` — continues a retained child session by worker id or display name |
 | `tools/subagent_stop.py` | `TaskStopTool` — cancels a background worker; handle remains in `session.workers` and is still continuable |
 | `tools/_worker_utils.py` | `resolve_worker` — shared id/display-name lookup helper used by continue and stop tools |
@@ -48,6 +48,10 @@
   `deep_agent/`, `workflow/`, `evals/`) sit apart from the always-on core, so the
   load-bearing loop is easy to find and the opt-in extras don't inflate the mental model
   of "what the SDK does by default."
+
+The virtual filesystem/offload layer is one such explicit capability: set
+`FeatureFlags(filesystem=True)` or choose a preset that does so. A bare SDK agent
+does not create `.linch` state merely by opening a session.
 
 ---
 

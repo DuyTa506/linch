@@ -99,8 +99,6 @@ PLANNER_AGENT = AgentDefinition(
             "SearchMemory",
             "ls",
             "read_file",
-            "write_file",
-            "edit_file",
         ],
     ),
     body="\n".join(
@@ -124,4 +122,45 @@ PLANNER_AGENT = AgentDefinition(
 )
 
 
-DEEP_AGENT_SUBAGENTS = [RESEARCHER_AGENT, PLANNER_AGENT, IMPLEMENTER_AGENT]
+VERIFICATION_AGENT = AgentDefinition(
+    name="verification",
+    file_path="<built-in:deep-agent>",
+    source="built-in",
+    frontmatter=AgentFrontmatter(
+        name="verification",
+        description=(
+            "Read-only adversarial verifier that runs focused checks and reports a verdict."
+        ),
+        tools=[
+            "Read",
+            "Glob",
+            "Grep",
+            "Bash",
+            "TaskList",
+            "TaskGet",
+            "SearchMemory",
+            "ls",
+            "read_file",
+        ],
+    ),
+    body="\n".join(
+        [
+            "You are a verification subagent. Try to disprove that the delegated",
+            "outcome is correct. Do not modify project files or durable state.",
+            "",
+            "Inspect the relevant implementation, run the narrowest meaningful",
+            "checks, and probe important failure cases. Finish with exactly one",
+            "verdict line: VERDICT: PASS, VERDICT: FAIL, or VERDICT: PARTIAL.",
+            "Then list evidence and any residual risk. Never claim a check ran",
+            "unless you observed its result.",
+        ]
+    ),
+)
+
+
+DEEP_AGENT_SUBAGENTS = [
+    RESEARCHER_AGENT,
+    PLANNER_AGENT,
+    IMPLEMENTER_AGENT,
+    VERIFICATION_AGENT,
+]

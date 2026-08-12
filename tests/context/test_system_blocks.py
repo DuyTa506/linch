@@ -139,8 +139,9 @@ def test_replace_defaults_env_block_still_present():
     cfg = SystemPromptConfig(replace_defaults=True)
     agent = _make_agent(system_prompt_config=cfg)
     combined = "\n".join(_block_texts(agent))
-    assert "Working directory" in combined
+    assert "Runtime:" in combined
     assert "Linch version" in combined
+    assert "Working directory" not in combined
 
 
 def test_custom_blocks_prepended_in_default_mode():
@@ -152,7 +153,7 @@ def test_custom_blocks_prepended_in_default_mode():
     agent = _make_agent(system_prompt_config=cfg)
     texts = _block_texts(agent)
     custom_idx = next(i for i, t in enumerate(texts) if "CUSTOM BLOCK" in t)
-    identity_idx = next(i for i, t in enumerate(texts) if "software engineering" in t)
+    identity_idx = next(i for i, t in enumerate(texts) if "configured through the Linch SDK" in t)
     assert custom_idx < identity_idx
 
 
@@ -184,9 +185,9 @@ def test_system_prompt_sections_render_by_placement():
     texts = _block_texts(agent)
 
     before_idx = texts.index("BEFORE DEFAULTS")
-    identity_idx = next(i for i, t in enumerate(texts) if "software engineering" in t)
+    identity_idx = next(i for i, t in enumerate(texts) if "configured through the Linch SDK" in t)
     after_defaults_idx = texts.index("AFTER DEFAULTS")
-    env_idx = next(i for i, t in enumerate(texts) if t.startswith("Environment:"))
+    env_idx = next(i for i, t in enumerate(texts) if t.startswith("Runtime:"))
     after_env_idx = texts.index("AFTER ENV")
     append_idx = next(i for i, t in enumerate(texts) if "APPEND" in t)
 
@@ -212,7 +213,7 @@ def test_system_prompt_sections_replace_defaults_skip_identity():
 
     assert "DOMAIN POLICY" in combined
     assert "autonomous software engineering assistant" not in combined
-    assert "Environment:" in combined
+    assert "Runtime:" in combined
 
 
 def test_system_prompt_sections_invalid_placement_raises():
@@ -261,6 +262,91 @@ def test_refresh_invalidates_cache():
     assert [b.text for b in blocks1] == [b.text for b in blocks2]
 
 
+def test_custom_tool_agent_prompt_is_domain_neutral():
+    from linch.tools.registry import empty_tools
+
+    agent = _make_agent(tools=empty_tools(FakeTool("RetrieveInvoices")))
+    combined = "\n".join(_block_texts(agent))
+
+    assert "configured through the Linch SDK" in combined
+    assert "RetrieveInvoices" in combined
+    for coding_assumption in (
+        "software engineering",
+        "codebase",
+        "Bash",
+        "Edit a file",
+        "task orchestration",
+        "Working directory",
+    ):
+        assert coding_assumption not in combined
+
+
+def test_tool_prompt_sections_are_sorted_and_filtered_by_active_tool():
+    from linch.config import SystemPromptSection
+    from linch.tools.registry import empty_tools
+
+    zulu = FakeTool("Zulu")
+    zulu.system_prompt_sections = [
+        SystemPromptSection(name="zulu-policy", text="ZULU POLICY", placement="after_defaults")
+    ]
+    alpha = FakeTool("Alpha")
+    alpha.system_prompt_sections = [
+        SystemPromptSection(name="alpha-policy", text="ALPHA POLICY", placement="after_defaults")
+    ]
+    agent = _make_agent(tools=empty_tools(zulu, alpha))
+
+    texts = _block_texts(agent)
+    assert texts.index("ALPHA POLICY") < texts.index("ZULU POLICY")
+
+    filtered = [block.text for block in agent.build_system_blocks_for_tool_names(["Zulu"])]
+    assert "ZULU POLICY" in filtered
+    assert "ALPHA POLICY" not in filtered
+
+
+def test_tool_prompt_section_must_use_typed_section():
+    from linch.errors import ConfigError
+    from linch.tools.registry import empty_tools
+
+    tool = FakeTool("Malformed")
+    tool.system_prompt_sections = [{"name": "bad", "text": "BAD"}]
+    agent = _make_agent(tools=empty_tools(tool))
+
+    with pytest.raises(ConfigError, match="SystemPromptSection"):
+        _ = agent.system_blocks
+
+
+def test_dynamic_tool_prompt_contribution_invalidates_agent_cache():
+    from linch.config import SystemPromptSection
+    from linch.tools.registry import empty_tools
+
+    class DynamicPromptTool(type(FakeTool("Base"))):
+        policy = "POLICY V1"
+
+        def system_prompt_sections(self):
+            return [SystemPromptSection(name="dynamic", text=self.policy)]
+
+    tool = DynamicPromptTool("Dynamic")
+    agent = _make_agent(tools=empty_tools(tool))
+    blocks1 = agent.system_blocks
+    tool.policy = "POLICY V2"
+    blocks2 = agent.system_blocks
+
+    assert blocks1 is not blocks2
+    assert "POLICY V1" in [block.text for block in blocks1]
+    assert "POLICY V2" in [block.text for block in blocks2]
+
+
+def test_registry_replace_same_name_invalidates_agent_prompt_cache():
+    from linch.tools.registry import empty_tools
+
+    agent = _make_agent(tools=empty_tools(FakeTool("StableName")))
+    blocks1 = agent.system_blocks
+    agent.tools.replace(FakeTool("StableName"))
+    blocks2 = agent.system_blocks
+
+    assert blocks1 is not blocks2
+
+
 # ── Feature flags ───────────────────────────────────────────────────────────
 
 
@@ -273,3 +359,22 @@ async def test_feature_flags_disable_skills_connect():
     session = await agent.session()
     assert session is not None
     assert agent.skills == {}
+
+
+@pytest.mark.asyncio
+async def test_bare_agent_defaults_are_inert_and_ephemeral(tmp_path):
+    from linch import Agent
+    from linch.sessions import InMemorySessionStore
+
+    agent = Agent(model="gpt-5", provider=_make_agent().provider, cwd=str(tmp_path))
+
+    assert agent.tools.list() == []
+    assert not agent.features.skills
+    assert not agent.features.subagents
+    assert not agent.features.mcp
+    assert not agent.features.filesystem
+    assert agent.session_store is None
+
+    await agent.session()
+    assert isinstance(agent.session_store, InMemorySessionStore)
+    assert not (tmp_path / ".linch").exists()

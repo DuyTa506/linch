@@ -422,6 +422,7 @@ async def test_docker_backend_smoke(tmp_path) -> None:
 
 @pytest.mark.asyncio(loop_scope="module")
 async def test_agent_replaces_bash_with_backend(tmp_path) -> None:
+    from linch import workspace_tools
     from linch.tools.builtin import BashTool
 
     fake = _FakeBackend()
@@ -431,6 +432,7 @@ async def test_agent_replaces_bash_with_backend(tmp_path) -> None:
     agent = Agent(
         model="claude-opus-4-8",
         cwd=str(tmp_path),
+        tools=workspace_tools(),
         execution_backend=fake,
     )
     bash_tool = agent.tools.get("Bash")
@@ -453,19 +455,25 @@ def _block_texts(agent) -> list[str]:
     return [b.text for b in agent.system_blocks if hasattr(b, "text")]
 
 
-def test_system_prompt_no_sandbox_present_by_default(tmp_path) -> None:
+def test_system_prompt_is_neutral_without_workspace_tools(tmp_path) -> None:
     from linch import Agent
 
     agent = Agent(model="claude-opus-4-8", cwd=str(tmp_path))
     combined = "\n".join(_block_texts(agent))
-    assert "There is no sandbox" in combined
+    assert "There is no sandbox" not in combined
+    assert "Tools available: none" in combined
 
 
 def test_system_prompt_sandbox_note_when_backend_injected(tmp_path) -> None:
     fake = _FakeBackend()
-    from linch import Agent
+    from linch import Agent, workspace_tools
 
-    agent = Agent(model="claude-opus-4-8", cwd=str(tmp_path), execution_backend=fake)
+    agent = Agent(
+        model="claude-opus-4-8",
+        cwd=str(tmp_path),
+        tools=workspace_tools(),
+        execution_backend=fake,
+    )
     combined = "\n".join(_block_texts(agent))
     assert "There is no sandbox" not in combined
     assert "sandbox" in combined.lower()

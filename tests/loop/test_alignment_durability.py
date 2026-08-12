@@ -212,6 +212,7 @@ async def test_checkpoint_snapshots_pending_alignment() -> None:
 async def test_resume_restores_and_injects_pending_alignment() -> None:
     """A restored queue drains at the next turn boundary, exactly once."""
     from linch.run_store import RunCheckpoint
+    from linch.session import RunOptions
     from linch.types import Usage
 
     session_store = _memory_session_store()
@@ -232,7 +233,7 @@ async def test_resume_restores_and_injects_pending_alignment() -> None:
         ),
     )
 
-    events = await _collect(session.resume(run.id))
+    events = await _collect(session.resume(run.id, RunOptions(allow_legacy_resume=True)))
 
     assert len(_alignment_events(events)) == 1
     assert provider.requests and "steer north" in _text_messages(provider.requests[0])
@@ -245,6 +246,7 @@ async def test_resume_restores_and_injects_pending_alignment() -> None:
 async def test_crash_after_enqueue_before_drain_resume_injects() -> None:
     """Full crash/resume: a second agent on the same stores injects the intent."""
     from linch.errors import ConfigError
+    from linch.session import RunOptions
 
     session_store = _memory_session_store()
     run_store = _memory_run_store()
@@ -260,7 +262,7 @@ async def test_crash_after_enqueue_before_drain_resume_injects() -> None:
     provider2 = _TextProvider()
     agent2 = _agent(provider2, _WaitTool(), session_store=session_store, run_store=run_store)
     resumed = await agent2.session(id="s1")
-    events = await _collect(resumed.resume(run_id))
+    events = await _collect(resumed.resume(run_id, RunOptions(allow_legacy_resume=True)))
 
     assert len(_alignment_events(events)) == 1
     assert provider2.requests and "steer north" in _text_messages(provider2.requests[0])
@@ -270,6 +272,7 @@ async def test_crash_after_enqueue_before_drain_resume_injects() -> None:
 async def test_resume_mid_tool_batch_defers_alignment_after_tool_results() -> None:
     """A mid-turn resume never injects between assistant(tool_use) and tool results."""
     from linch.run_store import RunCheckpoint
+    from linch.session import RunOptions
     from linch.types import Message, TextBlock, ToolUseBlock, Usage
 
     session_store = _memory_session_store()
@@ -298,7 +301,7 @@ async def test_resume_mid_tool_batch_defers_alignment_after_tool_results() -> No
         ),
     )
 
-    events = await _collect(session.resume(run.id))
+    events = await _collect(session.resume(run.id, RunOptions(allow_legacy_resume=True)))
 
     assert len(_alignment_events(events)) == 1
     assert events[-1].type == "result" and events[-1].subtype == "success"
@@ -333,6 +336,7 @@ async def test_resume_terminal_turn_drops_restored_alignment_silently() -> None:
     """A resumed turn that finalizes without another provider call drops the
     restored entries silently — no injection, no error (documented limitation)."""
     from linch.run_store import RunCheckpoint
+    from linch.session import RunOptions
     from linch.types import Message, TextBlock, Usage
 
     session_store = _memory_session_store()
@@ -359,7 +363,7 @@ async def test_resume_terminal_turn_drops_restored_alignment_silently() -> None:
         ),
     )
 
-    events = await _collect(session.resume(run.id))
+    events = await _collect(session.resume(run.id, RunOptions(allow_legacy_resume=True)))
 
     assert not _alignment_events(events)
     assert not [e for e in events if getattr(e, "type", None) == "error"]

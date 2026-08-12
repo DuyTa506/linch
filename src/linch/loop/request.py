@@ -67,15 +67,31 @@ def _re_inject_skill_context(session: Session) -> None:
         return
     from ..skills.system_reminder import wrap_in_system_reminder
 
+    # Compaction can retain a reminder that an earlier compaction injected.  Do
+    # not append it again in that case: repeated compactions must not grow the
+    # provider view with duplicate skill bodies/listings.  Exact text matching
+    # is intentional; if a compaction summarized the reminder away, it needs to
+    # be restored verbatim.
+    present_text = {
+        block.text
+        for message in session.provider_view
+        for block in message.content
+        if isinstance(block, TextBlock)
+    }
+
     if agent.skill_listing_text:
         text = wrap_in_system_reminder(agent.skill_listing_text)
-        session.provider_view.append(Message(role="user", content=[TextBlock(text=text)]))
+        if text not in present_text:
+            session.provider_view.append(Message(role="user", content=[TextBlock(text=text)]))
+            present_text.add(text)
     for rec in session.invoked_skills:
         text = wrap_in_system_reminder(
             f"Below is the body of a previously invoked skill "
             f"named '{rec.name}'.\n\n{rec.substituted_body}"
         )
-        session.provider_view.append(Message(role="user", content=[TextBlock(text=text)]))
+        if text not in present_text:
+            session.provider_view.append(Message(role="user", content=[TextBlock(text=text)]))
+            present_text.add(text)
 
 
 async def _build_context_result(session: Session, turn_index: int) -> ContextBuildResult | None:
@@ -162,7 +178,22 @@ def _build_turn_request(
     """
     agent = session.agent
 
-    base_system = list(session.system_blocks_override or agent.system_blocks)
+    tools = _select_context_tools(session, context)
+    if session.system_blocks_override is not None:
+        base_system = list(session.system_blocks_override)
+    else:
+        active_names = [tool.name for tool in tools.list()]
+        tool_sections = tools.system_prompt_sections(active_names=active_names)
+        private_builder = getattr(agent, "_build_system_blocks", None)
+        builder = getattr(agent, "build_system_blocks_for_tool_names", None)
+        if callable(private_builder):
+            base_system = list(
+                cast(Any, private_builder)(active_names, tool_sections=tool_sections)
+            )
+        elif callable(builder):
+            base_system = list(cast(Any, builder)(active_names))
+        else:
+            base_system = list(agent.system_blocks)
     if context and context.system_blocks:
         # Per-turn context blocks (RAG, dates, retrieved snippets) are ephemeral
         # and volatile, so force them out of the cacheable prefix: a ContextBuilder
@@ -177,8 +208,6 @@ def _build_turn_request(
     messages = list(session.provider_view)
     if context and context.messages:
         messages.extend(context.messages)
-
-    tools = _select_context_tools(session, context)
 
     req = ProviderRequest(
         # A run-level fallback (set by the model-fallback recovery path) overrides
@@ -211,6 +240,9 @@ def _build_turn_request(
 
 def _select_context_tools(session: Session, context: ContextBuildResult | None) -> Any:
     registry = session.tools_override or session.agent.tools
+    allowed = getattr(session, "current_turn_allowed_tools", None)
+    if allowed is not None:
+        registry = registry.select(names={str(name) for name in allowed})
     if context is None or context.selected_tools is None:
         return registry
 
