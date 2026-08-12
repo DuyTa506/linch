@@ -34,6 +34,13 @@ and persisted wire formats are versioned separately via `linch.RUN_SCHEMA_VERSIO
 
 ### Fixed
 
+- **A cancelled MCP connect leaked its resources.** The unwind caught
+  `Exception`, which does not include `asyncio.CancelledError`, so a connect
+  interrupted by a shutdown or a timeout stranded the stdio subprocess, the
+  `ClientSession`, and the httpx client. Cancellation now releases everything
+  entered so far and propagates unchanged instead of surfacing as a
+  `ConfigError`. Cleanup is best-effort: a second cancellation arriving mid-unwind
+  can still cut it short.
 - **MCP tool input schemas were being discarded.** `to_input_schema` read
   `.properties`/`.required` as attributes, but `Tool.input_schema` is a plain
   JSON Schema dict, so every MCP tool reached the model as
