@@ -22,7 +22,7 @@
 | `permissions/` | `PermissionEngine`: rule evaluation, event emission, loop suspension, durable permission decision keys |
 | `pricing.py` | `ModelPricing`, `_DEFAULT_PRICING`, `cost_usd()` for per-turn and cumulative cost events |
 | `evals/` | Scripted provider, eval case/result dataclasses, built-in scorers, `run_eval()` |
-| `providers/` | `BaseProvider`, `ProviderCapabilities`; implementations: `OpenAIChatCompletionsProvider` (generic OpenAI-compatible endpoint), `DeepSeekProvider` (native thinking, JSON-object output, `reasoning_content` round-trip), `OpenAIResponsesProvider` (stateful, native reasoning effort/summary), `AnthropicProvider` (adaptive/extended thinking with signature, prompt caching), `GeminiProvider`, `LlamaCppProvider`, `VLLMProvider`, `SGLangProvider` |
+| `providers/` | `BaseProvider`, `ProviderCapabilities`; implementations: `OpenAIChatCompletionsProvider` (generic OpenAI-compatible endpoint), `DeepSeekProvider` (native thinking, JSON-object output, `reasoning_content` round-trip), `OpenAIResponsesProvider` (stateful, native reasoning effort/summary), `AnthropicProvider` (adaptive/extended thinking with signature, prompt caching), `GeminiProvider`, `LlamaCppProvider`, `VLLMProvider`, `SGLangProvider`; `limiter.py` — `Limiter` protocol and the `provider_slot` gate core holds around every live provider call |
 | `tools/` | Tool protocol, `ToolContext`, `ToolRegistry`, `ToolResult`, `Citation`, built-in tools, execution backends |
 | `sessions/` | `SessionStore` protocol, `InMemorySessionStore`, `SqliteSessionStore` |
 | `mcp/` | MCP server connection → Linch tool adapters |

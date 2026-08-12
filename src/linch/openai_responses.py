@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from ._client_lifecycle import aclose_client
+from ._client_lifecycle import aclose_client, loop_changed, running_loop
 from ._http_errors import (
     error_message,
     error_status,
@@ -267,20 +267,30 @@ class OpenAIResponsesClient:
         if options.default_headers is not None:
             self._kwargs["default_headers"] = options.default_headers
         self.client: Any | None = None
+        self._client_loop: Any | None = None
         self.reasoning = reasoning
 
+    async def _get_client(self) -> Any:
+        if self.client is not None and loop_changed(self._client_loop):
+            # The old client's transport belongs to a loop that is gone; its
+            # close is async and cannot be awaited from here, so drop it and
+            # let GC reclaim the socket rather than raising on every call.
+            self.client = None
+        if self.client is not None:
+            return self.client
+        try:
+            from openai import AsyncOpenAI
+        except ModuleNotFoundError as exc:
+            raise ProviderError(
+                "The 'openai' package is required for live OpenAI calls. "
+                "Install linch with its runtime dependencies."
+            ) from exc
+        self.client = AsyncOpenAI(**self._kwargs)
+        self._client_loop = running_loop()
+        return self.client
+
     async def stream(self, req: ProviderRequest) -> AsyncIterator[dict[str, Any]]:
-        if self.client is None:
-            try:
-                from openai import AsyncOpenAI
-            except ModuleNotFoundError as exc:
-                raise ProviderError(
-                    "The 'openai' package is required for live OpenAI calls. "
-                    "Install linch with its runtime dependencies."
-                ) from exc
-            self.client = AsyncOpenAI(**self._kwargs)
-        assert self.client is not None
-        client = self.client
+        client = await self._get_client()
         payload = build_payload(req, self.reasoning)
         try:
             stream = await client.responses.create(**payload)
@@ -302,6 +312,7 @@ class OpenAIResponsesClient:
     async def aclose(self) -> None:
         client = self.client
         self.client = None
+        self._client_loop = None
         if client is None:
             return
         await aclose_client(client)

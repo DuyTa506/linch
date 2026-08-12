@@ -182,6 +182,70 @@ for the loop contract.
 
 ---
 
+## `Limiter` — gate every live provider call
+
+Retry handling is reactive: `providers/retry.py` honors `Retry-After` once a 429
+has already been returned. A `Limiter` is the proactive counterpart — core holds
+one of its slots around every live provider call, so you throttle before the
+provider does it for you.
+
+```python
+from typing import Protocol
+
+class Limiter(Protocol):
+    async def acquire(self, *, model: str) -> None: ...
+    def release(self, *, model: str) -> None: ...
+```
+
+A plain concurrency cap is six lines:
+
+```python
+import asyncio
+
+class SemaphoreLimiter:
+    def __init__(self, cap: int) -> None:
+        self._sem = asyncio.Semaphore(cap)
+
+    async def acquire(self, *, model: str) -> None:
+        await self._sem.acquire()
+
+    def release(self, *, model: str) -> None:
+        self._sem.release()
+
+agent = Agent(..., limiter=SemaphoreLimiter(8))
+```
+
+Build the semaphore lazily on first `acquire` if the `Agent` may be constructed
+outside a running loop. For that common case `Agent(max_provider_concurrency=8)`
+is the shortcut — it builds this limiter for you, and passing both raises
+`ConfigError`.
+
+**Know your loop affinity.** `asyncio.Semaphore` binds to the loop of its first
+*contended* acquire, so the sketch above breaks when an `Agent` is reused from a
+second loop — and only once calls start queueing, which makes it a load-only
+failure. `max_provider_concurrency` handles this for you: it rebuilds the
+semaphore when the loop changed and nothing is held, and raises `ConfigError`
+rather than rebuilding while slots are still outstanding, since that would hand
+the second loop its own full budget. A limiter of your own that must span
+concurrently running loops needs a primitive that is not loop-bound.
+
+`model` is passed so one limiter can keep per-model budgets: a token bucket keyed
+by model refills at that model's requests-per-minute and `acquire` waits for a
+token. Because `acquire` is awaited, cancellation propagates through it for free
+— an aborted run stops waiting rather than holding the queue.
+
+Two placements to know about. The gate is *inside* the turn generator, so it is
+released while a same-model retry backs off, and released deterministically when
+a caller abandons the run. It also wraps `strategy.compact(...)` at its single
+invocation point, so a custom `CompactionStrategy` is bounded too without its
+`compact(ctx, provider)` signature knowing about limiters.
+
+The limiter is per-`Agent`, so N agents in one process are independent by
+default. Sharing one instance across agents is how you give a tenant a single
+budget across several agents — that is a deliberate choice, not an accident.
+
+---
+
 ## System-prompt assembly — ordered static prefix + dynamic blocks
 
 There is deliberately **no** `SystemPromptBuilder` protocol: two existing seams already

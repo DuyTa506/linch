@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
 from typing import Any
 
+from linch._client_lifecycle import loop_changed, running_loop
 from linch._prompt_cache import openai_cached_tokens
 from linch.errors import AbortError, ProviderError
 from linch.openai_responses import map_openai_error
@@ -62,6 +63,7 @@ class OpenAIChatCompletionsProvider(BaseProvider):
     def __init__(self, options: OpenAIChatProviderOptions | None = None) -> None:
         self._options = options or OpenAIChatProviderOptions()
         self._client: Any | None = None
+        self._client_loop: Any | None = None
 
     def context_window(self, model: ModelId) -> int:
         if self._options.context_window is not None:
@@ -75,6 +77,11 @@ class OpenAIChatCompletionsProvider(BaseProvider):
         )
 
     async def _get_client(self) -> Any:
+        if self._client is not None and loop_changed(self._client_loop):
+            # The old client's transport belongs to a loop that is gone; its
+            # close is async and cannot be awaited from here, so drop it and
+            # let GC reclaim the socket rather than raising on every call.
+            self._client = None
         if self._client is not None:
             return self._client
         try:
@@ -93,11 +100,13 @@ class OpenAIChatCompletionsProvider(BaseProvider):
         if self._options.timeout is not None:
             kwargs["timeout"] = self._options.timeout
         self._client = AsyncOpenAI(**kwargs)
+        self._client_loop = running_loop()
         return self._client
 
     async def aclose(self) -> None:
         client = self._client
         self._client = None
+        self._client_loop = None
         if client is None:
             return
         closer = getattr(client, "aclose", None) or getattr(client, "close", None)

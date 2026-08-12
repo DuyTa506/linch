@@ -1,7 +1,7 @@
 """Map MCP tool annotations to permission rules.
 
-MCP servers may annotate a tool as ``readOnlyHint`` or ``destructiveHint``.
-``make_mcp_tool`` already turns ``readOnlyHint`` into a read scope (so it is
+MCP servers may annotate a tool as ``read_only_hint`` or ``destructive_hint``.
+``make_mcp_tool`` already turns ``read_only_hint`` into a read scope (so it is
 auto-allowed and parallel-safe). This bridge handles the other tier: a
 ``destructive`` tool maps to a ``ToolRule(name, "ask")`` so it triggers a
 permission prompt regardless of the agent's mode (even ``skip-dangerous`` /

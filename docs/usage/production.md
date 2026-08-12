@@ -104,6 +104,11 @@ These are mechanisms; you supply the policy.
 - **Loop guard** — on by default; stops runaway tool/failure streaks.
 - **Permissions** — path/bash/tool rules; default-deny where it matters.
 - **Timeouts & retries** — `tool_timeout_ms`, `tool_retry` per tool.
+- **Provider concurrency** — `Agent(max_provider_concurrency=N)`, or your own
+  `Limiter` for per-model quotas or a token bucket. This is the proactive
+  counterpart to retry: retry reacts to a 429, a limiter avoids earning one. It
+  bounds provider calls, not `run()` calls — see [Agent & session](./agent.md)
+  and [Extending](./extending.md).
 - **Truncation recovery** — opt in with `truncation_recovery=` (off by default;
   Linch never escalates output caps implicitly). See [Agent & session](./agent.md).
 - **Redaction** — attach a `RedactionHook` to scrub tool results / final answers
@@ -126,7 +131,7 @@ Everything else is an extra and fails with an explicit
 |---|---|
 | `linch[anthropic]` | Anthropic provider |
 | `linch[gemini]` | Gemini provider |
-| `linch[mcp]` | MCP tool servers |
+| `linch[mcp]` | MCP tool servers (requires `mcp>=2.0.0`; 1.x is not supported) |
 | `linch[otel]` | OpenTelemetry observer |
 | `linch[postgres]` | Postgres session/memory stores |
 

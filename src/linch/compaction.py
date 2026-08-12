@@ -5,6 +5,7 @@ from typing import Any, Protocol, cast, runtime_checkable
 
 from .abort import AbortContext
 from .events import CompactionEvent
+from .providers.limiter import provider_slot
 from .types import Message, SystemBlock, TextBlock, ToolResultBlock
 
 
@@ -442,7 +443,11 @@ async def _run_compaction_impl(
         model=agent.model,
         signal=signal,
     )
-    compacted = await strategy.compact(ctx, agent.provider)
+    # Gated here, not inside DefaultCompaction: this is the single invocation
+    # point, so a host's own CompactionStrategy is bounded too without the
+    # public compact(ctx, provider) signature having to know about limiters.
+    async with provider_slot(agent, agent.model):
+        compacted = await strategy.compact(ctx, agent.provider)
     compacted = strip_response_chaining(compacted)
 
     session.provider_view.clear()

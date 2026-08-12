@@ -4,6 +4,62 @@ Notable changes to `linch`. Versioning follows the contract in
 [docs/versioning.md](docs/versioning.md): the public API is exactly `linch.__all__`,
 and persisted wire formats are versioned separately via `linch.RUN_SCHEMA_VERSION`.
 
+## Unreleased
+
+### Added
+
+- **`Agent(limiter=...)`** — a duck-typed `Limiter` protocol
+  (`async acquire(*, model)` / `release(*, model)`) that core holds around every
+  live provider call: the turn stream and `strategy.compact(...)`. The gate sits
+  inside the turn generator, so it is released while a same-model retry backs off
+  and released deterministically when a caller abandons a run. Use it for a shared
+  budget across agents, per-model quotas, or a token bucket.
+- **`Agent(max_provider_concurrency=N)`** — shortcut that builds a
+  semaphore-backed limiter, so there is exactly one enforcement path. Passing both
+  it and `limiter=` raises `ConfigError`. Unlike a semaphore around `agent.run()`,
+  this bounds the provider calls a run fans out into: every turn, retry,
+  model-fallback swap, compaction summarization, and subagent. The cap survives
+  an `Agent` being reused from a second event loop: `asyncio.Semaphore` binds to
+  the loop of its first *contended* acquire, so the semaphore is rebuilt when the
+  loop changed and nothing is held. Rebuilding while slots are still outstanding
+  would give the second loop its own full budget, so that raises `ConfigError`
+  instead.
+
+### Changed
+
+- **`linch[mcp]` now requires `mcp>=2.0.0`** and no longer supports mcp 1.x.
+  mcp 2.0 renamed `streamablehttp_client` to `streamable_http_client`, removed
+  its `headers=` kwarg in favour of a caller-supplied `httpx2.AsyncClient`,
+  changed the transport from a 3-tuple to a 2-tuple yield, and switched its
+  pydantic models to snake_case fields (`is_error`, `input_schema`,
+  `read_only_hint`, `destructive_hint`, `mime_type`). `linch.mcp` targets the
+  2.x API; pin `linch<1.3` if you are held on mcp 1.x. Server config is
+  unchanged — `McpServerConfig.headers` still works, now carried on the httpx
+  client linch builds and owns.
+
+### Fixed
+
+- **A cancelled MCP connect leaked its resources.** The unwind caught
+  `Exception`, which does not include `asyncio.CancelledError`, so a connect
+  interrupted by a shutdown or a timeout stranded the stdio subprocess, the
+  `ClientSession`, and the httpx client. Cancellation now releases everything
+  entered so far and propagates unchanged instead of surfacing as a
+  `ConfigError`. Cleanup is best-effort: a second cancellation arriving mid-unwind
+  can still cut it short.
+- **MCP tool input schemas were being discarded.** `to_input_schema` read
+  `.properties`/`.required` as attributes, but `Tool.input_schema` is a plain
+  JSON Schema dict, so every MCP tool reached the model as
+  `{"type": "object", "properties": {}}` — no arguments, no `required`. The
+  schema now passes through intact. Only the unit tests' fake `mcp` modules,
+  which supplied attribute-shaped schemas, had ever matched the old code path.
+- Cached provider clients (`OpenAIChatCompletionsProvider` and its
+  vLLM/SGLang/llama.cpp/DeepSeek subclasses, `AnthropicProvider`,
+  `OpenAIResponsesClient`) are rebuilt when used from a different event loop than
+  the one they were constructed on. Reusing a provider across loops — the normal
+  shape of a Celery worker, which runs one loop per task — previously raised
+  `Event loop is closed` and forced hosts to keep their own loop-keyed provider
+  cache.
+
 ## 1.2.0 — 2026-08-11
 
 ### Added
