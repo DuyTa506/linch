@@ -138,6 +138,20 @@ async def _fan_out(agent: Agent, n: int) -> None:
     await asyncio.gather(*(drive(s) for s in sessions))
 
 
+async def _fan_out_errors(agent: Agent, n: int) -> list[str]:
+    """Run *n* sessions concurrently and return the name of every error event."""
+    sessions = [await agent.session() for _ in range(n)]
+
+    async def drive(session: Any) -> list[str]:
+        return [
+            str(event.error.get("name", "error"))
+            async for event in session.run("hi")
+            if event.type == "error"
+        ]
+
+    return [name for batch in await asyncio.gather(*(drive(s) for s in sessions)) for name in batch]
+
+
 async def test_limiter_is_acquired_and_released_around_a_turn() -> None:
     limiter = SpyLimiter()
     events = await _drain(_agent(TextProvider(), limiter=limiter))
@@ -301,3 +315,74 @@ async def test_max_provider_concurrency_caps_like_an_explicit_limiter() -> None:
 
 async def test_max_provider_concurrency_unset_leaves_no_limiter() -> None:
     assert _agent(TextProvider()).limiter is None
+
+
+def test_the_cap_survives_being_used_from_a_new_event_loop() -> None:
+    """An `Agent` reused across loops must not trip over its own semaphore.
+
+    `asyncio.Semaphore` binds to the loop of its first *contended* acquire, so
+    the failure only shows up under load: an uncapped second loop works, a
+    contended one raises "bound to a different event loop". A host that runs one
+    loop per task (Celery) is exactly the shape `Agent(max_provider_concurrency=)`
+    is for, so the cap has to outlive the loop it was first used on.
+    """
+    agent = _agent(TextProvider(delay=0.01), max_provider_concurrency=1)
+
+    def drive() -> list[str]:
+        # Three sessions against a cap of one guarantees contention. The loop
+        # turns a limiter failure into an error event rather than raising, so
+        # assert on the events: otherwise two of three runs fail silently.
+        return asyncio.run(_fan_out_errors(agent, 3))
+
+    assert drive() == []
+    assert drive() == []
+
+
+def test_the_cap_still_binds_on_the_second_loop() -> None:
+    """Rebuilding the semaphore must not quietly hand the new loop a free pass."""
+    provider = TextProvider(delay=0.01)
+    agent = _agent(provider, max_provider_concurrency=1)
+
+    running = 0
+    high_water = 0
+    original = provider.stream
+
+    def tracked(req: Any) -> AsyncIterator[dict[str, object]]:
+        async def run() -> AsyncIterator[dict[str, object]]:
+            nonlocal running, high_water
+            running += 1
+            high_water = max(high_water, running)
+            try:
+                async for item in original(req):
+                    yield item
+            finally:
+                running -= 1
+
+        return run()
+
+    provider.stream = tracked  # type: ignore[method-assign]
+
+    assert asyncio.run(_fan_out_errors(agent, 3)) == []
+    high_water = 0
+    assert asyncio.run(_fan_out_errors(agent, 3)) == []
+
+    assert high_water == 1
+
+
+def test_rebuilding_is_refused_while_slots_are_still_held() -> None:
+    """Two live loops sharing one cap is ambiguous — say so instead of doubling it."""
+    from linch.errors import ConfigError
+    from linch.providers.limiter import _SemaphoreLimiter
+
+    limiter = _SemaphoreLimiter(2)
+
+    async def take_one() -> None:
+        await limiter.acquire(model="m")  # deliberately never released
+
+    asyncio.run(take_one())
+
+    async def take_another() -> None:
+        await limiter.acquire(model="m")
+
+    with pytest.raises(ConfigError, match="event loop"):
+        asyncio.run(take_another())
