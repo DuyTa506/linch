@@ -4,7 +4,24 @@ Notable changes to `linch`. Versioning follows the contract in
 [docs/versioning.md](docs/versioning.md): the public API is exactly `linch.__all__`,
 and persisted wire formats are versioned separately via `linch.RUN_SCHEMA_VERSION`.
 
-## Unreleased
+## 1.2.1 — 2026-08-12
+
+### BREAKING (dependency floor)
+
+- **`linch[mcp]` now requires `mcp>=2.0.0`** and no longer supports mcp 1.x.
+  mcp 2.0 renamed `streamablehttp_client` to `streamable_http_client`, removed
+  its `headers=` kwarg in favour of a caller-supplied `httpx2.AsyncClient`,
+  changed the transport from a 3-tuple to a 2-tuple yield, and switched its
+  pydantic models to snake_case fields (`is_error`, `input_schema`,
+  `read_only_hint`, `destructive_hint`, `mime_type`). `linch.mcp` targets the
+  2.x API.
+
+  This lands in a PATCH because no name in `linch.__all__` changed — see
+  [docs/versioning.md](docs/versioning.md#optional-extra-dependencies-are-not-covered),
+  which does not cover an extra's dependency floor. **If you are held on mcp 1.x,
+  pin `linch<=1.2.0`.** Nothing else here requires action: your server config is
+  unchanged, and `McpServerConfig.headers` still works — it now rides on the
+  httpx client linch builds and owns.
 
 ### Added
 
@@ -24,18 +41,6 @@ and persisted wire formats are versioned separately via `linch.RUN_SCHEMA_VERSIO
   loop changed and nothing is held. Rebuilding while slots are still outstanding
   would give the second loop its own full budget, so that raises `ConfigError`
   instead.
-
-### Changed
-
-- **`linch[mcp]` now requires `mcp>=2.0.0`** and no longer supports mcp 1.x.
-  mcp 2.0 renamed `streamablehttp_client` to `streamable_http_client`, removed
-  its `headers=` kwarg in favour of a caller-supplied `httpx2.AsyncClient`,
-  changed the transport from a 3-tuple to a 2-tuple yield, and switched its
-  pydantic models to snake_case fields (`is_error`, `input_schema`,
-  `read_only_hint`, `destructive_hint`, `mime_type`). `linch.mcp` targets the
-  2.x API; pin `linch<1.3` if you are held on mcp 1.x. Server config is
-  unchanged — `McpServerConfig.headers` still works, now carried on the httpx
-  client linch builds and owns.
 
 ### Fixed
 
