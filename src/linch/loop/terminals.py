@@ -310,6 +310,7 @@ async def _final_tool_retry_tail(
     tool_blocks: list[ToolUseBlock],
     final_id: str,
     feedback: str,
+    final_is_error: bool = True,
 ) -> AsyncIterator[Event]:
     """Bounce a final-tool answer back into the loop with *feedback*.
 
@@ -323,7 +324,13 @@ async def _final_tool_retry_tail(
     content: list[ContentBlock] = []
     for block in tool_blocks:
         if block.id == final_id:
-            content.append(ToolResultBlock(tool_use_id=block.id, content=feedback, is_error=True))
+            content.append(
+                ToolResultBlock(
+                    tool_use_id=block.id,
+                    content=feedback,
+                    is_error=final_is_error,
+                )
+            )
         else:
             content.append(
                 ToolResultBlock(

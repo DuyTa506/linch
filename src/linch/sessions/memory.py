@@ -43,6 +43,20 @@ class InMemorySessionStore:
         self._task_counter[sid] = 1
         return record
 
+    async def create_if_absent(
+        self, *, id: str, meta: dict[str, object] | None = None
+    ) -> SessionRecord | None:
+        """Atomically create a specifically named session, or return ``None``.
+
+        This is an optional capability used by portable session forking.  The
+        method contains no suspension point, so lookup and insertion are one
+        event-loop-atomic operation.
+        """
+
+        if id in self._sessions:
+            return None
+        return await self.create(id=id, meta=meta)
+
     async def load(self, id: str) -> SessionRecord | None:
         return self._sessions.get(id)
 

@@ -24,6 +24,7 @@ async for event in session.run("hello"):
         case "partial_assistant":  # streaming text/thinking delta
         case "tool_call_start":   # tool about to run
         case "tool_call_end":     # tool finished, has .result
+        case "tool_progress":     # transient progress from an in-flight tool
         case "permission_request": # user approval needed (mode="default")
         case "usage":     # token counts for this turn
         case "budget":    # RunBudget warning (90%) or exhaustion
@@ -46,6 +47,11 @@ A few lifecycle rules worth internalizing:
 - **`tool_call_end` carries the result** on `.result`, including the rich
   `ToolResult` fields (summary, metadata, citations) even when the model only
   saw a truncated/offloaded preview.
+- **`tool_progress` is observational only.** A tool may call
+  `ctx.report_progress("scanning", {"completed": 3})`; Linch emits a
+  `ToolProgressEvent` for consumers, but never appends it to provider history,
+  the durable run event log, or changes the final `ToolResult`. Progress is
+  best-effort and may be ignored by consumers.
 - **`permission_request` pauses the loop** when running in `mode="default"`; the
   loop resumes once you respond. With `mode="skip-dangerous"` you never see it.
 - **`budget` fires on a `RunBudget`** — once as a warning at 90%, then on
@@ -132,8 +138,11 @@ Consequences to design for:
   raises `ConfigError` — fan out with separate sessions (or subagents) instead.
 - **Background work is the explicit exception.** A `run_in_background=True` tool or
   subagent detaches onto its own task and delivers completion as a drained
-  `<task-notification>` on a later turn — that path intentionally does *not* block
-  the foreground stream. See [Tools](./tools.md) and [deep-agent](./deep-agent.md).
+  `<task-notification>` on a later in-process turn — that path intentionally does
+  *not* block the foreground stream. With a `RunStore`, status is best-effort
+  audit telemetry on the origin run; the result notification and active task are
+  not reconstructed after restart. See [Tools](./tools.md) and
+  [deep-agent](./deep-agent.md).
 
 ---
 

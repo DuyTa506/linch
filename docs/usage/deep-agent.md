@@ -2,7 +2,12 @@
 
 [← Usage guide](./README.md)
 
-`create_deep_agent()` is a convenience factory that wires up a multi-agent configuration with a single call — task tools, a built-in subagent roster, optional durable stores, and a deepened system prompt. Reach for it when you want a coordinator-and-workers setup without assembling the pieces by hand.
+`create_deep_agent()` is an explicit opt-in factory that wires up a
+multi-agent configuration with a single call — workspace/task tools, a
+built-in subagent roster, trusted project features, optional durable stores,
+and a deepened system prompt. A bare `Agent` remains neutral, tool-free, and
+feature-disabled; reach for this preset when you want a coordinator-and-workers
+setup without assembling the pieces by hand.
 
 Unlike a [workflow](./workflows.md), a deep agent is LLM-driven: the model itself decides which subagents to spawn, when to run them in the background, and when to continue an existing worker. That makes it more flexible but non-deterministic — there is no journaled replay.
 
@@ -24,7 +29,20 @@ agent = create_deep_agent(
 session = await agent.session()
 ```
 
-`durable=True` sets up three persistent stores: `SqliteSessionStore`, `SqliteRunStore`, and a `CompositeFileBackend` with a persistent `/memories` partition (SQLite-backed). Everything else in the virtual filesystem is ephemeral (`StateFileBackend`). With `durable=False` all stores are in-memory.
+The default `profile="balanced"` is bounded to 64 turns and 1,000,000 tokens,
+retains workers for continue, and enables durable state. Use
+`profile="coordinator"` for a parent that delegates heavy work, or name
+`profile="unbounded"` only when the host owns equivalent cost and lifetime
+controls. The factory explicitly enables the skills, subagents, and filesystem
+features it assembles; MCP is enabled only when servers are configured.
+
+`durable=True` sets up three persistent stores: `SqliteSessionStore`,
+`SqliteRunStore`, and a `CompositeFileBackend` with a persistent `/memories`
+partition (SQLite-backed). Everything else in the virtual filesystem is
+ephemeral (`StateFileBackend`). With `durable=False` all stores are in-memory.
+Durable checkpoints and session history can be resumed after a process restart;
+an active detached worker task and its in-memory completion notification cannot
+be reconstructed.
 
 Durability is what lets a deep-agent run survive a process restart and resume mid-task — the session state and run checkpoint are read back from SQLite. See [Agent configuration](./agent.md) for the underlying store types, and [Virtual filesystem](./filesystem.md) for how the `/memories` partition is routed inside the `CompositeFileBackend`.
 
@@ -54,7 +72,17 @@ async for event in session.run("Summarise what the background researcher found."
         print(event.final_text)
 ```
 
-The key behaviour: a background spawn does **not** block the turn. The worker runs as a detached task while the coordinator keeps going. When it finishes it appends a `<task-notification>` message to the session, and the next `session.run()` drains that notification at the top of the turn so the coordinator sees the result without you having to poll. Awaiting `handle.task` yourself (as in turn 1.5 above) is optional — it only forces the timing, not the delivery.
+The key behaviour: a background spawn does **not** block the turn. The worker
+runs as a detached task while the coordinator keeps going. When it finishes it
+appends a `<task-notification>` message to the session's in-memory pending
+queue, and the next `session.run()` drains that notification at the top of the
+turn so the coordinator sees the result without you having to poll. With a
+`RunStore`, Linch also records an origin-attributed `BackgroundWorkerEvent`
+audit record; this is not durable result delivery. A process restart cannot
+resume the active task or recreate the notification. Hosts that need that
+guarantee must own a durable queue/workflow. Awaiting `handle.task` yourself
+(as in turn 1.5 above) is optional — it only forces the timing, not the
+delivery.
 
 ---
 
@@ -89,10 +117,17 @@ Continuing a worker resumes it with its entire prior context, so you can have a 
 Use `create_subagent_definition()` to turn a natural-language request into a normal disk-backed project subagent. The SDK writes `.linch/agents/<name>.md`, validates it with the same loader used at runtime, and reloads the `Agent` by default so the new subagent appears in the `Subagent` tool catalog immediately.
 
 ```python
-from linch import Agent, create_subagent_definition
+from linch import Agent, FeatureFlags, create_subagent_definition, workspace_tools
 
 agent = Agent(
     model="gpt-5",
+    tools=workspace_tools(),
+    features=FeatureFlags(
+        skills=False,
+        subagents=True,
+        mcp=False,
+        filesystem=False,
+    ),
     permissions={"mode": "skip-dangerous"},
     cwd=".",
 )
@@ -116,6 +151,7 @@ This is the one-call path: generate, validate, write, and reload. For host appli
 ```python
 agent = create_deep_agent(
     model="...",
+    profile="coordinator",
     coordinator=True,          # parent orchestrates only
     durable=False,
     permissions={"mode": "skip-dangerous"},

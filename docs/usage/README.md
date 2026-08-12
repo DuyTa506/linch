@@ -7,6 +7,11 @@ agent, and using each subsystem. If you are new to the SDK, start with
 For the *why* behind the design (data flow, the turn pipeline, module
 boundaries) see [`../architecture.md`](../architecture.md).
 
+If you are upgrading from Linch 1.x, read the
+[Linch 2.0 migration guide](../migration-2.0.md) first. Linch is an SDK: a
+coding workspace and its trust policy are now explicit choices at the call
+site.
+
 ---
 
 ## Install

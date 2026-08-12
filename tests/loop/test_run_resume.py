@@ -357,6 +357,8 @@ async def test_permission_pending_resume_reemits_before_tool_execution() -> None
     def allow(_request) -> dict[str, str]:
         return {"behavior": "allow"}
 
+    allow.__dict__["resume_policy_id"] = "test-allow"
+
     agent = _agent(
         model="gpt-5",
         provider=ScriptProvider(tool_names=["WriteThing"]),
@@ -634,6 +636,8 @@ async def test_crash_between_permission_checkpoint_and_start_event_reruns_tool()
         callback_calls.append(request)
         return {"behavior": "allow"}
 
+    allow_callback.__dict__["resume_policy_id"] = "test-allow"
+
     agent = _agent(
         model="gpt-5",
         provider=ScriptProvider(tool_names=["WriteThing"]),
@@ -723,6 +727,7 @@ async def test_completed_tool_recovered_from_event_log_when_checkpoint_lacks_res
 
 async def test_resume_marks_checkpointed_running_background_workers_killed() -> None:
     from linch.run_store import RunCheckpoint
+    from linch.session import RunOptions
     from linch.types import Usage
 
     session_store = _memory_session_store()
@@ -753,7 +758,7 @@ async def test_resume_marks_checkpointed_running_background_workers_killed() -> 
     )
     session = await agent.session(id="s1")
 
-    events = await _collect(session.resume(run.id))
+    events = await _collect(session.resume(run.id, RunOptions(allow_legacy_resume=True)))
 
     bg_events = [event for event in events if event.type == "background_worker"]
     user_events = [event for event in events if event.type == "user"]
@@ -950,6 +955,8 @@ async def test_permission_decision_persists_and_resume_skips_callback() -> None:
         callback_calls.append(request)
         return {"behavior": "allow"}
 
+    allow_callback.__dict__["resume_policy_id"] = "test-allow"
+
     agent = _agent(
         model="gpt-5",
         provider=ScriptProvider(tool_names=["WriteThing"]),
@@ -1004,6 +1011,8 @@ async def test_persisted_deny_decision_replays_on_resume() -> None:
     def deny_callback(request: Any) -> dict[str, str]:
         deny_calls.append(request)
         return {"behavior": "deny", "message": "not allowed"}
+
+    deny_callback.__dict__["resume_policy_id"] = "test-deny"
 
     agent = _agent(
         model="gpt-5",

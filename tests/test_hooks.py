@@ -521,9 +521,9 @@ class FailingTool:
 
 @pytest.mark.asyncio
 async def test_pre_tool_hook_allow_cannot_bypass_config_deny() -> None:
-    # Allow-invariant: a configured deny wins; a PreToolUse hook never even runs
-    # on a denied call, so it cannot resurrect (or rewrite the input of) a tool
-    # the permission layer refused.
+    # Allow-invariant: PreToolUse runs before final permission evaluation so its
+    # canonical input can be checked; a configured deny still wins and the hook
+    # cannot resurrect the tool.
     from linch import Agent, HookResult, ToolCallEndEvent, ToolRegistry
     from linch.config import FeatureFlags
     from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
@@ -560,7 +560,7 @@ async def test_pre_tool_hook_allow_cannot_bypass_config_deny() -> None:
     end = next(event for event in events if isinstance(event, ToolCallEndEvent))
     assert end.is_error is True
     assert tool.inputs == []  # tool never executed
-    assert hook_ran == []  # PreToolUse hook never fired on a denied call
+    assert hook_ran == ["Record"]
 
 
 @pytest.mark.asyncio

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from ..errors import AbortError
 from .rules import (
@@ -24,6 +24,9 @@ _ToolDecision = Literal["allow", "deny", "ask"]
 class PermissionDecision:
     decision: _ToolDecision
     reason: str | None = None
+    # Kept only so v1 checkpoints decode. Linch 2 never executes or replays a
+    # decision carrying updated input; mutation belongs in PreToolUse, before
+    # the final permission evaluation.
     updated_input: dict[str, Any] | None = None
     # Set by a PreToolUse hook that short-circuits execution (e.g. a cache hit):
     # when present, the scheduler returns this result instead of running the
@@ -51,7 +54,6 @@ class CanUseToolRequest:
 @dataclass(slots=True)
 class CanUseToolResponse:
     behavior: str
-    updated_input: dict[str, Any] | None = None
     message: str | None = None
 
 
@@ -111,7 +113,7 @@ class PermissionEngine:
                 "canUseTool callback is not configured.",
             )
 
-        if getattr(signal, "is_set", None):
+        if _signal_aborted(signal):
             return PermissionDecision(
                 decision="deny",
                 reason=f"Permission denied for {call.tool.name}: permission request aborted.",
@@ -153,28 +155,19 @@ class PermissionEngine:
         if response.get("behavior") != "allow":
             return _invalid_callback_response(call.tool.name)
 
-        updated_input = response.get("updatedInput")
-        if updated_input is None:
-            return PermissionDecision(decision="allow")
-
-        if not isinstance(updated_input, dict):
-            return _invalid_callback_response(call.tool.name)
-
-        try:
-            validated = call.tool.validate(updated_input)
-        except Exception:
+        # Linch 1 allowed an approval callback to rewrite the input *after*
+        # rules had approved the original call. That is a policy bypass for
+        # path/command-aware rules. Linch 2 rejects this shape: callers must use
+        # PreToolUse mutation, which is revalidated and then permission-checked.
+        if response.get("updatedInput") is not None:
             return PermissionDecision(
                 decision="deny",
-                reason=f"Permission denied for {call.tool.name}: updated input is invalid.",
+                reason=(
+                    f"Permission denied for {call.tool.name}: updatedInput is unsupported; "
+                    "mutate input in PreToolUse before permission evaluation."
+                ),
             )
-
-        if not isinstance(validated, dict):
-            return PermissionDecision(
-                decision="deny",
-                reason=f"Permission denied for {call.tool.name}: updated input is invalid.",
-            )
-
-        return PermissionDecision(decision="allow", updated_input=validated)
+        return PermissionDecision(decision="allow")
 
     def _evaluate_rules(self, call: PendingToolCall) -> PermissionDecision | None:
         return evaluate_rule_list(self.rules, call, self.project_root)
@@ -271,29 +264,53 @@ def _bash_rules_from(rules: list[PermissionRule], start_index: int) -> list[Bash
 
 
 async def _run_with_abort(coro: Any, signal: Any) -> Any:
-    is_set = getattr(signal, "is_set", False)
-    if is_set:
-        raise asyncio.CancelledError("aborted")
+    if _signal_aborted(signal):
+        raise AbortError("operation aborted")
 
-    if not inspect.isawaitable(coro):
+    if not hasattr(coro, "__await__"):
         return coro
 
     task: asyncio.Task[Any] = asyncio.ensure_future(coro)
-
-    async def _abort_watch() -> None:
-        while not task.done():
-            if getattr(signal, "is_set", False):
-                task.cancel()
-                return
-            await asyncio.sleep(0.05)
-
-    watcher = asyncio.ensure_future(_abort_watch())
+    watcher = asyncio.ensure_future(_wait_for_abort(signal))
     try:
         done, _ = await asyncio.wait([task, watcher], return_when=asyncio.FIRST_COMPLETED)
         if task in done:
             return task.result()
-        raise asyncio.CancelledError("aborted")
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        raise AbortError("operation aborted")
     finally:
         watcher.cancel()
+        with suppress(asyncio.CancelledError):
+            await watcher
         if not task.done():
             task.cancel()
+
+
+def _signal_aborted(signal: Any) -> bool:
+    if signal is None:
+        return False
+    aborted = getattr(signal, "aborted", None)
+    if isinstance(aborted, bool):
+        return aborted
+    is_set = getattr(signal, "is_set", None)
+    if callable(is_set):
+        try:
+            return bool(is_set())
+        except Exception:
+            return True
+    return bool(is_set) if isinstance(is_set, bool) else False
+
+
+async def _wait_for_abort(signal: Any) -> None:
+    wait = getattr(signal, "wait", None)
+    if callable(wait):
+        awaited = wait()
+        if hasattr(awaited, "__await__"):
+            await cast(Awaitable[Any], awaited)
+            return
+    # Unknown duck-typed signals retain a conservative polling fallback. The
+    # public AbortContext and asyncio.Event paths use wait(), so they do not poll.
+    while not _signal_aborted(signal):
+        await asyncio.sleep(0.05)

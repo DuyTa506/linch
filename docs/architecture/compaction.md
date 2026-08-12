@@ -10,6 +10,11 @@
 
 **Invariant:** `full_history` is never modified. Only `provider_view` shrinks. Compaction uses the configured `agent.provider` — never a hardcoded OpenAI call.
 
+The compaction path is provider-agnostic in Linch 2.0: summaries use the same
+normalized provider stream contract as a normal turn, retain message/tool
+pairing, and do not assume a coding workspace. Malformed or missing durable
+snapshot state is treated as a cache miss and rebuilt from `full_history`.
+
 ```mermaid
 flowchart TD
     A["Top of turn: maybe_compact()"] --> B{provider_view tokens<br/>within threshold?}

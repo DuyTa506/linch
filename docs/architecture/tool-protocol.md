@@ -35,9 +35,18 @@ class MyTool:
     def resources(self, input: dict) -> list[ResourceAccess]: ...
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult: ...
     def summarize(self, input: dict) -> str: ...   # one-line for logs
+
+    # Optional prompt guidance while this tool is active.
+    system_prompt_sections: Iterable[SystemPromptSection] | Callable[[], Iterable[SystemPromptSection]]
 ```
 
-`ToolContext` carries: `cwd`, `session_id`, `run_id`, `session_store`, `signal` (abort), `file_read_tracker`, `deps`, `filesystem`, `idempotency_key`.
+`ToolContext` carries: `cwd`, `session_id`, `run_id`, `session_store`, `signal`
+(abort), `file_read_tracker`, `deps`, `filesystem`, `idempotency_key`, and a
+best-effort progress sink. Tools report transient progress with
+`ctx.report_progress(message, data=None)` (or the compatibility spelling
+`ctx.reportProgress(...)`). Progress becomes a `ToolProgressEvent` for the
+live consumer only; it is not provider history, a tool result, or a durable run
+event.
 
 `deps` is threaded from `Agent(deps=...)` or overridden per-run with `RunOptions(deps=...)`. Use it to inject app state into tools without globals.
 
@@ -49,6 +58,20 @@ its own dedup table on it) to deduplicate or reconcile an interrupted intent.
 The key is stable across resume for the same tool call; Linch does not itself
 promise exactly-once execution across separate session stores, run stores, and
 external systems.
+
+### Tool-call safety order
+
+The scheduler resolves one canonical input before execution:
+
+1. decode and validate the provider's tool call;
+2. run `PreToolUse` hooks, which may transform or short-circuit it;
+3. validate the transformed input again;
+4. evaluate rules and `can_use_tool` on that final input;
+5. persist resolved decisions and execute the tool.
+
+Approval callbacks cannot return Linch 1.x's `updatedInput` rewrite. Input
+mutation belongs in `PreToolUse`, where it is revalidated and permission
+checked; this prevents approving one path or command and executing another.
 
 `BashTool` delegates command execution to a backend. `LocalBackend` preserves
 the default local subprocess behavior with timeout cleanup; `DockerBackend`
@@ -74,9 +97,16 @@ registry.replace(tool)                    # swap same-named tool
 registry.select(names={...}, tags={...})  # runtime subset (per-request)
 registry.copy()                           # shallow clone
 registry.schemas()                        # provider-ready schema list
+workspace_tools()                         # explicit software-workspace preset
 empty_tools(*extra)                       # no built-ins + optional extras
-tools_from_defaults(exclude, extra)       # standard set ± named tools
+tools_from_defaults(exclude, extra)       # workspace preset ± named tools
 ```
+
+`Agent` does not install `workspace_tools()` implicitly in Linch 2.0. The
+`default_tools()` / `defaultTools` names remain compatibility aliases for that
+preset; use `workspace_tools()` when the authority is intentional and visible.
+Project-local filesystem, skills, subagents, and MCP resources are likewise
+trust-gated by `FeatureFlags` and are not ambient bare-agent defaults.
 
 ## Design rationale
 

@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
+import math
 import sqlite3
-from dataclasses import dataclass, field
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field, fields, is_dataclass
+from datetime import date, datetime
+from decimal import Decimal
+from enum import Enum
 from pathlib import Path
 from typing import Any, Literal, Protocol
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from .events import Event, event_from_dict, event_to_dict, usage_from_dict, usage_to_dict
 from .sessions.memory import now_iso
@@ -26,6 +33,12 @@ from .types import (
 # reads any version best-effort (unknown future keys are ignored) and
 # `load_events` drops events it cannot decode, so a newer store is forward-safe.
 SCHEMA_VERSION = 1
+
+# A run contract is versioned independently from the checkpoint wire format.
+# Checkpoints describe *where* execution stopped; this contract describes the
+# execution inputs that must stay stable when that checkpoint is resumed.
+RUN_CONTRACT_SCHEMA_VERSION = 1
+RUN_CONTRACT_META_KEY = "run_contract"
 
 # "suspended" is a workflow parked at a wf.interrupt; distinct from
 # "waiting_permission", which belongs to the tool-permission flow.
@@ -105,6 +118,66 @@ class StoredRunEvent:
     event: Event
 
 
+@dataclass(frozen=True, slots=True)
+class RunContract:
+    """Canonical, fingerprinted inputs that define resume-safe execution.
+
+    ``payload`` is deliberately an open mapping.  Newer Linch versions may add
+    keys without making older stores unable to decode a run record.  The
+    schema version participates in the fingerprint so two meanings of the same
+    shape can never compare equal accidentally.
+    """
+
+    schema_version: int
+    payload: dict[str, Any]
+    fingerprint: str
+
+
+@dataclass(frozen=True, slots=True)
+class RunContractDifference:
+    """One actionable difference between a stored and requested contract."""
+
+    path: str
+    stored: Any
+    requested: Any
+
+
+@dataclass(frozen=True, slots=True)
+class RunContractComparison:
+    """Result of checking whether a durable run can be resumed safely."""
+
+    compatible: bool
+    legacy: bool
+    stored_fingerprint: str | None
+    requested_fingerprint: str
+    differences: tuple[RunContractDifference, ...] = ()
+
+    def describe(self) -> str:
+        if self.legacy:
+            return "legacy run has no persisted run contract"
+        if self.compatible:
+            return "run contract matches"
+        details = ", ".join(
+            f"{item.path}: stored={item.stored!r}, requested={item.requested!r}"
+            for item in self.differences[:8]
+        )
+        if len(self.differences) > 8:
+            details += f", and {len(self.differences) - 8} more"
+        return (
+            "run contract mismatch "
+            f"({self.stored_fingerprint or 'missing'} != {self.requested_fingerprint})"
+            + (f": {details}" if details else "")
+        )
+
+
+class RunContractMismatchError(ValueError):
+    """Raised when resume inputs differ from the inputs of the original run."""
+
+    def __init__(self, comparison: RunContractComparison) -> None:
+        self.comparison = comparison
+        super().__init__(comparison.describe())
+
+
 class RunStore(Protocol):
     async def create_run(
         self,
@@ -149,6 +222,282 @@ class RunEventBatchStore(Protocol):
     async def append_events(self, run_id: str, events: list[Event]) -> list[int]: ...
 
 
+def _json_safe(value: Any, *, strict: bool = False) -> Any:
+    """Return an isolated JSON-safe representation of arbitrary runtime data.
+
+    Persistence uses the permissive mode so an otherwise useful event is not
+    lost because extension-owned metadata contains a ``Path`` or dataclass.
+    Run-contract construction uses strict mode: an unstable ``repr`` must
+    never silently become part of a durability fingerprint.
+    """
+
+    if value is None or isinstance(value, str | bool | int):
+        return value
+    if isinstance(value, float):
+        if math.isfinite(value):
+            return value
+        return str(value)
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, Enum):
+        return _json_safe(value.value, strict=strict)
+    if isinstance(value, datetime | date):
+        return value.isoformat()
+    if isinstance(value, Path | UUID):
+        return str(value)
+    if isinstance(value, bytes | bytearray | memoryview):
+        return {"$bytes_base64": base64.b64encode(bytes(value)).decode("ascii")}
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            item.name: _json_safe(getattr(value, item.name), strict=strict)
+            for item in fields(value)
+        }
+    if isinstance(value, Mapping):
+        out: dict[str, Any] = {}
+        for key, item in value.items():
+            if strict and not isinstance(key, str):
+                raise TypeError(f"run contract mapping key must be str, got {type(key).__name__}")
+            out[str(key)] = _json_safe(item, strict=strict)
+        return out
+    if isinstance(value, set | frozenset):
+        items = [_json_safe(item, strict=strict) for item in value]
+        return sorted(items, key=canonical_json)
+    if isinstance(value, Sequence):
+        return [_json_safe(item, strict=strict) for item in value]
+    if strict:
+        raise TypeError(
+            f"run contract value of type {type(value).__name__} "
+            "is not deterministically serializable"
+        )
+    return str(value)
+
+
+def canonical_json(value: Any) -> str:
+    """Serialize ``value`` deterministically for signatures and snapshots."""
+
+    safe = _json_safe(value, strict=True)
+    return json.dumps(
+        safe,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _run_contract_fingerprint(schema_version: int, payload: Mapping[str, Any]) -> str:
+    canonical = canonical_json({"schema_version": schema_version, "payload": payload})
+    return f"sha256:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
+
+
+def _budget_contract(budget: Any) -> dict[str, Any] | None:
+    if budget is None:
+        return None
+    if isinstance(budget, Mapping):
+        return _json_safe(budget, strict=True)
+    # Mutable spend counters are checkpoint state, not part of the execution
+    # policy.  Keeping only limits avoids a legitimate resume mismatching after
+    # the original process charged the shared budget.
+    names = ("max_tokens", "max_cost_usd", "warn_ratio")
+    if any(hasattr(budget, name) for name in names):
+        return {name: _json_safe(getattr(budget, name, None), strict=True) for name in names}
+    raise TypeError("budget must be a mapping or expose max_tokens/max_cost_usd/warn_ratio")
+
+
+def build_run_contract(
+    *,
+    primary_model: str,
+    fallback_models: Sequence[str] | None = None,
+    system_blocks: Sequence[Any] | None = None,
+    tool_schemas: Sequence[Mapping[str, Any]] | None = None,
+    input_payload: Mapping[str, Any] | None = None,
+    output_schema: Any = None,
+    final_tool_name: str | None = None,
+    run_options: Mapping[str, Any] | None = None,
+    budget: Any = None,
+    policies: Mapping[str, Any] | None = None,
+) -> RunContract:
+    """Build the normalized contract to persist when a durable run starts.
+
+    Callers should pass the *resolved* values (after Agent/RunOptions defaults),
+    and provider-facing tool schemas rather than tool instances.  Tool order is
+    retained because it can affect provider behavior and prompt caching.
+    """
+
+    if not isinstance(primary_model, str) or not primary_model:
+        raise ValueError("primary_model must be a non-empty string")
+    fallback_chain = [str(model) for model in (fallback_models or ())]
+    if any(not model for model in fallback_chain):
+        raise ValueError("fallback_models cannot contain an empty model id")
+    tools = [_json_safe(schema, strict=True) for schema in (tool_schemas or ())]
+    if any(not isinstance(schema, dict) for schema in tools):
+        raise TypeError("every tool schema must be a mapping")
+
+    payload: dict[str, Any] = {
+        "models": {"primary": primary_model, "fallbacks": fallback_chain},
+        "system": _json_safe(system_blocks or (), strict=True),
+        "tools": tools,
+        "input": _json_safe(input_payload or {}, strict=True),
+        "output": {
+            "schema": _json_safe(output_schema, strict=True),
+            "final_tool_name": final_tool_name,
+        },
+        "run_options": _json_safe(run_options or {}, strict=True),
+        "budget": _budget_contract(budget),
+        "policies": _json_safe(policies or {}, strict=True),
+    }
+    fingerprint = _run_contract_fingerprint(RUN_CONTRACT_SCHEMA_VERSION, payload)
+    return RunContract(
+        schema_version=RUN_CONTRACT_SCHEMA_VERSION,
+        payload=payload,
+        fingerprint=fingerprint,
+    )
+
+
+def run_contract_to_dict(contract: RunContract) -> dict[str, Any]:
+    """Encode a run contract with an integrity-checkable fingerprint."""
+
+    payload = _json_safe(contract.payload, strict=True)
+    return {
+        "schema_version": contract.schema_version,
+        "fingerprint": _run_contract_fingerprint(contract.schema_version, payload),
+        "payload": payload,
+    }
+
+
+def run_contract_from_dict(raw: Mapping[str, Any]) -> RunContract:
+    """Decode old or future contract envelopes without rejecting extra keys."""
+
+    version_raw = raw.get("schema_version", 1)
+    if not isinstance(version_raw, int) or isinstance(version_raw, bool) or version_raw < 1:
+        raise ValueError("run contract schema_version must be a positive integer")
+    payload_raw = raw.get("payload")
+    if not isinstance(payload_raw, Mapping):
+        raise ValueError("run contract payload must be a mapping")
+    payload = _json_safe(payload_raw, strict=True)
+    assert isinstance(payload, dict)
+    computed = _run_contract_fingerprint(version_raw, payload)
+    declared = raw.get("fingerprint")
+    # Missing fingerprints are accepted for early/pre-release contract rows.
+    # A present but invalid value is retained so compatibility comparison can
+    # report corruption instead of silently blessing it.
+    fingerprint = declared if isinstance(declared, str) and declared else computed
+    return RunContract(schema_version=version_raw, payload=payload, fingerprint=fingerprint)
+
+
+def run_meta_with_contract(
+    contract: RunContract,
+    meta: Mapping[str, Any] | None = None,
+) -> dict[str, object]:
+    """Return JSON-safe run metadata carrying ``contract`` without mutation."""
+
+    safe = _json_safe(meta or {}, strict=False)
+    assert isinstance(safe, dict)
+    safe[RUN_CONTRACT_META_KEY] = run_contract_to_dict(contract)
+    return safe
+
+
+def run_contract_from_meta(meta: Mapping[str, Any]) -> RunContract | None:
+    """Load a persisted contract; ``None`` means a genuinely legacy run."""
+
+    if RUN_CONTRACT_META_KEY not in meta:
+        return None
+    raw = meta[RUN_CONTRACT_META_KEY]
+    if not isinstance(raw, Mapping):
+        raise ValueError("persisted run_contract metadata must be a mapping")
+    return run_contract_from_dict(raw)
+
+
+def _contract_differences(
+    stored: Any,
+    requested: Any,
+    path: str = "$",
+) -> list[RunContractDifference]:
+    if isinstance(stored, dict) and isinstance(requested, dict):
+        out: list[RunContractDifference] = []
+        for key in sorted(stored.keys() | requested.keys()):
+            child_path = f"{path}.{key}"
+            if key not in stored:
+                out.append(RunContractDifference(child_path, None, requested[key]))
+            elif key not in requested:
+                out.append(RunContractDifference(child_path, stored[key], None))
+            else:
+                out.extend(_contract_differences(stored[key], requested[key], child_path))
+        return out
+    if isinstance(stored, list) and isinstance(requested, list):
+        out = []
+        for index in range(max(len(stored), len(requested))):
+            child_path = f"{path}[{index}]"
+            if index >= len(stored):
+                out.append(RunContractDifference(child_path, None, requested[index]))
+            elif index >= len(requested):
+                out.append(RunContractDifference(child_path, stored[index], None))
+            else:
+                out.extend(_contract_differences(stored[index], requested[index], child_path))
+        return out
+    if stored != requested or type(stored) is not type(requested):
+        return [RunContractDifference(path, stored, requested)]
+    return []
+
+
+def compare_run_contract(
+    stored: RunContract | None,
+    requested: RunContract,
+    *,
+    allow_legacy: bool = False,
+) -> RunContractComparison:
+    """Compare persisted and requested inputs, failing closed for legacy runs.
+
+    Hosts migrating pre-contract records may opt in to ``allow_legacy``.  That
+    flag is intentionally explicit: without the original execution inputs,
+    compatibility cannot be proven.
+    """
+
+    if stored is None:
+        return RunContractComparison(
+            compatible=allow_legacy,
+            legacy=True,
+            stored_fingerprint=None,
+            requested_fingerprint=requested.fingerprint,
+        )
+    stored_computed = _run_contract_fingerprint(stored.schema_version, stored.payload)
+    requested_computed = _run_contract_fingerprint(requested.schema_version, requested.payload)
+    differences: list[RunContractDifference] = []
+    if stored.fingerprint != stored_computed:
+        differences.append(
+            RunContractDifference("$.fingerprint", stored.fingerprint, stored_computed)
+        )
+    if stored.schema_version != requested.schema_version:
+        differences.append(
+            RunContractDifference(
+                "$.schema_version", stored.schema_version, requested.schema_version
+            )
+        )
+    differences.extend(_contract_differences(stored.payload, requested.payload, "$.payload"))
+    compatible = not differences and stored_computed == requested_computed
+    return RunContractComparison(
+        compatible=compatible,
+        legacy=False,
+        stored_fingerprint=stored.fingerprint,
+        requested_fingerprint=requested.fingerprint,
+        differences=tuple(differences),
+    )
+
+
+def ensure_run_contract_compatible(
+    stored: RunContract | None,
+    requested: RunContract,
+    *,
+    allow_legacy: bool = False,
+) -> RunContractComparison:
+    """Return comparison or raise :class:`RunContractMismatchError`."""
+
+    comparison = compare_run_contract(stored, requested, allow_legacy=allow_legacy)
+    if not comparison.compatible:
+        raise RunContractMismatchError(comparison)
+    return comparison
+
+
 def checkpoint_to_dict(checkpoint: RunCheckpoint) -> dict[str, Any]:
     data = {
         "schema_version": SCHEMA_VERSION,
@@ -183,7 +532,9 @@ def checkpoint_to_dict(checkpoint: RunCheckpoint) -> dict[str, Any]:
     # byte-identical.  Readers still default a missing key to ``{}``.
     if checkpoint.extension_state:
         data["extension_state"] = checkpoint.extension_state
-    return data
+    safe = _json_safe(data, strict=False)
+    assert isinstance(safe, dict)
+    return safe
 
 
 def _dict_or_none(value: Any) -> dict[str, object] | None:
@@ -295,6 +646,35 @@ def checkpoint_from_dict(raw: dict[str, Any]) -> RunCheckpoint:
     )
 
 
+def _safe_meta(meta: Any) -> dict[str, object]:
+    safe = _json_safe(meta, strict=False)
+    return safe if isinstance(safe, dict) else {}
+
+
+def _copy_checkpoint(checkpoint: RunCheckpoint | None) -> RunCheckpoint | None:
+    if checkpoint is None:
+        return None
+    return checkpoint_from_dict(checkpoint_to_dict(checkpoint))
+
+
+def _copy_record(record: RunRecord) -> RunRecord:
+    return RunRecord(
+        id=record.id,
+        session_id=record.session_id,
+        status=record.status,
+        created_at=record.created_at,
+        updated_at=record.updated_at,
+        checkpoint=_copy_checkpoint(record.checkpoint),
+        meta=_safe_meta(record.meta),
+    )
+
+
+def _copy_event(event: Event) -> Event:
+    raw = _json_safe(event_to_dict(event), strict=False)
+    assert isinstance(raw, dict)
+    return event_from_dict(raw)
+
+
 class InMemoryRunStore:
     def __init__(self) -> None:
         self._runs: dict[str, RunRecord] = {}
@@ -310,7 +690,7 @@ class InMemoryRunStore:
         rid = id or str(uuid4())
         existing = self._runs.get(rid)
         if existing is not None:
-            return existing
+            return _copy_record(existing)
         ts = now_iso()
         record = RunRecord(
             id=rid,
@@ -318,14 +698,15 @@ class InMemoryRunStore:
             status="running",
             created_at=ts,
             updated_at=ts,
-            meta=dict(meta or {}),
+            meta=_safe_meta(meta),
         )
         self._runs[rid] = record
         self._events[rid] = []
-        return record
+        return _copy_record(record)
 
     async def load_run(self, run_id: str) -> RunRecord | None:
-        return self._runs.get(run_id)
+        record = self._runs.get(run_id)
+        return _copy_record(record) if record is not None else None
 
     async def save_checkpoint(
         self,
@@ -335,17 +716,17 @@ class InMemoryRunStore:
         status: str = "running",
     ) -> RunRecord:
         rec = self._runs[run_id]
-        rec.checkpoint = checkpoint
+        rec.checkpoint = _copy_checkpoint(checkpoint)
         rec.status = status  # type: ignore[assignment]
         rec.updated_at = now_iso()
-        return rec
+        return _copy_record(rec)
 
     async def append_event(self, run_id: str, event: Event) -> int:
         if run_id not in self._runs:
             raise KeyError(f"run not found: {run_id}")
         bucket = self._events.setdefault(run_id, [])
         seq = len(bucket) + 1
-        bucket.append(StoredRunEvent(seq=seq, appended_at=now_iso(), event=event))
+        bucket.append(StoredRunEvent(seq=seq, appended_at=now_iso(), event=_copy_event(event)))
         return seq
 
     async def append_events(self, run_id: str, events: list[Event]) -> list[int]:
@@ -354,7 +735,11 @@ class InMemoryRunStore:
         return [await self.append_event(run_id, event) for event in events]
 
     async def load_events(self, run_id: str, *, after_seq: int = 0) -> list[StoredRunEvent]:
-        return [row for row in self._events.get(run_id, []) if row.seq > after_seq]
+        return [
+            StoredRunEvent(seq=row.seq, appended_at=row.appended_at, event=_copy_event(row.event))
+            for row in self._events.get(run_id, [])
+            if row.seq > after_seq
+        ]
 
     async def mark_completed(self, run_id: str, checkpoint: RunCheckpoint) -> RunRecord:
         checkpoint.phase = "completed"
@@ -369,15 +754,15 @@ class InMemoryRunStore:
         rec = self._runs[run_id]
         if checkpoint is not None:
             checkpoint.phase = "failed"
-            rec.checkpoint = checkpoint
+            rec.checkpoint = _copy_checkpoint(checkpoint)
         if error is not None:
             rec.meta.setdefault("errors", [])
             errors = rec.meta["errors"]
             if isinstance(errors, list):
-                errors.append(error)
+                errors.append(_json_safe(error, strict=False))
         rec.status = "failed"
         rec.updated_at = now_iso()
-        return rec
+        return _copy_record(rec)
 
     async def close(self) -> None:
         return None
@@ -415,7 +800,7 @@ def _record(row: object) -> RunRecord:
         created_at=row[3],  # type: ignore[index]
         updated_at=row[4],  # type: ignore[index]
         checkpoint=(checkpoint_from_dict(json.loads(checkpoint_raw)) if checkpoint_raw else None),
-        meta=dict(json.loads(row[6] or "{}")),  # type: ignore[index]
+        meta=_safe_meta(json.loads(row[6] or "{}")),  # type: ignore[index]
     )
 
 
@@ -491,6 +876,7 @@ def _create_run(
     id: str | None,
     meta: dict[str, object],
 ) -> RunRecord:
+    safe_meta = _safe_meta(meta)
     rid = id or str(uuid4())
     row = conn.execute(
         "select id, session_id, status, created_at, updated_at, checkpoint, meta "
@@ -503,7 +889,7 @@ def _create_run(
     conn.execute(
         "insert into runs (id, session_id, status, created_at, updated_at, checkpoint, meta) "
         "values (?, ?, 'running', ?, ?, null, ?)",
-        (rid, session_id, ts, ts, json.dumps(meta)),
+        (rid, session_id, ts, ts, json.dumps(safe_meta, allow_nan=False)),
     )
     conn.commit()
     return RunRecord(
@@ -512,7 +898,7 @@ def _create_run(
         status="running",
         created_at=ts,
         updated_at=ts,
-        meta=dict(meta),
+        meta=safe_meta,
     )
 
 
@@ -541,7 +927,7 @@ def _save_checkpoint(
     ts = now_iso()
     conn.execute(
         "update runs set updated_at = ?, status = ?, checkpoint = ? where id = ?",
-        (ts, status, json.dumps(checkpoint_to_dict(checkpoint)), run_id),
+        (ts, status, json.dumps(checkpoint_to_dict(checkpoint), allow_nan=False), run_id),
     )
     conn.commit()
     return RunRecord(
@@ -551,7 +937,7 @@ def _save_checkpoint(
         created_at=row[3],
         updated_at=ts,
         checkpoint=checkpoint,
-        meta=dict(json.loads(row[6] or "{}")),
+        meta=_safe_meta(json.loads(row[6] or "{}")),
     )
 
 
@@ -561,7 +947,12 @@ def _append_event(conn: sqlite3.Connection, run_id: str, event: Event) -> int:
     ts = now_iso()
     conn.execute(
         "insert into run_events (run_id, seq, appended_at, event) values (?, ?, ?, ?)",
-        (run_id, seq, ts, json.dumps(event_to_dict(event))),
+        (
+            run_id,
+            seq,
+            ts,
+            json.dumps(_json_safe(event_to_dict(event), strict=False), allow_nan=False),
+        ),
     )
     conn.commit()
     return seq
@@ -577,7 +968,12 @@ def _append_events(conn: sqlite3.Connection, run_id: str, events: list[Event]) -
     )
     ts = now_iso()
     rows = [
-        (run_id, base + i, ts, json.dumps(event_to_dict(event)))
+        (
+            run_id,
+            base + i,
+            ts,
+            json.dumps(_json_safe(event_to_dict(event), strict=False), allow_nan=False),
+        )
         for i, event in enumerate(events, start=1)
     ]
     conn.executemany(
@@ -627,15 +1023,15 @@ def _mark_failed(
     if error is not None:
         errors = meta.setdefault("errors", [])
         if isinstance(errors, list):
-            errors.append(error)
+            errors.append(_json_safe(error, strict=False))
     ts = now_iso()
     checkpoint_json = row[5]
     if checkpoint is not None:
         checkpoint.phase = "failed"
-        checkpoint_json = json.dumps(checkpoint_to_dict(checkpoint))
+        checkpoint_json = json.dumps(checkpoint_to_dict(checkpoint), allow_nan=False)
     conn.execute(
         "update runs set updated_at = ?, status = 'failed', checkpoint = ?, meta = ? where id = ?",
-        (ts, checkpoint_json, json.dumps(meta), run_id),
+        (ts, checkpoint_json, json.dumps(_json_safe(meta, strict=False), allow_nan=False), run_id),
     )
     conn.commit()
     return RunRecord(

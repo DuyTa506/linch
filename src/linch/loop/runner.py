@@ -13,6 +13,7 @@ from typing import Any, cast
 from uuid import uuid4
 
 from .._prompt_cache import prompt_cache_advisories, tool_signature
+from .._version import get_version
 from ..compaction import (
     build_compaction_event,
     reset_read_tracker_after_compaction,
@@ -21,7 +22,9 @@ from ..context import context_budget_to_dict
 from ..errors import AbortError, ConfigError
 from ..events import (
     AssistantEvent,
+    BackgroundWorkerEvent,
     BudgetEvent,
+    CompactionEvent,
     ContextBuildEvent,
     ErrorEvent,
     Event,
@@ -33,6 +36,7 @@ from ..events import (
     SystemEvent,
     ToolCallEndEvent,
     ToolCallStartEvent,
+    ToolProgressEvent,
     UsageEvent,
     UserEvent,
 )
@@ -49,7 +53,15 @@ from ..hooks import (
     TurnStopContext,
 )
 from ..pricing import cost_usd as _cost_usd
-from ..run_store import RunCheckpoint, RunRecord
+from ..run_store import (
+    RunCheckpoint,
+    RunContractMismatchError,
+    RunRecord,
+    build_run_contract,
+    ensure_run_contract_compatible,
+    run_contract_from_meta,
+    run_meta_with_contract,
+)
 from ..scheduler import execute_tool_calls
 from ..session import RunOptions, Session
 from ..types import (
@@ -112,6 +124,7 @@ from .streaming import (
 from .terminals import (
     _budget_exhausted_tail,
     _error_result_tail,
+    _final_tool_retry_tail,
     _gate_retry_tail,
     _max_turns_tail,
     _stop_when_tail,
@@ -339,7 +352,12 @@ async def _drain_child_events(session: Session, run_id: str) -> AsyncIterator[Ev
     to_drain = list(pending)
     pending.clear()
     for event in to_drain:
-        await _persist_event(session, run_id, event)
+        # Detached completions are already best-effort persisted against the
+        # run that launched them. Keep this later-turn drain as a live stream
+        # projection; persisting it again would duplicate/misattribute audit
+        # telemetry under an unrelated run id.
+        if not isinstance(event, BackgroundWorkerEvent):
+            await _persist_event(session, run_id, event)
         yield event
 
 
@@ -392,10 +410,258 @@ async def _maybe_save_provider_snapshot(session: Session) -> None:
         )
 
 
+def _effective_final_tool_name(agent: Any, opts: RunOptions) -> str | None:
+    """Resolve the terminal structured-output tool for this run."""
+    explicit = opts.final_tool_name or getattr(agent, "final_tool_name", None)
+    if explicit is not None:
+        return explicit
+    schema = opts.output_schema or getattr(agent, "output_schema", None)
+    if schema is None or not hasattr(agent.provider, "capabilities"):
+        return None
+    caps = agent.provider.capabilities(agent.model)
+    return schema.name if getattr(caps, "structured_output_terminal_tool", False) else None
+
+
+def _contract_registry(session: Session) -> Any:
+    """Return the intended baseline tool surface for a durable run.
+
+    A pending skill overlay is already known at run creation and therefore
+    participates in identity.  Per-turn context selection is ephemeral and is
+    captured in the checkpointed request phase rather than by eagerly running
+    context hooks here.
+    """
+    registry = session.tools_override or session.agent.tools
+    pending = getattr(session, "pending_skill_overlay", None)
+    allowed = getattr(pending, "allowed_tools", None)
+    if allowed is not None:
+        return registry.select(names={str(name) for name in allowed})
+    return registry
+
+
+def _permission_rule_contract(rule: Any) -> dict[str, Any]:
+    kind = str(getattr(rule, "kind", rule.__class__.__name__))
+    out: dict[str, Any] = {"kind": kind, "decision": getattr(rule, "decision", None)}
+    for name in ("tool", "arg", "tools", "paths", "pattern"):
+        if hasattr(rule, name):
+            out[name] = getattr(rule, name)
+    return out
+
+
+def _permission_policy_contract(agent: Any) -> dict[str, Any]:
+    engine = agent.permission_engine
+    layered: list[dict[str, Any]] = []
+    rule_set = getattr(engine, "rule_set", None)
+    for layer in getattr(rule_set, "layers", ()) or ():
+        layered.append(
+            {
+                "name": getattr(layer, "name", None),
+                "rules": [_permission_rule_contract(rule) for rule in layer.rules],
+            }
+        )
+    callback = getattr(engine, "can_use_tool", None)
+    callback_identity = None
+    if callback is not None:
+        policy_id = getattr(callback, "resume_policy_id", getattr(callback, "policy_id", None))
+        policy_version = getattr(
+            callback,
+            "resume_policy_version",
+            getattr(callback, "policy_version", None),
+        )
+        if not isinstance(policy_id, str) or not policy_id:
+            raise ConfigError(
+                "durable runs with can_use_tool require callback.resume_policy_id "
+                "(and optionally resume_policy_version)"
+            )
+        callback_identity = {
+            "type": f"{callback.__class__.__module__}.{callback.__class__.__qualname__}",
+            "name": getattr(callback, "__qualname__", getattr(callback, "__name__", None)),
+            "policy_id": policy_id,
+            "policy_version": policy_version,
+            "config": getattr(callback, "resume_policy_config", None),
+        }
+    return {
+        "mode": engine.mode,
+        "project_root": engine.project_root,
+        "rules": [_permission_rule_contract(rule) for rule in engine.rules],
+        "layers": layered,
+        "layer_project_root": getattr(rule_set, "project_root", None),
+        "callback": callback_identity,
+        "policy_id": getattr(engine, "policy_id", None),
+        "policy_version": getattr(engine, "policy_version", None),
+    }
+
+
+def _hook_policy_contract(agent: Any) -> list[dict[str, Any]]:
+    identities: list[dict[str, Any]] = []
+    adapter_policies = {
+        "ContextInjectionHook",
+        "FinalAnswerVerifierHook",
+        "MemoryExtractionHook",
+        "StopPredicateHook",
+        "ToolMiddlewareHook",
+    }
+    for hook in getattr(agent, "hooks", ()) or ():
+        module = hook.__class__.__module__
+        class_name = hook.__class__.__name__
+        policy_id = getattr(hook, "resume_policy_id", getattr(hook, "policy_id", None))
+        policy_version = getattr(
+            hook,
+            "resume_policy_version",
+            getattr(hook, "policy_version", None),
+        )
+        checkpoint_key = getattr(hook, "checkpoint_key", None)
+        custom_or_adapter_policy = not module.startswith("linch.") or class_name in adapter_policies
+        if custom_or_adapter_policy and not (isinstance(policy_id, str) and policy_id):
+            raise ConfigError(
+                f"durable runs with custom hook {hook.__class__.__qualname__!r} require "
+                "hook.resume_policy_id (plus optional resume_policy_version/"
+                "resume_policy_config); checkpoint_key alone identifies state storage, "
+                "not policy behavior"
+            )
+        config = getattr(hook, "resume_policy_config", None)
+        if config is None:
+            config = getattr(hook, "config", getattr(hook, "_cfg", None))
+        identities.append(
+            {
+                "type": f"{module}.{hook.__class__.__qualname__}",
+                "name": getattr(hook, "name", None),
+                "checkpoint_key": checkpoint_key,
+                "policy_id": policy_id,
+                "policy_version": policy_version,
+                # Built-in policy hooks expose dataclass configs; the run
+                # contract serializer handles those canonically.
+                "config": config,
+            }
+        )
+    return identities
+
+
+def _execution_backend_contract(tools: list[Any], configured_backend: Any) -> dict[str, Any] | None:
+    """Fingerprint the effective backend of the offered built-in Bash tool.
+
+    ``Agent.execution_backend`` is only a constructor seam.  Callers may also
+    install ``BashTool(backend=...)`` directly, so the durable contract must
+    inspect the effective tool rather than only the constructor argument.  A
+    configured backend is irrelevant when this run does not offer Bash.
+    """
+    bash_tool = next((tool for tool in tools if getattr(tool, "name", None) == "Bash"), None)
+    if bash_tool is None:
+        return None
+
+    backend = getattr(bash_tool, "_backend", configured_backend)
+    if backend is None:
+        return None
+
+    policy_id = getattr(backend, "resume_policy_id", None)
+    policy_version = getattr(backend, "resume_policy_version", None)
+    configured = getattr(backend, "resume_policy_config", None)
+    if not isinstance(policy_id, str) or not policy_id or configured is None:
+        raise ConfigError(
+            "durable runs with a custom Bash execution backend require "
+            "backend.resume_policy_id and non-None backend.resume_policy_config "
+            "(plus optional resume_policy_version)"
+        )
+
+    return {
+        "type": f"{backend.__class__.__module__}.{backend.__class__.__qualname__}",
+        "policy_id": policy_id,
+        "policy_version": policy_version,
+        "config": configured,
+    }
+
+
+def _build_run_contract(session: Session, prompt: str, opts: RunOptions) -> Any:
+    """Build the normalized, resume-safe identity for one run."""
+    agent = session.agent
+    registry = _contract_registry(session)
+    tools = list(registry.list())
+    tool_schemas: list[dict[str, Any]] = []
+    for tool, schema in zip(tools, registry.schemas(), strict=True):
+        tool_schemas.append(
+            {
+                **schema,
+                # Scope is a security property even though providers do not
+                # receive it.  A write->read downgrade must invalidate resume.
+                "scope": getattr(tool, "scope", None),
+                "parallel": bool(getattr(tool, "parallel", True)),
+            }
+        )
+    if session.system_blocks_override is not None:
+        system_blocks = list(session.system_blocks_override)
+    else:
+        active_names = [tool.name for tool in tools]
+        tool_sections = registry.system_prompt_sections(active_names=active_names)
+        private_builder = getattr(agent, "_build_system_blocks", None)
+        builder = getattr(agent, "build_system_blocks_for_tool_names", None)
+        system_blocks = (
+            list(cast(Any, private_builder)(active_names, tool_sections=tool_sections))
+            if callable(private_builder)
+            else (
+                list(cast(Any, builder)(active_names))
+                if callable(builder)
+                else list(agent.system_blocks)
+            )
+        )
+    budget = (
+        opts.budget or getattr(session, "inherited_budget", None) or getattr(agent, "budget", None)
+    )
+    loop_guard = getattr(agent, "loop_guard", None)
+    ladder = getattr(agent, "compaction_ladder", None)
+    truncation = getattr(agent, "truncation_recovery", None)
+    backend_identity = _execution_backend_contract(
+        tools,
+        getattr(agent, "execution_backend", None),
+    )
+    return build_run_contract(
+        primary_model=agent.model,
+        fallback_models=getattr(agent, "fallback_models", None),
+        system_blocks=system_blocks,
+        tool_schemas=tool_schemas,
+        input_payload={"prompt": prompt, "images": opts.images},
+        output_schema=opts.output_schema or getattr(agent, "output_schema", None),
+        final_tool_name=_effective_final_tool_name(agent, opts),
+        run_options={
+            "max_output_tokens": opts.max_output_tokens or agent.max_output_tokens,
+            "temperature": opts.temperature,
+            "stream_partials": (
+                agent.include_partial_messages
+                if opts.stream_partials is None
+                else opts.stream_partials
+            ),
+            "thinking": opts.thinking,
+            "effort": opts.effort,
+            "tool_choice": opts.tool_choice or agent.tool_choice,
+            "cache_ttl": agent.cache_ttl,
+            "max_retries": agent.max_retries,
+        },
+        budget=budget,
+        policies={
+            "runtime_version": get_version(),
+            "permissions": _permission_policy_contract(agent),
+            "hooks": _hook_policy_contract(agent),
+            "features": getattr(agent, "features", None),
+            "execution_backend": backend_identity,
+            "max_turns": None if agent.max_turns == float("inf") else agent.max_turns,
+            "structured_output_retries": agent.structured_output_retries,
+            "loop_guard": loop_guard,
+            "compaction": getattr(getattr(agent, "compaction", None), "id", None),
+            "compaction_ladder": ladder,
+            "truncation_recovery": truncation,
+        },
+    )
+
+
 async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIterator[Event]:
     await session.agent._ensure_provider_prepared()
     store = session.agent.run_store
-    run_record = await store.create_run(session.id) if store is not None else None
+    run_record = (
+        await store.create_run(
+            session.id,
+            meta=run_meta_with_contract(_build_run_contract(session, prompt, opts)),
+        )
+        if store is not None
+        else None
+    )
     run_id = run_record.id if run_record is not None else str(uuid4())
     async for event in _run_loop_impl(
         session,
@@ -423,6 +689,16 @@ async def resume_loop(session: Session, run_id: str, opts: RunOptions) -> AsyncI
     checkpoint = run_record.checkpoint
     if checkpoint is None:
         return
+    requested_contract = _build_run_contract(session, checkpoint.prompt, opts)
+    try:
+        stored_contract = run_contract_from_meta(run_record.meta)
+        ensure_run_contract_compatible(
+            stored_contract,
+            requested_contract,
+            allow_legacy=opts.allow_legacy_resume,
+        )
+    except (RunContractMismatchError, TypeError, ValueError) as exc:
+        raise ConfigError(f"Cannot safely resume run {run_id}: {exc}") from None
     async for event in _run_loop_impl(
         session,
         checkpoint.prompt,
@@ -533,12 +809,25 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
 ) -> AsyncIterator[Event]:
     agent = session.agent
     session.active_run_id = run_id
+    _initial_event_seq = 0
+    if resume_checkpoint is not None and agent.run_store is not None:
+        _stored_events = await agent.run_store.load_events(run_id)
+        _initial_event_seq = max((row.seq for row in _stored_events), default=0)
     # Per-run event buffer: observational events batch between flush points; the
     # runner flushes tool start/end per-event to keep them durable at the yield.
-    session._event_journal = RunEventBuffer(agent.run_store, run_id)
+    session._event_journal = RunEventBuffer(agent.run_store, run_id, initial_seq=_initial_event_seq)
     # Reset run-level model-fallback state so each run starts on the primary model.
     session.active_model = None
     session.fallback_index = 0
+    if resume_checkpoint is not None:
+        _core_state = resume_checkpoint.extension_state.get("linch.core", {})
+        if isinstance(_core_state, dict):
+            _active_model = _core_state.get("active_model")
+            _fallback_index = _core_state.get("fallback_index")
+            session.active_model = _active_model if isinstance(_active_model, str) else None
+            session.fallback_index = (
+                max(0, _fallback_index) if isinstance(_fallback_index, int) else 0
+            )
     started = time.time()
     total = Usage()
     running_cost: float | None = None  # accumulated USD cost; None until first priced turn
@@ -587,19 +876,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
     session.active_budget = _budget
 
     # Resolve final_tool_name: RunOptions wins over Agent
-    effective_final_tool = opts.final_tool_name or getattr(agent, "final_tool_name", None)
-
-    # Providers that synthesize a final schema tool (rather than returning JSON
-    # directly) declare that distinct transport detail in capabilities. Wire the
-    # schema name as terminal only for that mode; native JSON-schema and
-    # JSON-object providers finish through the normal text/JSON parser path.
-    # An explicit final_tool_name still wins.
-    if effective_final_tool is None:
-        _schema = opts.output_schema or getattr(agent, "output_schema", None)
-        if _schema is not None and hasattr(agent.provider, "capabilities"):
-            _provider_caps = agent.provider.capabilities(agent.model)
-            if getattr(_provider_caps, "structured_output_terminal_tool", False):
-                effective_final_tool = _schema.name
+    effective_final_tool = _effective_final_tool_name(agent, opts)
 
     # Loop guard — detects repeated identical tool calls and consecutive
     # failure streaks.  On by default (Agent sets self.loop_guard = LoopGuard()
@@ -709,9 +986,16 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         # Snapshot undrained align() entries so steering intent survives a crash
         # (restored on resume; empty again after the drain).
         checkpoint.pending_alignment = _alignment_queue_to_dicts(session)
+        if not isinstance(checkpoint.extension_state, dict):
+            raise ConfigError("RunCheckpoint.extension_state must be a dict")
+        if session.active_model is not None or session.fallback_index:
+            checkpoint.extension_state["linch.core"] = {
+                "active_model": session.active_model,
+                "fallback_index": session.fallback_index,
+            }
+        else:
+            checkpoint.extension_state.pop("linch.core", None)
         if checkpointable_hooks:
-            if not isinstance(checkpoint.extension_state, dict):
-                raise ConfigError("RunCheckpoint.extension_state must be a dict")
             # Preserve namespaces owned by inactive/unknown extensions; only
             # the active hooks replace their own durable snapshot.
             checkpoint.extension_state = {
@@ -1163,13 +1447,18 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 )
                 resumed_assistant = True
 
-            if not resumed_assistant and await maybe_compact_resilient(session, agent, signal):
+            if not resumed_assistant and await maybe_compact_resilient(
+                session,
+                agent,
+                signal,
+                model=model_override or session.active_model or agent.model,
+            ):
                 reset_read_tracker_after_compaction(session, agent)
+                _re_inject_skill_context(session)
                 await _maybe_save_provider_snapshot(session)
                 event = build_compaction_event(session)
                 await _persist_event(session, run_id, event)
                 yield event
-                _re_inject_skill_context(session)
 
             # ── Context building (RAG-per-turn, schema injection, …) ──────
             context_result = (
@@ -1214,16 +1503,50 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                     await _persist_event(session, run_id, hook_event)
                     yield hook_event
                 if provider_action == "continue":
-                    async for event in _gate_retry_tail(
-                        session,
-                        run_id=run_id,
-                        feedback=provider_feedback or "",
-                    ):
-                        yield event
+                    _pending_tools = (
+                        [
+                            block
+                            for block in checkpoint.assistant_message.content
+                            if isinstance(block, ToolUseBlock)
+                        ]
+                        if resumed_assistant and checkpoint.assistant_message is not None
+                        else []
+                    )
+                    if _pending_tools:
+                        async for event in _final_tool_retry_tail(
+                            session,
+                            run_id=run_id,
+                            tool_blocks=_pending_tools,
+                            final_id=_pending_tools[0].id,
+                            feedback=provider_feedback or "Provider hook requested another turn.",
+                        ):
+                            yield event
+                    else:
+                        async for event in _gate_retry_tail(
+                            session,
+                            run_id=run_id,
+                            feedback=provider_feedback or "",
+                        ):
+                            yield event
                     await _end_active_turn()
                     await _save_checkpoint("turn_complete", turn_index=turn_index)
                     continue
                 if provider_action == "stop_success":
+                    if resumed_assistant and checkpoint.assistant_message is not None:
+                        _stopped_tools = [
+                            block
+                            for block in checkpoint.assistant_message.content
+                            if isinstance(block, ToolUseBlock)
+                        ]
+                        if _stopped_tools:
+                            async for event in _final_tool_retry_tail(
+                                session,
+                                run_id=run_id,
+                                tool_blocks=_stopped_tools,
+                                final_id=_stopped_tools[0].id,
+                                feedback="Provider hook stopped before tool execution.",
+                            ):
+                                yield event
                     _dur = int((time.time() - started) * 1000)
                     _final_result = _build_run_result("success", "end_turn", duration_ms=_dur)
                     await _end_active_turn()
@@ -1240,6 +1563,21 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                         yield event
                     return
                 if provider_action == "stop":
+                    if resumed_assistant and checkpoint.assistant_message is not None:
+                        _stopped_tools = [
+                            block
+                            for block in checkpoint.assistant_message.content
+                            if isinstance(block, ToolUseBlock)
+                        ]
+                        if _stopped_tools:
+                            async for event in _final_tool_retry_tail(
+                                session,
+                                run_id=run_id,
+                                tool_blocks=_stopped_tools,
+                                final_id=_stopped_tools[0].id,
+                                feedback=provider_feedback or "Provider hook stopped the run.",
+                            ):
+                                yield event
                     async for event in _emit_error_terminal(final_text_value=provider_feedback):
                         yield event
                     return
@@ -1304,6 +1642,8 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                     if isinstance(item, AssistantAssembly):
                         assembly = item
                     else:
+                        if isinstance(item, CompactionEvent):
+                            await _maybe_save_provider_snapshot(session)
                         await _persist_event(session, run_id, item)
                         yield item
 
@@ -1382,10 +1722,25 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 # message + usage are already committed (consistent with the
                 # text-path retry), so inject feedback and loop.
                 if after_action == "continue":
-                    async for event in _gate_retry_tail(
-                        session, run_id=run_id, feedback=after_feedback or ""
-                    ):
-                        yield event
+                    _after_tools = [
+                        block
+                        for block in assembly.message.content
+                        if isinstance(block, ToolUseBlock)
+                    ]
+                    if _after_tools:
+                        async for event in _final_tool_retry_tail(
+                            session,
+                            run_id=run_id,
+                            tool_blocks=_after_tools,
+                            final_id=_after_tools[0].id,
+                            feedback=after_feedback or "Provider hook requested another turn.",
+                        ):
+                            yield event
+                    else:
+                        async for event in _gate_retry_tail(
+                            session, run_id=run_id, feedback=after_feedback or ""
+                        ):
+                            yield event
                     await _end_active_turn()
                     await _save_checkpoint("turn_complete", turn_index=turn_index)
                     continue
@@ -1503,7 +1858,11 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 turn_index=turn_index,
                 on_permissions_resolved=_checkpoint_tool_executing,
             ):
-                await _persist_event(session, run_id, event)
+                # Progress is an intentionally transient live projection.  It
+                # may contain high-frequency or sensitive UI detail, so do not
+                # write it into the durable run journal.
+                if not isinstance(event, ToolProgressEvent):
+                    await _persist_event(session, run_id, event)
                 if isinstance(event, (ToolCallStartEvent, ToolCallEndEvent)):
                     # Recovery-critical: keep tool start/end durable at the yield
                     # boundary (a consumer can crash at the yield below).

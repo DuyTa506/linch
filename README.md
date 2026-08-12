@@ -4,6 +4,11 @@
 
 **linch** is an async-first, event-driven Python SDK for building agent loops inside your own application.
 
+Linch 2.0 is intentionally an SDK rather than a coding-agent product: a bare
+`Agent` is domain-neutral and has no implicit workspace or shell authority.
+Choose a tool registry or preset explicitly. Upgrading from 1.x? Read the
+[2.0 migration guide](docs/migration-2.0.md).
+
 It gives you the runtime pieces that production agents usually need but simple tool-calling wrappers leave to you: streamed events, tool scheduling, context/RAG, tiered memory, virtual filesystem offloading, structured outputs, permissions, retries, provider adapters, cost tracking, evals, MCP, skills, and subagents.
 
 Use linch when you want to build your own domain workflow — not force it into a hosted assistant, a rigid graph DSL, or a black-box multi-agent abstraction.
@@ -135,11 +140,19 @@ agent = Agent(
 async def main():
     session = await agent.session()
 
-    async for event in session.run("Summarize what this project does in one paragraph."):
+    async for event in session.run("Explain what an embeddable agent SDK is in one paragraph."):
         if event.type == "result":
             print(event.final_text)
 
 asyncio.run(main())
+```
+
+For a coding/workspace agent, make that authority visible at construction:
+
+```python
+from linch import Agent, workspace_tools
+
+agent = Agent(model="gpt-5", tools=workspace_tools())
 ```
 
 Put `OPENAI_API_KEY=...` in `.env` or export it in your shell. Never commit `.env`.
@@ -178,6 +191,11 @@ A `Session` represents one conversation or workflow run. One agent can serve man
 
 `coordinator=True` turns the parent into a pure orchestrator — it loses heavy tools (Edit/Write/Bash) and gains `SubagentContinueTool` and `TaskStopTool`. Workers receive full tool access. Background workers (`run_in_background=True` on Subagent) deliver results via `<task-notification>` at the top of the next turn. Fork/continue lets you re-engage any retained worker with its full prior context via `SubagentContinue`.
 
+Background delivery is in-process: a `RunStore` keeps status audit telemetry,
+but active detached tasks and result notifications are not reconstructed after
+a process restart. Use an application-owned durable queue/workflow when that
+delivery guarantee is required.
+
 ### Events
 
 linch streams the loop as events instead of hiding execution behind a blocking function call. This makes it easier to build CLIs, web UIs, background workers, and observability integrations.
@@ -191,7 +209,7 @@ Built-in adapters are available when you want a standard extension as a hook:
 `FinalAnswerVerifierHook`, and `StopPredicateHook`.
 
 ```python
-from linch import Agent, HookResult
+from linch import Agent, HookResult, workspace_tools
 
 class GuardTools:
     def on_pre_tool_use(self, ctx):
@@ -201,6 +219,7 @@ class GuardTools:
 
 agent = Agent(
     model="gpt-5",
+    tools=workspace_tools(),
     hooks=[GuardTools()],
     permissions={"mode": "skip-dangerous"},
 )

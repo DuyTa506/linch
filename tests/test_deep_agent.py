@@ -312,7 +312,9 @@ def test_deep_agent_planner_has_no_real_disk_write_tools() -> None:
     assert "Write" not in tools
     assert "Edit" not in tools
     assert "Bash" not in tools
-    assert "write_file" in tools or "read_file" in tools  # can use virtual FS
+    assert "write_file" not in tools
+    assert "edit_file" not in tools
+    assert "read_file" in tools
 
 
 async def test_deep_agent_specialized_subagents_includes_planner(tmp_path: Path) -> None:
@@ -833,6 +835,60 @@ def test_deep_agent_forwards_budget_and_max_turns(tmp_path: Path) -> None:
 
     assert agent.budget is budget
     assert agent.max_turns == 7
+
+
+def test_deep_agent_balanced_profile_has_safe_defaults(tmp_path: Path) -> None:
+    from linch import create_deep_agent
+
+    agent = create_deep_agent(
+        model="gpt-5",
+        provider=FakeProvider(),
+        cwd=str(tmp_path),
+        durable=False,
+    )
+
+    assert agent.deep_agent_profile.name == "balanced"
+    assert agent.max_turns == 64
+    assert agent.budget is not None
+    assert agent.budget.max_tokens == 1_000_000
+    assert agent.retain_subagents is True
+
+
+def test_deep_agent_unbounded_profile_requires_explicit_name(tmp_path: Path) -> None:
+    from linch import create_deep_agent
+
+    agent = create_deep_agent(
+        model="gpt-5",
+        provider=FakeProvider(),
+        cwd=str(tmp_path),
+        profile="unbounded",
+        durable=False,
+    )
+
+    assert agent.max_turns == float("inf")
+    assert agent.budget is None
+
+
+async def test_deep_agent_explicitly_enables_required_feature_profile(tmp_path: Path) -> None:
+    from linch import create_deep_agent
+    from linch.sessions import InMemorySessionStore
+
+    agent = create_deep_agent(
+        model="gpt-5",
+        provider=FakeProvider(),
+        cwd=str(tmp_path),
+        durable=False,
+        session_store=InMemorySessionStore(),
+    )
+
+    assert agent.features.skills
+    assert agent.features.subagents
+    assert agent.features.filesystem
+    assert not agent.features.mcp
+    session = await agent.session(id="profile")
+    assert session.filesystem is not None
+    assert agent.subagent_registry is not None
+    assert agent.tools.get("Skill") is not None
 
 
 def test_deep_agent_loop_guard_on_by_default(tmp_path: Path) -> None:

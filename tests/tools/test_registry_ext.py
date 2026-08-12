@@ -5,7 +5,14 @@ from __future__ import annotations
 import pytest
 
 from linch.tools.base import ToolContext, ToolResult, ToolScope
-from linch.tools.registry import ToolRegistry, default_tools, empty_tools, tools_from_defaults
+from linch.tools.registry import (
+    ToolRegistry,
+    coding_tools,
+    default_tools,
+    empty_tools,
+    tools_from_defaults,
+    workspace_tools,
+)
 
 # ── Minimal fake tool ───────────────────────────────────────────────────────
 
@@ -95,6 +102,15 @@ def test_subset_include_and_exclude():
 def test_empty_tools_no_args():
     r = empty_tools()
     assert r.list() == []
+
+
+def test_workspace_and_coding_presets_are_explicit_full_registries():
+    expected = {"Read", "Write", "Edit", "Bash", "Glob", "Grep"}
+
+    assert expected <= {tool.name for tool in workspace_tools().list()}
+    assert expected <= {tool.name for tool in coding_tools().list()}
+    # Kept only as a 2.0 migration alias; Agent itself no longer calls it.
+    assert expected <= {tool.name for tool in default_tools().list()}
 
 
 def test_empty_tools_with_args():

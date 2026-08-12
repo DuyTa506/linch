@@ -24,6 +24,9 @@ class _TextProvider:
 
 class _DurableStateHook:
     checkpoint_key = "test.durable-state"
+    resume_policy_id = "test.durable-state-policy"
+    resume_policy_version = "1"
+    resume_policy_config = {"fixture": "durable-state"}
 
     def __init__(self, state: dict[str, Any]) -> None:
         self.state = state
@@ -91,6 +94,7 @@ async def test_checkpointable_hook_snapshots_session_scoped_json_state() -> None
 
 async def test_checkpointable_hook_restores_matching_state_and_preserves_other_extensions() -> None:
     from linch.run_store import InMemoryRunStore, RunCheckpoint
+    from linch.session import RunOptions
     from linch.sessions import InMemorySessionStore
     from linch.types import Usage
 
@@ -120,7 +124,7 @@ async def test_checkpointable_hook_restores_matching_state_and_preserves_other_e
     )
     session = await agent.session(id="session-restore")
 
-    events = await _collect(session.resume(run.id))
+    events = await _collect(session.resume(run.id, RunOptions(allow_legacy_resume=True)))
 
     assert events[-1].type == "result"
     assert hook.restored == [
@@ -139,6 +143,8 @@ async def test_incomplete_checkpointable_hook_fails_closed_with_configuration_er
 
     class _IncompleteHook:
         checkpoint_key = "test.incomplete"
+        resume_policy_id = "test.incomplete-policy"
+        resume_policy_config: dict[str, Any] = {}
 
         def checkpoint_state(self, session: Any, run_id: str) -> dict[str, Any]:
             return {}

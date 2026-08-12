@@ -4,18 +4,21 @@ from typing import Any
 
 
 def _agent(provider: Any, tmp_path: Any, **kwargs: Any) -> Any:
-    from linch import Agent
+    from linch import Agent, workspace_tools
     from linch.config import FeatureFlags
     from linch.sessions import InMemorySessionStore
 
     kwargs.setdefault("result_offload", None)
+    filesystem = kwargs.get("filesystem") is not None
+    kwargs.setdefault("read_before_write", True)
     return Agent(
         model="m",
         provider=provider,
         cwd=str(tmp_path),
+        tools=workspace_tools(),
         permissions={"mode": "skip-dangerous"},
         session_store=InMemorySessionStore(),
-        features=FeatureFlags(skills=False, subagents=False, mcp=False),
+        features=FeatureFlags(skills=False, subagents=False, mcp=False, filesystem=filesystem),
         **kwargs,
     )
 

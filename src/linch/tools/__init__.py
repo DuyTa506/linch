@@ -10,7 +10,7 @@ from .base import Citation, ResourceAccess, ResourceMode, Tool, ToolContext, Too
 from .builtin import BashTool, EditTool, GlobTool, GrepTool, ReadTool, WriteTool
 from .file_tracker import FileReadTracker
 from .function import FunctionTool, tool
-from .registry import ToolRegistry, default_tools
+from .registry import ToolRegistry, coding_tools, default_tools, workspace_tools
 from .tasks import TaskCreateTool, TaskGetTool, TaskListTool, TaskUpdateTool
 
 defaultTools = default_tools
@@ -42,6 +42,8 @@ __all__ = [
     "ToolScope",
     "WriteTool",
     "defaultTools",
+    "coding_tools",
     "default_tools",
     "tool",
+    "workspace_tools",
 ]

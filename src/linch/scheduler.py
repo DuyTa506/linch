@@ -11,6 +11,7 @@ from xml.sax.saxutils import escape
 from .abort import AbortContext, throw_if_aborted
 from .errors import AbortError, ToolTimeoutError
 from .events import (
+    BackgroundWorkerEvent,
     Event,
     PermissionRequestEvent,
     PermissionRequestItem,
@@ -18,6 +19,7 @@ from .events import (
     SkillInvokedEvent,
     ToolCallEndEvent,
     ToolCallStartEvent,
+    ToolProgressEvent,
 )
 from .hooks import (
     HookDispatcher,
@@ -56,6 +58,12 @@ class ToolExecutionOutcome:
     block: ToolResultBlock
     tool_result: ToolResult
     duration_ms: int
+
+
+@dataclass(slots=True)
+class _RunningTool:
+    task: asyncio.Task[ToolExecutionOutcome]
+    progress: asyncio.Queue[ToolProgressEvent]
 
 
 def _tool_result_error(content: str, duration_ms: int = 0) -> ToolResult:
@@ -151,6 +159,16 @@ def _resolve_call(block: ToolUseBlock, tools: Any, cwd: str) -> ResolvedCall:
             is_immediate_error=True,
             immediate_error_reason=str(exc),
         )
+    if not isinstance(validated, dict):
+        return ResolvedCall(
+            id=block.id,
+            block=block,
+            tool=tool,
+            input=block.input,
+            summary=f"{block.name}(invalid input)",
+            is_immediate_error=True,
+            immediate_error_reason="tool.validate() must return a dict",
+        )
 
     try:
         summary = tool.summarize(validated)
@@ -191,6 +209,7 @@ async def _run_background_tool(
     bg_id: str,
     turn_index: int | None,
     middleware_error: str | None,
+    origin_run_id: str,
 ) -> None:
     """Run a detached tool call and post its completion as a <task-notification>.
 
@@ -209,6 +228,7 @@ async def _run_background_tool(
             signal,
             turn_index=turn_index,
             middleware_error=middleware_error,
+            run_id=origin_run_id,
         )
     except (AbortError, asyncio.CancelledError):
         raise
@@ -234,13 +254,25 @@ async def _run_background_tool(
     from .types import Message, TextBlock
 
     notifications.append(Message(role="user", content=[TextBlock(text=notification)]))
+    completion_event = BackgroundWorkerEvent(
+        worker_id=bg_id,
+        status=status_str,
+        display_name=tool_name,
+    )
     emit_list = getattr(session, "pending_child_events", None)
     if emit_list is not None:
-        from .events import BackgroundWorkerEvent
+        emit_list.append(completion_event)
 
-        emit_list.append(
-            BackgroundWorkerEvent(worker_id=bg_id, status=status_str, display_name=tool_name)
-        )
+    # Attribute detached completion to the run that launched it, even after
+    # ``Session._iterate`` has cleared ``active_run_id``. This is best-effort:
+    # notification delivery remains in-memory, but the typed completion record
+    # survives in the existing run event journal when a RunStore is configured.
+    run_store = getattr(agent, "run_store", None)
+    if run_store is not None:
+        try:
+            await run_store.append_event(origin_run_id, completion_event)
+        except Exception:
+            pass
 
 
 def _tool_name(call: ResolvedCall) -> str:
@@ -248,8 +280,8 @@ def _tool_name(call: ResolvedCall) -> str:
 
 
 def _effective_input(call: ResolvedCall, decision: PermissionDecision) -> dict[str, Any]:
-    if decision.decision == "allow" and decision.updated_input is not None:
-        return decision.updated_input
+    # Canonical input is finalized before permission evaluation. Permission
+    # decisions cannot mutate it in Linch 2.
     return call.input
 
 
@@ -277,6 +309,8 @@ async def _execute_one(
     *,
     turn_index: int | None = None,
     middleware_error: str | None = None,
+    on_progress: Callable[[ToolProgressEvent], None] | None = None,
+    run_id: str | None = None,
 ) -> ToolExecutionOutcome:
     throw_if_aborted(signal)
 
@@ -286,14 +320,14 @@ async def _execute_one(
             _tool_result_error(call.immediate_error_reason or "unknown error"),
         )
 
+    if middleware_error is not None:
+        return _execution_outcome(call.id, _tool_result_error(middleware_error))
+
     if decision.decision == "deny":
         return _execution_outcome(
             call.id,
             _tool_result_error(f"Tool call denied: {decision.reason or 'permission denied'}"),
         )
-
-    if middleware_error is not None:
-        return _execution_outcome(call.id, _tool_result_error(middleware_error))
 
     # A PreToolUse hook short-circuited this call (e.g. cache hit): use the
     # supplied result instead of executing. Re-run offload so an oversized
@@ -310,23 +344,70 @@ async def _execute_one(
     opts = _retry_options(agent)
     max_attempts = opts.max_attempts if opts is not None else 1
     started = time.perf_counter()
-    last_exc: Exception | None = None
 
-    run_id = session.active_run_id or "unknown"
+    execution_run_id = run_id or session.active_run_id or "unknown"
+    accepting_progress = True
+
+    def _report_progress(message: str, data: dict[str, Any] | None) -> None:
+        if not accepting_progress or on_progress is None:
+            return
+        on_progress(
+            ToolProgressEvent(
+                tool_use_id=call.id,
+                tool_name=_tool_name(call),
+                message=message,
+                data=dict(data) if data is not None else None,
+            )
+        )
+
     ctx = ToolContext(
         cwd=_effective_cwd(session, agent),
         session_id=session.id,
-        run_id=run_id,
+        run_id=execution_run_id,
         session_store=session.store,
         signal=signal,
         file_read_tracker=getattr(session, "file_read_tracker", None),
+        emit=_report_progress,
         deps=getattr(session, "run_deps", None),
         filesystem=getattr(session, "filesystem", None),
         # Stable across resume: run_id is reused by resume_loop and call.id comes
         # from the persisted provider_view, so a re-executed tool sees the same key.
-        idempotency_key=f"{run_id}:{call.id}",
+        idempotency_key=f"{execution_run_id}:{call.id}",
     )
+    try:
+        return await _execute_tool_attempts(
+            call,
+            decision,
+            agent,
+            session,
+            signal,
+            ctx,
+            tool,
+            result_timeout_ms,
+            opts,
+            max_attempts,
+            started,
+        )
+    finally:
+        # A tool may retain ctx.report_progress and call it from a stray task.
+        # Once execute() settles those late reports are stale and must be ignored.
+        accepting_progress = False
 
+
+async def _execute_tool_attempts(
+    call: ResolvedCall,
+    decision: PermissionDecision,
+    agent: Any,
+    session: Any,
+    signal: AbortContext,
+    ctx: ToolContext,
+    tool: Any,
+    result_timeout_ms: float | None,
+    opts: RetryOptions | None,
+    max_attempts: int,
+    started: float,
+) -> ToolExecutionOutcome:
+    last_exc: Exception | None = None
     for attempt in range(max_attempts):
         if attempt > 0:
             throw_if_aborted(signal)
@@ -574,6 +655,26 @@ async def _dispatch_pre_tool_use(
     return final_input, None, None, outcome.events
 
 
+def _canonicalize_hook_input(call: ResolvedCall, input: Any) -> str | None:
+    """Validate the final PreToolUse input and update the resolved call in place."""
+    if call.tool is None:
+        return call.immediate_error_reason or "tool is not registered"
+    if not isinstance(input, dict):
+        return "PreToolUse input must be a dict"
+    try:
+        validated = call.tool.validate(input)
+    except Exception as exc:
+        return f"PreToolUse produced invalid input: {exc}"
+    if not isinstance(validated, dict):
+        return "PreToolUse produced invalid input: tool.validate() must return a dict"
+    call.input = validated
+    try:
+        call.summary = call.tool.summarize(validated)
+    except Exception:
+        call.summary = f"{_tool_name(call)}(...)"
+    return None
+
+
 async def _dispatch_post_tool_use(
     dispatcher: HookDispatcher,
     call: ResolvedCall,
@@ -791,8 +892,34 @@ def _strip_background_hints(
     return stripped, bg_ids
 
 
+def _enforce_turn_tool_availability(resolved: list[ResolvedCall], session: Any) -> None:
+    """Fail closed when a call names a tool not offered on this turn.
+
+    ``current_turn_allowed_tools`` is restored from skill overlays/checkpoints
+    and also shapes the provider request. A provider can nevertheless emit an
+    unoffered/global tool name, so execution must enforce the same availability
+    boundary independently of provider compliance and permission mode.
+    """
+    allowed = getattr(session, "current_turn_allowed_tools", None)
+    if allowed is None:
+        return
+    offered = {str(name) for name in allowed}
+    for call in resolved:
+        if call.is_immediate_error or _tool_name(call) in offered:
+            continue
+        call.is_immediate_error = True
+        call.immediate_error_reason = (
+            f"Tool '{_tool_name(call)}' was not offered for the current turn"
+        )
+        call.summary = f"{_tool_name(call)}(unavailable)"
+
+
 def _evaluate_permissions(
-    resolved: list[ResolvedCall], agent: Any, session: Any
+    resolved: list[ResolvedCall],
+    agent: Any,
+    session: Any,
+    *,
+    middleware_errors: dict[str, str] | None = None,
 ) -> tuple[list[PermissionDecision], list[int]]:
     """First (synchronous) permission pass.
 
@@ -806,6 +933,9 @@ def _evaluate_permissions(
             decisions.append(
                 PermissionDecision(decision="deny", reason=call.immediate_error_reason)
             )
+            continue
+        if middleware_errors and call.id in middleware_errors:
+            decisions.append(PermissionDecision(decision="deny", reason=middleware_errors[call.id]))
             continue
 
         tool_obj = call.tool
@@ -909,7 +1039,7 @@ async def _run_serial_batch(
             summary=call.summary,
         )
         try:
-            outcome = await _execute_one(
+            running = _start_tool_execution(
                 call,
                 decision,
                 agent,
@@ -918,6 +1048,9 @@ async def _run_serial_batch(
                 turn_index=turn_index,
                 middleware_error=middleware_errors.get(call.id),
             )
+            async for progress in _drain_tool_execution(running):
+                yield progress
+            outcome = running.task.result()
             outcome, hook_events = await _dispatch_post_tool_use(
                 hook_dispatcher,
                 call,
@@ -984,30 +1117,28 @@ async def _run_parallel_batch(
             summary=call.summary,
         )
 
-    tasks = [
-        asyncio.ensure_future(
-            _execute_one(
-                call,
-                decision,
-                agent,
-                session,
-                signal,
-                turn_index=turn_index,
-                middleware_error=middleware_errors.get(call.id),
-            )
+    running = [
+        _start_tool_execution(
+            call,
+            decision,
+            agent,
+            session,
+            signal,
+            turn_index=turn_index,
+            middleware_error=middleware_errors.get(call.id),
         )
         for call, _idx, decision in batch["calls"]
     ]
 
-    # Await each call in provider order and emit its end as soon as that prefix
-    # completes — no full-batch barrier. All tasks run concurrently (started
-    # above), so total time is unchanged, but a fast provider-first tool no
-    # longer waits behind a slow later one before its end event is emitted.
-    # Provider order holds because tasks[i] is awaited before tasks[i + 1].
     emitted_ids: set[str] = set()
     try:
-        for (call, _idx, decision), task in zip(batch["calls"], tasks, strict=True):
-            outcome = await task
+        for (call, _idx, decision), execution in zip(batch["calls"], running, strict=True):
+            # While waiting for the next provider-ordered result, multiplex
+            # every call's bounded progress queue. A later tool can therefore
+            # update live without allowing its final end bracket to overtake.
+            async for progress in _drain_parallel_progress_until(running, execution.task):
+                yield progress
+            outcome = execution.task.result()
             input = _effective_input(call, decision)
             outcome, hook_events = await _dispatch_post_tool_use(
                 hook_dispatcher,
@@ -1033,11 +1164,11 @@ async def _run_parallel_batch(
             if sn is not None:
                 yield SkillCompletedEvent(name=sn, is_error=outcome.block.is_error)
     except (AbortError, asyncio.CancelledError):
-        for t in tasks:
-            t.cancel()
+        for execution in running:
+            execution.task.cancel()
         # Await the cancelled tool tasks so their finalizers run before we
         # synthesize aborted ends and re-raise.
-        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(*(execution.task for execution in running), return_exceptions=True)
         # Orphan-bracket synthesis: every started call that has not already
         # emitted a real end gets exactly one synthetic aborted end, in provider
         # order, so cancellation still closes every start/end bracket.
@@ -1059,6 +1190,104 @@ async def _run_parallel_batch(
         raise
 
 
+def _start_tool_execution(
+    call: ResolvedCall,
+    decision: PermissionDecision,
+    agent: Any,
+    session: Any,
+    signal: AbortContext,
+    *,
+    turn_index: int | None,
+    middleware_error: str | None,
+) -> _RunningTool:
+    # One pending update per call. A fast producer coalesces to its latest
+    # progress instead of creating an unbounded queue behind a slow consumer.
+    progress: asyncio.Queue[ToolProgressEvent] = asyncio.Queue(maxsize=1)
+
+    def _on_progress(event: ToolProgressEvent) -> None:
+        if progress.full():
+            try:
+                progress.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+        try:
+            progress.put_nowait(event)
+        except asyncio.QueueFull:
+            pass
+
+    task = asyncio.ensure_future(
+        _execute_one(
+            call,
+            decision,
+            agent,
+            session,
+            signal,
+            turn_index=turn_index,
+            middleware_error=middleware_error,
+            on_progress=_on_progress,
+        )
+    )
+    return _RunningTool(task=task, progress=progress)
+
+
+async def _drain_tool_execution(running: _RunningTool) -> AsyncIterator[ToolProgressEvent]:
+    """Yield bounded/coalesced progress live until the tool task settles."""
+    while True:
+        while not running.progress.empty():
+            yield running.progress.get_nowait()
+        if running.task.done():
+            # A report can race with settlement; drain it before the end event.
+            while not running.progress.empty():
+                yield running.progress.get_nowait()
+            return
+        progress_wait = asyncio.ensure_future(running.progress.get())
+        done, _ = await asyncio.wait(
+            [running.task, progress_wait], return_when=asyncio.FIRST_COMPLETED
+        )
+        if progress_wait in done:
+            yield progress_wait.result()
+        else:
+            progress_wait.cancel()
+            try:
+                await progress_wait
+            except asyncio.CancelledError:
+                pass
+
+
+async def _drain_parallel_progress_until(
+    executions: list[_RunningTool],
+    until: asyncio.Task[ToolExecutionOutcome],
+) -> AsyncIterator[ToolProgressEvent]:
+    while True:
+        for execution in executions:
+            while not execution.progress.empty():
+                yield execution.progress.get_nowait()
+        if until.done():
+            return
+
+        unfinished = [execution for execution in executions if not execution.task.done()]
+
+        queue_waiters = {
+            asyncio.ensure_future(execution.progress.get()): execution for execution in unfinished
+        }
+        try:
+            done, _ = await asyncio.wait(
+                [*(execution.task for execution in unfinished), *queue_waiters],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for waiter in queue_waiters:
+                if waiter in done:
+                    yield waiter.result()
+                else:
+                    waiter.cancel()
+        finally:
+            for waiter in queue_waiters:
+                if not waiter.done():
+                    waiter.cancel()
+            if queue_waiters:
+                await asyncio.gather(*queue_waiters, return_exceptions=True)
+
+
 async def execute_tool_calls(
     blocks: list[ToolUseBlock],
     agent: Any,
@@ -1075,10 +1304,45 @@ async def execute_tool_calls(
 
     effective_tools = getattr(session, "tools_override", None) or agent.tools
     resolved = [_resolve_call(b, effective_tools, agent.cwd) for b in blocks]
+    _enforce_turn_tool_availability(resolved, session)
     hook_dispatcher = HookDispatcher(_scheduler_hooks(agent))
 
-    # First pass: synchronous evaluate()
-    decisions, ask_indices = _evaluate_permissions(resolved, agent, session)
+    # PreToolUse is the only input-mutation seam. It runs after the tool's
+    # initial schema validation but before final policy evaluation. Every
+    # mutation is validated again and becomes the canonical input used for
+    # summary, resources, stored-decision key, callback, and execution.
+    middleware_errors: dict[str, str] = {}
+    precomputed_results: dict[str, Any] = {}
+    if hook_dispatcher.active:
+        for call in resolved:
+            if call.is_immediate_error:
+                continue
+            (
+                updated_input,
+                blocked_reason,
+                precomputed_result,
+                hook_events,
+            ) = await _dispatch_pre_tool_use(
+                hook_dispatcher,
+                call,
+                call.input,
+                session,
+                turn_index=turn_index,
+            )
+            for hook_event in hook_events:
+                yield hook_event
+            invalid_reason = _canonicalize_hook_input(call, updated_input)
+            if invalid_reason is not None:
+                middleware_errors[call.id] = invalid_reason
+            elif blocked_reason is not None:
+                middleware_errors[call.id] = blocked_reason
+            elif precomputed_result is not None:
+                precomputed_results[call.id] = precomputed_result
+
+    # Final permission evaluation binds to the canonical, post-hook input.
+    decisions, ask_indices = _evaluate_permissions(
+        resolved, agent, session, middleware_errors=middleware_errors
+    )
 
     # Emit single aggregated PermissionRequestEvent before resolve
     if ask_indices:
@@ -1098,39 +1362,9 @@ async def execute_tool_calls(
     # Second pass: async resolve()
     await _resolve_ask_decisions(resolved, ask_indices, decisions, agent, session, signal)
 
-    # PreToolUse hooks can transform or block the permission-resolved input.
-    middleware_errors: dict[str, str] = {}
-    if hook_dispatcher.active:
-        for i, call in enumerate(resolved):
-            if call.is_immediate_error or decisions[i].decision != "allow":
-                continue
-            effective_input = _effective_input(call, decisions[i])
-            (
-                updated_input,
-                blocked_reason,
-                precomputed_result,
-                hook_events,
-            ) = await _dispatch_pre_tool_use(
-                hook_dispatcher,
-                call,
-                effective_input,
-                session,
-                turn_index=turn_index,
-            )
-            for hook_event in hook_events:
-                yield hook_event
-            decisions[i] = PermissionDecision(
-                decision="allow",
-                updated_input=updated_input,
-                precomputed_result=precomputed_result,
-            )
-            try:
-                if call.tool is not None:
-                    call.summary = call.tool.summarize(updated_input)
-            except Exception:
-                pass
-            if blocked_reason is not None:
-                middleware_errors[call.id] = blocked_reason
+    for i, call in enumerate(resolved):
+        if decisions[i].decision == "allow" and call.id in precomputed_results:
+            decisions[i].precomputed_result = precomputed_results[call.id]
 
     # Permissions are resolved and PreToolUse middleware has settled. Fire the
     # once-per-batch durability callback so the caller can persist the resolved
@@ -1175,6 +1409,7 @@ async def execute_tool_calls(
                     bg_id=bg_id,
                     turn_index=turn_index,
                     middleware_error=middleware_errors.get(call.id),
+                    origin_run_id=session.active_run_id or "unknown",
                 )
             )
             session.background_tasks.append(task)
