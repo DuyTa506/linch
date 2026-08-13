@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Literal, Protocol, runtime_checkable
 
-from ..tools import ToolResult
+from ..tools import CanonicalToolOutput, ToolResult
 from ..types import AssistantAssembly, ProviderRequest
 
 
@@ -81,6 +81,7 @@ class HookResult:
     assembly: AssistantAssembly | None = None
     input: dict[str, Any] | None = None
     tool_result: ToolResult | None = None
+    tool_output: CanonicalToolOutput | None = None
     final_text: str | None = None
     structured_output: dict[str, Any] | None = None
     structured_error: str | None = None
@@ -125,10 +126,16 @@ class HookResult:
         return cls(action="force_continue", feedback=feedback, reason=reason, **kwargs)
 
     @classmethod
-    def resolve(cls, *, tool_result: ToolResult, **kwargs: Any) -> HookResult:
+    def resolve(
+        cls,
+        *,
+        tool_result: ToolResult | None = None,
+        tool_output: CanonicalToolOutput | None = None,
+        **kwargs: Any,
+    ) -> HookResult:
         """Short-circuit a tool call at ``PreToolUse``: skip execution and use
-        ``tool_result`` as the outcome (success or error per its ``is_error``)."""
-        return cls(action="resolve", tool_result=tool_result, **kwargs)
+        the supplied legacy or canonical output as its outcome."""
+        return cls(action="resolve", tool_result=tool_result, tool_output=tool_output, **kwargs)
 
     def with_events(self, events: list[Any]) -> HookResult:
         self.metadata = {**self.metadata, "events": [*self.metadata.get("events", []), *events]}

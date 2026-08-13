@@ -5,6 +5,8 @@ import sqlite3
 from pathlib import Path
 from uuid import uuid4
 
+from linch.durability import InboxDelivery, encode_inbox_delivery
+from linch.errors import ConfigError
 from linch.sessions.memory import now_iso
 from linch.sessions.tasks import CreateTaskInput, Task, TaskPatch
 from linch.types import Message, message_from_dict, message_to_dict
@@ -67,6 +69,21 @@ def _init_schema(conn: sqlite3.Connection) -> None:
           snapshot text not null,
           updated_at text not null
         );
+        create table if not exists session_inbox (
+          session_id text not null,
+          delivery_id text not null,
+          inbox_seq integer not null,
+          digest text not null,
+          enqueued_at text not null,
+          message text,
+          source text,
+          metadata_json text,
+          message_seq integer,
+          primary key (session_id, delivery_id),
+          unique (session_id, inbox_seq)
+        );
+        create index if not exists session_inbox_pending_idx
+          on session_inbox (session_id, message_seq, inbox_seq);
         """
     )
 
@@ -267,6 +284,12 @@ class SqliteSessionStore:
     async def append_messages(self, id: str, messages: list[Message]) -> list[StoredMessage]:
         return await self._exec.run(lambda c: _append_messages(c, id, messages))
 
+    async def enqueue_inbox(self, id: str, delivery: InboxDelivery) -> None:
+        await self._exec.run(lambda c: _enqueue_inbox(c, id, delivery))
+
+    async def commit_inbox(self, id: str, *, after_seq: int) -> list[StoredMessage]:
+        return await self._exec.run(lambda c: _commit_inbox(c, id, after_seq))
+
     async def save_provider_snapshot(self, id: str, snapshot: ProviderViewSnapshot) -> None:
         payload = json.dumps(snapshot_to_dict(snapshot))
         await self._exec.run(lambda c: _save_snapshot(c, id, payload))
@@ -419,6 +442,108 @@ def _append_messages(
     return stored
 
 
+def _enqueue_inbox(conn: sqlite3.Connection, id: str, delivery: InboxDelivery) -> None:
+    message_json, source, metadata_json = encode_inbox_delivery(delivery)
+    conn.execute("begin immediate")
+    if conn.execute("select 1 from sessions where id = ?", (id,)).fetchone() is None:
+        raise KeyError(f"session not found: {id}")
+    existing = conn.execute(
+        "select digest from session_inbox where session_id = ? and delivery_id = ?",
+        (id, delivery.delivery_id),
+    ).fetchone()
+    if existing is not None:
+        if existing[0] != delivery.digest:
+            raise ConfigError(
+                f"conflicting inbox delivery {delivery.delivery_id!r} for session {id!r}"
+            )
+        conn.commit()
+        return
+    inbox_seq = int(
+        conn.execute(
+            "select coalesce(max(inbox_seq), 0) + 1 from session_inbox where session_id = ?",
+            (id,),
+        ).fetchone()[0]
+    )
+    conn.execute(
+        """
+        insert into session_inbox (
+          session_id, delivery_id, inbox_seq, digest, enqueued_at,
+          message, source, metadata_json, message_seq
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, null)
+        """,
+        (
+            id,
+            delivery.delivery_id,
+            inbox_seq,
+            delivery.digest,
+            now_iso(),
+            message_json,
+            source,
+            metadata_json,
+        ),
+    )
+    conn.commit()
+
+
+def _commit_inbox(conn: sqlite3.Connection, id: str, after_seq: int) -> list[StoredMessage]:
+    if isinstance(after_seq, bool) or not isinstance(after_seq, int) or after_seq < 0:
+        raise ConfigError("after_seq must be a non-negative integer")
+    conn.execute("begin immediate")
+    if conn.execute("select 1 from sessions where id = ?", (id,)).fetchone() is None:
+        raise KeyError(f"session not found: {id}")
+
+    pending = conn.execute(
+        """
+        select delivery_id, message from session_inbox
+        where session_id = ? and message_seq is null
+        order by inbox_seq
+        """,
+        (id,),
+    ).fetchall()
+    cur_seq = int(
+        conn.execute(
+            "select coalesce(max(seq), 0) from messages where session_id = ?", (id,)
+        ).fetchone()[0]
+    )
+    if pending:
+        ts = now_iso()
+        for row in pending:
+            payload = row[1]
+            if payload is None:  # pragma: no cover - database corruption guard
+                raise ConfigError("pending inbox delivery has no message payload")
+            cur_seq += 1
+            conn.execute(
+                "insert into messages (session_id, seq, appended_at, message) values (?, ?, ?, ?)",
+                (id, cur_seq, ts, payload),
+            )
+            conn.execute(
+                """
+                update session_inbox
+                set message_seq = ?, message = null, source = null, metadata_json = null
+                where session_id = ? and delivery_id = ?
+                """,
+                (cur_seq, id, row[0]),
+            )
+        conn.execute("update sessions set updated_at = ? where id = ?", (ts, id))
+
+    rows = conn.execute(
+        """
+        select seq, appended_at, message from messages
+        where session_id = ? and seq > ? order by seq
+        """,
+        (id, after_seq),
+    ).fetchall()
+    conn.commit()
+    return [
+        StoredMessage(
+            seq=row[0],
+            appended_at=row[1],
+            message=message_from_dict(json.loads(row[2])),
+        )
+        for row in rows
+    ]
+
+
 def _update_meta(conn: sqlite3.Connection, id: str, meta: dict[str, object]) -> SessionRecord:
     row = conn.execute(
         "select id, created_at, updated_at, meta, invoked_skills from sessions where id = ?",
@@ -490,6 +615,7 @@ def _delete(conn: sqlite3.Connection, id: str) -> None:
     conn.execute("delete from tasks where session_id = ?", (id,))
     conn.execute("delete from task_counters where session_id = ?", (id,))
     conn.execute("delete from session_snapshots where session_id = ?", (id,))
+    conn.execute("delete from session_inbox where session_id = ?", (id,))
     conn.execute("delete from messages where session_id = ?", (id,))
     conn.execute("delete from sessions where id = ?", (id,))
     conn.commit()

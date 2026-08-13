@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
+from linch.durability import InboxDelivery, decode_inbox_message, encode_inbox_delivery
+from linch.errors import ConfigError
 from linch.sessions.tasks import CreateTaskInput, Task, TaskPatch
 from linch.types import Message
 
@@ -20,6 +23,15 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+@dataclass(slots=True)
+class _InboxRow:
+    digest: str
+    message_json: str | None
+    source: str | None
+    metadata_json: str | None
+    message_seq: int | None = None
+
+
 class InMemorySessionStore:
     def __init__(self) -> None:
         self._sessions: dict[str, SessionRecord] = {}
@@ -27,6 +39,10 @@ class InMemorySessionStore:
         self._snapshots: dict[str, dict[str, Any]] = {}
         self._tasks: dict[str, dict[str, Task]] = {}
         self._task_counter: dict[str, int] = {}
+        # Process-local implementation of the durable-inbox protocol.  It has
+        # identical dedupe/commit semantics but intentionally no restart
+        # guarantee.
+        self._inbox: dict[str, dict[str, _InboxRow]] = {}
 
     async def create(
         self, *, id: str | None = None, meta: dict[str, object] | None = None
@@ -41,6 +57,7 @@ class InMemorySessionStore:
         self._messages.setdefault(sid, [])
         self._tasks.setdefault(sid, {})
         self._task_counter.setdefault(sid, self._next_task_id(sid))
+        self._inbox.setdefault(sid, {})
         return record
 
     async def create_if_absent(
@@ -77,6 +94,51 @@ class InMemorySessionStore:
         rec.updated_at = ts
         return stored
 
+    async def enqueue_inbox(self, id: str, delivery: InboxDelivery) -> None:
+        if id not in self._sessions:
+            raise KeyError(f"session not found: {id}")
+        bucket = self._inbox.setdefault(id, {})
+        existing = bucket.get(delivery.delivery_id)
+        if existing is not None:
+            if existing.digest != delivery.digest:
+                raise ConfigError(
+                    f"conflicting inbox delivery {delivery.delivery_id!r} for session {id!r}"
+                )
+            return
+        message_json, source, metadata_json = encode_inbox_delivery(delivery)
+        bucket[delivery.delivery_id] = _InboxRow(
+            digest=delivery.digest,
+            message_json=message_json,
+            source=source,
+            metadata_json=metadata_json,
+        )
+
+    async def commit_inbox(self, id: str, *, after_seq: int) -> list[StoredMessage]:
+        if id not in self._sessions:
+            raise KeyError(f"session not found: {id}")
+        if isinstance(after_seq, bool) or not isinstance(after_seq, int) or after_seq < 0:
+            raise ConfigError("after_seq must be a non-negative integer")
+
+        ts = now_iso()
+        messages = self._messages[id]
+        for row in self._inbox.setdefault(id, {}).values():
+            if row.message_seq is not None:
+                continue
+            if row.message_json is None:  # pragma: no cover - internal corruption guard
+                raise ConfigError("pending inbox delivery has no message payload")
+            message = decode_inbox_message(row.message_json)
+            seq = len(messages) + 1
+            messages.append(StoredMessage(seq=seq, appended_at=ts, message=message))
+            row.message_seq = seq
+            # Keep the small receipt forever, discard the potentially large
+            # source payload after it is represented in message history.
+            row.message_json = None
+            row.source = None
+            row.metadata_json = None
+        if messages and messages[-1].seq > after_seq:
+            self._sessions[id].updated_at = ts
+        return [row for row in messages if row.seq > after_seq]
+
     async def save_provider_snapshot(self, id: str, snapshot: ProviderViewSnapshot) -> None:
         # Round-trip through the wire form so behavior matches the persisted stores.
         self._snapshots[id] = snapshot_to_dict(snapshot)
@@ -110,6 +172,7 @@ class InMemorySessionStore:
         self._snapshots.pop(id, None)
         self._tasks.pop(id, None)
         self._task_counter.pop(id, None)
+        self._inbox.pop(id, None)
 
     async def create_task(self, session_id: str, input: CreateTaskInput) -> Task:
         if session_id not in self._sessions:

@@ -11,6 +11,8 @@ import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
+import pytest
+
 
 class _Provider:
     id = "p"
@@ -85,21 +87,34 @@ async def test_force_release_aborts_and_unregisters_active_session() -> None:
     assert session._abort_controller.aborted
 
 
-async def test_force_release_continues_after_generator_teardown_error() -> None:
+async def test_force_release_keeps_generator_teardown_error_retryable() -> None:
     agent = _agent()
     session = await agent.session(id="s1")
 
     class FailingGenerator:
-        async def aclose(self) -> None:
-            raise ValueError("teardown failed")
+        calls = 0
 
+        async def aclose(self) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                raise ValueError("teardown failed")
+
+    gen = FailingGenerator()
     session._active = True
-    session._active_gen = FailingGenerator()
+    session._active_gen = gen
+
+    with pytest.raises(ValueError, match="teardown failed"):
+        await agent.release_session(session, force=True)
+
+    assert not session._closed
+    assert "s1" in agent._sessions
+    assert agent.session_store is not None
 
     await agent.release_session(session, force=True)
 
     assert session._closed
     assert "s1" not in agent._sessions
+    assert gen.calls == 2
 
 
 async def test_async_context_manager_releases_on_exit() -> None:
@@ -317,8 +332,6 @@ async def test_provider_reassignment_reruns_prepare() -> None:
 
 
 async def test_close_cancelled_mid_teardown_still_releases_provider() -> None:
-    import pytest
-
     order: list[str] = []
 
     class _SlowCloseProvider(_Provider):
@@ -375,3 +388,250 @@ async def test_append_after_close_raises() -> None:
         raise AssertionError("expected ConfigError appending to a closed session")
     except ConfigError:
         pass
+
+
+# ── Transactional quiescence races ──
+
+
+async def test_never_started_run_releases_admission_and_idle_barrier() -> None:
+    agent = _agent()
+    session = await agent.session(id="never-started")
+    iterator = session.run("hi")
+
+    assert session._active
+    assert not session._idle.is_set()
+
+    await session.aclose(force=True)
+
+    assert session._closed
+    assert not session._active
+    assert session._idle.is_set()
+    with pytest.raises(StopAsyncIteration):
+        await anext(iterator)
+
+
+async def test_close_finalizes_iterator_suspended_at_yield() -> None:
+    order: list[str] = []
+    agent = _agent(provider=_Provider(order))
+    session = await agent.session(id="yielded")
+    iterator = session.run("hi")
+
+    await anext(iterator)
+    assert session._active
+
+    await agent.close()
+
+    assert session._closed
+    assert not session._active
+    assert session._idle.is_set()
+    assert order == ["provider_closed"]
+
+
+async def test_concurrent_same_id_creation_is_reserved_once() -> None:
+    from linch.sessions import InMemorySessionStore
+
+    class SlowCreateStore(InMemorySessionStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.create_calls = 0
+            self.entered = asyncio.Event()
+            self.gate = asyncio.Event()
+
+        async def create(self, **kwargs: Any):
+            self.create_calls += 1
+            self.entered.set()
+            await self.gate.wait()
+            return await super().create(**kwargs)
+
+    store = SlowCreateStore()
+    agent = _agent(session_store=store)
+    first_task = asyncio.create_task(agent.session(id="same"))
+    await asyncio.wait_for(store.entered.wait(), 1.0)
+    second_task = asyncio.create_task(agent.session(id="same"))
+    await asyncio.sleep(0)
+    store.gate.set()
+
+    first, second = await asyncio.gather(first_task, second_task)
+
+    assert first is second
+    assert store.create_calls == 1
+
+
+async def test_session_setup_rolls_back_when_close_starts() -> None:
+    from linch.errors import ConfigError
+    from linch.sessions import InMemorySessionStore
+
+    class SlowCreateStore(InMemorySessionStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.entered = asyncio.Event()
+            self.gate = asyncio.Event()
+            self.closed = False
+
+        async def create(self, **kwargs: Any):
+            self.entered.set()
+            await self.gate.wait()
+            return await super().create(**kwargs)
+
+        async def close(self) -> None:
+            self.closed = True
+            await super().close()
+
+    store = SlowCreateStore()
+    agent = _agent(session_store=store)
+    create_task = asyncio.create_task(agent.session(id="racing"))
+    await asyncio.wait_for(store.entered.wait(), 1.0)
+
+    close_task = asyncio.create_task(agent.close())
+    await asyncio.sleep(0)
+    assert agent._lifecycle_state == "quiescing"
+    assert not store.closed
+
+    store.gate.set()
+    with pytest.raises(ConfigError, match="agent is closing"):
+        await create_task
+    await close_task
+
+    assert agent._lifecycle_state == "closed"
+    assert agent._sessions == {}
+    assert store.closed
+
+
+async def test_agent_close_waits_for_actively_iterated_provider_finalizer() -> None:
+    order: list[str] = []
+
+    class PausingProvider(_Provider):
+        def __init__(self) -> None:
+            super().__init__(order)
+            self.entered = asyncio.Event()
+            self.gate = asyncio.Event()
+
+        async def stream(self, req: Any) -> AsyncIterator[dict[str, object]]:
+            from linch.types import Usage
+
+            try:
+                self.entered.set()
+                await self.gate.wait()
+                yield {"type": "message_start", "model": req.model}
+                yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
+            finally:
+                order.append("provider_stream_finalized")
+
+    provider = PausingProvider()
+    agent = _agent(provider=provider)
+    session = await agent.session(id="active")
+
+    async def consume() -> None:
+        async for _ in session.run("hi"):
+            pass
+
+    consumer = asyncio.create_task(consume())
+    await asyncio.wait_for(provider.entered.wait(), 1.0)
+    close_task = asyncio.create_task(agent.close())
+    await asyncio.sleep(0)
+
+    assert not close_task.done()
+    assert order == []
+    provider.gate.set()
+    await asyncio.gather(consumer, close_task)
+
+    assert order == ["provider_stream_finalized", "provider_closed"]
+
+
+async def test_concurrent_agent_close_callers_share_one_teardown() -> None:
+    class SlowProvider(_Provider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+            self.entered = asyncio.Event()
+            self.gate = asyncio.Event()
+
+        async def aclose(self) -> None:
+            self.calls += 1
+            self.entered.set()
+            await self.gate.wait()
+
+    provider = SlowProvider()
+    agent = _agent(provider=provider)
+    first = asyncio.create_task(agent.close())
+    second = asyncio.create_task(agent.close())
+    await asyncio.wait_for(provider.entered.wait(), 1.0)
+
+    assert provider.calls == 1
+    assert not first.done()
+    assert not second.done()
+    provider.gate.set()
+    await asyncio.gather(first, second)
+
+    assert provider.calls == 1
+    assert agent._lifecycle_state == "closed"
+
+
+async def test_agent_close_failure_retries_only_unfinished_resources() -> None:
+    from linch.sessions import InMemorySessionStore
+
+    class CountingStore(InMemorySessionStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.close_calls = 0
+
+        async def close(self) -> None:
+            self.close_calls += 1
+            await super().close()
+
+    class FailOnceProvider(_Provider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.close_calls = 0
+
+        async def aclose(self) -> None:
+            self.close_calls += 1
+            if self.close_calls == 1:
+                raise RuntimeError("provider teardown failed")
+
+    store = CountingStore()
+    provider = FailOnceProvider()
+    agent = _agent(provider=provider, session_store=store)
+    session = await agent.session(id="s1")
+
+    with pytest.raises(RuntimeError, match="provider teardown failed"):
+        await agent.close()
+
+    assert agent._lifecycle_state == "quiescing"
+    assert session._closed
+    assert store.close_calls == 1
+    assert provider.close_calls == 1
+
+    await agent.close()
+
+    assert agent._lifecycle_state == "closed"
+    assert store.close_calls == 1
+    assert provider.close_calls == 2
+
+
+async def test_new_admission_is_rejected_while_agent_quiesces() -> None:
+    from linch.errors import ConfigError
+
+    class SlowProvider(_Provider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.entered = asyncio.Event()
+            self.gate = asyncio.Event()
+
+        async def aclose(self) -> None:
+            self.entered.set()
+            await self.gate.wait()
+
+    provider = SlowProvider()
+    agent = _agent(provider=provider)
+    session = await agent.session(id="existing")
+    close_task = asyncio.create_task(agent.close())
+    await asyncio.wait_for(provider.entered.wait(), 1.0)
+
+    with pytest.raises(ConfigError, match="agent is closing"):
+        await agent.session(id="new")
+    with pytest.raises(ConfigError):
+        session.run("late")
+
+    provider.gate.set()
+    await close_task

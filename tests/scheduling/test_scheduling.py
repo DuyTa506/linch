@@ -13,7 +13,10 @@ time.
 from __future__ import annotations
 
 import asyncio
+import json
+import sqlite3
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -77,6 +80,24 @@ class _FakeSession:
         self.pending_notifications: list[Any] = []
 
 
+class _DurableSession:
+    def __init__(self) -> None:
+        self.id = "durable-session"
+        self.agent = SimpleNamespace(
+            durability=SimpleNamespace(durable_inbox=True, delivery_lease_s=10.0)
+        )
+        self.notifications: list[dict[str, Any]] = []
+        self.fail: BaseException | None = None
+        self.order: list[str] = []
+
+    async def notify(self, message: Any, **kwargs: Any) -> str:
+        self.order.append("notify")
+        if self.fail is not None:
+            raise self.fail
+        self.notifications.append({"message": message, **kwargs})
+        return str(kwargs["delivery_id"])
+
+
 async def test_loop_fires_due_schedule_as_pending_notification() -> None:
     from linch import InMemoryScheduleStore, Schedule, SchedulerLoop
     from linch.events import ScheduleEvent
@@ -121,6 +142,135 @@ async def test_loop_skips_disabled_schedule() -> None:
 
     assert await loop.tick() == []
     assert session.pending_notifications == []
+
+
+async def test_durable_loop_claims_notifies_acks_then_emits() -> None:
+    from linch.coordination.scheduling import InMemoryScheduleStore, Schedule, SchedulerLoop
+
+    session = _DurableSession()
+
+    class RecordingStore(InMemoryScheduleStore):
+        async def ack_occurrences(self, occurrences: Any) -> None:
+            session.order.append("ack")
+            await super().ack_occurrences(occurrences)
+
+    store = RecordingStore()
+    await store.add(
+        Schedule(
+            id="nightly",
+            payload="run report",
+            interval_s=60,
+            next_run=1000.0,
+            metadata={"tenant": "acme"},
+        )
+    )
+
+    def on_event(event: Any) -> None:
+        session.order.append("event")
+        assert event.schedule_id == "nightly"
+
+    loop = SchedulerLoop(store, session, clock=lambda: 1000.0, on_event=on_event)
+    fired = await loop.tick()
+
+    assert len(fired) == 1
+    occurrence = fired[0]
+    notification = session.notifications[0]
+    assert notification["delivery_id"] == f"schedule:{occurrence.id}"
+    assert notification["source"] == "schedule"
+    assert notification["metadata"] == {
+        "schedule_id": "nightly",
+        "occurrence_id": occurrence.id,
+    }
+    assert notification["message"].role == "user"
+    assert "run report" in notification["message"].content[0].text
+    assert session.order == ["notify", "ack", "event"]
+    assert await store.claim_due_occurrences(1001.0, owner="probe", lease_s=10) == []
+
+
+async def test_durable_loop_releases_failed_delivery_for_same_id_retry() -> None:
+    from linch.coordination.scheduling import InMemoryScheduleStore, Schedule, SchedulerLoop
+
+    store = InMemoryScheduleStore()
+    await store.add(Schedule(id="retry", payload="p", interval_s=60, next_run=1000.0))
+    session = _DurableSession()
+    session.fail = RuntimeError("inbox unavailable")
+    loop = SchedulerLoop(store, session, clock=lambda: 1000.0)
+
+    assert await loop.tick() == []
+    session.fail = None
+    delivered = await loop.tick()
+
+    assert len(delivered) == 1
+    assert session.notifications[0]["delivery_id"] == f"schedule:{delivered[0].id}"
+
+
+async def test_durable_loop_releases_on_cancellation_and_propagates() -> None:
+    from linch.coordination.scheduling import InMemoryScheduleStore, Schedule, SchedulerLoop
+
+    store = InMemoryScheduleStore()
+    await store.add(Schedule(id="cancel", payload="p", interval_s=60, next_run=1000.0))
+
+    class SlowSession(_DurableSession):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = asyncio.Event()
+            self.block = True
+
+        async def notify(self, message: Any, **kwargs: Any) -> str:
+            if self.block:
+                self.started.set()
+                await asyncio.Future()
+            return await super().notify(message, **kwargs)
+
+    session = SlowSession()
+    loop = SchedulerLoop(store, session, clock=lambda: 1000.0)
+
+    tick = asyncio.create_task(loop.tick())
+    await session.started.wait()
+    tick.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await tick
+
+    session.block = False
+    assert len(await loop.tick()) == 1
+
+
+async def test_durable_loop_requires_leased_store_before_legacy_claim() -> None:
+    from linch.coordination.scheduling import Schedule, SchedulerLoop
+    from linch.errors import ConfigError
+
+    schedule = Schedule(id="legacy", payload="p", interval_s=60, next_run=1000.0)
+
+    class LegacyClaimingStore:
+        def __init__(self) -> None:
+            self.claim_calls = 0
+
+        async def add(self, item: Any) -> None:
+            pass
+
+        async def update(self, item: Any) -> None:
+            pass
+
+        async def remove(self, schedule_id: str) -> bool:
+            return False
+
+        async def get(self, schedule_id: str) -> Any:
+            return schedule
+
+        async def list(self) -> list[Any]:
+            return [schedule]
+
+        async def claim_due(self, now: float) -> list[Any]:
+            self.claim_calls += 1
+            return [schedule]
+
+    store = LegacyClaimingStore()
+    loop = SchedulerLoop(cast(Any, store), _DurableSession(), clock=lambda: 1000.0)
+
+    with pytest.raises(ConfigError, match="LeasedScheduleStore"):
+        await loop.tick()
+    assert store.claim_calls == 0
+    assert schedule.next_run == 1000.0
 
 
 async def test_fired_schedule_drains_as_user_event() -> None:
@@ -259,6 +409,152 @@ async def test_claim_tick_isolates_a_failing_fire_from_sibling_schedules(tmp_pat
     assert {s.id for s in fired} == {"a", "b"}
     payloads = "".join(msg.content[0].text for msg in session.pending_notifications)
     assert "alpha" in payloads and "bravo" in payloads
+
+
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+async def test_occurrence_materialization_advances_atomically_and_survives_remove(
+    backend: str, tmp_path: Any
+) -> None:
+    from linch.coordination.scheduling import InMemoryScheduleStore, Schedule, SqliteScheduleStore
+
+    store = (
+        InMemoryScheduleStore()
+        if backend == "memory"
+        else SqliteScheduleStore(tmp_path / "occurrences.db")
+    )
+    try:
+        schedule = Schedule(
+            id="nightly",
+            payload="original",
+            interval_s=60,
+            next_run=1000.0,
+            metadata={"revision": 1},
+        )
+        await store.add(schedule)
+
+        # limit=0 still atomically materializes and advances; it only declines
+        # to lease an occurrence to this caller.
+        assert (
+            await store.claim_due_occurrences(1000.0, owner="materializer", lease_s=30, limit=0)
+            == []
+        )
+        advanced = await store.get(schedule.id)
+        assert advanced is not None and advanced.next_run == 1060.0
+        assert await store.remove(schedule.id)
+
+        occurrences = await store.claim_due_occurrences(1001.0, owner="delivery", lease_s=30)
+        assert len(occurrences) == 1
+        occurrence = occurrences[0]
+        assert occurrence.schedule_id == "nightly"
+        assert occurrence.payload == "original"
+        assert occurrence.metadata == {"revision": 1}
+        assert occurrence.scheduled_for == 1000.0
+    finally:
+        close = getattr(store, "aclose", None)
+        if close is not None:
+            await close()
+
+
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+async def test_occurrence_lease_reclaim_and_stale_ack_are_token_fenced(
+    backend: str, tmp_path: Any
+) -> None:
+    from linch.coordination.scheduling import InMemoryScheduleStore, Schedule, SqliteScheduleStore
+
+    store = (
+        InMemoryScheduleStore()
+        if backend == "memory"
+        else SqliteScheduleStore(tmp_path / "occurrences.db")
+    )
+    try:
+        await store.add(Schedule(id="tick", payload="p", interval_s=60, next_run=1000.0))
+        original = await store.claim_due_occurrences(1000.0, owner="one", lease_s=10)
+        assert await store.claim_due_occurrences(1009.0, owner="two", lease_s=10) == []
+
+        reclaimed = await store.claim_due_occurrences(1010.0, owner="two", lease_s=10)
+        assert reclaimed[0].id == original[0].id
+        assert reclaimed[0].token != original[0].token
+
+        await store.ack_occurrences(original)
+        assert await store.claim_due_occurrences(1011.0, owner="three", lease_s=10) == []
+        await store.release_occurrences(reclaimed)
+        released = await store.claim_due_occurrences(1011.0, owner="three", lease_s=10)
+        assert released[0].id == original[0].id
+        await store.ack_occurrences(released)
+        assert await store.claim_due_occurrences(1012.0, owner="four", lease_s=10) == []
+    finally:
+        close = getattr(store, "aclose", None)
+        if close is not None:
+            await close()
+
+
+async def test_sqlite_occurrence_claims_are_shared_and_persist_across_restart(
+    tmp_path: Any,
+) -> None:
+    from linch.coordination.scheduling import Schedule, SqliteScheduleStore
+
+    path = tmp_path / "occurrences.db"
+    async with SqliteScheduleStore(path) as writer:
+        await writer.add(Schedule(id="a", payload="a", interval_s=60, next_run=1000.0))
+        await writer.add(Schedule(id="b", payload="b", interval_s=60, next_run=1000.0))
+        first = await writer.claim_due_occurrences(1000.0, owner="first", lease_s=10, limit=1)
+
+    left = SqliteScheduleStore(path)
+    right = SqliteScheduleStore(path)
+    try:
+        # The active lease on one occurrence does not prevent another consumer
+        # from leasing a distinct materialized occurrence.
+        second, blocked = await asyncio.gather(
+            left.claim_due_occurrences(1001.0, owner="second", lease_s=10, limit=1),
+            right.claim_due_occurrences(1001.0, owner="third", lease_s=10, limit=1),
+        )
+        assert len(second + blocked) == 1
+        assert {first[0].id, (second + blocked)[0].id}.__len__() == 2
+
+        reclaimed = await left.claim_due_occurrences(1010.0, owner="reclaimer", lease_s=10)
+        assert {occurrence.id for occurrence in reclaimed} == {first[0].id}
+    finally:
+        await left.aclose()
+        await right.aclose()
+
+
+async def test_sqlite_schedule_adds_occurrence_outbox_to_legacy_database(tmp_path: Any) -> None:
+    from linch.coordination.scheduling import SqliteScheduleStore
+
+    path = tmp_path / "legacy-schedules.db"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """
+        CREATE TABLE schedules (
+            id TEXT PRIMARY KEY,
+            payload TEXT NOT NULL,
+            cron TEXT,
+            interval_s REAL,
+            next_run REAL,
+            enabled INTEGER NOT NULL,
+            created_at REAL,
+            metadata TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO schedules(
+            id, payload, cron, interval_s, next_run, enabled, created_at, metadata
+        ) VALUES (?, ?, NULL, ?, ?, 1, NULL, ?)
+        """,
+        ("legacy", "old payload", 60.0, 1000.0, json.dumps({"old": True})),
+    )
+    conn.commit()
+    conn.close()
+
+    async with SqliteScheduleStore(path) as store:
+        occurrences = await store.claim_due_occurrences(1000.0, owner="migration", lease_s=30)
+        assert [(item.schedule_id, item.payload) for item in occurrences] == [
+            ("legacy", "old payload")
+        ]
+        loaded = await store.get("legacy")
+        assert loaded is not None and loaded.next_run == 1060.0
 
 
 # ── tools ────────────────────────────────────────────────────────────────────

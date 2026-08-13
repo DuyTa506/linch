@@ -54,10 +54,13 @@ from ..hooks import (
 )
 from ..pricing import cost_usd as _cost_usd
 from ..run_store import (
+    MODEL_INPUT_CODEC_VERSION,
+    ModelInputSnapshotError,
     RunCheckpoint,
     RunContractMismatchError,
     RunRecord,
     build_run_contract,
+    decode_model_input_snapshot,
     ensure_run_contract_compatible,
     run_contract_from_meta,
     run_meta_with_contract,
@@ -68,6 +71,7 @@ from ..types import (
     AssistantAssembly,
     ContentBlock,
     Message,
+    ProviderRequest,
     StopReason,
     TextBlock,
     ToolResultBlock,
@@ -133,6 +137,27 @@ from .terminals import (
 # Max BeforeFinalAnswer-induced retries honored per run before the answer is
 # accepted as-is. Keeps a perpetually-blocking final-answer hook from looping.
 _MAX_FINAL_ANSWER_REENTRIES = 1
+
+
+def _exact_model_input_enabled(agent: Any) -> bool:
+    return bool(getattr(getattr(agent, "durability", None), "exact_model_input", False))
+
+
+def _require_model_input_snapshot_store(agent: Any) -> Any:
+    store = getattr(agent, "run_store", None)
+    if store is None:
+        raise ConfigError("exact_model_input requires a run_store")
+    missing = [
+        name
+        for name in ("save", "load", "delete", "prune")
+        if not callable(getattr(store, name, None))
+    ]
+    if missing:
+        raise ConfigError(
+            "exact_model_input requires run_store model-input snapshot capabilities: "
+            + ", ".join(missing)
+        )
+    return store
 
 
 def _checkpointable_hooks(hooks: list[Any]) -> dict[str, Any]:
@@ -235,6 +260,32 @@ async def _drain_pending_notifications(
     run_id: str,
 ) -> AsyncIterator[Event]:
     """Inject pending background-worker notifications into provider_view and yield UserEvents."""
+    durability = getattr(session.agent, "durability", None)
+    if getattr(durability, "durable_inbox", False):
+        notifications = getattr(session, "pending_notifications", None)
+        if notifications:
+            raise ConfigError(
+                "durable_inbox cannot consume pending_notifications; use await Session.notify(...)"
+            )
+        commit = getattr(session.store, "commit_inbox", None)
+        enqueue = getattr(session.store, "enqueue_inbox", None)
+        if not callable(commit) or not callable(enqueue):
+            raise ConfigError(
+                "durable_inbox requires a SessionStore implementing "
+                "enqueue_inbox() and commit_inbox()"
+            )
+        stored = await cast(Any, commit)(session.id, after_seq=session._last_seq)
+        if not stored:
+            return
+        session._track_seqs(stored)
+        for row in stored:
+            note = row.message
+            session.provider_view.append(note)
+            session.full_history.append(note)
+            event: Event = UserEvent(message=note, subtype="notification")
+            await _persist_event(session, run_id, event)
+            yield event
+        return
     notifications = getattr(session, "pending_notifications", None)
     if not notifications:
         return
@@ -274,6 +325,43 @@ async def _drain_mailbox(session: Session, run_id: str) -> AsyncIterator[Event]:
     mailbox = getattr(session.agent, "mailbox", None)
     address = getattr(session, "mailbox_address", None)
     if mailbox is None or not address:
+        return
+    durability = getattr(session.agent, "durability", None)
+    if getattr(durability, "durable_inbox", False):
+        claim = getattr(mailbox, "claim", None)
+        ack = getattr(mailbox, "ack", None)
+        release = getattr(mailbox, "release", None)
+        if not all(callable(method) for method in (claim, ack, release)):
+            raise ConfigError(
+                "durable_inbox with mailbox requires ClaimableMailbox claim(), ack(), and release()"
+            )
+        claims = await cast(Any, claim)(
+            address,
+            owner=f"session:{session.id}",
+            lease_s=cast(Any, durability).delivery_lease_s,
+        )
+        delivered = []
+        try:
+            for claimed in claims:
+                message = claimed.message
+                note = _render_peer_message(message)
+                await session.notify(
+                    note,
+                    delivery_id=f"mailbox:{message.id}",
+                    source="mailbox",
+                    metadata={"message_id": message.id, "recipient": message.recipient},
+                )
+                await cast(Any, ack)([claimed])
+                delivered.append(claimed)
+        except BaseException:
+            pending = [item for item in claims if item not in delivered]
+            if pending:
+                await cast(Any, release)(pending)
+            raise
+        # The inbox commit below is the single insertion chokepoint. This also
+        # recovers a prior enqueue whose mailbox ack response was lost.
+        async for event in _drain_pending_notifications(session, run_id):
+            yield event
         return
     messages = await mailbox.drain(address)
     for message in messages:
@@ -587,6 +675,15 @@ def _build_run_contract(session: Session, prompt: str, opts: RunOptions) -> Any:
                 # receive it.  A write->read downgrade must invalidate resume.
                 "scope": getattr(tool, "scope", None),
                 "parallel": bool(getattr(tool, "parallel", True)),
+                **(
+                    {
+                        "output_schema": tool.output_schema,
+                        "renderer_id": getattr(tool, "renderer_id", None),
+                        "renderer_version": getattr(tool, "renderer_version", None),
+                    }
+                    if getattr(tool, "output_schema", None) is not None
+                    else {}
+                ),
             }
         )
     if session.system_blocks_override is not None:
@@ -615,6 +712,30 @@ def _build_run_contract(session: Session, prompt: str, opts: RunOptions) -> Any:
         tools,
         getattr(agent, "execution_backend", None),
     )
+    policies: dict[str, Any] = {
+        "runtime_version": get_version(),
+        "permissions": _permission_policy_contract(agent),
+        "hooks": _hook_policy_contract(agent),
+        "features": getattr(agent, "features", None),
+        "execution_backend": backend_identity,
+        "max_turns": None if agent.max_turns == float("inf") else agent.max_turns,
+        "structured_output_retries": agent.structured_output_retries,
+        "loop_guard": loop_guard,
+        "compaction": getattr(getattr(agent, "compaction", None), "id", None),
+        "compaction_ladder": ladder,
+        "truncation_recovery": truncation,
+    }
+    durability = getattr(agent, "durability", None)
+    if getattr(durability, "durable_inbox", False) or _exact_model_input_enabled(agent):
+        policies["durability"] = {
+            "durable_inbox": bool(getattr(durability, "durable_inbox", False)),
+            "exact_model_input": _exact_model_input_enabled(agent),
+            **(
+                {"model_input_codec_version": MODEL_INPUT_CODEC_VERSION}
+                if _exact_model_input_enabled(agent)
+                else {}
+            ),
+        }
     return build_run_contract(
         primary_model=agent.model,
         fallback_models=getattr(agent, "fallback_models", None),
@@ -638,23 +759,13 @@ def _build_run_contract(session: Session, prompt: str, opts: RunOptions) -> Any:
             "max_retries": agent.max_retries,
         },
         budget=budget,
-        policies={
-            "runtime_version": get_version(),
-            "permissions": _permission_policy_contract(agent),
-            "hooks": _hook_policy_contract(agent),
-            "features": getattr(agent, "features", None),
-            "execution_backend": backend_identity,
-            "max_turns": None if agent.max_turns == float("inf") else agent.max_turns,
-            "structured_output_retries": agent.structured_output_retries,
-            "loop_guard": loop_guard,
-            "compaction": getattr(getattr(agent, "compaction", None), "id", None),
-            "compaction_ladder": ladder,
-            "truncation_recovery": truncation,
-        },
+        policies=policies,
     )
 
 
 async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIterator[Event]:
+    if _exact_model_input_enabled(session.agent):
+        _require_model_input_snapshot_store(session.agent)
     await session.agent._ensure_provider_prepared()
     store = session.agent.run_store
     run_record = (
@@ -678,6 +789,8 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
 
 
 async def resume_loop(session: Session, run_id: str, opts: RunOptions) -> AsyncIterator[Event]:
+    if _exact_model_input_enabled(session.agent):
+        _require_model_input_snapshot_store(session.agent)
     await session.agent._ensure_provider_prepared()
     store = session.agent.run_store
     if store is None:
@@ -698,7 +811,11 @@ async def resume_loop(session: Session, run_id: str, opts: RunOptions) -> AsyncI
         ensure_run_contract_compatible(
             stored_contract,
             requested_contract,
-            allow_legacy=opts.allow_legacy_resume,
+            allow_legacy=(
+                opts.allow_legacy_resume
+                and checkpoint.provider_attempt == 0
+                and checkpoint.model_input_snapshot_id is None
+            ),
         )
     except (RunContractMismatchError, TypeError, ValueError) as exc:
         raise ConfigError(f"Cannot safely resume run {run_id}: {exc}") from None
@@ -811,6 +928,8 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
     resume_checkpoint: RunCheckpoint | None,
 ) -> AsyncIterator[Event]:
     agent = session.agent
+    _exact_model_input = _exact_model_input_enabled(agent)
+    _model_input_store = _require_model_input_snapshot_store(agent) if _exact_model_input else None
     session.active_run_id = run_id
     _initial_event_seq = 0
     if resume_checkpoint is not None and agent.run_store is not None:
@@ -938,6 +1057,24 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         total_usage=total,
     )
 
+    async def _best_effort_snapshot_cleanup(
+        *,
+        snapshot_id: str | None = None,
+        keep_ids: tuple[str, ...] = (),
+    ) -> None:
+        if _model_input_store is None:
+            return
+        logger = logging.getLogger(__name__)
+        if snapshot_id is not None:
+            try:
+                await _model_input_store.delete(snapshot_id)
+            except Exception as exc:
+                logger.warning("Failed to delete model-input snapshot %s: %s", snapshot_id, exc)
+        try:
+            await _model_input_store.prune(run_id, keep_ids=keep_ids)
+        except Exception as exc:
+            logger.warning("Failed to prune model-input snapshots for run %s: %s", run_id, exc)
+
     async def _save_checkpoint(
         phase: str,
         *,
@@ -955,6 +1092,18 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         # the checkpoint that accounts for it.
         await _flush_events(session)
         nonlocal checkpoint
+        completed_snapshot_id = (
+            checkpoint.model_input_snapshot_id
+            if _exact_model_input
+            and phase != "provider_pending"
+            and checkpoint.model_input_snapshot_id is not None
+            else None
+        )
+        if completed_snapshot_id is not None:
+            # The first durable non-pending checkpoint supersedes the frozen
+            # request. Clear its reference in that same commit, then remove the
+            # payload only after the commit returns successfully.
+            checkpoint.model_input_snapshot_id = None
         checkpoint.phase = phase  # type: ignore[assignment]
         if turn_index is not None:
             checkpoint.turn_index = turn_index
@@ -1015,6 +1164,80 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         elif phase not in ("permission_pending", "tool_executing"):
             checkpoint.tool_batch_event_after_seq = None
         await store.save_checkpoint(run_id, checkpoint, status=status)
+        if completed_snapshot_id is not None:
+            await _best_effort_snapshot_cleanup(snapshot_id=completed_snapshot_id)
+
+    async def _prepare_provider_call(
+        request: ProviderRequest,
+        turn_index: int,
+    ) -> ProviderRequest:
+        if not _exact_model_input:
+            await _save_checkpoint("provider_pending", turn_index=turn_index)
+            return request
+        assert _model_input_store is not None
+        # The live signal is process-local and intentionally excluded by the
+        # codec. Bind it only after all request hooks have run and immediately
+        # before freezing/dispatching the effective attempt.
+        request.signal = signal
+        provider_attempt = checkpoint.provider_attempt + 1
+        try:
+            snapshot = await _model_input_store.save(run_id, provider_attempt, request)
+        except Exception as exc:
+            raise ConfigError(
+                f"failed to save exact model input for provider attempt {provider_attempt}: {exc}"
+            ) from exc
+        if (
+            not isinstance(getattr(snapshot, "id", None), str)
+            or not snapshot.id
+            or getattr(snapshot, "run_id", None) != run_id
+            or getattr(snapshot, "provider_attempt", None) != provider_attempt
+        ):
+            raise ConfigError("run_store returned an invalid model-input snapshot")
+        checkpoint.provider_attempt = provider_attempt
+        checkpoint.model_input_snapshot_id = snapshot.id
+        try:
+            await _save_checkpoint("provider_pending", turn_index=turn_index)
+        except Exception as exc:
+            # Do not delete here: a custom durable store may have committed the
+            # checkpoint and then lost its response. Keeping the payload makes
+            # that ambiguous outcome resumable; a later prune removes orphans.
+            raise ConfigError(
+                f"failed to checkpoint exact model input for provider attempt "
+                f"{provider_attempt}: {exc}"
+            ) from exc
+        await _best_effort_snapshot_cleanup(keep_ids=(snapshot.id,))
+        return request
+
+    async def _load_pending_provider_request(signal: Any) -> ProviderRequest:
+        if not _exact_model_input or _model_input_store is None:
+            raise ConfigError("exact model-input replay is not configured")
+        snapshot_id = checkpoint.model_input_snapshot_id
+        if not snapshot_id:
+            raise ConfigError("provider_pending checkpoint is missing model_input_snapshot_id")
+        if checkpoint.provider_attempt < 1:
+            raise ConfigError("provider_pending checkpoint is missing a valid provider_attempt")
+        try:
+            snapshot = await _model_input_store.load(snapshot_id)
+        except Exception as exc:
+            raise ConfigError(
+                f"failed to load exact model input snapshot {snapshot_id!r}: {exc}"
+            ) from exc
+        if snapshot is None:
+            raise ConfigError(f"exact model input snapshot {snapshot_id!r} is missing")
+        if (
+            snapshot.run_id != run_id
+            or snapshot.provider_attempt != checkpoint.provider_attempt
+            or snapshot.id != snapshot_id
+        ):
+            raise ConfigError(
+                f"exact model input snapshot {snapshot_id!r} does not match its checkpoint"
+            )
+        try:
+            return decode_model_input_snapshot(snapshot, signal=signal)
+        except ModelInputSnapshotError as exc:
+            raise ConfigError(
+                f"exact model input snapshot {snapshot_id!r} cannot be decoded: {exc}"
+            ) from exc
 
     async def _handle_prompt_block(block_reason: str) -> AsyncIterator[Event]:
         # Terminal path for a UserPromptSubmit hook that blocked the prompt.
@@ -1333,6 +1556,12 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
 
         for turn_index in range(start_turn, max_turns):
             throw_if_aborted(signal)
+            _replaying_frozen_attempt = (
+                _exact_model_input
+                and resume_checkpoint is not None
+                and turn_index == checkpoint.turn_index
+                and checkpoint.phase == "provider_pending"
+            )
             # ── Budget pre-call check ─────────────────────────────────────
             # Before any turn span opens: an exhausted budget stops the run
             # gracefully (history intact, session reusable), mirroring the
@@ -1353,12 +1582,14 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 ):
                     yield event
                 return
-            # Drain background-worker notifications before this turn's provider call.
-            async for note_event in _drain_pending_notifications(session, run_id):
-                yield note_event
-            # Drain peer mailbox messages addressed to this session, same chokepoint.
-            async for mail_event in _drain_mailbox(session, run_id):
-                yield mail_event
+            # A provider_pending resume continues an already-frozen turn. New
+            # deliveries belong to the following turn; inserting them here
+            # would place a user message between that request and its assistant.
+            if not _replaying_frozen_attempt:
+                async for note_event in _drain_pending_notifications(session, run_id):
+                    yield note_event
+                async for mail_event in _drain_mailbox(session, run_id):
+                    yield mail_event
             # Bubble accumulated subagent events (incl. child PermissionRequests).
             async for child_event in _drain_child_events(session, run_id):
                 yield child_event
@@ -1450,11 +1681,23 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 )
                 resumed_assistant = True
 
-            if not resumed_assistant and await maybe_compact_resilient(
-                session,
-                agent,
-                signal,
-                model=model_override or session.active_model or agent.model,
+            frozen_pending_resume = (
+                _exact_model_input
+                and resume_checkpoint is not None
+                and turn_index == checkpoint.turn_index
+                and checkpoint.phase == "provider_pending"
+            )
+            exact_pending_replay = frozen_pending_resume and not resumed_assistant
+
+            if (
+                not resumed_assistant
+                and not exact_pending_replay
+                and await maybe_compact_resilient(
+                    session,
+                    agent,
+                    signal,
+                    model=model_override or session.active_model or agent.model,
+                )
             ):
                 reset_read_tracker_after_compaction(session, agent)
                 _re_inject_skill_context(session)
@@ -1465,7 +1708,9 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
 
             # ── Context building (RAG-per-turn, schema injection, …) ──────
             context_result = (
-                None if resumed_assistant else await _build_context_result(session, turn_index)
+                None
+                if resumed_assistant or frozen_pending_resume
+                else await _build_context_result(session, turn_index)
             )
             if context_result is not None:
                 event = ContextBuildEvent(
@@ -1478,24 +1723,25 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 await _persist_event(session, run_id, event)
                 yield event
 
-            req = (
-                None
-                if resumed_assistant
-                else _build_turn_request(
+            if resumed_assistant:
+                req = None
+            elif exact_pending_replay:
+                req = await _load_pending_provider_request(signal)
+            else:
+                req = _build_turn_request(
                     session, opts, context=context_result, model_override=model_override
                 )
-            )
 
             # If the previous turn tripped the guard with force_final, strip
             # all tools so the model must produce a text response.
-            if req is not None and _force_final_pending:
+            if req is not None and _force_final_pending and not exact_pending_replay:
                 req.tools = []
                 req.tool_choice = None
 
             # Runs even when req is None (resumed-assistant turn) so stop-style
             # BeforeProviderCall hooks (e.g. StopPredicateHook) still fire on
             # resume; request mutation is simply ignored when there is no req.
-            if hook_dispatcher.active:
+            if hook_dispatcher.active and not frozen_pending_resume:
                 (
                     req,
                     hook_events,
@@ -1623,9 +1869,10 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                         req,
                         turn_index=turn_index,
                         signal=signal,
-                        save_checkpoint=_save_checkpoint,
+                        prepare_provider_call=_prepare_provider_call,
                         start_provider_call=_start_provider_call,
                         end_provider_call=_end_active_provider_call,
+                        request_prepared=exact_pending_replay,
                     )
                 else:
                     # Ladder recovery: micro-compact, then capped forced compactions.
@@ -1638,9 +1885,10 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                         signal=signal,
                         ladder=_ladder,
                         forced_used=_forced_compactions_used,
-                        save_checkpoint=_save_checkpoint,
+                        prepare_provider_call=_prepare_provider_call,
                         start_provider_call=_start_provider_call,
                         end_provider_call=_end_active_provider_call,
+                        request_prepared=exact_pending_replay,
                     )
                 async for item in _provider_stream:
                     if isinstance(item, AssistantAssembly):
@@ -2077,6 +2325,13 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             await store.mark_failed(run_id, checkpoint, error=_err_dict)
         yield event
     finally:
+        if (
+            _exact_model_input
+            and checkpoint.model_input_snapshot_id is not None
+            and checkpoint.phase != "provider_pending"
+        ):
+            await _best_effort_snapshot_cleanup(snapshot_id=checkpoint.model_input_snapshot_id)
+            checkpoint.model_input_snapshot_id = None
         # Flush any events still buffered (best-effort) and drop the buffer so it
         # never leaks into a later run on this session.
         try:
