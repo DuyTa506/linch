@@ -6,6 +6,9 @@ Professional reference for the V2 harness. Covers every subsystem, its contract,
 
 This guide is split by topic so you can jump to a subsystem instead of scrolling one long file. For *how to use* these features, see the [usage guide](../usage/README.md).
 
+The SDK/application boundary and the Linch 2.0 compatibility changes are
+summarized in the [migration guide](../migration-2.0.md).
+
 ## Sections
 
 | Section | What it covers |

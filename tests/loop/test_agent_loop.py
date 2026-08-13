@@ -165,8 +165,8 @@ async def test_stream_partials_request_override_suppresses_events_but_keeps_asse
 
 
 async def test_run_options_thread_stream_partial_policy_to_provider_request() -> None:
+    from linch import RunOptions
     from linch.loop.request import _build_turn_request
-    from linch.session import RunOptions
 
     agent = Agent(
         model="gpt-5",

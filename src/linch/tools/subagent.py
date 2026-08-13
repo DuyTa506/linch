@@ -247,15 +247,23 @@ class SubagentTool:
                 session.pending_notifications.append(
                     Message(role="user", content=[TextBlock(text=notification_text)])
                 )
-                # Emit a BackgroundWorkerEvent to the session's child-event log too.
+                completion_event = BackgroundWorkerEvent(
+                    worker_id=worker_id,
+                    status=status_str,
+                    display_name=display_name,
+                )
+                # Emit to the in-memory child-event channel for the next parent
+                # turn, and best-effort to the run that launched this worker.
+                # The durable record is audit telemetry only: neither the task
+                # nor its result notification is reconstructed after restart.
                 if emit_list is not None:
-                    emit_list.append(
-                        BackgroundWorkerEvent(
-                            worker_id=worker_id,
-                            status=status_str,
-                            display_name=display_name,
-                        )
-                    )
+                    emit_list.append(completion_event)
+                run_store = getattr(session.agent, "run_store", None)
+                if run_store is not None:
+                    try:
+                        await run_store.append_event(ctx.run_id, completion_event)
+                    except Exception:
+                        pass
 
             handle.task = asyncio.create_task(_bg_run())
             return ToolResult(

@@ -260,6 +260,121 @@ async def test_maybe_compact_uses_provider_context_window():
     assert len(fake_provider._stream_calls) >= 1  # provider.stream was used for summarization
 
 
+@pytest.mark.asyncio
+async def test_maybe_compact_estimates_without_last_usage():
+    """Fresh/reloaded sessions still compact when their derived view is large."""
+    provider = _FakeNonOpenAIProvider()
+
+    class FakeAgent:
+        model = "model-x"
+        max_output_tokens = 10
+        compaction = None
+        compaction_ladder = None
+        token_estimator = None
+
+        def __init__(self, provider):
+            self.provider = provider
+
+    class FakeSession:
+        provider_view = _make_messages(40)
+        full_history = list(provider_view)
+        last_usage = None
+        last_compaction_info = None
+        active_model = None
+
+    session = FakeSession()
+    history_before = list(session.full_history)
+
+    fired = await maybe_compact(session, FakeAgent(provider), AbortContext())
+
+    assert fired is True
+    assert provider._stream_calls[0].model == "model-x"
+    assert session.full_history == history_before
+    assert all(a is b for a, b in zip(session.full_history, history_before, strict=True))
+
+
+@pytest.mark.asyncio
+async def test_maybe_compact_missing_usage_below_estimated_threshold_is_noop():
+    provider = _FakeNonOpenAIProvider()
+
+    class FakeAgent:
+        model = "model-x"
+        max_output_tokens = 10
+        compaction = None
+        compaction_ladder = None
+        token_estimator = staticmethod(lambda messages, model: 1)
+
+        def __init__(self, provider):
+            self.provider = provider
+
+    class FakeSession:
+        provider_view = _make_messages(2)
+        last_usage = None
+        last_compaction_info = None
+        active_model = None
+
+    original = list(FakeSession.provider_view)
+
+    fired = await maybe_compact(FakeSession(), FakeAgent(provider), AbortContext())
+
+    assert fired is False
+    assert FakeSession.provider_view == original
+    assert provider._stream_calls == []
+
+
+@pytest.mark.asyncio
+async def test_compaction_uses_active_fallback_model_consistently():
+    class TrackingProvider(_FakeNonOpenAIProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.window_models: list[str] = []
+
+        def context_window(self, model: str) -> int:
+            self.window_models.append(model)
+            return 1024
+
+    provider = TrackingProvider()
+    estimated_models: list[str] = []
+
+    class FakeAgent:
+        model = "primary-model"
+        max_output_tokens = 10
+        compaction = None
+        compaction_ladder = None
+
+        def __init__(self, provider):
+            self.provider = provider
+
+        @staticmethod
+        def token_estimator(messages, model):
+            estimated_models.append(model)
+            return (
+                sum(
+                    len(block.text)
+                    for message in messages
+                    for block in message.content
+                    if isinstance(block, TextBlock)
+                )
+                // 4
+            )
+
+    class FakeSession:
+        provider_view = _make_messages(40)
+        last_usage = None
+        last_compaction_info = None
+        active_model = "fallback-model"
+
+    session = FakeSession()
+
+    fired = await maybe_compact(session, FakeAgent(provider), AbortContext())
+
+    assert fired is True
+    assert provider.window_models == ["fallback-model"]
+    assert set(estimated_models) == {"fallback-model"}
+    assert provider._stream_calls[0].model == "fallback-model"
+    assert session.last_compaction_info["model"] == "fallback-model"
+
+
 class _FakeAgent:
     model = "model-x"
     max_retries = 5

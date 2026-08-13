@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, Protocol, cast, runtime_checkable
 
 from .abort import AbortContext
 from .events import CompactionEvent
 from .providers.limiter import provider_slot
-from .types import Message, SystemBlock, TextBlock, ToolResultBlock
+from .types import Message, SystemBlock, TextBlock, ToolResultBlock, message_to_dict
 
 
 @dataclass
@@ -45,6 +46,10 @@ class CompactionLadder:
     max_forced_compactions: int = 3
     reset_read_tracker: bool = True
 
+    def __post_init__(self) -> None:
+        if self.keep_recent_turns < 1:
+            raise ValueError("compaction_ladder.keep_recent_turns must be >= 1")
+
 
 _ELIDED = "[tool result elided to save context]"
 
@@ -60,6 +65,8 @@ def micro_compact(
     *keep_recent_turns* assistant turns are replaced, so every ``tool_use_id``
     stays paired and the message structure remains provider-valid.  No LLM call.
     """
+    if keep_recent_turns < 1:
+        raise ValueError("micro_compact.keep_recent_turns must be >= 1")
     recent = last_n_turn_boundaries(messages, keep_recent_turns)
     boundary = len(messages) - len(recent)
     if boundary <= 0:
@@ -105,14 +112,21 @@ def micro_compact(
     return out, n_elided
 
 
-def apply_micro_compaction(session: Any, agent: Any, *, keep_recent_turns: int) -> bool:
+def apply_micro_compaction(
+    session: Any,
+    agent: Any,
+    *,
+    keep_recent_turns: int,
+    model: str | None = None,
+) -> bool:
     """Elide old tool results in ``session.provider_view`` in place.
 
     Returns ``True`` and sets ``session.last_compaction_info`` (strategy
     ``"micro"``) when anything was elided; ``False`` leaves the session
     untouched.
     """
-    tokens_before = _estimate_tokens(agent, session.provider_view)
+    resolved_model = _resolve_compaction_model(session, agent, model)
+    tokens_before = _estimate_tokens(agent, session.provider_view, model=resolved_model)
     new_view, n_elided = micro_compact(session.provider_view, keep_recent_turns=keep_recent_turns)
     if n_elided == 0:
         return False
@@ -123,8 +137,9 @@ def apply_micro_compaction(session: Any, agent: Any, *, keep_recent_turns: int) 
         "messages_before": messages_count,
         "messages_after": messages_count,
         "tokens_before": tokens_before,
-        "tokens_after": _estimate_tokens(agent, session.provider_view),
+        "tokens_after": _estimate_tokens(agent, session.provider_view, model=resolved_model),
         "strategy": "micro",
+        "model": resolved_model,
     }
     return True
 
@@ -167,6 +182,13 @@ class CompactionStrategy(Protocol):
 
 
 def last_n_turn_boundaries(messages: list[Message], n: int) -> list[Message]:
+    # Defensive behavior for direct/internal callers.  Public compaction
+    # configs reject n < 1, but returning the complete view here is the only
+    # safe fallback: the old `messages[-1:]` result could retain a trailing
+    # ToolResultBlock while dropping its matching ToolUseBlock.
+    if n < 1:
+        return messages
+
     assistants_found = 0
     boundary_idx = -1
 
@@ -322,6 +344,8 @@ class DetailedCompaction:
         max_output_tokens: int = 8192,
         prompt: str = _DETAILED_SUMMARY_PROMPT,
     ) -> None:
+        if keep_recent_turns < 1:
+            raise ValueError("detailed_compaction.keep_recent_turns must be >= 1")
         self.keep_recent_turns = keep_recent_turns
         self.max_output_tokens = max_output_tokens
         self.prompt = prompt
@@ -415,9 +439,19 @@ async def _run_compaction_impl(
     agent: Any,
     signal: AbortContext,
     strategy: Any,
-) -> None:
+    *,
+    model: str | None = None,
+) -> bool:
+    """Run *strategy* against the model selected for the current provider call.
+
+    ``model`` is intentionally supplied by the loop for per-turn overrides.  If
+    omitted, run-level fallback state wins over the agent default.  The boolean
+    return lets the loop distinguish a real provider-view mutation from a
+    no-op strategy before persisting a derived-view snapshot.
+    """
+    resolved_model = _resolve_compaction_model(session, agent, model)
     messages_before = len(session.provider_view)
-    tokens_before = _estimate_tokens(agent, session.provider_view)
+    tokens_before = _estimate_tokens(agent, session.provider_view, model=resolved_model)
 
     dispatcher = _compaction_hook_dispatcher(agent)
     run_id = getattr(session, "active_run_id", None) or "unknown"
@@ -440,15 +474,17 @@ async def _run_compaction_impl(
     snapshot = list(session.provider_view)
     ctx = CompactionContext(
         messages=snapshot,
-        model=agent.model,
+        model=resolved_model,
         signal=signal,
     )
     # Gated here, not inside DefaultCompaction: this is the single invocation
     # point, so a host's own CompactionStrategy is bounded too without the
     # public compact(ctx, provider) signature having to know about limiters.
-    async with provider_slot(agent, agent.model):
+    async with provider_slot(agent, resolved_model):
         compacted = await strategy.compact(ctx, agent.provider)
     compacted = strip_response_chaining(compacted)
+
+    changed = compacted != snapshot
 
     session.provider_view.clear()
     session.provider_view.extend(compacted)
@@ -458,8 +494,9 @@ async def _run_compaction_impl(
         "messages_before": messages_before,
         "messages_after": len(session.provider_view),
         "tokens_before": tokens_before,
-        "tokens_after": _estimate_tokens(agent, session.provider_view),
+        "tokens_after": _estimate_tokens(agent, session.provider_view, model=resolved_model),
         "strategy": strategy.id,
+        "model": resolved_model,
     }
 
     if dispatcher is not None:
@@ -480,20 +517,25 @@ async def _run_compaction_impl(
                 strategy=strategy.id,
             ),
         )
+    return changed
 
 
 async def maybe_compact(
     session: Any,
     agent: Any,
     signal: AbortContext,
+    *,
+    model: str | None = None,
 ) -> bool:
-    if session.last_usage is None:
-        return False
-
+    resolved_model = _resolve_compaction_model(session, agent, model)
     strategy = getattr(agent, "compaction", None) or default_compaction
-    limit = agent.provider.context_window(agent.model)
-    reserve = agent.max_output_tokens or 32768
-    projected = _estimate_tokens(agent, session.provider_view) + reserve
+    limit = agent.provider.context_window(resolved_model)
+    # Keep the historical 32k default on normal large-context models, but do
+    # not let the reserve alone make every request to a small/local context
+    # appear over threshold.  An explicitly configured output cap remains the
+    # host's requested reservation and is therefore not clamped.
+    reserve = agent.max_output_tokens or min(32768, max(1, limit // 5))
+    projected = _estimate_tokens(agent, session.provider_view, model=resolved_model) + reserve
 
     if projected < 0.8 * limit:
         return False
@@ -504,17 +546,27 @@ async def maybe_compact(
     micro_info: dict[str, Any] | None = None
     ladder = getattr(agent, "compaction_ladder", None)
     if ladder is not None and ladder.micro:
-        if apply_micro_compaction(session, agent, keep_recent_turns=ladder.keep_recent_turns):
-            projected = _estimate_tokens(agent, session.provider_view) + reserve
+        if apply_micro_compaction(
+            session,
+            agent,
+            keep_recent_turns=ladder.keep_recent_turns,
+            model=resolved_model,
+        ):
+            projected = (
+                _estimate_tokens(agent, session.provider_view, model=resolved_model) + reserve
+            )
             if projected < 0.8 * limit:
                 return True
             micro_info = session.last_compaction_info
 
-    length_before = len(session.provider_view)
-    head_before = session.provider_view[0] if session.provider_view else None
-
     try:
-        await _run_compaction_impl(session, agent, signal, strategy)
+        changed = await _run_compaction_impl(
+            session,
+            agent,
+            signal,
+            strategy,
+            model=resolved_model,
+        )
     except Exception:
         # Micro-compaction already mutated provider_view in place above; if the
         # follow-up summarization now fails (and the caller degrades instead of
@@ -525,34 +577,51 @@ async def maybe_compact(
             reset_read_tracker_after_compaction(session, agent)
         raise
 
-    if len(session.provider_view) == length_before:
-        if session.provider_view and head_before is session.provider_view[0]:
-            # Full strategy was a no-op; if micro elided something, that is
-            # still a reportable compaction.
-            if micro_info is not None:
-                session.last_compaction_info = micro_info
-                return True
-            session.last_compaction_info = None
-            return False
+    if not changed:
+        # Full strategy was a no-op; if micro elided something, that is still a
+        # reportable compaction.
+        if micro_info is not None:
+            session.last_compaction_info = micro_info
+            return True
+        session.last_compaction_info = None
+        return False
 
     return True
 
 
-def _estimate_tokens(agent: Any, messages: list[Message]) -> int:
+def _resolve_compaction_model(session: Any, agent: Any, model: str | None) -> str:
+    """Resolve the exact model whose context is being compacted.
+
+    An explicit per-turn model override wins.  Otherwise retain a run-level
+    fallback selected after provider overload, then fall back to the agent's
+    configured primary model.
+    """
+    return model or getattr(session, "active_model", None) or agent.model
+
+
+def _estimate_tokens(
+    agent: Any,
+    messages: list[Message],
+    *,
+    model: str | None = None,
+) -> int:
+    resolved_model = model or agent.model
     estimator = getattr(agent, "token_estimator", None)
     if callable(estimator):
         try:
-            value = estimator(messages, agent.model)
+            value = estimator(messages, resolved_model)
             return max(0, int(cast(Any, value)))
         except Exception:
             pass
 
-    # Simple fallback heuristic for compaction decisions and telemetry.
-    chars = 0
-    for message in messages:
-        for block in message.content:
-            if isinstance(block, TextBlock):
-                chars += len(block.text)
+    # Provider-neutral fallback heuristic for compaction decisions and
+    # telemetry.  Serialising the normalized message shape counts tool results,
+    # tool inputs, thinking, image metadata, and provider metadata too; counting
+    # TextBlocks alone badly underestimates tool-heavy sessions.
+    chars = sum(
+        len(json.dumps(message_to_dict(message), ensure_ascii=False, default=str))
+        for message in messages
+    )
     return max(0, chars // 4)
 
 
@@ -560,9 +629,11 @@ async def run_forced_compaction(
     session: Any,
     agent: Any,
     signal: AbortContext,
-) -> None:
+    *,
+    model: str | None = None,
+) -> bool:
     strategy = getattr(agent, "compaction", None) or default_compaction
-    await _run_compaction_impl(session, agent, signal, strategy)
+    return await _run_compaction_impl(session, agent, signal, strategy, model=model)
 
 
 def build_compaction_event(session: Any) -> CompactionEvent:

@@ -13,6 +13,8 @@ Two implementations ship:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import os
 import shutil
 import signal as signal_mod
@@ -34,6 +36,14 @@ class ExecResult:
 
 class LocalBackend:
     """Runs commands in a subprocess shell — identical to the original BashTool body."""
+
+    resume_policy_id = "linch.execution.local"
+    resume_policy_version = "1"
+
+    @property
+    def resume_policy_config(self) -> dict[str, object]:
+        """Stable, JSON-safe identity used by durable run contracts."""
+        return {}
 
     async def run(
         self,
@@ -92,6 +102,9 @@ class DockerBackend:
         env:             Explicit environment variables to pass into Docker.
         forward_env:     Allowlist of host environment variables to forward.
         user:            Optional Docker ``--user`` value.
+        resume_fingerprint_key: Host secret used to HMAC environment values in
+                         durable run contracts. Required for durable runs when
+                         ``env`` or ``forward_env`` is non-empty; never stored.
     """
 
     def __init__(
@@ -106,9 +119,14 @@ class DockerBackend:
         env: dict[str, str] | None = None,
         forward_env: tuple[str, ...] = (),
         user: str | None = None,
+        resume_fingerprint_key: bytes | None = None,
     ) -> None:
         if workspace_mount not in ("rw", "ro"):
             raise ValueError('workspace_mount must be "rw" or "ro"')
+        if resume_fingerprint_key is not None and (
+            not isinstance(resume_fingerprint_key, bytes) or len(resume_fingerprint_key) < 16
+        ):
+            raise ValueError("resume_fingerprint_key must be at least 16 bytes")
         self._docker = docker_path
         self.image = image
         self.network = network
@@ -118,6 +136,49 @@ class DockerBackend:
         self.env = dict(env or {})
         self.forward_env = tuple(forward_env)
         self.user = user
+        self._resume_fingerprint_key = resume_fingerprint_key
+
+    resume_policy_id = "linch.execution.docker"
+    resume_policy_version = "1"
+
+    @property
+    def resume_policy_config(self) -> dict[str, object]:
+        """Return replay-relevant configuration without persisting environment values.
+
+        Environment values participate through a caller-keyed HMAC. This makes
+        a changed environment fail resume without exposing a reversible plain
+        digest in run-store metadata. Image contents remain external state;
+        callers who need reproducible containers should configure an immutable
+        digest.
+        """
+
+        if (self.env or self.forward_env) and self._resume_fingerprint_key is None:
+            raise ValueError(
+                "durable DockerBackend with env or forward_env requires resume_fingerprint_key"
+            )
+
+        def digest(value: str) -> str:
+            key = self._resume_fingerprint_key
+            assert key is not None
+            value_digest = hmac.new(key, value.encode(), hashlib.sha256).hexdigest()
+            return f"hmac-sha256:{value_digest}"
+
+        forwarded = {
+            key: digest(os.environ[key]) if key in os.environ else None for key in self.forward_env
+        }
+        return {
+            # The configured value is policy. PATH resolution is host state and
+            # stays in _docker_path(), immediately before execution.
+            "docker_path": self._docker,
+            "image": self.image,
+            "network": self.network,
+            "workspace_mount": self.workspace_mount,
+            "read_only_root": self.read_only_root,
+            "tmpfs": self.tmpfs,
+            "env": {key: digest(value) for key, value in sorted(self.env.items())},
+            "forward_env": forwarded,
+            "user": self.user,
+        }
 
     async def run(
         self,

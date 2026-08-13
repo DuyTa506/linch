@@ -23,29 +23,37 @@ chokepoint, see [./tools.md](./tools.md).
 
 ---
 
-## On by default
+## Explicit opt-in
 
-Every `Agent()` enables offloading with an ephemeral `StateFileBackend`. The
-threshold is derived automatically from the model's context window
-(`threshold_fraction=0.1` → 10 % of the context window). A 128 k-token model
-offloads results above ~12 800 tokens; a 200 k model above ~20 000 tokens. No
-configuration is required unless you want to change the backend or tune the
-threshold.
+Filesystem tools and large-result offloading are opt-in in Linch 2.0. A bare
+`Agent()` has no virtual filesystem tools, no offload backend, and does not
+trust project-local files. Enable the subsystem explicitly with
+`FeatureFlags(filesystem=True)` and choose a backend or let active sessions
+use an ephemeral `StateFileBackend`. This keeps SDK embedding from acquiring
+filesystem authority merely because it runs inside a checkout.
+
+When active, the default threshold is derived automatically from the model's
+context window (`threshold_fraction=0.1` → 10 % of the context window). A 128
+k-token model offloads results above ~12 800 tokens; a 200 k model above ~20
+000 tokens.
 
 ```python
-# Default — ephemeral in-memory backend, threshold = 10 % of context window
-agent = Agent(...)   # offload is already on
+# Explicit — ephemeral session backend, threshold = 10 % of context window
+from linch import FeatureFlags
+agent = Agent(..., features=FeatureFlags(filesystem=True))
 
 # Persist offloaded files under .linch/offload (inspectable, gitignored)
 from linch.filesystem import DiskFileBackend, OffloadConfig
 agent = Agent(
     ...,
+    features=FeatureFlags(filesystem=True),
     filesystem=DiskFileBackend(root=".linch/offload"),
 )
 
 # Tune the threshold or fraction explicitly
 agent = Agent(
     ...,
+    features=FeatureFlags(filesystem=True),
     result_offload=OffloadConfig(threshold_tokens=5_000),   # hard override
     # or:
     result_offload=OffloadConfig(threshold_fraction=0.05),  # 5 % of context
@@ -55,6 +63,7 @@ agent = Agent(
 from linch.filesystem import CompositeFileBackend, SqliteFileBackend, StateFileBackend
 agent = Agent(
     ...,
+    features=FeatureFlags(filesystem=True),
     filesystem=CompositeFileBackend(
         default=StateFileBackend(),
         routes={"/memories/": SqliteFileBackend(".linch/memories.db")},
@@ -70,7 +79,7 @@ agent = Agent(..., result_offload=None)
 
 The four backends differ only in where they persist and how they scope files:
 
-- **`StateFileBackend`** (default) — in-memory and per-session. Zero setup, but
+- **`StateFileBackend`** (active-session default) — in-memory and per-session. Zero setup, but
   files vanish when the session ends. Right for ordinary offloading where the
   model only needs to read payloads back within the same run.
 - **`DiskFileBackend(root=...)`** — real files under a sandboxed root (default
@@ -91,7 +100,8 @@ a bounded daemon thread, so persistence never blocks the agent loop.
 
 ## Auto-registered tools
 
-When the subsystem is active, four tools are registered automatically:
+When the subsystem is active, four tools are registered automatically. A bare
+agent does not receive these tools:
 
 | Tool | Description |
 |---|---|
@@ -133,8 +143,9 @@ raise it when most results are small and you'd rather avoid the read-back
 round-trip.
 
 Set `result_offload=None` or `features=FeatureFlags(filesystem=False)` to turn
-the subsystem off entirely — when unset it carries zero overhead until a result
-actually exceeds the threshold.
+the subsystem off entirely. With the default bare-agent flags it is already
+inactive; enabling it is an explicit trust decision. When active, the config
+carries zero offload I/O until a result actually exceeds the threshold.
 
 ---
 

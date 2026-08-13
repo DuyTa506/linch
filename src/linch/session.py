@@ -47,6 +47,13 @@ class RunOptions:
     budget: Any = None  # RunBudget | None
     """Spending cap for this run (and its subagent tree).  Overrides
     ``Agent.budget`` when set.  See :class:`~linch.budget.RunBudget`."""
+    allow_legacy_resume: bool = False
+    """Explicitly allow resuming a pre-2.0 run with no persisted run contract.
+
+    This is an unsafe migration escape hatch: compatibility cannot be proven
+    for a legacy row.  It has no effect on newly created runs and is not part
+    of the run fingerprint.
+    """
 
 
 @dataclass(slots=True)

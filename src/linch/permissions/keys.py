@@ -20,7 +20,9 @@ def permission_decision_to_dict(decision: Any) -> dict[str, Any]:
     return {
         "decision": decision.decision,
         "reason": decision.reason,
-        "updated_input": decision.updated_input,
+        # Retain the field for wire compatibility, but Linch 2 never persists
+        # post-approval mutation.
+        "updated_input": None,
     }
 
 
@@ -32,8 +34,9 @@ def permission_decision_from_dict(raw: dict[str, Any]) -> Any:
     decision = raw.get("decision")
     if decision not in {"allow", "deny"}:
         raise ValueError("stored permission decision must be 'allow' or 'deny'")
+    if raw.get("updated_input") is not None:
+        raise ValueError("stored permission decision with updated_input is not replayable")
     return PermissionDecision(
         decision=decision,
         reason=raw.get("reason"),
-        updated_input=raw.get("updated_input"),
     )

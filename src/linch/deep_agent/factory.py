@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from ..agent import Agent
-from ..config import SystemPromptConfig, SystemPromptSection
+from ..budget import RunBudget
+from ..config import FeatureFlags, SystemPromptConfig, SystemPromptSection
 from ..errors import ConfigError
 from ..filesystem.backend import CompositeFileBackend, StateFileBackend
 from ..filesystem.sqlite import SqliteFileBackend
@@ -12,13 +14,12 @@ from ..hooks import ContextInjectionHook
 from ..memory import MemoryContextBuilder, MemorySearchTool, MemoryUpsertTool
 from ..run_store import SqliteRunStore
 from ..sessions import SqliteSessionStore
-from ..tools.registry import default_tools
+from ..tools.registry import workspace_tools
 from ..tools.tasks import TaskCreateTool, TaskGetTool, TaskListTool, TaskUpdateTool
 from .prompts import COORDINATOR_SYSTEM_PROMPT, DEEP_AGENT_SYSTEM_PROMPT
 from .subagents import DEEP_AGENT_SUBAGENTS
 
 if TYPE_CHECKING:
-    from ..config import FeatureFlags
     from ..memory import MemoryStore
     from ..run_store import RunStore
     from ..sessions import SessionStore
@@ -29,11 +30,74 @@ if TYPE_CHECKING:
 _COORDINATOR_EXCLUDED_TOOLS = frozenset(["Edit", "Write", "Bash", "Grep", "Glob", "Read"])
 
 
+@dataclass(frozen=True, slots=True)
+class DeepAgentProfile:
+    """Named deep-agent policy bundle.
+
+    Profiles make long-horizon authority, retention, and spending visible and
+    reviewable.  Callers can still override individual values on the factory.
+    """
+
+    name: str
+    durable: bool
+    coordinator: bool
+    max_turns: int | None
+    max_tokens: int | None
+    retain_subagents: bool
+    enable_background_subagents: bool
+
+
+DEEP_AGENT_PROFILES: dict[str, DeepAgentProfile] = {
+    "balanced": DeepAgentProfile(
+        name="balanced",
+        durable=True,
+        coordinator=False,
+        max_turns=64,
+        max_tokens=1_000_000,
+        retain_subagents=True,
+        enable_background_subagents=True,
+    ),
+    "coordinator": DeepAgentProfile(
+        name="coordinator",
+        durable=True,
+        coordinator=True,
+        max_turns=64,
+        max_tokens=1_000_000,
+        retain_subagents=True,
+        enable_background_subagents=True,
+    ),
+    # Explicit escape hatch for hosts that intentionally own all outer-loop
+    # cost/lifetime controls.  A caller must name this profile to get no cap.
+    "unbounded": DeepAgentProfile(
+        name="unbounded",
+        durable=True,
+        coordinator=False,
+        max_turns=None,
+        max_tokens=None,
+        retain_subagents=True,
+        enable_background_subagents=True,
+    ),
+}
+
+
+def _resolve_profile(profile: str | DeepAgentProfile) -> DeepAgentProfile:
+    if isinstance(profile, DeepAgentProfile):
+        return profile
+    try:
+        return DEEP_AGENT_PROFILES[profile]
+    except (KeyError, TypeError) as exc:
+        choices = ", ".join(sorted(DEEP_AGENT_PROFILES))
+        raise ConfigError(
+            f"unknown deep-agent profile {profile!r}; choose one of: {choices}"
+        ) from exc
+
+
 def create_deep_agent(
     *,
     model: str,
-    durable: bool = True,
-    coordinator: bool = False,
+    profile: str | DeepAgentProfile = "balanced",
+    durable: bool | None = None,
+    coordinator: bool | None = None,
     cwd: str | None = None,
     system_prompt: str | None = None,
     tools: ToolRegistry | None = None,
@@ -50,7 +114,7 @@ def create_deep_agent(
     max_verification_retries: int = 2,
     **agent_kwargs: Any,
 ) -> Agent:
-    """Create a normal :class:`Agent` with deep-agent defaults.
+    """Create a normal :class:`Agent` from an explicit deep-agent profile.
 
     This is a distribution layer over the existing Linch runtime. It keeps the
     core loop unchanged while enabling planning tools, specialized subagents,
@@ -63,13 +127,11 @@ def create_deep_agent(
     injected and ``run_in_background`` becomes the default worker pattern.
     A persistent ``/memories`` filesystem partition is set up for durable state.
 
-    **Open-loop safety rails.** A deep agent is an *open loop*: the model authors
-    its own path, so by default it runs unbounded (``max_turns`` is infinite, no
-    budget cap). ``loop_guard`` is on by default (it stops pathological repeat/
-    failure loops) but does not bound a productive-but-endless exploration. The
-    SDK deliberately does **not** fabricate a default cost ceiling or quality
-    standard — those are policy you own. Set them explicitly to keep the loop
-    honest and affordable:
+    The default ``balanced`` profile is durable, retains workers for continue,
+    and bounds the open loop to 64 turns / 1,000,000 tokens across the complete
+    subagent tree. Name ``profile="unbounded"`` only when an outer service owns
+    equivalent lifetime and cost policy. ``loop_guard`` remains enabled to stop
+    pathological repeat/failure loops.
 
     - ``budget=RunBudget(...)`` — the cost line; also caps the whole subagent tree.
     - ``verifiers=[...]`` — the standard checked before the final answer; wired
@@ -78,8 +140,10 @@ def create_deep_agent(
 
     Args:
         model: Model identifier passed through to Agent.
-        durable: Whether to wire durable session/run storage by default.
-        coordinator: Whether to configure this agent as a pure orchestrator
+        profile: Named/profile-object policy bundle. Built-ins are ``balanced``,
+            ``coordinator``, and the explicit ``unbounded`` escape hatch.
+        durable: Optional override for profile durability.
+        coordinator: Optional override for pure-orchestrator mode
             (heavy tools removed, coordinator system prompt, background-worker
             default pattern).
         cwd: Working directory root for the virtual filesystem; defaults to ".".
@@ -94,7 +158,7 @@ def create_deep_agent(
             memory tools under memory_namespace.
         memory_namespace: Namespace passed to memory_store and its tools.
         budget: RunBudget cap applied to this agent and its subagent tree.
-        max_turns: Hard turn-count cap; None leaves the loop unbounded.
+        max_turns: Hard turn-count override; the profile supplies the default.
         verifiers: Verifiers checked before the final answer is accepted.
         max_verification_retries: Retry cap for failed verifiers.
         **agent_kwargs: Forwarded verbatim to Agent.
@@ -104,7 +168,29 @@ def create_deep_agent(
         durable storage wired in.
     """
 
-    if coordinator and features is not None and not getattr(features, "subagents", True):
+    resolved_profile = _resolve_profile(profile)
+    if durable is None:
+        durable = resolved_profile.durable
+    if coordinator is None:
+        coordinator = resolved_profile.coordinator
+    if max_turns is None:
+        max_turns = resolved_profile.max_turns
+    if budget is None and resolved_profile.max_tokens is not None:
+        budget = RunBudget(max_tokens=resolved_profile.max_tokens)
+
+    # A deep-agent factory is the explicit opt-in boundary for project-local
+    # skills/subagents and its virtual filesystem. MCP stays off unless servers
+    # were actually configured, preventing an unrelated ambient connection.
+    if features is None:
+        has_mcp = bool(agent_kwargs.get("mcp_servers") or agent_kwargs.get("mcpServers"))
+        features = FeatureFlags(
+            skills=True,
+            subagents=True,
+            mcp=has_mcp,
+            filesystem=True,
+        )
+
+    if coordinator and not features.subagents:
         raise ConfigError("create_deep_agent(coordinator=True) requires features.subagents=True")
 
     root = Path(cwd or ".").resolve()
@@ -125,17 +211,31 @@ def create_deep_agent(
 
     hooks = _normalize_hooks(agent_kwargs.pop("hooks", None))
     if memory_store is not None:
-        hooks.append(
-            ContextInjectionHook(MemoryContextBuilder(memory_store, namespace=memory_namespace))
+        memory_hook = ContextInjectionHook(
+            MemoryContextBuilder(memory_store, namespace=memory_namespace)
         )
+        # The factory owns this adapter's behavior, so it can make the durable
+        # policy identity explicit. The store's changing data is runtime input,
+        # like a database queried by a tool; the builder configuration is the
+        # resume-critical policy.
+        cast(Any, memory_hook).resume_policy_id = "linch.deep-agent.memory-context"
+        cast(Any, memory_hook).resume_policy_version = "1"
+        cast(Any, memory_hook).resume_policy_config = {
+            "namespace": memory_namespace,
+            "limit": 5,
+        }
+        hooks.append(memory_hook)
     if verifiers is not None:
         from ..hooks import FinalAnswerVerifierHook
 
         hooks.append(FinalAnswerVerifierHook(verifiers, max_retries=max_verification_retries))
     agent_kwargs.setdefault("enable_worker_tools", True)
-    agent_kwargs.setdefault("retain_subagents", True)
-    agent_kwargs.setdefault("enable_background_subagents", True)
+    agent_kwargs.setdefault("retain_subagents", resolved_profile.retain_subagents)
+    agent_kwargs.setdefault(
+        "enable_background_subagents", resolved_profile.enable_background_subagents
+    )
     agent_kwargs.setdefault("enable_task_stop", True)
+    agent_kwargs.setdefault("read_before_write", True)
 
     if durable:
         store_root = root / ".linch"
@@ -168,6 +268,7 @@ def create_deep_agent(
     )
     if coordinator:
         agent._set_subagent_tool_registry(worker_registry)
+    cast(Any, agent).deep_agent_profile = resolved_profile
     return agent
 
 
@@ -178,7 +279,7 @@ def _deep_agent_tools(
     namespace: str | None,
     features: FeatureFlags | None = None,
 ) -> ToolRegistry:
-    registry = tools.copy() if tools is not None else default_tools()
+    registry = tools.copy() if tools is not None else workspace_tools()
     for tool in (TaskCreateTool(), TaskListTool(), TaskGetTool(), TaskUpdateTool()):
         if registry.get(tool.name) is None:
             registry.register(tool)

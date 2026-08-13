@@ -32,7 +32,13 @@ class ToolContext:
     session_store: Any
     signal: Any = None
     file_read_tracker: Any = None
-    emit: Callable[..., None] | None = None
+    emit: Callable[[str, dict[str, Any] | None], None] | None = None
+    """Runtime-owned progress sink.
+
+    Tools should call :meth:`report_progress` instead of invoking this field
+    directly. The sink is scoped to one ``execute()`` call and ignores reports
+    made after that call settles.
+    """
     deps: Any = None
     """Application-state dependency object injected via ``Agent(deps=...)``
     or ``RunOptions(deps=...)``.  Use this to share a vector-store client,
@@ -74,6 +80,29 @@ class ToolContext:
     @property
     def idempotencyKey(self) -> str:
         return self.idempotency_key
+
+    def report_progress(self, message: str, data: dict[str, Any] | None = None) -> None:
+        """Report transient execution progress to event-stream observers.
+
+        Progress is deliberately best-effort and cannot fail tool execution:
+        observer/sink exceptions are swallowed. Calls are a no-op when the
+        scheduler did not install a sink (for example in direct unit tests).
+        """
+        if not isinstance(message, str):
+            raise TypeError("progress message must be a string")
+        if data is not None and not isinstance(data, dict):
+            raise TypeError("progress data must be a dict or None")
+        sink = self.emit
+        if sink is None:
+            return
+        try:
+            sink(message, data)
+        except Exception:
+            return
+
+    @property
+    def reportProgress(self) -> Callable[[str, dict[str, Any] | None], None]:
+        return self.report_progress
 
 
 @dataclass(slots=True)

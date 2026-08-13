@@ -149,6 +149,31 @@ async def test_structured_output_from_json_text():
 
 
 @pytest.mark.asyncio
+async def test_empty_text_with_output_schema_reports_parse_error():
+    from linch import Agent
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import empty_tools
+    from linch.types import OutputSchema
+
+    provider = _text_provider("")
+    schema = OutputSchema(name="answer", schema={"type": "object"})
+    agent = Agent(
+        model="gpt-5",
+        provider=provider,
+        tools=empty_tools(),
+        permissions={"mode": "skip-dangerous"},
+        session_store=InMemorySessionStore(),
+        output_schema=schema,
+    )
+    session = await agent.session()
+    result = [event async for event in session.run("go")][-1]
+
+    assert result.subtype == "success"
+    assert result.structured_output is None
+    assert "JSON parse error" in result.structured_error
+
+
+@pytest.mark.asyncio
 async def test_structured_output_from_fenced_json_text():
     from linch import Agent
     from linch.sessions import InMemorySessionStore
@@ -444,6 +469,62 @@ async def test_final_tool_terminates_loop_with_structured_output():
     assert result is not None
     assert result.structured_output == tool_input
     assert tool_call_ends == []
+    # The synthetic terminal tool is not scheduled, but its protocol bracket
+    # is durably closed so this session can be used for another provider turn.
+    from linch.types import ToolResultBlock
+
+    assert isinstance(session.provider_view[-1].content[0], ToolResultBlock)
+    assert session.provider_view[-1].content[0].tool_use_id == "t1"
+    follow_up = [event async for event in session.run("continue")]
+    assert follow_up[-1].type == "result" and follow_up[-1].subtype == "success"
+
+
+@pytest.mark.asyncio
+async def test_final_tool_mixed_with_ordinary_call_fails_without_executing_either():
+    from linch import Agent
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import empty_tools
+    from linch.types import Usage
+
+    executions = 0
+
+    class Ordinary(type(_make_emit_tool())):
+        name = "ordinary"
+
+        async def execute(self, input, ctx):
+            nonlocal executions
+            executions += 1
+            return await super().execute(input, ctx)
+
+    class Provider:
+        id = "mixed-final"
+
+        def context_window(self, model):
+            return 128_000
+
+        async def stream(self, req):
+            yield {"type": "message_start", "model": req.model}
+            for tool_id, name in (("ordinary-1", "ordinary"), ("final-1", "emit_answer")):
+                yield {"type": "tool_use_start", "id": tool_id, "name": name}
+                yield {"type": "tool_use_input_delta", "id": tool_id, "json_delta": "{}"}
+                yield {"type": "tool_use_end", "id": tool_id}
+            yield {"type": "message_end", "stop_reason": "tool_use", "usage": Usage()}
+
+    agent = Agent(
+        model="gpt-5",
+        provider=Provider(),
+        tools=empty_tools(Ordinary(), _make_emit_tool()),
+        permissions={"mode": "skip-dangerous"},
+        session_store=InMemorySessionStore(),
+        final_tool_name="emit_answer",
+    )
+    session = await agent.session()
+    events = [event async for event in session.run("go")]
+
+    assert executions == 0
+    assert any(event.type == "error" for event in events)
+    assert events[-1].type == "result" and events[-1].subtype == "error"
+    assert len(session.provider_view[-1].content) == 2
 
 
 @pytest.mark.asyncio

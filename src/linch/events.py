@@ -61,6 +61,22 @@ class ToolCallEndEvent:
 
 
 @dataclass(slots=True)
+class ToolProgressEvent:
+    """Transient progress reported by an in-flight tool invocation.
+
+    Progress is observational only: it is never added to provider history and
+    does not alter the final :class:`ToolResult`. ``data`` is an optional,
+    JSON-safe UI payload supplied by the tool.
+    """
+
+    tool_use_id: str
+    tool_name: str
+    message: str
+    data: dict[str, Any] | None = None
+    type: Literal["tool_progress"] = "tool_progress"
+
+
+@dataclass(slots=True)
 class PermissionRequestItem:
     tool_use_id: str
     tool_name: str
@@ -350,6 +366,7 @@ Event: TypeAlias = (
     | AssistantEvent
     | PartialAssistantEvent
     | ToolCallStartEvent
+    | ToolProgressEvent
     | ToolCallEndEvent
     | PermissionRequestEvent
     | UsageEvent
@@ -395,6 +412,10 @@ def is_tool_call_start_event(e: Event) -> bool:
 
 def is_tool_call_end_event(e: Event) -> bool:
     return e.type == "tool_call_end"  # type: ignore[comparison-overlap]
+
+
+def is_tool_progress_event(e: Event) -> bool:
+    return e.type == "tool_progress"  # type: ignore[comparison-overlap]
 
 
 def is_permission_request_event(e: Event) -> bool:
@@ -586,6 +607,14 @@ def event_to_dict(event: Event) -> dict[str, Any]:
             "tool_name": event.tool_name,
             "input": event.input,
             "summary": event.summary,
+        }
+    if isinstance(event, ToolProgressEvent):
+        return {
+            "type": event.type,
+            "tool_use_id": event.tool_use_id,
+            "tool_name": event.tool_name,
+            "message": event.message,
+            "data": _json_safe(event.data),
         }
     if isinstance(event, ToolCallEndEvent):
         out = {
@@ -790,6 +819,14 @@ def event_from_dict(raw: dict[str, Any]) -> Event:
             tool_name=str(raw.get("tool_name", "")),
             input=dict(raw.get("input", {})),
             summary=str(raw.get("summary", "")),
+        )
+    if typ == "tool_progress":
+        data = raw.get("data")
+        return ToolProgressEvent(
+            tool_use_id=str(raw.get("tool_use_id", "")),
+            tool_name=str(raw.get("tool_name", "")),
+            message=str(raw.get("message", "")),
+            data=dict(data) if isinstance(data, dict) else None,
         )
     if typ == "tool_call_end":
         raw_tool_result = raw.get("tool_result")

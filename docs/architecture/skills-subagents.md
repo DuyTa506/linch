@@ -7,7 +7,9 @@ such as `verify` are also registered unless a disk skill uses the same name.
 Each file has YAML frontmatter (`name`, `description`, `allowed_tools`,
 `model_override`) and a markdown body. When a skill is invoked, the body is
 injected as a `<system-reminder>` per-turn via `_re_inject_skill_context`.
-Gated by `FeatureFlags(skills=True)`.
+Gated by `FeatureFlags(skills=True)`. Linch 2.0's bare `Agent` sets this flag
+to `False`, so an SDK embedder does not discover project instructions merely
+because its process is running in a checkout.
 
 **Subagents** are defined in `.linch/agents/*.md`; built-in named agents
 such as `verification` are also registered unless a disk agent uses the same
@@ -15,14 +17,25 @@ name. `subagents/runner.py` creates a child agent with its own tool overlay and
 system prompt. The child's system blocks are computed from its own tool names —
 not copied from the parent. Gated by `FeatureFlags(subagents=True)`.
 
+The bare SDK agent also leaves `subagents`, `mcp`, and `filesystem` disabled.
+Enable each trusted project resource explicitly, or use the opt-in
+`create_deep_agent()` preset, which enables the capabilities it assembles.
+
 **MCP** — `connect_mcp_servers(configs)` wraps each MCP tool as a duck-typed Linch tool. Names are normalized via `mcp/naming.py`. The connection closes on `agent.close()`. Gated by `FeatureFlags(mcp=True)`.
 
 ### Deep agent preset (`deep_agent/`)
 
-`create_deep_agent(model, durable, coordinator, cwd, ...)` is a factory that assembles a full deep-agent configuration in one call: task tools, a specialist subagent roster (researcher, planner, implementer), durable stores, a persistent `/memories` filesystem, and a deepened system prompt.
+`create_deep_agent(model, profile, durable, coordinator, cwd, ...)` is an
+explicit factory that assembles a full deep-agent configuration in one call:
+task tools, a specialist subagent roster (researcher, planner, implementer),
+durable stores, a persistent `/memories` filesystem, and a deepened system
+prompt. The default `balanced` profile bounds a run to 64 turns and 1,000,000
+tokens while retaining workers; `coordinator` has the same bounds and strips
+heavy tools from the parent. `unbounded` is an explicit escape hatch for a
+host that owns equivalent lifetime and cost controls.
 
 - **`coordinator=True`** — the parent agent strips heavy tools (`Edit`, `Write`, `Bash`, `Grep`, `Glob`, `Read`); `COORDINATOR_SYSTEM_PROMPT` is injected via `SystemPromptConfig`; `TaskStopTool` is registered on the coordinator. Worker subagents receive full tool access via `build_child_tools`.
-- **`durable=True`** — wires `SqliteSessionStore` + `SqliteRunStore` + `CompositeFileBackend` with a `/memories` route to `SqliteFileBackend` so memory persists across restarts.
+- **`durable=True`** — wires `SqliteSessionStore` + `SqliteRunStore` + `CompositeFileBackend` with a `/memories` route to `SqliteFileBackend` so session history, checkpoints, and memory data persist across restarts. An active detached worker task is process-local and is not reconstructed after a crash.
 
 ### Background workers and fork/continue
 
@@ -31,13 +44,15 @@ sequenceDiagram
     participant P as Parent loop
     participant ST as SubagentTool
     participant W as Worker (child session)
-    participant N as pending_notifications
+    participant N as pending_notifications (in-memory)
+    participant RS as RunStore audit log
 
     P->>ST: call (run_in_background=true)
     ST->>W: asyncio.create_task(_bg_run)
     ST-->>P: ack — turn continues, not blocked
     W->>W: run to completion (retain=true → stays in agent._sessions)
-    W->>N: append <task-notification>
+    W->>N: append <task-notification> (in-memory)
+    W->>RS: append origin-attributed audit event (when configured)
     Note over P,N: top of the next turn
     P->>N: _drain_pending_notifications
     N-->>P: UserEvent per notification (before context build)
@@ -50,11 +65,15 @@ sequenceDiagram
 
 - `SubagentTool` always passes `retain=True` so the child session stays live in `agent._sessions` after the run ends.
 - `session.workers: dict[str, WorkerHandle]` indexes every spawned worker by `worker_id`.
-- **`run_in_background=True`** on `SubagentTool`: spawns `asyncio.create_task(_bg_run())` and returns an acknowledgement immediately. On completion, the task appends a `<task-notification>` XML `Message` to `session.pending_notifications`.
+- **`run_in_background=True`** on `SubagentTool`: spawns `asyncio.create_task(_bg_run())` and returns an acknowledgement immediately. On completion, the task appends a `<task-notification>` XML `Message` to `session.pending_notifications`. That notification is in-memory only. When a `RunStore` is configured, Linch also records an origin-attributed `BackgroundWorkerEvent` audit record, but it does not turn the detached result into a restart-recoverable queue.
 - The loop drains `session.pending_notifications` at the top of each turn (`_drain_pending_notifications`), yielding each notification as a `UserEvent` before `ContextInjectionHook.build_context()` runs, so the model sees task-completion content before the next provider call.
 - `SubagentContinueTool` resolves a worker by id or display name via `resolve_worker`, then calls `continue_subagent()`, which re-drives the live child session using the full prior `provider_view`.
 - `TaskStopTool` cancels the background `asyncio.Task` and signals abort on the child session; the `WorkerHandle` remains in `session.workers` so the worker can be continued later.
 - `session.abort()` and `agent.close()` both cancel all running background worker tasks. `agent.close()` additionally clears `agent._sessions`.
+- A process restart cannot resume an active detached task or recreate its
+  in-memory completion notification. Hosts that need durable worker delivery
+  must persist the work and result in an application-owned queue or workflow;
+  the audit event is evidence of state, not the result payload delivery path.
 
 ### Run budgets (`budget.py`)
 

@@ -36,13 +36,17 @@ sequenceDiagram
         alt stop_reason = end_turn
             RL-->>Caller: ResultEvent(success)
         else stop_reason = tool_use
-            RL->>PE: check_all(tool_calls)
+            RL->>SC: resolve + validate tool calls
+            SC->>SC: enforce offered-tool boundary
+            SC->>SC: PreToolUse transform/block/resolve
+            SC->>SC: revalidate canonical input
+            SC->>PE: evaluate final permissions
             PE-->>Caller: PermissionRequestEvent (if pending)
-            PE-->>RL: approved calls
+            PE-->>SC: approved or denied canonical calls
 
-            RL->>SC: execute_tool_calls(approved_calls)
             SC-->>Caller: ToolCallStartEvent x N
-            Note over SC: maybe_offload() — on by default<br/>threshold = context_window × 0.1 (resolved at Agent init)<br/>if tokens(result) > threshold: write to FileBackend, replace with preview + path
+            SC-->>Caller: ToolProgressEvent (optional, stream-only)
+            Note over SC: when FeatureFlags(filesystem=True) enables it,<br/>maybe_offload() writes results over the configured threshold<br/>to FileBackend and replaces provider-facing content with a preview
             SC-->>Caller: ToolCallEndEvent x N (result=preview, tool_result=full)
             SC-->>RL: result_blocks (previews only enter provider_view)
 
@@ -70,21 +74,24 @@ sequenceDiagram
   the response contains tool calls and stops on a text-only (`end_turn`) response.
   This lets a task take as many or as few turns as it needs; `max_turns` and the
   loop guard are safety bounds, not the primary control.
-- **Permission gate sits *between* the model's request and execution.** Tool calls
-  are checked before the scheduler runs them, so a denied call never produces a side
-  effect — the gate can pause the loop for human input mid-turn.
+- **The security gate has a canonical order.** The scheduler resolves and validates the
+  model proposal, enforces that the tool was offered in this request, runs `PreToolUse`,
+  validates the transformed input again, and only then evaluates rules or asks the caller
+  for approval. An unoffered call never reaches hooks; denied and unoffered calls never
+  produce a side effect.
 - **Context-builder output is appended to the request, never written into
   `provider_view`.** Per-turn RAG/memory is ephemeral: it informs one provider call
   without polluting the durable conversation, which keeps `provider_view` stable and
   replayable across turns.
 - **Everything is an event over an async generator.** The caller drives iteration, so
   a slow consumer naturally backpressures the producer, and a UI can render
-  streaming/usage/permission events as they arrive instead of waiting for the turn to
-  finish.
-- **Loop-guard and offload run at fixed chokepoints.** Loop detection evaluates each
-  tool batch (no extra LLM call), and `maybe_offload` is applied at the single result
-  chokepoint — both are structural, so they can't be bypassed by a code path that
-  forgets to call them.
+  streaming/usage/permission/progress events as they arrive instead of waiting for the
+  turn to finish. `ToolProgressEvent` is observational only: it is neither provider
+  history nor durable tool-result state.
+- **Loop-guard and optional offload run at fixed chokepoints.** Loop detection evaluates
+  each tool batch (no extra LLM call), and filesystem-enabled `maybe_offload` is applied
+  at the single result chokepoint — both are structural, so an enabled path cannot be
+  skipped by a code path that forgets to call them.
 
 ---
 

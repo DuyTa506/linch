@@ -63,7 +63,12 @@ if TYPE_CHECKING:
         schedule_tools,
         validate_cron,
     )
-    from .deep_agent import DEEP_AGENT_SYSTEM_PROMPT, create_deep_agent
+    from .deep_agent import (
+        DEEP_AGENT_PROFILES,
+        DEEP_AGENT_SYSTEM_PROMPT,
+        DeepAgentProfile,
+        create_deep_agent,
+    )
     from .errors import (
         AbortError,
         AuthError,
@@ -125,6 +130,7 @@ if TYPE_CHECKING:
         SystemEvent,
         ToolCallEndEvent,
         ToolCallStartEvent,
+        ToolProgressEvent,
         UsageEvent,
         UserEvent,
         VerificationEvent,
@@ -279,11 +285,22 @@ if TYPE_CHECKING:
     from .run_store import (
         InMemoryRunStore,
         RunCheckpoint,
+        RunContract,
+        RunContractComparison,
+        RunContractDifference,
+        RunContractMismatchError,
         RunEventBatchStore,
         RunRecord,
         RunStore,
         SqliteRunStore,
         StoredRunEvent,
+        build_run_contract,
+        compare_run_contract,
+        ensure_run_contract_compatible,
+        run_contract_from_dict,
+        run_contract_from_meta,
+        run_contract_to_dict,
+        run_meta_with_contract,
     )
     from .scheduler import ToolBatchingStrategy
     from .session import RunOptions, Session
@@ -333,7 +350,7 @@ if TYPE_CHECKING:
         tool,
     )
     from .tools.isolation import IsolationBackend, TempDirIsolation
-    from .tools.registry import empty_tools, tools_from_defaults
+    from .tools.registry import empty_tools, tools_from_defaults, workspace_tools
     from .types import (
         ContentBlock,
         ImageBlock,
@@ -408,7 +425,12 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
         "schedule_tools",
         "validate_cron",
     ),
-    ".deep_agent": ("DEEP_AGENT_SYSTEM_PROMPT", "create_deep_agent"),
+    ".deep_agent": (
+        "DEEP_AGENT_PROFILES",
+        "DEEP_AGENT_SYSTEM_PROMPT",
+        "DeepAgentProfile",
+        "create_deep_agent",
+    ),
     ".errors": (
         "AbortError",
         "AuthError",
@@ -444,6 +466,7 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
         "SystemEvent",
         "ToolCallEndEvent",
         "ToolCallStartEvent",
+        "ToolProgressEvent",
         "UsageEvent",
         "UserEvent",
         "VerificationEvent",
@@ -621,11 +644,22 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
     ".run_store": (
         "InMemoryRunStore",
         "RunCheckpoint",
+        "RunContract",
+        "RunContractComparison",
+        "RunContractDifference",
+        "RunContractMismatchError",
         "RunEventBatchStore",
         "RunRecord",
         "RunStore",
         "SqliteRunStore",
         "StoredRunEvent",
+        "build_run_contract",
+        "compare_run_contract",
+        "ensure_run_contract_compatible",
+        "run_contract_from_dict",
+        "run_contract_from_meta",
+        "run_contract_to_dict",
+        "run_meta_with_contract",
     ),
     ".scheduler": ("ToolBatchingStrategy",),
     ".session": ("RunOptions", "Session"),
@@ -675,7 +709,7 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
         "tool",
     ),
     ".tools.isolation": ("IsolationBackend", "TempDirIsolation"),
-    ".tools.registry": ("empty_tools", "tools_from_defaults"),
+    ".tools.registry": ("empty_tools", "tools_from_defaults", "workspace_tools"),
     ".types": (
         "ContentBlock",
         "ImageBlock",
@@ -782,7 +816,9 @@ __all__ = [
     "DefaultCompaction",
     "DetailedCompaction",
     "GENERAL_SUMMARY_PROMPT",
+    "DEEP_AGENT_PROFILES",
     "DEEP_AGENT_SYSTEM_PROMPT",
+    "DeepAgentProfile",
     "FeatureFlags",
     "CompositeFileBackend",
     "DiskFileBackend",
@@ -894,6 +930,7 @@ __all__ = [
     "ToolCallMiddlewareInput",
     "ToolCallMiddlewareResult",
     "ToolCallStartEvent",
+    "ToolProgressEvent",
     "ToolContext",
     "ToolExecutionError",
     "ToolTimeoutError",
@@ -933,6 +970,10 @@ __all__ = [
     "RunReport",
     "RUN_SCHEMA_VERSION",
     "RunCheckpoint",
+    "RunContract",
+    "RunContractComparison",
+    "RunContractDifference",
+    "RunContractMismatchError",
     "RunRecord",
     "RunStore",
     "SqliteRunStore",
@@ -941,6 +982,12 @@ __all__ = [
     "VLLMProviderOptions",
     "apply_provider_capabilities",
     "build_run_report",
+    "build_run_contract",
+    "run_contract_from_dict",
+    "run_contract_from_meta",
+    "run_contract_to_dict",
+    "run_meta_with_contract",
+    "compare_run_contract",
     "create_subagent_definition",
     "LoopGuard",
     "LoopGuardDecision",
@@ -978,6 +1025,8 @@ __all__ = [
     "create_deep_agent",
     "defaultTools",
     "default_tools",
+    "workspace_tools",
+    "ensure_run_contract_compatible",
     "get_version",
     "__version__",
     "is_context_build_event",

@@ -112,3 +112,28 @@ def test_no_undeclared_public_attributes() -> None:
         and not isinstance(getattr(linch, name), types.ModuleType)
     ]
     assert leaked == [], f"public attributes missing from __all__: {leaked}"
+
+
+def test_external_consumer_fixture_uses_only_top_level_api() -> None:
+    """A consumer module must not need private Linch submodule paths."""
+
+    fixture = Path(__file__).parent / "fixtures" / "public_consumer.py"
+    script = f"""
+import importlib.util
+import sys
+sys.path.insert(0, {str(Path(__file__).resolve().parents[1] / "src")!r})
+spec = importlib.util.spec_from_file_location("external_consumer", {str(fixture)!r})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+assert module.make_agent().tools.list()
+assert module.make_contract().fingerprint.startswith("sha256:")
+assert module.DeepAgentProfile is not None
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr

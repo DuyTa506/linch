@@ -4,13 +4,19 @@
 
 ### 3.1 Scheduler — Parallel & Serialized Execution
 
-The scheduler is the only place tool calls are executed. It enforces concurrency policies and resource conflict rules before dispatching.
+The scheduler is the only place tool calls are executed. It establishes one canonical,
+validated input for each call, applies the final policy gate, and then enforces
+concurrency and resource-conflict rules before dispatching.
 
 ```mermaid
 flowchart TD
     IN["Incoming ToolUseBlocks\n(from AssistantAssembly)"]
 
-    RESOLVE["Resolve each call\n• validate JSON input\n• look up tool in registry\n• collect ResourceAccess declarations"]
+    RESOLVE["Resolve each call\n• parse/validate input\n• look up registered tool"]
+    OFFERED["Enforce offered-tool boundary\n• unavailable calls stop here"]
+    HOOK["PreToolUse pipeline\n• transform, block, or serve a result"]
+    REVALIDATE["Revalidate canonical input\n• rebuild summary/resources"]
+    PERMIT["Final permission decision\n• rules / mode / durable same-turn replay\n• aggregate human approval if needed"]
 
     CLASSIFY{{"Classify\ntool scope"}}
 
@@ -24,7 +30,7 @@ flowchart TD
 
     OUT["Collect ToolCallEndEvents\nin original provider call order"]
 
-    IN --> RESOLVE --> CLASSIFY
+    IN --> RESOLVE --> OFFERED --> HOOK --> REVALIDATE --> PERMIT --> CLASSIFY
     CLASSIFY -->|"read + parallel"| READ
     CLASSIFY -->|"write / exec"| WRITE
     READ --> RES
@@ -40,6 +46,14 @@ flowchart TD
 - `scope="write"` or `scope="exec"` → always serialize, regardless of `parallel` flag.
 - `ResourceAccess(resource, mode)` enables finer conflict detection: two `"read"` accesses on the same resource overlap freely; any `"write"` on a resource being read or written by another call serializes.
 - Result events are emitted in the **original provider tool-call order**, not completion order.
+- The security order is fixed: resolve and validate → reject a registered tool that was
+  not offered in the current provider request → `PreToolUse` → revalidate the transformed
+  input → evaluate final permissions → execute. An unoffered call never reaches hooks,
+  and an approval is never transferable from the model's original input to a
+  hook-transformed one.
+- `ToolProgressEvent` is a bounded, coalesced **stream-only** observation. It is emitted
+  after that call's `ToolCallStartEvent` and before its `ToolCallEndEvent`, never becomes
+  provider history or a `ToolResult`, and must not be treated as durable execution state.
 - **Timeouts** — `Agent(tool_timeout_ms=N)` (env `AGENTKIT_TOOL_TIMEOUT_MS`) sets an agent-wide execution deadline. Per-tool override: `execution_timeout_ms` class attribute (`0` = opt-out). Timeout → `is_error=True` result, run continues. Uses `asyncio.wait_for` (Python 3.10 safe). `ToolTimeoutError` (`retryable=True`) is the typed exception class.
 - **Retry** — `Agent(tool_retry=RetryOptions(...))` enables opt-in exponential-backoff retry. Read-scope tools retry any exception; write/exec tools only retry when the tool sets `retryable = True`. `AbortError` is never retried.
 
@@ -231,16 +245,26 @@ graph TD
 
 ### 3.6 Permission Evaluation
 
-Every tool call passes through the permission engine before reaching the scheduler.
+Every tool call is authorized only after the scheduler has produced its canonical
+input. The provider may propose only tools offered in its current request; a tool
+that happens to be registered but was filtered from that request is a hard error,
+not an opportunity for hooks or policy fallback. Once the offered-tool boundary passes,
+`PreToolUse` may transform, block, or serve a call; every transformed input is validated
+again before permission evaluation.
+
 For durable resume, allow/deny decisions made during a turn are snapshotted in
-`RunCheckpoint.permission_decisions`. On resume of the same checkpointed turn,
-the scheduler replays those decisions before invoking `canUseTool`; on the next
-fresh turn, `session.current_turn_permission_decisions` is cleared so approvals
-cannot leak across turns.
+`RunCheckpoint.permission_decisions` under the final canonical `(tool_name, input)`
+key. On resume of the same checkpointed turn, only a well-formed decision for that
+same key is replayed before invoking `canUseTool`; on the next fresh turn,
+`session.current_turn_permission_decisions` is cleared so approvals cannot leak
+across turns. Legacy post-approval `updatedInput` decisions are not replayable.
 
 ```mermaid
 flowchart TD
-    CALLS["Pending tool calls"]
+    CALLS["Provider-proposed tool calls"]
+
+    VALIDATE["Resolve + validate\ncheck tool was offered this turn"]
+    FINAL["Run PreToolUse\nrevalidate canonical input"]
 
     RULES["Evaluate rule list in order\n1  ToolRule(tool_name, allow|deny)\n2  PathRule(path_globs, allow|deny)\n3  BashRule(cmd_patterns, allow|deny)"]
 
@@ -255,7 +279,7 @@ flowchart TD
     EXEC["Dispatch to Scheduler"]
     DENY["ToolCallEndEvent(is_error=True)"]
 
-    CALLS --> RULES --> MATCH
+    CALLS --> VALIDATE --> FINAL --> RULES --> MATCH
     MATCH -->|"allow"| EXEC
     MATCH -->|"deny"| DENY
     MATCH -->|"no match"| MODE
@@ -335,11 +359,16 @@ scheduler writes the full payload to a `FileBackend` and substitutes a short
 preview + path reference in `provider_view`. The model reads back only the slices
 it needs via the `read_file` tool.
 
+This is an explicit capability, not a bare-`Agent` default. A neutral SDK agent
+has `FeatureFlags(filesystem=False)` and no filesystem tools or offload path. Enable
+it with `Agent(features=FeatureFlags(filesystem=True), ...)` (optionally supplying
+`filesystem=` or an `OffloadConfig`); coding/deep-agent presets enable it explicitly.
+
 ```mermaid
 flowchart TD
     EXEC["tool.execute() → ToolResult\ncontent = full payload (potentially huge)"]
 
-    OFFLOAD{{"offload enabled (on by default)\nAND backend attached\nAND tokens(content) > threshold\n(threshold = context_window × 0.1)"}}
+    OFFLOAD{{"filesystem feature enabled\nAND backend/offload configured\nAND tokens(content) > threshold\n(threshold = context_window × 0.1)"}}
 
     WRITE["backend.write(path, content)\nwrite full payload to FileBackend"]
     REPLACE["result.content = preview (N lines) + path hint\nresult.truncated = True\nresult.metadata[offloaded_to] = path"]
@@ -358,7 +387,7 @@ flowchart TD
 
 | Backend | Storage | Lifecycle | Use when |
 |---|---|---|---|
-| `StateFileBackend` | In-memory dict | Per-session (default) | Zero-overhead ephemeral scratch |
+| `StateFileBackend` | In-memory dict | Per-session when the filesystem feature is enabled | Zero-overhead ephemeral scratch |
 | `DiskFileBackend` | Real files under a root dir | Until deleted | Want human-inspectable files; root defaults to `.linch/offload` (gitignored) |
 | `SqliteFileBackend` | SQLite table | Persistent across sessions | Need cross-session recall (e.g. `/memories/`) |
 | `CompositeFileBackend` | Routes by path prefix | Mixed | Ephemeral scratch + persistent `/memories/` subtree |
@@ -375,7 +404,8 @@ class FileBackend(Protocol):
     async def delete(self, path) -> None: ...
 ```
 
-**Four tools** are registered automatically when a backend is configured:
+**Four tools** are registered automatically when the filesystem feature is enabled
+and a backend/offload path is active:
 
 | Tool | Scope | Description |
 |---|---|---|
@@ -401,7 +431,8 @@ not the raw payload — matching the session's context budget.
   `(tool_name, input)` lets a resumed run replay a prior allow/deny instead of
   re-prompting. Only explicit allow/deny persist — abort/error denials don't, so a
   transient failure never hardens into a stored "no".
-- **Offload mutates only the model's view.** The preview replaces `ToolResult.content`
+- **Offload is an explicit model-view optimization.** When the filesystem feature is
+  enabled, the preview replaces `ToolResult.content`
   before the block enters `provider_view`, but the full payload still rides on the
   event for observers/RAG — large results stay within the context budget without being
   lost. A write failure silently returns the original result, so storage trouble never

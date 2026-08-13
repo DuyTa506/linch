@@ -4,6 +4,52 @@ Notable changes to `linch`. Versioning follows the contract in
 [docs/versioning.md](docs/versioning.md): the public API is exactly `linch.__all__`,
 and persisted wire formats are versioned separately via `linch.RUN_SCHEMA_VERSION`.
 
+## 2.0.0 — 2026-08-13
+
+Linch 2.0 is a breaking release for the SDK runtime defaults. It keeps Linch
+as a reusable harness; a coding agent remains an explicit application/preset,
+not the SDK's implicit identity.
+
+### BREAKING
+
+- **Neutral `Agent` defaults.** A bare `Agent` has an empty tool registry, a
+  domain-neutral system identity, and `FeatureFlags` disabled for skills,
+  subagents, MCP, and filesystem discovery. Pass `tools=workspace_tools()` (or
+  your own registry), enable trusted features explicitly, or use
+  `create_deep_agent(...)` for the opt-in deep-agent preset. `default_tools()`
+  remains a compatibility alias for the workspace preset but is no longer an
+  implicit `Agent` default.
+- **Permission input is canonical before approval.** Pre-tool transformations
+  are validated and permission-checked again. The old approval callback
+  `updatedInput` response is rejected; mutate in `PreToolUse` instead.
+- **Provider stream boundary is strict.** Provider adapters must emit Linch's
+  normalized event vocabulary and required fields; raw vendor objects and
+  malformed events are not accepted by the loop.
+
+### Added
+
+- `workspace_tools()` and explicit deep-agent profiles (`DeepAgentProfile` /
+  `DEEP_AGENT_PROFILES`) for callers that want a ready software-workspace
+  catalog without making it an SDK default.
+- `ToolContext.report_progress()` and `ToolProgressEvent`, a best-effort,
+  observational progress channel that never enters provider history or the
+  durable run event log.
+- `RunContract`, canonical fingerprint helpers, and
+  `RunContractMismatchError` for fail-closed durable resume checks. Legacy runs
+  without a contract require `RunOptions(allow_legacy_resume=True)` for an
+  explicit migration override; new durable runs are persisted and compared by
+  the runtime automatically.
+- Portable session forking through the public `Agent.fork_session(...)`
+  surface. Forks copy a validated history prefix and metadata, not live work
+  or arbitrary application state.
+- Provider-agnostic compaction/snapshot recovery and concurrency-safe SQLite /
+  Postgres storage allocation. Background worker audit events carry their
+  origin, but detached result notifications are still process-local; durable
+  delivery belongs to the embedding application.
+
+See [migration-2.0.md](docs/migration-2.0.md) for examples and the complete
+upgrade checklist.
+
 ## 1.2.1 — 2026-08-12
 
 ### BREAKING (dependency floor)
