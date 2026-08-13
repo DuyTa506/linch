@@ -13,8 +13,9 @@ flowchart TD
     IN["Incoming ToolUseBlocks\n(from AssistantAssembly)"]
 
     RESOLVE["Resolve each call\n• parse/validate input\n• look up registered tool"]
+    OFFERED["Enforce offered-tool boundary\n• unavailable calls stop here"]
     HOOK["PreToolUse pipeline\n• transform, block, or serve a result"]
-    REVALIDATE["Revalidate canonical input\n• rebuild summary/resources\n• enforce offered-tool boundary"]
+    REVALIDATE["Revalidate canonical input\n• rebuild summary/resources"]
     PERMIT["Final permission decision\n• rules / mode / durable same-turn replay\n• aggregate human approval if needed"]
 
     CLASSIFY{{"Classify\ntool scope"}}
@@ -29,7 +30,7 @@ flowchart TD
 
     OUT["Collect ToolCallEndEvents\nin original provider call order"]
 
-    IN --> RESOLVE --> HOOK --> REVALIDATE --> PERMIT --> CLASSIFY
+    IN --> RESOLVE --> OFFERED --> HOOK --> REVALIDATE --> PERMIT --> CLASSIFY
     CLASSIFY -->|"read + parallel"| READ
     CLASSIFY -->|"write / exec"| WRITE
     READ --> RES
@@ -45,10 +46,11 @@ flowchart TD
 - `scope="write"` or `scope="exec"` → always serialize, regardless of `parallel` flag.
 - `ResourceAccess(resource, mode)` enables finer conflict detection: two `"read"` accesses on the same resource overlap freely; any `"write"` on a resource being read or written by another call serializes.
 - Result events are emitted in the **original provider tool-call order**, not completion order.
-- The security order is fixed: resolve and validate → `PreToolUse` → revalidate the
-  transformed input → reject a registered tool that was not offered in the current
-  provider request → evaluate final permissions → execute. An approval is therefore
-  never transferable from the model's original input to a hook-transformed one.
+- The security order is fixed: resolve and validate → reject a registered tool that was
+  not offered in the current provider request → `PreToolUse` → revalidate the transformed
+  input → evaluate final permissions → execute. An unoffered call never reaches hooks,
+  and an approval is never transferable from the model's original input to a
+  hook-transformed one.
 - `ToolProgressEvent` is a bounded, coalesced **stream-only** observation. It is emitted
   after that call's `ToolCallStartEvent` and before its `ToolCallEndEvent`, never becomes
   provider history or a `ToolResult`, and must not be treated as durable execution state.
@@ -246,9 +248,9 @@ graph TD
 Every tool call is authorized only after the scheduler has produced its canonical
 input. The provider may propose only tools offered in its current request; a tool
 that happens to be registered but was filtered from that request is a hard error,
-not an opportunity for policy fallback. `PreToolUse` may transform, block, or serve
-a call, but every transformed input is validated again before this boundary and
-permission evaluation.
+not an opportunity for hooks or policy fallback. Once the offered-tool boundary passes,
+`PreToolUse` may transform, block, or serve a call; every transformed input is validated
+again before permission evaluation.
 
 For durable resume, allow/deny decisions made during a turn are snapshotted in
 `RunCheckpoint.permission_decisions` under the final canonical `(tool_name, input)`
@@ -261,8 +263,8 @@ across turns. Legacy post-approval `updatedInput` decisions are not replayable.
 flowchart TD
     CALLS["Provider-proposed tool calls"]
 
-    VALIDATE["Resolve + validate\nthen run PreToolUse"]
-    FINAL["Revalidate canonical input\ncheck tool was offered this turn"]
+    VALIDATE["Resolve + validate\ncheck tool was offered this turn"]
+    FINAL["Run PreToolUse\nrevalidate canonical input"]
 
     RULES["Evaluate rule list in order\n1  ToolRule(tool_name, allow|deny)\n2  PathRule(path_globs, allow|deny)\n3  BashRule(cmd_patterns, allow|deny)"]
 

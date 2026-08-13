@@ -130,7 +130,7 @@ exist (`defaultTools` → `default_tools`, `tools_from_defaults`) follow this ru
 
 ```toml
 # pyproject.toml — no name in `linch.__all__` will break inside this range
-dependencies = ["linch>=1.0,<2.0"]
+dependencies = ["linch>=2.0,<3.0"]
 ```
 
 That range is the *compatibility* guarantee, and it is enough if you only call

@@ -37,8 +37,9 @@ sequenceDiagram
             RL-->>Caller: ResultEvent(success)
         else stop_reason = tool_use
             RL->>SC: resolve + validate tool calls
+            SC->>SC: enforce offered-tool boundary
             SC->>SC: PreToolUse transform/block/resolve
-            SC->>SC: revalidate canonical input<br/>enforce offered-tool boundary
+            SC->>SC: revalidate canonical input
             SC->>PE: evaluate final permissions
             PE-->>Caller: PermissionRequestEvent (if pending)
             PE-->>SC: approved or denied canonical calls
@@ -74,9 +75,10 @@ sequenceDiagram
   This lets a task take as many or as few turns as it needs; `max_turns` and the
   loop guard are safety bounds, not the primary control.
 - **The security gate has a canonical order.** The scheduler resolves and validates the
-  model proposal, runs `PreToolUse`, validates the transformed input again, enforces
-  that the tool was offered in this request, and only then evaluates rules or asks the
-  caller for approval. A denied or unoffered call never produces a side effect.
+  model proposal, enforces that the tool was offered in this request, runs `PreToolUse`,
+  validates the transformed input again, and only then evaluates rules or asks the caller
+  for approval. An unoffered call never reaches hooks; denied and unoffered calls never
+  produce a side effect.
 - **Context-builder output is appended to the request, never written into
   `provider_view`.** Per-turn RAG/memory is ephemeral: it informs one provider call
   without polluting the durable conversation, which keeps `provider_view` stable and

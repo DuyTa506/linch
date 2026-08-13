@@ -29,7 +29,7 @@ These must not break across refactors:
 | 21 | **The public API surface is exactly `linch.__all__`** — `tests/test_public_api.py` enforces that every name resolves, there are no duplicates, and no public (non-underscore) attribute leaks onto the package undeclared. Changing the surface is a deliberate, reviewable edit; `docs/versioning.md` is the semver contract. |
 | 22 | **The event stream is a plain async generator** — `session.run()`/`resume()` `yield` events directly from `run_loop`; there is no unbounded internal queue. Per-tool progress is a bounded, coalesced stream projection, never provider context or terminal state. |
 | 23 | **No process-global mutable state** — every `Agent` builds its own registries/stores/engines so N agents are multi-tenant-isolated; a bare agent uses an in-memory session store and does not create project-local filesystem state. `session.abort()` and `agent.close()` drain background-worker and background-tool tasks. |
-| 24 | **Permission decisions authorize only canonical calls** — resolve/validate → `PreToolUse` → revalidate → offered-tool boundary → final permissions → execute. Persisted approvals are keyed by that final canonical input and cannot authorize a transformed or unoffered call. |
+| 24 | **Permission decisions authorize only canonical, offered calls** — resolve/validate → offered-tool boundary → `PreToolUse` → revalidate → final permissions → execute. Unoffered calls never reach hooks or policy fallback. Persisted approvals are keyed by the final canonical input and cannot authorize a transformed or unoffered call. |
 
 ## Design rationale
 
@@ -39,10 +39,10 @@ These are written down (and several are pinned by tests) on purpose:
   the loop, compaction, subagents, and resume all depend on — enumerating them means a
   refactor can be checked against an explicit list instead of rediscovering each rule by
   breaking it.
-- **The load-bearing ones are pinned by byte-identical tests.** The default system
-  prompt (#5), the ladder-disabled event sequence (#17), and the public API (#20) assert
-  exact equality, so accidental drift fails CI — a change has to be a deliberate
-  edit-plus-update.
+- **The load-bearing ones are pinned by exact tests.** The default system prompt (#5)
+  has targeted protocol assertions, while the ladder-disabled event sequence (#18) and
+  the public API (#21) assert exact equality. Accidental drift therefore fails CI and
+  requires a deliberate edit-plus-update.
 - **"Byte-identical when the feature is off" is a recurring design choice for a
   reason.** Opt-in features (compaction ladder, offload, budgets, coordination) must add
   zero observable behavior when unused, so existing users can upgrade without surprises

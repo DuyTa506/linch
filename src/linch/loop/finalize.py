@@ -19,7 +19,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from ..errors import ConfigError
+from ..errors import ProviderError
 from ..events import Event, ResultEvent
 from ..observability import RunResultInfo
 from ..session import Session
@@ -200,7 +200,7 @@ async def finalize_final_tool_answer(
             feedback=feedback,
         ):
             yield event
-        raise ConfigError(feedback)
+        raise ProviderError(feedback)
 
     # A terminal tool is intercepted rather than scheduled, but provider
     # histories still require every assistant tool_use to have a matching

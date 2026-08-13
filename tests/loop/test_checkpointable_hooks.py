@@ -93,8 +93,8 @@ async def test_checkpointable_hook_snapshots_session_scoped_json_state() -> None
 
 
 async def test_checkpointable_hook_restores_matching_state_and_preserves_other_extensions() -> None:
+    from linch import RunOptions
     from linch.run_store import InMemoryRunStore, RunCheckpoint
-    from linch.session import RunOptions
     from linch.sessions import InMemorySessionStore
     from linch.types import Usage
 

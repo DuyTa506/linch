@@ -52,10 +52,11 @@ identity, or `system_prompt=` to append application instructions.
 Tool calls now follow one security order:
 
 1. parse and validate the provider call;
-2. run `PreToolUse` transformation/hooks;
-3. validate the transformed input again;
-4. evaluate rules and `can_use_tool` on that final canonical input;
-5. persist the decision and execute.
+2. reject it unless that tool was offered in the current provider request;
+3. run `PreToolUse` transformation/hooks;
+4. validate the transformed input again;
+5. evaluate rules and `can_use_tool` on that final canonical input;
+6. persist the decision and execute.
 
 The approval callback's Linch 1 `updatedInput` response is rejected. Mutate in
 `PreToolUse`, where the resulting input is validated and permission-checked;
@@ -92,7 +93,12 @@ approval callbacks and policy hooks therefore need `resume_policy_id` and may
 add `resume_policy_version` / `resume_policy_config`. Custom Bash backends also
 require a non-`None`, JSON-safe `resume_policy_config`. Linch compares the
 resulting contract before resuming. The public helpers remain available for
-custom stores and migration tooling:
+custom stores and migration tooling.
+
+Contract verification begins when a durable run is created, not only when it is
+resumed. Linch rejects custom callbacks, hooks, and Bash backends that cannot provide
+stable resume-policy identity and JSON-stable authority configuration. This prevents a
+run from being created with semantics that cannot later be verified.
 
 This also applies to policy-bearing built-in adapters such as
 `ToolMiddlewareHook`, `ContextInjectionHook`, `FinalAnswerVerifierHook`, and

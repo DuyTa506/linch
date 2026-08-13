@@ -127,6 +127,8 @@ async def test_task_allocator_uses_atomic_incrementing_upsert() -> None:
 
     assert allocated == "7"
     sql = conn.queries[-1]
+    assert "MAX(id::BIGINT)" in sql
+    assert "id ~ '^[0-9]+$'" in sql
     assert "ON CONFLICT (session_id) DO UPDATE" in sql
     assert "task_counters.next_id + 1" in sql
     assert "RETURNING next_id - 1" in sql
@@ -153,7 +155,24 @@ async def test_create_if_absent_proves_ownership_with_insert_returning() -> None
     assert "ON CONFLICT (id) DO NOTHING" in sql
     assert "RETURNING id, created_at, updated_at, meta, invoked_skills" in sql
     assert "SELECT" not in sql
-    assert any("INSERT INTO task_counters" in query for query, _ in conn.executions)
+    counter_sql = next(
+        query for query, _ in conn.executions if "INSERT INTO task_counters" in query
+    )
+    assert "MAX(id::BIGINT)" in counter_sql
+    assert "ON CONFLICT DO NOTHING" in counter_sql
+
+
+async def test_create_if_absent_tolerates_orphan_task_counter() -> None:
+    conn = _FakeConnection(insert_session_wins=True)
+    store = _store_with(conn)
+
+    created = await store.create_if_absent(id="orphan-counter", meta={})
+
+    assert created is not None
+    counter_sql = next(
+        query for query, _ in conn.executions if "INSERT INTO task_counters" in query
+    )
+    assert "ON CONFLICT DO NOTHING" in counter_sql
 
 
 async def test_create_if_absent_loser_does_not_initialize_existing_session() -> None:

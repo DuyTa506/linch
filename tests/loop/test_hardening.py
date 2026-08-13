@@ -103,6 +103,80 @@ async def test_permission_callback_allows_sync_and_async() -> None:
 
 
 @pytest.mark.asyncio
+async def test_spurious_signal_wait_does_not_cancel_permission_callback() -> None:
+    class DummyTool:
+        name = "WriteDummy"
+        scope = "write"
+
+        def validate(self, raw: dict[str, object]) -> dict[str, object]:
+            return raw
+
+        def summarize(self, input: dict[str, object]) -> str:
+            return "dummy"
+
+    class SpuriousSignal:
+        def __init__(self) -> None:
+            self.wait_calls = 0
+            self.rearmed = asyncio.Event()
+            self._never = asyncio.Event()
+
+        def is_set(self) -> bool:
+            return False
+
+        async def wait(self) -> None:
+            self.wait_calls += 1
+            if self.wait_calls == 1:
+                return
+            self.rearmed.set()
+            await self._never.wait()
+
+    release = asyncio.Event()
+
+    async def allow(_req: object) -> dict[str, str]:
+        await release.wait()
+        return {"behavior": "allow"}
+
+    signal = SpuriousSignal()
+    engine = PermissionEngine(mode="default", can_use_tool=allow)
+    resolving = asyncio.create_task(
+        engine.resolve(PendingToolCall(tool_use_id="t1", tool=DummyTool(), input={}), signal)
+    )
+    await asyncio.wait_for(signal.rearmed.wait(), timeout=1.0)
+
+    assert not resolving.done()
+    release.set()
+    decision = await asyncio.wait_for(resolving, timeout=1.0)
+    assert decision.decision == "allow"
+
+
+def test_context_registry_selection_cannot_widen_turn_allowlist() -> None:
+    from linch import ContextBuildResult
+    from linch.loop.request import _select_context_tools
+
+    registry = ToolRegistry()
+    registry.register(ReadSleepTool("Allowed"))
+    registry.register(ReadSleepTool("GlobalOnly"))
+    selected = registry.select(names={"Allowed", "GlobalOnly"})
+    session = SimpleNamespace(
+        agent=SimpleNamespace(tools=registry),
+        tools_override=None,
+        current_turn_allowed_tools=["Allowed"],
+    )
+
+    effective = _select_context_tools(session, ContextBuildResult(selected_tools=selected))
+
+    assert [tool.name for tool in effective.list()] == ["Allowed"]
+
+
+def test_deep_agent_verification_profile_has_no_unrestricted_shell() -> None:
+    from linch.deep_agent import DEEP_AGENT_SUBAGENTS
+
+    verification = next(agent for agent in DEEP_AGENT_SUBAGENTS if agent.name == "verification")
+    assert "Bash" not in (verification.frontmatter.tools or [])
+    assert "run the narrowest meaningful" not in verification.body
+
+
+@pytest.mark.asyncio
 async def test_scheduler_emits_non_zero_duration() -> None:
     registry = ToolRegistry()
     registry.register(SleepTool())

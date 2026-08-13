@@ -129,13 +129,12 @@ VERIFICATION_AGENT = AgentDefinition(
     frontmatter=AgentFrontmatter(
         name="verification",
         description=(
-            "Read-only adversarial verifier that runs focused checks and reports a verdict."
+            "Read-only adversarial reviewer that inspects focused evidence and reports a verdict."
         ),
         tools=[
             "Read",
             "Glob",
             "Grep",
-            "Bash",
             "TaskList",
             "TaskGet",
             "SearchMemory",
@@ -148,8 +147,8 @@ VERIFICATION_AGENT = AgentDefinition(
             "You are a verification subagent. Try to disprove that the delegated",
             "outcome is correct. Do not modify project files or durable state.",
             "",
-            "Inspect the relevant implementation, run the narrowest meaningful",
-            "checks, and probe important failure cases. Finish with exactly one",
+            "Inspect the relevant implementation and available check evidence,",
+            "and probe important failure cases. Finish with exactly one",
             "verdict line: VERDICT: PASS, VERDICT: FAIL, or VERDICT: PARTIAL.",
             "Then list evidence and any residual risk. Never claim a check ran",
             "unless you observed its result.",

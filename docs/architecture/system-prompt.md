@@ -29,10 +29,10 @@ flowchart TD
 ```
 
 **Invariant:** when the explicit `workspace_tools()` preset is registered and
-`replace_defaults=False`, the software-workspace protocol block is byte-identical
-to the pinned reference in `tests/test_system_blocks.py`. A bare agent renders
-the neutral identity and runtime metadata without workspace instructions.
-Change wording only intentionally and update the parity test.
+`replace_defaults=False`, selected software-workspace protocol clauses are pinned by
+`tests/context/test_system_blocks.py`. A bare agent renders the neutral identity and
+runtime metadata without workspace instructions. Change wording only intentionally and
+update the protocol assertions.
 
 ## Design rationale
 
@@ -50,9 +50,10 @@ Change wording only intentionally and update the parity test.
   name and declaration order, and inserts them at their declared placement.
   Inactive tools cannot affect a request prompt; duplicate or malformed active
   sections fail before the provider call.
-- **The default prompt is pinned by a parity test.** Byte-identical assertion against
-  `tests/test_system_blocks.py` means prompt wording can't drift accidentally; a change is
-  a deliberate edit-plus-update, because prompt text materially affects behavior.
+- **The workspace protocol is pinned by targeted assertions.** The checks in
+  `tests/context/test_system_blocks.py` ensure the important Read/Edit/Bash/Glob/Grep
+  clauses cannot disappear accidentally. Wording changes remain deliberate because prompt
+  text materially affects behavior.
 
 ---
 

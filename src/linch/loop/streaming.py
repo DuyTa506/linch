@@ -6,7 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
-from typing import Any, cast
+from typing import Any, cast, get_args
 
 from ..compaction import (
     apply_micro_compaction,
@@ -48,6 +48,7 @@ from .request import (
 # tuned for RateLimitError). Still exponential-with-jitter so a run of failures
 # doesn't hammer the server.
 _SAME_MODEL_RETRY_OPTIONS = RetryOptions(base_delay_ms=100, max_delay_ms=2000, jitter=0.2)
+_STOP_REASONS = frozenset(get_args(StopReason))
 
 
 async def _retry_same_model(exc: Exception, attempts: list[int], agent: Any) -> bool:
@@ -424,15 +425,7 @@ async def _stream_turn(
                     "message_end arrived before tool_use_end for " + ", ".join(sorted(tool_meta))
                 )
             raw_stop = event.get("stop_reason")
-            if raw_stop not in {
-                "end_turn",
-                "tool_use",
-                "max_tokens",
-                "stop_sequence",
-                "refusal",
-                "error",
-                "interrupted",
-            }:
+            if raw_stop not in _STOP_REASONS:
                 raise protocol_error(f"invalid message_end.stop_reason {raw_stop!r}")
             raw_usage = event.get("usage")
             if not isinstance(raw_usage, Usage):

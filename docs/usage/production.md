@@ -83,6 +83,12 @@ async for event in session.resume(run_id):
     await publish(event)
 ```
 
+Runs created before Linch 2.0 have no persisted execution contract and are rejected by
+default. During a deliberate migration, pass
+`RunOptions(allow_legacy_resume=True)` and accept that the original authority inputs
+cannot be verified; otherwise start a new run. See the
+[2.0 migration guide](../migration-2.0.md#durable-runs-and-legacy-records).
+
 ## 5. Shut down without leaking work
 
 On shutdown, `await agent.close()` cancels background workers/tools and flushes

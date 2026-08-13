@@ -38,9 +38,9 @@ class InMemorySessionStore:
         ts = now_iso()
         record = SessionRecord(id=sid, created_at=ts, updated_at=ts, meta=dict(meta or {}))
         self._sessions[sid] = record
-        self._messages[sid] = []
-        self._tasks[sid] = {}
-        self._task_counter[sid] = 1
+        self._messages.setdefault(sid, [])
+        self._tasks.setdefault(sid, {})
+        self._task_counter.setdefault(sid, self._next_task_id(sid))
         return record
 
     async def create_if_absent(
@@ -114,7 +114,7 @@ class InMemorySessionStore:
     async def create_task(self, session_id: str, input: CreateTaskInput) -> Task:
         if session_id not in self._sessions:
             raise KeyError(f"session not found: {session_id}")
-        task_id = str(self._task_counter.get(session_id, 1))
+        task_id = str(self._task_counter.get(session_id, self._next_task_id(session_id)))
         self._task_counter[session_id] = int(task_id) + 1
         ts = now_iso()
         task = Task(
@@ -131,6 +131,12 @@ class InMemorySessionStore:
         self._tasks.setdefault(session_id, {})[task_id] = task
         self._sessions[session_id].updated_at = ts
         return task
+
+    def _next_task_id(self, session_id: str) -> int:
+        numeric_ids = (
+            int(task_id) for task_id in self._tasks.get(session_id, {}) if task_id.isdecimal()
+        )
+        return max(numeric_ids, default=0) + 1
 
     async def get_task(self, session_id: str, task_id: str) -> Task | None:
         return self._tasks.get(session_id, {}).get(task_id)

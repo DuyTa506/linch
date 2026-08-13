@@ -7,6 +7,7 @@ records that belong to that history.  Everything else is initialized by
 
 from __future__ import annotations
 
+import logging
 from collections import Counter
 from collections.abc import Mapping
 from copy import deepcopy
@@ -30,6 +31,7 @@ if TYPE_CHECKING:
 
 FORKED_FROM_SESSION_ID = "forked_from_session_id"
 FORKED_AT_SEQ = "forked_at_seq"
+_logger = logging.getLogger(__name__)
 
 
 async def fork_session(
@@ -138,11 +140,26 @@ async def fork_session(
         return target
     except BaseException:
         if owns_target and target_record is not None and target_record.id != source_id:
-            agent._sessions.pop(target_record.id, None)
-            try:
-                await store.delete(target_record.id)
-            except Exception:
-                pass
+            registered = agent._sessions.get(target_record.id)
+            # A concurrent ``Agent.session(id=...)`` may have attached to the
+            # durable fork between creation and handoff.  Never evict or delete
+            # storage underneath another live (especially active) Session.
+            if registered is None or registered._closed:
+                if registered is not None:
+                    agent._sessions.pop(target_record.id, None)
+                try:
+                    await store.delete(target_record.id)
+                except Exception:
+                    _logger.warning(
+                        "failed to clean up partially forked session %s",
+                        target_record.id,
+                        exc_info=True,
+                    )
+            else:
+                _logger.warning(
+                    "skipping cleanup of partially forked session %s because it is live",
+                    target_record.id,
+                )
         raise
 
 

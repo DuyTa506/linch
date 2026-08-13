@@ -286,7 +286,8 @@ def _make_agent(provider: Any, **kwargs: Any) -> Any:
 
     tools = ToolRegistry()
     tools.register(BigTool())
-    session_store = kwargs.pop("session_store", None) or InMemorySessionStore()
+    provided_store = kwargs.pop("session_store", None)
+    session_store = InMemorySessionStore() if provided_store is None else provided_store
     return Agent(
         model="gpt-5",
         provider=provider,

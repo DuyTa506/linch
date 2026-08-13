@@ -17,7 +17,7 @@ from linch.events import (
 from linch.hooks import HookResult
 from linch.permissions import BashRule, PathRule, PendingToolCall, PermissionEngine
 from linch.permissions.keys import permission_decision_key
-from linch.scheduler import execute_tool_calls
+from linch.scheduler import ResolvedCall, _execute_one, execute_tool_calls
 from linch.tools import ToolContext, ToolRegistry, ToolResult, ToolScope
 from linch.tools.builtin import BashTool
 from linch.types import ToolUseBlock
@@ -298,6 +298,43 @@ async def test_progress_is_live_bracketed_and_round_trips() -> None:
     retained[0].report_progress("late")  # ignored after execute() settled
 
 
+async def test_late_progress_callback_is_not_invoked_after_execution_settles() -> None:
+    retained: list[ToolContext] = []
+    observed: list[str] = []
+
+    class RetainingTool(_RecordingTool):
+        def __init__(self) -> None:
+            super().__init__("Retaining")
+
+        async def execute(self, input: dict[str, Any], ctx: ToolContext) -> ToolResult:
+            retained.append(ctx)
+            ctx.report_progress("during")
+            return ToolResult(content="done")
+
+    tool = RetainingTool()
+    call = ResolvedCall(
+        id="call",
+        block=ToolUseBlock(id="call", name=tool.name, input={"file_path": "x"}),
+        tool=tool,
+        input={"file_path": "x"},
+        summary="Retaining(x)",
+        is_immediate_error=False,
+    )
+    await _execute_one(
+        call,
+        PermissionEngine(mode="skip-dangerous").evaluate(
+            PendingToolCall(tool_use_id="call", tool=tool, input=call.input)
+        ),
+        _agent(tool, PermissionEngine(mode="skip-dangerous")),
+        _session(),
+        AbortContext(),
+        on_progress=lambda event: observed.append(event.message),
+    )
+    retained[0].report_progress("late")
+
+    assert observed == ["during"]
+
+
 async def test_parallel_later_tool_progress_is_not_hidden_by_slow_first() -> None:
     release = asyncio.Event()
 
@@ -343,6 +380,79 @@ async def test_parallel_later_tool_progress_is_not_hidden_by_slow_first() -> Non
         "first",
         "second",
     ]
+
+
+async def test_closing_serial_event_stream_cancels_started_tool() -> None:
+    cancelled = asyncio.Event()
+
+    class BlockingTool(_RecordingTool):
+        scope: ToolScope = "read"
+        parallel = False
+
+        def __init__(self) -> None:
+            super().__init__("Blocking")
+
+        async def execute(self, input: dict[str, Any], ctx: ToolContext) -> ToolResult:
+            try:
+                ctx.report_progress("started")
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+    iterator = execute_tool_calls(
+        [ToolUseBlock(id="call", name="Blocking", input={"file_path": "x"})],
+        _agent(BlockingTool(), PermissionEngine(mode="skip-dangerous")),
+        _session(),
+        AbortContext(),
+    ).__aiter__()
+
+    assert (await iterator.__anext__()).type == "tool_call_start"
+    assert isinstance(await asyncio.wait_for(iterator.__anext__(), timeout=1.0), ToolProgressEvent)
+    await iterator.aclose()
+
+    assert cancelled.is_set()
+
+
+async def test_closing_parallel_event_stream_cancels_all_started_tools() -> None:
+    cancelled: set[str] = set()
+
+    class BlockingTool(_RecordingTool):
+        scope: ToolScope = "read"
+        parallel = True
+
+        def __init__(self, name: str) -> None:
+            super().__init__(name)
+
+        async def execute(self, input: dict[str, Any], ctx: ToolContext) -> ToolResult:
+            try:
+                ctx.report_progress("started")
+                await asyncio.Event().wait()
+            finally:
+                cancelled.add(self.name)
+
+    first = BlockingTool("First")
+    second = BlockingTool("Second")
+    registry = ToolRegistry()
+    registry.add(first)
+    registry.add(second)
+    agent = _agent(first, PermissionEngine(mode="skip-dangerous"))
+    agent.tools = registry
+    iterator = execute_tool_calls(
+        [
+            ToolUseBlock(id="first", name="First", input={"file_path": "a"}),
+            ToolUseBlock(id="second", name="Second", input={"file_path": "b"}),
+        ],
+        agent,
+        _session(),
+        AbortContext(),
+    ).__aiter__()
+
+    assert (await iterator.__anext__()).type == "tool_call_start"
+    assert (await iterator.__anext__()).type == "tool_call_start"
+    assert isinstance(await asyncio.wait_for(iterator.__anext__(), timeout=1.0), ToolProgressEvent)
+    await iterator.aclose()
+
+    assert cancelled == {"First", "Second"}
 
 
 async def test_background_completion_audit_is_attributed_to_origin_run() -> None:
@@ -392,3 +502,40 @@ async def test_background_completion_audit_is_attributed_to_origin_run() -> None
     assert run_id == "run-origin"
     assert isinstance(event, BackgroundWorkerEvent)
     assert event.status == "completed"
+
+
+async def test_background_audit_failure_logs_origin_and_worker(caplog: Any) -> None:
+    class FailingStore:
+        async def append_event(self, run_id: str, event: Any) -> int:
+            raise RuntimeError("journal unavailable")
+
+    class BackgroundTool(_RecordingTool):
+        scope: ToolScope = "read"
+
+        def __init__(self) -> None:
+            super().__init__("Background")
+
+        async def execute(self, input: dict[str, Any], ctx: ToolContext) -> ToolResult:
+            return ToolResult(content="finished")
+
+    session = _session()
+    await _events(
+        _agent(
+            BackgroundTool(),
+            PermissionEngine(mode="skip-dangerous"),
+            run_store=FailingStore(),
+            enable_background_tools=True,
+        ),
+        session,
+        ToolUseBlock(
+            id="call",
+            name="Background",
+            input={"file_path": "x", "run_in_background": True},
+        ),
+    )
+    await asyncio.gather(*session.background_tasks)
+
+    record = next(record for record in caplog.records if "background worker" in record.message)
+    assert "origin_run_id=run-origin" in record.message
+    assert "worker_id=bgtool_" in record.message
+    assert record.exc_info is not None

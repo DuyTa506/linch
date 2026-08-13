@@ -726,8 +726,8 @@ async def test_completed_tool_recovered_from_event_log_when_checkpoint_lacks_res
 
 
 async def test_resume_marks_checkpointed_running_background_workers_killed() -> None:
+    from linch import RunOptions
     from linch.run_store import RunCheckpoint
-    from linch.session import RunOptions
     from linch.types import Usage
 
     session_store = _memory_session_store()
@@ -775,11 +775,11 @@ async def test_run_loop_aclose_at_worker_yield_runs_observer_finally() -> None:
     finally block (observer on_run_end). Regression for the yield-outside-try bug:
     if the yield sits before `try:`, GeneratorExit skips finally and spans leak.
     """
+    from linch import RunOptions
     from linch.hooks import RunTelemetryHook
     from linch.loop import _run_loop_impl
     from linch.observability.protocol import BaseObserver
     from linch.run_store import RunCheckpoint
-    from linch.session import RunOptions
     from linch.types import Usage
 
     class _RunSpanObserver(BaseObserver):

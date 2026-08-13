@@ -6,25 +6,26 @@ from typing import Any
 
 import pytest
 
-from linch.errors import ConfigError
-from linch.providers import BaseProvider
-from linch.sessions.fork import fork_session
-from linch.sessions.tasks import CreateTaskInput
-from linch.types import Message, TextBlock, ToolResultBlock, ToolUseBlock, message_to_dict
+
+def _provider() -> Any:
+    from linch.providers import BaseProvider
+
+    class _Provider(BaseProvider):
+        id = "fork-test"
+
+        def context_window(self, model: str) -> int:
+            return 100_000
+
+        async def stream(self, req: Any) -> AsyncIterator[dict[str, object]]:
+            if False:  # pragma: no cover - the fork tests never call the provider
+                yield {}
+
+    return _Provider()
 
 
-class _Provider(BaseProvider):
-    id = "fork-test"
+def _history() -> list[Any]:
+    from linch.types import Message, TextBlock, ToolResultBlock, ToolUseBlock
 
-    def context_window(self, model: str) -> int:
-        return 100_000
-
-    async def stream(self, req: Any) -> AsyncIterator[dict[str, object]]:
-        if False:  # pragma: no cover - the fork tests never call the provider
-            yield {}
-
-
-def _history() -> list[Message]:
     return [
         Message(role="user", content=[TextBlock(text="first request")]),
         Message(
@@ -57,6 +58,8 @@ def _skills() -> list[dict[str, object]]:
 
 
 async def _seed(agent: Any, store: Any) -> Any:
+    from linch.sessions.tasks import CreateTaskInput
+
     await store.create(id="source", meta={"title": "source", "nested": {"value": 1}})
     await store.append_messages("source", _history())
     await store.set_invoked_skills("source", _skills())
@@ -69,9 +72,11 @@ async def _seed(agent: Any, store: Any) -> Any:
 async def test_memory_tail_fork_is_independent_and_copies_no_transient_state() -> None:
     from linch import Agent
     from linch.sessions import InMemorySessionStore, ProviderViewSnapshot
+    from linch.sessions.fork import fork_session
+    from linch.types import Message, TextBlock, message_to_dict
 
     store = InMemorySessionStore()
-    agent = Agent(model="test", provider=_Provider(), session_store=store, cwd=".")
+    agent = Agent(model="test", provider=_provider(), session_store=store, cwd=".")
     source = await _seed(agent, store)
     await store.save_provider_snapshot(
         source.id,
@@ -124,10 +129,12 @@ async def test_memory_tail_fork_is_independent_and_copies_no_transient_state() -
 
 async def test_earlier_fork_filters_skills_and_rejects_dangling_tool_use() -> None:
     from linch import Agent
+    from linch.errors import ConfigError
     from linch.sessions import InMemorySessionStore
+    from linch.sessions.fork import fork_session
 
     store = InMemorySessionStore()
-    agent = Agent(model="test", provider=_Provider(), session_store=store, cwd=".")
+    agent = Agent(model="test", provider=_provider(), session_store=store, cwd=".")
     source = await _seed(agent, store)
 
     child = await fork_session(agent, "source", before_seq=5, id="early-fork")
@@ -153,7 +160,10 @@ async def test_earlier_fork_filters_skills_and_rejects_dangling_tool_use() -> No
 
 async def test_custom_id_requires_positive_atomic_ownership() -> None:
     from linch import Agent
+    from linch.errors import ConfigError
     from linch.sessions import InMemorySessionStore
+    from linch.sessions.fork import fork_session
+    from linch.types import Message
 
     class RaceLosingStore(InMemorySessionStore):
         def __init__(self) -> None:
@@ -177,7 +187,7 @@ async def test_custom_id_requires_positive_atomic_ownership() -> None:
             await super().delete(id)
 
     store = RaceLosingStore()
-    agent = Agent(model="test", provider=_Provider(), session_store=store, cwd=".")
+    agent = Agent(model="test", provider=_provider(), session_store=store, cwd=".")
     source = await _seed(agent, store)
 
     with pytest.raises(ConfigError, match="already exists"):
@@ -199,13 +209,92 @@ async def test_custom_id_requires_positive_atomic_ownership() -> None:
     await agent.close()
 
 
+async def test_fork_handoff_does_not_evict_or_delete_concurrent_active_session() -> None:
+    import asyncio
+
+    from linch import Agent
+    from linch.sessions import InMemorySessionStore
+    from linch.sessions.fork import fork_session
+
+    class HandoffStore(InMemorySessionStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.target_ready = asyncio.Event()
+            self.finish_handoff = asyncio.Event()
+            self.deleted_target = False
+
+        async def set_invoked_skills(self, id: str, skills: list[dict[str, object]]) -> None:
+            await super().set_invoked_skills(id, skills)
+            if id == "handoff-target":
+                self.target_ready.set()
+                await self.finish_handoff.wait()
+
+        async def delete(self, id: str) -> None:
+            if id == "handoff-target":
+                self.deleted_target = True
+            await super().delete(id)
+
+    store = HandoffStore()
+    agent = Agent(model="test", provider=_provider(), session_store=store, cwd=".")
+    source = await _seed(agent, store)
+    forking = asyncio.create_task(fork_session(agent, source, id="handoff-target"))
+    await store.target_ready.wait()
+
+    concurrent = await agent.session(id="handoff-target")
+    concurrent._active = True
+    store.finish_handoff.set()
+
+    with pytest.raises(RuntimeError, match="unexpectedly became active"):
+        await forking
+
+    assert agent._sessions["handoff-target"] is concurrent
+    assert await store.load("handoff-target") is not None
+    assert store.deleted_target is False
+
+    concurrent._active = False
+    await agent.close()
+
+
+async def test_failed_partial_fork_cleanup_is_logged(caplog: Any) -> None:
+    import logging
+
+    from linch import Agent
+    from linch.sessions import InMemorySessionStore
+    from linch.sessions.fork import fork_session
+    from linch.types import Message
+
+    class CleanupFailingStore(InMemorySessionStore):
+        async def append_messages(self, id: str, messages: list[Message]) -> Any:
+            if id == "cleanup-target":
+                raise RuntimeError("copy failed")
+            return await super().append_messages(id, messages)
+
+        async def delete(self, id: str) -> None:
+            if id == "cleanup-target":
+                raise RuntimeError("cleanup failed")
+            await super().delete(id)
+
+    store = CleanupFailingStore()
+    agent = Agent(model="test", provider=_provider(), session_store=store, cwd=".")
+    source = await _seed(agent, store)
+
+    with caplog.at_level(logging.WARNING, logger="linch.sessions.fork"):
+        with pytest.raises(RuntimeError, match="copy failed"):
+            await fork_session(agent, source, id="cleanup-target")
+
+    assert "failed to clean up partially forked session cleanup-target" in caplog.text
+    await agent.close()
+
+
 async def test_sqlite_fork_survives_restart_without_snapshot_or_tasks(tmp_path: Any) -> None:
     from linch import Agent
     from linch.sessions import ProviderViewSnapshot, SqliteSessionStore
+    from linch.sessions.fork import fork_session
+    from linch.types import Message, TextBlock, message_to_dict
 
     path = tmp_path / "sessions.db"
     first_store = SqliteSessionStore(path)
-    first_agent = Agent(model="test", provider=_Provider(), session_store=first_store, cwd=".")
+    first_agent = Agent(model="test", provider=_provider(), session_store=first_store, cwd=".")
     source = await _seed(first_agent, first_store)
     await first_store.save_provider_snapshot(
         source.id,
@@ -223,7 +312,7 @@ async def test_sqlite_fork_survives_restart_without_snapshot_or_tasks(tmp_path: 
     await first_agent.close()
 
     second_store = SqliteSessionStore(path)
-    second_agent = Agent(model="test", provider=_Provider(), session_store=second_store, cwd=".")
+    second_agent = Agent(model="test", provider=_provider(), session_store=second_store, cwd=".")
     reopened = await second_agent.session(id="sqlite-fork")
 
     assert len(reopened.full_history) == 4

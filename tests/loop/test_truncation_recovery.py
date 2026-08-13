@@ -246,12 +246,11 @@ async def test_recovery_attempts_are_restored_on_resume() -> None:
 
 @pytest.mark.asyncio
 async def test_pending_recovery_feedback_is_appended_on_resume() -> None:
-    from linch import Agent, TruncationRecovery
+    from linch import Agent, RunOptions, TruncationRecovery
     from linch.config import FeatureFlags
     from linch.evals import ScriptedProvider, TextTurn
     from linch.events import ResultEvent, UserEvent
     from linch.run_store import InMemoryRunStore, RunCheckpoint
-    from linch.session import RunOptions
     from linch.sessions import InMemorySessionStore
     from linch.types import Message, TextBlock, Usage
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, replace
@@ -40,6 +41,8 @@ from .types import ToolResultBlock, ToolUseBlock
 # conflicts and admitting them in a later batch — non-parallel calls stay hard
 # barriers. Result blocks/hooks remain provider-ordered either way.
 ToolBatchingStrategy = Literal["greedy", "maximal"]
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -272,7 +275,13 @@ async def _run_background_tool(
         try:
             await run_store.append_event(origin_run_id, completion_event)
         except Exception:
-            pass
+            logger.warning(
+                "Failed to append background worker completion event "
+                "(origin_run_id=%s, worker_id=%s)",
+                origin_run_id,
+                bg_id,
+                exc_info=True,
+            )
 
 
 def _tool_name(call: ResolvedCall) -> str:
@@ -1038,16 +1047,16 @@ async def _run_serial_batch(
             input=input,
             summary=call.summary,
         )
+        running = _start_tool_execution(
+            call,
+            decision,
+            agent,
+            session,
+            signal,
+            turn_index=turn_index,
+            middleware_error=middleware_errors.get(call.id),
+        )
         try:
-            running = _start_tool_execution(
-                call,
-                decision,
-                agent,
-                session,
-                signal,
-                turn_index=turn_index,
-                middleware_error=middleware_errors.get(call.id),
-            )
             async for progress in _drain_tool_execution(running):
                 yield progress
             outcome = running.task.result()
@@ -1073,6 +1082,13 @@ async def _run_serial_batch(
                 tool_result=tool_result,
             )
             raise
+        finally:
+            # Closing an async generator injects GeneratorExit, which does not
+            # enter the AbortError handler above. Never leave an already-started
+            # tool running after its event stream has been abandoned.
+            if not running.task.done():
+                running.task.cancel()
+                await asyncio.gather(running.task, return_exceptions=True)
         yield ToolCallEndEvent(
             tool_use_id=call.id,
             tool_name=_tool_name(call),
@@ -1188,6 +1204,14 @@ async def _run_parallel_batch(
             if sn is not None:
                 yield SkillCompletedEvent(name=sn, is_error=True)
         raise
+    finally:
+        # GeneratorExit (for example, consumer ``aclose()``) bypasses the
+        # exception handler. Cancel and join every started task on all exits.
+        pending = [execution.task for execution in running if not execution.task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
 
 def _start_tool_execution(
@@ -1443,7 +1467,7 @@ async def execute_tool_calls(
     for batch in batches:
         throw_if_aborted(signal)
         lane = _run_serial_batch if not batch["parallel"] else _run_parallel_batch
-        async for event in lane(
+        lane_events = lane(
             batch,
             agent=agent,
             session=session,
@@ -1451,5 +1475,11 @@ async def execute_tool_calls(
             hook_dispatcher=hook_dispatcher,
             middleware_errors=middleware_errors,
             turn_index=turn_index,
-        ):
-            yield event
+        )
+        try:
+            async for event in lane_events:
+                yield event
+        finally:
+            # Async-generator delegation does not automatically close the
+            # delegated iterator when this outer stream is abandoned.
+            await cast(Any, lane_events).aclose()

@@ -174,6 +174,38 @@ async def test_docker_backend_configuration_change_denies_resume() -> None:
         _ = [event async for event in (await changed.session(id="s1")).resume(run_id)]
 
 
+async def test_docker_path_lookup_does_not_change_durable_contract(monkeypatch: Any) -> None:
+    import shutil
+
+    from linch.run_store import InMemoryRunStore
+    from linch.sessions import InMemorySessionStore
+    from linch.tools import workspace_tools
+    from linch.tools.execution import DockerBackend
+
+    run_store = InMemoryRunStore()
+    session_store = InMemorySessionStore()
+    monkeypatch.setattr(shutil, "which", lambda _: "/host-a/docker")
+    first = _agent(
+        run_store=run_store,
+        session_store=session_store,
+        tools=workspace_tools(),
+        execution_backend=DockerBackend(docker_path=None, network="none"),
+    )
+    run_id = await _interrupt_after_first_event(await first.session(id="s1"))
+
+    monkeypatch.setattr(shutil, "which", lambda _: "/host-b/docker")
+    resumed = _agent(
+        run_store=run_store,
+        session_store=session_store,
+        tools=workspace_tools(),
+        execution_backend=DockerBackend(docker_path=None, network="none"),
+    )
+    events = [event async for event in (await resumed.session(id="s1")).resume(run_id)]
+
+    assert events[-1].type == "result"
+    assert events[-1].subtype == "success"
+
+
 async def test_docker_backend_contract_hashes_environment_values() -> None:
     import json
 
@@ -185,6 +217,7 @@ async def test_docker_backend_contract_hashes_environment_values() -> None:
 
     run_store = InMemoryRunStore()
     session_store = InMemorySessionStore()
+    fingerprint_key = b"test-only-fingerprint-key"
     first = _agent(
         run_store=run_store,
         session_store=session_store,
@@ -193,6 +226,7 @@ async def test_docker_backend_contract_hashes_environment_values() -> None:
             docker_path="/opt/docker",
             image="python@sha256:fixture",
             env={"API_KEY": "do-not-store-raw"},
+            resume_fingerprint_key=fingerprint_key,
         ),
     )
     run_id = await _interrupt_after_first_event(await first.session(id="s1"))
@@ -200,7 +234,7 @@ async def test_docker_backend_contract_hashes_environment_values() -> None:
     assert stored is not None
     serialized = json.dumps(stored.meta, sort_keys=True)
     assert "do-not-store-raw" not in serialized
-    assert "sha256:" in serialized
+    assert "hmac-sha256:" in serialized
 
     changed = _agent(
         run_store=run_store,
@@ -210,10 +244,28 @@ async def test_docker_backend_contract_hashes_environment_values() -> None:
             docker_path="/opt/docker",
             image="python@sha256:fixture",
             env={"API_KEY": "changed"},
+            resume_fingerprint_key=fingerprint_key,
         ),
     )
     with pytest.raises(ConfigError, match="API_KEY"):
         _ = [event async for event in (await changed.session(id="s1")).resume(run_id)]
+
+
+async def test_durable_docker_environment_requires_fingerprint_key() -> None:
+    from linch.errors import ConfigError
+    from linch.run_store import InMemoryRunStore
+    from linch.sessions import InMemorySessionStore
+    from linch.tools import workspace_tools
+    from linch.tools.execution import DockerBackend
+
+    agent = _agent(
+        run_store=InMemoryRunStore(),
+        session_store=InMemorySessionStore(),
+        tools=workspace_tools(),
+        execution_backend=DockerBackend(env={"STAGE": "dev"}),
+    )
+    with pytest.raises(ConfigError, match="resume_fingerprint_key"):
+        _ = [event async for event in (await agent.session()).run("go")]
 
 
 async def test_slots_only_custom_bash_backend_requires_stable_identity() -> None:

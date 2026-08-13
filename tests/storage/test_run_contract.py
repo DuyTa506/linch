@@ -76,6 +76,8 @@ def test_contract_future_envelope_keys_are_forward_tolerant() -> None:
     restored = run_contract_from_dict(wire)
 
     assert restored.fingerprint == wire["fingerprint"]
+    assert restored.payload == _contract().payload
+    assert "future_envelope_key" not in run_contract_to_dict(restored)
 
 
 def test_contract_mismatch_reports_stable_field_path() -> None:
@@ -115,6 +117,28 @@ def test_legacy_contract_requires_explicit_unsafe_override() -> None:
 def test_contract_rejects_noncanonical_callable_configuration() -> None:
     with pytest.raises(TypeError, match="not deterministically serializable"):
         _contract(policies={"permission_callback": lambda: None})
+
+
+def test_contract_budget_ignores_mutable_spend_counters() -> None:
+    from linch import RunBudget
+
+    budget = RunBudget(max_tokens=5000, max_cost_usd=1.0, warn_ratio=0.8)
+    first = _contract(budget=budget)
+    budget.spent_tokens = 1234
+    budget.spent_usd = 0.4
+    second = _contract(budget=budget)
+
+    assert first.fingerprint == second.fingerprint
+    assert first.payload["budget"] == {
+        "max_cost_usd": 1.0,
+        "max_tokens": 5000,
+        "warn_ratio": 0.8,
+    }
+
+
+def test_contract_rejects_unsupported_budget_object() -> None:
+    with pytest.raises(TypeError, match="budget must be a mapping"):
+        _contract(budget=object())
 
 
 async def test_run_meta_contract_is_deep_copied_in_memory() -> None:
