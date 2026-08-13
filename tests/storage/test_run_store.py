@@ -175,6 +175,34 @@ async def test_run_stores_normalize_recursive_metadata(tmp_path) -> None:
             await store.close()
 
 
+async def test_run_stores_preserve_non_list_error_metadata(tmp_path) -> None:
+    stores = [InMemoryRunStore(), SqliteRunStore(tmp_path / "legacy-errors.db")]
+    try:
+        for index, store in enumerate(stores):
+            run_id = f"run-{index}"
+            await store.create_run(
+                "session-1",
+                id=run_id,
+                meta={"errors": "legacy failure", "kind": "test"},
+            )
+            recursive_error: dict[str, object] = {"message": "new failure"}
+            recursive_error["self"] = recursive_error
+
+            failed = await store.mark_failed(run_id, error=recursive_error)
+            loaded = await store.load_run(run_id)
+
+            assert failed.meta["errors"] == [
+                "legacy failure",
+                {"message": "new failure", "self": "<recursion>"},
+            ]
+            assert loaded is not None
+            assert loaded.meta == failed.meta
+            assert loaded.meta is not failed.meta
+    finally:
+        for store in stores:
+            await store.close()
+
+
 async def test_sqlite_checkpoint_results_are_isolated_persisted_snapshots(tmp_path) -> None:
     store = SqliteRunStore(tmp_path / "snapshot-results.db")
     try:

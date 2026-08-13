@@ -226,6 +226,7 @@ class LadderProvider:
         self.window = window
         self.calls = 0
         self.summarize_calls = 0
+        self.main_models: list[str] = []
 
     def context_window(self, model: str) -> int:
         return self.window
@@ -241,6 +242,7 @@ class LadderProvider:
             yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
             return
 
+        self.main_models.append(req.model)
         behavior, n = self.behaviors[self.calls]
         self.calls += 1
         if behavior == "raise_cle":
@@ -440,6 +442,26 @@ async def test_reactive_micro_then_forced_on_context_length_error() -> None:
     assert provider.summarize_calls == 1
     assert events[-1].type == "result"
     assert events[-1].subtype == "success"
+
+
+@pytest.mark.parametrize("use_ladder", [False, True])
+async def test_compaction_retry_preserves_per_turn_model_override(use_ladder: bool) -> None:
+    from linch import DetailedCompaction
+    from linch.compaction import CompactionLadder
+    from linch.types import SkillOverlay
+
+    provider = LadderProvider([("raise_cle", 0), ("text", 0)])
+    kwargs: dict[str, Any] = {"compaction": DetailedCompaction(keep_recent_turns=1)}
+    if use_ladder:
+        kwargs["compaction_ladder"] = CompactionLadder(keep_recent_turns=1)
+    agent = _make_agent(provider, **kwargs)
+    session = await agent.session()
+    session.pending_skill_overlay = SkillOverlay(model_override="skill-model")
+
+    events = [event async for event in session.run("go")]
+
+    assert events[-1].type == "result" and events[-1].subtype == "success"
+    assert provider.main_models == ["skill-model", "skill-model"]
 
 
 async def test_reactive_compaction_snapshot_restores_exact_post_compaction_view() -> None:

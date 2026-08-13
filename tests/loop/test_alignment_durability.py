@@ -386,6 +386,7 @@ async def test_resume_stop_success_closes_pending_tool_bracket_as_success() -> N
     assert events[-1].type == "result" and events[-1].subtype == "success"
     result = session.provider_view[-1].content[0]
     assert isinstance(result, ToolResultBlock)
+    assert result.tool_use_id == "call-stop"
     assert result.is_error is False
 
 
