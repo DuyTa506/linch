@@ -24,6 +24,9 @@ class _TextProvider:
 
 class _DurableStateHook:
     checkpoint_key = "test.durable-state"
+    resume_policy_id = "test.durable-state-policy"
+    resume_policy_version = "1"
+    resume_policy_config = {"fixture": "durable-state"}
 
     def __init__(self, state: dict[str, Any]) -> None:
         self.state = state
@@ -90,6 +93,7 @@ async def test_checkpointable_hook_snapshots_session_scoped_json_state() -> None
 
 
 async def test_checkpointable_hook_restores_matching_state_and_preserves_other_extensions() -> None:
+    from linch import RunOptions
     from linch.run_store import InMemoryRunStore, RunCheckpoint
     from linch.sessions import InMemorySessionStore
     from linch.types import Usage
@@ -120,7 +124,7 @@ async def test_checkpointable_hook_restores_matching_state_and_preserves_other_e
     )
     session = await agent.session(id="session-restore")
 
-    events = await _collect(session.resume(run.id))
+    events = await _collect(session.resume(run.id, RunOptions(allow_legacy_resume=True)))
 
     assert events[-1].type == "result"
     assert hook.restored == [
@@ -132,6 +136,47 @@ async def test_checkpointable_hook_restores_matching_state_and_preserves_other_e
     assert loaded.checkpoint.extension_state["test.durable-state"] == hook.state
 
 
+async def test_empty_hook_snapshot_clears_stale_active_namespace_only() -> None:
+    from linch import RunOptions
+    from linch.run_store import InMemoryRunStore, RunCheckpoint
+    from linch.sessions import InMemorySessionStore
+    from linch.types import Usage
+
+    session_store = InMemorySessionStore()
+    run_store = InMemoryRunStore()
+    await session_store.create(id="session-clear")
+    run = await run_store.create_run("session-clear", id="run-clear")
+    await run_store.save_checkpoint(
+        run.id,
+        RunCheckpoint(
+            phase="turn_complete",
+            prompt="continue",
+            turn_index=0,
+            total_usage=Usage(),
+            extension_state={
+                "test.durable-state": {"stale": True},
+                "another-extension": {"must": "survive"},
+            },
+        ),
+    )
+    hook = _DurableStateHook({})
+    agent = _agent(
+        provider=_TextProvider(),
+        session_store=session_store,
+        run_store=run_store,
+        hooks=[hook],
+    )
+    session = await agent.session(id="session-clear")
+
+    events = await _collect(session.resume(run.id, RunOptions(allow_legacy_resume=True)))
+
+    assert events[-1].type == "result"
+    loaded = await run_store.load_run(run.id)
+    assert loaded is not None and loaded.checkpoint is not None
+    assert "test.durable-state" not in loaded.checkpoint.extension_state
+    assert loaded.checkpoint.extension_state["another-extension"] == {"must": "survive"}
+
+
 async def test_incomplete_checkpointable_hook_fails_closed_with_configuration_error() -> None:
     from linch.errors import ConfigError
     from linch.run_store import InMemoryRunStore
@@ -139,6 +184,8 @@ async def test_incomplete_checkpointable_hook_fails_closed_with_configuration_er
 
     class _IncompleteHook:
         checkpoint_key = "test.incomplete"
+        resume_policy_id = "test.incomplete-policy"
+        resume_policy_config: dict[str, Any] = {}
 
         def checkpoint_state(self, session: Any, run_id: str) -> dict[str, Any]:
             return {}

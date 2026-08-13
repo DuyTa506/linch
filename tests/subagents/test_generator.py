@@ -6,6 +6,22 @@ from pathlib import Path
 import pytest
 
 
+def _make_agent(provider, tmp_path):
+    from linch import Agent, workspace_tools
+    from linch.config import FeatureFlags
+    from linch.sessions import InMemorySessionStore
+
+    return Agent(
+        model="gpt-5",
+        provider=provider,
+        tools=workspace_tools(),
+        session_store=InMemorySessionStore(),
+        cwd=str(tmp_path),
+        permissions={"mode": "skip-dangerous"},
+        features=FeatureFlags(subagents=True),
+    )
+
+
 def test_generator_schema_requires_nullable_tools() -> None:
     from linch.subagents import generator
 
@@ -42,9 +58,7 @@ async def test_rendered_generated_subagent_loads_from_disk(tmp_path) -> None:
 
 
 async def test_generate_subagent_definition_from_scripted_provider(tmp_path: Path) -> None:
-    from linch import Agent
     from linch.evals import ScriptedProvider, TextTurn
-    from linch.sessions import InMemorySessionStore
     from linch.subagents import generate_subagent_definition
 
     payload = {
@@ -53,13 +67,7 @@ async def test_generate_subagent_definition_from_scripted_provider(tmp_path: Pat
         "body": "You are a test runner. Run relevant tests and report failures.",
         "tools": ["Bash", "Read"],
     }
-    agent = Agent(
-        model="gpt-5",
-        provider=ScriptedProvider([TextTurn(json.dumps(payload))]),
-        session_store=InMemorySessionStore(),
-        cwd=str(tmp_path),
-        permissions={"mode": "skip-dangerous"},
-    )
+    agent = _make_agent(ScriptedProvider([TextTurn(json.dumps(payload))]), tmp_path)
 
     generated = await generate_subagent_definition(agent, "make a test runner")
 
@@ -85,9 +93,8 @@ async def test_write_subagent_definition_rejects_existing_file(tmp_path: Path) -
 
 
 async def test_generate_subagent_definition_rejects_existing_name(tmp_path: Path) -> None:
-    from linch import Agent, ConfigError
+    from linch import ConfigError
     from linch.evals import ScriptedProvider, TextTurn
-    from linch.sessions import InMemorySessionStore
     from linch.subagents import generate_subagent_definition
 
     payload = {
@@ -96,22 +103,14 @@ async def test_generate_subagent_definition_rejects_existing_name(tmp_path: Path
         "body": "You are a verifier.",
         "tools": ["Read"],
     }
-    agent = Agent(
-        model="gpt-5",
-        provider=ScriptedProvider([TextTurn(json.dumps(payload))]),
-        session_store=InMemorySessionStore(),
-        cwd=str(tmp_path),
-        permissions={"mode": "skip-dangerous"},
-    )
+    agent = _make_agent(ScriptedProvider([TextTurn(json.dumps(payload))]), tmp_path)
 
     with pytest.raises(ConfigError, match="already exists"):
         await generate_subagent_definition(agent, "make a verifier")
 
 
 async def test_create_subagent_definition_writes_and_reloads(tmp_path: Path) -> None:
-    from linch import Agent
     from linch.evals import ScriptedProvider, TextTurn
-    from linch.sessions import InMemorySessionStore
     from linch.subagents import create_subagent_definition
 
     payload = {
@@ -120,13 +119,7 @@ async def test_create_subagent_definition_writes_and_reloads(tmp_path: Path) -> 
         "body": "You are a documentation writer. Produce concise docs.",
         "tools": [],
     }
-    agent = Agent(
-        model="gpt-5",
-        provider=ScriptedProvider([TextTurn(json.dumps(payload))]),
-        session_store=InMemorySessionStore(),
-        cwd=str(tmp_path),
-        permissions={"mode": "skip-dangerous"},
-    )
+    agent = _make_agent(ScriptedProvider([TextTurn(json.dumps(payload))]), tmp_path)
 
     created = await create_subagent_definition(agent, "make a documentation writer")
 

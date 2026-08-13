@@ -137,12 +137,17 @@ def evaluate_bash_rules(
     if not segments:
         return None
     all_allowed = True
+    saw_ask = False
     for segment in segments:
         decision = _first_matching_bash_decision(rules, segment)
         if decision == "deny":
             return "deny"
+        if decision == "ask":
+            saw_ask = True
         if decision != "allow":
             all_allowed = False
+    if saw_ask:
+        return "ask"
     return "allow" if all_allowed else None
 
 
@@ -299,6 +304,8 @@ def _first_matching_bash_decision(
 ) -> RuleDecision | None:
     for rule in rules:
         if match_bash_rule(rule, command_segment):
+            if rule.decision == "passthrough":
+                continue
             return rule.decision
     return None
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import platform
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -16,8 +17,8 @@ from .permissions import BashRule, CanUseTool, PathRule, PermissionEngine, Permi
 from .providers import BaseProvider, OpenAIResponsesProvider, OpenAIResponsesProviderOptions
 from .providers.limiter import Limiter, _SemaphoreLimiter
 from .recovery import TruncationRecovery
-from .sessions import SessionStore, SqliteSessionStore
-from .tools import ToolRegistry, default_tools
+from .sessions import InMemorySessionStore, SessionStore
+from .tools import ToolRegistry
 from .types import InvokedSkillRecord, Message, PermissionMode, SystemBlock
 
 if TYPE_CHECKING:
@@ -263,12 +264,13 @@ def _has_read_before_write_hook(hooks: list[Any]) -> bool:
     return any(isinstance(hook, ReadBeforeWriteHook) for hook in hooks)
 
 
-def _system_prompt_section_blocks(cfg: SystemPromptConfig | None) -> dict[str, list[SystemBlock]]:
+def _system_prompt_section_blocks(
+    cfg: SystemPromptConfig | None,
+    tool_sections: list[Any] | None = None,
+) -> dict[str, list[SystemBlock]]:
     grouped: dict[str, list[SystemBlock]] = {placement: [] for placement in _SECTION_PLACEMENTS}
-    if cfg is None or not cfg.sections:
-        return grouped
-
-    for section in cfg.sections:
+    sections = [*((cfg.sections or []) if cfg is not None else []), *(tool_sections or [])]
+    for section in sections:
         placement = getattr(section, "placement", "before_defaults")
         if placement not in grouped:
             raise ConfigError(
@@ -290,18 +292,13 @@ def _system_prompt_section_blocks(cfg: SystemPromptConfig | None) -> dict[str, l
     return grouped
 
 
-# Built-in software-engineering identity prepended to the system prompt in
-# default mode (skipped when SystemPromptConfig.replace_defaults is set).
-_SWE_IDENTITY = (
-    "You are Linch, an autonomous software engineering assistant. "
-    "You work inside a codebase on the user's computer, using the "
-    "file and shell tools provided to read, modify, and run code. "
-    "Your goal is to complete the user's coding task correctly and "
-    "minimally.\n\n"
-    "Behave like an experienced engineer: read before you write, run "
-    "before you claim, prefer small focused changes, surface "
-    "uncertainty instead of guessing. Do not narrate trivial "
-    "operations. Do not produce status reports unless the user asked."
+# Domain-neutral identity for the SDK core.  Coding identity and operating
+# doctrine belong to explicit presets (for example ``create_deep_agent``).
+_CORE_IDENTITY = (
+    "You are an AI assistant configured through the Linch SDK. Follow the "
+    "user's instructions and the configured policies. Use only capabilities "
+    "that are actually available, keep claims grounded in observed results, "
+    "and state material uncertainty instead of guessing."
 )
 
 # Tools whose presence marks an agent as doing software-engineering work.
@@ -393,9 +390,9 @@ class AgentOptions:
     final_tool_name: str | None = None
     loop_guard: Any = None  # LoopGuard | None; None means "use default LoopGuard"
     filesystem: Any = None  # FileBackend | None
-    result_offload: Any = None  # OffloadConfig | None; None = use default OffloadConfig()
+    result_offload: Any = None  # OffloadConfig | None; requires filesystem feature opt-in
     hooks: Any = None
-    read_before_write: Any = True
+    read_before_write: Any = False
     extra_subagents: list[AgentDefinition] | None = None
     enable_worker_tools: bool = False
     retain_subagents: bool = False
@@ -463,7 +460,7 @@ class Agent:
         mailbox: Any = None,
         schedule_store: Any = None,
         hooks: Any = None,
-        read_before_write: Any = True,
+        read_before_write: Any = False,
         tool_cache: Any = None,
         extra_subagents: list[AgentDefinition] | None = None,
         enable_worker_tools: bool = False,
@@ -519,7 +516,10 @@ class Agent:
         cwd_resolved = str(Path(cwd or os.getcwd()).resolve())
         self.model = model
         self.cwd = cwd_resolved
-        self.tools = tools or default_tools()
+        # Linch is an SDK, not an implicit coding harness.  A bare Agent gets
+        # no shell/filesystem authority; applications opt in with their own
+        # registry or ``workspace_tools()``/a higher-level preset.
+        self.tools = tools if tools is not None else ToolRegistry()
         self.execution_backend = execution_backend
         if execution_backend is not None:
             from .tools.builtin import BashTool
@@ -596,6 +596,7 @@ class Agent:
         # Store SystemPromptConfig for use in _build_system_blocks
         self._system_prompt_config: SystemPromptConfig | None = system_prompt_config
         self._cached_system_blocks: list[SystemBlock] | None = None
+        self._cached_system_blocks_signature: tuple[Any, ...] | None = None
         self._configure_loop_guard(loop_guard, loopGuard)
         self._configure_hooks(
             hooks=hooks,
@@ -675,7 +676,7 @@ class Agent:
         self,
         *,
         hooks: Any,
-        read_before_write: Any = True,
+        read_before_write: Any = False,
         tool_cache: Any = None,
     ) -> None:
         from .hooks import normalize_hooks
@@ -779,19 +780,71 @@ class Agent:
 
     @property
     def system_blocks(self) -> list[SystemBlock]:
-        if self._cached_system_blocks is not None:
-            return self._cached_system_blocks
         tool_names = sorted(tool.name for tool in self.tools.list())
-        blocks = self._build_system_blocks(tool_names)
+        tool_sections = self.tools.system_prompt_sections(active_names=tool_names)
+        signature = self._system_blocks_signature(tool_names, tool_sections)
+        if (
+            self._cached_system_blocks is not None
+            and self._cached_system_blocks_signature == signature
+        ):
+            return self._cached_system_blocks
+        blocks = self._build_system_blocks(tool_names, tool_sections=tool_sections)
         self._cached_system_blocks = blocks
+        self._cached_system_blocks_signature = signature
         return blocks
 
     def _refresh_system_blocks(self) -> None:
         self._cached_system_blocks = None
+        self._cached_system_blocks_signature = None
+
+    def _system_blocks_signature(
+        self,
+        tool_names: list[str],
+        tool_sections: list[Any],
+    ) -> tuple[Any, ...]:
+        """Return the stable identity of every static prompt input.
+
+        Tool-contributed section content is part of this key, so changing a
+        dynamic contribution invalidates the cached provider prefix even when
+        the registered tool names and JSON schemas did not change.
+        """
+        cfg = self._system_prompt_config
+        cfg_sections = tuple(
+            (
+                getattr(section, "name", None),
+                getattr(section, "text", None),
+                getattr(section, "cacheable", None),
+                getattr(section, "placement", None),
+            )
+            for section in ((cfg.sections or []) if cfg is not None else [])
+        )
+        contributed = tuple(
+            (section.name, section.text, section.cacheable, section.placement)
+            for section in tool_sections
+        )
+        cfg_blocks = tuple(
+            (getattr(block, "text", None), getattr(block, "cacheable", None))
+            for block in ((cfg.blocks or []) if cfg is not None else [])
+        )
+        return (
+            self.tools.generation,
+            tuple(tool_names),
+            contributed,
+            cfg_sections,
+            cfg_blocks,
+            getattr(cfg, "replace_defaults", False),
+            getattr(cfg, "append", None),
+            self.system_prompt,
+            self.permission_engine.mode,
+            self.execution_backend is not None,
+        )
 
     def _get_store(self) -> SessionStore:
         if self._store is None:
-            self._store = SqliteSessionStore(Path(self.cwd) / ".linch" / "sessions.db")
+            # A neutral SDK instance must not create project-local state merely
+            # because a caller opened a session. Durable presets and services
+            # pass an explicit store.
+            self._store = InMemorySessionStore()
         return self._store
 
     @property
@@ -894,7 +947,12 @@ class Agent:
         if getattr(self, "result_offload", None) is not None:
             self._refresh_context_window_derived()
 
-    def _build_system_blocks(self, tool_names: list[str]) -> list[SystemBlock]:
+    def _build_system_blocks(
+        self,
+        tool_names: list[str],
+        *,
+        tool_sections: list[Any] | None = None,
+    ) -> list[SystemBlock]:
         names = ", ".join(sorted(tool_names))
         shell = os.environ.get("SHELL", os.environ.get("COMSPEC", "unknown"))
         py_ver = platform.python_version()
@@ -912,22 +970,29 @@ class Agent:
         )
 
         # ── env block (always included) ──────────────────────────────────────
-        env_text = (
-            f"Environment:\n\n"
-            f"- Linch version: {get_version()}\n"
-            f"- Working directory: {self.cwd}\n"
-            f"- OS: {os_info}\n"
-            f"- Shell: {shell}\n"
-            f"- Python: {py_ver}\n"
-            f"- Permission mode: {self.permission_engine.mode}\n"
-            f"- Tools available: {names}"
-        )
+        env_lines = [
+            "Runtime:",
+            "",
+            f"- Linch version: {get_version()}",
+            f"- Permission mode: {self.permission_engine.mode}",
+            f"- Tools available: {names or 'none'}",
+        ]
+        if has_swe_tools:
+            env_lines.extend(
+                [
+                    f"- Working directory: {self.cwd}",
+                    f"- OS: {os_info}",
+                    f"- Shell: {shell}",
+                    f"- Python: {py_ver}",
+                ]
+            )
+        env_text = "\n".join(env_lines)
 
         cfg = self._system_prompt_config
 
         # ── Assemble blocks ──────────────────────────────────────────────────
         blocks: list[SystemBlock] = []
-        section_blocks = _system_prompt_section_blocks(cfg)
+        section_blocks = _system_prompt_section_blocks(cfg, tool_sections)
 
         if cfg is not None and cfg.replace_defaults:
             # Custom-identity / non-SWE mode: skip built-in identity + protocol
@@ -936,11 +1001,11 @@ class Agent:
                 blocks.extend(cfg.blocks)
             blocks.extend(section_blocks["after_defaults"])
         else:
-            # Default SWE mode: prepend any extra blocks, then identity + protocol
+            # Neutral SDK mode: caller/tool blocks surround a generic identity.
             blocks.extend(section_blocks["before_defaults"])
             if cfg is not None and cfg.blocks:
                 blocks.extend(cfg.blocks)
-            blocks.append(SystemBlock(text=_SWE_IDENTITY, cacheable=True))
+            blocks.append(SystemBlock(text=_CORE_IDENTITY, cacheable=True))
             if has_swe_tools and protocol_lines:
                 protocol = "Tool use protocol:\n\n" + "\n".join(protocol_lines)
                 blocks.append(SystemBlock(text=protocol, cacheable=True))
@@ -997,11 +1062,14 @@ class Agent:
         """
         # Temporarily override _cached_system_blocks to avoid polluting the
         # agent-level cache; build with the requested names and return.
-        saved = self._cached_system_blocks
-        # Stash current system_prompt_config; use same one (child inherits parent config)
-        result = self._build_system_blocks(tool_names)
-        self._cached_system_blocks = saved
-        return result
+        active = set(tool_names)
+        registry = self.tools
+        if not active.issubset({tool.name for tool in registry.list()}):
+            worker_registry = self._subagent_tool_registry
+            if worker_registry is not None:
+                registry = worker_registry
+        tool_sections = registry.system_prompt_sections(active_names=tool_names)
+        return self._build_system_blocks(tool_names, tool_sections=tool_sections)
 
     async def connect_skills(self) -> None:
         if self._skills_loaded:
@@ -1277,6 +1345,30 @@ class Agent:
             )
         self._sessions[record.id] = session
         return session
+
+    async def fork_session(
+        self,
+        source_or_id: Session | str,
+        *,
+        before_seq: int | None = None,
+        id: str | None = None,
+        meta: Mapping[str, object] | None = None,
+    ) -> Session:
+        """Create an independent session from a safe prefix of another.
+
+        ``before_seq`` is an exclusive boundary.  The store-level helper owns
+        lineage metadata, assistant/tool pairing validation, and atomic custom
+        id handling; this method intentionally remains a thin lifecycle seam.
+        """
+        from .sessions.fork import fork_session as _fork_session
+
+        return await _fork_session(
+            self,
+            source_or_id,
+            before_seq=before_seq,
+            id=id,
+            meta=meta,
+        )
 
     async def run_workflow(
         self,

@@ -27,9 +27,23 @@ class BaseProvider(ABC):
 | `"tool_use_input_delta"` | `id: str`, `json_delta: str` |
 | `"tool_use_end"` | `id: str` |
 | `"thinking_delta"` | `text: str`, `signature?: str` |
-| `"message_end"` | `stop_reason: StopReason`, `usage: Usage`, `provider_metadata: Any` |
+| `"redacted_thinking"` | `data?: object` (converted to a string by the loop) |
+| `"message_end"` | `stop_reason: StopReason`, `usage: Usage`, `provider_metadata?: dict[str, object] \| None` |
 
 The loop assembles these — it never imports any provider's raw types. Adding a new provider means implementing this dict contract only.
+
+The vocabulary is a strict boundary in Linch 2.0: an adapter must emit the
+declared `type` and required fields with the documented normalized shapes.
+Malformed events are provider errors; the loop does not silently accept raw
+SDK objects, infer missing tool IDs, or turn unknown event shapes into a
+successful assistant response. `redacted_thinking` is the one intentionally
+opaque content marker; its optional payload is converted to the normalized
+redacted-thinking block. Keep compatibility shims inside the adapter.
+
+`message_end.usage` must be an actual `linch.Usage` instance, not a mapping or a
+provider SDK object. Stop reasons and tool calls must agree: `"tool_use"` requires at
+least one completed tool call, while every other stop reason forbids completed tool calls
+in that message. The accepted stop-reason vocabulary is the public `StopReason` literal.
 
 ## Optional lifecycle hooks
 

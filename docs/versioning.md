@@ -1,5 +1,10 @@
 # Versioning & public API
 
+Linch 2.0 is the first release whose defaults enforce the SDK boundary: a bare
+`Agent` is neutral, has no implicit workspace tools, and does not trust ambient
+project resources. See [Migrating to Linch 2.0](migration-2.0.md) for the
+required opt-ins and durable-run changes.
+
 Linch versions `MAJOR.MINOR.PATCH` and never breaks `linch.__all__` outside a MAJOR.
 This page is the contract an embedder can pin to.
 
@@ -125,7 +130,7 @@ exist (`defaultTools` → `default_tools`, `tools_from_defaults`) follow this ru
 
 ```toml
 # pyproject.toml — no name in `linch.__all__` will break inside this range
-dependencies = ["linch>=1.0,<2.0"]
+dependencies = ["linch>=2.0,<3.0"]
 ```
 
 That range is the *compatibility* guarantee, and it is enough if you only call
@@ -137,7 +142,7 @@ Pin tighter when you need the release to be inert:
 
 ```toml
 # review every release before taking it
-dependencies = ["linch==1.2.1"]
+dependencies = ["linch==2.0.0"]
 ```
 
 - **Implementing a protocol?** Pin the exact version, or at least the MINOR. New optional

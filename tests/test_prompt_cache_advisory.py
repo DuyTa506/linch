@@ -18,14 +18,13 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from linch import Agent, ContextBuildResult
+from linch import Agent, ContextBuildResult, RunOptions
 from linch._prompt_cache import prompt_cache_advisories, tool_signature
 from linch.events import PromptCacheAdvisoryEvent, event_from_dict, event_to_dict
 from linch.hooks import ContextInjectionHook
 from linch.loop.request import _build_turn_request
 from linch.providers.base import BaseProvider, ProviderCapabilities
 from linch.reports import build_run_report
-from linch.session import RunOptions
 from linch.sessions import InMemorySessionStore
 from linch.tools import ToolContext, ToolRegistry, ToolResult
 from linch.types import ProviderRequest, SystemBlock, Usage

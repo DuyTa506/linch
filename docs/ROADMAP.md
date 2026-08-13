@@ -8,10 +8,15 @@ Completed roadmap slices do not remain here as active work. When a phase ships,
 move its durable contracts into architecture or usage documentation and replace
 it with the next evidence-backed priority.
 
-**Status (July 2026):** the audit-driven hardening program — measurement
-guardrails, runtime reliability, lifecycle and scalability, provider parity, and
-durable context — has shipped. Its durable contracts now live in the
-architecture and usage docs (see [Recently shipped](#recently-shipped) below).
+**Status (August 2026):** Linch 2.0's SDK-boundary and audit-driven hardening
+program — neutral defaults, trust-gated project resources, canonical
+permission ordering, strict provider streams, progress events, durable run
+contracts, portable session forks, provider-agnostic compaction, and storage
+allocation safety — has shipped. Its durable contracts now live in the
+architecture, usage, and [migration guide](migration-2.0.md). The earlier
+audit-driven hardening program — measurement guardrails, runtime reliability,
+lifecycle and scalability, provider parity, and durable context — is included
+in the shipped contracts below.
 There is no active phase queued; ranked prospects live in
 [Next candidates](#next-candidates) and enter active work through the
 [acceptance gate](#roadmap-item-acceptance-gate) when evidence justifies it.
@@ -121,6 +126,14 @@ work.
 | GenAI semconv traces | `OpenTelemetryObserver` emits `gen_ai.*` semantic-convention attributes (operation, provider, conversation, cache tokens, tool call) alongside unchanged `linch.*` names | [usage/hooks.md](./usage/hooks.md#genai-semantic-conventions) |
 | Scaffolding CLI | Stdlib-only `linch new` / `linch add tool` console script; generated projects run and test offline; core import graph untouched | [usage/cli.md](./usage/cli.md) |
 | Proactive provider gate | Optional `Agent(limiter=...)` / `max_provider_concurrency=N` held around every live provider call (turn stream and compaction), released across retry backoff; cached provider clients rebuild when the event loop changes | [usage/extending.md](./usage/extending.md#limiter--gate-every-live-provider-call) |
+| SDK-neutral defaults | Bare `Agent` has no implicit workspace tools or project-resource discovery; `workspace_tools()` and deep-agent profiles are explicit opt-ins; prompt identity is domain-neutral | [migration-2.0.md](./migration-2.0.md) |
+| Canonical permission boundary | Pre-tool transforms are revalidated before rules/callback approval; `updatedInput` is rejected instead of executing post-approval mutation | [migration-2.0.md](./migration-2.0.md#tool-permissions-and-hooks) |
+| Strict provider stream | Normalized event vocabulary and required fields are enforced at the adapter boundary | [architecture/provider-contract.md](./architecture/provider-contract.md) |
+| Tool progress | Best-effort `ToolContext.report_progress()` and `ToolProgressEvent` provide transient UI/telemetry updates without entering provider history or the durable run event log | [usage/events.md](./usage/events.md) |
+| Durable run contract | Canonical execution inputs are fingerprinted and compared on resume; legacy runs require an explicit unsafe migration policy | [migration-2.0.md](./migration-2.0.md#durable-runs-and-legacy-records) |
+| Portable session forks | Validated message-prefix forks preserve relevant metadata while rejecting unsafe tool-exchange boundaries; live work is not copied | [migration-2.0.md](./migration-2.0.md#session-forks) |
+| Provider-neutral compaction | Compaction and durable snapshots preserve pairing and fall back safely to full history when cache state is malformed | [architecture/compaction.md](./architecture/compaction.md) |
+| Concurrent storage allocation | Session/run allocation is transaction-safe under concurrent creators in SQLite and Postgres | [migration-2.0.md](./migration-2.0.md#compaction-and-storage-fixes) |
 
 ### Deferred: central-loop structural split
 
@@ -170,10 +183,6 @@ semantic-convention alignment** (additive `gen_ai.*` attributes on every span).
 
 ### Tier 2 — real value, needs design or a second embedder
 
-- **Public session forking** — `agent.fork_session(session, at_seq=...)` for
-  best-of-N sampling, A/B eval runs, and speculative exploration. The fork
-  mechanics exist for subagents; the open design question is store semantics
-  for the forked history (shared prefix vs. copy).
 - **Anthropic cache-breakpoint tuning** — explicit `cache_control` placement at
   the last stable message to shrink the re-billed span after compaction
   (live-measured at ~79% warm versus ~99% baseline). Pure win with no behavior

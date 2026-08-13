@@ -19,6 +19,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+from ..errors import ProviderError
 from ..events import Event, ResultEvent
 from ..observability import RunResultInfo
 from ..session import Session
@@ -186,6 +187,35 @@ async def finalize_final_tool_answer(
 ) -> AsyncIterator[Event]:
     """Terminal final-tool path: treat the tool input as structured output, run
     the schema/verifier/stop gates, then emit the success or error tail."""
+    if len(tool_blocks) != 1:
+        feedback = (
+            "Invalid terminal tool batch: the final-answer tool must be the only "
+            "tool call in its assistant message; no calls were executed."
+        )
+        async for event in _final_tool_retry_tail(
+            ctx.session,
+            run_id=ctx.run_id,
+            tool_blocks=tool_blocks,
+            final_id=final_block.id,
+            feedback=feedback,
+        ):
+            yield event
+        raise ProviderError(feedback)
+
+    # A terminal tool is intercepted rather than scheduled, but provider
+    # histories still require every assistant tool_use to have a matching
+    # user tool_result.  Persist the acknowledgement before any terminal gate
+    # so success, stop, and crash paths all leave a reusable session.
+    async for event in _final_tool_retry_tail(
+        ctx.session,
+        run_id=ctx.run_id,
+        tool_blocks=tool_blocks,
+        final_id=final_block.id,
+        feedback="Final answer captured by the host.",
+        final_is_error=False,
+    ):
+        yield event
+
     raw_structured_output = dict(final_block.input)
     structured_output: dict[str, Any] | None = raw_structured_output
     structured_error: str | None = None
@@ -212,12 +242,8 @@ async def finalize_final_tool_answer(
                 yield event
             return
         if _gate.decision == "retry":
-            async for event in _final_tool_retry_tail(
-                ctx.session,
-                run_id=ctx.run_id,
-                tool_blocks=tool_blocks,
-                final_id=final_block.id,
-                feedback=_gate.feedback or "",
+            async for event in _gate_retry_tail(
+                ctx.session, run_id=ctx.run_id, feedback=_gate.feedback or ""
             ):
                 yield event
             await ctx.end_active_turn()
@@ -246,12 +272,8 @@ async def finalize_final_tool_answer(
         yield hook_event
     if hook_action == "retry" and ctx.final_answer_reentries[0] < ctx.max_final_answer_reentries:
         ctx.final_answer_reentries[0] += 1
-        async for event in _final_tool_retry_tail(
-            ctx.session,
-            run_id=ctx.run_id,
-            tool_blocks=tool_blocks,
-            final_id=final_block.id,
-            feedback=feedback or "",
+        async for event in _gate_retry_tail(
+            ctx.session, run_id=ctx.run_id, feedback=feedback or ""
         ):
             yield event
         await ctx.end_active_turn()
@@ -279,12 +301,8 @@ async def finalize_final_tool_answer(
         await _persist_event(ctx.session, ctx.run_id, hook_event)
         yield hook_event
     if stop_action == "continue":
-        async for event in _final_tool_retry_tail(
-            ctx.session,
-            run_id=ctx.run_id,
-            tool_blocks=tool_blocks,
-            final_id=final_block.id,
-            feedback=feedback or "",
+        async for event in _gate_retry_tail(
+            ctx.session, run_id=ctx.run_id, feedback=feedback or ""
         ):
             yield event
         await ctx.end_active_turn()
@@ -323,8 +341,11 @@ async def finalize_text_answer(
     structured_output: dict[str, Any] | None = None
     structured_error: str | None = None
     effective_schema = ctx.opts.output_schema or getattr(ctx.agent, "output_schema", None)
-    if effective_schema is not None and ft is not None:
-        structured_output, structured_error = _parse_structured_output(ft, effective_schema)
+    if effective_schema is not None:
+        # Empty assistant content is still an attempted structured response;
+        # surface/repair its parse error instead of silently returning success
+        # with ``structured_output=None`` and no explanation.
+        structured_output, structured_error = _parse_structured_output(ft or "", effective_schema)
 
     # ── Closed-loop gates: schema repair, then verifiers ──────
     # Skipped on a loop-guard force_final turn: a guard-tripped run must not

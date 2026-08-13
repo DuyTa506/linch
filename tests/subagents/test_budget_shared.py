@@ -87,22 +87,24 @@ class ThreeLevelProvider:
 
 
 def _make_agent(provider: Any, **kwargs: Any) -> Any:
-    from linch import Agent
+    from linch import Agent, workspace_tools
+    from linch.config import FeatureFlags
     from linch.sessions import InMemorySessionStore
 
     return Agent(
         model="gpt-5",
         provider=provider,
+        tools=workspace_tools(),
         session_store=InMemorySessionStore(),
         permissions={"mode": "skip-dangerous"},
         cwd=".",
+        features=FeatureFlags(subagents=True),
         **kwargs,
     )
 
 
 async def test_subagent_run_charges_parent_budget() -> None:
-    from linch import RunBudget
-    from linch.session import RunOptions
+    from linch import RunBudget, RunOptions
 
     provider = ParentChildProvider(tokens_per_turn=500)
     agent = _make_agent(provider)
@@ -122,8 +124,7 @@ async def test_budget_aggregates_across_three_levels() -> None:
     # Budget inheritance must compose recursively: a grandchild charges the same
     # shared RunBudget as the parent (active_budget threads parent → child →
     # grandchild), so the total reflects every turn in the tree.
-    from linch import RunBudget
-    from linch.session import RunOptions
+    from linch import RunBudget, RunOptions
 
     provider = ThreeLevelProvider(tokens_per_turn=300)
     agent = _make_agent(provider)

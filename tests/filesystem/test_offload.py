@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 
 from linch import Agent
+from linch.config import FeatureFlags
 from linch.filesystem import OffloadConfig, StateFileBackend
 from linch.filesystem.offload import maybe_offload
 from linch.sessions import InMemorySessionStore
@@ -119,6 +120,7 @@ async def test_offload_end_to_end() -> None:
         permissions={"mode": "skip-dangerous"},
         cwd=".",
         tools=tools_from_defaults(extra=[BigTool()]),
+        features=FeatureFlags(filesystem=True),
         result_offload=OffloadConfig(threshold_tokens=10, preview_lines=5),
     )
     session = await agent.session()

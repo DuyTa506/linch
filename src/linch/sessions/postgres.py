@@ -171,28 +171,73 @@ class PostgresSessionStore:
         sid = id or str(uuid4())
         ts = now_iso()
         async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT id, created_at, updated_at, meta, invoked_skills "
-                "FROM sessions WHERE id = $1",
-                sid,
-            )
-            if row:
-                return _record(row)
-            await conn.execute(
-                "INSERT INTO sessions (id, created_at, updated_at, meta, invoked_skills) "
-                "VALUES ($1, $2, $3, $4, $5)",
-                sid,
-                ts,
-                ts,
-                json.dumps(_meta),
-                "[]",
-            )
-            await conn.execute(
-                "INSERT INTO task_counters (session_id, next_id) VALUES ($1, 1) "
-                "ON CONFLICT DO NOTHING",
-                sid,
-            )
-        return SessionRecord(id=sid, created_at=ts, updated_at=ts, meta=_meta)
+            async with conn.transaction():
+                # Idempotent even when two processes create the same explicit
+                # id concurrently.  The winner's record is returned to both.
+                await conn.execute(
+                    "INSERT INTO sessions (id, created_at, updated_at, meta, invoked_skills) "
+                    "VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO NOTHING",
+                    sid,
+                    ts,
+                    ts,
+                    json.dumps(_meta),
+                    "[]",
+                )
+                await conn.execute(
+                    "INSERT INTO task_counters (session_id, next_id) "
+                    "SELECT $1, COALESCE(MAX(id::BIGINT), 0) + 1 FROM tasks "
+                    "WHERE session_id = $1 AND id ~ '^[0-9]+$' "
+                    "ON CONFLICT DO NOTHING",
+                    sid,
+                )
+                row = await conn.fetchrow(
+                    "SELECT id, created_at, updated_at, meta, invoked_skills "
+                    "FROM sessions WHERE id = $1",
+                    sid,
+                )
+        if row is None:  # pragma: no cover - transaction invariant
+            raise RuntimeError(f"session disappeared during create: {sid}")
+        return _record(row)
+
+    async def create_if_absent(
+        self, *, id: str, meta: dict[str, object] | None = None
+    ) -> SessionRecord | None:
+        """Atomically create a named session, or return ``None`` if it exists.
+
+        This is an optional capability used by session forking to prove that
+        this caller owns the destination id before copying any history.  The
+        ``RETURNING`` row comes only from this transaction's successful insert;
+        no select-then-insert ownership inference is involved.
+        """
+        pool = await self._ensure()
+        ts = now_iso()
+        payload = json.dumps(meta or {})
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO sessions (
+                        id, created_at, updated_at, meta, invoked_skills
+                    ) VALUES ($1, $2, $3, $4, $5)
+                    ON CONFLICT (id) DO NOTHING
+                    RETURNING id, created_at, updated_at, meta, invoked_skills
+                    """,
+                    id,
+                    ts,
+                    ts,
+                    payload,
+                    "[]",
+                )
+                if row is None:
+                    return None
+                await conn.execute(
+                    "INSERT INTO task_counters (session_id, next_id) "
+                    "SELECT $1, COALESCE(MAX(id::BIGINT), 0) + 1 FROM tasks "
+                    "WHERE session_id = $1 AND id ~ '^[0-9]+$' "
+                    "ON CONFLICT DO NOTHING",
+                    id,
+                )
+        return _record(row)
 
     async def load(self, id: str) -> SessionRecord | None:
         pool = await self._ensure()
@@ -225,11 +270,13 @@ class PostgresSessionStore:
         ts = now_iso()
         async with pool.acquire() as conn:
             async with conn.transaction():
-                row = await conn.fetchrow(
-                    "SELECT COALESCE(MAX(seq), 0) AS cur FROM messages WHERE session_id = $1",
-                    id,
-                )
-                cur_seq: int = row["cur"]
+                # MAX(seq) alone is racy under READ COMMITTED: concurrent
+                # transactions can observe the same maximum and collide on the
+                # primary key.  Every append first locks the stable parent row,
+                # serialising allocation per session while unrelated sessions
+                # continue in parallel.
+                await _lock_session_pg(conn, id)
+                cur_seq = await _current_message_seq_pg(conn, id)
                 stored: list[StoredMessage] = []
                 for msg in messages:
                     cur_seq += 1
@@ -339,12 +386,8 @@ class PostgresSessionStore:
         pool = await self._ensure()
         async with pool.acquire() as conn:
             async with conn.transaction():
-                row = await conn.fetchrow(
-                    "SELECT next_id FROM task_counters WHERE session_id = $1",
-                    session_id,
-                )
-                next_id = int(row["next_id"]) if row else 1
-                task_id = str(next_id)
+                await _lock_session_pg(conn, session_id)
+                task_id = await _allocate_task_id_pg(conn, session_id)
                 now = now_iso()
                 await conn.execute(
                     """
@@ -361,12 +404,6 @@ class PostgresSessionStore:
                     json.dumps(input.metadata or {}),
                     now,
                     now,
-                )
-                await conn.execute(
-                    "INSERT INTO task_counters (session_id, next_id) VALUES ($1, $2) "
-                    "ON CONFLICT (session_id) DO UPDATE SET next_id = $2",
-                    session_id,
-                    next_id + 1,
                 )
                 await conn.execute(
                     "UPDATE sessions SET updated_at = $1 WHERE id = $2",
@@ -576,6 +613,53 @@ class PostgresSessionStore:
 
 
 # ── Async PG helpers (run within an acquired connection) ────────────────────
+
+
+async def _lock_session_pg(conn: Any, session_id: str) -> None:
+    """Lock the parent session row for transaction-scoped allocation.
+
+    PostgreSQL row locks are released automatically on commit/rollback.  Using
+    the parent row avoids process-local locks and works across every pool and
+    worker connected to the database.
+    """
+    found = await conn.fetchval(
+        "SELECT id FROM sessions WHERE id = $1 FOR UPDATE",
+        session_id,
+    )
+    if found is None:
+        raise KeyError(f"session not found: {session_id}")
+
+
+async def _current_message_seq_pg(conn: Any, session_id: str) -> int:
+    value = await conn.fetchval(
+        "SELECT COALESCE(MAX(seq), 0) FROM messages WHERE session_id = $1",
+        session_id,
+    )
+    return int(value or 0)
+
+
+async def _allocate_task_id_pg(conn: Any, session_id: str) -> str:
+    """Atomically reserve the next numeric task id for *session_id*.
+
+    The caller holds the session-row lock.  The upsert also makes allocation
+    safe for databases upgraded from a partial/older schema where the counter
+    row is missing.
+    """
+    allocated = await conn.fetchval(
+        """
+        INSERT INTO task_counters (session_id, next_id)
+        SELECT $1, COALESCE(MAX(id::BIGINT), 0) + 2
+        FROM tasks
+        WHERE session_id = $1 AND id ~ '^[0-9]+$'
+        ON CONFLICT (session_id) DO UPDATE
+            SET next_id = task_counters.next_id + 1
+        RETURNING next_id - 1
+        """,
+        session_id,
+    )
+    if allocated is None:  # pragma: no cover - INSERT ... RETURNING invariant
+        raise RuntimeError(f"failed to allocate task id for session: {session_id}")
+    return str(int(allocated))
 
 
 def _record(row: Any) -> SessionRecord:

@@ -36,11 +36,11 @@ class RunEventBuffer:
 
     __slots__ = ("store", "run_id", "_pending", "_last_seq")
 
-    def __init__(self, store: Any, run_id: str) -> None:
+    def __init__(self, store: Any, run_id: str, *, initial_seq: int = 0) -> None:
         self.store = store
         self.run_id = run_id
         self._pending: list[Event] = []
-        self._last_seq = 0
+        self._last_seq = max(0, initial_seq)
 
     @property
     def last_seq(self) -> int:

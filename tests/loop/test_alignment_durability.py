@@ -110,7 +110,14 @@ class _QuickTool:
         return ToolResult(content="A-ok")
 
 
-def _agent(provider: Any, tool: Any, *, session_store: Any, run_store: Any) -> Any:
+def _agent(
+    provider: Any,
+    tool: Any,
+    *,
+    session_store: Any,
+    run_store: Any,
+    hooks: Any = None,
+) -> Any:
     from linch import Agent
     from linch.config import FeatureFlags
     from linch.tools.registry import empty_tools
@@ -122,6 +129,7 @@ def _agent(provider: Any, tool: Any, *, session_store: Any, run_store: Any) -> A
         permissions={"mode": "skip-dangerous"},
         session_store=session_store,
         run_store=run_store,
+        hooks=hooks,
         features=FeatureFlags(skills=False, subagents=False, mcp=False),
         result_offload=None,
         loop_guard=None,
@@ -211,6 +219,7 @@ async def test_checkpoint_snapshots_pending_alignment() -> None:
 
 async def test_resume_restores_and_injects_pending_alignment() -> None:
     """A restored queue drains at the next turn boundary, exactly once."""
+    from linch import RunOptions
     from linch.run_store import RunCheckpoint
     from linch.types import Usage
 
@@ -232,7 +241,7 @@ async def test_resume_restores_and_injects_pending_alignment() -> None:
         ),
     )
 
-    events = await _collect(session.resume(run.id))
+    events = await _collect(session.resume(run.id, RunOptions(allow_legacy_resume=True)))
 
     assert len(_alignment_events(events)) == 1
     assert provider.requests and "steer north" in _text_messages(provider.requests[0])
@@ -244,6 +253,7 @@ async def test_resume_restores_and_injects_pending_alignment() -> None:
 
 async def test_crash_after_enqueue_before_drain_resume_injects() -> None:
     """Full crash/resume: a second agent on the same stores injects the intent."""
+    from linch import RunOptions
     from linch.errors import ConfigError
 
     session_store = _memory_session_store()
@@ -260,7 +270,7 @@ async def test_crash_after_enqueue_before_drain_resume_injects() -> None:
     provider2 = _TextProvider()
     agent2 = _agent(provider2, _WaitTool(), session_store=session_store, run_store=run_store)
     resumed = await agent2.session(id="s1")
-    events = await _collect(resumed.resume(run_id))
+    events = await _collect(resumed.resume(run_id, RunOptions(allow_legacy_resume=True)))
 
     assert len(_alignment_events(events)) == 1
     assert provider2.requests and "steer north" in _text_messages(provider2.requests[0])
@@ -269,6 +279,7 @@ async def test_crash_after_enqueue_before_drain_resume_injects() -> None:
 
 async def test_resume_mid_tool_batch_defers_alignment_after_tool_results() -> None:
     """A mid-turn resume never injects between assistant(tool_use) and tool results."""
+    from linch import RunOptions
     from linch.run_store import RunCheckpoint
     from linch.types import Message, TextBlock, ToolUseBlock, Usage
 
@@ -298,7 +309,7 @@ async def test_resume_mid_tool_batch_defers_alignment_after_tool_results() -> No
         ),
     )
 
-    events = await _collect(session.resume(run.id))
+    events = await _collect(session.resume(run.id, RunOptions(allow_legacy_resume=True)))
 
     assert len(_alignment_events(events)) == 1
     assert events[-1].type == "result" and events[-1].subtype == "success"
@@ -329,9 +340,60 @@ async def test_resume_mid_tool_batch_defers_alignment_after_tool_results() -> No
     assert provider.requests and "steer north" in _text_messages(provider.requests[0])
 
 
+async def test_resume_stop_success_closes_pending_tool_bracket_as_success() -> None:
+    from linch import HookResult, RunOptions
+    from linch.run_store import RunCheckpoint
+    from linch.types import Message, TextBlock, ToolResultBlock, ToolUseBlock, Usage
+
+    class StopBeforeProvider:
+        resume_policy_id = "test.stop-before-provider"
+        resume_policy_config: dict[str, object] = {}
+
+        def on_before_provider_call(self, ctx: Any) -> Any:
+            return HookResult.stop("review complete", metadata={"subtype": "success"})
+
+    session_store = _memory_session_store()
+    run_store = _memory_run_store()
+    agent = _agent(
+        _TextProvider(fail_on_call=True),
+        _QuickTool(),
+        session_store=session_store,
+        run_store=run_store,
+        hooks=[StopBeforeProvider()],
+    )
+    session = await agent.session(id="s-stop-success")
+    assistant = Message(
+        role="assistant",
+        content=[ToolUseBlock(id="call-stop", name="A", input={})],
+    )
+    await session.append([Message(role="user", content=[TextBlock(text="go")]), assistant])
+    run = await run_store.create_run(session.id, id="run-stop-success")
+    await run_store.save_checkpoint(
+        run.id,
+        RunCheckpoint(
+            phase="tool_batch_pending",
+            prompt="go",
+            turn_index=0,
+            total_usage=Usage(),
+            assistant_message=assistant,
+            assistant_stop_reason="tool_use",
+            pending_tool_blocks=[ToolUseBlock(id="call-stop", name="A", input={})],
+        ),
+    )
+
+    events = await _collect(session.resume(run.id, RunOptions(allow_legacy_resume=True)))
+
+    assert events[-1].type == "result" and events[-1].subtype == "success"
+    result = session.provider_view[-1].content[0]
+    assert isinstance(result, ToolResultBlock)
+    assert result.tool_use_id == "call-stop"
+    assert result.is_error is False
+
+
 async def test_resume_terminal_turn_drops_restored_alignment_silently() -> None:
     """A resumed turn that finalizes without another provider call drops the
     restored entries silently — no injection, no error (documented limitation)."""
+    from linch import RunOptions
     from linch.run_store import RunCheckpoint
     from linch.types import Message, TextBlock, Usage
 
@@ -359,7 +421,7 @@ async def test_resume_terminal_turn_drops_restored_alignment_silently() -> None:
         ),
     )
 
-    events = await _collect(session.resume(run.id))
+    events = await _collect(session.resume(run.id, RunOptions(allow_legacy_resume=True)))
 
     assert not _alignment_events(events)
     assert not [e for e in events if getattr(e, "type", None) == "error"]

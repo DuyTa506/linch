@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 
-@dataclass
+@dataclass(slots=True)
 class FeatureFlags:
     """Controls which optional subsystems are enabled when creating a session.
 
@@ -27,13 +27,17 @@ class FeatureFlags:
         )
     """
 
-    skills: bool = True
-    subagents: bool = True
-    mcp: bool = True
-    filesystem: bool = True
+    # Linch core is deliberately inert by default.  Project-local discovery is
+    # useful for a coding harness, but is surprising (and can be unsafe) for an
+    # SDK embedded in a service that happens to run inside an untrusted checkout.
+    # Presets such as ``create_deep_agent`` opt the relevant subsystems back in.
+    skills: bool = False
+    subagents: bool = False
+    mcp: bool = False
+    filesystem: bool = False
 
 
-@dataclass
+@dataclass(slots=True)
 class SystemPromptSection:
     """Named system-prompt section rendered as a :class:`SystemBlock`.
 
@@ -55,7 +59,7 @@ class SystemPromptSection:
     placement: Literal["before_defaults", "after_defaults", "after_env"] = "before_defaults"
 
 
-@dataclass
+@dataclass(slots=True)
 class SystemPromptConfig:
     """Controls how the agent system prompt is constructed.
 
@@ -77,9 +81,9 @@ class SystemPromptConfig:
             ``placement``.  Use this for reusable prompt policies without
             replacing the default Linch prompt.
         replace_defaults:
-            When ``True`` the built-in SWE identity and protocol blocks are
-            omitted entirely.  Use this for non-SWE agents (RAG, text-to-SQL,
-            document analysis) where those descriptions are misleading.
+            When ``True`` the built-in neutral identity and generic/tool-aware
+            protocol blocks are omitted entirely. Tool-contributed sections,
+            environment metadata, and caller additions are still rendered.
 
     Example — fully custom prompt::
 

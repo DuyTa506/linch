@@ -172,8 +172,7 @@ def _make_agent(provider: Any, **kwargs: Any) -> Any:
 
 
 async def test_loop_stops_when_token_budget_exhausted() -> None:
-    from linch import RunBudget
-    from linch.session import RunOptions
+    from linch import RunBudget, RunOptions
 
     provider = ToolLoopProvider(tokens_per_turn=600)
     agent = _make_agent(provider)
@@ -195,8 +194,7 @@ async def test_loop_stops_when_token_budget_exhausted() -> None:
 
 
 async def test_warning_event_emitted_once_at_90_percent() -> None:
-    from linch import RunBudget
-    from linch.session import RunOptions
+    from linch import RunBudget, RunOptions
 
     provider = UsageScriptProvider([("tool_use", 9500), ("end_turn", 400)])
     agent = _make_agent(provider)
@@ -214,8 +212,7 @@ async def test_warning_event_emitted_once_at_90_percent() -> None:
 
 
 async def test_agent_level_budget_fallback_and_runoptions_precedence() -> None:
-    from linch import RunBudget
-    from linch.session import RunOptions
+    from linch import RunBudget, RunOptions
 
     agent_budget = RunBudget(max_tokens=10_000)
     provider = UsageScriptProvider([("end_turn", 100), ("end_turn", 100)])
@@ -235,8 +232,7 @@ async def test_agent_level_budget_fallback_and_runoptions_precedence() -> None:
 
 
 async def test_budget_queryable_after_run() -> None:
-    from linch import RunBudget
-    from linch.session import RunOptions
+    from linch import RunBudget, RunOptions
 
     provider = UsageScriptProvider([("end_turn", 250)])
     agent = _make_agent(provider)

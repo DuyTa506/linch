@@ -56,8 +56,10 @@ async def test_pg_session_store_concurrent_appends() -> None:
     from linch.types import Message, TextBlock
 
     store = PostgresSessionStore(DSN, min_size=5, max_size=20)
+    session_id: str | None = None
     try:
         rec = await store.create()
+        session_id = rec.id
         msg = Message(role="user", content=[TextBlock(text="tick")])
         await asyncio.gather(*[store.append_messages(rec.id, [msg]) for _ in range(50)])
 
@@ -66,7 +68,64 @@ async def test_pg_session_store_concurrent_appends() -> None:
         seqs = [r.seq for r in rows]
         assert seqs == list(range(1, 51))
     finally:
-        await store.delete(rec.id)
+        if session_id is not None:
+            await store.delete(session_id)
+        await store.close()
+
+
+@needs_pg
+async def test_pg_session_store_concurrent_task_ids() -> None:
+    """Concurrent task creation reserves each numeric id exactly once."""
+    import asyncio
+
+    from linch.sessions.postgres import PostgresSessionStore
+    from linch.sessions.tasks import CreateTaskInput
+
+    store = PostgresSessionStore(DSN, min_size=5, max_size=20)
+    session_id: str | None = None
+    try:
+        rec = await store.create()
+        session_id = rec.id
+        tasks = await asyncio.gather(
+            *[
+                store.create_task(
+                    rec.id,
+                    CreateTaskInput(subject=f"task-{i}", description="concurrent"),
+                )
+                for i in range(50)
+            ]
+        )
+
+        assert sorted(int(task.id) for task in tasks) == list(range(1, 51))
+        assert len({task.id for task in tasks}) == 50
+    finally:
+        if session_id is not None:
+            await store.delete(session_id)
+        await store.close()
+
+
+@needs_pg
+async def test_pg_create_if_absent_has_one_concurrent_owner() -> None:
+    """Exactly one caller positively owns a concurrently requested id."""
+    import asyncio
+    from uuid import uuid4
+
+    from linch.sessions.postgres import PostgresSessionStore
+
+    store = PostgresSessionStore(DSN, min_size=5, max_size=20)
+    session_id = f"create-if-absent-{uuid4()}"
+    try:
+        results = await asyncio.gather(
+            *[store.create_if_absent(id=session_id, meta={"contender": i}) for i in range(50)]
+        )
+
+        winners = [record for record in results if record is not None]
+        assert len(winners) == 1
+        loaded = await store.load(session_id)
+        assert loaded is not None
+        assert loaded.meta == winners[0].meta
+    finally:
+        await store.delete(session_id)
         await store.close()
 
 

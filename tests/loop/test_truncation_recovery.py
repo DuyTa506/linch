@@ -246,7 +246,7 @@ async def test_recovery_attempts_are_restored_on_resume() -> None:
 
 @pytest.mark.asyncio
 async def test_pending_recovery_feedback_is_appended_on_resume() -> None:
-    from linch import Agent, TruncationRecovery
+    from linch import Agent, RunOptions, TruncationRecovery
     from linch.config import FeatureFlags
     from linch.evals import ScriptedProvider, TextTurn
     from linch.events import ResultEvent, UserEvent
@@ -293,7 +293,9 @@ async def test_pending_recovery_feedback_is_appended_on_resume() -> None:
     )
     session = await agent.session(id="s1")
 
-    events = [event async for event in session.resume("run-1")]
+    events = [
+        event async for event in session.resume("run-1", RunOptions(allow_legacy_resume=True))
+    ]
 
     assert sum(isinstance(event, UserEvent) for event in events) == 1
     result = events[-1]
