@@ -131,6 +131,13 @@ the scheduler can avoid conflicts. The `ToolResult` carries the compact
 `citations`, `attachments`) that host apps can use for provenance and rendering
 without bloating the model's context.
 
+For a canonical JSON contract, pass `output_schema=` to `@tool`. The function
+then returns a raw JSON value, `ToolOutput`, or `ToolOutputError`; returning
+legacy `ToolResult` is rejected. Linch validates with JSON Schema Draft 2020-12
+and renders non-string values as compact, sorted JSON by default. A custom
+synchronous `render_output` also requires stable `renderer_id` and
+`renderer_version`, which become part of durable-run compatibility.
+
 ---
 
 ## The scheduler

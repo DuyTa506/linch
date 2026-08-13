@@ -262,8 +262,9 @@ async for event in session.run("..."):
 ## Cleanup
 
 Hooks that hold resources can expose `close()` or `aclose()`; `Agent.close()`
-calls them (after stores and the filesystem) and swallows errors so shutdown is
-never blocked. `RunTelemetryHook` uses this to flush wrapped observers.
+calls them after sessions, stores, and the filesystem are idle. A close error
+leaves the agent quiescing; calling `close()` again retries only unfinished
+resources. `RunTelemetryHook` uses this seam to flush wrapped observers.
 
 ---
 

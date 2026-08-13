@@ -140,9 +140,10 @@ async def _stream_turn_with_ladder(
     signal: Any,
     ladder: Any,
     forced_used: list[int],
-    save_checkpoint: Any,
+    prepare_provider_call: Any,
     start_provider_call: Any,
     end_provider_call: Any,
+    request_prepared: bool = False,
 ) -> AsyncIterator[Any]:
     """Provider-call attempt loop with compaction-ladder recovery.
 
@@ -158,8 +159,12 @@ async def _stream_turn_with_ladder(
     """
     micro_tried_this_turn = False
     same_model_retries = [0]
+    prepared = request_prepared
     while True:
-        await save_checkpoint("provider_pending", turn_index=turn_index)
+        if prepared:
+            prepared = False
+        else:
+            req = await prepare_provider_call(req, turn_index)
         await start_provider_call(turn_index, req.model)
         try:
             async for item in stream_turn(session, req):
@@ -230,9 +235,10 @@ async def _stream_turn_with_compaction_retry(
     *,
     turn_index: int,
     signal: Any,
-    save_checkpoint: Any,
+    prepare_provider_call: Any,
     start_provider_call: Any,
     end_provider_call: Any,
+    request_prepared: bool = False,
 ) -> AsyncIterator[Any]:
     """Legacy provider-call path: a single forced-compaction retry per turn.
 
@@ -245,8 +251,12 @@ async def _stream_turn_with_compaction_retry(
     # configured/available it runs exactly once, keeping the legacy
     # single-compaction-retry behavior byte-identical.
     same_model_retries = [0]
+    prepared = request_prepared
     while True:
-        await save_checkpoint("provider_pending", turn_index=turn_index)
+        if prepared:
+            prepared = False
+        else:
+            req = await prepare_provider_call(req, turn_index)
         await start_provider_call(turn_index, req.model)
         try:
             try:
@@ -276,7 +286,7 @@ async def _stream_turn_with_compaction_retry(
                     context=context_result,
                     model_override=req.model,
                 )
-                await save_checkpoint("provider_pending", turn_index=turn_index)
+                req = await prepare_provider_call(req, turn_index)
                 await start_provider_call(turn_index, req.model)
                 async for item in stream_turn(session, req):
                     yield item

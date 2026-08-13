@@ -44,8 +44,8 @@ The round trip has two halves — the agent schedules, **the embedder fires**:
 1. The agent calls `CreateSchedule(payload=..., cron="0 9 * * *")` (a 5-field UTC
    cron expression) or `CreateSchedule(payload=..., interval_s=3600)`.
 2. You drive a `SchedulerLoop` over the same store. `loop.start()` ticks once a
-   second; each due schedule fires its `payload` into the session's
-   `pending_notifications` — the same channel background workers use.
+   second; each due schedule fires its `payload` into the session's next-turn
+   notification channel — the same channel background workers use.
 3. The next `session.run()` drains the payload as a `<scheduled-task>`
    `UserEvent` at the top of the turn, so the agent acts on it as if a user asked.
 
@@ -62,6 +62,12 @@ validated at creation, so an invalid expression is rejected before it can fire.
 due claims: if two `SchedulerLoop`s share the same SQLite database, only one loop
 claims and fires a due schedule for a given tick. A `ScheduleEvent` is emitted on
 each fire for observers.
+
+With `DurabilityOptions(durable_inbox=True)`, the loop uses the optional
+`LeasedScheduleStore` occurrence outbox: materialization and `next_run`
+advancement are atomic, delivery uses the stable occurrence ID, and an
+unacknowledged occurrence is reclaimed after its lease. Removing a schedule
+prevents future occurrences but does not discard one already materialized.
 
 **When to reach for it:** the agent itself should set up recurring work
 ("check CI every 30 min", "summarize the inbox at 9am"). If your *application*
@@ -88,8 +94,8 @@ agent = Agent(model="gpt-5", mailbox=box)   # registers send_message
 
 Two mechanisms:
 
-**Message bus.** A session with a `mailbox_address` drains its inbox at the top of
-each turn (exactly like `pending_notifications`). One agent addresses a peer with
+**Message bus.** A session with a `mailbox_address` receives its inbox at the top of
+each turn (through the same next-turn notification seam). One agent addresses a peer with
 `send_message(to=..., content=..., type=...)`; the peer picks it up on its next
 run as a `<peer-message>` `UserEvent`. Spawned workers are auto-addressed by their
 `display_name` when the agent has a mailbox.
@@ -131,6 +137,11 @@ agent = Agent(model="gpt-5", mailbox=box)
 inside one SQLite transaction, so two workers draining the same inbox do not both
 receive the same message. For Redis/SQS or other infrastructure, implement the
 same `Mailbox` protocol — see [Extending](./extending.md).
+
+Durable inbox mode uses the additive `ClaimableMailbox` lease protocol instead
+of destructive drain: claim → enqueue by `mailbox:<message-id>` → acknowledge.
+A crash before enqueue permits reclaim; a crash after enqueue is deduplicated by
+the session inbox receipt. Legacy `send()`/`drain()` behavior remains unchanged.
 
 **When to reach for it:** long-lived teammates that negotiate (plan approval,
 graceful shutdown) or self-organize. For one-shot delegation, plain

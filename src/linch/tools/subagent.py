@@ -222,7 +222,7 @@ class SubagentTool:
                 # Append a <task-notification> message for the next turn to drain.
                 # Use the session captured at spawn time, not a fresh _get_session lookup,
                 # to avoid writing into a different session if the id was re-registered.
-                if not hasattr(session, "pending_notifications"):
+                if not hasattr(session, "notify"):
                     return
                 status_str = (
                     "aborted" if result.aborted else ("failed" if result.errored else "completed")
@@ -244,8 +244,15 @@ class SubagentTool:
                     f"{error_line}"
                     f"</task-notification>"
                 )
-                session.pending_notifications.append(
-                    Message(role="user", content=[TextBlock(text=notification_text)])
+                await session.notify(
+                    Message(role="user", content=[TextBlock(text=notification_text)]),
+                    delivery_id=f"subagent:{worker_id}",
+                    source="subagent",
+                    metadata={
+                        "worker_id": worker_id,
+                        "display_name": display_name,
+                        "status": status_str,
+                    },
                 )
                 completion_event = BackgroundWorkerEvent(
                     worker_id=worker_id,

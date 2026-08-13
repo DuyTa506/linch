@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from typing import Any
 
 import pytest
 
 from linch.coordination.mailbox import (
+    ClaimableMailbox,
     Correlator,
     InMemoryMailbox,
     MailboxMessage,
@@ -219,3 +221,113 @@ async def test_sqlite_mailbox_concurrent_drains_deliver_once(tmp_path) -> None:
     assert sorted(int(content) for content in contents) == list(range(20))
     assert len(drained_a) in {0, 20}
     assert len(drained_b) in {0, 20}
+
+
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+async def test_claim_is_fifo_and_valid_oldest_lease_blocks_newer(
+    backend: str, tmp_path: Any
+) -> None:
+    box: ClaimableMailbox
+    if backend == "memory":
+        box = InMemoryMailbox()
+    else:
+        box = SqliteMailbox(tmp_path / "leased-mailbox.db")
+    try:
+        for index in range(3):
+            await box.send(_msg("a", "b", str(index), id=f"m-{index}"))
+
+        first = await box.claim("b", owner="one", lease_s=30, now=100, limit=1)
+        blocked = await box.claim("b", owner="two", lease_s=30, now=101)
+        assert [claim.message.content for claim in first] == ["0"]
+        assert blocked == []
+
+        await box.ack(first)
+        remaining = await box.claim("b", owner="two", lease_s=30, now=101)
+        assert [claim.message.content for claim in remaining] == ["1", "2"]
+    finally:
+        close = getattr(box, "aclose", None)
+        if close is not None:
+            await close()
+
+
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+async def test_claim_release_expiry_and_stale_ack_are_token_fenced(
+    backend: str, tmp_path: Any
+) -> None:
+    box: ClaimableMailbox
+    if backend == "memory":
+        box = InMemoryMailbox()
+    else:
+        box = SqliteMailbox(tmp_path / "leased-mailbox.db")
+    try:
+        await box.send(_msg("a", "b", "payload", id="stable-message"))
+        original = await box.claim("b", owner="one", lease_s=10, now=100)
+        assert await box.claim("b", owner="two", lease_s=10, now=109) == []
+
+        reclaimed = await box.claim("b", owner="two", lease_s=10, now=110)
+        assert reclaimed[0].message.id == original[0].message.id
+        assert reclaimed[0].token != original[0].token
+
+        await box.ack(original)
+        assert await box.claim("b", owner="three", lease_s=10, now=111) == []
+        await box.release(reclaimed)
+        released = await box.claim("b", owner="three", lease_s=10, now=111)
+        assert [claim.message.id for claim in released] == ["stable-message"]
+        await box.ack(released)
+        assert await box.drain("b") == []
+    finally:
+        close = getattr(box, "aclose", None)
+        if close is not None:
+            await close()
+
+
+async def test_sqlite_claim_survives_reopen_and_is_reclaimed_after_expiry(tmp_path: Any) -> None:
+    path = tmp_path / "leased-mailbox.db"
+    first = SqliteMailbox(path)
+    await first.send(_msg("a", "b", "persisted", id="persisted-id"))
+    claimed = await first.claim("b", owner="one", lease_s=10, now=100)
+    await first.aclose()
+
+    second = SqliteMailbox(path)
+    try:
+        assert await second.claim("b", owner="two", lease_s=10, now=109) == []
+        reclaimed = await second.claim("b", owner="two", lease_s=10, now=110)
+        assert reclaimed[0].message.id == claimed[0].message.id
+        assert reclaimed[0].token != claimed[0].token
+    finally:
+        await second.aclose()
+
+
+async def test_sqlite_mailbox_adds_lease_schema_to_legacy_database(tmp_path: Any) -> None:
+    path = tmp_path / "legacy-mailbox.db"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """
+        CREATE TABLE mailbox_messages (
+            seq INTEGER PRIMARY KEY AUTOINCREMENT,
+            id TEXT NOT NULL UNIQUE,
+            sender TEXT NOT NULL,
+            recipient TEXT NOT NULL,
+            content TEXT NOT NULL,
+            type TEXT NOT NULL,
+            request_id TEXT,
+            in_reply_to TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO mailbox_messages(
+            id, sender, recipient, content, type, request_id, in_reply_to
+        ) VALUES ('legacy', 'a', 'b', 'old', 'message', NULL, NULL)
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    box = SqliteMailbox(path)
+    try:
+        claims = await box.claim("b", owner="migration", lease_s=30, now=100)
+        assert [claim.message.id for claim in claims] == ["legacy"]
+    finally:
+        await box.aclose()

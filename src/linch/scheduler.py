@@ -32,7 +32,17 @@ from .hooks import (
 from .permissions import PendingToolCall, PermissionDecision
 from .permissions.keys import permission_decision_key as _permission_key
 from .providers.retry import RetryOptions, _delay_for_error
-from .tools import ResourceAccess, ToolContext, ToolResult
+from .tools import (
+    CanonicalToolOutput,
+    ResourceAccess,
+    ToolContext,
+    ToolOutputContractError,
+    ToolOutputError,
+    ToolResult,
+    normalize_tool_output,
+    render_tool_output,
+    validate_tool_output,
+)
 from .types import ToolResultBlock, ToolUseBlock
 
 # How parallel-safe tool calls in one assistant turn are packed into batches.
@@ -61,6 +71,13 @@ class ToolExecutionOutcome:
     block: ToolResultBlock
     tool_result: ToolResult
     duration_ms: int
+    tool_output: CanonicalToolOutput | None = None
+
+
+@dataclass(slots=True)
+class _PrecomputedOutput:
+    tool_result: ToolResult | None = None
+    tool_output: CanonicalToolOutput | None = None
 
 
 @dataclass(slots=True)
@@ -112,6 +129,8 @@ def _execution_outcome(
     call_id: str,
     tool_result: ToolResult,
     block_result: ToolResult | None = None,
+    *,
+    tool_output: CanonicalToolOutput | None = None,
 ) -> ToolExecutionOutcome:
     provider_result = block_result or tool_result
     return ToolExecutionOutcome(
@@ -122,6 +141,50 @@ def _execution_outcome(
         ),
         tool_result=tool_result,
         duration_ms=tool_result.duration_ms,
+        tool_output=tool_output,
+    )
+
+
+def _is_v2_tool(call: ResolvedCall) -> bool:
+    return call.tool is not None and getattr(call.tool, "output_schema", None) is not None
+
+
+def _v2_projection(
+    call: ResolvedCall,
+    raw: Any,
+    *,
+    duration_ms: int,
+) -> ToolExecutionOutcome:
+    """Normalize, validate, and render one V2 result without offloading it.
+
+    This boundary deliberately runs after execution retry has settled. Contract,
+    schema, and renderer failures are deterministic and therefore non-retryable.
+    """
+
+    if isinstance(raw, ToolResult):
+        raise TypeError(
+            f"V2 tool {_tool_name(call)!r} declares output_schema and must not return ToolResult"
+        )
+    assert call.tool is not None
+    output = normalize_tool_output(raw)
+    schema = call.tool.output_schema
+    validate_tool_output(output, schema)
+    rendered = render_tool_output(output, getattr(call.tool, "render_output", None))
+    result = ToolResult(
+        content=rendered,
+        summary=call.summary,
+        is_error=isinstance(output, ToolOutputError),
+        duration_ms=duration_ms,
+    )
+    return _execution_outcome(call.id, result, tool_output=output)
+
+
+def _v2_contract_error(
+    call: ResolvedCall, exc: Exception, duration_ms: int
+) -> ToolExecutionOutcome:
+    return _execution_outcome(
+        call.id,
+        _tool_result_error(f"Tool output invalid: {exc}", duration_ms),
     )
 
 
@@ -239,12 +302,19 @@ async def _run_background_tool(
         result_text = f"{type(exc).__name__}: {exc}"
         is_error = True
     else:
+        if _is_v2_tool(call):
+            outcome, _ = await _dispatch_post_tool_use(
+                HookDispatcher(_scheduler_hooks(agent)),
+                call,
+                _effective_input(call, decision),
+                outcome,
+                session,
+                agent=agent,
+                turn_index=turn_index,
+            )
         result_text = str(outcome.block.content)
         is_error = outcome.block.is_error
 
-    notifications = getattr(session, "pending_notifications", None)
-    if notifications is None:
-        return
     status_str = "failed" if is_error else "completed"
     notification = (
         "<task-notification>"
@@ -256,7 +326,26 @@ async def _run_background_tool(
     )
     from .types import Message, TextBlock
 
-    notifications.append(Message(role="user", content=[TextBlock(text=notification)]))
+    notification_message = Message(role="user", content=[TextBlock(text=notification)])
+    notify = getattr(session, "notify", None)
+    if callable(notify):
+        await cast(
+            Awaitable[Any],
+            notify(
+                notification_message,
+                delivery_id=f"background-tool:{bg_id}",
+                source="background-tool",
+                metadata={"task_id": bg_id, "tool_name": tool_name, "status": status_str},
+            ),
+        )
+    else:
+        # Compatibility for lightweight Session duck types used by legacy
+        # embedders/tests. Real Session instances always route through notify(),
+        # which enforces the durable-inbox contract when enabled.
+        notifications = getattr(session, "pending_notifications", None)
+        if notifications is None:
+            return
+        notifications.append(notification_message)
     completion_event = BackgroundWorkerEvent(
         worker_id=bg_id,
         status=status_str,
@@ -343,6 +432,26 @@ async def _execute_one(
     # served result still gets a preview rather than re-injecting the full body.
     precomputed = getattr(decision, "precomputed_result", None)
     if precomputed is not None:
+        if _is_v2_tool(call):
+            if not isinstance(precomputed, _PrecomputedOutput):
+                return _v2_contract_error(
+                    call, TypeError("V2 PreToolUse resolve must supply tool_output"), 0
+                )
+            if precomputed.tool_output is None:
+                return _v2_contract_error(
+                    call, TypeError("V2 PreToolUse resolve must supply tool_output"), 0
+                )
+            try:
+                return _v2_projection(call, precomputed.tool_output, duration_ms=0)
+            except Exception as exc:
+                return _v2_contract_error(call, exc, 0)
+        if isinstance(precomputed, _PrecomputedOutput):
+            precomputed = precomputed.tool_result
+        if not isinstance(precomputed, ToolResult):
+            return _execution_outcome(
+                call.id,
+                _tool_result_error("Legacy PreToolUse resolve must supply tool_result"),
+            )
         block_result = await _maybe_offload_block(
             precomputed, call=call, agent=agent, session=session
         )
@@ -429,10 +538,16 @@ async def _execute_tool_attempts(
             effective_input = _effective_input(call, decision)
             coro = tool.execute(effective_input, ctx)
             if result_timeout_ms is None:
-                result = await coro
+                raw_result = await coro
             else:
-                result = await asyncio.wait_for(coro, timeout=result_timeout_ms / 1000.0)
+                raw_result = await asyncio.wait_for(coro, timeout=result_timeout_ms / 1000.0)
             elapsed = int((time.perf_counter() - attempt_start) * 1000)
+            if _is_v2_tool(call):
+                try:
+                    return _v2_projection(call, raw_result, duration_ms=elapsed)
+                except Exception as exc:
+                    return _v2_contract_error(call, exc, elapsed)
+            result = raw_result
             if result.duration_ms <= 0:
                 result.duration_ms = elapsed
             # ── Auto-offload oversized results ────────────────────────────────
@@ -461,6 +576,9 @@ async def _execute_tool_attempts(
                     duration_ms,
                 ),
             )
+        except ToolOutputContractError as exc:
+            duration_ms = int((time.perf_counter() - started) * 1000)
+            return _v2_contract_error(call, exc, duration_ms)
         except Exception as exc:
             last_exc = exc
             if _tool_retryable(call, exc) and attempt < max_attempts - 1:
@@ -650,11 +768,24 @@ async def _dispatch_pre_tool_use(
     final_input = getattr(outcome.context, "input", input)
     if result.action == "resolve":
         # A hook served a result (e.g. cache hit): skip execution, use it as-is.
-        if result.tool_result is not None:
-            return final_input, None, result.tool_result, outcome.events
-        # Malformed resolve (no tool_result): the hook meant to short-circuit, so
+        if result.tool_result is not None or result.tool_output is not None:
+            return (
+                final_input,
+                None,
+                _PrecomputedOutput(
+                    tool_result=result.tool_result,
+                    tool_output=result.tool_output,
+                ),
+                outcome.events,
+            )
+        # Malformed resolve (no output): the hook meant to short-circuit, so
         # block rather than silently running the tool it intended to suppress.
-        reason = result.reason or result.feedback or "resolve hook returned no tool_result"
+        default_reason = (
+            "resolve hook returned no tool_output"
+            if _is_v2_tool(call)
+            else "resolve hook returned no tool_result"
+        )
+        reason = result.reason or result.feedback or default_reason
         return final_input, reason, None, outcome.events
     if result.action == "mutate" and result.input is not None:
         return result.input, None, None, outcome.events
@@ -705,11 +836,30 @@ async def _dispatch_post_tool_use(
             tool_name=_tool_name(call),
             input=input,
             result=outcome.tool_result,
+            tool_output=outcome.tool_output,
         ),
     )
     result = dispatched.result
     events = list(dispatched.events)
-    if result.action == "mutate" and result.tool_result is not None:
+    if result.action == "mutate" and result.tool_output is not None and _is_v2_tool(call):
+        try:
+            final = _v2_projection(
+                call,
+                result.tool_output,
+                duration_ms=outcome.duration_ms,
+            )
+        except Exception as exc:
+            final = _v2_contract_error(call, exc, outcome.duration_ms)
+        block_result = await _maybe_offload_block(
+            final.tool_result, call=call, agent=agent, session=session
+        )
+        final = _execution_outcome(
+            call.id,
+            final.tool_result,
+            block_result=block_result,
+            tool_output=final.tool_output,
+        )
+    elif result.action == "mutate" and result.tool_result is not None:
         mutated = result.tool_result
         # Re-run offload so a mutated oversized result doesn't bypass the
         # preview and re-inject the full payload into provider history.
@@ -721,6 +871,18 @@ async def _dispatch_post_tool_use(
             outcome.duration_ms,
         )
         final = _execution_outcome(call.id, blocked)
+    elif _is_v2_tool(call):
+        # V2 offload happens after PostToolUse, so hooks always inspect the full
+        # rendered projection and canonical output rather than an offload preview.
+        block_result = await _maybe_offload_block(
+            outcome.tool_result, call=call, agent=agent, session=session
+        )
+        final = _execution_outcome(
+            call.id,
+            outcome.tool_result,
+            block_result=block_result,
+            tool_output=outcome.tool_output,
+        )
     else:
         final = outcome
     # PostToolUseFailure: an observational notification fired only when the final
@@ -757,6 +919,7 @@ async def _dispatch_post_tool_use_failure(
             tool_name=_tool_name(call),
             input=input,
             result=tool_result,
+            tool_output=outcome.tool_output,
         ),
     )
     return dispatched.events
@@ -1096,6 +1259,7 @@ async def _run_serial_batch(
             is_error=outcome.block.is_error,
             duration_ms=outcome.duration_ms,
             tool_result=outcome.tool_result,
+            tool_output=outcome.tool_output,
         )
         if skill_name is not None:
             yield SkillCompletedEvent(name=skill_name, is_error=outcome.block.is_error)
@@ -1174,6 +1338,7 @@ async def _run_parallel_batch(
                 is_error=outcome.block.is_error,
                 duration_ms=outcome.duration_ms,
                 tool_result=outcome.tool_result,
+                tool_output=outcome.tool_output,
             )
             emitted_ids.add(call.id)
             sn = skill_names.get(call.id)

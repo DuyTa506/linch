@@ -4,7 +4,15 @@ import json
 from dataclasses import dataclass
 from typing import Any, Literal, TypeAlias, cast
 
-from .tools.base import Citation, ToolResult
+from .tools.base import (
+    CanonicalToolOutput,
+    Citation,
+    ToolAttachment,
+    ToolOutput,
+    ToolOutputError,
+    ToolResult,
+    normalize_tool_output,
+)
 from .types import Message, StopReason, Usage, message_from_dict, message_to_dict
 
 
@@ -58,6 +66,7 @@ class ToolCallEndEvent:
     duration_ms: int = 0
     tool_result: ToolResult | None = None
     type: Literal["tool_call_end"] = "tool_call_end"
+    tool_output: CanonicalToolOutput | None = None
 
 
 @dataclass(slots=True)
@@ -574,6 +583,84 @@ def tool_result_from_dict(raw: dict[str, Any]) -> ToolResult:
     )
 
 
+def tool_attachment_to_dict(attachment: ToolAttachment) -> dict[str, Any]:
+    normalized = normalize_tool_output(ToolOutput(value=None, attachments=[attachment]))
+    assert isinstance(normalized, ToolOutput)
+    item = normalized.attachments[0]
+    return {
+        "reference": item.reference,
+        "name": item.name,
+        "media_type": item.media_type,
+        "metadata": item.metadata,
+    }
+
+
+def tool_attachment_from_dict(raw: dict[str, Any]) -> ToolAttachment:
+    attachment = ToolAttachment(
+        reference=raw.get("reference"),
+        name=raw.get("name"),
+        media_type=raw.get("media_type"),
+        metadata=raw.get("metadata", {}),
+    )
+    normalized = normalize_tool_output(ToolOutput(value=None, attachments=[attachment]))
+    assert isinstance(normalized, ToolOutput)
+    return normalized.attachments[0]
+
+
+def tool_output_to_dict(output: CanonicalToolOutput) -> dict[str, Any]:
+    """Encode canonical tool output without lossy JSON coercion."""
+
+    normalized = normalize_tool_output(output)
+    common = {
+        "attachments": [tool_attachment_to_dict(item) for item in normalized.attachments],
+        "metadata": normalized.metadata,
+    }
+    if isinstance(normalized, ToolOutputError):
+        return {
+            "kind": "error",
+            "message": normalized.message,
+            "code": normalized.code,
+            "details": normalized.details,
+            **common,
+        }
+    return {"kind": "success", "value": normalized.value, **common}
+
+
+def tool_output_from_dict(raw: dict[str, Any]) -> CanonicalToolOutput:
+    """Decode a canonical output, rejecting malformed attachments and values."""
+
+    raw_attachments = raw.get("attachments", [])
+    if not isinstance(raw_attachments, list):
+        raise ValueError("tool_output.attachments must be a list")
+    attachments = []
+    for index, item in enumerate(raw_attachments):
+        if not isinstance(item, dict):
+            raise ValueError(f"tool_output.attachments[{index}] must be an object")
+        attachments.append(tool_attachment_from_dict(item))
+    metadata = raw.get("metadata", {})
+    kind = raw.get("kind", "success")
+    if kind == "error":
+        message = raw.get("message")
+        if not isinstance(message, str):
+            raise ValueError("tool_output.message must be a string")
+        output: CanonicalToolOutput = ToolOutputError(
+            message=message,
+            code=raw.get("code"),
+            details=raw.get("details"),
+            attachments=attachments,
+            metadata=metadata,
+        )
+    elif kind == "success":
+        output = ToolOutput(
+            value=raw.get("value"),
+            attachments=attachments,
+            metadata=metadata,
+        )
+    else:
+        raise ValueError(f"unknown tool_output kind {kind!r}")
+    return normalize_tool_output(output)
+
+
 def event_to_dict(event: Event) -> dict[str, Any]:
     if isinstance(event, SystemEvent):
         return {
@@ -627,6 +714,8 @@ def event_to_dict(event: Event) -> dict[str, Any]:
         }
         if event.tool_result is not None:
             out["tool_result"] = tool_result_to_dict(event.tool_result)
+        if event.tool_output is not None:
+            out["tool_output"] = tool_output_to_dict(event.tool_output)
         return out
     if isinstance(event, PermissionRequestEvent):
         return {
@@ -830,6 +919,7 @@ def event_from_dict(raw: dict[str, Any]) -> Event:
         )
     if typ == "tool_call_end":
         raw_tool_result = raw.get("tool_result")
+        raw_tool_output = raw.get("tool_output")
         return ToolCallEndEvent(
             tool_use_id=str(raw.get("tool_use_id", "")),
             tool_name=str(raw.get("tool_name", "")),
@@ -838,6 +928,9 @@ def event_from_dict(raw: dict[str, Any]) -> Event:
             duration_ms=int(raw.get("duration_ms", 0) or 0),
             tool_result=tool_result_from_dict(raw_tool_result)
             if isinstance(raw_tool_result, dict)
+            else None,
+            tool_output=tool_output_from_dict(raw_tool_output)
+            if isinstance(raw_tool_output, dict)
             else None,
         )
     if typ == "permission_request":
