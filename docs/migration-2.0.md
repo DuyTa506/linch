@@ -95,6 +95,12 @@ require a non-`None`, JSON-safe `resume_policy_config`. Linch compares the
 resulting contract before resuming. The public helpers remain available for
 custom stores and migration tooling.
 
+For a durable run that offers a Docker-backed `Bash` tool, non-empty
+`DockerBackend.env` or `DockerBackend.forward_env` also requires a protected
+`resume_fingerprint_key` of at least 16 bytes. Use the same key on every host
+that may resume the run; Linch HMACs environment values into the contract and
+does not persist the values or key.
+
 Contract verification begins when a durable run is created, not only when it is
 resumed. Linch rejects custom callbacks, hooks, and Bash backends that cannot provide
 stable resume-policy identity and JSON-stable authority configuration. This prevents a
@@ -138,9 +144,12 @@ at-least-once, so integrations must reconcile external side effects with
 `ToolContext.idempotency_key`.
 
 Detached background workers emit origin-attributed audit events when their
-state changes. The detached task and its completion notification are not
-reconstructed after a process restart; hosts that need durable result delivery
-must persist/reconcile that work in an application-owned queue or workflow.
+state changes. A task that is still running when its process stops is never
+reconstructed. By default, its completion notification is also process-local.
+With `durable_inbox=True` and a capable `SessionInboxStore`, a completion
+already accepted by `Session.notify()` survives restart and is deduplicated for
+the next turn; hosts that need recovery of the work itself must still use an
+application-owned queue or workflow.
 
 ## Session forks
 
@@ -181,5 +190,8 @@ the new optional contract/progress fields.
 5. Make provider adapters emit the normalized stream contract strictly.
 6. Let Linch persist and compare the run contract before resuming durable runs;
    use `RunOptions(allow_legacy_resume=True)` only for an explicit migration.
-7. Treat detached background completion as an in-process convenience unless
-   your application owns a durable delivery path.
+7. For Docker-backed durable runs that pass environment values to Bash, supply
+   the same protected `resume_fingerprint_key` on every resume host.
+8. Treat detached background completion as an in-process convenience unless
+   you enable the durable inbox with a capable session store. The application
+   still owns recovery of work interrupted by process failure.
