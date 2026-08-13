@@ -1,5 +1,15 @@
+import json
+
+import pytest
+
 from linch.events import ToolCallEndEvent
-from linch.run_store import InMemoryRunStore, RunCheckpoint, SqliteRunStore
+from linch.run_store import (
+    InMemoryRunStore,
+    RunCheckpoint,
+    SqliteRunStore,
+    _json_safe,
+    canonical_json,
+)
 from linch.tools import Citation, ToolResult
 from linch.types import ToolResultBlock, ToolUseBlock, Usage
 
@@ -109,5 +119,117 @@ async def test_sqlite_run_store_round_trip(tmp_path) -> None:
     store = SqliteRunStore(tmp_path / "runs.db")
     try:
         await _exercise_store(store)
+    finally:
+        await store.close()
+
+
+def test_json_safe_handles_cycles_depth_collisions_and_aliases() -> None:
+    recursive: dict[str, object] = {}
+    recursive["self"] = recursive
+
+    assert _json_safe(recursive) == {"self": "<recursion>"}
+    with pytest.raises(TypeError, match="recursive value"):
+        canonical_json(recursive)
+
+    nested: list[object] = []
+    cursor = nested
+    for _ in range(101):
+        child: list[object] = []
+        cursor.append(child)
+        cursor = child
+    permissive = _json_safe(nested)
+    assert "<max-depth>" in json.dumps(permissive)
+    with pytest.raises(TypeError, match="maximum nesting depth"):
+        canonical_json(nested)
+
+    colliding = _json_safe({1: "integer", "1": "string", "1~int": "reserved"})
+    assert colliding == {
+        "1~int~2": "integer",
+        "1": "string",
+        "1~int": "reserved",
+    }
+
+    shared = {"items": [1, 2]}
+    aliases = _json_safe({"left": shared, "right": shared})
+    assert aliases == {"left": shared, "right": shared}
+    assert aliases["left"] is not aliases["right"]
+    assert canonical_json({"left": shared, "right": shared})
+
+
+async def test_run_stores_normalize_recursive_metadata(tmp_path) -> None:
+    stores = [InMemoryRunStore(), SqliteRunStore(tmp_path / "recursive-meta.db")]
+    try:
+        for index, store in enumerate(stores):
+            meta: dict[str, object] = {"kind": "recursive"}
+            meta["self"] = meta
+
+            created = await store.create_run("session-1", id=f"run-{index}", meta=meta)
+            loaded = await store.load_run(f"run-{index}")
+
+            assert created.meta == {"kind": "recursive", "self": "<recursion>"}
+            assert loaded is not None
+            assert loaded.meta == created.meta
+            assert loaded.meta is not created.meta
+    finally:
+        for store in stores:
+            await store.close()
+
+
+async def test_sqlite_checkpoint_results_are_isolated_persisted_snapshots(tmp_path) -> None:
+    store = SqliteRunStore(tmp_path / "snapshot-results.db")
+    try:
+        await store.create_run("session-1", id="run-1", meta={"labels": ("a", "b")})
+        shared = {"items": [1]}
+        recursive: dict[str, object] = {}
+        recursive["self"] = recursive
+        checkpoint = RunCheckpoint(
+            phase="turn_complete",
+            prompt="hello",
+            turn_index=1,
+            total_usage=Usage(input_tokens=1, output_tokens=2),
+            extension_state={"example": {"left": shared, "right": shared, "recursive": recursive}},
+        )
+
+        saved = await store.save_checkpoint("run-1", checkpoint)
+        loaded = await store.load_run("run-1")
+
+        assert saved.checkpoint is not checkpoint
+        assert saved.meta == {"labels": ["a", "b"]}
+        assert loaded is not None
+        assert saved.checkpoint == loaded.checkpoint
+        assert saved.meta == loaded.meta
+        assert saved.checkpoint is not None
+        snapshot = saved.checkpoint.extension_state["example"]
+        assert snapshot["left"] == snapshot["right"] == {"items": [1]}
+        assert snapshot["left"] is not snapshot["right"]
+        assert snapshot["recursive"] == {"self": "<recursion>"}
+
+        shared["items"].append(2)
+        assert snapshot["left"] == {"items": [1]}
+
+        error: dict[str, object] = {"message": "boom"}
+        error["self"] = error
+        failed = await store.mark_failed("run-1", error=error)
+        loaded_failed = await store.load_run("run-1")
+
+        assert failed.checkpoint is not None
+        assert failed.checkpoint == saved.checkpoint
+        assert failed.checkpoint is not saved.checkpoint
+        assert failed.meta["errors"] == [{"message": "boom", "self": "<recursion>"}]
+        assert loaded_failed is not None
+        assert failed.checkpoint == loaded_failed.checkpoint
+        assert failed.meta == loaded_failed.meta
+
+        replacement = RunCheckpoint(
+            phase="turn_complete",
+            prompt="replacement",
+            turn_index=2,
+            total_usage=Usage(),
+        )
+        failed_with_checkpoint = await store.mark_failed("run-1", replacement)
+        assert replacement.phase == "failed"
+        assert failed_with_checkpoint.checkpoint is not replacement
+        assert failed_with_checkpoint.checkpoint is not None
+        assert failed_with_checkpoint.checkpoint.phase == "failed"
     finally:
         await store.close()

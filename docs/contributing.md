@@ -109,7 +109,9 @@ The `loop/` package and `scheduler.py` must not import from `openai_responses.py
 
 ### system_blocks parity test
 
-`tests/context/test_system_blocks.py` has a byte-identical assertion on the default SWE system-block text. If you intentionally change the wording, update that assertion too. If a test starts failing there, you've accidentally changed the prompt.
+`tests/context/test_system_blocks.py` has targeted assertions for the default workspace
+protocol clauses. If you intentionally change that wording, update those assertions too.
+If a test starts failing there, you may have accidentally changed the prompt contract.
 
 ---
 
@@ -253,7 +255,7 @@ Implement six async methods: `read`, `write`, `ls`, `edit`, `exists`, `delete`.
 - [ ] New public symbols exported from `__init__.py`
 - [ ] New primitives have a unit test using a fake provider
 - [ ] No module-level `linch` imports in test files (lazy import rule)
-- [ ] If system-block text changed, `test_system_blocks.py` parity assertion updated
+- [ ] If workspace protocol text changed, `test_system_blocks.py` assertions updated
 - [ ] If a new `FileBackend` was added, `tests/filesystem/test_backends.py` exercises it via `_exercise(backend)`
 - [ ] CHANGELOG entry if behavior changed for existing users
 - [ ] Background worker tasks are cancelled in both `except AbortError` and `except Exception` handlers if the change touches the `loop/` package or worker spawning

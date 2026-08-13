@@ -222,6 +222,9 @@ class RunEventBatchStore(Protocol):
     async def append_events(self, run_id: str, events: list[Event]) -> list[int]: ...
 
 
+_JSON_SAFE_MAX_DEPTH = 100
+
+
 def _json_safe(value: Any, *, strict: bool = False) -> Any:
     """Return an isolated JSON-safe representation of arbitrary runtime data.
 
@@ -231,6 +234,16 @@ def _json_safe(value: Any, *, strict: bool = False) -> Any:
     never silently become part of a durability fingerprint.
     """
 
+    return _json_safe_inner(value, strict=strict, seen=frozenset(), depth=0)
+
+
+def _json_safe_inner(
+    value: Any,
+    *,
+    strict: bool,
+    seen: frozenset[int],
+    depth: int,
+) -> Any:
     if value is None or isinstance(value, str | bool | int):
         return value
     if isinstance(value, float):
@@ -240,30 +253,63 @@ def _json_safe(value: Any, *, strict: bool = False) -> Any:
     if isinstance(value, Decimal):
         return str(value)
     if isinstance(value, Enum):
-        return _json_safe(value.value, strict=strict)
+        return _json_safe_inner(value.value, strict=strict, seen=seen, depth=depth)
     if isinstance(value, datetime | date):
         return value.isoformat()
     if isinstance(value, Path | UUID):
         return str(value)
     if isinstance(value, bytes | bytearray | memoryview):
         return {"$bytes_base64": base64.b64encode(bytes(value)).decode("ascii")}
+
+    is_recursive_value = (is_dataclass(value) and not isinstance(value, type)) or isinstance(
+        value, Mapping | set | frozenset | Sequence
+    )
+    if is_recursive_value:
+        if id(value) in seen:
+            if strict:
+                raise TypeError("run contract contains a recursive value")
+            return "<recursion>"
+        if depth >= _JSON_SAFE_MAX_DEPTH:
+            if strict:
+                raise TypeError(
+                    f"run contract exceeds maximum nesting depth {_JSON_SAFE_MAX_DEPTH}"
+                )
+            return "<max-depth>"
+        seen = seen | {id(value)}
+        depth += 1
+
     if is_dataclass(value) and not isinstance(value, type):
         return {
-            item.name: _json_safe(getattr(value, item.name), strict=strict)
+            item.name: _json_safe_inner(
+                getattr(value, item.name), strict=strict, seen=seen, depth=depth
+            )
             for item in fields(value)
         }
     if isinstance(value, Mapping):
         out: dict[str, Any] = {}
+        reserved_string_keys = {key for key in value if isinstance(key, str)}
         for key, item in value.items():
             if strict and not isinstance(key, str):
                 raise TypeError(f"run contract mapping key must be str, got {type(key).__name__}")
-            out[str(key)] = _json_safe(item, strict=strict)
+            name = str(key)
+            if name in out or (not isinstance(key, str) and name in reserved_string_keys):
+                if strict:
+                    raise TypeError(
+                        f"run contract mapping keys collide after normalization: {name!r}"
+                    )
+                base = f"{name}~{type(key).__name__}"
+                name = base
+                discriminator = 2
+                while name in out or name in reserved_string_keys:
+                    name = f"{base}~{discriminator}"
+                    discriminator += 1
+            out[name] = _json_safe_inner(item, strict=strict, seen=seen, depth=depth)
         return out
     if isinstance(value, set | frozenset):
-        items = [_json_safe(item, strict=strict) for item in value]
+        items = [_json_safe_inner(item, strict=strict, seen=seen, depth=depth) for item in value]
         return sorted(items, key=canonical_json)
     if isinstance(value, Sequence):
-        return [_json_safe(item, strict=strict) for item in value]
+        return [_json_safe_inner(item, strict=strict, seen=seen, depth=depth) for item in value]
     if strict:
         raise TypeError(
             f"run contract value of type {type(value).__name__} "
@@ -925,9 +971,10 @@ def _save_checkpoint(
     if row is None:
         raise KeyError(f"run not found: {run_id}")
     ts = now_iso()
+    checkpoint_data = checkpoint_to_dict(checkpoint)
     conn.execute(
         "update runs set updated_at = ?, status = ?, checkpoint = ? where id = ?",
-        (ts, status, json.dumps(checkpoint_to_dict(checkpoint), allow_nan=False), run_id),
+        (ts, status, json.dumps(checkpoint_data, allow_nan=False), run_id),
     )
     conn.commit()
     return RunRecord(
@@ -936,7 +983,7 @@ def _save_checkpoint(
         status=status,  # type: ignore[arg-type]
         created_at=row[3],
         updated_at=ts,
-        checkpoint=checkpoint,
+        checkpoint=checkpoint_from_dict(checkpoint_data),
         meta=_safe_meta(json.loads(row[6] or "{}")),
     )
 
@@ -1019,19 +1066,24 @@ def _mark_failed(
     ).fetchone()
     if row is None:
         raise KeyError(f"run not found: {run_id}")
-    meta = dict(json.loads(row[6] or "{}"))
+    meta = _safe_meta(json.loads(row[6] or "{}"))
     if error is not None:
         errors = meta.setdefault("errors", [])
         if isinstance(errors, list):
             errors.append(_json_safe(error, strict=False))
     ts = now_iso()
     checkpoint_json = row[5]
+    checkpoint_data: dict[str, Any] | None = None
     if checkpoint is not None:
         checkpoint.phase = "failed"
-        checkpoint_json = json.dumps(checkpoint_to_dict(checkpoint), allow_nan=False)
+        checkpoint_data = checkpoint_to_dict(checkpoint)
+        checkpoint_json = json.dumps(checkpoint_data, allow_nan=False)
+    elif checkpoint_json:
+        checkpoint_data = json.loads(checkpoint_json)
+    safe_meta = _safe_meta(meta)
     conn.execute(
         "update runs set updated_at = ?, status = 'failed', checkpoint = ?, meta = ? where id = ?",
-        (ts, checkpoint_json, json.dumps(_json_safe(meta, strict=False), allow_nan=False), run_id),
+        (ts, checkpoint_json, json.dumps(safe_meta, allow_nan=False), run_id),
     )
     conn.commit()
     return RunRecord(
@@ -1040,6 +1092,6 @@ def _mark_failed(
         status="failed",
         created_at=row[3],
         updated_at=ts,
-        checkpoint=checkpoint,
-        meta=meta,
+        checkpoint=(checkpoint_from_dict(checkpoint_data) if checkpoint_data is not None else None),
+        meta=safe_meta,
     )

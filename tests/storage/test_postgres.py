@@ -56,8 +56,10 @@ async def test_pg_session_store_concurrent_appends() -> None:
     from linch.types import Message, TextBlock
 
     store = PostgresSessionStore(DSN, min_size=5, max_size=20)
+    session_id: str | None = None
     try:
         rec = await store.create()
+        session_id = rec.id
         msg = Message(role="user", content=[TextBlock(text="tick")])
         await asyncio.gather(*[store.append_messages(rec.id, [msg]) for _ in range(50)])
 
@@ -66,7 +68,8 @@ async def test_pg_session_store_concurrent_appends() -> None:
         seqs = [r.seq for r in rows]
         assert seqs == list(range(1, 51))
     finally:
-        await store.delete(rec.id)
+        if session_id is not None:
+            await store.delete(session_id)
         await store.close()
 
 
@@ -79,8 +82,10 @@ async def test_pg_session_store_concurrent_task_ids() -> None:
     from linch.sessions.tasks import CreateTaskInput
 
     store = PostgresSessionStore(DSN, min_size=5, max_size=20)
+    session_id: str | None = None
     try:
         rec = await store.create()
+        session_id = rec.id
         tasks = await asyncio.gather(
             *[
                 store.create_task(
@@ -94,7 +99,8 @@ async def test_pg_session_store_concurrent_task_ids() -> None:
         assert sorted(int(task.id) for task in tasks) == list(range(1, 51))
         assert len({task.id for task in tasks}) == 50
     finally:
-        await store.delete(rec.id)
+        if session_id is not None:
+            await store.delete(session_id)
         await store.close()
 
 

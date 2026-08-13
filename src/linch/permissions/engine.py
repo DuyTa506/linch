@@ -305,12 +305,17 @@ def _signal_aborted(signal: Any) -> bool:
 
 async def _wait_for_abort(signal: Any) -> None:
     wait = getattr(signal, "wait", None)
-    if callable(wait):
-        awaited = wait()
-        if hasattr(awaited, "__await__"):
-            await cast(Awaitable[Any], awaited)
-            return
-    # Unknown duck-typed signals retain a conservative polling fallback. The
-    # public AbortContext and asyncio.Event paths use wait(), so they do not poll.
     while not _signal_aborted(signal):
+        if callable(wait):
+            awaited = wait()
+            if hasattr(awaited, "__await__"):
+                await cast(Awaitable[Any], awaited)
+                # Duck-typed wait() implementations may complete spuriously.
+                # Yield before retrying so an immediately-returning waiter
+                # cannot starve the permission callback.
+                if not _signal_aborted(signal):
+                    await asyncio.sleep(0)
+                continue
+        # Unknown duck-typed signals retain a conservative polling fallback.
+        # The public AbortContext and asyncio.Event paths use wait().
         await asyncio.sleep(0.05)

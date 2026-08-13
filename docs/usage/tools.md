@@ -232,6 +232,8 @@ agent = Agent(
         workspace_mount="rw",
         tmpfs=("/tmp:rw,noexec,nosuid,nodev,size=64m",),
         forward_env=(),
+        # Required for durable runs when env/forward_env is non-empty:
+        resume_fingerprint_key=my_host_secret,
     ),
 )
 ```
@@ -248,10 +250,11 @@ process. The backend is purely about *where and how* an approved command runs â€
 
 For a strict durable deployment, use an explicit trusted `docker_path` and pin
 `image` by immutable digest rather than a mutable tag. The run contract records
-the resolved backend policy and hashes configured/forwarded environment values
-so secrets are not copied into run metadata; a changed value blocks resume.
-Hashes are comparison identifiers, not a secret vaultâ€”avoid low-entropy secrets
-and protect the run store. A custom Bash backend on a durable run must expose
+the configured backend policy and HMACs configured/forwarded environment values
+with `resume_fingerprint_key`, so values are not copied into run metadata and a
+change blocks resume. The key must be stable across hosts that resume the same
+run and is never stored by Linch. Protect both this key and the run store. A
+custom Bash backend on a durable run must expose
 `resume_policy_id`, a non-`None` JSON-safe `resume_policy_config` (use `{}` only
 when it truly has no configuration), and optionally `resume_policy_version`.
 That identity is the host's assertion: include every authority-relevant input

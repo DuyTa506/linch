@@ -64,10 +64,11 @@ external systems.
 The scheduler resolves one canonical input before execution:
 
 1. decode and validate the provider's tool call;
-2. run `PreToolUse` hooks, which may transform or short-circuit it;
-3. validate the transformed input again;
-4. evaluate rules and `can_use_tool` on that final input;
-5. persist resolved decisions and execute the tool.
+2. reject the call unless that tool was offered in the current provider request;
+3. run `PreToolUse` hooks, which may transform or short-circuit it;
+4. validate the transformed input again;
+5. evaluate rules and `can_use_tool` on that final input;
+6. persist resolved decisions and execute the tool.
 
 Approval callbacks cannot return Linch 1.x's `updatedInput` rewrite. Input
 mutation belongs in `PreToolUse`, where it is revalidated and permission

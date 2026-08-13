@@ -40,6 +40,11 @@ successful assistant response. `redacted_thinking` is the one intentionally
 opaque content marker; its optional payload is converted to the normalized
 redacted-thinking block. Keep compatibility shims inside the adapter.
 
+`message_end.usage` must be an actual `linch.Usage` instance, not a mapping or a
+provider SDK object. Stop reasons and tool calls must agree: `"tool_use"` requires at
+least one completed tool call, while every other stop reason forbids completed tool calls
+in that message. The accepted stop-reason vocabulary is the public `StopReason` literal.
+
 ## Optional lifecycle hooks
 
 Beyond the three core methods, providers **may** expose two optional,

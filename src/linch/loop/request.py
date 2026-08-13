@@ -241,14 +241,23 @@ def _build_turn_request(
 def _select_context_tools(session: Session, context: ContextBuildResult | None) -> Any:
     registry = session.tools_override or session.agent.tools
     allowed = getattr(session, "current_turn_allowed_tools", None)
+    allowed_names = {str(name) for name in allowed} if allowed is not None else None
     if allowed is not None:
-        registry = registry.select(names={str(name) for name in allowed})
+        registry = registry.select(names=allowed_names)
     if context is None or context.selected_tools is None:
         return registry
 
     selected = context.selected_tools
     if hasattr(selected, "schemas") and hasattr(selected, "get"):
-        return selected
+        if allowed_names is None:
+            return selected
+        selector = getattr(selected, "select", None)
+        if callable(selector):
+            return selector(names=allowed_names)
+        # A duck-typed registry without select() cannot safely replace the
+        # per-turn boundary. Keep only allowed names present in both registries.
+        intersection = {name for name in allowed_names if selected.get(name) is not None}
+        return registry.select(names=intersection)
     if isinstance(selected, str):
         return registry.select(names={selected})
     if isinstance(selected, dict):

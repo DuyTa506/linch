@@ -554,7 +554,10 @@ def _execution_backend_contract(tools: list[Any], configured_backend: Any) -> di
 
     policy_id = getattr(backend, "resume_policy_id", None)
     policy_version = getattr(backend, "resume_policy_version", None)
-    configured = getattr(backend, "resume_policy_config", None)
+    try:
+        configured = getattr(backend, "resume_policy_config", None)
+    except Exception as exc:
+        raise ConfigError(f"cannot build durable Bash backend contract: {exc}") from exc
     if not isinstance(policy_id, str) or not policy_id or configured is None:
         raise ConfigError(
             "durable runs with a custom Bash execution backend require "
@@ -1545,6 +1548,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                                 tool_blocks=_stopped_tools,
                                 final_id=_stopped_tools[0].id,
                                 feedback="Provider hook stopped before tool execution.",
+                                final_is_error=False,
                             ):
                                 yield event
                     _dur = int((time.time() - started) * 1000)

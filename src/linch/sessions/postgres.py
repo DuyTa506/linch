@@ -184,7 +184,9 @@ class PostgresSessionStore:
                     "[]",
                 )
                 await conn.execute(
-                    "INSERT INTO task_counters (session_id, next_id) VALUES ($1, 1) "
+                    "INSERT INTO task_counters (session_id, next_id) "
+                    "SELECT $1, COALESCE(MAX(id::BIGINT), 0) + 1 FROM tasks "
+                    "WHERE session_id = $1 AND id ~ '^[0-9]+$' "
                     "ON CONFLICT DO NOTHING",
                     sid,
                 )
@@ -229,7 +231,10 @@ class PostgresSessionStore:
                 if row is None:
                     return None
                 await conn.execute(
-                    "INSERT INTO task_counters (session_id, next_id) VALUES ($1, 1)",
+                    "INSERT INTO task_counters (session_id, next_id) "
+                    "SELECT $1, COALESCE(MAX(id::BIGINT), 0) + 1 FROM tasks "
+                    "WHERE session_id = $1 AND id ~ '^[0-9]+$' "
+                    "ON CONFLICT DO NOTHING",
                     id,
                 )
         return _record(row)
@@ -642,7 +647,10 @@ async def _allocate_task_id_pg(conn: Any, session_id: str) -> str:
     """
     allocated = await conn.fetchval(
         """
-        INSERT INTO task_counters (session_id, next_id) VALUES ($1, 2)
+        INSERT INTO task_counters (session_id, next_id)
+        SELECT $1, COALESCE(MAX(id::BIGINT), 0) + 2
+        FROM tasks
+        WHERE session_id = $1 AND id ~ '^[0-9]+$'
         ON CONFLICT (session_id) DO UPDATE
             SET next_id = task_counters.next_id + 1
         RETURNING next_id - 1

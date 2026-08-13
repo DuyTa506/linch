@@ -345,8 +345,10 @@ def _create(conn: sqlite3.Connection, id: str | None, meta: dict[str, object]) -
         (sid, ts, ts, json.dumps(meta), "[]"),
     )
     conn.execute(
-        "insert or ignore into task_counters (session_id, next_id) values (?, 1)",
-        (sid,),
+        "insert or ignore into task_counters (session_id, next_id) "
+        "select ?, coalesce(max(cast(id as integer)), 0) + 1 from tasks "
+        "where session_id = ? and id <> '' and id not glob '*[^0-9]*'",
+        (sid, sid),
     )
     conn.commit()
     return SessionRecord(id=sid, created_at=ts, updated_at=ts, meta=meta)
@@ -365,8 +367,10 @@ def _create_if_absent(
         conn.commit()
         return None
     conn.execute(
-        "insert into task_counters (session_id, next_id) values (?, 1)",
-        (id,),
+        "insert or ignore into task_counters (session_id, next_id) "
+        "select ?, coalesce(max(cast(id as integer)), 0) + 1 from tasks "
+        "where session_id = ? and id <> '' and id not glob '*[^0-9]*'",
+        (id, id),
     )
     conn.commit()
     return SessionRecord(id=id, created_at=ts, updated_at=ts, meta=meta)
@@ -495,7 +499,15 @@ def _create_task(conn: sqlite3.Connection, session_id: str, input: CreateTaskInp
     row = conn.execute(
         "select next_id from task_counters where session_id = ?", (session_id,)
     ).fetchone()
-    next_id = int(row[0]) if row else 1
+    if row is None:
+        max_row = conn.execute(
+            "select coalesce(max(cast(id as integer)), 0) from tasks "
+            "where session_id = ? and id <> '' and id not glob '*[^0-9]*'",
+            (session_id,),
+        ).fetchone()
+        next_id = int(max_row[0]) + 1
+    else:
+        next_id = int(row[0])
     task_id = str(next_id)
     now = now_iso()
     conn.execute(
