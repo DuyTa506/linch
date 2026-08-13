@@ -1001,10 +1001,10 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         if checkpointable_hooks:
             # Preserve namespaces owned by inactive/unknown extensions; only
             # the active hooks replace their own durable snapshot.
-            checkpoint.extension_state = {
-                **checkpoint.extension_state,
-                **_checkpoint_extension_state(checkpointable_hooks, session, run_id),
-            }
+            hook_state = _checkpoint_extension_state(checkpointable_hooks, session, run_id)
+            for key in checkpointable_hooks:
+                checkpoint.extension_state.pop(key, None)
+            checkpoint.extension_state.update(hook_state)
         # Tool-batch event cursor: capture the watermark just before this turn's
         # tool starts at tool_batch_pending; permission_pending/tool_executing
         # inherit it (they are saved before any start is emitted); reset it

@@ -697,6 +697,18 @@ def _safe_meta(meta: Any) -> dict[str, object]:
     return safe if isinstance(safe, dict) else {}
 
 
+def _append_run_error(meta: dict[str, object], error: dict[str, object]) -> None:
+    """Append an error without discarding malformed or legacy metadata."""
+
+    existing = meta.get("errors")
+    if isinstance(existing, list):
+        errors = existing
+    else:
+        errors = [] if existing is None else [existing]
+        meta["errors"] = errors
+    errors.append(_json_safe(error, strict=False))
+
+
 def _copy_checkpoint(checkpoint: RunCheckpoint | None) -> RunCheckpoint | None:
     if checkpoint is None:
         return None
@@ -802,10 +814,7 @@ class InMemoryRunStore:
             checkpoint.phase = "failed"
             rec.checkpoint = _copy_checkpoint(checkpoint)
         if error is not None:
-            rec.meta.setdefault("errors", [])
-            errors = rec.meta["errors"]
-            if isinstance(errors, list):
-                errors.append(_json_safe(error, strict=False))
+            _append_run_error(rec.meta, error)
         rec.status = "failed"
         rec.updated_at = now_iso()
         return _copy_record(rec)
@@ -1068,9 +1077,7 @@ def _mark_failed(
         raise KeyError(f"run not found: {run_id}")
     meta = _safe_meta(json.loads(row[6] or "{}"))
     if error is not None:
-        errors = meta.setdefault("errors", [])
-        if isinstance(errors, list):
-            errors.append(_json_safe(error, strict=False))
+        _append_run_error(meta, error)
     ts = now_iso()
     checkpoint_json = row[5]
     checkpoint_data: dict[str, Any] | None = None

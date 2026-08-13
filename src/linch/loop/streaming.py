@@ -214,7 +214,12 @@ async def _stream_turn_with_ladder(
                     budget=context_budget_to_dict(context_result.budget),
                     metadata=dict(context_result.metadata),
                 )
-            req = _build_turn_request(session, opts, context=context_result)
+            req = _build_turn_request(
+                session,
+                opts,
+                context=context_result,
+                model_override=req.model,
+            )
 
 
 async def _stream_turn_with_compaction_retry(
@@ -265,7 +270,12 @@ async def _stream_turn_with_compaction_retry(
                         budget=context_budget_to_dict(context_result.budget),
                         metadata=dict(context_result.metadata),
                     )
-                req = _build_turn_request(session, opts, context=context_result)
+                req = _build_turn_request(
+                    session,
+                    opts,
+                    context=context_result,
+                    model_override=req.model,
+                )
                 await save_checkpoint("provider_pending", turn_index=turn_index)
                 await start_provider_call(turn_index, req.model)
                 async for item in stream_turn(session, req):
@@ -425,7 +435,7 @@ async def _stream_turn(
                     "message_end arrived before tool_use_end for " + ", ".join(sorted(tool_meta))
                 )
             raw_stop = event.get("stop_reason")
-            if raw_stop not in _STOP_REASONS:
+            if not isinstance(raw_stop, str) or raw_stop not in _STOP_REASONS:
                 raise protocol_error(f"invalid message_end.stop_reason {raw_stop!r}")
             raw_usage = event.get("usage")
             if not isinstance(raw_usage, Usage):

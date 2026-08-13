@@ -59,6 +59,13 @@ def _end(stop_reason: str = "tool_use") -> dict[str, Any]:
         ([_start(), _start(), _end("end_turn")], "duplicate message_start"),
         ([_start(), _end("tool_use")], "at least one complete tool call"),
         (
+            [
+                _start(),
+                {"type": "message_end", "stop_reason": [], "usage": _end()["usage"]},
+            ],
+            "invalid message_end.stop_reason",
+        ),
+        (
             [_start(), {"type": "tool_use_input_delta", "id": "x", "json_delta": "{}"}],
             "unknown or closed",
         ),
