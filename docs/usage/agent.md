@@ -111,6 +111,12 @@ append-only `SessionLog`: `provider_view` (model-visible) and `full_history`
 is ephemeral and is never part of the log. Pick ephemeral for stateless workers,
 SQLite to survive restarts.
 
+Because each read of `provider_view`/`full_history` builds a detached deep copy,
+reach for the cheap accessors when you only need a count or the newest turn —
+`session.message_count`, `session.last_provider_message()`, or on the log itself
+`visible_count` / `history_count` / `last_visible()`. On a long session that is
+the difference between copying the whole conversation and copying nothing.
+
 `MessageEntry` and `ProjectionEntry` are in-memory log entries. The durable
 boundary is the session snapshot, not a persisted projection-entry journal. On
 load, Linch seeds a fresh log from the stored historical and visible snapshots.

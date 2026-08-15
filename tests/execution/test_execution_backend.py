@@ -286,6 +286,38 @@ def test_remote_prompt_does_not_claim_sandbox_without_metadata(tmp_path: Any) ->
     assert "has not declared sandbox confinement" in combined
 
 
+def test_docker_backend_declares_its_own_confinement() -> None:
+    """Linch's own Docker sandbox must declare confinement, not read as unverified."""
+    from linch.tools.execution import DockerBackend
+
+    backend = DockerBackend(image="alpine", network="none")
+    confinement = backend.confinement
+    assert confinement, "DockerBackend must declare non-empty confinement metadata"
+    assert confinement["kind"] == "docker"
+    assert confinement["image"] == "alpine"
+    assert confinement["network"] == "none"
+
+
+def test_docker_backend_prompt_reports_sandbox_confinement(tmp_path: Any) -> None:
+    from linch import Agent, workspace_tools
+    from linch.tools.execution import DockerBackend
+
+    # DockerBackend is shell-only, so it reaches Agent via the deprecated
+    # compatibility path — still the shape existing users pass today.
+    with pytest.warns(DeprecationWarning, match="shell-only execution_backend"):
+        agent = Agent(
+            model="test",
+            provider=_Provider(),
+            cwd=str(tmp_path),
+            tools=workspace_tools(),
+            execution_backend=DockerBackend(image="alpine"),
+            result_offload=None,
+        )
+    combined = "\n".join(block.text for block in agent.system_blocks)
+    assert "declares sandbox confinement" in combined
+    assert "has not declared sandbox confinement" not in combined
+
+
 def test_remote_prompt_uses_explicit_confinement_metadata(tmp_path: Any) -> None:
     from linch import Agent, workspace_tools
 

@@ -561,3 +561,19 @@ async def test_pipeline_cannot_mutate_away_v2_normalization_boundary() -> None:
     assert end.is_error is True
     assert "must not return ToolResult" in end.result
     assert end.tool_output is None
+
+
+def test_pipeline_wrappers_are_public_api() -> None:
+    """Shipped execute wrappers must be importable from the top-level package.
+
+    CLAUDE.md: the public API is exactly ``linch.__all__``; submodule paths are
+    private, so an embedder following the contract cannot reach these otherwise.
+    """
+    import linch
+
+    assert "metrics_wrapper" in linch.__all__
+    assert "timeout_wrapper" in linch.__all__
+    from linch import metrics_wrapper, timeout_wrapper
+
+    assert callable(metrics_wrapper)
+    assert callable(timeout_wrapper)

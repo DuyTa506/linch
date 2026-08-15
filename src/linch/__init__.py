@@ -377,6 +377,7 @@ if TYPE_CHECKING:
     from .tools.isolation import IsolationBackend, TempDirIsolation
     from .tools.pipeline import ToolExecution, ToolPipeline
     from .tools.registry import empty_tools, tools_from_defaults, workspace_tools
+    from .tools.wrappers import metrics_wrapper, timeout_wrapper
     from .types import (
         ContentBlock,
         ImageBlock,
@@ -761,6 +762,7 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
     ),
     ".tools.isolation": ("IsolationBackend", "TempDirIsolation"),
     ".tools.pipeline": ("ToolExecution", "ToolPipeline"),
+    ".tools.wrappers": ("metrics_wrapper", "timeout_wrapper"),
     ".tools.registry": ("empty_tools", "tools_from_defaults", "workspace_tools"),
     ".types": (
         "ContentBlock",
@@ -840,6 +842,8 @@ __all__ = [
     "is_ignorable_event",
     "ToolExecution",
     "ToolPipeline",
+    "metrics_wrapper",
+    "timeout_wrapper",
     "ExecutionBackend",
     "LocalExecutionBackend",
     "RemoteExecutionBackend",

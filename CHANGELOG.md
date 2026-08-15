@@ -63,7 +63,26 @@ and persisted wire formats are versioned separately via `linch.RUN_SCHEMA_VERSIO
   event readers. `ToolPipeline` exposes the
   `tools/pre-execute → tools/execute → tools/post-execute` lifecycle; active
   pipeline listeners and execution worlds contribute stable durable resume
-  identity.
+  identity. The shipped `tools/execute` wrappers `metrics_wrapper` and
+  `timeout_wrapper` are public as well, so embedders can compose them without
+  importing a private submodule path.
+
+- **Cheap projection reads.** `SessionLog.visible_count`, `.history_count`, and
+  `.last_visible()` (plus `Session.last_provider_message()`) answer count and
+  newest-message questions without snapshotting the conversation. Reading
+  `provider_view`/`full_history` returns a detached deep copy by design, so
+  callers that only need a length or the last turn should use these instead —
+  the loop, checkpointing, and compaction now do.
+
+### Fixed
+
+- `DockerBackend` now declares `confinement`, so an agent configured with it
+  again reports Bash as sandboxed in the system prompt. The tri-state
+  sandbox reporting introduced with the execution seam requires an explicit
+  confinement declaration, which Linch's own Docker backend did not make —
+  it was described to the model as unverified. Durable resume identity is
+  unchanged: a shell-only backend still fingerprints through its
+  `resume_policy_config`, which does not include confinement.
 
 - **Incremental durability ledger.** `Agent(durability=...)`,
   `DurabilityOptions`, and `DurabilityOptions.strict_v1()` opt into a durable

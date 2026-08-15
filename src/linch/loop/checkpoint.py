@@ -264,13 +264,14 @@ def _message_matches(left: Message, right: Message) -> bool:
 
 
 def _last_message_matches(session: Session, message: Message) -> bool:
-    return bool(session.provider_view) and _message_matches(session.provider_view[-1], message)
+    last = session.last_provider_message()
+    return last is not None and _message_matches(last, message)
 
 
 def _last_message_has_tool_results(session: Session, tool_blocks: list[ToolUseBlock]) -> bool:
-    if not session.provider_view:
+    message = session.last_provider_message()
+    if message is None:
         return False
-    message = session.provider_view[-1]
     if message.role != "user":
         return False
     results = [block for block in message.content if isinstance(block, ToolResultBlock)]
