@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+import warnings
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
@@ -9,6 +10,7 @@ from uuid import uuid4
 from .abort import AbortContext
 from .errors import ConfigError
 from .events import Event
+from .session_log import SessionLog
 from .sessions import SessionStore
 from .tools import FileReadTracker
 from .types import InvokedSkillRecord, Message, SkillOverlay, Usage
@@ -82,8 +84,10 @@ class Session:
     meta: dict[str, object]
     agent: Agent
     store: SessionStore
-    provider_view: list[Message] = field(default_factory=list)
-    full_history: list[Message] = field(default_factory=list)
+    session_log: SessionLog = field(default_factory=SessionLog)
+    """The single append-only log behind the session-owned provider view and
+    audit history. Ephemeral per-request context is assembled outside this log.
+    Compaction is recorded as a projection, never an untracked mutation."""
     _active: bool = False
     _closed: bool = False
     _lifecycle_state: str = _OPEN
@@ -171,6 +175,16 @@ class Session:
     """Per-session working directory overriding ``agent.cwd`` for tool execution and
     permission path-rule matching. Set by an :class:`~linch.tools.isolation.IsolationBackend`
     so a subagent branch runs in its own cwd. ``None`` = use ``agent.cwd``."""
+
+    @property
+    def provider_view(self) -> Sequence[Message]:
+        """A read-only snapshot of the session-owned provider projection."""
+        return self.session_log.provider_view
+
+    @property
+    def full_history(self) -> Sequence[Message]:
+        """A read-only snapshot of the session's full audit history."""
+        return self.session_log.full_history
 
     @property
     def message_count(self) -> int:
@@ -487,8 +501,7 @@ class Session:
             raise ConfigError("session is closed")
         stored = await self.store.append_messages(self.id, messages)
         self._track_seqs(stored)
-        self.provider_view.extend(messages)
-        self.full_history.extend(messages)
+        self.session_log.append_many(messages)
 
     def _track_seqs(self, stored: list[Any]) -> None:
         for row in stored:
@@ -515,6 +528,48 @@ async def _aclose_generator(gen: Any) -> None:
     if aclose is None:
         return
     await aclose()
+
+
+# ``provider_view=`` and ``full_history=`` were public Session constructor
+# keywords before SessionLog became canonical. Keep a keyword-only compatibility
+# seam without restoring either value as mutable Session state. The generated
+# dataclass initializer remains the implementation for the standard path.
+_SESSION_INIT = Session.__init__
+_LEGACY_VIEW_MISSING = object()
+
+
+def _session_init_compat(
+    self: Session,
+    *args: Any,
+    provider_view: Sequence[Message] | object = _LEGACY_VIEW_MISSING,
+    full_history: Sequence[Message] | object = _LEGACY_VIEW_MISSING,
+    **kwargs: Any,
+) -> None:
+    legacy_supplied = (
+        provider_view is not _LEGACY_VIEW_MISSING or full_history is not _LEGACY_VIEW_MISSING
+    )
+    if legacy_supplied:
+        if len(args) >= 6 or "session_log" in kwargs:
+            raise TypeError(
+                "Session() cannot combine legacy provider_view/full_history with session_log"
+            )
+        warnings.warn(
+            "Session(provider_view=..., full_history=...) is deprecated; "
+            "pass session_log=SessionLog.seed(historical=..., visible=...) instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        historical = (
+            () if full_history is _LEGACY_VIEW_MISSING else cast(Sequence[Message], full_history)
+        )
+        visible = (
+            () if provider_view is _LEGACY_VIEW_MISSING else cast(Sequence[Message], provider_view)
+        )
+        kwargs["session_log"] = SessionLog.seed(historical=historical, visible=visible)
+    _SESSION_INIT(self, *args, **kwargs)
+
+
+Session.__init__ = _session_init_compat  # type: ignore[method-assign]
 
 
 def _consume_task_exception(task: asyncio.Task[None]) -> None:

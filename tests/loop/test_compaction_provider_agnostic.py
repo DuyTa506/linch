@@ -12,7 +12,29 @@ from linch.compaction import (
     maybe_compact,
     summarize_with_provider,
 )
+from linch.session_log import SessionLog
 from linch.types import Message, TextBlock, Usage
+
+
+class _LoggedViews:
+    """Mixin: back a fake session's views with a real single-log (Phase 4)."""
+
+    session_log: SessionLog
+
+    def _seed_views(self, provider_view, full_history=None) -> None:
+        self.session_log = SessionLog.seed(
+            historical=provider_view if full_history is None else full_history,
+            visible=provider_view,
+        )
+
+    @property
+    def provider_view(self):
+        return self.session_log.provider_view
+
+    @property
+    def full_history(self):
+        return self.session_log.full_history
+
 
 # ── Fake provider that is NOT the OpenAI Responses provider ──────────────────
 
@@ -235,15 +257,14 @@ async def test_maybe_compact_uses_provider_context_window():
         compaction = None
         token_estimator = None
 
-    class FakeSession:
-        provider_view: list
+    class FakeSession(_LoggedViews):
         last_usage: object
         last_compaction_info: dict | None
         compaction_retry_used_this_turn = False
 
         def __init__(self):
             # Many big messages to exceed 80% of the 1024 token limit
-            self.provider_view = _make_messages(40)
+            self._seed_views(_make_messages(40))
             self.last_usage = object()  # non-None so maybe_compact proceeds
             self.last_compaction_info = None
 
@@ -275,12 +296,13 @@ async def test_maybe_compact_estimates_without_last_usage():
         def __init__(self, provider):
             self.provider = provider
 
-    class FakeSession:
-        provider_view = _make_messages(40)
-        full_history = list(provider_view)
+    class FakeSession(_LoggedViews):
         last_usage = None
         last_compaction_info = None
         active_model = None
+
+        def __init__(self):
+            self._seed_views(_make_messages(40))
 
     session = FakeSession()
     history_before = list(session.full_history)
@@ -289,8 +311,8 @@ async def test_maybe_compact_estimates_without_last_usage():
 
     assert fired is True
     assert provider._stream_calls[0].model == "model-x"
-    assert session.full_history == history_before
-    assert all(a is b for a, b in zip(session.full_history, history_before, strict=True))
+    assert list(session.full_history) == history_before
+    assert all(a is not b for a, b in zip(session.full_history, history_before, strict=True))
 
 
 @pytest.mark.asyncio
@@ -318,7 +340,7 @@ async def test_maybe_compact_missing_usage_below_estimated_threshold_is_noop():
     fired = await maybe_compact(FakeSession(), FakeAgent(provider), AbortContext())
 
     assert fired is False
-    assert FakeSession.provider_view == original
+    assert list(FakeSession.provider_view) == original
     assert provider._stream_calls == []
 
 
@@ -358,11 +380,13 @@ async def test_compaction_uses_active_fallback_model_consistently():
                 // 4
             )
 
-    class FakeSession:
-        provider_view = _make_messages(40)
+    class FakeSession(_LoggedViews):
         last_usage = None
         last_compaction_info = None
         active_model = "fallback-model"
+
+        def __init__(self):
+            self._seed_views(_make_messages(40))
 
     session = FakeSession()
 
@@ -387,9 +411,9 @@ class _FakeAgent:
         self.provider = provider
 
 
-class _FakeSession:
+class _FakeSession(_LoggedViews):
     def __init__(self, n_messages: int = 40):
-        self.provider_view = _make_messages(n_messages)
+        self._seed_views(_make_messages(n_messages))
         self.last_usage = object()  # non-None so maybe_compact proceeds
         self.last_compaction_info = None
         self.compaction_retry_used_this_turn = False
@@ -458,7 +482,7 @@ async def test_maybe_compact_resilient_skips_compaction_when_exhausted():
     fired = await maybe_compact_resilient(session, agent, signal)
 
     assert fired is False
-    assert session.provider_view == original_view  # untouched, no partial mutation
+    assert list(session.provider_view) == original_view  # untouched, no partial mutation
 
 
 @pytest.mark.asyncio
@@ -504,7 +528,7 @@ async def test_maybe_compact_resilient_resets_read_tracker_after_partial_micro_e
     # 12 turns, keep_recent_turns=2 -> 10 old tool results elided but the 2 kept
     # (2000 chars each) still push the projection back over the 0.8*1024 limit,
     # so maybe_compact falls through to the (always-failing) summarization call.
-    session.provider_view = _history_with_tool_results(12, result_size=2000)
+    session._seed_views(_history_with_tool_results(12, result_size=2000))
     session.file_read_tracker = _FakeTracker()
     signal = AbortContext()
 

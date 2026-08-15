@@ -69,6 +69,12 @@ class ToolContext:
     stable key; the integration owns the deduplication.  Empty string when the
     context is built outside the loop (e.g. direct unit tests)."""
 
+    execution: Any = None
+    """The agent's unified execution world (``shell`` + ``fs``), when one is
+    configured. Custom tools can consume this capability directly without
+    reaching back through the Agent or global state. ``None`` on the legacy
+    default path. Kept last for positional-constructor compatibility."""
+
     @property
     def sessionId(self) -> str:
         return self.session_id

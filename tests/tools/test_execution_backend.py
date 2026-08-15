@@ -135,6 +135,34 @@ class _FakeBackend:
         return ExecResult(stdout="fake-out", stderr="", returncode=0, timed_out=False)
 
 
+class _FakeFs:
+    """Minimal filesystem transport paired with the fake shell world."""
+
+    async def read(self, path: str, *, offset: int = 0, limit: int | None = None) -> str:
+        return ""
+
+    async def write(self, path: str, content: str) -> None:
+        return None
+
+    async def ls(self, prefix: str = "") -> list[str]:
+        return []
+
+    async def edit(self, path: str, old: str, new: str, *, replace_all: bool = False) -> int:
+        return 0
+
+    async def exists(self, path: str) -> bool:
+        return False
+
+    async def delete(self, path: str) -> None:
+        return None
+
+
+def _fake_world(shell: _FakeBackend):
+    from linch.execution import RemoteExecutionBackend
+
+    return RemoteExecutionBackend(shell=shell, fs=_FakeFs())
+
+
 class _FakeDockerProcess:
     def __init__(self, *, stdout: bytes = b"", stderr: bytes = b"", returncode: int = 0):
         self.stdout = stdout
@@ -426,6 +454,7 @@ async def test_agent_replaces_bash_with_backend(tmp_path) -> None:
     from linch.tools.builtin import BashTool
 
     fake = _FakeBackend()
+    world = _fake_world(fake)
 
     from linch import Agent
 
@@ -433,7 +462,7 @@ async def test_agent_replaces_bash_with_backend(tmp_path) -> None:
         model="claude-opus-4-8",
         cwd=str(tmp_path),
         tools=workspace_tools(),
-        execution_backend=fake,
+        execution_backend=world,
     )
     bash_tool = agent.tools.get("Bash")
     assert bash_tool is not None
@@ -444,6 +473,19 @@ async def test_agent_replaces_bash_with_backend(tmp_path) -> None:
     result = await bash_tool.execute(validated, ctx)
     assert fake.calls == ["echo wired"]
     assert result.is_error is False
+
+
+def test_agent_shell_only_backend_warns_for_compatibility(tmp_path) -> None:
+    """The deprecated shell-only Agent path remains covered explicitly."""
+    from linch import Agent, workspace_tools
+
+    with pytest.warns(DeprecationWarning, match="shell-only"):
+        Agent(
+            model="claude-opus-4-8",
+            cwd=str(tmp_path),
+            tools=workspace_tools(),
+            execution_backend=_FakeBackend(),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -466,13 +508,14 @@ def test_system_prompt_is_neutral_without_workspace_tools(tmp_path) -> None:
 
 def test_system_prompt_sandbox_note_when_backend_injected(tmp_path) -> None:
     fake = _FakeBackend()
+    world = _fake_world(fake)
     from linch import Agent, workspace_tools
 
     agent = Agent(
         model="claude-opus-4-8",
         cwd=str(tmp_path),
         tools=workspace_tools(),
-        execution_backend=fake,
+        execution_backend=world,
     )
     combined = "\n".join(_block_texts(agent))
     assert "There is no sandbox" not in combined
@@ -482,6 +525,7 @@ def test_system_prompt_sandbox_note_when_backend_injected(tmp_path) -> None:
 def test_execution_backend_not_injected_into_restricted_registry(tmp_path) -> None:
     """execution_backend must not grant shell access to a registry that deliberately omits Bash."""
     fake = _FakeBackend()
+    world = _fake_world(fake)
     from linch import Agent
     from linch.tools import ToolRegistry
 
@@ -490,7 +534,7 @@ def test_execution_backend_not_injected_into_restricted_registry(tmp_path) -> No
         model="claude-opus-4-8",
         cwd=str(tmp_path),
         tools=no_bash,
-        execution_backend=fake,
+        execution_backend=world,
     )
     assert agent.tools.get("Bash") is None, (
         "execution_backend must not inject BashTool into a registry that did not include it"

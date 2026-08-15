@@ -86,7 +86,7 @@ def test_micro_compact_does_not_mutate_input_messages() -> None:
     new_messages, n_elided = micro_compact(messages, keep_recent_turns=10)
 
     assert n_elided == 2
-    # Input messages and blocks are untouched (shared with full_history).
+    # Input messages and blocks are untouched (projections use independent copies).
     after_contents = [
         block.content
         for msg in messages

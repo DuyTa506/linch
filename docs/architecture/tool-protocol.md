@@ -90,6 +90,19 @@ uses `docker run --rm` when the Docker daemon is available. Passing
 `Agent(execution_backend=...)` replaces an existing `Bash` tool only, so a
 restricted registry that omits `Bash` does not gain shell access.
 
+The preferred `ExecutionBackend` exposes both `.shell` and `.fs`, so shell and
+filesystem operations share one coherent execution world.
+`LocalExecutionBackend` supplies that pair locally; `RemoteExecutionBackend`
+bundles host-supplied transports. Confinement metadata is declarative: a remote
+backend is described as sandboxed only when the embedder supplies non-empty
+confinement metadata, and the SDK does not independently verify that boundary.
+The effective session `cwd` is passed to the shell transport; a remote backend
+must map that cwd and its filesystem paths to the same world if it claims
+coherence. The old shell-only `run(...)` value is a deprecated compatibility
+path: it has no filesystem transport unless `filesystem=` is supplied explicitly
+and cannot claim shell/filesystem coherence. Migrate by constructing
+`LocalExecutionBackend` or `RemoteExecutionBackend(shell=..., fs=...)`.
+
 Permissions and execution backends are separate layers. `ToolRule`, `PathRule`,
 and `BashRule` determine whether a tool call may run. If a Bash call is
 approved, the configured backend determines the runtime boundary. `DockerBackend`
@@ -102,9 +115,10 @@ controls such as `network="none"`, `workspace_mount="ro"`,
 ### ToolRegistry
 
 ```python
-registry.add(tool)                        # add; raises if name exists
+registry.add(tool)                        # add; raises if name exists → Disposable
+registry.register(tool)                   # add; raises if name exists → Disposable
+registry.replace(tool)                    # swap same-named tool → Disposable
 registry.remove(name)                     # remove by name
-registry.replace(tool)                    # swap same-named tool
 registry.select(names={...}, tags={...})  # runtime subset (per-request)
 registry.copy()                           # shallow clone
 registry.schemas()                        # provider-ready schema list
@@ -112,6 +126,34 @@ workspace_tools()                         # explicit software-workspace preset
 empty_tools(*extra)                       # no built-ins + optional extras
 tools_from_defaults(exclude, extra)       # workspace preset ± named tools
 ```
+
+`add`/`register`/`replace` are **reversible effects**: each returns a
+`linch.Disposable`. `register` rejects a duplicate name; use `replace` for an
+intentional hot swap. Disposing a registration removes exactly that registration
+(identity-checked, single-use, and idempotent). Disposing a replacement restores
+the previous registration when it still owns the slot; disposing a stale handle
+never removes a newer tool. Because teardown may be async, always use
+`await disposer.dispose()` (or `await disposer()`). See [kernel.md](./kernel.md).
+
+### Tool pipeline
+
+`ToolPipeline` is an optional per-Agent extension seam around every tool call:
+
+```text
+tools/pre-execute → tools/execute → tools/post-execute
+```
+
+Register phases with `on_pre_execute`, `on_execute`, and `on_post_execute`;
+each registration returns a `Disposable`. Execute listeners are around-wrappers:
+they receive a `ToolExecution` record and must `await next()` exactly once to
+run the inner body, or may deliberately short-circuit it. Pre and post listeners
+can likewise replace the candidate result. With no listeners the scheduler
+keeps the direct execution path. An active pipeline contributes an ordered,
+stable `resume_policy_id`/version/config to durable run identity; custom
+listeners must provide their own stable `resume_policy_id`.
+The pipeline runs after canonical validation and permission evaluation. Pipeline
+listeners must not mutate authorization-sensitive `input`, `tool`, or decisions;
+put rewrites in `PreToolUse`, which is revalidated and re-authorized.
 
 `Agent` does not install `workspace_tools()` implicitly in Linch 2.0. The
 `default_tools()` / `defaultTools` names remain compatibility aliases for that

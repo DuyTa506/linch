@@ -3,31 +3,38 @@ from __future__ import annotations
 import asyncio
 import os
 import platform
+import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 from ._blocking import run_blocking
 from ._version import get_version
 from .config import FeatureFlags, SystemPromptConfig
 from .durability import DurabilityOptions
 from .errors import ConfigError
+from .execution import ExecutionBackend, ShellBackend
+from .kernel import Context
 from .openai_responses import OpenAIOptions, OpenAIReasoning
 from .permissions import BashRule, CanUseTool, PathRule, PermissionEngine, PermissionRule, ToolRule
 from .providers import BaseProvider, OpenAIResponsesProvider, OpenAIResponsesProviderOptions
 from .providers.limiter import Limiter, _SemaphoreLimiter
 from .recovery import TruncationRecovery
+from .run_store import RunStore
+from .session import Session
 from .sessions import InMemorySessionStore, SessionStore
-from .tools import ToolRegistry
-from .types import InvokedSkillRecord, Message, PermissionMode, SystemBlock
-
-if TYPE_CHECKING:
-    from .run_store import RunStore
-    from .session import Session
-    from .subagents.types import AgentDefinition
-    from .tools import Tool
-    from .types import OutputSchema, ToolChoice
+from .subagents.types import AgentDefinition
+from .tools import Tool, ToolRegistry
+from .tools.pipeline import ToolPipeline
+from .types import (
+    InvokedSkillRecord,
+    Message,
+    OutputSchema,
+    PermissionMode,
+    SystemBlock,
+    ToolChoice,
+)
 
 # Sentinel for "loop_guard not explicitly provided" — distinguishes the
 # default (LoopGuard on) from an explicit None/False (guard disabled).
@@ -311,7 +318,7 @@ _SWE_TOOL_FAMILIES = {"Read", "Edit", "Write", "Glob", "Grep", "Bash"}
 
 
 def _build_tool_protocol_lines(
-    present: set[str], *, has_swe_tools: bool, bash_sandboxed: bool
+    present: set[str], *, has_swe_tools: bool, bash_security: str
 ) -> list[str]:
     """Build the tool-use-protocol bullet lines for the tools actually present.
 
@@ -335,9 +342,17 @@ def _build_tool_protocol_lines(
             "searching file contents. They are read-only."
         )
     if "Bash" in present:
-        if bash_sandboxed:
+        if bash_security == "sandboxed":
             lines.append(
-                "- Bash runs inside a sandbox. Commands are isolated from the host environment."
+                "- The configured Bash backend declares sandbox confinement. This is "
+                "provider-supplied metadata, not an independently verified security boundary; "
+                "continue to follow the configured permissions."
+            )
+        elif bash_security == "unverified":
+            lines.append(
+                "- Bash uses a configured execution backend, but that backend has not "
+                "declared sandbox confinement. Do not assume commands are isolated from "
+                "the host or other workloads."
             )
         else:
             lines.append(
@@ -404,6 +419,9 @@ class AgentOptions:
     retain_subagents: bool = False
     enable_background_subagents: bool = False
     enable_task_stop: bool = False
+    execution_backend: ExecutionBackend | ShellBackend | None = None
+    context: Context | None = None
+    tool_pipeline: ToolPipeline | None = None
 
 
 class Agent:
@@ -475,7 +493,9 @@ class Agent:
         enable_background_subagents: bool = False,
         enable_task_stop: bool = False,
         enable_background_tools: bool = False,
-        execution_backend: Any = None,
+        execution_backend: ExecutionBackend | ShellBackend | None = None,
+        context: Context | None = None,
+        tool_pipeline: ToolPipeline | None = None,
         ask_user: Any = None,
     ) -> None:
         system_prompt = _resolve_system_prompt(system_prompt, systemPrompt, system_prompt_config)
@@ -525,16 +545,85 @@ class Agent:
         cwd_resolved = str(Path(cwd or os.getcwd()).resolve())
         self.model = model
         self.cwd = cwd_resolved
+        self.features: FeatureFlags = features or FeatureFlags()
+
+        if context is not None and not isinstance(context, Context):
+            raise ConfigError("context must be a linch.Context or None")
+        # A supplied Context is a parent/host scope, never transferred into the
+        # Agent. Each Agent owns a child so two agents can share host services
+        # without one Agent.close() disposing the other's branch.
+        self.context: Context = (
+            context.scope(label=f"agent:{model}")
+            if context is not None
+            else Context(label=f"agent:{model}")
+        )
+        self.tool_pipeline: ToolPipeline = tool_pipeline or ToolPipeline()
+
+        inherited_execution = context.get("execution") if context is not None else None
+        execution_source = (
+            execution_backend if execution_backend is not None else inherited_execution
+        )
+        self.execution_backend: Any = None
+        if execution_source is not None:
+            from .execution.backend import (
+                UnavailableFileBackend,
+                normalize_execution_backend,
+            )
+
+            try:
+                self.execution_backend = normalize_execution_backend(
+                    execution_source,
+                    filesystem=filesystem,
+                )
+            except TypeError as exc:
+                raise ConfigError(str(exc)) from exc
+            host_workspace_root = getattr(
+                self.execution_backend,
+                "host_workspace_root",
+                None,
+            )
+            if isinstance(host_workspace_root, str) and Path(host_workspace_root).resolve() != Path(
+                cwd_resolved
+            ):
+                raise ConfigError(
+                    "LocalExecutionBackend cwd does not match Agent cwd; construct the "
+                    "local execution world with cwd=Agent.cwd so shell and fs share one workspace"
+                )
+            if getattr(self.execution_backend, "legacy_shell_only", False):
+                warnings.warn(
+                    "shell-only execution_backend values are deprecated; pass an "
+                    "ExecutionBackend exposing both .shell and .fs",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+                if self.features.filesystem and isinstance(
+                    self.execution_backend.fs, UnavailableFileBackend
+                ):
+                    raise ConfigError(
+                        "filesystem=True with a legacy shell-only execution backend "
+                        "requires an explicit filesystem=; migrate to an ExecutionBackend "
+                        "with coherent shell and fs transports"
+                    )
+        self._owns_execution_backend = bool(
+            execution_backend is not None
+            and self.execution_backend is not None
+            and not getattr(self.execution_backend, "legacy_shell_only", False)
+        )
+        self._borrows_execution_filesystem = bool(
+            execution_backend is None
+            and inherited_execution is not None
+            and self.execution_backend is not None
+            and not getattr(self.execution_backend, "legacy_shell_only", False)
+        )
         # Linch is an SDK, not an implicit coding harness.  A bare Agent gets
         # no shell/filesystem authority; applications opt in with their own
         # registry or ``workspace_tools()``/a higher-level preset.
         self.tools = tools if tools is not None else ToolRegistry()
-        self.execution_backend = execution_backend
-        if execution_backend is not None:
+        if self.execution_backend is not None:
             from .tools.builtin import BashTool
 
             if self.tools.get("Bash") is not None:
-                self.tools.replace(BashTool(backend=execution_backend))
+                self.tools.replace(BashTool(execution=self.execution_backend))
         if ask_user is not None:
             from .tools.ask_user import AskUserTool
 
@@ -591,9 +680,6 @@ class Agent:
         # Prefer RunOptions(budget=...) for per-run caps.
         self.budget: Any = budget
 
-        # Feature flags (controls which subsystems connect in session())
-        self.features: FeatureFlags = features or FeatureFlags()
-
         # App-state dependency object threaded into ToolContext.deps
         self.deps: Any = deps
 
@@ -616,6 +702,9 @@ class Agent:
         self._configure_filesystem(filesystem, result_offload)
         self._configure_mailbox(mailbox)
         self._configure_schedule_store(schedule_store)
+        self.context.register("tool_pipeline", self.tool_pipeline)
+        if self.execution_backend is not None:
+            self.context.register("execution", self.execution_backend)
 
     def _initialize_extension_state(
         self,
@@ -666,7 +755,7 @@ class Agent:
         if self.execution_backend is not None and worker_tools.get("Bash") is not None:
             from .tools.builtin import BashTool
 
-            worker_tools.replace(BashTool(backend=self.execution_backend))
+            worker_tools.replace(BashTool(execution=self.execution_backend))
         for tool in self.tools.list():
             if worker_tools.get(tool.name) is None:
                 worker_tools.register(tool)
@@ -718,10 +807,12 @@ class Agent:
         self._close_task: asyncio.Task[None] | None = None
         self._session_lock: asyncio.Lock | None = None
         self._teardown_complete: set[str] = set()
-        self._closed_hook_ids: set[int] = set()
+        self._closed_resource_ids: set[int] = set()
 
     def _configure_filesystem(self, filesystem: Any, result_offload: Any) -> None:
-        self._filesystem_default: Any = filesystem
+        self._filesystem_default: Any = (
+            filesystem if filesystem is not None else getattr(self.execution_backend, "fs", None)
+        )
         # An auto-derived offload threshold (a fraction of the context window) is
         # refreshed after a successful provider.prepare(); an explicit
         # threshold_tokens is left untouched.
@@ -850,8 +941,16 @@ class Agent:
             getattr(cfg, "append", None),
             self.system_prompt,
             self.permission_engine.mode,
-            self.execution_backend is not None,
+            self._bash_security_mode(),
         )
+
+    def _bash_security_mode(self) -> str:
+        """Return the prompt-safe security posture of the effective Bash world."""
+        if self.execution_backend is None:
+            return "host"
+        if bool(getattr(self.execution_backend, "sandboxed", False)):
+            return "sandboxed"
+        return "unverified"
 
     def _get_store(self) -> SessionStore:
         if self._store is None:
@@ -980,7 +1079,7 @@ class Agent:
         protocol_lines = _build_tool_protocol_lines(
             present,
             has_swe_tools=has_swe_tools,
-            bash_sandboxed=self.execution_backend is not None,
+            bash_security=self._bash_security_mode(),
         )
 
         # ── env block (always included) ──────────────────────────────────────
@@ -1281,6 +1380,7 @@ class Agent:
         self, id: str | None = None, meta: dict[str, object] | None = None
     ) -> Session:
         from .session import Session
+        from .session_log import SessionLog
 
         self._require_open()
         if self._session_lock is None:
@@ -1325,8 +1425,7 @@ class Agent:
                 meta=record.meta,
                 agent=self,
                 store=store,
-                provider_view=provider_view,
-                full_history=full_history,
+                session_log=SessionLog.seed(historical=full_history, visible=provider_view),
             )
             # Seed the snapshot watermark from the loaded messages; disable snapshot
             # caching if their seqs are not strictly increasing (can't trust a split).
@@ -1503,6 +1602,41 @@ class Agent:
             self._close_task = task
         await asyncio.shield(task)
 
+    async def _close_resource_once(self, resource: Any) -> None:
+        """Close one owned resource once, recording success only after it returns."""
+        import inspect as _inspect
+
+        resource_id = id(resource)
+        if resource_id in self._closed_resource_ids:
+            return
+        closer = getattr(resource, "aclose", None) or getattr(resource, "close", None)
+        if closer is not None:
+            result = closer()
+            if _inspect.isawaitable(result):
+                await result
+        self._closed_resource_ids.add(resource_id)
+
+    async def _close_owned_execution(self) -> None:
+        """Close the explicitly transferred unified world and its transports."""
+        backend = self.execution_backend
+        if backend is None or not self._owns_execution_backend:
+            return
+        aggregate_closer = getattr(backend, "aclose", None) or getattr(backend, "close", None)
+        shell = getattr(backend, "shell", None)
+        filesystem = getattr(backend, "fs", None)
+        if aggregate_closer is not None:
+            await self._close_resource_once(backend)
+            # A world-level closer owns both transports by contract.
+            for component in (shell, filesystem):
+                if component is not None:
+                    self._closed_resource_ids.add(id(component))
+            return
+        # Component-level success is tracked independently so retrying after an
+        # fs failure does not close an already-closed shell again.
+        for component in (shell, filesystem):
+            if component is not None:
+                await self._close_resource_once(component)
+
     async def _close_impl(self) -> None:
         import inspect as _inspect
 
@@ -1538,14 +1672,21 @@ class Agent:
                 if _inspect.isawaitable(result):
                     await result
         self._teardown_complete.add("run_store")
-        if "filesystem" not in self._teardown_complete and self._filesystem_default is not None:
-            closer = getattr(self._filesystem_default, "aclose", None) or getattr(
-                self._filesystem_default, "close", None
+
+        if "execution" not in self._teardown_complete:
+            await self._close_owned_execution()
+            self._teardown_complete.add("execution")
+
+        if (
+            "filesystem" not in self._teardown_complete
+            and self._filesystem_default is not None
+            and not (
+                self._borrows_execution_filesystem
+                and self.execution_backend is not None
+                and self._filesystem_default is self.execution_backend.fs
             )
-            if closer is not None:
-                result = closer()
-                if _inspect.isawaitable(result):
-                    await result
+        ):
+            await self._close_resource_once(self._filesystem_default)
         self._teardown_complete.add("filesystem")
 
         # Close the provider's transport (e.g. the OpenAI/httpx connection pool)
@@ -1553,13 +1694,7 @@ class Agent:
         # providers without a closer (test doubles) are skipped. A failing closer
         # leaves the agent quiescing so a later close() can retry it.
         if "provider" not in self._teardown_complete:
-            provider_closer = getattr(self._provider, "aclose", None) or getattr(
-                self._provider, "close", None
-            )
-            if provider_closer is not None:
-                result = provider_closer()
-                if _inspect.isawaitable(result):
-                    await result
+            await self._close_resource_once(self._provider)
             self._teardown_complete.add("provider")
 
         # Close hooks that expose a closer (e.g. RunTelemetryHook flushes its
@@ -1567,15 +1702,15 @@ class Agent:
         # Also close any hooks that were replaced via the hooks setter so their
         # resources (e.g. OTel exporters) are not orphaned.
         for hook in [*self._hooks, *self._replaced_hooks]:
-            if id(hook) in self._closed_hook_ids:
-                continue
-            closer = getattr(hook, "aclose", None) or getattr(hook, "close", None)
-            if closer is not None:
-                result = closer()
-                if _inspect.isawaitable(result):
-                    await result
-            self._closed_hook_ids.add(id(hook))
+            await self._close_resource_once(hook)
         self._teardown_complete.add("hooks")
+        # The per-agent Context owns reversible service/pipeline registrations.
+        # Keep it in the transactional teardown ledger: a custom Context whose
+        # dispose fails leaves the agent quiescing, and a later close() retries
+        # this stage without repeating already-completed resource stages.
+        if "context" not in self._teardown_complete:
+            await self.context.dispose()
+            self._teardown_complete.add("context")
         self._lifecycle_state = _CLOSED
         self._closed = True
 

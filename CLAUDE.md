@@ -55,8 +55,24 @@ These hold for *every* change, regardless of subsystem:
   `compaction.py`, `providers/`).
 - **Tools are duck-typed protocols** — implement the protocol attributes
   directly; do not introduce a base class to inherit from.
-- **`provider_view` vs `full_history`** are separate — only `provider_view` is
-  sent to the LLM, and compaction mutates `provider_view` only.
+- **Registrations are reversible effects** — a registration returns a
+  `Disposable` (`linch.Disposable`) whose call undoes exactly that registration,
+  and is idempotent. `ToolRegistry.add/register/replace` already follow this;
+  new registries and extension points do the same. See `docs/architecture/kernel.md`.
+- **New behavior hangs off kernel extension points, not loop edits** — extend
+  tool execution through the pipeline seams (`tools/pre-execute` →
+  `tools/execute` → `tools/post-execute` via `ToolPipeline`), not by threading
+  new branches into `scheduler.py`/`loop/`. Each seam is registered as an effect
+  (returns a `Disposable`) and stays byte-identical when no listener is attached.
+- **Single append-only session log; session-owned model-visible state is logged** —
+  `Session` owns one `SessionLog` (`src/linch/session_log.py`). Its
+  `provider_view` (model-visible) and `full_history` (audit) are *deep-copied,
+  read-only projections* of it; per-request `ContextInjectionHook`/RAG context
+  is assembled only into `ProviderRequest` and is intentionally outside the log.
+  Never `append`/`extend`/`clear`/`[:]=` the projections. Append via
+  `session.append(...)` or `session.session_log.append(...)`; record compaction
+  as a **logged projection** (`session.session_log.record_projection(...)`),
+  never as an untracked in-place mutation.
 - **The loop continues while a response has tool calls** and stops on a
   text-only response (or a stop condition).
 - **Python 3.10+** — no 3.11+-only APIs (e.g. use `asyncio.wait_for` +
@@ -64,8 +80,11 @@ These hold for *every* change, regardless of subsystem:
 - **No vendor lock-in in core** — observability reaches Langfuse/LangSmith/etc.
   only through the OpenTelemetry seam; memory core ships no vector-DB or
   embedding dependency (such adapters live in `examples/`).
-- **Multi-tenant safe** — no process-global mutable state; each `Agent` owns its
-  own registries and session dict so N agents run concurrently in one process.
+- **Multi-tenant safe via per-agent `Context`** — no process-global mutable
+  state; each `Agent` owns its own `Context` scope (`linch.Context`) holding its
+  service registry, event bus, and effect scope, plus its registries and session
+  dict, so N agents run concurrently in one process. Shared services are resolved
+  through the `Context` (a scoped IoC container), never module globals.
 - **Opt-in features stay zero-overhead** — when a feature is unset (compaction
   ladder, verification gates, virtual filesystem, tool timeouts/retry) behavior
   must be byte-identical to before it existed.

@@ -12,7 +12,7 @@ graph TD
 
     subgraph Core["Linch Core"]
         Agent["Agent\nmodel · provider · tools\npermissions · loop_guard\nhooks · deps"]
-        Session["Session\nprovider_view · full_history\nrun_deps · active_run_id"]
+        Session["Session\nsession_log (→ provider_view · full_history)\nrun_deps · active_run_id"]
         RunLoop["run_loop()"]
 
         subgraph Pipeline["Turn Pipeline"]

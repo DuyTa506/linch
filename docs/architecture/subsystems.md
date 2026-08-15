@@ -217,29 +217,47 @@ flowchart TD
 
 ### 3.5 Session History Model
 
-Two separate lists track conversation history; only one is ever sent to the LLM.
+One **append-only log** (`session_log.py`) is the single source of truth for
+session-owned conversation state;
+`full_history` (audit) and `provider_view` (model-visible) are **read-only
+projections** of it. Only `provider_view` is ever sent to the LLM. Session-owned
+model state is logged; per-request ContextBuilder output is assembled only into
+`ProviderRequest` and stays outside the log.
 
 ```mermaid
 graph TD
-    subgraph FH["full_history  — append-only audit record"]
+    subgraph LOG["SessionLog  — single append-only source of truth"]
         direction LR
-        fh1["user turn 1"] --> fh2["assistant turn 1"] --> fh3["user turn 2"] --> fh4["assistant tool call"] --> fh5["tool result"] --> fh6["...all turns intact"]
+        e1["MessageEntry (visible+historical)"] --> e2["MessageEntry"] --> e3["ProjectionEntry (compaction)"] --> e4["MessageEntry"]
     end
 
-    subgraph PV["provider_view  — trimmed copy sent to LLM"]
+    subgraph FH["full_history  — projection: every historical message"]
+        direction LR
+        fh1["user turn 1"] --> fh2["assistant turn 1"] --> fh3["...all turns intact"]
+    end
+
+    subgraph PV["provider_view  — projection sent to LLM (compaction applied)"]
         direction LR
         pvc["COMPACTED SUMMARY"] --> pv4["assistant tool call"] --> pv5["tool result"] --> pv6["...recent turns"]
     end
 
-    COMP["Compaction\nmutates provider_view only\nreplaces old messages with summary\nnever touches full_history"]
+    COMP["Compaction\nrecord_projection() → appends a ProjectionEntry\nrewrites provider_view projection\nfull_history untouched"]
 
-    CTX["ContextInjectionHook output\nephemeral per-request\nappended to ProviderRequest only\nnot stored in either list"]
+    CTX["ContextInjectionHook output\nephemeral per-request\nappended to ProviderRequest only\nnot stored in the log"]
 
-    COMP --> PV
+    LOG --> FH
+    LOG --> PV
+    COMP --> LOG
     CTX -.->|"injected per-request"| PV
 ```
 
-**Invariant:** `full_history` is a strict superset of the logical conversation. Do not write to it outside the `loop/` package.
+**Invariant:** grow history through `session.append(...)` /
+`session.session_log.append(...)`; record compaction as a logged projection.
+Never mutate `provider_view`/`full_history` in place — they are derived views.
+`MessageEntry` and `ProjectionEntry` are in-memory log entries. Durable session
+stores persist the message/projection *snapshots* needed to reconstruct the two
+views; they do not persist the in-memory entry list as a replay journal. Loading
+a session therefore seeds a fresh log at that durable snapshot boundary.
 
 ---
 

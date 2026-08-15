@@ -246,6 +246,129 @@ budget across several agents — that is a deliberate choice, not an accident.
 
 ---
 
+## Reversible registration — every registration returns a `Disposable`
+
+Anything that mutates a registry hands you back a `linch.Disposable` — a single
+undo handle — so a host can add a capability for the scope of a task and remove
+exactly it afterward, without tracking names.
+
+```python
+from linch import Disposable  # only needed for a type annotation
+
+disposer = agent.tools.register(MyTool())   # -> Disposable
+...
+await disposer.dispose()                     # removes exactly that registration
+await disposer.dispose()                     # single-use: a no-op
+```
+
+Three properties make this safe to lean on:
+
+- **Idempotent.** A successful `dispose()` is final; a second call does nothing.
+- **Identity-checked.** Disposing a tool registration removes the tool only if
+  the current entry is still the one that was registered, so a stale disposer
+  never clobbers a later `replace`.
+- **Retryable on failure.** If teardown raises, the disposer stays live so a
+  later close can finish the cleanup.
+
+`register` rejects a duplicate name; use `replace` for a reversible hot swap.
+The same contract holds for services registered on an agent's `Context`
+(`ctx.register(key, service) -> Disposable`) and for event listeners. To run
+setup and teardown together, `ctx.effect(fn)` runs `fn` now and collects the
+disposer it returns, disposing it (and everything after it) in reverse order
+when the scope closes. See [the kernel](../architecture/kernel.md).
+
+---
+
+## The tool pipeline — wrap `tools/execute`
+
+Every `Agent` owns a `ToolPipeline` (`agent.tool_pipeline`) exposing three seams
+around a single tool call — `tools/pre-execute → tools/execute →
+tools/post-execute`. This is where cross-cutting behavior (metrics, a
+pipeline-scoped deadline, tracing) hangs off, instead of editing the scheduler.
+
+The `tools/execute` seam is a **waterfall**: each wrapper receives a `next` and
+must `await next()` to run the wrapped body (the real `tool.execute` is the
+innermost call). Wrap around `next()` to add behavior:
+
+```python
+import time
+from linch import ToolExecution   # public; the payload threaded through the seam
+
+def metrics_wrapper(record):
+    async def wrapper(execution: ToolExecution, next):
+        start = time.perf_counter()
+        error = None
+        try:
+            return await next()                     # run the wrapped body
+        except Exception as exc:
+            error = type(exc).__name__
+            raise
+        finally:
+            record(execution.tool_name, time.perf_counter() - start, error)
+    return wrapper
+
+disposer = agent.tool_pipeline.on_execute(metrics_wrapper(my_sink))  # -> Disposable
+```
+
+`on_pre_execute(listener)` and `on_post_execute(listener)` register the other
+two seams; all three return a `Disposable`. Points to know:
+
+- **Zero-overhead when unused.** With no `tools/execute` listener attached the
+  scheduler calls `tool.execute` directly — behavior is byte-identical to before
+  the pipeline existed.
+- **The payload is read-only for authorization.** `ToolExecution` carries
+  `tool_name`, `tool_use_id`, `input`, `ctx`, `tool`, plus `signal`/`metadata`
+  extension fields. The pipeline runs *after* canonical validation and
+  permission, so a listener must **not** rewrite `tool`, `input`, or the
+  decision — scheduler dispatch fails closed if it does. An
+  authorization-sensitive transform belongs in a `PreToolUse` hook, where the
+  input is validated and checked again.
+- **Skipping `next()` vetoes.** Returning from a wrapper without awaiting `next()`
+  deliberately short-circuits the body — use it to block a call, never by
+  accident.
+
+---
+
+## `ExecutionBackend` — one shell + filesystem world
+
+Shell (subprocess) and filesystem used to be unrelated worlds. `ExecutionBackend`
+bundles them so a consumer swaps one object and both move together — a duck-typed
+protocol, no base class:
+
+```python
+from typing import Any, Protocol, runtime_checkable
+
+@runtime_checkable
+class ShellBackend(Protocol):
+    async def run(self, command: str, *, cwd: str, timeout_s: float,
+                  signal: Any = None) -> "ExecResult": ...
+
+@runtime_checkable
+class ExecutionBackend(Protocol):
+    shell: ShellBackend   # the subprocess half
+    fs: "FileBackend"     # the filesystem half (see FileBackend on the tools page)
+```
+
+`LocalExecutionBackend` is the default (local subprocess + on-disk files);
+`RemoteExecutionBackend(shell=..., fs=...)` bundles transports you supply (e.g. a
+sandbox). `BashTool` sources its shell from the backend and the filesystem tools
+read its `fs`, so pointing an agent at a sandbox is one argument:
+
+```python
+from linch import Agent, LocalExecutionBackend
+
+agent = Agent(..., cwd=".", execution_backend=LocalExecutionBackend(cwd="."))
+```
+
+Construct the local world with `cwd=Agent.cwd` so shell and filesystem share one
+workspace (a mismatch raises `ConfigError`). A child agent inherits its parent's
+world through the `Context` (`ctx.get("execution")`) unless you pass its own. A
+shell-only `execution_backend` remains a deprecated compatibility path — it has
+no filesystem transport, and pairing it with `FeatureFlags(filesystem=True)`
+requires an explicit `filesystem=`; migrate to a real `ExecutionBackend`.
+
+---
+
 ## System-prompt assembly — ordered static prefix + dynamic blocks
 
 There is deliberately **no** `SystemPromptBuilder` protocol: two existing seams already
