@@ -33,8 +33,8 @@ from .types import (
 
 # Wire-format version for the serialized RunCheckpoint and stored-event log.
 # Bump only on a breaking change to the persisted shape. `checkpoint_from_dict`
-# reads any version best-effort (unknown future keys are ignored) and
-# `load_events` drops events it cannot decode, so a newer store is forward-safe.
+# reads any version best-effort (unknown future keys are ignored). Stored events
+# are required on read unless their envelope explicitly declares them ignorable.
 SCHEMA_VERSION = 1
 
 # A run contract is versioned independently from the checkpoint wire format.
@@ -1643,17 +1643,14 @@ def _load_events(
         "select seq, appended_at, event from run_events where run_id = ? and seq > ? order by seq",
         (run_id, after_seq),
     ).fetchall()
-    out: list[StoredRunEvent] = []
-    for row in rows:
-        try:
-            event = event_from_dict(json.loads(row[2]))
-        except (ValueError, KeyError, TypeError, json.JSONDecodeError):
-            # Forward-compat: an event written by a newer schema (unknown type or
-            # shape) is skipped rather than aborting the whole resume. The
-            # checkpoint, not the event log, drives resume.
-            continue
-        out.append(StoredRunEvent(seq=row[0], appended_at=row[1], event=event))
-    return out
+    return [
+        StoredRunEvent(
+            seq=row[0],
+            appended_at=row[1],
+            event=event_from_dict(json.loads(row[2])),
+        )
+        for row in rows
+    ]
 
 
 def _mark_failed(

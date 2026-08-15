@@ -25,4 +25,6 @@ summarized in the [migration guide](../migration-2.0.md).
 | 10. [Structured Output Paths](./structured-output.md) | Structured-output paths: final-text vs final-tool capture, schema repair |
 | 11. [Compaction](./compaction.md) | Compaction: when and how old context is summarized |
 | 12. [Skills and Subagents](./skills-subagents.md) | Skills (slash commands) and subagents (roles, workers, fork/continue) |
-| 13. [Key Invariants](./invariants.md) | Key invariants the whole system upholds |
+| 13. [Kernel](./kernel.md) | The IoC/effect kernel: `Context` scopes, reversible `Disposable` effects, the event bus (emit/serial/waterfall), the open tool pipeline, and capability seams |
+| 14. [Development Principles](./development_principles.md) | Scope, extension, durability, compatibility, async, and security rules for contributors |
+| 15. [Key Invariants](./invariants.md) | Key invariants the whole system upholds |

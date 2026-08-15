@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -10,7 +11,7 @@ from uuid import uuid4
 from xml.sax.saxutils import escape
 
 from .abort import AbortContext, throw_if_aborted
-from .errors import AbortError, ToolTimeoutError
+from .errors import AbortError, ToolExecutionError, ToolTimeoutError
 from .events import (
     BackgroundWorkerEvent,
     Event,
@@ -43,6 +44,7 @@ from .tools import (
     render_tool_output,
     validate_tool_output,
 )
+from .tools.pipeline import ToolExecution
 from .types import ToolResultBlock, ToolUseBlock
 
 # How parallel-safe tool calls in one assistant turn are packed into batches.
@@ -78,6 +80,14 @@ class ToolExecutionOutcome:
 class _PrecomputedOutput:
     tool_result: ToolResult | None = None
     tool_output: CanonicalToolOutput | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _V2ProjectionContract:
+    """Immutable V2 boundary captured before extension code can mutate a tool."""
+
+    output_schema: Any
+    render_output: Any
 
 
 @dataclass(slots=True)
@@ -149,11 +159,22 @@ def _is_v2_tool(call: ResolvedCall) -> bool:
     return call.tool is not None and getattr(call.tool, "output_schema", None) is not None
 
 
+def _snapshot_v2_contract(tool: Any) -> _V2ProjectionContract | None:
+    schema = getattr(tool, "output_schema", None)
+    if schema is None:
+        return None
+    return _V2ProjectionContract(
+        output_schema=copy.deepcopy(schema),
+        render_output=getattr(tool, "render_output", None),
+    )
+
+
 def _v2_projection(
     call: ResolvedCall,
     raw: Any,
     *,
     duration_ms: int,
+    contract: _V2ProjectionContract | None = None,
 ) -> ToolExecutionOutcome:
     """Normalize, validate, and render one V2 result without offloading it.
 
@@ -167,9 +188,14 @@ def _v2_projection(
         )
     assert call.tool is not None
     output = normalize_tool_output(raw)
-    schema = call.tool.output_schema
+    schema = contract.output_schema if contract is not None else call.tool.output_schema
+    renderer = (
+        contract.render_output
+        if contract is not None
+        else getattr(call.tool, "render_output", None)
+    )
     validate_tool_output(output, schema)
-    rendered = render_tool_output(output, getattr(call.tool, "render_output", None))
+    rendered = render_tool_output(output, renderer)
     result = ToolResult(
         content=rendered,
         summary=call.summary,
@@ -487,6 +513,7 @@ async def _execute_one(
         file_read_tracker=getattr(session, "file_read_tracker", None),
         emit=_report_progress,
         deps=getattr(session, "run_deps", None),
+        execution=getattr(agent, "execution_backend", None),
         filesystem=getattr(session, "filesystem", None),
         # Stable across resume: run_id is reused by resume_loop and call.id comes
         # from the persisted provider_view, so a re-executed tool sees the same key.
@@ -512,6 +539,67 @@ async def _execute_one(
         accepting_progress = False
 
 
+def _dispatch_execute(
+    agent: Any,
+    call: ResolvedCall,
+    tool: Any,
+    effective_input: dict[str, Any],
+    ctx: ToolContext,
+    signal: AbortContext,
+) -> Awaitable[Any]:
+    """Run the tool body through the agent's tool pipeline when it is active.
+
+    With no pipeline listeners registered this returns ``tool.execute(...)``
+    unchanged, so the default path is byte-identical.
+    """
+    pipeline = getattr(agent, "tool_pipeline", None)
+    has_listeners = getattr(pipeline, "has_listeners", None)
+    if pipeline is None or not callable(has_listeners) or not has_listeners():
+        return tool.execute(effective_input, ctx)
+
+    authorized_input = copy.deepcopy(effective_input)
+    authorized_ctx_fields = {
+        name: getattr(ctx, name, None)
+        for name in (
+            "cwd",
+            "session_id",
+            "run_id",
+            "session_store",
+            "file_read_tracker",
+            "emit",
+            "deps",
+            "filesystem",
+            "idempotency_key",
+        )
+    }
+    execution = ToolExecution(
+        tool_name=_tool_name(call),
+        tool_use_id=call.id,
+        input=copy.deepcopy(authorized_input),
+        ctx=ctx,
+        tool=tool,
+        signal=signal,
+    )
+
+    async def _terminal() -> Any:
+        # Authorization was decided for this exact tool/input/context. The
+        # post-authorization pipeline may wrap execution and replace its signal
+        # or result, but changing an authority-bearing operand must fail closed.
+        ctx_changed = execution.ctx is not ctx or any(
+            getattr(ctx, name, None) is not value for name, value in authorized_ctx_fields.items()
+        )
+        if execution.tool is not tool or execution.input != authorized_input or ctx_changed:
+            raise ToolExecutionError(
+                "tool pipeline attempted to mutate an authorization-sensitive "
+                "tool, input, or context after permission was granted"
+            )
+        if ctx is not None:
+            ctx.signal = execution.signal
+        return await tool.execute(authorized_input, ctx)
+
+    return pipeline.run(execution, _terminal)
+
+
 async def _execute_tool_attempts(
     call: ResolvedCall,
     decision: PermissionDecision,
@@ -526,6 +614,7 @@ async def _execute_tool_attempts(
     started: float,
 ) -> ToolExecutionOutcome:
     last_exc: Exception | None = None
+    v2_contract = _snapshot_v2_contract(tool)
     for attempt in range(max_attempts):
         if attempt > 0:
             throw_if_aborted(signal)
@@ -536,15 +625,20 @@ async def _execute_tool_attempts(
         try:
             assert tool is not None
             effective_input = _effective_input(call, decision)
-            coro = tool.execute(effective_input, ctx)
+            coro = _dispatch_execute(agent, call, tool, effective_input, ctx, signal)
             if result_timeout_ms is None:
                 raw_result = await coro
             else:
                 raw_result = await asyncio.wait_for(coro, timeout=result_timeout_ms / 1000.0)
             elapsed = int((time.perf_counter() - attempt_start) * 1000)
-            if _is_v2_tool(call):
+            if v2_contract is not None:
                 try:
-                    return _v2_projection(call, raw_result, duration_ms=elapsed)
+                    return _v2_projection(
+                        call,
+                        raw_result,
+                        duration_ms=elapsed,
+                        contract=v2_contract,
+                    )
                 except Exception as exc:
                     return _v2_contract_error(call, exc, elapsed)
             result = raw_result

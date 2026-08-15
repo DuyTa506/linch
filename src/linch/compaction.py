@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, cast, runtime_checkable
 
@@ -119,7 +120,7 @@ def apply_micro_compaction(
     keep_recent_turns: int,
     model: str | None = None,
 ) -> bool:
-    """Elide old tool results in ``session.provider_view`` in place.
+    """Elide old tool results in ``session.provider_view`` via a logged projection.
 
     Returns ``True`` and sets ``session.last_compaction_info`` (strategy
     ``"micro"``) when anything was elided; ``False`` leaves the session
@@ -127,11 +128,13 @@ def apply_micro_compaction(
     """
     resolved_model = _resolve_compaction_model(session, agent, model)
     tokens_before = _estimate_tokens(agent, session.provider_view, model=resolved_model)
-    new_view, n_elided = micro_compact(session.provider_view, keep_recent_turns=keep_recent_turns)
+    new_view, n_elided = micro_compact(
+        list(session.provider_view), keep_recent_turns=keep_recent_turns
+    )
     if n_elided == 0:
         return False
     messages_count = len(session.provider_view)
-    session.provider_view[:] = new_view
+    session.session_log.record_projection(new_view, reason="micro-compaction")
     session.last_compaction_info = {
         "type": "compaction",
         "messages_before": messages_count,
@@ -484,10 +487,7 @@ async def _run_compaction_impl(
         compacted = await strategy.compact(ctx, agent.provider)
     compacted = strip_response_chaining(compacted)
 
-    changed = compacted != snapshot
-
-    session.provider_view.clear()
-    session.provider_view.extend(compacted)
+    changed = session.session_log.record_projection(compacted, reason="compaction")
 
     session.last_compaction_info = {
         "type": "compaction",
@@ -568,7 +568,7 @@ async def maybe_compact(
             model=resolved_model,
         )
     except Exception:
-        # Micro-compaction already mutated provider_view in place above; if the
+        # Micro-compaction already recorded a provider-view projection above; if the
         # follow-up summarization now fails (and the caller degrades instead of
         # crashing, e.g. maybe_compact_resilient), the read tracker must still
         # be reset here or a file whose contents were just elided keeps passing
@@ -601,7 +601,7 @@ def _resolve_compaction_model(session: Any, agent: Any, model: str | None) -> st
 
 def _estimate_tokens(
     agent: Any,
-    messages: list[Message],
+    messages: Sequence[Message],
     *,
     model: str | None = None,
 ) -> int:

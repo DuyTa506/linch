@@ -5,7 +5,10 @@
 | Module | Responsibility |
 |--------|---------------|
 | `agent.py` | Neutral SDK configuration; tool-aware system-block assembly; `session()` and safe `fork_session()` factories. A bare agent has no implicit workspace tools or project-local store. |
-| `session.py` | Per-conversation state: `provider_view`, `full_history`, `run_deps`, `RunOptions` |
+| `session.py` | Per-conversation state: `session_log`, `run_deps`, `RunOptions`; `provider_view`/`full_history` are read-only projections of `session_log` |
+| `session_log.py` | The single append-only `SessionLog` + `MessageEntry`/`ProjectionEntry`; deep-copy projects the session-owned model-visible `provider_view` and audit `full_history` (per-request context is outside the log); compaction is a logged `record_projection` |
+| `kernel/` | Dependency-free IoC/effect kernel: `Context` (per-agent scope), `Disposable` (reversible effects), `EffectScope`, `EventBus` (emit/serial/waterfall). See [kernel.md](./kernel.md) |
+| `execution/` | Capability seam: `ExecutionBackend` protocol (`shell` + `fs`), `LocalExecutionBackend` (default), `RemoteExecutionBackend` (bundles supplied transports) |
 | `loop/` | Turn orchestration (`runner.py`), streaming + `ContextLengthError` recovery (`streaming.py`), `ProviderRequest` assembly (`request.py`), terminal event tails + gate evaluation (`terminals.py`), event persistence + checkpoint serialization (`checkpoint.py`) |
 | `types.py` | Shared dataclasses: `Message`, `ContentBlock`, `ProviderRequest`, `OutputSchema` |
 | `events.py` | All event dataclasses + round-trip serialization (`event_to_dict` / `event_from_dict`), including stream-only `ToolProgressEvent` |
@@ -23,7 +26,7 @@
 | `pricing.py` | `ModelPricing`, `_DEFAULT_PRICING`, `cost_usd()` for per-turn and cumulative cost events |
 | `evals/` | Scripted provider, eval case/result dataclasses, built-in scorers, `run_eval()` |
 | `providers/` | `BaseProvider`, `ProviderCapabilities`; implementations: `OpenAIChatCompletionsProvider` (generic OpenAI-compatible endpoint), `DeepSeekProvider` (native thinking, JSON-object output, `reasoning_content` round-trip), `OpenAIResponsesProvider` (stateful, native reasoning effort/summary), `AnthropicProvider` (adaptive/extended thinking with signature, prompt caching), `GeminiProvider`, `LlamaCppProvider`, `VLLMProvider`, `SGLangProvider`; `limiter.py` — `Limiter` protocol and the `provider_slot` gate core holds around every live provider call |
-| `tools/` | Tool protocol, `ToolContext`, `ToolRegistry`, `ToolResult`, `Citation`, built-in tools, execution backends |
+| `tools/` | Tool protocol, `ToolContext`, `ToolRegistry` (registration returns a `Disposable`), `ToolResult`, `Citation`, built-in tools, execution backends; `pipeline.py` — the open `tools/pre-execute → execute → post-execute` seam (`ToolPipeline`); `wrappers/` — `tools/execute` around-wrappers (metrics, timeout) |
 | `sessions/` | `SessionStore` protocol, `InMemorySessionStore`, `SqliteSessionStore`, Postgres store, provider-view snapshots, and portable safe-prefix session forking |
 | `mcp/` | MCP server connection → Linch tool adapters |
 | `skills/` | `SKILL.md`-based slash-commands with argument substitution |

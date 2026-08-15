@@ -19,6 +19,7 @@ from ..hooks import (
     SubagentStopContext,
 )
 from ..session import RunOptions, Session
+from ..session_log import SessionLog
 from ..types import SystemBlock, TextBlock
 from .types import AgentDefinition
 
@@ -257,8 +258,12 @@ async def run_subagent(args: RunSubagentArgs) -> RunSubagentResult:
         meta=child_record.meta,
         agent=agent,
         store=store,
-        provider_view=seed_view,
+        session_log=SessionLog.seed(historical=[], visible=seed_view),
     )
+    # A unified execution world is agent-scoped. Child sessions must see the
+    # same filesystem half as their parent so Bash and filesystem tools do not
+    # drift into different worlds merely because work moved to a subagent.
+    child_session.filesystem = getattr(args.parent_session, "filesystem", None)
     if args.fork:
         # Clone the parent's read-file tracker so the child skips re-reading files
         # the parent already loaded.

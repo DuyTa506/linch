@@ -12,7 +12,58 @@ and persisted wire formats are versioned separately via `linch.RUN_SCHEMA_VERSIO
   Tool Output V2. Environments pinned to jsonschema 3.x must update that pin
   before installing this release.
 
+### BREAKING / Migration
+
+- **Session construction and projections are migrating.** `Session` now uses
+  one `session_log=` source of truth. The deprecated direct-construction
+  `provider_view=`/`full_history=` compatibility shim remains for migration;
+  new callers should use `SessionLog.seed(historical=..., visible=...)`.
+  `session.provider_view` and `session.full_history` are deep-copied, read-only
+  snapshots. Append with `await session.append(...)` or
+  `session.session_log.append(...)`, and record compaction with
+  `session.session_log.record_projection(...)` rather than mutating either
+  projection.
+- **Projection durability has a defined boundary.** `MessageEntry` and
+  `ProjectionEntry` are in-memory log entries; session stores persist the
+  message/projection snapshots needed to reconstruct the views, not a second
+  projection journal. Per-request context-builder output remains ephemeral and
+  is outside the session log.
+- **Agent context ownership is explicit.** `Agent(context=...)` adopts and
+  disposes the supplied scope during `close()`. Hosts retaining a parent scope
+  should pass a child from `parent.scope(...)`.
+- **Execution backends are unified.** New integrations should pass an
+  `ExecutionBackend` exposing coherent `.shell` and `.fs` transports (use
+  `LocalExecutionBackend` or `RemoteExecutionBackend`). A shell-only
+  `execution_backend` remains a deprecated compatibility path and emits
+  `DeprecationWarning`; it has no filesystem transport unless `filesystem=` is
+  explicit. Migrate before enabling `FeatureFlags(filesystem=True)`.
+- **Execution confinement and cwd are declarative.** Non-empty confinement
+  metadata records the embedder's claim; Linch does not verify that boundary.
+  The effective session cwd is sent to the shell transport, and a custom world
+  must map it consistently with filesystem paths.
+- **Pipeline authorization ordering is fixed.** `ToolPipeline` runs after
+  canonical validation and permission. Its listeners must not rewrite the
+  authorization-sensitive tool, input, or decision; use `PreToolUse` for a
+  transform that is validated and authorized again.
+- **Tool registration semantics are exact.** `ToolRegistry.register` now
+  rejects duplicate names; use `replace` for a reversible hot swap. Await the
+  returned `Disposable` (`await disposer.dispose()`), which removes only its
+  identity-owned registration. A successful disposer is single-use; failed
+  teardown remains retryable.
+- **Required persisted data is strict on read.** Unknown or malformed required
+  events fail loading. Only producer-declared `ignorable` events may be read as
+  `IgnorableEvent` and skipped.
+
 ### Added
+
+- New public kernel and capability names: `Context`, `Disposable`,
+  `ExecutionBackend`, `ShellBackend`, `LocalExecutionBackend`,
+  `RemoteExecutionBackend`, `ToolExecution`, `ToolPipeline`, and `SessionLog`.
+  `IgnorableEvent` and `is_ignorable_event` are public for forward-compatible
+  event readers. `ToolPipeline` exposes the
+  `tools/pre-execute → tools/execute → tools/post-execute` lifecycle; active
+  pipeline listeners and execution worlds contribute stable durable resume
+  identity.
 
 - **Incremental durability ledger.** `Agent(durability=...)`,
   `DurabilityOptions`, and `DurabilityOptions.strict_v1()` opt into a durable
