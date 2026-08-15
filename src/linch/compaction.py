@@ -127,20 +127,22 @@ def apply_micro_compaction(
     untouched.
     """
     resolved_model = _resolve_compaction_model(session, agent, model)
-    tokens_before = _estimate_tokens(agent, session.provider_view, model=resolved_model)
-    new_view, n_elided = micro_compact(
-        list(session.provider_view), keep_recent_turns=keep_recent_turns
-    )
+    # One snapshot for the whole pre-compaction pass: each read is a detached
+    # deep copy, so re-reading the projection per use is O(history) each time.
+    current_view = list(session.provider_view)
+    tokens_before = _estimate_tokens(agent, current_view, model=resolved_model)
+    new_view, n_elided = micro_compact(current_view, keep_recent_turns=keep_recent_turns)
     if n_elided == 0:
         return False
-    messages_count = len(session.provider_view)
+    messages_count = len(current_view)
     session.session_log.record_projection(new_view, reason="micro-compaction")
     session.last_compaction_info = {
         "type": "compaction",
         "messages_before": messages_count,
         "messages_after": messages_count,
         "tokens_before": tokens_before,
-        "tokens_after": _estimate_tokens(agent, session.provider_view, model=resolved_model),
+        # ``new_view`` is what the projection now holds — no second snapshot.
+        "tokens_after": _estimate_tokens(agent, new_view, model=resolved_model),
         "strategy": "micro",
         "model": resolved_model,
     }
@@ -453,8 +455,11 @@ async def _run_compaction_impl(
     no-op strategy before persisting a derived-view snapshot.
     """
     resolved_model = _resolve_compaction_model(session, agent, model)
-    messages_before = len(session.provider_view)
-    tokens_before = _estimate_tokens(agent, session.provider_view, model=resolved_model)
+    # Single pre-compaction snapshot reused by the count, the estimate, and the
+    # strategy context below (each projection read deep-copies the history).
+    snapshot = list(session.provider_view)
+    messages_before = len(snapshot)
+    tokens_before = _estimate_tokens(agent, snapshot, model=resolved_model)
 
     dispatcher = _compaction_hook_dispatcher(agent)
     run_id = getattr(session, "active_run_id", None) or "unknown"
@@ -474,7 +479,6 @@ async def _run_compaction_impl(
             ),
         )
 
-    snapshot = list(session.provider_view)
     ctx = CompactionContext(
         messages=snapshot,
         model=resolved_model,
@@ -492,9 +496,11 @@ async def _run_compaction_impl(
     session.last_compaction_info = {
         "type": "compaction",
         "messages_before": messages_before,
-        "messages_after": len(session.provider_view),
+        "messages_after": len(compacted),
         "tokens_before": tokens_before,
-        "tokens_after": _estimate_tokens(agent, session.provider_view, model=resolved_model),
+        # ``compacted`` is what the projection now holds, so estimate from it
+        # rather than taking another whole-history snapshot.
+        "tokens_after": _estimate_tokens(agent, compacted, model=resolved_model),
         "strategy": strategy.id,
         "model": resolved_model,
     }

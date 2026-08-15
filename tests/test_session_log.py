@@ -295,3 +295,51 @@ def test_session_provider_projection_is_logged() -> None:
             logged.extend(entry.replacement)
     for message in log.provider_view:
         assert message in logged
+
+
+def test_counts_and_last_visible_are_cheap_accessors() -> None:
+    """Count/last-message reads must not copy the whole conversation.
+
+    ``provider_view``/``full_history`` return detached deep copies, so callers
+    that only need a length or the newest message would otherwise pay an O(n)
+    deepcopy of the entire history on every check.
+    """
+    log = SessionLog()
+    log.append_many([_msg("1"), _msg("2")])
+    log.append(_msg("audit"), visible=False)
+
+    assert log.visible_count == 2
+    assert log.history_count == 3
+    assert log.last_visible() == _msg("2")
+
+    import linch.session_log as mod
+
+    calls = 0
+    real = mod.deepcopy
+
+    def counting(obj):
+        nonlocal calls
+        calls += 1
+        return real(obj)
+
+    mod.deepcopy = counting
+    try:
+        _ = log.visible_count
+        _ = log.history_count
+        assert calls == 0, "counts must not deepcopy"
+        _ = log.last_visible()
+        assert calls == 1, "last_visible copies only the one message it returns"
+    finally:
+        mod.deepcopy = real
+
+
+def test_last_visible_is_detached_and_empty_safe() -> None:
+    log = SessionLog()
+    assert log.last_visible() is None
+    assert log.visible_count == 0
+
+    log.append(_msg("only"))
+    first = log.last_visible()
+    assert first is not None
+    first.content[0].text = "mutated"  # type: ignore[union-attr]
+    assert log.last_visible() == _msg("only")  # authoritative state untouched

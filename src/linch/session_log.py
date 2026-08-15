@@ -125,6 +125,30 @@ class SessionLog:
         """
         return self.provider_view
 
+    @property
+    def visible_count(self) -> int:
+        """How many messages the provider view holds.
+
+        A count needs no snapshot, so this avoids the whole-history deep copy
+        that reading :attr:`provider_view` for its length would cost.
+        """
+        return len(self._derived)
+
+    @property
+    def history_count(self) -> int:
+        """How many messages the full history holds (no snapshot taken)."""
+        return len(self._full)
+
+    def last_visible(self) -> Message | None:
+        """The newest provider-view message as a detached copy, or ``None``.
+
+        Copies only the returned message rather than the whole projection, for
+        callers that just inspect the latest turn.
+        """
+        if not self._derived:
+            return None
+        return deepcopy(self._derived[-1])
+
     @classmethod
     def seed(
         cls,

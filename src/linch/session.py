@@ -188,7 +188,15 @@ class Session:
 
     @property
     def message_count(self) -> int:
-        return len(self.provider_view)
+        return self.session_log.visible_count
+
+    def last_provider_message(self) -> Message | None:
+        """The newest model-visible message, or ``None`` when the view is empty.
+
+        Prefer this over ``session.provider_view[-1]``: it copies one message
+        instead of snapshotting the whole conversation.
+        """
+        return self.session_log.last_visible()
 
     def run(self, prompt: str, opts: RunOptions | None = None) -> AsyncIterator[Event]:
         if self._lifecycle_state != _OPEN or self._closed:

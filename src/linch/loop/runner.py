@@ -487,7 +487,7 @@ async def _maybe_save_provider_snapshot(session: Session) -> None:
 
     snapshot = ProviderViewSnapshot(
         provider_view=list(session.provider_view),
-        covers_seq=getattr(session, "_last_seq", len(session.full_history)),
+        covers_seq=getattr(session, "_last_seq", session.session_log.history_count),
     )
     try:
         await saver(session.id, snapshot)
@@ -1620,10 +1620,8 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
     def _last_user_message_is_feedback(feedback: str) -> bool:
         from ..skills.system_reminder import wrap_in_system_reminder
 
-        if not session.provider_view:
-            return False
-        message = session.provider_view[-1]
-        if message.role != "user":
+        message = session.last_provider_message()
+        if message is None or message.role != "user":
             return False
         expected = wrap_in_system_reminder(feedback)
         return any(
@@ -1764,10 +1762,10 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 and not resumed_assistant
                 and turn_index == checkpoint.turn_index
                 and checkpoint.phase == "provider_pending"
-                and session.provider_view
-                and session.provider_view[-1].role == "assistant"
+                and (_pending_last := session.last_provider_message()) is not None
+                and _pending_last.role == "assistant"
             ):
-                last_assistant = session.provider_view[-1]
+                last_assistant = _pending_last
                 checkpoint.assistant_message = last_assistant
                 checkpoint.assistant_stop_reason = (
                     "tool_use"
