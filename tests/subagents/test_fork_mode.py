@@ -47,9 +47,11 @@ async def _parent_with_context() -> tuple[Any, RecordingProvider, Any]:
         cwd=".",
     )
     parent = await agent.session()
-    parent.provider_view.append(Message(role="user", content=[TextBlock(text="parent ask")]))
-    parent.provider_view.append(
-        Message(role="assistant", content=[TextBlock(text="parent answer")])
+    await parent.append(
+        [
+            Message(role="user", content=[TextBlock(text="parent ask")]),
+            Message(role="assistant", content=[TextBlock(text="parent answer")]),
+        ]
     )
     parent.file_read_tracker.add("/x.py")
     return agent, provider, parent

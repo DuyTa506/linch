@@ -236,10 +236,19 @@ class BashTool:
     scope: ToolScope = "exec"
     parallel: bool = False
 
-    def __init__(self, *, backend: Any = None) -> None:
+    def __init__(self, *, backend: Any = None, execution: Any = None) -> None:
         from .execution import LocalBackend
 
-        self._backend: Any = backend if backend is not None else LocalBackend()
+        if backend is not None and execution is not None:
+            raise ValueError("pass either backend= or execution= to BashTool, not both")
+        # An ExecutionBackend (capability seam) sources the shell half; an
+        # explicit legacy ``backend`` remains available for direct use.
+        if execution is not None:
+            self._backend: Any = execution.shell
+        elif backend is not None:
+            self._backend = backend
+        else:
+            self._backend = LocalBackend()
 
     def validate(self, raw: dict[str, object]) -> dict[str, object]:
         timeout = _to_int(raw.get("timeout_ms", 120000), 120000)

@@ -21,6 +21,74 @@ class _Provider:
         yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
 
 
+class _ContractShell:
+    async def run(self, command: str, **kwargs: Any) -> Any:
+        raise AssertionError("backend must not execute in this test")
+
+
+class _ContractFs:
+    resume_policy_id = "test.contract-fs"
+    resume_policy_version = "1"
+
+    @property
+    def resume_policy_config(self) -> dict[str, str]:
+        return {"root": "contract-fixture"}
+
+    async def read(self, path: str, **kwargs: Any) -> str:
+        raise AssertionError("backend must not execute in this test")
+
+    async def write(self, path: str, content: str) -> None:
+        raise AssertionError("backend must not execute in this test")
+
+    async def ls(self, prefix: str = "") -> list[str]:
+        raise AssertionError("backend must not execute in this test")
+
+    async def edit(self, path: str, old: str, new: str, **kwargs: Any) -> int:
+        raise AssertionError("backend must not execute in this test")
+
+    async def exists(self, path: str) -> bool:
+        raise AssertionError("backend must not execute in this test")
+
+    async def delete(self, path: str) -> None:
+        raise AssertionError("backend must not execute in this test")
+
+
+class _OpaqueWorld:
+    def __init__(self) -> None:
+        self.shell = _ContractShell()
+        self.fs = _ContractFs()
+
+
+class _IdOnlyWorld(_OpaqueWorld):
+    resume_policy_id = "custom-world"
+
+
+class _StableTransport:
+    resume_policy_id = "custom-transport"
+    resume_policy_version = "1"
+
+    def __init__(self, endpoint: str) -> None:
+        self.endpoint = endpoint
+
+    @property
+    def resume_policy_config(self) -> dict[str, str]:
+        return {"endpoint": self.endpoint}
+
+
+class _StableWorld:
+    resume_policy_id = "custom-world"
+    resume_policy_version = "1"
+
+    def __init__(self, endpoint: str) -> None:
+        self.endpoint = endpoint
+        self.shell = _StableTransport(endpoint)
+        self.fs = _StableTransport(endpoint)
+
+    @property
+    def resume_policy_config(self) -> dict[str, str]:
+        return {"endpoint": self.endpoint}
+
+
 def _agent(
     *,
     run_store: Any,
@@ -32,7 +100,23 @@ def _agent(
 ):
     from linch import Agent
     from linch.config import FeatureFlags
+    from linch.execution import RemoteExecutionBackend
     from linch.tools.registry import empty_tools
+
+    if execution_backend is not None and not hasattr(execution_backend, "shell"):
+        # DockerBackend is the legacy shell transport; tests that exercise its
+        # durable identity still use it as the shell half of a coherent world.
+        try:
+            shell_config = getattr(execution_backend, "resume_policy_config", None)
+        except Exception:
+            shell_config = None
+        execution_backend = RemoteExecutionBackend(
+            shell=execution_backend,
+            fs=_ContractFs(),
+            resume_policy_id=getattr(execution_backend, "resume_policy_id", "test.shell"),
+            resume_policy_version=getattr(execution_backend, "resume_policy_version", "1"),
+            resume_policy_config={"shell": shell_config},
+        )
 
     return Agent(
         model="test-model",
@@ -264,7 +348,7 @@ async def test_durable_docker_environment_requires_fingerprint_key() -> None:
         tools=workspace_tools(),
         execution_backend=DockerBackend(env={"STAGE": "dev"}),
     )
-    with pytest.raises(ConfigError, match="resume_fingerprint_key"):
+    with pytest.raises(ConfigError, match="shell backend.*resume_policy"):
         _ = [event async for event in (await agent.session()).run("go")]
 
 
@@ -274,19 +358,13 @@ async def test_slots_only_custom_bash_backend_requires_stable_identity() -> None
     from linch.sessions import InMemorySessionStore
     from linch.tools import workspace_tools
 
-    class OpaqueBackend:
-        __slots__ = ()
-
-        async def run(self, command: str, **kwargs: Any) -> Any:
-            raise AssertionError("backend must not execute in this test")
-
     agent = _agent(
         run_store=InMemoryRunStore(),
         session_store=InMemorySessionStore(),
         tools=workspace_tools(),
-        execution_backend=OpaqueBackend(),
+        execution_backend=_OpaqueWorld(),
     )
-    with pytest.raises(ConfigError, match="custom Bash execution backend.*resume_policy_id"):
+    with pytest.raises(ConfigError, match="custom execution world.*resume_policy_id"):
         _ = [event async for event in (await agent.session()).run("go")]
 
 
@@ -296,20 +374,13 @@ async def test_custom_bash_backend_requires_explicit_stable_config() -> None:
     from linch.sessions import InMemorySessionStore
     from linch.tools import workspace_tools
 
-    class IdOnlyBackend:
-        __slots__ = ()
-        resume_policy_id = "custom-shell"
-
-        async def run(self, command: str, **kwargs: Any) -> Any:
-            raise AssertionError("backend must not execute in this test")
-
     agent = _agent(
         run_store=InMemoryRunStore(),
         session_store=InMemorySessionStore(),
         tools=workspace_tools(),
-        execution_backend=IdOnlyBackend(),
+        execution_backend=_IdOnlyWorld(),
     )
-    with pytest.raises(ConfigError, match="non-None backend.resume_policy_config"):
+    with pytest.raises(ConfigError, match="custom execution world.*resume_policy_config"):
         _ = [event async for event in (await agent.session()).run("go")]
 
 
@@ -319,35 +390,20 @@ async def test_custom_bash_backend_config_change_denies_resume() -> None:
     from linch.sessions import InMemorySessionStore
     from linch.tools import workspace_tools
 
-    class StableBackend:
-        __slots__ = ("endpoint",)
-        resume_policy_id = "custom-shell"
-        resume_policy_version = "1"
-
-        def __init__(self, endpoint: str) -> None:
-            self.endpoint = endpoint
-
-        @property
-        def resume_policy_config(self) -> dict[str, str]:
-            return {"endpoint": self.endpoint}
-
-        async def run(self, command: str, **kwargs: Any) -> Any:
-            raise AssertionError("backend must not execute in this test")
-
     run_store = InMemoryRunStore()
     session_store = InMemorySessionStore()
     first = _agent(
         run_store=run_store,
         session_store=session_store,
         tools=workspace_tools(),
-        execution_backend=StableBackend("sandbox-a"),
+        execution_backend=_StableWorld("sandbox-a"),
     )
     run_id = await _interrupt_after_first_event(await first.session(id="s1"))
     changed = _agent(
         run_store=run_store,
         session_store=session_store,
         tools=workspace_tools(),
-        execution_backend=StableBackend("sandbox-b"),
+        execution_backend=_StableWorld("sandbox-b"),
     )
     with pytest.raises(ConfigError, match="endpoint"):
         _ = [event async for event in (await changed.session(id="s1")).resume(run_id)]

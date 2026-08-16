@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import math
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Literal, TypeAlias, cast
 
@@ -369,6 +371,136 @@ class PromptCacheAdvisoryEvent:
     type: Literal["prompt_cache_advisory"] = "prompt_cache_advisory"
 
 
+_KNOWN_EVENT_TYPES = frozenset(
+    {
+        "assistant",
+        "background_worker",
+        "budget",
+        "compaction",
+        "context_build",
+        "error",
+        "hook",
+        "loop_guard",
+        "model_fallback",
+        "partial_assistant",
+        "permission_request",
+        "prompt_cache_advisory",
+        "result",
+        "schedule",
+        "skill_completed",
+        "skill_invoked",
+        "skills_loaded",
+        "subagent_event",
+        "system",
+        "tool_call_end",
+        "tool_call_start",
+        "tool_progress",
+        "usage",
+        "user",
+        "verification",
+        "workflow",
+    }
+)
+
+
+def _validate_ignorable_event_envelope(
+    raw: dict[str, Any], *, original_type: str | None = None
+) -> str:
+    _validate_ignorable_json_value(raw, path="event")
+    typ = raw.get("type")
+    if not isinstance(typ, str) or not typ:
+        raise ValueError("ignorable event type must be a non-empty string")
+    if raw.get("ignorable") is not True:
+        raise ValueError("unknown event must declare ignorable as true")
+    if typ in _KNOWN_EVENT_TYPES:
+        raise ValueError(f"known event type cannot be wrapped as ignorable: {typ!r}")
+    if original_type is not None and original_type != typ:
+        raise ValueError(
+            f"ignorable event original_type {original_type!r} does not match raw type {typ!r}"
+        )
+    return typ
+
+
+def _validate_ignorable_json_value(value: Any, *, path: str, seen: set[int] | None = None) -> None:
+    """Reject values that cannot survive an ignorable event round trip.
+
+    Ignorable events are intentionally opaque, so preserving arbitrary Python
+    objects would make their forwarding behavior depend on the in-memory
+    process.  Keep the envelope to the same strict JSON value domain used by
+    the durable codec: object keys must be strings, floats must be finite, and
+    recursive containers are rejected.
+    """
+
+    if value is None or isinstance(value, str | bool | int):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"ignorable event {path} must not contain NaN or Infinity")
+        return
+    if not isinstance(value, list | dict):
+        raise ValueError(
+            f"ignorable event {path} must be strictly JSON-serializable; got {type(value).__name__}"
+        )
+
+    active = seen if seen is not None else set()
+    identity = id(value)
+    if identity in active:
+        raise ValueError(f"ignorable event {path} must not contain reference cycles")
+    active.add(identity)
+    try:
+        if isinstance(value, list):
+            for index, item in enumerate(value):
+                _validate_ignorable_json_value(item, path=f"{path}[{index}]", seen=active)
+        else:
+            for key, item in value.items():
+                if not isinstance(key, str):
+                    raise ValueError(f"ignorable event {path} must contain only string object keys")
+                _validate_ignorable_json_value(item, path=f"{path}.{key}", seen=active)
+    finally:
+        active.remove(identity)
+
+
+def _copy_ignorable_event_envelope(
+    raw: dict[str, Any], *, original_type: str | None = None
+) -> dict[str, Any]:
+    """Validate and isolate an opaque event envelope at an API boundary."""
+
+    _validate_ignorable_event_envelope(raw, original_type=original_type)
+    # Validation proves deepcopy cannot encounter an unsupported value or a
+    # cycle.  Returning a fresh tree prevents both the producer's input and a
+    # serialized output from sharing nested state with the sentinel.
+    return deepcopy(raw)
+
+
+@dataclass(frozen=True, slots=True)
+class IgnorableEvent:
+    """A durable event of a type this build does not know, kept for pass-through.
+
+    When a run log written by a newer schema carries an event whose envelope has
+    ``ignorable: true``, decoding preserves it verbatim as this sentinel instead
+    of aborting the replay. It re-serializes to its original ``raw`` payload, so
+    telemetry and forwarding carry it forward unchanged. An unknown event without
+    the flag is still rejected — the flag is the producer's promise it is safe to
+    skip. Ports dsh's "required-on-read unless ignorable" session-log rule.
+    """
+
+    original_type: str
+    raw: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "raw",
+            _copy_ignorable_event_envelope(self.raw, original_type=self.original_type),
+        )
+
+    @property
+    def type(self) -> str:
+        """Return the original wire type for generic consumers such as reports."""
+
+        return self.original_type
+
+
 Event: TypeAlias = (
     SystemEvent
     | UserEvent
@@ -396,6 +528,7 @@ Event: TypeAlias = (
     | ScheduleEvent
     | WorkflowEvent
     | PromptCacheAdvisoryEvent
+    | IgnorableEvent
 )
 
 
@@ -433,6 +566,10 @@ def is_permission_request_event(e: Event) -> bool:
 
 def is_usage_event(e: Event) -> bool:
     return e.type == "usage"  # type: ignore[comparison-overlap]
+
+
+def is_ignorable_event(e: Event) -> bool:
+    return isinstance(e, IgnorableEvent)
 
 
 def is_budget_event(e: Event) -> bool:
@@ -662,6 +799,9 @@ def tool_output_from_dict(raw: dict[str, Any]) -> CanonicalToolOutput:
 
 
 def event_to_dict(event: Event) -> dict[str, Any]:
+    if isinstance(event, IgnorableEvent):
+        # Re-serialize verbatim so a pass-through event round-trips unchanged.
+        return _copy_ignorable_event_envelope(event.raw, original_type=event.original_type)
     if isinstance(event, SystemEvent):
         return {
             "type": event.type,
@@ -875,8 +1015,40 @@ def event_to_dict(event: Event) -> dict[str, Any]:
     raise ValueError(f"unknown event type: {getattr(event, 'type', '<missing>')}")
 
 
+_USER_EVENT_SUBTYPES = ("prompt", "tool_result", "alignment", "notification")
+_PROMPT_CACHE_ADVISORY_REASONS = ("tool_set_changed", "model_changed")
+_RESULT_SUBTYPES = ("success", "error", "aborted", "interrupted")
+_STOP_REASONS = (
+    "end_turn",
+    "tool_use",
+    "max_tokens",
+    "stop_sequence",
+    "refusal",
+    "error",
+    "interrupted",
+)
+
+
+def _required_discriminator(
+    raw: dict[str, Any], field: str, allowed: tuple[str, ...], default: str
+) -> str:
+    """Decode a discriminator without silently changing future semantics."""
+
+    value = raw.get(field, default)
+    if value not in allowed:
+        raise ValueError(f"unknown {field} {value!r}; expected one of {allowed!r}")
+    return value
+
+
 def event_from_dict(raw: dict[str, Any]) -> Event:
+    if not isinstance(raw, dict):
+        raise ValueError("event must be an object")
     typ = raw.get("type")
+    # Checked before known-type dispatch: the ignorable branch below is reached
+    # only after every known type has returned, so a known type carrying the
+    # flag would otherwise decode as itself and bypass envelope validation.
+    if raw.get("ignorable") is True and typ in _KNOWN_EVENT_TYPES:
+        raise ValueError(f"known event type cannot be wrapped as ignorable: {typ!r}")
     if typ == "system":
         return SystemEvent(
             session_id=str(raw.get("session_id", "")),
@@ -888,17 +1060,16 @@ def event_from_dict(raw: dict[str, Any]) -> Event:
             subtype="init",
         )
     if typ == "user":
-        subtype = raw.get("subtype", "prompt")
-        if subtype not in {"prompt", "tool_result", "alignment", "notification"}:
-            subtype = "prompt"
+        subtype = _required_discriminator(raw, "subtype", _USER_EVENT_SUBTYPES, "prompt")
         return UserEvent(
             message=message_from_dict(dict(raw.get("message", {}))),
-            subtype=subtype,
+            subtype=cast(Any, subtype),
         )
     if typ == "assistant":
+        stop_reason = _required_discriminator(raw, "stop_reason", _STOP_REASONS, "error")
         return AssistantEvent(
             message=message_from_dict(dict(raw.get("message", {}))),
-            stop_reason=raw.get("stop_reason", "error"),
+            stop_reason=cast(StopReason, stop_reason),
         )
     if typ == "partial_assistant":
         return PartialAssistantEvent(delta=dict(raw.get("delta", {})))
@@ -960,7 +1131,9 @@ def event_from_dict(raw: dict[str, Any]) -> Event:
         _max_tokens = raw.get("max_tokens")
         _max_cost = raw.get("max_cost_usd")
         return BudgetEvent(
-            kind="exceeded" if raw.get("kind") == "exceeded" else "warning",
+            kind=cast(
+                Any, _required_discriminator(raw, "kind", ("warning", "exceeded"), "warning")
+            ),
             spent_tokens=int(raw.get("spent_tokens", 0) or 0),
             spent_usd=float(raw.get("spent_usd", 0.0) or 0.0),
             max_tokens=int(_max_tokens) if isinstance(_max_tokens, int) else None,
@@ -1002,8 +1175,10 @@ def event_from_dict(raw: dict[str, Any]) -> Event:
         se_raw = raw.get("structured_error")
         _total_cost = raw.get("total_cost_usd")
         return ResultEvent(
-            subtype=raw.get("subtype", "error"),
-            stop_reason=raw.get("stop_reason", "error"),
+            subtype=cast(Any, _required_discriminator(raw, "subtype", _RESULT_SUBTYPES, "error")),
+            stop_reason=cast(
+                StopReason, _required_discriminator(raw, "stop_reason", _STOP_REASONS, "error")
+            ),
             total_usage=usage_from_dict(dict(raw.get("total_usage", {}))),
             duration_ms=int(raw.get("duration_ms", 0) or 0),
             final_text=raw.get("final_text") if isinstance(raw.get("final_text"), str) else None,
@@ -1069,19 +1244,15 @@ def event_from_dict(raw: dict[str, Any]) -> Event:
             reason=str(raw.get("reason", "")),
         )
     if typ == "prompt_cache_advisory":
-        _reason = raw.get("reason")
-        if _reason not in ("tool_set_changed", "model_changed"):
-            _reason = "tool_set_changed"
+        _reason = _required_discriminator(
+            raw, "reason", _PROMPT_CACHE_ADVISORY_REASONS, "tool_set_changed"
+        )
         return PromptCacheAdvisoryEvent(
             reason=cast(Any, _reason),
             detail=str(raw.get("detail", "")),
         )
     if typ == "workflow":
-        _kind = raw.get("kind")
-        if _kind not in WORKFLOW_EVENT_KINDS:
-            # Forward tolerance: a kind written by a newer linch degrades to a
-            # plain progress marker rather than failing the whole resume.
-            _kind = "phase"
+        _kind = _required_discriminator(raw, "kind", WORKFLOW_EVENT_KINDS, "phase")
         return WorkflowEvent(
             kind=cast(Any, _kind),
             title=str(raw.get("title", "")),
@@ -1102,4 +1273,9 @@ def event_from_dict(raw: dict[str, Any]) -> Event:
                 else None
             ),
         )
+    if raw.get("ignorable") is True:
+        # Forward-compat: only a well-formed newer-schema event whose producer
+        # explicitly promised it is safe to skip may survive as a sentinel.
+        original_type = _validate_ignorable_event_envelope(raw)
+        return IgnorableEvent(original_type=original_type, raw=raw)
     raise ValueError(f"unknown event type: {typ!r}")

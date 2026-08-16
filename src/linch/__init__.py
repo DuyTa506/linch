@@ -121,6 +121,7 @@ if TYPE_CHECKING:
         ErrorEvent,
         Event,
         HookEventRecord,
+        IgnorableEvent,
         LoopGuardEvent,
         ModelFallbackEvent,
         PartialAssistantEvent,
@@ -143,10 +144,17 @@ if TYPE_CHECKING:
         is_budget_event,
         is_context_build_event,
         is_hook_event,
+        is_ignorable_event,
         is_loop_guard_event,
         is_subagent_event,
         is_verification_event,
         is_workflow_event,
+    )
+    from .execution import (
+        ExecutionBackend,
+        LocalExecutionBackend,
+        RemoteExecutionBackend,
+        ShellBackend,
     )
     from .filesystem import (
         CompositeFileBackend,
@@ -191,6 +199,7 @@ if TYPE_CHECKING:
         UserPromptSubmitContext,
         normalize_hooks,
     )
+    from .kernel import Context, Disposable
     from .loop import apply_provider_capabilities
     from .loop_guard import (
         LoopGuard,
@@ -314,6 +323,7 @@ if TYPE_CHECKING:
     )
     from .scheduler import ToolBatchingStrategy
     from .session import RunOptions, Session
+    from .session_log import SessionLog
     from .sessions import (
         InMemorySessionStore,
         ProviderViewSnapshot,
@@ -365,7 +375,9 @@ if TYPE_CHECKING:
         tool,
     )
     from .tools.isolation import IsolationBackend, TempDirIsolation
+    from .tools.pipeline import ToolExecution, ToolPipeline
     from .tools.registry import empty_tools, tools_from_defaults, workspace_tools
+    from .tools.wrappers import metrics_wrapper, timeout_wrapper
     from .types import (
         ContentBlock,
         ImageBlock,
@@ -414,6 +426,7 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
         "DetailedCompaction",
     ),
     ".config": ("FeatureFlags", "SystemPromptConfig", "SystemPromptSection"),
+    ".kernel": ("Context", "Disposable"),
     ".context": (
         "ContextBudget",
         "ContextBuilder",
@@ -464,6 +477,12 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
         "ToolExecutionError",
         "ToolTimeoutError",
     ),
+    ".execution": (
+        "ExecutionBackend",
+        "LocalExecutionBackend",
+        "RemoteExecutionBackend",
+        "ShellBackend",
+    ),
     ".events": (
         "AssistantEvent",
         "BudgetEvent",
@@ -472,6 +491,7 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
         "ErrorEvent",
         "Event",
         "HookEventRecord",
+        "IgnorableEvent",
         "LoopGuardEvent",
         "ModelFallbackEvent",
         "PartialAssistantEvent",
@@ -494,6 +514,7 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
         "is_budget_event",
         "is_context_build_event",
         "is_hook_event",
+        "is_ignorable_event",
         "is_loop_guard_event",
         "is_subagent_event",
         "is_verification_event",
@@ -688,6 +709,7 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
     ),
     ".scheduler": ("ToolBatchingStrategy",),
     ".session": ("RunOptions", "Session"),
+    ".session_log": ("SessionLog",),
     ".sessions": (
         "InMemorySessionStore",
         "ProviderViewSnapshot",
@@ -739,6 +761,8 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
         "tool",
     ),
     ".tools.isolation": ("IsolationBackend", "TempDirIsolation"),
+    ".tools.pipeline": ("ToolExecution", "ToolPipeline"),
+    ".tools.wrappers": ("metrics_wrapper", "timeout_wrapper"),
     ".tools.registry": ("empty_tools", "tools_from_defaults", "workspace_tools"),
     ".types": (
         "ContentBlock",
@@ -812,6 +836,18 @@ __all__ = [
     "Agent",
     "LinchError",
     "AgentOptions",
+    "Context",
+    "Disposable",
+    "IgnorableEvent",
+    "is_ignorable_event",
+    "ToolExecution",
+    "ToolPipeline",
+    "metrics_wrapper",
+    "timeout_wrapper",
+    "ExecutionBackend",
+    "LocalExecutionBackend",
+    "RemoteExecutionBackend",
+    "ShellBackend",
     "DurabilityOptions",
     "InboxDelivery",
     "RunBudget",
@@ -960,6 +996,7 @@ __all__ = [
     "SubagentEvent",
     "SystemEvent",
     "Session",
+    "SessionLog",
     "SqliteMemoryStore",
     "TieredMemoryStore",
     "TextBlock",
