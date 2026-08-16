@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import inspect
 from collections.abc import Iterable
 from typing import Any
+
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
 
 from linch.errors import ConfigError
 
@@ -29,6 +33,36 @@ def _check_tool_shape(tool: Any) -> None:
     for method in _REQUIRED_METHODS:
         if not callable(getattr(tool, method, None)):
             raise ConfigError(f"tool {name!r} is missing a callable {method!r} method")
+    output_schema = getattr(tool, "output_schema", None)
+    renderer = getattr(tool, "render_output", None)
+    renderer_id = getattr(tool, "renderer_id", None)
+    renderer_version = getattr(tool, "renderer_version", None)
+    if output_schema is None:
+        if renderer is not None or renderer_id is not None or renderer_version is not None:
+            raise ConfigError(f"tool {name!r} configures output rendering without an output_schema")
+        return
+    if not isinstance(output_schema, dict):
+        raise ConfigError(f"tool {name!r}.output_schema must be a JSON Schema object")
+    try:
+        Draft202012Validator.check_schema(output_schema)
+    except SchemaError as exc:
+        raise ConfigError(f"tool {name!r}.output_schema is invalid: {exc.message}") from exc
+    if renderer is None:
+        if renderer_id is not None or renderer_version is not None:
+            raise ConfigError(
+                f"tool {name!r} sets renderer identity without a custom render_output"
+            )
+        return
+    if (
+        not callable(renderer)
+        or inspect.iscoroutinefunction(renderer)
+        or inspect.iscoroutinefunction(type(renderer).__call__)
+    ):
+        raise ConfigError(f"tool {name!r}.render_output must be a synchronous callable")
+    if not isinstance(renderer_id, str) or not renderer_id.strip():
+        raise ConfigError(f"tool {name!r}.renderer_id must be a non-empty stable string")
+    if not isinstance(renderer_version, str) or not renderer_version.strip():
+        raise ConfigError(f"tool {name!r}.renderer_version must be a non-empty stable string")
 
 
 class ToolRegistry:

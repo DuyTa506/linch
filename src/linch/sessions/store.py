@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from linch.durability import InboxDelivery
 from linch.sessions.tasks import CreateTaskInput, Task, TaskPatch
 from linch.types import Message, message_from_dict, message_to_dict
 
@@ -120,3 +121,11 @@ class ProviderViewSnapshotStore(Protocol):
     async def save_provider_snapshot(self, id: str, snapshot: ProviderViewSnapshot) -> None: ...
 
     async def load_provider_snapshot(self, id: str) -> ProviderViewSnapshot | None: ...
+
+
+class SessionInboxStore(Protocol):
+    """Optional capability for exactly-once insertion of next-turn messages."""
+
+    async def enqueue_inbox(self, id: str, delivery: InboxDelivery) -> None: ...
+
+    async def commit_inbox(self, id: str, *, after_seq: int) -> list[StoredMessage]: ...

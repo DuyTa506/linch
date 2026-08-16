@@ -44,14 +44,14 @@ sequenceDiagram
     participant P as Parent loop
     participant ST as SubagentTool
     participant W as Worker (child session)
-    participant N as pending_notifications (in-memory)
+    participant N as next-turn inbox
     participant RS as RunStore audit log
 
     P->>ST: call (run_in_background=true)
     ST->>W: asyncio.create_task(_bg_run)
     ST-->>P: ack — turn continues, not blocked
     W->>W: run to completion (retain=true → stays in agent._sessions)
-    W->>N: append <task-notification> (in-memory)
+    W->>N: Session.notify(<task-notification>)
     W->>RS: append origin-attributed audit event (when configured)
     Note over P,N: top of the next turn
     P->>N: _drain_pending_notifications
@@ -65,15 +65,15 @@ sequenceDiagram
 
 - `SubagentTool` always passes `retain=True` so the child session stays live in `agent._sessions` after the run ends.
 - `session.workers: dict[str, WorkerHandle]` indexes every spawned worker by `worker_id`.
-- **`run_in_background=True`** on `SubagentTool`: spawns `asyncio.create_task(_bg_run())` and returns an acknowledgement immediately. On completion, the task appends a `<task-notification>` XML `Message` to `session.pending_notifications`. That notification is in-memory only. When a `RunStore` is configured, Linch also records an origin-attributed `BackgroundWorkerEvent` audit record, but it does not turn the detached result into a restart-recoverable queue.
-- The loop drains `session.pending_notifications` at the top of each turn (`_drain_pending_notifications`), yielding each notification as a `UserEvent` before `ContextInjectionHook.build_context()` runs, so the model sees task-completion content before the next provider call.
+- **`run_in_background=True`** on `SubagentTool`: spawns `asyncio.create_task(_bg_run())` and returns an acknowledgement immediately. On completion, the task calls `Session.notify()` with a stable delivery ID before recording its `BackgroundWorkerEvent`. The default notification is in-memory; durable inbox mode persists an already-enqueued completion across restart.
+- The loop drains the selected next-turn channel at the top of each new turn, yielding each notification as a `UserEvent` before `ContextInjectionHook.build_context()` runs, so the model sees task-completion content before the next provider call.
 - `SubagentContinueTool` resolves a worker by id or display name via `resolve_worker`, then calls `continue_subagent()`, which re-drives the live child session using the full prior `provider_view`.
 - `TaskStopTool` cancels the background `asyncio.Task` and signals abort on the child session; the `WorkerHandle` remains in `session.workers` so the worker can be continued later.
 - `session.abort()` and `agent.close()` both cancel all running background worker tasks. `agent.close()` additionally clears `agent._sessions`.
-- A process restart cannot resume an active detached task or recreate its
-  in-memory completion notification. Hosts that need durable worker delivery
-  must persist the work and result in an application-owned queue or workflow;
-  the audit event is evidence of state, not the result payload delivery path.
+- A process restart cannot resume an active detached task. Durable inbox mode
+  preserves only completions that reached `Session.notify()`; hosts that need
+  durable execution must persist the work in an application-owned queue or
+  workflow. Provider/tool execution remains at-least-once.
 
 ### Run budgets (`budget.py`)
 

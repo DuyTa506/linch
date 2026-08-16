@@ -11,11 +11,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from ...storage._executor import SqliteExecutor
-from .schedule import Schedule
+from .schedule import Schedule, ScheduleOccurrence, occurrence_id
+from .store import _validate_occurrence_claim_args
 
 
 def _init_schema(conn: sqlite3.Connection) -> None:
@@ -31,6 +34,34 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             created_at REAL,
             metadata TEXT NOT NULL
         )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS schedule_occurrences (
+            seq INTEGER PRIMARY KEY AUTOINCREMENT,
+            id TEXT NOT NULL UNIQUE,
+            schedule_id TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            scheduled_for REAL NOT NULL,
+            metadata TEXT NOT NULL,
+            materialized_at REAL NOT NULL,
+            lease_token TEXT UNIQUE,
+            lease_owner TEXT,
+            lease_expires_at REAL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_schedule_occurrences_delivery
+        ON schedule_occurrences(scheduled_for, seq)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_schedule_occurrences_lease_expiry
+        ON schedule_occurrences(lease_expires_at)
         """
     )
 
@@ -87,6 +118,33 @@ class SqliteScheduleStore:
 
     async def claim_due(self, now: float) -> list[Schedule]:
         return await self._exec.run(lambda conn: _claim_due(conn, now))
+
+    async def claim_due_occurrences(
+        self,
+        now: float,
+        *,
+        owner: str,
+        lease_s: float,
+        limit: int | None = None,
+    ) -> list[ScheduleOccurrence]:
+        _validate_occurrence_claim_args(owner=owner, lease_s=lease_s, now=now, limit=limit)
+        return await self._exec.run(
+            lambda conn: _claim_due_occurrences(
+                conn,
+                now,
+                owner=owner,
+                lease_s=lease_s,
+                limit=limit,
+            )
+        )
+
+    async def ack_occurrences(self, occurrences: Sequence[ScheduleOccurrence]) -> None:
+        if occurrences:
+            await self._exec.run(lambda conn: _ack_occurrences(conn, occurrences))
+
+    async def release_occurrences(self, occurrences: Sequence[ScheduleOccurrence]) -> None:
+        if occurrences:
+            await self._exec.run(lambda conn: _release_occurrences(conn, occurrences))
 
     async def aclose(self) -> None:
         await self._exec.close()
@@ -175,3 +233,136 @@ def _fetch_due(conn: sqlite3.Connection, now: float) -> list[dict[str, Any]]:
         (now,),
     )
     return [dict(row) for row in cursor.fetchall()]
+
+
+def _claim_due_occurrences(
+    conn: sqlite3.Connection,
+    now: float,
+    *,
+    owner: str,
+    lease_s: float,
+    limit: int | None,
+) -> list[ScheduleOccurrence]:
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        # First commit-worthy action is the occurrence outbox write.  It shares
+        # this transaction with advancing next_run, eliminating the historical
+        # crash window between those two operations.
+        for row in _fetch_due(conn, now):
+            schedule = _row_to_schedule(row)
+            assert schedule.next_run is not None
+            scheduled_for = schedule.next_run
+            stable_id = occurrence_id(schedule.id, scheduled_for)
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO schedule_occurrences(
+                    id, schedule_id, payload, scheduled_for, metadata, materialized_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    stable_id,
+                    schedule.id,
+                    schedule.payload,
+                    scheduled_for,
+                    json.dumps(schedule.metadata, sort_keys=True),
+                    now,
+                ),
+            )
+            conn.execute(
+                "UPDATE schedules SET next_run = ? WHERE id = ?",
+                (schedule.compute_next_run(now), schedule.id),
+            )
+
+        rows = _fetch_available_occurrences(conn, now, limit=limit)
+        claimed: list[ScheduleOccurrence] = []
+        for row in rows:
+            token = uuid4().hex
+            expires_at = now + lease_s
+            conn.execute(
+                """
+                UPDATE schedule_occurrences
+                SET lease_token = ?, lease_owner = ?, lease_expires_at = ?
+                WHERE id = ?
+                """,
+                (token, owner, expires_at, str(row["id"])),
+            )
+            claimed.append(
+                _row_to_occurrence(
+                    row,
+                    token=token,
+                    owner=owner,
+                    expires_at=expires_at,
+                )
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return claimed
+
+
+def _fetch_available_occurrences(
+    conn: sqlite3.Connection, now: float, *, limit: int | None
+) -> list[dict[str, Any]]:
+    sql = """
+        SELECT * FROM schedule_occurrences
+        WHERE lease_token IS NULL
+           OR lease_expires_at IS NULL
+           OR lease_expires_at <= ?
+        ORDER BY scheduled_for ASC, seq ASC
+    """
+    params: list[Any] = [now]
+    if limit is not None:
+        sql += " LIMIT ?"
+        params.append(limit)
+    cursor = conn.execute(sql, params)
+    return [dict(row) for row in cursor.fetchall()]
+
+
+def _row_to_occurrence(
+    row: dict[str, Any], *, token: str, owner: str, expires_at: float
+) -> ScheduleOccurrence:
+    return ScheduleOccurrence(
+        id=str(row["id"]),
+        schedule_id=str(row["schedule_id"]),
+        payload=str(row["payload"]),
+        scheduled_for=float(row["scheduled_for"]),
+        metadata=dict(json.loads(row["metadata"] or "{}")),
+        materialized_at=float(row["materialized_at"]),
+        token=token,
+        owner=owner,
+        expires_at=expires_at,
+    )
+
+
+def _ack_occurrences(conn: sqlite3.Connection, occurrences: Sequence[ScheduleOccurrence]) -> None:
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.executemany(
+            "DELETE FROM schedule_occurrences WHERE id = ? AND lease_token = ?",
+            [(occurrence.id, occurrence.token) for occurrence in occurrences],
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def _release_occurrences(
+    conn: sqlite3.Connection, occurrences: Sequence[ScheduleOccurrence]
+) -> None:
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.executemany(
+            """
+            UPDATE schedule_occurrences
+            SET lease_token = NULL, lease_owner = NULL, lease_expires_at = NULL
+            WHERE id = ? AND lease_token = ?
+            """,
+            [(occurrence.id, occurrence.token) for occurrence in occurrences],
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise

@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
+from uuid import uuid4
 
 from .abort import AbortContext
 from .errors import ConfigError
@@ -15,6 +16,17 @@ from .types import InvokedSkillRecord, Message, SkillOverlay, Usage
 if TYPE_CHECKING:
     from .agent import Agent
     from .tools import ToolRegistry
+
+
+_OPEN = "open"
+_QUIESCING = "quiescing"
+_CLOSED = "closed"
+
+
+def _set_event() -> asyncio.Event:
+    event = asyncio.Event()
+    event.set()
+    return event
 
 
 @dataclass(slots=True)
@@ -74,11 +86,19 @@ class Session:
     full_history: list[Message] = field(default_factory=list)
     _active: bool = False
     _closed: bool = False
+    _lifecycle_state: str = _OPEN
+    _close_task: asyncio.Task[None] | None = None
+    _idle: asyncio.Event = field(default_factory=_set_event)
+    """Set only when the run iterator and all of its finalizers are finished."""
     active_run_id: str | None = None
     _active_gen: Any = None
     """The async generator driving the in-flight ``run``/``resume`` iterator.
     Captured so a forced ``aclose`` can finalize an abandoned run generator
     (running its ``finally``) instead of leaving ``_active`` stuck true."""
+    _active_inner: Any = None
+    """The underlying loop iterator, retained for never-started generator cleanup."""
+    _active_started: bool = False
+    """Whether ``_iterate`` has entered its body for the admitted run."""
     _event_journal: Any = None
     """Per-run ``RunEventBuffer`` (loop/checkpoint.py) that batches observational
     events between flush points. Set by the runner at run start, cleared in its
@@ -157,34 +177,46 @@ class Session:
         return len(self.provider_view)
 
     def run(self, prompt: str, opts: RunOptions | None = None) -> AsyncIterator[Event]:
-        if self._closed:
+        if self._lifecycle_state != _OPEN or self._closed:
             raise ConfigError("session is closed")
+        if getattr(self.agent, "_lifecycle_state", _OPEN) != _OPEN:
+            raise ConfigError("agent is closing")
         if self._active:
             raise ConfigError("Session already has an active run")
         self._active = True
+        self._active_started = False
+        self._idle.clear()
         self.interrupt_requested = False
         self._abort_controller = AbortContext()
 
         from .loop import run_loop
 
-        it = self._iterate(run_loop(self, prompt, opts or RunOptions()), "")
+        inner = run_loop(self, prompt, opts or RunOptions())
+        self._active_inner = inner
+        it = self._iterate(inner, "")
         self._active_gen = it
         return it
 
     def resume(self, run_id: str, opts: RunOptions | None = None) -> AsyncIterator[Event]:
-        if self._closed:
+        if self._lifecycle_state != _OPEN or self._closed:
             raise ConfigError("session is closed")
+        if getattr(self.agent, "_lifecycle_state", _OPEN) != _OPEN:
+            raise ConfigError("agent is closing")
         if self._active:
             raise ConfigError("Session already has an active run")
         if self.agent.run_store is None:
             raise ConfigError("Agent has no run_store configured")
         self._active = True
+        self._active_started = False
+        self._idle.clear()
         self.interrupt_requested = False
         self._abort_controller = AbortContext()
 
         from .loop import resume_loop
 
-        it = self._iterate(resume_loop(self, run_id, opts or RunOptions()), run_id)
+        inner = resume_loop(self, run_id, opts or RunOptions())
+        self._active_inner = inner
+        it = self._iterate(inner, run_id)
         self._active_gen = it
         return it
 
@@ -195,6 +227,7 @@ class Session:
     ) -> AsyncIterator[Event]:
         from .hooks import EventEmitContext, HookDispatcher, HookEvent
 
+        self._active_started = True
         hooks = HookDispatcher(getattr(self.agent, "hooks", None))
         try:
             async for event in inner:
@@ -211,11 +244,20 @@ class Session:
                         ),
                     )
         finally:
-            await _aclose_quietly(inner)
-            self._active_gen = None
-            self._reject_pending_alignment(ConfigError("run ended before alignment was applied"))
-            self._active = False
-            self.active_run_id = None
+            try:
+                await _aclose_generator(inner)
+            finally:
+                self._finish_run()
+
+    def _finish_run(self) -> None:
+        """Release the single-run admission token and publish true idleness."""
+        self._active_gen = None
+        self._active_inner = None
+        self._active_started = False
+        self._reject_pending_alignment(ConfigError("run ended before alignment was applied"))
+        self._active = False
+        self.active_run_id = None
+        self._idle.set()
 
     async def align(
         self,
@@ -224,6 +266,8 @@ class Session:
         images: list[dict[str, str]] | None = None,
         timeout_s: float | None = None,
     ) -> None:
+        if self._lifecycle_state != _OPEN:
+            raise ConfigError("session is closed")
         if not self._active:
             raise ConfigError("Session has no active run to align")
         if not isinstance(prompt, str) or prompt == "":
@@ -301,34 +345,87 @@ class Session:
             force: Whether to abort an active run and drain its work instead of
                 raising. Required to release a session whose run has not ended.
         """
-        if self._closed:
+        if self._lifecycle_state == _CLOSED or self._closed:
             return
         if self._active and not force:
             raise ConfigError(
                 "session has an active run; call aclose(force=True) to abort and release it"
             )
+        self._lifecycle_state = _QUIESCING
+        task = self._close_task
+        if task is None or task.done():
+            # A failed teardown deliberately leaves the session quiescing. A
+            # later aclose() starts a fresh attempt and retries the unfinished
+            # portion instead of publishing CLOSED prematurely.
+            task = asyncio.create_task(self._aclose_impl(force=force))
+            task.add_done_callback(_consume_task_exception)
+            self._close_task = task
+        await asyncio.shield(task)
+
+    async def _aclose_impl(self, *, force: bool) -> None:
         if self._active:
+            if not force:
+                raise ConfigError(
+                    "session has an active run; call aclose(force=True) to abort and release it"
+                )
             self.abort()
-            # Finalize an abandoned run generator so its finally runs (resetting
-            # ``_active``). If a consumer is actively iterating it in another task
-            # aclose() raises RuntimeError — swallow it; the abort signal ends the
-            # run and the consumer's own iteration runs the finally.
-            gen = self._active_gen
-            if gen is not None:
-                await _aclose_quietly(gen)
+            await self._finalize_active_run()
         await self._drain_owned_work()
         # Recursively release retained child sessions owned by this session
         # (snapshot ids first — release mutates the agent's registry).
-        child_ids = [
-            cid
-            for handle in self.workers.values()
-            if isinstance((cid := getattr(handle, "child_session_id", None)), str) and cid
-        ]
-        self.workers.clear()
-        for child_id in child_ids:
+        for worker_id, handle in list(self.workers.items()):
+            child_id = getattr(handle, "child_session_id", None)
+            if not isinstance(child_id, str) or not child_id:
+                continue
             await self.agent.release_session(child_id, force=True)
+            # Remove each ownership edge only after that child successfully
+            # closes. A failing child teardown therefore remains discoverable
+            # and retryable on the next parent aclose().
+            self.workers.pop(worker_id, None)
+        self.workers.clear()
+        self._lifecycle_state = _CLOSED
         self._closed = True
         self.agent._unregister_session(self.id, self)
+
+    async def _finalize_active_run(self) -> None:
+        """Abort an admitted run and wait until its complete unwind is observable.
+
+        Async generators that have never been iterated do not execute their body
+        or ``finally`` when closed. Handle that case explicitly so the admission
+        token and idle barrier cannot remain stuck. If another task is currently
+        advancing the generator, the abort signal lets that task unwind and this
+        method waits for its finalizer rather than closing shared resources early.
+        """
+        gen = self._active_gen
+        if gen is None:
+            self._finish_run()
+            return
+
+        if not self._active_started:
+            # Neither async-generator body has started, so closing them cannot
+            # run ``_iterate``'s finally. Only publish idle after both closes
+            # succeed; a teardown error remains retryable.
+            await _aclose_generator(gen)
+            inner = self._active_inner
+            if inner is not None:
+                await _aclose_generator(inner)
+            self._finish_run()
+            return
+
+        if getattr(gen, "ag_running", False):
+            await self._idle.wait()
+            return
+        try:
+            await _aclose_generator(gen)
+        except RuntimeError:
+            # ``ag_running`` can change between the check and aclose(). Only
+            # reinterpret the error as that race while the run is still active;
+            # genuine teardown RuntimeErrors remain visible to the caller.
+            if not self._active:
+                raise
+            await self._idle.wait()
+            return
+        await self._idle.wait()
 
     async def __aenter__(self) -> Session:
         return self
@@ -339,8 +436,54 @@ class Session:
     def mark_compaction_used(self) -> None:
         self.compaction_retry_used_this_turn = True
 
+    async def notify(
+        self,
+        message: Message,
+        delivery_id: str | None = None,
+        source: str = "host",
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
+        """Queue a user message for insertion at the next turn boundary.
+
+        The default path preserves the legacy in-process notification queue.
+        With durable inbox enabled, the delivery is written to the optional
+        session-store capability and deduplicated by its stable delivery id.
+        """
+        if self._lifecycle_state == _CLOSED or self._closed:
+            raise ConfigError("session is closed")
+        if not isinstance(message, Message) or message.role != "user":
+            raise ConfigError("Session.notify() requires a user Message")
+        stable_id = delivery_id or uuid4().hex
+        durability = getattr(self.agent, "durability", None)
+        if not getattr(durability, "durable_inbox", False):
+            self.pending_notifications.append(message)
+            return stable_id
+
+        enqueue = getattr(self.store, "enqueue_inbox", None)
+        commit = getattr(self.store, "commit_inbox", None)
+        if not callable(enqueue) or not callable(commit):
+            raise ConfigError(
+                "durable_inbox requires a SessionStore implementing "
+                "enqueue_inbox() and commit_inbox()"
+            )
+        from .durability import InboxDelivery
+
+        await cast(Any, enqueue)(
+            self.id,
+            InboxDelivery(
+                delivery_id=stable_id,
+                message=message,
+                source=source,
+                metadata=dict(metadata or {}),
+            ),
+        )
+        return stable_id
+
     async def append(self, messages: list[Message]) -> None:
-        if self._closed:
+        # An admitted run may still need to durably append its terminal state
+        # while the session is quiescing. Only the final CLOSED transition makes
+        # history immutable through this live object.
+        if self._lifecycle_state == _CLOSED or self._closed:
             raise ConfigError("session is closed")
         stored = await self.store.append_messages(self.id, messages)
         self._track_seqs(stored)
@@ -360,19 +503,21 @@ class Session:
                     self._last_seq = max(self._last_seq, seq)
 
     async def update_meta(self, patch: dict[str, object]) -> None:
-        if self._closed:
+        if self._lifecycle_state == _CLOSED or self._closed:
             raise ConfigError("session is closed")
         updated = await self.store.update_meta(self.id, patch)
         self.meta.update(updated.meta)
 
 
-async def _aclose_quietly(gen: Any) -> None:
-    """Finalize an async generator, swallowing the RuntimeError raised when it is
-    already running in another task and any error from its own teardown."""
+async def _aclose_generator(gen: Any) -> None:
+    """Finalize a duck-typed async iterator without hiding teardown failures."""
     aclose = getattr(gen, "aclose", None)
     if aclose is None:
         return
-    try:
-        await aclose()
-    except Exception:
-        pass
+    await aclose()
+
+
+def _consume_task_exception(task: asyncio.Task[None]) -> None:
+    """Avoid an un-retrieved exception if a shielded caller is cancelled."""
+    if not task.cancelled():
+        task.exception()

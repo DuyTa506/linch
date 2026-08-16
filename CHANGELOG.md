@@ -4,6 +4,48 @@ Notable changes to `linch`. Versioning follows the contract in
 [docs/versioning.md](docs/versioning.md): the public API is exactly `linch.__all__`,
 and persisted wire formats are versioned separately via `linch.RUN_SCHEMA_VERSION`.
 
+## Unreleased
+
+### Dependencies
+
+- `linch` now installs `jsonschema>=4,<5` as a core dependency for Canonical
+  Tool Output V2. Environments pinned to jsonschema 3.x must update that pin
+  before installing this release.
+
+### Added
+
+- **Incremental durability ledger.** `Agent(durability=...)`,
+  `DurabilityOptions`, and `DurabilityOptions.strict_v1()` opt into a durable
+  next-turn inbox and exact pending model input. Public `InboxDelivery` and the
+  optional `SessionInboxStore` support delivery-ID deduplication through the
+  new `Session.notify()` method when `durable_inbox=True`. `ModelInputSnapshot`,
+  `ModelInputSnapshotError`, `ModelInputSnapshotStore`,
+  `create_model_input_snapshot()`, and `decode_model_input_snapshot()` expose
+  crash-safe provider-request replay. In-memory implementations preserve the
+  same semantics only within one process; SQLite stores survive restarts, and
+  Postgres implements the session inbox capability. Each enabled mode fails
+  closed when a configured custom store lacks its corresponding optional inbox
+  or snapshot protocol.
+- **Leased coordination delivery.** Public `ClaimableMailbox`, `MailboxClaim`,
+  `LeasedScheduleStore`, and `ScheduleOccurrence` add claim/ack/release leases
+  with stable delivery IDs. The built-in in-memory and SQLite mailbox/schedule
+  stores support the new protocols while the legacy `send()`/`drain()` and
+  `claim_due()` paths remain available.
+- **Canonical Tool Output V2.** Public `JsonValue`, `ToolOutput`,
+  `ToolOutputError`, and `ToolAttachment` types support schema-validated JSON
+  tool results. `@tool(...)` accepts `output_schema`, `render_output`,
+  `renderer_id`, and `renderer_version`; `ToolCallEndEvent.tool_output` carries
+  the optional canonical value while all legacy result projections remain.
+  Validation uses JSON Schema Draft 2020-12.
+- Transactional `Agent`/`Session` shutdown stops new admissions, waits for live
+  provider/tool/iterator work, coalesces concurrent close calls, and permits a
+  later close to retry unfinished teardown after an error.
+- Background worker audit events carry their origin. By default, detached
+  result notifications remain process-local. With `durable_inbox=True` and a
+  capable session store, a completion that reaches `Session.notify()` is
+  durably queued and deduplicated for the next turn. Linch still does not
+  reconstruct a detached task that was in flight when the process stopped.
+
 ## 2.0.0 — 2026-08-13
 
 Linch 2.0 is a breaking release for the SDK runtime defaults. It keeps Linch
@@ -19,33 +61,87 @@ not the SDK's implicit identity.
   `create_deep_agent(...)` for the opt-in deep-agent preset. `default_tools()`
   remains a compatibility alias for the workspace preset but is no longer an
   implicit `Agent` default.
+- **A bare `Agent` no longer writes conversation state under the working
+  directory.** Its implicit session store changed from
+  `.linch/sessions.db` to `InMemorySessionStore`, so history no longer survives
+  a process restart unless the host supplies `session_store=` explicitly. Use
+  `SqliteSessionStore` or another persistent session store in services that
+  require restart durability.
+- **Read-before-write is now opt-in on a bare `Agent`.** The
+  `read_before_write` default changed from `True` to `False` with the neutral
+  runtime defaults. Set `read_before_write=True` for custom/workspace tool
+  configurations that still require the virtual-filesystem edit-after-read
+  guard; `create_deep_agent()` enables it for its workspace preset.
+- **The deep-agent factory is bounded by default.**
+  `create_deep_agent()` now selects `profile="balanced"`, which caps the shared
+  agent/subagent tree at 64 turns and 1,000,000 tokens. Select
+  `profile="unbounded"` only when the embedding service supplies equivalent
+  lifetime and cost controls.
 - **Permission input is canonical before approval.** Pre-tool transformations
   are validated and permission-checked again. The old approval callback
   `updatedInput` response is rejected; mutate in `PreToolUse` instead.
 - **Provider stream boundary is strict.** Provider adapters must emit Linch's
   normalized event vocabulary and required fields; raw vendor objects and
   malformed events are not accepted by the loop.
+- **Durable Docker runs with environment forwarding require a fingerprint
+  secret.** For a durable run that offers a Docker-backed `Bash` tool, a
+  non-empty `DockerBackend.env` or `DockerBackend.forward_env` now requires
+  `resume_fingerprint_key` as `bytes` with at least 16 bytes. Linch uses the key
+  to HMAC environment values into the run contract without persisting the
+  values themselves. Supply the same protected key on every host that may
+  resume the run; configurations without Docker environment values are
+  unaffected.
 
 ### Added
 
 - `workspace_tools()` and explicit deep-agent profiles (`DeepAgentProfile` /
   `DEEP_AGENT_PROFILES`) for callers that want a ready software-workspace
-  catalog without making it an SDK default.
+  catalog without making it an SDK default. The new built-in verification
+  subagent is intentionally read-only and does not offer Bash; prompt
+  instructions alone cannot enforce that boundary.
 - `ToolContext.report_progress()` and `ToolProgressEvent`, a best-effort,
   observational progress channel that never enters provider history or the
   durable run event log.
 - `RunContract`, canonical fingerprint helpers, and
-  `RunContractMismatchError` for fail-closed durable resume checks. Legacy runs
-  without a contract require `RunOptions(allow_legacy_resume=True)` for an
-  explicit migration override; new durable runs are persisted and compared by
-  the runtime automatically.
+  `RunContractMismatchError` for fail-closed durable-run checks. Verification
+  runs when a durable run is created as well as when it resumes. Custom
+  callbacks and policy-bearing hooks require a stable `resume_policy_id`;
+  custom Bash backends require both stable identity and non-`None`, JSON-safe
+  policy configuration. Unverifiable runs are rejected before persistence.
+  Legacy runs without a contract require
+  `RunOptions(allow_legacy_resume=True)` for an explicit migration override.
 - Portable session forking through the public `Agent.fork_session(...)`
   surface. Forks copy a validated history prefix and metadata, not live work
   or arbitrary application state.
 - Provider-agnostic compaction/snapshot recovery and concurrency-safe SQLite /
-  Postgres storage allocation. Background worker audit events carry their
-  origin, but detached result notifications are still process-local; durable
-  delivery belongs to the embedding application.
+  Postgres storage allocation. In 2.0.0, background worker audit events carried
+  their origin, but detached result notifications remained process-local and
+  durable delivery belonged to the embedding application. The opt-in ledger
+  described under Unreleased adds durable delivery after enqueue, not recovery
+  of a worker that was still running when its process stopped.
+
+### Fixed
+
+- A duck-typed abort signal whose `wait()` completed spuriously could cancel a
+  live permission callback. Linch now waits until the signal reports an actual
+  abort.
+- Closing or abandoning a serial or parallel tool event stream now cancels and
+  joins every tool task it started instead of allowing detached execution to
+  leak past the stream lifetime.
+- Durable run-contract JSON normalization now rejects recursive/deep values and
+  non-string or colliding mapping keys instead of recursing indefinitely or
+  silently merging distinct authority configuration.
+- A context hook can no longer re-widen the per-turn offered-tool boundary;
+  the resolved request is intersected with the current turn's allowed tools.
+- SQLite run failure records now isolate checkpoint/meta values consistently,
+  and session task-ID allocation resumes above existing rows under concurrent
+  creation instead of reusing hard-coded counters.
+- Model-produced terminal-tool batches raise `ProviderError`, and successful
+  stop acknowledgements are recorded as non-error tool results.
+- Compaction retries preserve the selected fallback model, active
+  checkpointable hooks clear stale state they no longer own, legacy non-list
+  error metadata is retained when a new failure is appended, and provider
+  `stop_reason` values must be strings from the normalized vocabulary.
 
 See [migration-2.0.md](docs/migration-2.0.md) for examples and the complete
 upgrade checklist.

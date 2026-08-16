@@ -11,7 +11,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 from uuid import UUID, uuid4
 
 from .events import Event, event_from_dict, event_to_dict, usage_from_dict, usage_to_dict
@@ -19,6 +19,9 @@ from .sessions.memory import now_iso
 from .storage._executor import SqliteExecutor
 from .types import (
     Message,
+    OutputSchema,
+    ProviderRequest,
+    SystemBlock,
     ToolResultBlock,
     ToolUseBlock,
     Usage,
@@ -39,6 +42,11 @@ SCHEMA_VERSION = 1
 # execution inputs that must stay stable when that checkpoint is resumed.
 RUN_CONTRACT_SCHEMA_VERSION = 1
 RUN_CONTRACT_META_KEY = "run_contract"
+
+# Model input snapshots have their own codec version because their compatibility
+# requirement is stricter than the best-effort checkpoint/event readers.  A
+# pending provider request must either decode exactly or fail closed.
+MODEL_INPUT_CODEC_VERSION = 1
 
 # "suspended" is a workflow parked at a wf.interrupt; distinct from
 # "waiting_permission", which belongs to the tool-permission flow.
@@ -98,6 +106,14 @@ class RunCheckpoint:
     independently installed extensions can share one durable checkpoint.  A
     checkpoint written before this field existed restores as an empty mapping.
     """
+    provider_attempt: int = 0
+    """1-based provider dispatch attempt for an exact model-input snapshot.
+
+    Zero is the legacy/default value and is omitted from the checkpoint wire
+    shape so runs without exact-input durability keep their existing payload.
+    """
+    model_input_snapshot_id: str | None = None
+    """Snapshot referenced by a ``provider_pending`` checkpoint, when enabled."""
 
 
 @dataclass(slots=True)
@@ -116,6 +132,28 @@ class StoredRunEvent:
     seq: int
     appended_at: str
     event: Event
+
+
+@dataclass(frozen=True, slots=True)
+class ModelInputSnapshot:
+    """Immutable encoded provider request captured immediately before dispatch.
+
+    ``request_json`` is canonical JSON rather than a mutable ``ProviderRequest``
+    graph.  Use :func:`decode_model_input_snapshot` to integrity-check it and
+    recreate a request with the current process's live abort signal.
+    """
+
+    id: str
+    run_id: str
+    provider_attempt: int
+    codec_version: int
+    request_json: str
+    integrity_hash: str
+    created_at: str
+
+
+class ModelInputSnapshotError(ValueError):
+    """Raised when an exact model-input snapshot cannot be trusted or decoded."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,6 +258,23 @@ class RunEventBatchStore(Protocol):
     """
 
     async def append_events(self, run_id: str, events: list[Event]) -> list[int]: ...
+
+
+class ModelInputSnapshotStore(Protocol):
+    """Optional run-store capability for exact pending provider requests."""
+
+    async def save(
+        self,
+        run_id: str,
+        provider_attempt: int,
+        request: ProviderRequest,
+    ) -> ModelInputSnapshot: ...
+
+    async def load(self, snapshot_id: str) -> ModelInputSnapshot | None: ...
+
+    async def delete(self, snapshot_id: str) -> None: ...
+
+    async def prune(self, run_id: str, keep_ids: Sequence[str] = ()) -> int: ...
 
 
 _JSON_SAFE_MAX_DEPTH = 100
@@ -328,6 +383,384 @@ def canonical_json(value: Any) -> str:
         allow_nan=False,
         sort_keys=True,
         separators=(",", ":"),
+    )
+
+
+_MODEL_INPUT_REQUEST_FIELDS = frozenset(
+    {
+        "model",
+        "system",
+        "tools",
+        "messages",
+        "signal",
+        "max_output_tokens",
+        "temperature",
+        "stop_sequences",
+        "max_retries",
+        "reasoning",
+        "cache_prompt",
+        "cache_ttl",
+        "thinking",
+        "effort",
+        "output_schema",
+        "tool_choice",
+        "stream_partials",
+    }
+)
+_MODEL_INPUT_PAYLOAD_FIELDS = _MODEL_INPUT_REQUEST_FIELDS - {"signal"}
+
+
+def _strict_model_json(
+    value: Any,
+    *,
+    path: str = "$",
+    seen: frozenset[int] = frozenset(),
+    depth: int = 0,
+) -> Any:
+    """Normalize a JSON value without lossy persistence fallbacks."""
+
+    if value is None or isinstance(value, str | bool | int):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise TypeError(f"{path} contains a non-finite float")
+        return value
+    if depth >= _JSON_SAFE_MAX_DEPTH:
+        raise TypeError(f"{path} exceeds maximum nesting depth {_JSON_SAFE_MAX_DEPTH}")
+    if isinstance(value, Mapping):
+        if id(value) in seen:
+            raise TypeError(f"{path} contains a recursive value")
+        nested_seen = seen | {id(value)}
+        out: dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError(f"{path} mapping key must be str, got {type(key).__name__}")
+            out[key] = _strict_model_json(
+                item,
+                path=f"{path}.{key}",
+                seen=nested_seen,
+                depth=depth + 1,
+            )
+        return out
+    if isinstance(value, list):
+        if id(value) in seen:
+            raise TypeError(f"{path} contains a recursive value")
+        nested_seen = seen | {id(value)}
+        return [
+            _strict_model_json(
+                item,
+                path=f"{path}[{index}]",
+                seen=nested_seen,
+                depth=depth + 1,
+            )
+            for index, item in enumerate(value)
+        ]
+    raise TypeError(f"{path} contains non-JSON value of type {type(value).__name__}")
+
+
+def _output_schema_to_snapshot(schema: OutputSchema | None) -> dict[str, Any] | None:
+    if schema is None:
+        return None
+    if not isinstance(schema, OutputSchema):
+        raise TypeError("ProviderRequest.output_schema must be OutputSchema or None")
+    return {
+        "name": schema.name,
+        "schema": schema.schema,
+        "strict": schema.strict,
+        "description": schema.description,
+    }
+
+
+def _provider_request_payload(request: ProviderRequest) -> dict[str, Any]:
+    if not isinstance(request, ProviderRequest):
+        raise TypeError("request must be a ProviderRequest")
+    actual_fields = {item.name for item in fields(ProviderRequest)}
+    if actual_fields != _MODEL_INPUT_REQUEST_FIELDS:
+        missing = sorted(actual_fields - _MODEL_INPUT_REQUEST_FIELDS)
+        stale = sorted(_MODEL_INPUT_REQUEST_FIELDS - actual_fields)
+        raise ModelInputSnapshotError(
+            "model-input codec does not cover the current ProviderRequest fields "
+            f"(unencoded={missing}, removed={stale})"
+        )
+    if not isinstance(request.model, str) or not request.model:
+        raise TypeError("ProviderRequest.model must be a non-empty string")
+    if not isinstance(request.system, list) or not all(
+        isinstance(block, SystemBlock) for block in request.system
+    ):
+        raise TypeError("ProviderRequest.system must be a list of SystemBlock")
+    if not isinstance(request.tools, list) or not all(
+        isinstance(schema, Mapping) for schema in request.tools
+    ):
+        raise TypeError("ProviderRequest.tools must be a list of mappings")
+    if not isinstance(request.messages, list) or not all(
+        isinstance(message, Message) for message in request.messages
+    ):
+        raise TypeError("ProviderRequest.messages must be a list of Message")
+
+    payload = {
+        "model": request.model,
+        "system": [
+            {"type": block.type, "text": block.text, "cacheable": block.cacheable}
+            for block in request.system
+        ],
+        "tools": request.tools,
+        "messages": [message_to_dict(message) for message in request.messages],
+        "max_output_tokens": request.max_output_tokens,
+        "temperature": request.temperature,
+        "stop_sequences": request.stop_sequences,
+        "max_retries": request.max_retries,
+        "reasoning": request.reasoning,
+        "cache_prompt": request.cache_prompt,
+        "cache_ttl": request.cache_ttl,
+        "thinking": request.thinking,
+        "effort": request.effort,
+        "output_schema": _output_schema_to_snapshot(request.output_schema),
+        "tool_choice": request.tool_choice,
+        "stream_partials": request.stream_partials,
+    }
+    safe = _strict_model_json(payload)
+    assert isinstance(safe, dict)
+    return safe
+
+
+def _model_input_integrity_hash(codec_version: int, request_json: str) -> str:
+    content = f"{codec_version}\n{request_json}".encode()
+    return f"sha256:{hashlib.sha256(content).hexdigest()}"
+
+
+def create_model_input_snapshot(
+    run_id: str,
+    provider_attempt: int,
+    request: ProviderRequest,
+    *,
+    id: str | None = None,
+    created_at: str | None = None,
+) -> ModelInputSnapshot:
+    """Strictly encode ``request`` while deliberately excluding its live signal."""
+
+    if not isinstance(run_id, str) or not run_id:
+        raise ValueError("run_id must be a non-empty string")
+    if (
+        not isinstance(provider_attempt, int)
+        or isinstance(provider_attempt, bool)
+        or provider_attempt < 1
+    ):
+        raise ValueError("provider_attempt must be a positive integer")
+    snapshot_id = id or str(uuid4())
+    if not isinstance(snapshot_id, str) or not snapshot_id:
+        raise ValueError("snapshot id must be a non-empty string")
+    payload = _provider_request_payload(request)
+    request_json = json.dumps(
+        payload,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    snapshot = ModelInputSnapshot(
+        id=snapshot_id,
+        run_id=run_id,
+        provider_attempt=provider_attempt,
+        codec_version=MODEL_INPUT_CODEC_VERSION,
+        request_json=request_json,
+        integrity_hash=_model_input_integrity_hash(MODEL_INPUT_CODEC_VERSION, request_json),
+        created_at=created_at or now_iso(),
+    )
+    # Decode once at the write boundary so malformed typed fields fail before a
+    # provider checkpoint can ever reference this snapshot.
+    decode_model_input_snapshot(snapshot)
+    return snapshot
+
+
+def _validated_snapshot_payload(snapshot: ModelInputSnapshot) -> dict[str, Any]:
+    if snapshot.codec_version != MODEL_INPUT_CODEC_VERSION:
+        raise ModelInputSnapshotError(
+            "unsupported model-input snapshot codec version "
+            f"{snapshot.codec_version}; expected {MODEL_INPUT_CODEC_VERSION}"
+        )
+    expected = _model_input_integrity_hash(snapshot.codec_version, snapshot.request_json)
+    if snapshot.integrity_hash != expected:
+        raise ModelInputSnapshotError(
+            f"model-input snapshot {snapshot.id!r} failed its integrity check"
+        )
+    try:
+        raw = json.loads(snapshot.request_json)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise ModelInputSnapshotError(
+            f"model-input snapshot {snapshot.id!r} contains invalid JSON"
+        ) from exc
+    if not isinstance(raw, dict):
+        raise ModelInputSnapshotError("model-input snapshot request payload must be an object")
+    keys = set(raw)
+    if keys != _MODEL_INPUT_PAYLOAD_FIELDS:
+        raise ModelInputSnapshotError(
+            "model-input snapshot request fields do not match codec "
+            f"(missing={sorted(_MODEL_INPUT_PAYLOAD_FIELDS - keys)}, "
+            f"extra={sorted(keys - _MODEL_INPUT_PAYLOAD_FIELDS)})"
+        )
+    try:
+        safe = _strict_model_json(raw)
+    except TypeError as exc:
+        raise ModelInputSnapshotError(str(exc)) from exc
+    assert isinstance(safe, dict)
+    return safe
+
+
+def _optional_int(raw: Any, name: str) -> int | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, int) or isinstance(raw, bool):
+        raise ModelInputSnapshotError(f"{name} must be an integer or null")
+    return raw
+
+
+def _optional_bool(raw: Any, name: str) -> bool | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, bool):
+        raise ModelInputSnapshotError(f"{name} must be a boolean or null")
+    return raw
+
+
+def _optional_mapping(raw: Any, name: str) -> dict[str, Any] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ModelInputSnapshotError(f"{name} must be an object or null")
+    return dict(raw)
+
+
+def _decode_output_schema(raw: Any) -> OutputSchema | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or set(raw) != {"name", "schema", "strict", "description"}:
+        raise ModelInputSnapshotError("output_schema has an invalid shape")
+    name = raw["name"]
+    schema = raw["schema"]
+    strict = raw["strict"]
+    description = raw["description"]
+    if not isinstance(name, str) or not name:
+        raise ModelInputSnapshotError("output_schema.name must be a non-empty string")
+    if not isinstance(schema, dict):
+        raise ModelInputSnapshotError("output_schema.schema must be an object")
+    if not isinstance(strict, bool):
+        raise ModelInputSnapshotError("output_schema.strict must be a boolean")
+    if description is not None and not isinstance(description, str):
+        raise ModelInputSnapshotError("output_schema.description must be a string or null")
+    return OutputSchema(name=name, schema=dict(schema), strict=strict, description=description)
+
+
+def decode_model_input_snapshot(
+    snapshot: ModelInputSnapshot,
+    *,
+    signal: Any = None,
+) -> ProviderRequest:
+    """Verify and decode a snapshot, rebinding only the caller's live signal."""
+
+    raw = _validated_snapshot_payload(snapshot)
+    model = raw["model"]
+    if not isinstance(model, str) or not model:
+        raise ModelInputSnapshotError("model must be a non-empty string")
+
+    system_raw = raw["system"]
+    if not isinstance(system_raw, list):
+        raise ModelInputSnapshotError("system must be an array")
+    system: list[SystemBlock] = []
+    for item in system_raw:
+        if not isinstance(item, dict) or set(item) != {"type", "text", "cacheable"}:
+            raise ModelInputSnapshotError("system block has an invalid shape")
+        if item["type"] != "text" or not isinstance(item["text"], str):
+            raise ModelInputSnapshotError("system block must contain text")
+        if not isinstance(item["cacheable"], bool):
+            raise ModelInputSnapshotError("system block cacheable must be a boolean")
+        system.append(SystemBlock(text=item["text"], cacheable=item["cacheable"]))
+
+    tools_raw = raw["tools"]
+    if not isinstance(tools_raw, list) or not all(isinstance(item, dict) for item in tools_raw):
+        raise ModelInputSnapshotError("tools must be an array of objects")
+    tools = [dict(item) for item in tools_raw]
+
+    messages_raw = raw["messages"]
+    if not isinstance(messages_raw, list):
+        raise ModelInputSnapshotError("messages must be an array")
+    messages: list[Message] = []
+    try:
+        for item in messages_raw:
+            if not isinstance(item, dict):
+                raise ModelInputSnapshotError("message must be an object")
+            if item.get("role") not in ("user", "assistant"):
+                raise ModelInputSnapshotError("message role must be user or assistant")
+            if not isinstance(item.get("content"), list):
+                raise ModelInputSnapshotError("message content must be an array")
+            metadata = item.get("provider_metadata")
+            if metadata is not None and not isinstance(metadata, dict):
+                raise ModelInputSnapshotError("message provider_metadata must be an object or null")
+            messages.append(message_from_dict(item))
+    except (KeyError, TypeError, ValueError) as exc:
+        if isinstance(exc, ModelInputSnapshotError):
+            raise
+        raise ModelInputSnapshotError("message content block has an invalid shape") from exc
+
+    max_output_tokens = _optional_int(raw["max_output_tokens"], "max_output_tokens")
+    temperature_raw = raw["temperature"]
+    if temperature_raw is not None and (
+        not isinstance(temperature_raw, int | float) or isinstance(temperature_raw, bool)
+    ):
+        raise ModelInputSnapshotError("temperature must be a number or null")
+    # JSON preserves ``0`` versus ``0.0``; retain the decoded numeric object so
+    # even callers that supplied an int at runtime get the same provider input.
+    temperature = cast(float | None, temperature_raw)
+    stop_raw = raw["stop_sequences"]
+    if stop_raw is not None and (
+        not isinstance(stop_raw, list) or not all(isinstance(item, str) for item in stop_raw)
+    ):
+        raise ModelInputSnapshotError("stop_sequences must be an array of strings or null")
+    stop_sequences = list(stop_raw) if isinstance(stop_raw, list) else None
+    max_retries = raw["max_retries"]
+    if not isinstance(max_retries, int) or isinstance(max_retries, bool):
+        raise ModelInputSnapshotError("max_retries must be an integer")
+
+    cache_ttl = raw["cache_ttl"]
+    if cache_ttl not in (None, "5m", "1h"):
+        raise ModelInputSnapshotError("cache_ttl has an invalid value")
+    effort = raw["effort"]
+    if effort not in (None, "low", "medium", "high", "xhigh", "max"):
+        raise ModelInputSnapshotError("effort has an invalid value")
+    tool_choice_raw = raw["tool_choice"]
+    if isinstance(tool_choice_raw, str):
+        if tool_choice_raw not in ("auto", "none", "required"):
+            raise ModelInputSnapshotError("tool_choice has an invalid string value")
+        tool_choice: Any = tool_choice_raw
+    elif isinstance(tool_choice_raw, dict):
+        if not all(
+            isinstance(key, str) and isinstance(value, str)
+            for key, value in tool_choice_raw.items()
+        ):
+            raise ModelInputSnapshotError("tool_choice object must contain string values")
+        tool_choice = dict(tool_choice_raw)
+    elif tool_choice_raw is None:
+        tool_choice = None
+    else:
+        raise ModelInputSnapshotError("tool_choice must be a string, object, or null")
+
+    return ProviderRequest(
+        model=model,
+        system=system,
+        tools=tools,
+        messages=messages,
+        signal=signal,
+        max_output_tokens=max_output_tokens,
+        temperature=temperature,
+        stop_sequences=stop_sequences,
+        max_retries=max_retries,
+        reasoning=_optional_mapping(raw["reasoning"], "reasoning"),
+        cache_prompt=_optional_bool(raw["cache_prompt"], "cache_prompt"),
+        cache_ttl=cast(Any, cache_ttl),
+        thinking=_optional_mapping(raw["thinking"], "thinking"),
+        effort=cast(Any, effort),
+        output_schema=_decode_output_schema(raw["output_schema"]),
+        tool_choice=cast(Any, tool_choice),
+        stream_partials=_optional_bool(raw["stream_partials"], "stream_partials"),
     )
 
 
@@ -578,6 +1011,10 @@ def checkpoint_to_dict(checkpoint: RunCheckpoint) -> dict[str, Any]:
     # byte-identical.  Readers still default a missing key to ``{}``.
     if checkpoint.extension_state:
         data["extension_state"] = checkpoint.extension_state
+    if checkpoint.provider_attempt:
+        data["provider_attempt"] = checkpoint.provider_attempt
+    if checkpoint.model_input_snapshot_id is not None:
+        data["model_input_snapshot_id"] = checkpoint.model_input_snapshot_id
     safe = _json_safe(data, strict=False)
     assert isinstance(safe, dict)
     return safe
@@ -689,6 +1126,18 @@ def checkpoint_from_dict(raw: dict[str, Any]) -> RunCheckpoint:
         ),
         pending_alignment=_pending_alignment_from_raw(raw.get("pending_alignment")),
         extension_state=_extension_state_from_raw(raw.get("extension_state")),
+        provider_attempt=(
+            max(0, raw["provider_attempt"])
+            if isinstance(raw.get("provider_attempt"), int)
+            and not isinstance(raw.get("provider_attempt"), bool)
+            else 0
+        ),
+        model_input_snapshot_id=(
+            raw["model_input_snapshot_id"]
+            if isinstance(raw.get("model_input_snapshot_id"), str)
+            and raw["model_input_snapshot_id"]
+            else None
+        ),
     )
 
 
@@ -733,10 +1182,26 @@ def _copy_event(event: Event) -> Event:
     return event_from_dict(raw)
 
 
+def _validate_model_input_snapshot(snapshot: ModelInputSnapshot) -> ModelInputSnapshot:
+    if not snapshot.id or not snapshot.run_id:
+        raise ModelInputSnapshotError("model-input snapshot id and run_id must be non-empty")
+    if (
+        not isinstance(snapshot.provider_attempt, int)
+        or isinstance(snapshot.provider_attempt, bool)
+        or snapshot.provider_attempt < 1
+    ):
+        raise ModelInputSnapshotError("model-input snapshot provider_attempt must be positive")
+    if not isinstance(snapshot.created_at, str) or not snapshot.created_at:
+        raise ModelInputSnapshotError("model-input snapshot created_at must be non-empty")
+    _validated_snapshot_payload(snapshot)
+    return snapshot
+
+
 class InMemoryRunStore:
     def __init__(self) -> None:
         self._runs: dict[str, RunRecord] = {}
         self._events: dict[str, list[StoredRunEvent]] = {}
+        self._model_input_snapshots: dict[str, ModelInputSnapshot] = {}
 
     async def create_run(
         self,
@@ -799,6 +1264,36 @@ class InMemoryRunStore:
             if row.seq > after_seq
         ]
 
+    async def save(
+        self,
+        run_id: str,
+        provider_attempt: int,
+        request: ProviderRequest,
+    ) -> ModelInputSnapshot:
+        if run_id not in self._runs:
+            raise KeyError(f"run not found: {run_id}")
+        snapshot = create_model_input_snapshot(run_id, provider_attempt, request)
+        self._model_input_snapshots[snapshot.id] = snapshot
+        return snapshot
+
+    async def load(self, snapshot_id: str) -> ModelInputSnapshot | None:
+        snapshot = self._model_input_snapshots.get(snapshot_id)
+        return _validate_model_input_snapshot(snapshot) if snapshot is not None else None
+
+    async def delete(self, snapshot_id: str) -> None:
+        self._model_input_snapshots.pop(snapshot_id, None)
+
+    async def prune(self, run_id: str, keep_ids: Sequence[str] = ()) -> int:
+        keep = set(keep_ids)
+        doomed = [
+            snapshot_id
+            for snapshot_id, snapshot in self._model_input_snapshots.items()
+            if snapshot.run_id == run_id and snapshot_id not in keep
+        ]
+        for snapshot_id in doomed:
+            del self._model_input_snapshots[snapshot_id]
+        return len(doomed)
+
     async def mark_completed(self, run_id: str, checkpoint: RunCheckpoint) -> RunRecord:
         checkpoint.phase = "completed"
         return await self.save_checkpoint(run_id, checkpoint, status="completed")
@@ -842,6 +1337,17 @@ def _init_schema(conn: sqlite3.Connection) -> None:
           event text not null,
           primary key (run_id, seq)
         );
+        create table if not exists model_input_snapshots (
+          id text primary key,
+          run_id text not null,
+          provider_attempt integer not null,
+          codec_version integer not null,
+          request_json text not null,
+          integrity_hash text not null,
+          created_at text not null
+        );
+        create index if not exists model_input_snapshots_run_id_idx
+          on model_input_snapshots (run_id);
         """
     )
 
@@ -896,6 +1402,25 @@ class SqliteRunStore:
 
     async def load_events(self, run_id: str, *, after_seq: int = 0) -> list[StoredRunEvent]:
         return await self._exec.run(lambda c: _load_events(c, run_id, after_seq))
+
+    async def save(
+        self,
+        run_id: str,
+        provider_attempt: int,
+        request: ProviderRequest,
+    ) -> ModelInputSnapshot:
+        snapshot = create_model_input_snapshot(run_id, provider_attempt, request)
+        return await self._exec.run(lambda c: _save_model_input_snapshot(c, snapshot))
+
+    async def load(self, snapshot_id: str) -> ModelInputSnapshot | None:
+        return await self._exec.run(lambda c: _load_model_input_snapshot(c, snapshot_id))
+
+    async def delete(self, snapshot_id: str) -> None:
+        await self._exec.run(lambda c: _delete_model_input_snapshot(c, snapshot_id))
+
+    async def prune(self, run_id: str, keep_ids: Sequence[str] = ()) -> int:
+        ids = tuple(str(snapshot_id) for snapshot_id in keep_ids)
+        return await self._exec.run(lambda c: _prune_model_input_snapshots(c, run_id, ids))
 
     async def mark_completed(self, run_id: str, checkpoint: RunCheckpoint) -> RunRecord:
         checkpoint.phase = "completed"
@@ -964,6 +1489,75 @@ def _load_run(conn: sqlite3.Connection, run_id: str) -> RunRecord | None:
         (run_id,),
     ).fetchone()
     return _record(row) if row else None
+
+
+def _save_model_input_snapshot(
+    conn: sqlite3.Connection,
+    snapshot: ModelInputSnapshot,
+) -> ModelInputSnapshot:
+    if conn.execute("select 1 from runs where id = ?", (snapshot.run_id,)).fetchone() is None:
+        raise KeyError(f"run not found: {snapshot.run_id}")
+    conn.execute(
+        "insert into model_input_snapshots "
+        "(id, run_id, provider_attempt, codec_version, request_json, integrity_hash, created_at) "
+        "values (?, ?, ?, ?, ?, ?, ?)",
+        (
+            snapshot.id,
+            snapshot.run_id,
+            snapshot.provider_attempt,
+            snapshot.codec_version,
+            snapshot.request_json,
+            snapshot.integrity_hash,
+            snapshot.created_at,
+        ),
+    )
+    conn.commit()
+    return snapshot
+
+
+def _load_model_input_snapshot(
+    conn: sqlite3.Connection,
+    snapshot_id: str,
+) -> ModelInputSnapshot | None:
+    row = conn.execute(
+        "select id, run_id, provider_attempt, codec_version, request_json, integrity_hash, "
+        "created_at from model_input_snapshots where id = ?",
+        (snapshot_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    snapshot = ModelInputSnapshot(
+        id=row[0],
+        run_id=row[1],
+        provider_attempt=row[2],
+        codec_version=row[3],
+        request_json=row[4],
+        integrity_hash=row[5],
+        created_at=row[6],
+    )
+    return _validate_model_input_snapshot(snapshot)
+
+
+def _delete_model_input_snapshot(conn: sqlite3.Connection, snapshot_id: str) -> None:
+    conn.execute("delete from model_input_snapshots where id = ?", (snapshot_id,))
+    conn.commit()
+
+
+def _prune_model_input_snapshots(
+    conn: sqlite3.Connection,
+    run_id: str,
+    keep_ids: tuple[str, ...],
+) -> int:
+    if keep_ids:
+        placeholders = ",".join("?" for _ in keep_ids)
+        cursor = conn.execute(
+            f"delete from model_input_snapshots where run_id = ? and id not in ({placeholders})",
+            (run_id, *keep_ids),
+        )
+    else:
+        cursor = conn.execute("delete from model_input_snapshots where run_id = ?", (run_id,))
+    conn.commit()
+    return max(0, cursor.rowcount)
 
 
 def _save_checkpoint(

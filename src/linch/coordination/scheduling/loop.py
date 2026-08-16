@@ -15,14 +15,16 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Callable
-from typing import Any
+from collections.abc import Awaitable, Callable
+from typing import Any, cast
+from uuid import uuid4
 from xml.sax.saxutils import escape
 
+from ...errors import ConfigError
 from ...events import ScheduleEvent
 from ...types import Message, TextBlock
-from .schedule import Schedule
-from .store import ClaimingScheduleStore, ScheduleStore
+from .schedule import Schedule, ScheduleOccurrence
+from .store import ClaimingScheduleStore, LeasedScheduleStore, ScheduleStore
 
 
 def render_schedule_message(schedule: Schedule) -> Message:
@@ -31,6 +33,16 @@ def render_schedule_message(schedule: Schedule) -> Message:
         "<scheduled-task>",
         f"<id>{escape(schedule.id)}</id>",
         f"<payload>{escape(schedule.payload)}</payload>",
+        "</scheduled-task>",
+    ]
+    return Message(role="user", content=[TextBlock(text="".join(parts))])
+
+
+def _render_occurrence_message(occurrence: ScheduleOccurrence) -> Message:
+    parts = [
+        "<scheduled-task>",
+        f"<id>{escape(occurrence.schedule_id)}</id>",
+        f"<payload>{escape(occurrence.payload)}</payload>",
         "</scheduled-task>",
     ]
     return Message(role="user", content=[TextBlock(text="".join(parts))])
@@ -52,6 +64,8 @@ class SchedulerLoop:
         self._tick_s = tick_s
         self._on_event = on_event
         self._task: asyncio.Task[None] | None = None
+        session_id = getattr(session, "id", "unknown")
+        self._lease_owner = f"scheduler:{session_id}:{uuid4().hex}"
 
     @property
     def running(self) -> bool:
@@ -76,9 +90,38 @@ class SchedulerLoop:
         except asyncio.CancelledError:
             pass
 
-    async def tick(self) -> list[Schedule]:
+    async def tick(self) -> list[Schedule | ScheduleOccurrence]:
         """Fire every schedule whose ``next_run`` is due. Returns those fired."""
         now = self._clock()
+        durability = getattr(getattr(self._session, "agent", None), "durability", None)
+        if bool(getattr(durability, "durable_inbox", False)):
+            if not isinstance(self._store, LeasedScheduleStore):
+                raise ConfigError(
+                    "durable inbox scheduling requires a LeasedScheduleStore with "
+                    "claim_due_occurrences(), ack_occurrences(), and release_occurrences()"
+                )
+            lease_s = float(getattr(durability, "delivery_lease_s", 30.0))
+            occurrences = await self._store.claim_due_occurrences(
+                now,
+                owner=self._lease_owner,
+                lease_s=lease_s,
+            )
+            delivered: list[ScheduleOccurrence] = []
+            for occurrence in occurrences:
+                try:
+                    await self._deliver_occurrence(occurrence)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logging.getLogger(__name__).warning(
+                        "SchedulerLoop: durable delivery failed for occurrence %r",
+                        occurrence.id,
+                        exc_info=True,
+                    )
+                    continue
+                delivered.append(occurrence)
+            return cast("list[Schedule | ScheduleOccurrence]", delivered)
+
         if isinstance(self._store, ClaimingScheduleStore):
             fired = await self._store.claim_due(now)
             for schedule in fired:
@@ -98,7 +141,7 @@ class SchedulerLoop:
                     logging.getLogger(__name__).warning(
                         "SchedulerLoop: _fire failed for schedule %r", schedule.id, exc_info=True
                     )
-            return fired
+            return cast("list[Schedule | ScheduleOccurrence]", fired)
 
         fired: list[Schedule] = []
         for schedule in await self._store.list():
@@ -110,7 +153,76 @@ class SchedulerLoop:
             schedule.next_run = schedule.compute_next_run(now)
             await self._store.update(schedule)
             fired.append(schedule)
-        return fired
+        return cast("list[Schedule | ScheduleOccurrence]", fired)
+
+    async def _deliver_occurrence(self, occurrence: ScheduleOccurrence) -> None:
+        assert isinstance(self._store, LeasedScheduleStore)
+        try:
+            notify = getattr(self._session, "notify", None)
+            if not callable(notify):
+                raise ConfigError("durable inbox scheduling requires Session.notify()")
+            await cast(
+                "Awaitable[str]",
+                notify(
+                    _render_occurrence_message(occurrence),
+                    delivery_id=f"schedule:{occurrence.id}",
+                    source="schedule",
+                    metadata={
+                        "schedule_id": occurrence.schedule_id,
+                        "occurrence_id": occurrence.id,
+                    },
+                ),
+            )
+            await self._store.ack_occurrences([occurrence])
+        except BaseException:
+            # If notify committed before its response was lost, releasing and
+            # redelivering is safe: Session.notify deduplicates the stable
+            # delivery id. Token fencing makes this a no-op after a successful
+            # ack or after another consumer has reclaimed the occurrence.
+            release = asyncio.create_task(self._release_occurrence_safely(occurrence))
+            try:
+                await asyncio.shield(release)
+            except asyncio.CancelledError:
+                # The release task retains its own reference and continues to
+                # completion even when this scheduler tick is being cancelled.
+                pass
+            raise
+
+        # Observability is deliberately outside the delivery/ack transaction.
+        # A sink failure must never make a completed occurrence retry.
+        if self._on_event is not None:
+            try:
+                outcome = self._on_event(
+                    ScheduleEvent(
+                        schedule_id=occurrence.schedule_id,
+                        status="fired",
+                        payload=occurrence.payload,
+                    )
+                )
+                if asyncio.iscoroutine(outcome):
+                    await outcome
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "SchedulerLoop: event sink failed for occurrence %r",
+                    occurrence.id,
+                    exc_info=True,
+                )
+
+    async def _release_occurrence_safely(self, occurrence: ScheduleOccurrence) -> None:
+        assert isinstance(self._store, LeasedScheduleStore)
+        try:
+            await self._store.release_occurrences([occurrence])
+        except Exception:
+            # A release failure leaves the lease to expire naturally. It must
+            # not hide the delivery failure or cancellation that caused this
+            # cleanup path.
+            logging.getLogger(__name__).warning(
+                "SchedulerLoop: failed to release occurrence %r",
+                occurrence.id,
+                exc_info=True,
+            )
 
     async def _fire(self, schedule: Schedule) -> None:
         notifications = getattr(self._session, "pending_notifications", None)

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, cast
 from ._blocking import run_blocking
 from ._version import get_version
 from .config import FeatureFlags, SystemPromptConfig
+from .durability import DurabilityOptions
 from .errors import ConfigError
 from .openai_responses import OpenAIOptions, OpenAIReasoning
 from .permissions import BashRule, CanUseTool, PathRule, PermissionEngine, PermissionRule, ToolRule
@@ -38,6 +39,10 @@ _UNSET: Any = object()
 _DEFAULT_OFFLOAD: Any = object()
 
 _SECTION_PLACEMENTS = ("before_defaults", "after_defaults", "after_env")
+
+_OPEN = "open"
+_QUIESCING = "quiescing"
+_CLOSED = "closed"
 
 
 @dataclass(slots=True)
@@ -362,6 +367,7 @@ class AgentOptions:
     permissions: dict[str, object] | None = None
     session_store: SessionStore | None = None
     run_store: RunStore | None = None
+    durability: DurabilityOptions | None = None
     cwd: str | None = None
     system_prompt: str | None = None
     system_prompt_config: SystemPromptConfig | None = None
@@ -414,6 +420,7 @@ class Agent:
         permissions: Any | dict[str, object] | None = None,
         session_store: SessionStore | None = None,
         run_store: RunStore | None = None,
+        durability: DurabilityOptions | None = None,
         cwd: str | None = None,
         system_prompt: str | None = None,
         systemPrompt: str | None = None,
@@ -503,6 +510,8 @@ class Agent:
             truncation_recovery, TruncationRecovery
         ):
             raise ConfigError("truncation_recovery must be TruncationRecovery or None")
+        if durability is not None and not isinstance(durability, DurabilityOptions):
+            raise ConfigError("durability must be DurabilityOptions or None")
 
         openai = _normalize_openai_options(
             openai,
@@ -538,6 +547,7 @@ class Agent:
         )
         self._store: SessionStore | None = session_store
         self.run_store: RunStore | None = run_store
+        self.durability: DurabilityOptions = durability or DurabilityOptions()
         self.system_prompt = system_prompt
         self.max_retries = max_retries
         self.max_output_tokens = max_output_tokens
@@ -701,10 +711,14 @@ class Agent:
         self._provider_prepared: bool = False
         self._prepare_lock: asyncio.Lock | None = None
 
-        # Coalesced, cancellation-safe agent teardown. The lock is created lazily
-        # (loop-bound state stays per-agent); a second close() is a no-op.
+        # Transactional lifecycle state. Locks/tasks are created lazily inside a
+        # running loop so constructing an Agent never binds it to an event loop.
+        self._lifecycle_state: str = _OPEN
         self._closed: bool = False
-        self._close_lock: asyncio.Lock | None = None
+        self._close_task: asyncio.Task[None] | None = None
+        self._session_lock: asyncio.Lock | None = None
+        self._teardown_complete: set[str] = set()
+        self._closed_hook_ids: set[int] = set()
 
     def _configure_filesystem(self, filesystem: Any, result_offload: Any) -> None:
         self._filesystem_default: Any = filesystem
@@ -1268,83 +1282,101 @@ class Agent:
     ) -> Session:
         from .session import Session
 
-        if self.features.mcp:
-            await self.connect_mcp()
-        if self.features.skills:
-            await self.connect_skills()
-        if self.features.subagents:
-            await self.connect_subagents()
+        self._require_open()
+        if self._session_lock is None:
+            self._session_lock = asyncio.Lock()
+        # Session setup is a reservation: same-id callers serialize behind it,
+        # and close waits for the reservation to either publish or roll back
+        # before shared stores are released.
+        async with self._session_lock:
+            self._require_open()
+            if self.features.mcp:
+                await self.connect_mcp()
+            if self.features.skills:
+                await self.connect_skills()
+            if self.features.subagents:
+                await self.connect_subagents()
 
-        # One live Session per (agent, id): re-attaching a live id returns the
-        # registered instance rather than overwriting it (which would orphan the
-        # first Session and its in-flight work).
-        if id is not None:
-            existing = self._sessions.get(id)
-            if existing is not None and not existing._closed:
-                return existing
+            # One live Session per (agent, id): re-attaching a live id returns the
+            # registered instance rather than overwriting it.
+            if id is not None:
+                existing = self._sessions.get(id)
+                if existing is not None and not existing._closed:
+                    return existing
 
-        store = self._get_store()
-        record = await store.create(id=id, meta=meta)
-        messages = await store.load_messages(record.id) if id else []
-        full_history = [row.message for row in messages]
+            store = self._get_store()
+            record = await store.create(id=id, meta=meta)
+            messages = await store.load_messages(record.id) if id else []
+            full_history = [row.message for row in messages]
 
-        # Optional store capability (Phase 3.3): if a durable compacted snapshot
-        # exists, restore that provider_view plus every message appended after the
-        # sequence it covers, instead of rebuilding the view from full history.
-        provider_view = list(full_history)
-        snapshot_loader = getattr(store, "load_provider_snapshot", None)
-        if id and snapshot_loader is not None:
-            provider_view = await _restore_provider_view(
-                snapshot_loader, record.id, messages, full_history
-            )
-
-        session = Session(
-            id=record.id,
-            created_at=record.created_at,
-            meta=record.meta,
-            agent=self,
-            store=store,
-            provider_view=provider_view,
-            full_history=full_history,
-        )
-        # Seed the snapshot watermark from the loaded messages; disable snapshot
-        # caching if their seqs are not strictly increasing (can't trust a split).
-        _loaded_seqs = [row.seq for row in messages]
-        session._last_seq = max(_loaded_seqs, default=0)
-        session._seq_cacheable = all(
-            b > a for a, b in zip(_loaded_seqs, _loaded_seqs[1:], strict=False)
-        )
-        # Attach a per-session filesystem backend when the subsystem is active.
-        if self._filesystem_active():
-            from .filesystem.backend import StateFileBackend
-
-            # If the caller passed a backend, use it as the session-level store.
-            # CompositeFileBackend and SqliteFileBackend are shared across sessions
-            # by design; StateFileBackend is session-local by default.
-            session.filesystem = (
-                self._filesystem_default
-                if self._filesystem_default is not None
-                else StateFileBackend()
-            )
-
-        session.invoked_skills = []
-        for rec in record.invoked_skills:
-            if not isinstance(rec, dict):
-                continue
-            session.invoked_skills.append(
-                # Stored metadata may come from JSON backends; normalize defensively.
-                InvokedSkillRecord(
-                    name=str(rec.get("name", "")),
-                    substituted_body=str(
-                        rec.get("substituted_body", rec.get("substitutedBody", ""))
-                    ),
-                    invoked_at=float(
-                        cast(Any, rec.get("invoked_at", rec.get("invokedAt", 0.0)) or 0.0)
-                    ),
+            # Optional store capability (Phase 3.3): if a durable compacted snapshot
+            # exists, restore that provider_view plus every message appended after the
+            # sequence it covers, instead of rebuilding the view from full history.
+            provider_view = list(full_history)
+            snapshot_loader = getattr(store, "load_provider_snapshot", None)
+            if id and snapshot_loader is not None:
+                provider_view = await _restore_provider_view(
+                    snapshot_loader, record.id, messages, full_history
                 )
+
+            session = Session(
+                id=record.id,
+                created_at=record.created_at,
+                meta=record.meta,
+                agent=self,
+                store=store,
+                provider_view=provider_view,
+                full_history=full_history,
             )
-        self._sessions[record.id] = session
-        return session
+            # Seed the snapshot watermark from the loaded messages; disable snapshot
+            # caching if their seqs are not strictly increasing (can't trust a split).
+            _loaded_seqs = [row.seq for row in messages]
+            session._last_seq = max(_loaded_seqs, default=0)
+            session._seq_cacheable = all(
+                b > a for a, b in zip(_loaded_seqs, _loaded_seqs[1:], strict=False)
+            )
+            # Attach a per-session filesystem backend when the subsystem is active.
+            if self._filesystem_active():
+                from .filesystem.backend import StateFileBackend
+
+                # If the caller passed a backend, use it as the session-level store.
+                # CompositeFileBackend and SqliteFileBackend are shared across sessions
+                # by design; StateFileBackend is session-local by default.
+                session.filesystem = (
+                    self._filesystem_default
+                    if self._filesystem_default is not None
+                    else StateFileBackend()
+                )
+
+            session.invoked_skills = []
+            for rec in record.invoked_skills:
+                if not isinstance(rec, dict):
+                    continue
+                session.invoked_skills.append(
+                    # Stored metadata may come from JSON backends; normalize defensively.
+                    InvokedSkillRecord(
+                        name=str(rec.get("name", "")),
+                        substituted_body=str(
+                            rec.get("substituted_body", rec.get("substitutedBody", ""))
+                        ),
+                        invoked_at=float(
+                            cast(Any, rec.get("invoked_at", rec.get("invokedAt", 0.0)) or 0.0)
+                        ),
+                    )
+                )
+            # close() may have started while store/setup calls were awaiting. Do
+            # not publish a session into a quiescing agent; mark the unregistered
+            # object closed and let close() proceed after this reservation exits.
+            if self._lifecycle_state != _OPEN:
+                session._lifecycle_state = _CLOSED
+                session._closed = True
+                raise ConfigError("agent is closing")
+            self._sessions[record.id] = session
+            return session
+
+    def _require_open(self) -> None:
+        if self._lifecycle_state != _OPEN:
+            raise ConfigError("agent is closing")
 
     async def fork_session(
         self,
@@ -1453,18 +1485,23 @@ class Agent:
         self._sessions.pop(sid, None)
 
     async def close(self) -> None:
-        """Tear down the agent's shared resources. Coalesced and idempotent: a
-        second call is a no-op, and a cancellation mid-teardown still finishes
-        releasing the store/provider/hooks (the teardown is shielded)."""
-        if self._closed:
+        """Quiesce sessions, then tear down shared resources transactionally.
+
+        Concurrent callers await one shielded task. Caller cancellation never
+        cancels teardown; failures leave the agent quiescing so a later call can
+        retry only resources that have not already closed successfully.
+        """
+        if self._lifecycle_state == _CLOSED:
             return
-        if self._close_lock is None:
-            self._close_lock = asyncio.Lock()
-        async with self._close_lock:
-            if self._closed:
-                return
-            self._closed = True
-            await asyncio.shield(self._close_impl())
+        # No await precedes this transition: once close() starts executing, all
+        # new session/run admission observes QUIESCING immediately.
+        self._lifecycle_state = _QUIESCING
+        task = self._close_task
+        if task is None or task.done():
+            task = asyncio.create_task(self._close_impl())
+            task.add_done_callback(_consume_task_exception)
+            self._close_task = task
+        await asyncio.shield(task)
 
     async def _close_impl(self) -> None:
         import inspect as _inspect
@@ -1472,32 +1509,36 @@ class Agent:
         # Drain and release every live session — cancel owned worker/background
         # tasks and await their finalizers — before closing shared resources, so
         # a finalizer never touches an already-closed store/provider/filesystem.
-        for sess in list(self._sessions.values()):
-            await sess.aclose(force=True)
-        self._sessions.clear()
+        if "sessions" not in self._teardown_complete:
+            if self._session_lock is None:
+                self._session_lock = asyncio.Lock()
+            async with self._session_lock:
+                for sess in list(self._sessions.values()):
+                    await sess.aclose(force=True)
+                self._sessions.clear()
+            self._teardown_complete.add("sessions")
 
-        if self._mcp_connection is not None:
+        if "mcp" not in self._teardown_complete and self._mcp_connection is not None:
             await self._mcp_connection.close()
             self._mcp_connection = None
-        for connection in self._extra_mcp_connections:
-            try:
+        self._teardown_complete.add("mcp")
+        if "extra_mcp" not in self._teardown_complete:
+            while self._extra_mcp_connections:
+                connection = self._extra_mcp_connections[0]
                 await connection.close()
-            except Exception as exc:
-                import logging as _logging
-
-                _logging.getLogger(__name__).warning(
-                    "Error closing MCP connection %r during agent close: %s", connection, exc
-                )
-        self._extra_mcp_connections.clear()
-        if self._store is not None:
+                self._extra_mcp_connections.pop(0)
+            self._teardown_complete.add("extra_mcp")
+        if "store" not in self._teardown_complete and self._store is not None:
             await self._store.close()
-        if self.run_store is not None:
+        self._teardown_complete.add("store")
+        if "run_store" not in self._teardown_complete and self.run_store is not None:
             closer = getattr(self.run_store, "close", None)
             if closer is not None:
                 result = closer()
                 if _inspect.isawaitable(result):
                     await result
-        if self._filesystem_default is not None:
+        self._teardown_complete.add("run_store")
+        if "filesystem" not in self._teardown_complete and self._filesystem_default is not None:
             closer = getattr(self._filesystem_default, "aclose", None) or getattr(
                 self._filesystem_default, "close", None
             )
@@ -1505,40 +1546,38 @@ class Agent:
                 result = closer()
                 if _inspect.isawaitable(result):
                     await result
+        self._teardown_complete.add("filesystem")
 
         # Close the provider's transport (e.g. the OpenAI/httpx connection pool)
         # so closing the agent never leaks sockets/file descriptors. Duck-typed:
-        # providers without a closer (test doubles) are skipped, and a faulty
-        # closer never aborts shutdown.
-        provider_closer = getattr(self._provider, "aclose", None) or getattr(
-            self._provider, "close", None
-        )
-        if provider_closer is not None:
-            try:
+        # providers without a closer (test doubles) are skipped. A failing closer
+        # leaves the agent quiescing so a later close() can retry it.
+        if "provider" not in self._teardown_complete:
+            provider_closer = getattr(self._provider, "aclose", None) or getattr(
+                self._provider, "close", None
+            )
+            if provider_closer is not None:
                 result = provider_closer()
                 if _inspect.isawaitable(result):
                     await result
-            except Exception as exc:
-                import logging as _logging
-
-                _logging.getLogger(__name__).warning(
-                    "Error closing provider %r during agent close: %s", self._provider, exc
-                )
+            self._teardown_complete.add("provider")
 
         # Close hooks that expose a closer (e.g. RunTelemetryHook flushes its
-        # wrapped observers).  A faulty closer never aborts agent shutdown.
+        # wrapped observers). Successful hooks are remembered across retries.
         # Also close any hooks that were replaced via the hooks setter so their
         # resources (e.g. OTel exporters) are not orphaned.
         for hook in [*self._hooks, *self._replaced_hooks]:
-            closer = getattr(hook, "aclose", None) or getattr(hook, "close", None)
-            if closer is None:
+            if id(hook) in self._closed_hook_ids:
                 continue
-            try:
+            closer = getattr(hook, "aclose", None) or getattr(hook, "close", None)
+            if closer is not None:
                 result = closer()
                 if _inspect.isawaitable(result):
                     await result
-            except Exception:
-                pass
+            self._closed_hook_ids.add(id(hook))
+        self._teardown_complete.add("hooks")
+        self._lifecycle_state = _CLOSED
+        self._closed = True
 
 
 async def _restore_provider_view(
@@ -1579,6 +1618,12 @@ async def _restore_provider_view(
         return fallback
     tail = [row.message for row in messages if row.seq > covers]
     return list(snapshot.provider_view) + tail
+
+
+def _consume_task_exception(task: asyncio.Task[None]) -> None:
+    """Avoid an un-retrieved exception if a shielded close caller is cancelled."""
+    if not task.cancelled():
+        task.exception()
 
 
 def _normalize_permission_mode(raw: object) -> PermissionMode:
