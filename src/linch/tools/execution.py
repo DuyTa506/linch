@@ -142,6 +142,24 @@ class DockerBackend:
     resume_policy_version = "1"
 
     @property
+    def confinement(self) -> dict[str, object]:
+        """Declare the container boundary commands run inside.
+
+        Consumed by :class:`~linch.execution.backend.ExecutionBackend` views to
+        report ``sandboxed``. This records what this backend configures, not an
+        independently verified guarantee — a container is only as isolated as
+        its image, mounts, and daemon allow.
+        """
+        return {
+            "kind": "docker",
+            "image": self.image,
+            "network": self.network,
+            "workspace_mount": self.workspace_mount,
+            "read_only_root": self.read_only_root,
+            "user": self.user,
+        }
+
+    @property
     def resume_policy_config(self) -> dict[str, object]:
         """Return replay-relevant configuration without persisting environment values.
 

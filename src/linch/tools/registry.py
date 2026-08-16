@@ -2,18 +2,30 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Any
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
 
 from linch.errors import ConfigError
+from linch.kernel import Disposable
 
 from .base import Tool
 from .builtin import BashTool, EditTool, GlobTool, GrepTool, ReadTool, WriteTool
 from .tasks import TaskCreateTool, TaskGetTool, TaskListTool, TaskUpdateTool
 
 _REQUIRED_METHODS = ("validate", "execute", "summarize")
+
+
+@dataclass(slots=True)
+class _Registration:
+    """One ownership claim for a registry slot."""
+
+    token: object
+    tool: Tool
+    previous: _Registration | None = None
+    disposed: bool = False
 
 
 def _check_tool_shape(tool: Any) -> None:
@@ -68,23 +80,31 @@ def _check_tool_shape(tool: Any) -> None:
 class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
+        self._registrations: dict[str, _Registration] = {}
         self._generation = 0
 
-    def add(self, tool: Tool) -> None:
-        self.register(tool)
+    def add(self, tool: Tool) -> Disposable:
+        return self.register(tool)
 
     @property
     def generation(self) -> int:
         """Monotonic structural revision used by prompt/request caches."""
         return self._generation
 
-    def register(self, tool: Tool) -> None:
-        """Register a new tool.  Raises :exc:`ConfigError` if the name is taken."""
+    def register(self, tool: Tool) -> Disposable:
+        """Register a new tool; returns a disposer that unregisters it.
+
+        Raises :exc:`ConfigError` if the name is taken.  The returned
+        :class:`~linch.kernel.Disposable` removes only this registration. A later
+        registration owns the slot even when it reuses the same tool object.
+        """
         _check_tool_shape(tool)
         if tool.name in self._tools:
             raise ConfigError(f"tool {tool.name!r} already registered")
-        self._tools[tool.name] = tool
+        registration = _Registration(token=object(), tool=tool)
+        self._set_current(tool.name, registration)
         self._generation += 1
+        return self._disposer(tool.name, registration)
 
     def remove(self, name: str) -> Tool | None:
         return self.unregister(name)
@@ -99,18 +119,57 @@ class ToolRegistry:
         """
         removed = self._tools.pop(name, None)
         if removed is not None:
+            self._registrations.pop(name, None)
             self._generation += 1
         return removed
 
-    def replace(self, tool: Tool) -> None:
+    def replace(self, tool: Tool) -> Disposable:
         """Register *tool*, overwriting any existing tool with the same name.
 
         Unlike :meth:`register` this does **not** raise if the name exists;
-        use it to hot-swap a built-in with a custom implementation.
+        use it to hot-swap a built-in with a custom implementation.  Returns a
+        disposer that restores the preceding registration if this replacement
+        still owns the slot.
         """
         _check_tool_shape(tool)
-        self._tools[tool.name] = tool
+        registration = _Registration(
+            token=object(),
+            tool=tool,
+            previous=self._registrations.get(tool.name),
+        )
+        self._set_current(tool.name, registration)
         self._generation += 1
+        return self._disposer(tool.name, registration)
+
+    def _set_current(self, name: str, registration: _Registration) -> None:
+        self._tools[name] = registration.tool
+        self._registrations[name] = registration
+
+    def _disposer(self, name: str, registration: _Registration) -> Disposable:
+        """Build an ownership-aware teardown handle for *registration*."""
+
+        def _undo() -> None:
+            registration.disposed = True
+            current = self._registrations.get(name)
+            if current is None or current.token is not registration.token:
+                return
+
+            previous = registration.previous
+            while previous is not None and previous.disposed:
+                previous = previous.previous
+
+            if previous is None:
+                self._tools.pop(name, None)
+                self._registrations.pop(name, None)
+            else:
+                self._set_current(name, previous)
+            self._generation += 1
+
+        return Disposable(_undo)
+
+    def _copy_entry(self, name: str, tool: Tool) -> None:
+        """Install an independent base registration without changing generation."""
+        self._set_current(name, _Registration(token=object(), tool=tool))
 
     def copy(self) -> ToolRegistry:
         """Return a shallow copy of this registry.
@@ -119,8 +178,8 @@ class ToolRegistry:
         copy (register / unregister) do not affect the original.
         """
         new = ToolRegistry()
-        for tool in self._tools.values():
-            new._tools[tool.name] = tool
+        for name, tool in self._tools.items():
+            new._copy_entry(name, tool)
         new._generation = self._generation
         return new
 
@@ -150,7 +209,7 @@ class ToolRegistry:
                 continue
             if exclude is not None and name in exclude:
                 continue
-            new._tools[name] = tool
+            new._copy_entry(name, tool)
         return new
 
     def select(
@@ -170,10 +229,10 @@ class ToolRegistry:
         for name, tool in self._tools.items():
             tool_tags = set(getattr(tool, "tags", ()) or ())
             if names is not None and name in names:
-                selected._tools[name] = tool
+                selected._copy_entry(name, tool)
                 continue
             if tags is not None and tool_tags.intersection(tags):
-                selected._tools[name] = tool
+                selected._copy_entry(name, tool)
         return selected
 
     def get(self, name: str) -> Tool | None:

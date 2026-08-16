@@ -6,9 +6,9 @@
 
 1. Count tokens in `provider_view` via `agent.provider.context_window(agent.model)`.
 2. If within threshold — no-op.
-3. Otherwise submit a summarization request via `agent.provider.stream()` and replace old messages in `provider_view` with the summary, emitting `CompactionEvent`.
+3. Otherwise submit a summarization request via `agent.provider.stream()` and record the summary as a **logged projection** — `session.session_log.record_projection(...)` appends a `ProjectionEntry` and rewrites the derived `provider_view` — emitting `CompactionEvent`.
 
-**Invariant:** `full_history` is never modified. Only `provider_view` shrinks. Compaction uses the configured `agent.provider` — never a hardcoded OpenAI call.
+**Invariant:** `full_history` is never modified. Only `provider_view` (a projection of the single append-only log) shrinks, and it shrinks by a *logged* projection, not an untracked in-place mutation. This covers session-owned model input; per-request `ContextInjectionHook`/RAG context is ephemeral and exists only in `ProviderRequest`. Compaction uses the configured `agent.provider` — never a hardcoded OpenAI call.
 
 The compaction path is provider-agnostic in Linch 2.0: summaries use the same
 normalized provider stream contract as a normal turn, retain message/tool
@@ -95,15 +95,16 @@ it cannot be trusted — a loader error, a malformed payload, or a `covers_seq`
 that is negative, ahead of the newest stored message, or inconsistent with a
 non-monotonic message log. Message-sequence gaps are legal and preserved;
 out-of-order sequences simply disable snapshot caching for that session.
-Compaction never mutates or removes the append-only `full_history` — the
-snapshot is a cache of a derived view, never a source of truth.
+Compaction never mutates or removes the append-only session log's historical
+projection — the snapshot is a cache of a derived view, never a source of truth.
 
 ## Design rationale
 
-- **Only `provider_view` shrinks; `full_history` is sacred.** The model only ever
-  sees `provider_view`, so that is the only thing worth compacting. `full_history`
-  stays complete because it is the durable audit record and the source of truth a
-  resumed run rebuilds from — summarizing it would be lossy and irreversible.
+- **Only the provider projection shrinks; historical messages stay complete.**
+  The model only ever sees `provider_view`, so `record_projection(...)` rewrites
+  that derived projection while leaving the `full_history` projection intact.
+  The append-only `SessionLog` remains the source of truth; persisted session
+  snapshots are the durable boundary, not a projection-entry journal.
 - **Summarize through `agent.provider`, never a hardcoded vendor call.** Compaction
   is just another model turn, so it must honor the same provider the run uses.
   Hardcoding OpenAI would break Anthropic/Gemini/local users and split the cost

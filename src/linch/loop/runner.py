@@ -280,8 +280,7 @@ async def _drain_pending_notifications(
         session._track_seqs(stored)
         for row in stored:
             note = row.message
-            session.provider_view.append(note)
-            session.full_history.append(note)
+            session.session_log.append(note)
             event: Event = UserEvent(message=note, subtype="notification")
             await _persist_event(session, run_id, event)
             yield event
@@ -488,7 +487,7 @@ async def _maybe_save_provider_snapshot(session: Session) -> None:
 
     snapshot = ProviderViewSnapshot(
         provider_view=list(session.provider_view),
-        covers_seq=getattr(session, "_last_seq", len(session.full_history)),
+        covers_seq=getattr(session, "_last_seq", session.session_log.history_count),
     )
     try:
         await saver(session.id, snapshot)
@@ -624,40 +623,135 @@ def _hook_policy_contract(agent: Any) -> list[dict[str, Any]]:
     return identities
 
 
-def _execution_backend_contract(tools: list[Any], configured_backend: Any) -> dict[str, Any] | None:
-    """Fingerprint the effective backend of the offered built-in Bash tool.
+def _tool_pipeline_contract(agent: Any) -> dict[str, Any] | None:
+    """Return the stable identity of active tool-pipeline policy.
 
-    ``Agent.execution_backend`` is only a constructor seam.  Callers may also
-    install ``BashTool(backend=...)`` directly, so the durable contract must
-    inspect the effective tool rather than only the constructor argument.  A
-    configured backend is irrelevant when this run does not offer Bash.
+    The pipeline is optional and duck typed so Agent construction remains
+    decoupled from the tools package. An inactive pipeline has no execution
+    effect and is omitted. Active custom implementations and every listener in
+    the built-in pipeline must expose host-stable resume policy metadata.
     """
-    bash_tool = next((tool for tool in tools if getattr(tool, "name", None) == "Bash"), None)
-    if bash_tool is None:
+    pipeline = getattr(agent, "tool_pipeline", None)
+    if pipeline is None:
+        return None
+    has_listeners = getattr(pipeline, "has_listeners", None)
+    if not callable(has_listeners) or not has_listeners():
         return None
 
-    backend = getattr(bash_tool, "_backend", configured_backend)
-    if backend is None:
-        return None
+    policy_id = getattr(pipeline, "resume_policy_id", None)
+    policy_version = getattr(pipeline, "resume_policy_version", None)
+    if not isinstance(policy_id, str) or not policy_id:
+        raise ConfigError(
+            "durable runs with an active tool pipeline require "
+            "pipeline.resume_policy_id (plus optional resume_policy_version/"
+            "resume_policy_config)"
+        )
+    try:
+        config = getattr(pipeline, "resume_policy_config", None)
+    except Exception as exc:
+        raise ConfigError(f"cannot build durable tool pipeline contract: {exc}") from exc
+    if config is None:
+        raise ConfigError(
+            "durable runs with an active tool pipeline require non-None "
+            "pipeline.resume_policy_config"
+        )
+    try:
+        json.dumps(config, allow_nan=False, separators=(",", ":"), sort_keys=True)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(
+            f"durable tool pipeline resume_policy_config must be JSON-safe: {exc}"
+        ) from exc
+    return {
+        "type": f"{pipeline.__class__.__module__}.{pipeline.__class__.__qualname__}",
+        "policy_id": policy_id,
+        "policy_version": policy_version,
+        "config": config,
+    }
 
+
+def _legacy_bash_backend_contract(backend: Any) -> dict[str, Any]:
+    """Preserve the shell-only contract and its established diagnostics."""
     policy_id = getattr(backend, "resume_policy_id", None)
     policy_version = getattr(backend, "resume_policy_version", None)
     try:
-        configured = getattr(backend, "resume_policy_config", None)
+        config = getattr(backend, "resume_policy_config", None)
     except Exception as exc:
-        raise ConfigError(f"cannot build durable Bash backend contract: {exc}") from exc
-    if not isinstance(policy_id, str) or not policy_id or configured is None:
+        raise ConfigError(
+            f"cannot build durable execution shell backend resume_policy_config: {exc}"
+        ) from exc
+    if not isinstance(policy_id, str) or not policy_id or config is None:
         raise ConfigError(
             "durable runs with a custom Bash execution backend require "
             "backend.resume_policy_id and non-None backend.resume_policy_config "
             "(plus optional resume_policy_version)"
         )
-
     return {
         "type": f"{backend.__class__.__module__}.{backend.__class__.__qualname__}",
         "policy_id": policy_id,
         "policy_version": policy_version,
-        "config": configured,
+        "config": config,
+    }
+
+
+def _execution_backend_contract(tools: list[Any], configured_backend: Any) -> dict[str, Any] | None:
+    """Fingerprint the effective execution world, including shell, fs, and confinement.
+
+    Unified backends can affect filesystem tools even when Bash is not offered,
+    so their whole effective world participates in resume identity. The legacy
+    ``BashTool(backend=...)`` path retains its historical shell-only contract.
+    """
+    bash_tool = next((tool for tool in tools if getattr(tool, "name", None) == "Bash"), None)
+    bash_backend = getattr(bash_tool, "_backend", None) if bash_tool is not None else None
+
+    if configured_backend is None:
+        return _legacy_bash_backend_contract(bash_backend) if bash_backend is not None else None
+
+    if getattr(configured_backend, "legacy_shell_only", False):
+        shell = bash_backend or getattr(configured_backend, "shell", None)
+        return _legacy_bash_backend_contract(shell)
+
+    shell = getattr(configured_backend, "shell", None)
+    filesystem = getattr(configured_backend, "fs", None)
+    if shell is None or filesystem is None:
+        # A non-normalized shell backend can still reach this helper in tests
+        # or host-owned Agent-like objects. Keep the compatibility behavior.
+        backend = bash_backend or configured_backend
+        return _legacy_bash_backend_contract(backend)
+    if bash_backend is not None and bash_backend is not shell:
+        raise ConfigError(
+            "durable execution world mismatch: the effective BashTool backend is not "
+            "agent.execution_backend.shell; configure one coherent shell/filesystem world"
+        )
+
+    from ..execution.backend import resume_policy_descriptor
+
+    world = resume_policy_descriptor(configured_backend)
+    if world is None:
+        raise ConfigError(
+            "durable runs with a custom execution world require "
+            "execution_backend.resume_policy_id and non-None "
+            "execution_backend.resume_policy_config (plus optional "
+            "resume_policy_version); filesystem overrides must also expose "
+            "stable resume policy metadata"
+        )
+    shell_policy = _legacy_bash_backend_contract(shell)
+    filesystem_policy = resume_policy_descriptor(filesystem)
+    if filesystem_policy is None:
+        raise ConfigError(
+            "durable runs with a custom execution world require its filesystem backend "
+            "to expose resume_policy_id and non-None resume_policy_config"
+        )
+    try:
+        confinement = getattr(configured_backend, "confinement", None)
+    except Exception as exc:
+        raise ConfigError(f"cannot build durable execution world confinement: {exc}") from exc
+
+    return {
+        "world": world,
+        "shell": shell_policy,
+        "filesystem": filesystem_policy,
+        "confinement": confinement,
+        "sandboxed": bool(getattr(configured_backend, "sandboxed", False)),
     }
 
 
@@ -716,6 +810,7 @@ def _build_run_contract(session: Session, prompt: str, opts: RunOptions) -> Any:
         "runtime_version": get_version(),
         "permissions": _permission_policy_contract(agent),
         "hooks": _hook_policy_contract(agent),
+        "tool_pipeline": _tool_pipeline_contract(agent),
         "features": getattr(agent, "features", None),
         "execution_backend": backend_identity,
         "max_turns": None if agent.max_turns == float("inf") else agent.max_turns,
@@ -1525,10 +1620,8 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
     def _last_user_message_is_feedback(feedback: str) -> bool:
         from ..skills.system_reminder import wrap_in_system_reminder
 
-        if not session.provider_view:
-            return False
-        message = session.provider_view[-1]
-        if message.role != "user":
+        message = session.last_provider_message()
+        if message is None or message.role != "user":
             return False
         expected = wrap_in_system_reminder(feedback)
         return any(
@@ -1669,10 +1762,10 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 and not resumed_assistant
                 and turn_index == checkpoint.turn_index
                 and checkpoint.phase == "provider_pending"
-                and session.provider_view
-                and session.provider_view[-1].role == "assistant"
+                and (_pending_last := session.last_provider_message()) is not None
+                and _pending_last.role == "assistant"
             ):
-                last_assistant = session.provider_view[-1]
+                last_assistant = _pending_last
                 checkpoint.assistant_message = last_assistant
                 checkpoint.assistant_stop_reason = (
                     "tool_use"

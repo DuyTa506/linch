@@ -33,9 +33,16 @@ from .backend import _slice_lines, normalize_path
 class DiskFileBackend:
     """A virtual filesystem mapped onto a real directory subtree."""
 
+    resume_policy_id = "linch.filesystem.disk"
+    resume_policy_version = "1"
+
     def __init__(self, root: str | Path = ".linch/offload") -> None:
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def resume_policy_config(self) -> dict[str, str]:
+        return {"root": str(self.root)}
 
     def _real_path(self, path: str) -> Path:
         # normalize_path guarantees a single leading slash and no '..' segments

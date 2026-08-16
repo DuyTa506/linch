@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 import pytest
@@ -772,6 +773,7 @@ async def test_post_tool_use_hook_exception_does_not_crash_tool_loop() -> None:
 async def test_compaction_dispatches_pre_and_post_compact_hooks() -> None:
     from linch.abort import AbortContext
     from linch.compaction import run_forced_compaction
+    from linch.session_log import SessionLog
     from linch.types import Message, TextBlock
 
     class FakeStrategy:
@@ -801,10 +803,16 @@ async def test_compaction_dispatches_pre_and_post_compact_hooks() -> None:
         active_run_id = "r"
 
         def __init__(self) -> None:
-            self.provider_view = [
-                Message(role="user", content=[TextBlock(text="a" * 100)]) for _ in range(5)
-            ]
+            self.session_log = SessionLog.seed(
+                visible=[
+                    Message(role="user", content=[TextBlock(text="a" * 100)]) for _ in range(5)
+                ]
+            )
             self.last_compaction_info: dict[str, Any] | None = None
+
+        @property
+        def provider_view(self) -> Sequence[Message]:
+            return self.session_log.derive_messages()
 
     session = FakeSession()
     await run_forced_compaction(session, FakeAgent(), AbortContext())
