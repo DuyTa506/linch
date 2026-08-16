@@ -361,11 +361,28 @@ agent = Agent(..., cwd=".", execution_backend=LocalExecutionBackend(cwd="."))
 ```
 
 Construct the local world with `cwd=Agent.cwd` so shell and filesystem share one
-workspace (a mismatch raises `ConfigError`). A child agent inherits its parent's
-world through the `Context` (`ctx.get("execution")`) unless you pass its own. A
-shell-only `execution_backend` remains a deprecated compatibility path — it has
-no filesystem transport, and pairing it with `FeatureFlags(filesystem=True)`
-requires an explicit `filesystem=`; migrate to a real `ExecutionBackend`.
+workspace (a mismatch raises `ConfigError`). A shell-only `execution_backend`
+remains a deprecated compatibility path — it has no filesystem transport, and
+pairing it with `FeatureFlags(filesystem=True)` requires an explicit
+`filesystem=`; migrate to a real `ExecutionBackend`.
+
+**`execution_backend=` transfers ownership.** The agent closes that world during
+`Agent.close()`, so do *not* hand the same object to two agents — the first
+close leaves the second on closed transports. To share one world, register it on
+a `Context` and let each agent inherit it:
+
+```python
+host = Context(label="host")
+host.register("execution", RemoteExecutionBackend(shell=..., fs=...))
+
+first = Agent(..., context=host)
+second = Agent(..., context=host)   # same world, borrowed not owned
+await first.close()                 # the shared world stays open
+```
+
+An inherited world is borrowed: closing one agent disposes only its own child
+scope. This is also how a subagent picks up its parent's world
+(`ctx.get("execution")`) unless you give it its own.
 
 ---
 
