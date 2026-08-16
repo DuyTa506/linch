@@ -236,19 +236,22 @@ graph TD
         fh1["user turn 1"] --> fh2["assistant turn 1"] --> fh3["...all turns intact"]
     end
 
-    subgraph PV["provider_view  — projection sent to LLM (compaction applied)"]
+    subgraph PV["provider_view  — projection the request is built from (compaction applied)"]
         direction LR
         pvc["COMPACTED SUMMARY"] --> pv4["assistant tool call"] --> pv5["tool result"] --> pv6["...recent turns"]
     end
 
     COMP["Compaction\nrecord_projection() → appends a ProjectionEntry\nrewrites provider_view projection\nfull_history untouched"]
 
-    CTX["ContextInjectionHook output\nephemeral per-request\nappended to ProviderRequest only\nnot stored in the log"]
+    CTX["ContextInjectionHook output\nephemeral per-request\nassembled into ProviderRequest only\nnot stored in the log"]
+
+    REQ["ProviderRequest — what the LLM receives this turn"]
 
     LOG --> FH
     LOG --> PV
     COMP --> LOG
-    CTX -.->|"injected per-request"| PV
+    PV --> REQ
+    CTX -.->|"merged per-request"| REQ
 ```
 
 **Invariant:** grow history through `session.append(...)` /

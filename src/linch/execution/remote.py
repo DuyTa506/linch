@@ -34,6 +34,13 @@ class RemoteExecutionBackend:
         self.confinement = dict(confinement) if confinement else None
         self.resume_policy_id = resume_policy_id
         self.resume_policy_version = resume_policy_version
+        if resume_policy_config is not None and "confinement" in resume_policy_config:
+            # resume_policy_config merges this world's confinement under that
+            # name, so a caller key would be dropped from the fingerprint.
+            raise ValueError(
+                "resume_policy_config must not define 'confinement'; it is reserved "
+                "for the execution world's own confinement declaration"
+            )
         self._resume_policy_config = (
             dict(resume_policy_config) if resume_policy_config is not None else None
         )

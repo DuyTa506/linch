@@ -569,6 +569,10 @@ def _dispatch_execute(
             "emit",
             "deps",
             "filesystem",
+            # Authority-bearing: filesystem tools fall back to ``execution.fs``
+            # and shell access rides the same world, so swapping it after
+            # permission would redirect the approved call to another workspace.
+            "execution",
             "idempotency_key",
         )
     }

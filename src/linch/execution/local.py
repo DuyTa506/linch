@@ -54,6 +54,16 @@ class LocalExecutionBackend:
         return False
 
     @property
+    def security_posture(self) -> str:
+        """Declare the host posture explicitly.
+
+        Without this a local world is indistinguishable from a custom backend
+        that simply declared nothing, and would be described to the model as
+        "unverified" rather than as running directly on the host.
+        """
+        return "host"
+
+    @property
     def resume_policy_config(self) -> dict[str, object] | None:
         from .backend import resume_policy_descriptor
 

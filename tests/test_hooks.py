@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 import pytest
@@ -810,7 +811,7 @@ async def test_compaction_dispatches_pre_and_post_compact_hooks() -> None:
             self.last_compaction_info: dict[str, Any] | None = None
 
         @property
-        def provider_view(self) -> list[Message]:
+        def provider_view(self) -> Sequence[Message]:
             return self.session_log.derive_messages()
 
     session = FakeSession()

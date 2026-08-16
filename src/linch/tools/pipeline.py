@@ -108,10 +108,14 @@ class ToolPipeline:
     async def run(self, execution: ToolExecution, terminal: Terminal) -> Any:
         """Run the complete pre → execute → post lifecycle.
 
-        A pre listener that does not call ``next()`` supplies the candidate
-        result and skips dispatch. Post listeners receive that candidate (or
-        the executed result); ``await next()`` accepts/delegates it, while the
-        value returned by a listener is the authoritative replacement.
+        Dispatch happens only when the ``tools/pre-execute`` waterfall hands
+        back the private sentinel its terminal produced, so a pre listener
+        proceeds by returning ``await next()`` unchanged. Any other value —
+        returned without calling ``next()``, or substituted after calling it —
+        becomes the result and the tool body never runs. Post listeners then
+        receive that value (or the executed result); ``await next()``
+        accepts/delegates it, while the value returned by a listener is the
+        authoritative replacement.
         """
 
         async def _execute() -> Any:
@@ -143,6 +147,12 @@ class ToolPipeline:
         return await self._bus.waterfall(EXECUTE, execution, next=terminal)
 
     async def run_pre_execute(self, execution: ToolExecution, terminal: Terminal) -> Any:
+        """Run the ``tools/pre-execute`` waterfall with *terminal* as the proceed signal.
+
+        Whatever *terminal* returns is the only value :meth:`run` reads as
+        "proceed to dispatch"; a listener that substitutes its own value
+        vetoes dispatch and supplies the result instead.
+        """
         return await self._bus.waterfall(PRE_EXECUTE, execution, next=terminal)
 
     async def run_post_execute(
