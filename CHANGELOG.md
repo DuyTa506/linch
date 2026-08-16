@@ -52,7 +52,11 @@ and persisted wire formats are versioned separately via `linch.RUN_SCHEMA_VERSIO
   teardown remains retryable.
 - **Required persisted data is strict on read.** Unknown or malformed required
   events fail loading. Only producer-declared `ignorable` events may be read as
-  `IgnorableEvent` and skipped.
+  `IgnorableEvent` and skipped. `ignorable` is reserved for unknown types: a
+  *known* event type carrying the flag is now rejected instead of decoding as
+  itself. An unrecognized `prompt_cache_advisory` `reason` is likewise rejected
+  rather than silently coerced to `"tool_set_changed"`; a row that omits the
+  field still defaults, so legacy rows keep loading.
 
 ### Added
 
@@ -83,6 +87,20 @@ and persisted wire formats are versioned separately via `linch.RUN_SCHEMA_VERSIO
   it was described to the model as unverified. Durable resume identity is
   unchanged: a shell-only backend still fingerprints through its
   `resume_policy_config`, which does not include confinement.
+- `LocalExecutionBackend` now declares `security_posture = "host"`. Passing it
+  explicitly described Bash to the model as an undeclared boundary, when the
+  world in fact declares it runs on the host; "unverified" is now reserved for
+  a backend whose boundary Linch genuinely cannot describe.
+- A tool call's `ctx.execution` can no longer be swapped by a pipeline listener
+  after permission. Filesystem tools fall back to `execution.fs` and shell
+  access rides the same world, so swapping it redirected an approved call into
+  another workspace.
+- `RemoteExecutionBackend` rejects a `resume_policy_config` that defines
+  `confinement`; the seam merges its own declaration under that key, which
+  silently dropped the caller's value from the resume fingerprint.
+- A `ConfigError` about an execution world inherited from a supplied `Context`
+  now says so, instead of blaming an `execution_backend=` argument the caller
+  never passed.
 
 - **Incremental durability ledger.** `Agent(durability=...)`,
   `DurabilityOptions`, and `DurabilityOptions.strict_v1()` opt into a durable

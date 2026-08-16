@@ -1016,6 +1016,7 @@ def event_to_dict(event: Event) -> dict[str, Any]:
 
 
 _USER_EVENT_SUBTYPES = ("prompt", "tool_result", "alignment", "notification")
+_PROMPT_CACHE_ADVISORY_REASONS = ("tool_set_changed", "model_changed")
 _RESULT_SUBTYPES = ("success", "error", "aborted", "interrupted")
 _STOP_REASONS = (
     "end_turn",
@@ -1043,6 +1044,11 @@ def event_from_dict(raw: dict[str, Any]) -> Event:
     if not isinstance(raw, dict):
         raise ValueError("event must be an object")
     typ = raw.get("type")
+    # Checked before known-type dispatch: the ignorable branch below is reached
+    # only after every known type has returned, so a known type carrying the
+    # flag would otherwise decode as itself and bypass envelope validation.
+    if raw.get("ignorable") is True and typ in _KNOWN_EVENT_TYPES:
+        raise ValueError(f"known event type cannot be wrapped as ignorable: {typ!r}")
     if typ == "system":
         return SystemEvent(
             session_id=str(raw.get("session_id", "")),
@@ -1238,9 +1244,9 @@ def event_from_dict(raw: dict[str, Any]) -> Event:
             reason=str(raw.get("reason", "")),
         )
     if typ == "prompt_cache_advisory":
-        _reason = raw.get("reason")
-        if _reason not in ("tool_set_changed", "model_changed"):
-            _reason = "tool_set_changed"
+        _reason = _required_discriminator(
+            raw, "reason", _PROMPT_CACHE_ADVISORY_REASONS, "tool_set_changed"
+        )
         return PromptCacheAdvisoryEvent(
             reason=cast(Any, _reason),
             detail=str(raw.get("detail", "")),

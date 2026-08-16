@@ -201,3 +201,40 @@ async def test_ignorable_event_round_trips_through_sqlite_store(tmp_path) -> Non
 def test_known_event_is_not_ignorable() -> None:
     event = AssistantEvent(message=Message(role="assistant", content=[]), stop_reason="end_turn")
     assert not is_ignorable_event(event)
+
+
+def test_known_event_type_cannot_claim_ignorable() -> None:
+    """``ignorable`` is reserved for unknown types; a known type must be rejected.
+
+    The envelope validator already forbids this, but it was unreachable: the
+    ignorable branch only runs after every known type has decoded, so a known
+    type carrying the flag silently decoded as itself.
+    """
+    from linch.events import event_from_dict
+
+    with pytest.raises(ValueError, match="known event type cannot be wrapped as ignorable"):
+        event_from_dict({"type": "system", "subtype": "x", "message": "hi", "ignorable": True})
+
+
+def test_unknown_prompt_cache_reason_is_rejected_not_coerced() -> None:
+    """Strict decoding: an unsupported discriminator must fail, not silently default."""
+    from linch.events import event_from_dict
+
+    with pytest.raises(ValueError, match="unknown reason"):
+        event_from_dict({"type": "prompt_cache_advisory", "reason": "from_the_future"})
+
+
+def test_prompt_cache_advisory_without_reason_keeps_legacy_default() -> None:
+    """A legacy row that never wrote ``reason`` must still decode."""
+    from linch.events import event_from_dict
+
+    event = event_from_dict({"type": "prompt_cache_advisory", "detail": "d"})
+    assert event.reason == "tool_set_changed"  # type: ignore[union-attr]
+
+
+def test_known_prompt_cache_reasons_still_decode() -> None:
+    from linch.events import event_from_dict
+
+    for reason in ("tool_set_changed", "model_changed"):
+        event = event_from_dict({"type": "prompt_cache_advisory", "reason": reason, "detail": "d"})
+        assert event.reason == reason  # type: ignore[union-attr]

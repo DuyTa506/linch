@@ -570,13 +570,21 @@ class Agent:
                 normalize_execution_backend,
             )
 
+            # These messages name ``execution_backend=``/"the execution world",
+            # but an inherited world was never passed here — say where it came
+            # from so the caller knows which construction site to fix.
+            origin = (
+                ""
+                if execution_backend is not None
+                else " (execution world inherited from the supplied Context as ctx.execution)"
+            )
             try:
                 self.execution_backend = normalize_execution_backend(
                     execution_source,
                     filesystem=filesystem,
                 )
             except TypeError as exc:
-                raise ConfigError(str(exc)) from exc
+                raise ConfigError(f"{exc}{origin}") from exc
             host_workspace_root = getattr(
                 self.execution_backend,
                 "host_workspace_root",
@@ -587,7 +595,8 @@ class Agent:
             ):
                 raise ConfigError(
                     "LocalExecutionBackend cwd does not match Agent cwd; construct the "
-                    "local execution world with cwd=Agent.cwd so shell and fs share one workspace"
+                    "local execution world with cwd=Agent.cwd so shell and fs share "
+                    f"one workspace{origin}"
                 )
             if getattr(self.execution_backend, "legacy_shell_only", False):
                 warnings.warn(
@@ -948,6 +957,11 @@ class Agent:
         """Return the prompt-safe security posture of the effective Bash world."""
         if self.execution_backend is None:
             return "host"
+        # A world may declare its own posture (a local world knows it is the
+        # host). Anything that declares nothing stays "unverified".
+        declared = getattr(self.execution_backend, "security_posture", None)
+        if declared in ("host", "sandboxed", "unverified"):
+            return cast(str, declared)
         if bool(getattr(self.execution_backend, "sandboxed", False)):
             return "sandboxed"
         return "unverified"

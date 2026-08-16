@@ -16,6 +16,10 @@ from linch.providers.base import BaseProvider
 from linch.tools.base import ToolContext, ToolResult
 from linch.tools.builtin import BashTool
 
+# The three Bash-posture prompt branches are mutually exclusive, so each
+# posture test pins the other two as absent rather than asserting one string.
+_HOST_POSTURE_LINE = "Bash runs in the user's environment with full permissions"
+
 
 class _Provider(BaseProvider):
     id = "execution-test"
@@ -282,8 +286,10 @@ def test_remote_prompt_does_not_claim_sandbox_without_metadata(tmp_path: Any) ->
         result_offload=None,
     )
     combined = "\n".join(block.text for block in agent.system_blocks)
-    assert "runs inside a sandbox" not in combined
     assert "has not declared sandbox confinement" in combined
+    # Pin the branch: neither of the other two postures may also be described.
+    assert "declares sandbox confinement" not in combined
+    assert _HOST_POSTURE_LINE not in combined
 
 
 def test_docker_backend_declares_its_own_confinement() -> None:
@@ -316,6 +322,7 @@ def test_docker_backend_prompt_reports_sandbox_confinement(tmp_path: Any) -> Non
     combined = "\n".join(block.text for block in agent.system_blocks)
     assert "declares sandbox confinement" in combined
     assert "has not declared sandbox confinement" not in combined
+    assert _HOST_POSTURE_LINE not in combined
 
 
 def test_remote_prompt_uses_explicit_confinement_metadata(tmp_path: Any) -> None:
@@ -337,7 +344,8 @@ def test_remote_prompt_uses_explicit_confinement_metadata(tmp_path: Any) -> None
     combined = "\n".join(block.text for block in agent.system_blocks)
     assert "declares sandbox confinement" in combined
     assert "not an independently verified security boundary" in combined
-    assert "Commands are isolated" not in combined
+    assert "has not declared sandbox confinement" not in combined
+    assert _HOST_POSTURE_LINE not in combined
 
 
 async def test_subagent_inherits_parent_execution_filesystem(
@@ -600,3 +608,99 @@ async def test_agents_share_parent_context_without_transferring_world_ownership(
     await second.close()
     assert world.close_calls == 0
     assert parent.execution is world
+
+
+def test_inherited_world_error_names_the_context_not_the_kwarg(tmp_path: Any) -> None:
+    """An inherited world was never passed as ``execution_backend=``.
+
+    Blaming that kwarg sends the caller to a construction site that does not
+    exist; the message must point at the Context the world came from.
+    """
+    from linch import Agent, ConfigError, Context
+
+    parent = Context(label="host")
+    parent.register("execution", object())  # neither {shell, fs} nor a shell backend
+    with pytest.raises(ConfigError, match=r"inherited from the supplied Context"):
+        Agent(
+            model="test",
+            provider=_Provider(),
+            cwd=str(tmp_path),
+            context=parent,
+            result_offload=None,
+        )
+
+
+def test_directly_passed_world_error_does_not_claim_inheritance(tmp_path: Any) -> None:
+    from linch import Agent, ConfigError
+
+    with pytest.raises(ConfigError) as excinfo:
+        Agent(
+            model="test",
+            provider=_Provider(),
+            cwd=str(tmp_path),
+            execution_backend=object(),  # type: ignore[arg-type]
+            result_offload=None,
+        )
+    assert "inherited from the supplied Context" not in str(excinfo.value)
+
+
+def test_local_world_reports_host_posture_not_unverified(tmp_path: Any) -> None:
+    """An explicitly local world runs on the host; that is known, not unverified.
+
+    "unverified" means a backend is configured whose boundary Linch cannot
+    describe. ``LocalExecutionBackend`` declares it runs on the host, so the
+    prompt should say so rather than implying an undeclared boundary.
+    """
+    from linch import Agent, LocalExecutionBackend, workspace_tools
+
+    world = LocalExecutionBackend(cwd=str(tmp_path))
+    assert world.security_posture == "host"
+
+    agent = Agent(
+        model="test",
+        provider=_Provider(),
+        cwd=str(tmp_path),
+        tools=workspace_tools(),
+        execution_backend=world,
+        result_offload=None,
+    )
+    assert agent._bash_security_mode() == "host"
+    combined = "\n".join(block.text for block in agent.system_blocks)
+    assert _HOST_POSTURE_LINE in combined
+    assert "has not declared sandbox confinement" not in combined
+    assert "declares sandbox confinement" not in combined
+
+
+def test_undeclared_custom_world_still_reports_unverified() -> None:
+    """A world that declares no posture and no confinement stays "unverified"."""
+    world = RemoteExecutionBackend(shell=_FakeShell(), fs=_FakeFs())
+    assert getattr(world, "security_posture", None) in (None, "unverified")
+    assert world.sandboxed is False
+
+
+def test_remote_backend_rejects_reserved_confinement_resume_key() -> None:
+    """``confinement`` is owned by the seam; a caller key would be overwritten.
+
+    ``resume_policy_config`` merges the world's confinement in under that name,
+    so accepting a caller-supplied one would silently drop it from the resume
+    fingerprint instead of failing.
+    """
+    with pytest.raises(ValueError, match="confinement"):
+        RemoteExecutionBackend(
+            shell=_FakeShell(),
+            fs=_FakeFs(),
+            confinement={"boundary": "sandbox"},
+            resume_policy_id="custom",
+            resume_policy_config={"confinement": "caller-value", "other": 1},
+        )
+
+
+def test_remote_backend_resume_config_still_merges_confinement() -> None:
+    world = RemoteExecutionBackend(
+        shell=_FakeShell(),
+        fs=_FakeFs(),
+        confinement={"boundary": "sandbox"},
+        resume_policy_id="custom",
+        resume_policy_config={"other": 1},
+    )
+    assert world.resume_policy_config == {"other": 1, "confinement": {"boundary": "sandbox"}}
