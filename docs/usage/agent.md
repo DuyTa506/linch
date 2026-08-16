@@ -117,6 +117,31 @@ checkpoints (resume across process restarts, durable HITL approvals) also pass a
 `run_store=SqliteRunStore(...)` — see [workflows.md](./workflows.md) and
 [deep-agent.md](./deep-agent.md).
 
+### Incremental durability
+
+`DurabilityOptions` enables durability without changing the default 2.x path:
+
+```python
+from linch import Agent, DurabilityOptions, SqliteRunStore, SqliteSessionStore
+
+agent = Agent(
+    model="gpt-5",
+    session_store=SqliteSessionStore("sessions.db"),
+    run_store=SqliteRunStore("runs.db"),
+    durability=DurabilityOptions.strict_v1(),
+)
+
+await session.notify(message, delivery_id="webhook:123")
+```
+
+`durable_inbox` gives exactly-once insertion into session history by delivery
+ID (not exactly-once external effects). `exact_model_input` freezes every
+pending provider request and replays it exactly after a crash. Enabled
+capabilities fail closed when a custom store does not implement the required
+optional protocol. In-memory stores provide the same process semantics but do
+not survive a restart. Snapshots can contain prompts, context, and tool schemas;
+the SDK verifies integrity but encryption and access control belong to the host.
+
 ---
 
 ## Feature flags

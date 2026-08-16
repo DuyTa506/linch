@@ -138,8 +138,7 @@ async def _queue_crashed_worker_notifications(
     if not checkpoint.background_workers:
         return []
     live_workers = getattr(session, "workers", {})
-    notifications = getattr(session, "pending_notifications", None)
-    if notifications is None:
+    if not hasattr(session, "notify"):
         return []
 
     events: list[BackgroundWorkerEvent] = []
@@ -152,10 +151,15 @@ async def _queue_crashed_worker_notifications(
             status="killed",
             display_name=display_name,
         )
-        # Persist first: if this raises, we have not yet queued a stale
-        # notification nor mutated the in-memory checkpoint status.
+        # Delivery precedes audit so a completion that reached the durable inbox
+        # is never represented only by observability metadata.
+        await session.notify(
+            _crashed_worker_notification(worker_id, display_name),
+            delivery_id=f"subagent:{worker_id}",
+            source="subagent-recovery",
+            metadata={"worker_id": worker_id, "status": "killed"},
+        )
         await _persist_event(session, run_id, event)
-        notifications.append(_crashed_worker_notification(worker_id, display_name))
         raw["status"] = "killed"
         events.append(event)
     return events

@@ -6,7 +6,16 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, get_args, get_origin
 
-from .base import ResourceAccess, ToolContext, ToolResult, ToolScope
+from .base import (
+    CanonicalToolOutput,
+    JsonValue,
+    RenderOutput,
+    ResourceAccess,
+    ToolContext,
+    ToolOutputContractError,
+    ToolResult,
+    ToolScope,
+)
 
 _NON_JSON_DEFAULT = object()
 
@@ -151,6 +160,10 @@ class FunctionTool:
     )
     retryable: bool = False
     execution_timeout_ms: float | None = None
+    output_schema: dict[str, Any] | None = None
+    render_output: RenderOutput | None = None
+    renderer_id: str | None = None
+    renderer_version: str | None = None
     _signature: inspect.Signature = field(init=False, repr=False)
     _required: list[str] = field(init=False, repr=False)
     _params: list[str] = field(init=False, repr=False)
@@ -180,7 +193,9 @@ class FunctionTool:
             return dict(raw)
         return {name: raw[name] for name in self._params if name in raw}
 
-    async def execute(self, input: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    async def execute(
+        self, input: dict[str, Any], ctx: ToolContext
+    ) -> ToolResult | CanonicalToolOutput | JsonValue:
         kwargs = dict(input)
         if self._ctx_param is not None:
             kwargs[self._ctx_param] = ctx
@@ -192,6 +207,12 @@ class FunctionTool:
             value = await _run_sync_callable(self.fn, kwargs)
             if inspect.isawaitable(value):
                 value = await value
+        if self.output_schema is not None:
+            if isinstance(value, ToolResult):
+                raise ToolOutputContractError(
+                    f"V2 tool {self.name!r} declares output_schema and must not return ToolResult"
+                )
+            return value
         return _result_from_value(value, self.summarize(input))
 
     def summarize(self, input: dict[str, Any]) -> str:
@@ -209,6 +230,10 @@ def tool(
     name: str | None = None,
     description: str | None = None,
     input_schema: dict[str, Any] | None = None,
+    output_schema: dict[str, Any] | None = None,
+    render_output: RenderOutput | None = None,
+    renderer_id: str | None = None,
+    renderer_version: str | None = None,
     scope: ToolScope = "read",
     parallel: bool = True,
     tags: tuple[str, ...] = (),
@@ -225,6 +250,10 @@ def tool(
             name=name,
             description=description,
             input_schema=input_schema,
+            output_schema=output_schema,
+            render_output=render_output,
+            renderer_id=renderer_id,
+            renderer_version=renderer_version,
             scope=scope,
             parallel=parallel,
             tags=tags,

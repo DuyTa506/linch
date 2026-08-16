@@ -40,6 +40,16 @@ class MyTool:
     system_prompt_sections: Iterable[SystemPromptSection] | Callable[[], Iterable[SystemPromptSection]]
 ```
 
+Tools may opt into Canonical Tool Output V2 by declaring `output_schema`. A V2
+tool returns a JSON value, `ToolOutput`, or `ToolOutputError`; it must not return
+legacy `ToolResult`. Linch strictly rejects cycles, non-finite floats,
+non-string object keys, and arbitrary Python objects, validates successful
+values with JSON Schema Draft 2020-12, then renders the provider projection.
+Strings render unchanged; other values use compact deterministic JSON. A custom
+synchronous renderer must declare stable `renderer_id` and `renderer_version`.
+`ToolCallEndEvent.tool_output` carries the canonical value while the existing
+`result`, `tool_result`, and `ToolResultBlock` projections remain available.
+
 `ToolContext` carries: `cwd`, `session_id`, `run_id`, `session_store`, `signal`
 (abort), `file_read_tracker`, `deps`, `filesystem`, `idempotency_key`, and a
 best-effort progress sink. Tools report transient progress with

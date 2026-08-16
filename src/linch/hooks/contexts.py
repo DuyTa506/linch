@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from ..context import ContextBuildResult
-from ..tools import ToolResult
+from ..tools import CanonicalToolOutput, ToolResult
 from ..types import AssistantAssembly, ProviderRequest, StopReason, ToolUseBlock
 
 
@@ -94,6 +94,7 @@ class ToolUseStopContext(HookContext):
     duration_ms: int = 0
     result: str = ""
     tool_result: ToolResult | None = None
+    tool_output: CanonicalToolOutput | None = None
 
 
 @dataclass(slots=True)
@@ -102,6 +103,7 @@ class PostToolUseContext(HookContext):
     tool_name: str = ""
     input: dict[str, Any] = field(default_factory=dict)
     result: ToolResult | None = None
+    tool_output: CanonicalToolOutput | None = None
 
 
 @dataclass(slots=True)
@@ -110,6 +112,7 @@ class PostToolUseFailureContext(HookContext):
     tool_name: str = ""
     input: dict[str, Any] = field(default_factory=dict)
     result: ToolResult | None = None
+    tool_output: CanonicalToolOutput | None = None
 
 
 @dataclass(slots=True)

@@ -167,7 +167,16 @@ def _combine_mutation(left: HookResult, right: HookResult) -> HookResult:
         request=right.request if right.request is not None else left.request,
         assembly=right.assembly if right.assembly is not None else left.assembly,
         input=right.input if right.input is not None else left.input,
-        tool_result=right.tool_result if right.tool_result is not None else left.tool_result,
+        tool_result=(
+            right.tool_result
+            if right.tool_result is not None
+            else (None if right.tool_output is not None else left.tool_result)
+        ),
+        tool_output=(
+            right.tool_output
+            if right.tool_output is not None
+            else (None if right.tool_result is not None else left.tool_output)
+        ),
         final_text=right.final_text if right.final_text is not None else left.final_text,
         structured_output=(
             right.structured_output
@@ -201,6 +210,9 @@ def _apply_mutation(ctx: HookContext, result: HookResult) -> HookContext:
     elif isinstance(ctx, PostToolUseContext):
         if result.tool_result is not None:
             updates["result"] = result.tool_result
+            updates["tool_output"] = None
+        elif result.tool_output is not None:
+            updates["tool_output"] = result.tool_output
     elif isinstance(ctx, BeforeFinalAnswerContext):
         if result.final_text is not None:
             updates["final_text"] = result.final_text

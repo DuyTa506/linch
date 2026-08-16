@@ -19,7 +19,7 @@ graph LR
     subgraph Tools["Tool Execution"]
         direction TB
         TCS["ToolCallStartEvent\ntype=tool_call_start\ntool_name · input · summary"]
-        TCE["ToolCallEndEvent\ntype=tool_call_end\nresult · is_error · duration_ms"]
+        TCE["ToolCallEndEvent\ntype=tool_call_end\nresult · is_error · duration_ms · tool_output?"]
         PRE["PermissionRequestEvent\ntype=permission_request"]
     end
 

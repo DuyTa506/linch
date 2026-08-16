@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..permissions.keys import permission_decision_key
-from ..tools import ToolResult
+from ..tools import CanonicalToolOutput, ToolOutput, ToolOutputError, ToolResult
 from .contexts import AgentStopContext, PostToolUseContext, PreToolUseContext
 from .types import HookResult
 
@@ -70,14 +70,26 @@ class ToolCacheConfig:
 
 @dataclass(slots=True)
 class _RunCache:
-    entries: OrderedDict[str, ToolResult] = field(default_factory=OrderedDict)
+    entries: OrderedDict[str, _CacheEntry] = field(default_factory=OrderedDict)
     # tool_use_id -> cache key, for a cacheable miss awaiting its result in post.
     # Bounded (LRU) because a backgrounded read never fires PostToolUse, so its
     # entry would otherwise never be popped.
-    pending: OrderedDict[str, str] = field(default_factory=OrderedDict)
+    pending: OrderedDict[str, _PendingEntry] = field(default_factory=OrderedDict)
     # tool_use_ids of write/exec calls awaiting PostToolUse, where they clear the
     # cache *after* executing (so a read+write in the same turn invalidates too).
     writers: OrderedDict[str, None] = field(default_factory=OrderedDict)
+
+
+@dataclass(slots=True)
+class _CacheEntry:
+    result: ToolResult | None
+    tool_output: CanonicalToolOutput | None
+
+
+@dataclass(slots=True)
+class _PendingEntry:
+    key: str
+    expects_canonical: bool
 
 
 class ToolCacheHook:
@@ -123,11 +135,19 @@ class ToolCacheHook:
         hit = bucket.entries.get(key)
         if hit is not None:
             bucket.entries.move_to_end(key)
-            return HookResult.resolve(tool_result=hit).with_events(
-                [_cache_event("cache_hit", ctx.tool_name)]
-            )
+            return HookResult.resolve(
+                tool_result=hit.result, tool_output=hit.tool_output
+            ).with_events([_cache_event("cache_hit", ctx.tool_name)])
         # Miss on a cacheable call: record so on_post_tool_use stores the result.
-        _bounded_set(bucket.pending, ctx.tool_use_id, key, self._cfg.max_entries)
+        _bounded_set(
+            bucket.pending,
+            ctx.tool_use_id,
+            _PendingEntry(
+                key=key,
+                expects_canonical=getattr(ctx.tool, "output_schema", None) is not None,
+            ),
+            self._cfg.max_entries,
+        )
         return None
 
     async def on_post_tool_use(self, ctx: PostToolUseContext) -> HookResult | None:
@@ -139,18 +159,31 @@ class ToolCacheHook:
             # which catches a read cached earlier in this same turn.
             bucket.entries.clear()
             return None
-        key = bucket.pending.pop(ctx.tool_use_id, None)
-        if key is None:
+        pending = bucket.pending.pop(ctx.tool_use_id, None)
+        if pending is None:
             return None
         result = ctx.result
+        tool_output = ctx.tool_output
         # Never cache errors — let the model retry a failed call.
-        if result is None or getattr(result, "is_error", False):
+        if result is None and tool_output is None:
+            return None
+        if pending.expects_canonical and tool_output is None:
+            # A V2 result replaced by a legacy ToolResult at PostToolUse has
+            # explicitly left the canonical contract. Do not cache it as a V2
+            # hit that would fail normalization on the next resolve.
+            return None
+        if getattr(result, "is_error", False) or isinstance(tool_output, ToolOutputError):
             return None
         # Don't cache large results: offload handles those, and caching them
         # would pin full payloads in memory and re-offload on each served hit.
-        if _result_size(result) > self._cfg.max_value_bytes:
+        if _result_size(result, tool_output) > self._cfg.max_value_bytes:
             return None
-        _bounded_set(bucket.entries, key, result, self._cfg.max_entries)
+        _bounded_set(
+            bucket.entries,
+            pending.key,
+            _CacheEntry(result=result, tool_output=tool_output),
+            self._cfg.max_entries,
+        )
         return None
 
     async def on_agent_stop(self, ctx: AgentStopContext) -> HookResult | None:
@@ -181,9 +214,25 @@ class ToolCacheHook:
         return True
 
 
-def _result_size(result: ToolResult) -> int:
-    content = getattr(result, "content", "")
-    return len(content) if isinstance(content, str) else len(str(content))
+def _result_size(
+    result: ToolResult | None,
+    tool_output: CanonicalToolOutput | None,
+) -> int:
+    if result is not None:
+        content = getattr(result, "content", "")
+        return len(content) if isinstance(content, str) else len(str(content))
+    if isinstance(tool_output, ToolOutput):
+        import json
+
+        return len(
+            json.dumps(
+                tool_output.value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+    return 0
 
 
 def _bounded_set(od: OrderedDict, key: Any, value: Any, cap: int) -> None:

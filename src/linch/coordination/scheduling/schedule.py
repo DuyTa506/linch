@@ -6,6 +6,8 @@ is opaque to the SDK — the embedder decides what a fired schedule means.
 
 from __future__ import annotations
 
+import hashlib
+import struct
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
@@ -69,3 +71,33 @@ class Schedule:
             metadata=dict(data.get("metadata") or {}),
             id=data.get("id") or _new_id(),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduleOccurrence:
+    """A materialized schedule firing held under a delivery lease.
+
+    ``payload`` and ``metadata`` are snapshots: removing or editing the source
+    schedule cannot change an occurrence that has already been committed.
+    ``id`` is deterministic for the schedule and its originally due timestamp,
+    so every retry carries the same downstream delivery identity.
+    """
+
+    id: str
+    schedule_id: str
+    payload: str
+    scheduled_for: float
+    metadata: dict[str, Any]
+    materialized_at: float
+    token: str
+    owner: str
+    expires_at: float
+
+
+def occurrence_id(schedule_id: str, scheduled_for: float) -> str:
+    """Return the stable identity for one materialized schedule firing."""
+    digest = hashlib.sha256()
+    digest.update(schedule_id.encode("utf-8"))
+    digest.update(b"\x00")
+    digest.update(struct.pack(">d", scheduled_for))
+    return digest.hexdigest()

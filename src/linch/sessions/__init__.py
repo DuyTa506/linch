@@ -3,6 +3,7 @@ from .sqlite import SqliteSessionStore
 from .store import (
     ProviderViewSnapshot,
     ProviderViewSnapshotStore,
+    SessionInboxStore,
     SessionRecord,
     SessionStore,
     StoredMessage,
@@ -15,6 +16,7 @@ __all__ = [
     "ProviderViewSnapshot",
     "ProviderViewSnapshotStore",
     "SessionRecord",
+    "SessionInboxStore",
     "SessionStore",
     "SqliteSessionStore",
     "StoredMessage",

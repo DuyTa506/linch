@@ -47,6 +47,9 @@ A few lifecycle rules worth internalizing:
 - **`tool_call_end` carries the result** on `.result`, including the rich
   `ToolResult` fields (summary, metadata, citations) even when the model only
   saw a truncated/offloaded preview.
+- **`tool_call_end.tool_output` carries Canonical Tool Output V2** for tools
+  declaring `output_schema`: the validated JSON value or structured error and
+  JSON-reference attachments remain available beside the legacy projections.
 - **`tool_progress` is observational only.** A tool may call
   `ctx.report_progress("scanning", {"completed": 3})`; Linch emits a
   `ToolProgressEvent` for consumers, but never appends it to provider history,
