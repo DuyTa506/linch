@@ -14,7 +14,14 @@ from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 from uuid import UUID, uuid4
 
-from .events import Event, event_from_dict, event_to_dict, usage_from_dict, usage_to_dict
+from .events import (
+    IGNORABLE_MAX_DEPTH,
+    Event,
+    event_from_dict,
+    event_to_dict,
+    usage_from_dict,
+    usage_to_dict,
+)
 from .sessions.memory import now_iso
 from .storage._executor import SqliteExecutor
 from .types import (
@@ -33,8 +40,8 @@ from .types import (
 
 # Wire-format version for the serialized RunCheckpoint and stored-event log.
 # Bump only on a breaking change to the persisted shape. `checkpoint_from_dict`
-# reads any version best-effort (unknown future keys are ignored) and
-# `load_events` drops events it cannot decode, so a newer store is forward-safe.
+# reads any version best-effort (unknown future keys are ignored). Stored events
+# are required on read unless their envelope explicitly declares them ignorable.
 SCHEMA_VERSION = 1
 
 # A run contract is versioned independently from the checkpoint wire format.
@@ -277,7 +284,9 @@ class ModelInputSnapshotStore(Protocol):
     async def prune(self, run_id: str, keep_ids: Sequence[str] = ()) -> int: ...
 
 
-_JSON_SAFE_MAX_DEPTH = 100
+# Single source of truth with the ignorable-event validator: a value this
+# codec would truncate must never have been accepted into an event.
+_JSON_SAFE_MAX_DEPTH = IGNORABLE_MAX_DEPTH
 
 
 def _json_safe(value: Any, *, strict: bool = False) -> Any:
@@ -1643,17 +1652,14 @@ def _load_events(
         "select seq, appended_at, event from run_events where run_id = ? and seq > ? order by seq",
         (run_id, after_seq),
     ).fetchall()
-    out: list[StoredRunEvent] = []
-    for row in rows:
-        try:
-            event = event_from_dict(json.loads(row[2]))
-        except (ValueError, KeyError, TypeError, json.JSONDecodeError):
-            # Forward-compat: an event written by a newer schema (unknown type or
-            # shape) is skipped rather than aborting the whole resume. The
-            # checkpoint, not the event log, drives resume.
-            continue
-        out.append(StoredRunEvent(seq=row[0], appended_at=row[1], event=event))
-    return out
+    return [
+        StoredRunEvent(
+            seq=row[0],
+            appended_at=row[1],
+            event=event_from_dict(json.loads(row[2])),
+        )
+        for row in rows
+    ]
 
 
 def _mark_failed(

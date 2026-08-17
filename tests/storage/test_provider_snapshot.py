@@ -211,7 +211,7 @@ async def test_maybe_save_provider_snapshot_persists_current_view() -> None:
     store = InMemorySessionStore()
     session = await _agent(store, _Provider()).session(id="s1")
     await session.append([_msg("a"), _msg("b")])  # full_history == 2
-    session.provider_view[:] = [_msg("SUM")]  # simulate compaction shrinking the view
+    session.session_log.record_projection([_msg("SUM")], reason="test-compaction")
 
     await _maybe_save_provider_snapshot(session)
 
@@ -280,7 +280,7 @@ async def test_snapshot_caching_disabled_when_store_seqs_non_monotonic() -> None
     await session.append([_msg("b")])  # seq 1 again → non-increasing
     assert session._seq_cacheable is False
 
-    session.provider_view[:] = [_msg("SUM")]
+    session.session_log.record_projection([_msg("SUM")], reason="test-compaction")
     await _maybe_save_provider_snapshot(session)
     # Caching disabled: no snapshot persisted (watermark can't be trusted).
     assert await store.load_provider_snapshot("s1") is None
@@ -307,7 +307,7 @@ async def test_snapshot_watermark_tolerates_gapped_seqs() -> None:
     assert session._seq_cacheable is True
     assert session._last_seq == 20
 
-    session.provider_view[:] = [_msg("SUM")]
+    session.session_log.record_projection([_msg("SUM")], reason="test-compaction")
     await _maybe_save_provider_snapshot(session)
     snap = await store.load_provider_snapshot("s1")
     assert snap is not None

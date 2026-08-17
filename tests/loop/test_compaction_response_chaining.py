@@ -16,6 +16,7 @@ import pytest
 
 from linch.abort import AbortContext
 from linch.compaction import _run_compaction_impl, strip_response_chaining
+from linch.session_log import SessionLog
 from linch.types import Message, TextBlock
 
 
@@ -39,7 +40,7 @@ def test_strip_removes_response_id_without_mutating_input():
         meta = m.provider_metadata or {}
         assert "response_id" not in meta.get("openai_responses", {})
 
-    # Originals are shared with full_history and the session store — never mutated.
+    # Originals are independently copied into projections and the session store — never mutated.
     assert msgs[0].provider_metadata["openai_responses"]["response_id"] == "resp_1"
     assert msgs[1].provider_metadata["openai_responses"]["response_id"] == "resp_2"
 
@@ -82,10 +83,14 @@ async def test_chokepoint_strips_even_for_a_passthrough_strategy():
 
     class _FakeSession:
         def __init__(self) -> None:
-            self.provider_view = [_msg_with_response_id("resp_final")]
+            self.session_log = SessionLog.seed(visible=[_msg_with_response_id("resp_final")])
             self.active_run_id = "run-1"
             self.run_deps = None
             self.last_compaction_info = None
+
+        @property
+        def provider_view(self):
+            return self.session_log.provider_view
 
     session = _FakeSession()
     await _run_compaction_impl(session, _FakeAgent(), AbortContext(), _PassthroughStrategy())
