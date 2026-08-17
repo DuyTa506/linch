@@ -70,7 +70,9 @@ These hold for *every* change, regardless of subsystem:
   read-only projections* of it; per-request `ContextInjectionHook`/RAG context
   is assembled only into `ProviderRequest` and is intentionally outside the log.
   Never `append`/`extend`/`clear`/`[:]=` the projections. Append via
-  `session.append(...)` or `session.session_log.append(...)`; record compaction
+  `await session.append(...)` (the only durable path — it writes the session
+  store *and* the log; direct `SessionLog.append(...)` is in-memory only and is
+  lost on reload); record compaction
   as a **logged projection** (`session.session_log.record_projection(...)`),
   never as an untracked in-place mutation.
 - **The loop continues while a response has tool calls** and stops on a

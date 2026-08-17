@@ -6,7 +6,7 @@ These must not break across refactors:
 
 | # | Invariant |
 |---|---|
-| 1 | **One append-only session log; session-owned model-visible state is logged** — `Session` owns a single `SessionLog` (`session_log.py`). `provider_view` (model-visible) and `full_history` (audit) are **deep-copied, read-only derived projections**; per-request `ContextInjectionHook`/RAG output is assembled only into `ProviderRequest` and is intentionally outside this invariant. Never `append`/`extend`/`clear`/`[:]=` the projections. Grow history via `session.append(...)` / `session.session_log.append(...)`. |
+| 1 | **One append-only session log; session-owned model-visible state is logged** — `Session` owns a single `SessionLog` (`session_log.py`). `provider_view` (model-visible) and `full_history` (audit) are **deep-copied, read-only derived projections**; per-request `ContextInjectionHook`/RAG output is assembled only into `ProviderRequest` and is intentionally outside this invariant. Never `append`/`extend`/`clear`/`[:]=` the projections. Grow history via `await session.append(...)`, the only durable path (it writes the session store before the log); direct `SessionLog.append(...)` is in-memory only. |
 | 2 | **Compaction is a *logged projection*, not an in-place mutation** — it calls `session.session_log.record_projection(...)`, which appends a `ProjectionEntry` and rewrites the derived provider view; `full_history` is untouched. |
 | 3 | **Tool protocol is duck-typed** — no base class, no `isinstance`; check attribute presence. |
 | 4 | **`stream()` yields normalized dicts** — the loop must not import any provider's raw types. |

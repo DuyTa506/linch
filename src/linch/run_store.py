@@ -14,7 +14,14 @@ from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 from uuid import UUID, uuid4
 
-from .events import Event, event_from_dict, event_to_dict, usage_from_dict, usage_to_dict
+from .events import (
+    IGNORABLE_MAX_DEPTH,
+    Event,
+    event_from_dict,
+    event_to_dict,
+    usage_from_dict,
+    usage_to_dict,
+)
 from .sessions.memory import now_iso
 from .storage._executor import SqliteExecutor
 from .types import (
@@ -277,7 +284,9 @@ class ModelInputSnapshotStore(Protocol):
     async def prune(self, run_id: str, keep_ids: Sequence[str] = ()) -> int: ...
 
 
-_JSON_SAFE_MAX_DEPTH = 100
+# Single source of truth with the ignorable-event validator: a value this
+# codec would truncate must never have been accepted into an event.
+_JSON_SAFE_MAX_DEPTH = IGNORABLE_MAX_DEPTH
 
 
 def _json_safe(value: Any, *, strict: bool = False) -> Any:

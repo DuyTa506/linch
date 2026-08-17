@@ -704,3 +704,38 @@ def test_remote_backend_resume_config_still_merges_confinement() -> None:
         resume_policy_config={"other": 1},
     )
     assert world.resume_policy_config == {"other": 1, "confinement": {"boundary": "sandbox"}}
+
+
+def test_resume_descriptor_propagates_a_config_error_instead_of_erasing_identity() -> None:
+    """A component that opted into durable identity must not fail silently.
+
+    Swallowing the error degrades the transport to "opaque", so the durable
+    fingerprint quietly loses its contribution and a resume that should be
+    denied is allowed. The misconfiguration is the actionable signal.
+    """
+    from linch.execution.backend import resume_policy_descriptor
+
+    class _Misconfigured:
+        resume_policy_id = "test.world"
+        resume_policy_version = "1"
+
+        @property
+        def resume_policy_config(self) -> dict[str, object]:
+            raise ValueError("durable world with env requires resume_fingerprint_key")
+
+    with pytest.raises(ValueError, match="requires resume_fingerprint_key"):
+        resume_policy_descriptor(_Misconfigured())
+
+
+def test_resume_descriptor_still_returns_none_for_an_opaque_component() -> None:
+    from linch.execution.backend import resume_policy_descriptor
+
+    class _NoIdentity:
+        pass
+
+    class _NoConfig:
+        resume_policy_id = "test.world"
+        resume_policy_config = None
+
+    assert resume_policy_descriptor(_NoIdentity()) is None
+    assert resume_policy_descriptor(_NoConfig()) is None

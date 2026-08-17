@@ -371,6 +371,13 @@ class PromptCacheAdvisoryEvent:
     type: Literal["prompt_cache_advisory"] = "prompt_cache_advisory"
 
 
+# Persistence encodes events with ``_json_safe(..., strict=False)``, which
+# substitutes ``"<max-depth>"`` past this depth rather than raising. An
+# ignorable event must round-trip verbatim, so it may not nest deeper than the
+# durable codec preserves. ``run_store`` imports this as its own limit to keep
+# the two provably equal.
+IGNORABLE_MAX_DEPTH = 100
+
 _KNOWN_EVENT_TYPES = frozenset(
     {
         "assistant",
@@ -421,14 +428,17 @@ def _validate_ignorable_event_envelope(
     return typ
 
 
-def _validate_ignorable_json_value(value: Any, *, path: str, seen: set[int] | None = None) -> None:
+def _validate_ignorable_json_value(
+    value: Any, *, path: str, seen: set[int] | None = None, depth: int = 0
+) -> None:
     """Reject values that cannot survive an ignorable event round trip.
 
     Ignorable events are intentionally opaque, so preserving arbitrary Python
     objects would make their forwarding behavior depend on the in-memory
     process.  Keep the envelope to the same strict JSON value domain used by
-    the durable codec: object keys must be strings, floats must be finite, and
-    recursive containers are rejected.
+    the durable codec: object keys must be strings, floats must be finite,
+    recursive containers are rejected, and nesting stays inside the depth the
+    durable codec preserves verbatim.
     """
 
     if value is None or isinstance(value, str | bool | int):
@@ -446,11 +456,17 @@ def _validate_ignorable_json_value(value: Any, *, path: str, seen: set[int] | No
     identity = id(value)
     if identity in active:
         raise ValueError(f"ignorable event {path} must not contain reference cycles")
+    if depth >= IGNORABLE_MAX_DEPTH:
+        raise ValueError(
+            f"ignorable event {path} exceeds maximum nesting depth {IGNORABLE_MAX_DEPTH}"
+        )
     active.add(identity)
     try:
         if isinstance(value, list):
             for index, item in enumerate(value):
-                _validate_ignorable_json_value(item, path=f"{path}[{index}]", seen=active)
+                _validate_ignorable_json_value(
+                    item, path=f"{path}[{index}]", seen=active, depth=depth + 1
+                )
         else:
             for key, item in value.items():
                 if not isinstance(key, str):
