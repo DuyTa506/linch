@@ -66,9 +66,12 @@ it rather than through module globals — that is what makes Linch multi-tenant
 safe.
 
 - `register(key, service) -> Disposable` — add a service; dispose to remove it.
-- `ctx.<name>` — read a **declared** capability as an attribute (e.g.
-  `ctx.execution`). Underscore names raise, to avoid recursion.
-- `ctx.get(name, default)` — flat/optional lookup.
+- `ctx.<name>` — read a **required** capability as an attribute (e.g.
+  `ctx.execution`); `AttributeError` if unresolved. Underscore names raise, to
+  avoid recursion.
+- `ctx.get(name, default)` — the same lookup, made **optional**: *default* when
+  unresolved. Both walk up to parent scopes, so a child sees a service its
+  parent registered unless it shadows the name.
 - `on(...)` / `effect(...)` — delegate to the bus / scope.
 - `scope(label) -> Context` — a **child** sharing the bus but with an isolated
   service overlay and its own child `EffectScope`, so per-agent (or per-subagent)

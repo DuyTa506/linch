@@ -105,9 +105,11 @@ another provider call drops restored entries silently.
 
 The session store persists the message snapshots needed by the session's single
 append-only `SessionLog`: `provider_view` (model-visible) and `full_history`
-(audit). Both are deep-copied, read-only projections; append through `session.append(...)` or
-`session.session_log.append(...)`, and record compaction with
-`session.session_log.record_projection(...)`. Per-request context-builder output
+(audit). Both are deep-copied, read-only projections. Grow history with
+`await session.append(...)` — it writes to the session store *and* the log,
+so the messages survive a reload. `session.session_log.append(...)` updates
+only the in-memory log and is not a durable session mutation. Record
+compaction with `session.session_log.record_projection(...)`. Per-request context-builder output
 is ephemeral and is never part of the log. Pick ephemeral for stateless workers,
 SQLite to survive restarts.
 

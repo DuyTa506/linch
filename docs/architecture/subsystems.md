@@ -254,8 +254,9 @@ graph TD
     CTX -.->|"merged per-request"| REQ
 ```
 
-**Invariant:** grow history through `session.append(...)` /
-`session.session_log.append(...)`; record compaction as a logged projection.
+**Invariant:** grow history through `await session.append(...)` — the only
+path that writes to the session store as well as the log; record compaction as
+a logged projection. Direct `SessionLog.append(...)` mutates memory only.
 Never mutate `provider_view`/`full_history` in place — they are derived views.
 `MessageEntry` and `ProjectionEntry` are in-memory log entries. Durable session
 stores persist the message/projection *snapshots* needed to reconstruct the two

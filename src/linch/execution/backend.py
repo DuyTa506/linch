@@ -178,10 +178,12 @@ def resume_policy_descriptor(component: Any) -> dict[str, object] | None:
     policy_id = getattr(component, "resume_policy_id", None)
     if not isinstance(policy_id, str) or not policy_id:
         return None
-    try:
-        config = getattr(component, "resume_policy_config", None)
-    except Exception:
-        return None
+    # No blanket except here: a component that declared ``resume_policy_id``
+    # opted into durable identity, so a raising config is a misconfiguration,
+    # not an opaque transport. Swallowing it silently drops that component's
+    # contribution to the fingerprint and lets a resume through that should
+    # have been denied.
+    config = getattr(component, "resume_policy_config", None)
     if config is None:
         return None
     return {

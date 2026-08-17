@@ -8,6 +8,7 @@ carries ``ignorable: true``, and still rejected otherwise.
 from __future__ import annotations
 
 import math
+from typing import Any
 
 import pytest
 
@@ -238,3 +239,46 @@ def test_known_prompt_cache_reasons_still_decode() -> None:
     for reason in ("tool_set_changed", "model_changed"):
         event = event_from_dict({"type": "prompt_cache_advisory", "reason": reason, "detail": "d"})
         assert event.reason == reason  # type: ignore[union-attr]
+
+
+def test_ignorable_event_rejects_nesting_deeper_than_persistence_allows() -> None:
+    """Depth the durable codec would truncate breaks the verbatim round trip.
+
+    Persistence encodes events with ``_json_safe(..., strict=False)``, which
+    substitutes ``"<max-depth>"`` past its limit. Accepting deeper values here
+    would let an ignorable event be stored as something it is not.
+    """
+    from linch.events import IGNORABLE_MAX_DEPTH
+
+    payload: Any = "leaf"
+    for _ in range(IGNORABLE_MAX_DEPTH + 2):
+        payload = [payload]
+
+    with pytest.raises(ValueError, match="nesting depth"):
+        IgnorableEvent(
+            original_type="future_event",
+            raw={"type": "future_event", "ignorable": True, "payload": payload},
+        )
+
+
+def test_ignorable_event_accepts_nesting_at_the_persistence_limit() -> None:
+    from linch.events import IGNORABLE_MAX_DEPTH
+
+    payload: Any = "leaf"
+    # The envelope itself contributes two levels (raw dict -> payload value).
+    for _ in range(IGNORABLE_MAX_DEPTH - 4):
+        payload = [payload]
+
+    event = IgnorableEvent(
+        original_type="future_event",
+        raw={"type": "future_event", "ignorable": True, "payload": payload},
+    )
+    assert event_to_dict(event)["payload"] == payload
+
+
+def test_ignorable_depth_limit_matches_the_durable_codec() -> None:
+    """The two limits must not drift; that drift is the bug being prevented."""
+    from linch.events import IGNORABLE_MAX_DEPTH
+    from linch.run_store import _JSON_SAFE_MAX_DEPTH
+
+    assert IGNORABLE_MAX_DEPTH == _JSON_SAFE_MAX_DEPTH

@@ -215,3 +215,20 @@ def test_effect_rejects_invalid_iterable_disposer_during_registration() -> None:
 
     with pytest.raises(TypeError, match="disposer must be callable"):
         scope.effect(lambda: [lambda: None, 42])
+
+
+async def test_effect_keeps_disposers_coerced_before_an_invalid_item() -> None:
+    """A partially valid iterable must not strand the disposers already coerced.
+
+    ``fn()`` has already run, so every item before the invalid one is a live
+    registration. Dropping the group on the raise leaves them unreachable and
+    scope teardown never undoes them.
+    """
+    scope = EffectScope()
+    released: list[str] = []
+
+    with pytest.raises(TypeError, match="disposer must be callable"):
+        scope.effect(lambda: [lambda: released.append("first"), 42])
+
+    await scope.dispose()
+    assert released == ["first"]

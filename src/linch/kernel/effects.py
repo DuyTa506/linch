@@ -133,20 +133,25 @@ class EffectScope:
         self.ensure_active()
         result = fn()
         group: list[Disposable] = []
-        if result is None:
-            pass
-        elif isinstance(result, Disposable) or callable(result):
-            group.append(_coerce(result))
-        elif isinstance(result, Iterable):
-            for item in result:
-                if item is not None:
-                    group.append(_coerce(item))
-        else:
-            raise TypeError(
-                "effect fn must return None, a disposer, or an iterable of disposers, "
-                f"got {type(result).__name__}"
-            )
-        self._disposers.extend(group)
+        try:
+            if result is None:
+                pass
+            elif isinstance(result, Disposable) or callable(result):
+                group.append(_coerce(result))
+            elif isinstance(result, Iterable):
+                for item in result:
+                    if item is not None:
+                        group.append(_coerce(item))
+            else:
+                raise TypeError(
+                    "effect fn must return None, a disposer, or an iterable of disposers, "
+                    f"got {type(result).__name__}"
+                )
+        finally:
+            # fn() already ran, so anything coerced before a rejected item is a
+            # live registration. The scope must still own it or it can never be
+            # torn down.
+            self._disposers.extend(group)
         return Disposable(lambda: _dispose_reverse(group))
 
     async def dispose(self) -> None:

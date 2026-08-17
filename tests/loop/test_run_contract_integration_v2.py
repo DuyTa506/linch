@@ -106,10 +106,7 @@ def _agent(
     if execution_backend is not None and not hasattr(execution_backend, "shell"):
         # DockerBackend is the legacy shell transport; tests that exercise its
         # durable identity still use it as the shell half of a coherent world.
-        try:
-            shell_config = getattr(execution_backend, "resume_policy_config", None)
-        except Exception:
-            shell_config = None
+        shell_config = getattr(execution_backend, "resume_policy_config", None)
         execution_backend = RemoteExecutionBackend(
             shell=execution_backend,
             fs=_ContractFs(),
@@ -336,20 +333,38 @@ async def test_docker_backend_contract_hashes_environment_values() -> None:
 
 
 async def test_durable_docker_environment_requires_fingerprint_key() -> None:
-    from linch.errors import ConfigError
+    """The env-without-key misconfiguration is the error the caller must see.
+
+    Degrading it to "this shell has no resume_policy" names a symptom and
+    hides the fix, and would let the env drop out of the durable fingerprint.
+    """
     from linch.run_store import InMemoryRunStore
     from linch.sessions import InMemorySessionStore
     from linch.tools import workspace_tools
     from linch.tools.execution import DockerBackend
 
-    agent = _agent(
-        run_store=InMemoryRunStore(),
-        session_store=InMemorySessionStore(),
-        tools=workspace_tools(),
-        execution_backend=DockerBackend(env={"STAGE": "dev"}),
+    with pytest.raises(ValueError, match="requires resume_fingerprint_key"):
+        _agent(
+            run_store=InMemoryRunStore(),
+            session_store=InMemorySessionStore(),
+            tools=workspace_tools(),
+            execution_backend=DockerBackend(env={"STAGE": "dev"}),
+        )
+
+
+async def test_durable_docker_environment_with_fingerprint_key_contributes_identity() -> None:
+    """With the key supplied, env reaches the durable fingerprint."""
+    from linch.execution.backend import resume_policy_descriptor
+    from linch.tools.execution import DockerBackend
+
+    key = b"0123456789abcdef"
+    dev = resume_policy_descriptor(DockerBackend(env={"STAGE": "dev"}, resume_fingerprint_key=key))
+    prod = resume_policy_descriptor(
+        DockerBackend(env={"STAGE": "prod"}, resume_fingerprint_key=key)
     )
-    with pytest.raises(ConfigError, match="shell backend.*resume_policy"):
-        _ = [event async for event in (await agent.session()).run("go")]
+
+    assert dev is not None and prod is not None
+    assert dev["config"] != prod["config"], "env must reach the durable fingerprint"
 
 
 async def test_slots_only_custom_bash_backend_requires_stable_identity() -> None:
