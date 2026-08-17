@@ -5,7 +5,7 @@
 **Skills** are loaded from `.linch/skills/*/SKILL.md`; built-in skills
 such as `verify` are also registered unless a disk skill uses the same name.
 Each file has YAML frontmatter (`name`, `description`, `allowed_tools`,
-`model_override`) and a markdown body. When a skill is invoked, the body is
+`model`) and a markdown body. When a skill is invoked, the body is
 injected as a `<system-reminder>` per-turn via `_re_inject_skill_context`.
 Gated by `FeatureFlags(skills=True)`. Linch 2.0's bare `Agent` sets this flag
 to `False`, so an SDK embedder does not discover project instructions merely
@@ -59,7 +59,7 @@ sequenceDiagram
     alt continue
         P->>W: SubagentContinueTool → continue_subagent (full prior provider_view)
     else stop
-        P->>W: TaskStopTool → cancel task + abort; handle stays continuable
+        P->>W: TaskStopTool → cancel task + abort, handle stays continuable
     end
 ```
 
@@ -176,7 +176,7 @@ subagents via `wf.agent` / `wf.step` / `wf.interrupt` / `wf.parallel` /
   from the parent forces delegation: the coordinator orchestrates, workers execute.
   That separation is a safety rail, not a limitation.
 - **Workflows must be deterministic so resume can replay by content.** The journal keys
-  each call by `sha256(subagent_type, prompt, run_options)`; nondeterministic branching
+  each call by `sha256(subagent_type, prompt, call_options)`; nondeterministic branching
   would replay the wrong prefix, so determinism is the price of cheap, correct resume.
 
 ---
