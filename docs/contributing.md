@@ -99,9 +99,16 @@ Cross-cutting behavior — telemetry, tool-call governance, RAG/context injectio
 
 `provider.stream()` must yield normalized dicts only — never raw API response objects. The loop is provider-agnostic; if you add a new provider, map its wire format inside the provider module.
 
-### `full_history` is append-only
+### Session history uses one append-only log
 
-Never modify `session.full_history` outside the `loop/` package. It is the audit log. Only `session.provider_view` may be pruned or summarized.
+`SessionLog` is the source of truth. Never modify `session.full_history` or
+`session.provider_view` directly: both are read-only projections. Append through
+`await session.append(...)`, which is the only durable path — it writes the
+messages to the session store before updating the log. Direct
+`SessionLog.append(...)` is an in-memory-only mutation and is lost on reload;
+reach for it only when there is no store behind the session. Record compaction
+with `session.session_log.record_projection(...)`. Per-request context is ephemeral
+and remains outside the log.
 
 ### No importing provider-specific types outside providers/
 

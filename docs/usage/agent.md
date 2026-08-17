@@ -40,6 +40,14 @@ on the same `Session` to continue the thread — history persists in the session
 store. When you are done, `await agent.close()` cancels any live background
 workers, flushes stores, and closes hooks that expose `close`/`aclose`.
 
+Each Agent also owns one per-agent `Context` scope. It contains the agent's
+service registrations, event bus, tool pipeline, and effective execution world;
+it is not process-global state. Pass `context=` to supply a scope to the Agent;
+the Agent disposes that supplied scope on close. If a host needs to retain a
+parent scope, pass a child from `parent.scope(...)`. Closing the agent disposes
+the scope after quiescing active work. Disposal is retryable: if a custom
+teardown fails, a later `await agent.close()` retries only unfinished cleanup.
+
 ### Releasing a single session
 
 `agent.close()` tears down the whole agent. To release just one long-lived
@@ -95,8 +103,25 @@ another provider call drops restored entries silently.
 
 ## Session store
 
-The session store persists conversation state (`provider_view`, `full_history`,
-tasks). Pick ephemeral for stateless workers, SQLite to survive restarts.
+The session store persists the message snapshots needed by the session's single
+append-only `SessionLog`: `provider_view` (model-visible) and `full_history`
+(audit). Both are deep-copied, read-only projections. Grow history with
+`await session.append(...)` — it writes to the session store *and* the log,
+so the messages survive a reload. `session.session_log.append(...)` updates
+only the in-memory log and is not a durable session mutation. Record
+compaction with `session.session_log.record_projection(...)`. Per-request context-builder output
+is ephemeral and is never part of the log. Pick ephemeral for stateless workers,
+SQLite to survive restarts.
+
+Because each read of `provider_view`/`full_history` builds a detached deep copy,
+reach for the cheap accessors when you only need a count or the newest turn —
+`session.message_count`, `session.last_provider_message()`, or on the log itself
+`visible_count` / `history_count` / `last_visible()`. On a long session that is
+the difference between copying the whole conversation and copying nothing.
+
+`MessageEntry` and `ProjectionEntry` are in-memory log entries. The durable
+boundary is the session snapshot, not a persisted projection-entry journal. On
+load, Linch seeds a fresh log from the stored historical and visible snapshots.
 
 ```python
 from linch.sessions import InMemorySessionStore, SqliteSessionStore

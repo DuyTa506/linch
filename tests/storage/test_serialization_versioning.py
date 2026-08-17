@@ -3,18 +3,21 @@
 The `RunCheckpoint` wire format and the stored-event log are a stable, versioned
 contract. A checkpoint dict carries an explicit `schema_version`; a loader from an
 older binary must tolerate a *newer* checkpoint (unknown future keys, a higher
-version) without crashing, and `load_events` must skip an event it cannot decode
-(a future event type) rather than aborting the whole resume.
+version) without crashing. Stored events are required on read unless a future
+event explicitly carries a valid ``ignorable: true`` envelope.
 
 Verify: the version stamp is present; `checkpoint_from_dict` round-trips a
-future-versioned dict; `load_events` drops an undecodable row and keeps the rest.
+future-versioned dict; `load_events` preserves explicitly ignorable events and
+fails closed for required or malformed rows.
 """
 
 from __future__ import annotations
 
 import json
 
-from linch.events import ToolCallStartEvent
+import pytest
+
+from linch.events import IgnorableEvent, ToolCallStartEvent, event_to_dict
 from linch.run_store import (
     SCHEMA_VERSION,
     RunCheckpoint,
@@ -124,7 +127,7 @@ def test_checkpoint_from_dict_defaults_missing_pending_alignment() -> None:
     assert restored.pending_alignment == [{"prompt": "ok", "images": None}]
 
 
-async def test_load_events_skips_undecodable_future_events(tmp_path) -> None:
+async def test_load_events_preserves_explicitly_ignorable_future_events(tmp_path) -> None:
     store = SqliteRunStore(tmp_path / "runs.db")
     try:
         await store.create_run("session-1", id="run-1")
@@ -132,21 +135,50 @@ async def test_load_events_skips_undecodable_future_events(tmp_path) -> None:
             "run-1",
             ToolCallStartEvent(tool_use_id="t1", tool_name="Search", input={}, summary="s"),
         )
-        # Inject a row from a hypothetical newer schema: an event type this binary
-        # does not know how to decode. It must be skipped, not crash the resume.
-        future_event = json.dumps({"type": "telepathy_event", "payload": 42})
+        future_raw = {"type": "telepathy_event", "ignorable": True, "payload": 42}
         await store._exec.run(
             lambda c: c.execute(
                 "insert into run_events (run_id, seq, appended_at, event) values (?, ?, ?, ?)",
-                ("run-1", 2, "2026-01-01T00:00:00Z", future_event),
+                ("run-1", 2, "2026-01-01T00:00:00Z", json.dumps(future_raw)),
             )
         )
 
         events = await store.load_events("run-1")
 
-        # Only the decodable event survives; the future one is dropped.
-        assert len(events) == 1
+        assert len(events) == 2
         assert isinstance(events[0].event, ToolCallStartEvent)
         assert events[0].seq == 1
+        assert isinstance(events[1].event, IgnorableEvent)
+        assert events[1].seq == 2
+        assert event_to_dict(events[1].event) == future_raw
+    finally:
+        await store.close()
+
+
+@pytest.mark.parametrize(
+    ("encoded", "error"),
+    [
+        (json.dumps({"type": "telepathy_event", "payload": 42}), "unknown event type"),
+        (json.dumps({"type": "", "ignorable": True}), "non-empty string"),
+        (json.dumps({"ignorable": True}), "non-empty string"),
+        (json.dumps([]), "event must be an object"),
+        ("{", "Expecting property name"),
+    ],
+)
+async def test_load_events_fails_closed_for_required_or_malformed_rows(
+    tmp_path, encoded: str, error: str
+) -> None:
+    store = SqliteRunStore(tmp_path / "runs.db")
+    try:
+        await store.create_run("session-1", id="run-1")
+        await store._exec.run(
+            lambda c: c.execute(
+                "insert into run_events (run_id, seq, appended_at, event) values (?, ?, ?, ?)",
+                ("run-1", 1, "2026-01-01T00:00:00Z", encoded),
+            )
+        )
+
+        with pytest.raises(ValueError, match=error):
+            await store.load_events("run-1")
     finally:
         await store.close()

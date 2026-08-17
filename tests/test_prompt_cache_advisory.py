@@ -18,6 +18,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
+
 from linch import Agent, ContextBuildResult, RunOptions
 from linch._prompt_cache import prompt_cache_advisories, tool_signature
 from linch.events import PromptCacheAdvisoryEvent, event_from_dict, event_to_dict
@@ -103,10 +105,15 @@ def test_advisory_event_round_trips() -> None:
     assert restored.detail == "tools changed"
 
 
-def test_advisory_event_from_dict_defaults_unknown_reason() -> None:
-    restored = event_from_dict({"type": "prompt_cache_advisory", "reason": "???", "detail": "d"})
-    assert isinstance(restored, PromptCacheAdvisoryEvent)
-    assert restored.reason == "tool_set_changed"
+def test_advisory_event_from_dict_rejects_unknown_reason() -> None:
+    """An unsupported discriminator must fail, not silently decode as another reason.
+
+    Coercing it made a future writer's advisory indistinguishable from a
+    genuine ``tool_set_changed`` row. A missing ``reason`` still defaults —
+    that is the legacy-row case, not an unrecognized value.
+    """
+    with pytest.raises(ValueError, match="unknown reason"):
+        event_from_dict({"type": "prompt_cache_advisory", "reason": "???", "detail": "d"})
 
 
 # ── Stable tool selection ────────────────────────────────────────────────────

@@ -12,7 +12,95 @@ and persisted wire formats are versioned separately via `linch.RUN_SCHEMA_VERSIO
   Tool Output V2. Environments pinned to jsonschema 3.x must update that pin
   before installing this release.
 
+### BREAKING / Migration
+
+- **Session construction and projections are migrating.** `Session` now uses
+  one `session_log=` source of truth. The deprecated direct-construction
+  `provider_view=`/`full_history=` compatibility shim remains for migration;
+  new callers should use `SessionLog.seed(historical=..., visible=...)`.
+  `session.provider_view` and `session.full_history` are deep-copied, read-only
+  snapshots. Append with `await session.append(...)` or
+  `session.session_log.append(...)`, and record compaction with
+  `session.session_log.record_projection(...)` rather than mutating either
+  projection.
+- **Projection durability has a defined boundary.** `MessageEntry` and
+  `ProjectionEntry` are in-memory log entries; session stores persist the
+  message/projection snapshots needed to reconstruct the views, not a second
+  projection journal. Per-request context-builder output remains ephemeral and
+  is outside the session log.
+- **Agent context ownership is explicit.** `Agent(context=...)` adopts and
+  disposes the supplied scope during `close()`. Hosts retaining a parent scope
+  should pass a child from `parent.scope(...)`.
+- **Execution backends are unified.** New integrations should pass an
+  `ExecutionBackend` exposing coherent `.shell` and `.fs` transports (use
+  `LocalExecutionBackend` or `RemoteExecutionBackend`). A shell-only
+  `execution_backend` remains a deprecated compatibility path and emits
+  `DeprecationWarning`; it has no filesystem transport unless `filesystem=` is
+  explicit. Migrate before enabling `FeatureFlags(filesystem=True)`.
+- **Execution confinement and cwd are declarative.** Non-empty confinement
+  metadata records the embedder's claim; Linch does not verify that boundary.
+  The effective session cwd is sent to the shell transport, and a custom world
+  must map it consistently with filesystem paths.
+- **Pipeline authorization ordering is fixed.** `ToolPipeline` runs after
+  canonical validation and permission. Its listeners must not rewrite the
+  authorization-sensitive tool, input, or decision; use `PreToolUse` for a
+  transform that is validated and authorized again.
+- **Tool registration semantics are exact.** `ToolRegistry.register` now
+  rejects duplicate names; use `replace` for a reversible hot swap. Await the
+  returned `Disposable` (`await disposer.dispose()`), which removes only its
+  identity-owned registration. A successful disposer is single-use; failed
+  teardown remains retryable.
+- **Required persisted data is strict on read.** Unknown or malformed required
+  events fail loading. Only producer-declared `ignorable` events may be read as
+  `IgnorableEvent` and skipped. `ignorable` is reserved for unknown types: a
+  *known* event type carrying the flag is now rejected instead of decoding as
+  itself. An unrecognized `prompt_cache_advisory` `reason` is likewise rejected
+  rather than silently coerced to `"tool_set_changed"`; a row that omits the
+  field still defaults, so legacy rows keep loading.
+
 ### Added
+
+- New public kernel and capability names: `Context`, `Disposable`,
+  `ExecutionBackend`, `ShellBackend`, `LocalExecutionBackend`,
+  `RemoteExecutionBackend`, `ToolExecution`, `ToolPipeline`, and `SessionLog`.
+  `IgnorableEvent` and `is_ignorable_event` are public for forward-compatible
+  event readers. `ToolPipeline` exposes the
+  `tools/pre-execute → tools/execute → tools/post-execute` lifecycle; active
+  pipeline listeners and execution worlds contribute stable durable resume
+  identity. The shipped `tools/execute` wrappers `metrics_wrapper` and
+  `timeout_wrapper` are public as well, so embedders can compose them without
+  importing a private submodule path.
+
+- **Cheap projection reads.** `SessionLog.visible_count`, `.history_count`, and
+  `.last_visible()` (plus `Session.last_provider_message()`) answer count and
+  newest-message questions without snapshotting the conversation. Reading
+  `provider_view`/`full_history` returns a detached deep copy by design, so
+  callers that only need a length or the last turn should use these instead —
+  the loop, checkpointing, and compaction now do.
+
+### Fixed
+
+- `DockerBackend` now declares `confinement`, so an agent configured with it
+  again reports Bash as sandboxed in the system prompt. The tri-state
+  sandbox reporting introduced with the execution seam requires an explicit
+  confinement declaration, which Linch's own Docker backend did not make —
+  it was described to the model as unverified. Durable resume identity is
+  unchanged: a shell-only backend still fingerprints through its
+  `resume_policy_config`, which does not include confinement.
+- `LocalExecutionBackend` now declares `security_posture = "host"`. Passing it
+  explicitly described Bash to the model as an undeclared boundary, when the
+  world in fact declares it runs on the host; "unverified" is now reserved for
+  a backend whose boundary Linch genuinely cannot describe.
+- A tool call's `ctx.execution` can no longer be swapped by a pipeline listener
+  after permission. Filesystem tools fall back to `execution.fs` and shell
+  access rides the same world, so swapping it redirected an approved call into
+  another workspace.
+- `RemoteExecutionBackend` rejects a `resume_policy_config` that defines
+  `confinement`; the seam merges its own declaration under that key, which
+  silently dropped the caller's value from the resume fingerprint.
+- A `ConfigError` about an execution world inherited from a supplied `Context`
+  now says so, instead of blaming an `execution_backend=` argument the caller
+  never passed.
 
 - **Incremental durability ledger.** `Agent(durability=...)`,
   `DurabilityOptions`, and `DurabilityOptions.strict_v1()` opt into a durable

@@ -24,6 +24,9 @@ from .backend import FileBackend, resolve_filesystem_backend
 def _get_backend(ctx: ToolContext) -> FileBackend:
     fs = getattr(ctx, "filesystem", None)
     if fs is None:
+        execution = getattr(ctx, "execution", None)
+        fs = getattr(execution, "fs", None)
+    if fs is None:
         fs = resolve_filesystem_backend(ctx.deps)
     if fs is None:
         raise RuntimeError(

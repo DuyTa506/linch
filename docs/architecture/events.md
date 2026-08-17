@@ -50,6 +50,13 @@ graph LR
 
 `event_to_dict` and `event_from_dict` in `events.py` provide full round-trip serialization for all event types.
 
+Readers are strict by default: an unknown or malformed required event — at the
+top level or nested inside an event payload — is a load error, because silently
+dropping it could change the meaning of a resumed run. Only an event explicitly
+tagged `ignorable` may decode to the public `IgnorableEvent` sentinel and be
+skipped by a consumer. Ignorability is a producer-declared compatibility
+property, not a fallback for unknown required fields or nested shapes.
+
 ## Design rationale
 
 - **Events are the *only* output channel.** Every cross-cutting concern (assistant

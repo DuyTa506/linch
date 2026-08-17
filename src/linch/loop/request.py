@@ -82,7 +82,9 @@ def _re_inject_skill_context(session: Session) -> None:
     if agent.skill_listing_text:
         text = wrap_in_system_reminder(agent.skill_listing_text)
         if text not in present_text:
-            session.provider_view.append(Message(role="user", content=[TextBlock(text=text)]))
+            session.session_log.append(
+                Message(role="user", content=[TextBlock(text=text)]), historical=False
+            )
             present_text.add(text)
     for rec in session.invoked_skills:
         text = wrap_in_system_reminder(
@@ -90,7 +92,9 @@ def _re_inject_skill_context(session: Session) -> None:
             f"named '{rec.name}'.\n\n{rec.substituted_body}"
         )
         if text not in present_text:
-            session.provider_view.append(Message(role="user", content=[TextBlock(text=text)]))
+            session.session_log.append(
+                Message(role="user", content=[TextBlock(text=text)]), historical=False
+            )
             present_text.add(text)
 
 
