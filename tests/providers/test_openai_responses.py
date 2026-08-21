@@ -96,6 +96,19 @@ def test_map_openai_error_retry_after_numeric_and_non_context_400() -> None:
     assert isinstance(bad, ProviderError)
 
 
+def test_map_openai_error_argumentless_exception_is_nonempty_and_retryable() -> None:
+    from linch.errors import ProviderError
+    from linch.openai_responses import map_openai_error
+
+    class ArgumentLessError(Exception):
+        pass
+
+    mapped = map_openai_error(ArgumentLessError())
+    assert isinstance(mapped, ProviderError)
+    assert str(mapped) == "ArgumentLessError: ArgumentLessError()"
+    assert mapped.retryable is True
+
+
 def test_map_openai_error_structured_context_length() -> None:
     from linch.errors import ContextLengthError
     from linch.openai_responses import map_openai_error

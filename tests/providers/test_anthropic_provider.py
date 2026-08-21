@@ -782,6 +782,19 @@ def test_error_mapping_non_context_400_stays_provider_error():
     assert isinstance(result, ProviderError)
 
 
+def test_error_mapping_argumentless_exception_is_nonempty_and_retryable():
+    from linch.errors import ProviderError
+    from linch.providers.anthropic import _map_anthropic_error
+
+    class ArgumentLessError(Exception):
+        pass
+
+    mapped = _map_anthropic_error(ArgumentLessError())
+    assert isinstance(mapped, ProviderError)
+    assert str(mapped) == "ArgumentLessError: ArgumentLessError()"
+    assert mapped.retryable is True
+
+
 def test_provider_missing_package(monkeypatch):
     """Raises ProviderError when anthropic package is not installed."""
     import sys
