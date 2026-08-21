@@ -10,7 +10,7 @@ from linch._prompt_cache import LLAMACPP_PROMPT_CACHE, apply_extra_body_cache
 from linch.providers.openai_chat import (
     OpenAIChatCompletionsProvider,
     OpenAIChatProviderOptions,
-    _build_chat_payload,
+    _build_openai_compatible_payload,
 )
 from linch.types import ModelId, ProviderRequest
 
@@ -119,23 +119,6 @@ def _build_llamacpp_payload(
     req: ProviderRequest, options: LlamaCppProviderOptions | None = None
 ) -> dict[str, Any]:
     opts = options or LlamaCppProviderOptions()
-    payload = _build_chat_payload(req, json_mode=False)
-
-    # stream_options.include_usage is what makes llama.cpp emit token usage in
-    # the final stream chunk; without it the run reports zero tokens. Older
-    # server builds reject the unknown field, so allow opting out.
-    if not opts.include_stream_options:
-        payload.pop("stream_options", None)
-
-    if req.output_schema is not None:
-        if opts.json_mode:
-            payload["response_format"] = {"type": "json_object"}
-        else:
-            payload["response_format"] = {
-                "type": "json_schema",
-                "schema": req.output_schema.schema,
-            }
-
     extra_body = dict(opts.extra_body or {})
     if opts.chat_template_kwargs is not None:
         extra_body["chat_template_kwargs"] = opts.chat_template_kwargs
@@ -148,13 +131,18 @@ def _build_llamacpp_payload(
     if opts.parse_tool_calls is not None:
         extra_body["parse_tool_calls"] = opts.parse_tool_calls
     apply_extra_body_cache(extra_body, req, wire=LLAMACPP_PROMPT_CACHE)
-    if extra_body:
-        payload["extra_body"] = extra_body
 
-    if opts.parallel_tool_calls is not None:
-        payload["parallel_tool_calls"] = opts.parallel_tool_calls
-
-    return payload
+    # Use the shared OpenAI-compatible builder so structured output retains the
+    # nested ``json_schema`` shape expected by llama.cpp's OpenAI endpoint.
+    # ``stream_options.include_usage`` is what makes llama.cpp emit token usage
+    # in the final stream chunk; older servers can opt out via the option.
+    return _build_openai_compatible_payload(
+        req,
+        json_mode=opts.json_mode,
+        include_stream_options=opts.include_stream_options,
+        parallel_tool_calls=opts.parallel_tool_calls,
+        extra_body=extra_body or None,
+    )
 
 
 def _fetch_llamacpp_context_window(opts: LlamaCppProviderOptions) -> int | None:
