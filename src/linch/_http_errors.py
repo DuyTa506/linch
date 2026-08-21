@@ -47,7 +47,8 @@ def error_message(err: Exception) -> str:
     raw = nested_error(err).get("message")
     if isinstance(raw, str) and raw:
         return raw
-    return str(err)
+    message = str(err)
+    return message or f"{type(err).__name__}: {err!r}"
 
 
 def retry_after_seconds(err: Exception) -> float | None:

@@ -27,6 +27,25 @@ def test_retry_after_zero_is_honored_not_dropped() -> None:
     assert retry_after_seconds(Err("rate limited")) == 0.0
 
 
+def test_error_message_preserves_body_and_exception_messages() -> None:
+    from linch._http_errors import error_message
+
+    class BodyMessage(Exception):
+        body = {"error": {"message": "message from response body"}}
+
+    assert error_message(BodyMessage("message from exception")) == "message from response body"
+    assert error_message(Exception("message from exception")) == "message from exception"
+
+
+def test_error_message_falls_back_to_exception_type() -> None:
+    from linch._http_errors import error_message
+
+    class ArgumentLessError(Exception):
+        pass
+
+    assert error_message(ArgumentLessError()) == "ArgumentLessError: ArgumentLessError()"
+
+
 def test_delay_for_error_uses_zero_retry_after_for_immediate_retry() -> None:
     """A RateLimitError with retry_after_seconds == 0.0 retries immediately."""
     from linch.errors import RateLimitError

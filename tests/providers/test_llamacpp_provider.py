@@ -62,7 +62,7 @@ def test_llamacpp_payload_omits_stream_options_when_opted_out() -> None:
     assert "stream_options" not in payload
 
 
-def test_llamacpp_payload_uses_llamacpp_json_schema_shape() -> None:
+def test_llamacpp_payload_uses_openai_json_schema_shape() -> None:
     schema = OutputSchema(
         name="answer",
         schema={
@@ -84,7 +84,11 @@ def test_llamacpp_payload_uses_llamacpp_json_schema_shape() -> None:
 
     assert payload["response_format"] == {
         "type": "json_schema",
-        "schema": schema.schema,
+        "json_schema": {
+            "name": schema.name,
+            "strict": schema.strict,
+            "schema": schema.schema,
+        },
     }
 
 
