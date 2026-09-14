@@ -4,13 +4,14 @@ Notable changes to `linch`. Versioning follows the contract in
 [docs/versioning.md](docs/versioning.md): the public API is exactly `linch.__all__`,
 and persisted wire formats are versioned separately via `linch.RUN_SCHEMA_VERSION`.
 
-## Unreleased
+## 2.0.0 — 2026-09-14
 
 ### Dependencies
 
 - `linch` now installs `jsonschema>=4,<5` as a core dependency for Canonical
   Tool Output V2. Environments pinned to jsonschema 3.x must update that pin
   before installing this release.
+
 
 ### BREAKING / Migration
 
@@ -58,6 +59,45 @@ and persisted wire formats are versioned separately via `linch.RUN_SCHEMA_VERSIO
   rather than silently coerced to `"tool_set_changed"`; a row that omits the
   field still defaults, so legacy rows keep loading.
 
+- **Neutral `Agent` defaults.** A bare `Agent` has an empty tool registry, a
+  domain-neutral system identity, and `FeatureFlags` disabled for skills,
+  subagents, MCP, and filesystem discovery. Pass `tools=workspace_tools()` (or
+  your own registry), enable trusted features explicitly, or use
+  `create_deep_agent(...)` for the opt-in deep-agent preset. `default_tools()`
+  remains a compatibility alias for the workspace preset but is no longer an
+  implicit `Agent` default.
+- **A bare `Agent` no longer writes conversation state under the working
+  directory.** Its implicit session store changed from
+  `.linch/sessions.db` to `InMemorySessionStore`, so history no longer survives
+  a process restart unless the host supplies `session_store=` explicitly. Use
+  `SqliteSessionStore` or another persistent session store in services that
+  require restart durability.
+- **Read-before-write is now opt-in on a bare `Agent`.** The
+  `read_before_write` default changed from `True` to `False` with the neutral
+  runtime defaults. Set `read_before_write=True` for custom/workspace tool
+  configurations that still require the virtual-filesystem edit-after-read
+  guard; `create_deep_agent()` enables it for its workspace preset.
+- **The deep-agent factory is bounded by default.**
+  `create_deep_agent()` now selects `profile="balanced"`, which caps the shared
+  agent/subagent tree at 64 turns and 1,000,000 tokens. Select
+  `profile="unbounded"` only when the embedding service supplies equivalent
+  lifetime and cost controls.
+- **Permission input is canonical before approval.** Pre-tool transformations
+  are validated and permission-checked again. The old approval callback
+  `updatedInput` response is rejected; mutate in `PreToolUse` instead.
+- **Provider stream boundary is strict.** Provider adapters must emit Linch's
+  normalized event vocabulary and required fields; raw vendor objects and
+  malformed events are not accepted by the loop.
+- **Durable Docker runs with environment forwarding require a fingerprint
+  secret.** For a durable run that offers a Docker-backed `Bash` tool, a
+  non-empty `DockerBackend.env` or `DockerBackend.forward_env` now requires
+  `resume_fingerprint_key` as `bytes` with at least 16 bytes. Linch uses the key
+  to HMAC environment values into the run contract without persisting the
+  values themselves. Supply the same protected key on every host that may
+  resume the run; configurations without Docker environment values are
+  unaffected.
+
+
 ### Added
 
 - New public kernel and capability names: `Context`, `Disposable`,
@@ -77,6 +117,32 @@ and persisted wire formats are versioned separately via `linch.RUN_SCHEMA_VERSIO
   `provider_view`/`full_history` returns a detached deep copy by design, so
   callers that only need a length or the last turn should use these instead —
   the loop, checkpointing, and compaction now do.
+
+- `workspace_tools()` and explicit deep-agent profiles (`DeepAgentProfile` /
+  `DEEP_AGENT_PROFILES`) for callers that want a ready software-workspace
+  catalog without making it an SDK default. The new built-in verification
+  subagent is intentionally read-only and does not offer Bash; prompt
+  instructions alone cannot enforce that boundary.
+- `ToolContext.report_progress()` and `ToolProgressEvent`, a best-effort,
+  observational progress channel that never enters provider history or the
+  durable run event log.
+- `RunContract`, canonical fingerprint helpers, and
+  `RunContractMismatchError` for fail-closed durable-run checks. Verification
+  runs when a durable run is created as well as when it resumes. Custom
+  callbacks and policy-bearing hooks require a stable `resume_policy_id`;
+  custom Bash backends require both stable identity and non-`None`, JSON-safe
+  policy configuration. Unverifiable runs are rejected before persistence.
+  Legacy runs without a contract require
+  `RunOptions(allow_legacy_resume=True)` for an explicit migration override.
+- Portable session forking through the public `Agent.fork_session(...)`
+  surface. Forks copy a validated history prefix and metadata, not live work
+  or arbitrary application state.
+- Provider-agnostic compaction/snapshot recovery and concurrency-safe SQLite /
+  Postgres storage allocation. Background worker audit events carry their
+  origin, and the opt-in durability ledger adds durable delivery after enqueue
+  — not recovery of a worker that was still running when its process stopped,
+  which remains the embedding application's responsibility.
+
 
 ### Fixed
 
@@ -134,82 +200,6 @@ and persisted wire formats are versioned separately via `linch.RUN_SCHEMA_VERSIO
   durably queued and deduplicated for the next turn. Linch still does not
   reconstruct a detached task that was in flight when the process stopped.
 
-## 2.0.0 — 2026-08-13
-
-Linch 2.0 is a breaking release for the SDK runtime defaults. It keeps Linch
-as a reusable harness; a coding agent remains an explicit application/preset,
-not the SDK's implicit identity.
-
-### BREAKING
-
-- **Neutral `Agent` defaults.** A bare `Agent` has an empty tool registry, a
-  domain-neutral system identity, and `FeatureFlags` disabled for skills,
-  subagents, MCP, and filesystem discovery. Pass `tools=workspace_tools()` (or
-  your own registry), enable trusted features explicitly, or use
-  `create_deep_agent(...)` for the opt-in deep-agent preset. `default_tools()`
-  remains a compatibility alias for the workspace preset but is no longer an
-  implicit `Agent` default.
-- **A bare `Agent` no longer writes conversation state under the working
-  directory.** Its implicit session store changed from
-  `.linch/sessions.db` to `InMemorySessionStore`, so history no longer survives
-  a process restart unless the host supplies `session_store=` explicitly. Use
-  `SqliteSessionStore` or another persistent session store in services that
-  require restart durability.
-- **Read-before-write is now opt-in on a bare `Agent`.** The
-  `read_before_write` default changed from `True` to `False` with the neutral
-  runtime defaults. Set `read_before_write=True` for custom/workspace tool
-  configurations that still require the virtual-filesystem edit-after-read
-  guard; `create_deep_agent()` enables it for its workspace preset.
-- **The deep-agent factory is bounded by default.**
-  `create_deep_agent()` now selects `profile="balanced"`, which caps the shared
-  agent/subagent tree at 64 turns and 1,000,000 tokens. Select
-  `profile="unbounded"` only when the embedding service supplies equivalent
-  lifetime and cost controls.
-- **Permission input is canonical before approval.** Pre-tool transformations
-  are validated and permission-checked again. The old approval callback
-  `updatedInput` response is rejected; mutate in `PreToolUse` instead.
-- **Provider stream boundary is strict.** Provider adapters must emit Linch's
-  normalized event vocabulary and required fields; raw vendor objects and
-  malformed events are not accepted by the loop.
-- **Durable Docker runs with environment forwarding require a fingerprint
-  secret.** For a durable run that offers a Docker-backed `Bash` tool, a
-  non-empty `DockerBackend.env` or `DockerBackend.forward_env` now requires
-  `resume_fingerprint_key` as `bytes` with at least 16 bytes. Linch uses the key
-  to HMAC environment values into the run contract without persisting the
-  values themselves. Supply the same protected key on every host that may
-  resume the run; configurations without Docker environment values are
-  unaffected.
-
-### Added
-
-- `workspace_tools()` and explicit deep-agent profiles (`DeepAgentProfile` /
-  `DEEP_AGENT_PROFILES`) for callers that want a ready software-workspace
-  catalog without making it an SDK default. The new built-in verification
-  subagent is intentionally read-only and does not offer Bash; prompt
-  instructions alone cannot enforce that boundary.
-- `ToolContext.report_progress()` and `ToolProgressEvent`, a best-effort,
-  observational progress channel that never enters provider history or the
-  durable run event log.
-- `RunContract`, canonical fingerprint helpers, and
-  `RunContractMismatchError` for fail-closed durable-run checks. Verification
-  runs when a durable run is created as well as when it resumes. Custom
-  callbacks and policy-bearing hooks require a stable `resume_policy_id`;
-  custom Bash backends require both stable identity and non-`None`, JSON-safe
-  policy configuration. Unverifiable runs are rejected before persistence.
-  Legacy runs without a contract require
-  `RunOptions(allow_legacy_resume=True)` for an explicit migration override.
-- Portable session forking through the public `Agent.fork_session(...)`
-  surface. Forks copy a validated history prefix and metadata, not live work
-  or arbitrary application state.
-- Provider-agnostic compaction/snapshot recovery and concurrency-safe SQLite /
-  Postgres storage allocation. In 2.0.0, background worker audit events carried
-  their origin, but detached result notifications remained process-local and
-  durable delivery belonged to the embedding application. The opt-in ledger
-  described under Unreleased adds durable delivery after enqueue, not recovery
-  of a worker that was still running when its process stopped.
-
-### Fixed
-
 - A duck-typed abort signal whose `wait()` completed spuriously could cancel a
   live permission callback. Linch now waits until the signal reports an actual
   abort.
@@ -233,6 +223,7 @@ not the SDK's implicit identity.
 
 See [migration-2.0.md](docs/migration-2.0.md) for examples and the complete
 upgrade checklist.
+
 
 ## 1.2.1 — 2026-08-12
 
