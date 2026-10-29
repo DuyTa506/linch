@@ -1,14 +1,24 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import AsyncGenerator, Sequence
+from dataclasses import dataclass, replace
 from typing import Any, Protocol, cast, runtime_checkable
+from uuid import uuid4
 
 from .abort import AbortContext
+from .errors import ProviderError
 from .events import CompactionEvent
+from .model_calls import _AccountedAuxiliaryCaller, _AuxiliaryDelivery
 from .providers.limiter import provider_slot
-from .types import Message, SystemBlock, TextBlock, ToolResultBlock, message_to_dict
+from .types import (
+    Message,
+    ProviderRequest,
+    SystemBlock,
+    TextBlock,
+    ToolResultBlock,
+    message_to_dict,
+)
 
 
 @dataclass
@@ -16,6 +26,8 @@ class CompactionContext:
     messages: list[Message]
     model: str
     signal: AbortContext
+    auxiliary_caller: _AccountedAuxiliaryCaller | None = None
+    logical_call_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -308,6 +320,94 @@ async def summarize_with_provider(
     return text.strip()
 
 
+async def _summarize_context(
+    ctx: CompactionContext,
+    provider: Any,
+    older: list[Message],
+    *,
+    prompt: str,
+    max_output_tokens: int = 4096,
+) -> str:
+    if ctx.auxiliary_caller is None:
+        return await summarize_with_provider(
+            provider,
+            ctx.model,
+            older,
+            ctx.signal,
+            prompt=prompt,
+            max_output_tokens=max_output_tokens,
+        )
+    result = await ctx.auxiliary_caller.text(
+        logical_call_id=ctx.logical_call_id or str(uuid4()),
+        model=ctx.model,
+        system=[SystemBlock(text=prompt, cacheable=False)],
+        messages=older,
+        max_output_tokens=max_output_tokens,
+        signal=ctx.signal,
+    )
+    if result.receipt.disposition != "accepted" or result.text is None:
+        raise ProviderError("compaction provider returned an unusable summary", retryable=False)
+    return result.text
+
+
+class _AccountedCompactionProvider:
+    """Account only streams made through the supplied provider.
+
+    This facade does not observe opaque external calls or promise replay of a
+    custom strategy's arbitrary transformation. Its scope closes early streams
+    before the strategy's result may be committed to the provider view.
+    """
+
+    def __init__(
+        self, caller: _AccountedAuxiliaryCaller, logical_call_id: str, signal: AbortContext
+    ) -> None:
+        self._caller, self._logical_call_id, self._signal = caller, logical_call_id, signal
+        self._streams: set[AsyncGenerator[dict[str, Any], None]] = set()
+        self._call_index = 0
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._caller._provider, name)
+
+    def stream(self, request: ProviderRequest) -> AsyncGenerator[dict[str, Any], None]:
+        # Distinct calls by a custom strategy are distinct intended operations;
+        # the same ordered calls in a retry retain their operation bindings.
+        index = self._call_index
+        self._call_index += 1
+        logical_id = self._logical_call_id if index == 0 else f"{self._logical_call_id}/{index}"
+        request = replace(request, signal=self._signal)
+
+        async def accounted() -> AsyncGenerator[dict[str, Any], None]:
+            delivery = _AuxiliaryDelivery(self._caller, request, logical_id, self._signal)
+            stream = delivery.stream()
+            try:
+                async for event in stream:
+                    yield event
+            finally:
+                try:
+                    await stream.aclose()
+                finally:
+                    self._streams.discard(wrapped)
+
+        wrapped = accounted()
+        self._streams.add(wrapped)
+        return wrapped
+
+    async def aclose(self) -> None:
+        # A plain async-for break does not synchronously close a generator. The
+        # strategy scope owns every facade stream, including such early breaks.
+        failure: BaseException | None = None
+        try:
+            for stream in tuple(self._streams):
+                try:
+                    await stream.aclose()
+                except BaseException as exc:
+                    failure = failure or exc
+        finally:
+            self._streams.clear()
+        if failure is not None:
+            raise failure
+
+
 class DefaultCompaction:
     id = "default-keep-recent-10"
 
@@ -325,9 +425,7 @@ class DefaultCompaction:
         if not older:
             return ctx.messages
 
-        summary_text = await summarize_with_provider(
-            provider, ctx.model, older, ctx.signal, prompt=self.prompt
-        )
+        summary_text = await _summarize_context(ctx, provider, older, prompt=self.prompt)
 
         summary_msg = Message(
             role="user",
@@ -363,13 +461,8 @@ class DetailedCompaction:
         if not older:
             return ctx.messages
 
-        summary_text = await summarize_with_provider(
-            provider,
-            ctx.model,
-            older,
-            ctx.signal,
-            prompt=self.prompt,
-            max_output_tokens=self.max_output_tokens,
+        summary_text = await _summarize_context(
+            ctx, provider, older, prompt=self.prompt, max_output_tokens=self.max_output_tokens
         )
 
         summary_msg = Message(
@@ -446,6 +539,8 @@ async def _run_compaction_impl(
     strategy: Any,
     *,
     model: str | None = None,
+    auxiliary_caller: _AccountedAuxiliaryCaller | None = None,
+    logical_call_id: str | None = None,
 ) -> bool:
     """Run *strategy* against the model selected for the current provider call.
 
@@ -479,16 +574,32 @@ async def _run_compaction_impl(
             ),
         )
 
+    caller = (
+        auxiliary_caller._for_compaction(strategy.id, snapshot)
+        if auxiliary_caller is not None
+        else None
+    )
+    operation_id = logical_call_id or str(uuid4())
     ctx = CompactionContext(
         messages=snapshot,
         model=resolved_model,
         signal=signal,
+        auxiliary_caller=caller,
+        logical_call_id=operation_id if caller is not None else None,
     )
-    # Gated here, not inside DefaultCompaction: this is the single invocation
-    # point, so a host's own CompactionStrategy is bounded too without the
-    # public compact(ctx, provider) signature having to know about limiters.
-    async with provider_slot(agent, resolved_model):
-        compacted = await strategy.compact(ctx, agent.provider)
+    if caller is None:
+        # Standalone legacy execution retains its gate. Accounted deliveries
+        # acquire inside the gateway, once for each physical provider stream.
+        async with provider_slot(agent, resolved_model):
+            compacted = await strategy.compact(ctx, agent.provider)
+    else:
+        facade = _AccountedCompactionProvider(caller, operation_id, signal)
+        try:
+            compacted = await strategy.compact(ctx, facade)
+        finally:
+            await facade.aclose()
+        signal.throw_if_aborted()
+        caller._ledger.assert_may_start()
     compacted = strip_response_chaining(compacted)
 
     changed = session.session_log.record_projection(compacted, reason="compaction")
@@ -532,6 +643,8 @@ async def maybe_compact(
     signal: AbortContext,
     *,
     model: str | None = None,
+    auxiliary_caller: _AccountedAuxiliaryCaller | None = None,
+    logical_call_id: str | None = None,
 ) -> bool:
     resolved_model = _resolve_compaction_model(session, agent, model)
     strategy = getattr(agent, "compaction", None) or default_compaction
@@ -572,6 +685,8 @@ async def maybe_compact(
             signal,
             strategy,
             model=resolved_model,
+            auxiliary_caller=auxiliary_caller,
+            logical_call_id=logical_call_id,
         )
     except Exception:
         # Micro-compaction already recorded a provider-view projection above; if the
@@ -637,9 +752,19 @@ async def run_forced_compaction(
     signal: AbortContext,
     *,
     model: str | None = None,
+    auxiliary_caller: _AccountedAuxiliaryCaller | None = None,
+    logical_call_id: str | None = None,
 ) -> bool:
     strategy = getattr(agent, "compaction", None) or default_compaction
-    return await _run_compaction_impl(session, agent, signal, strategy, model=model)
+    return await _run_compaction_impl(
+        session,
+        agent,
+        signal,
+        strategy,
+        model=model,
+        auxiliary_caller=auxiliary_caller,
+        logical_call_id=logical_call_id,
+    )
 
 
 def build_compaction_event(session: Any) -> CompactionEvent:
