@@ -823,3 +823,120 @@ async def test_corrupt_journal_cumulative_cost_is_validated_before_budget_restor
         await _ModelCallLedger(intent.run_id, budget=budget).restore(None, journal)
     assert budget.spent_tokens == 0
     assert budget.spent_usd == 0.0
+
+
+async def test_started_delivery_cannot_settle_as_not_dispatched() -> None:
+    from linch.budget import RunBudget
+    from linch.model_calls import _ModelCallError, _ModelCallLedger
+
+    intent, receipt = _records(
+        actual_model="",
+        usage_status="not_dispatched",
+        usage=None,
+        cost_usd=None,
+        disposition="not_dispatched",
+        accepted_text=None,
+        accepted_text_sha256=None,
+    )
+    budget = RunBudget(max_tokens=1000)
+    ledger = _ModelCallLedger(intent.run_id, budget=budget)
+    await ledger.begin(intent)
+    await ledger.mark_dispatch_started(intent)
+    with pytest.raises(_ModelCallError) as error:
+        await ledger.settle(receipt)
+    assert error.value.code == "invalid_state"
+    assert ledger.snapshot()["settled_delivery_ids"] == []
+    assert ledger.snapshot()["started_delivery_ids"] == [intent.delivery_attempt_id]
+    await ledger.abandon(intent, reason="dispatched delivery has no reported usage")
+    with pytest.raises(_ModelCallError):
+        _ModelCallLedger("sibling", budget=budget).assert_may_start()
+    assert ledger.usage_complete is False
+
+
+@pytest.mark.parametrize("source", ["journal", "snapshot", "snapshot_and_journal"])
+async def test_recovery_rejects_not_dispatched_receipt_for_started_delivery(source: str) -> None:
+    from linch.budget import RunBudget
+    from linch.events import ModelCallEvent
+    from linch.model_calls import (
+        _ModelCallError,
+        _ModelCallLedger,
+        intent_to_dict,
+        receipt_to_dict,
+    )
+
+    intent, receipt = _records(
+        actual_model="",
+        usage_status="not_dispatched",
+        usage=None,
+        cost_usd=None,
+        disposition="not_dispatched",
+        accepted_text=None,
+        accepted_text_sha256=None,
+    )
+    raw_intent = intent_to_dict(intent)
+    journal = [
+        ModelCallEvent(intent.run_id, "intent", raw_intent),
+        ModelCallEvent(intent.run_id, "dispatch_started", raw_intent),
+        ModelCallEvent(intent.run_id, "receipt", receipt_to_dict(receipt)),
+    ]
+    state = None
+    if source != "journal":
+        state = _ModelCallLedger(intent.run_id).snapshot()
+        state["receipts"] = [receipt_to_dict(receipt)]
+        state["settled_delivery_ids"] = [intent.delivery_attempt_id]
+    budget = RunBudget(max_tokens=1000)
+    restored = _ModelCallLedger(intent.run_id, budget=budget)
+    with pytest.raises(_ModelCallError):
+        await restored.restore(state, journal if source != "snapshot" else [])
+    assert budget.spent_tokens == 0
+    assert budget._budget_owner_id is None
+
+
+@pytest.mark.parametrize("restore_budget", ["same_owner", "fresh_zero"])
+async def test_budgeted_checkpoint_before_first_intent_reconciles_later_journal(
+    restore_budget: str,
+) -> None:
+    from linch.budget import RunBudget
+    from linch.model_calls import _ModelCallLedger
+
+    journal = []
+
+    async def persist(event: Any) -> None:
+        journal.append(event)
+
+    intent, receipt = _records()
+    budget = RunBudget(max_tokens=1000)
+    ledger = _ModelCallLedger(intent.run_id, budget=budget, persist=persist)
+    checkpoint = ledger.snapshot()
+    await ledger.begin(intent)
+    await ledger.mark_dispatch_started(intent)
+    await ledger.settle(receipt)
+    resumed_budget = budget if restore_budget == "same_owner" else RunBudget(max_tokens=1000)
+    restored = _ModelCallLedger(intent.run_id, budget=resumed_budget)
+    await restored.restore(checkpoint, journal)
+    assert restored.total_usage.input_tokens == 111
+    assert restored.total_usage.output_tokens == 22
+    assert resumed_budget.spent_tokens == 133
+    assert restored.snapshot()["budget_owner_id"] == checkpoint["budget_owner_id"]
+    assert all(event.budget_owner_id == checkpoint["budget_owner_id"] for event in journal)
+
+
+async def test_predispatch_shared_budget_snapshots_keep_one_owner() -> None:
+    from linch.budget import RunBudget
+    from linch.model_calls import _ModelCallLedger
+
+    budget = RunBudget(max_tokens=1000)
+    intent, receipt = _records()
+    first = _ModelCallLedger(intent.run_id, budget=budget)
+    sibling = _ModelCallLedger("sibling", budget=budget)
+    first_checkpoint = first.snapshot()
+    sibling_checkpoint = sibling.snapshot()
+    await first.begin(intent)
+    await first.mark_dispatch_started(intent)
+    await first.settle(receipt)
+    restored_sibling = _ModelCallLedger("sibling", budget=budget)
+    await restored_sibling.restore(sibling_checkpoint, [])
+    restored_sibling.assert_may_start()
+    assert budget.spent_tokens == 133
+    assert sibling_checkpoint["budget_owner_id"] == first_checkpoint["budget_owner_id"]
+    assert restored_sibling.snapshot()["budget_owner_id"] == first_checkpoint["budget_owner_id"]
