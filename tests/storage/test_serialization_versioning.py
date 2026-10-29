@@ -25,7 +25,9 @@ from linch.run_store import (
     checkpoint_from_dict,
     checkpoint_to_dict,
 )
-from linch.types import ToolUseBlock, Usage
+from linch.sessions.store import ProviderViewSnapshot, snapshot_from_dict, snapshot_to_dict
+from linch.tool_surface import ToolSurfaceReaderGuard
+from linch.types import Message, ToolActivation, ToolResultBlock, ToolUseBlock, Usage
 
 
 def _checkpoint() -> RunCheckpoint:
@@ -44,6 +46,48 @@ def _checkpoint() -> RunCheckpoint:
 def test_checkpoint_dict_carries_schema_version() -> None:
     data = checkpoint_to_dict(_checkpoint())
     assert data["schema_version"] == SCHEMA_VERSION
+
+
+def test_provider_snapshot_preserves_identity_while_projecting_control_fields() -> None:
+    activation = ToolActivation(
+        schema_version=1,
+        name="deferred_tool",
+        activation_id="catalog:deferred_tool",
+        activation_version=None,
+        tool_contract_fingerprint="tool-fingerprint",
+        scope_id="scope-1",
+        scope_fingerprint="scope-fingerprint",
+        catalog_policy_id="catalog-policy",
+        catalog_policy_version="1",
+        activation_policy_id="activation-policy",
+        activation_policy_version="1",
+        source_loader_id="linch.tool_search.v1",
+        source_tool_use_id="search-call",
+    )
+    snapshot = ProviderViewSnapshot(
+        provider_view=[
+            Message(
+                role="user",
+                content=[
+                    ToolResultBlock(
+                        tool_use_id="search-call",
+                        content="activated",
+                        tool_activations=(activation,),
+                    ),
+                    ToolSurfaceReaderGuard(required_reader_version=1, feature_version=1),
+                ],
+            )
+        ],
+        covers_seq=3,
+        projection_id="persisted-projection",
+    )
+
+    restored = snapshot_from_dict(snapshot_to_dict(snapshot))
+
+    assert restored.projection_id == "persisted-projection"
+    result = restored.provider_view[0].content[0]
+    assert isinstance(result, ToolResultBlock)
+    assert result.tool_activations == ()
 
 
 def test_checkpoint_from_dict_tolerates_future_version_and_unknown_keys() -> None:
