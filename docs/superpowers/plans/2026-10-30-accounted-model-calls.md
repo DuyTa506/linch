@@ -121,12 +121,12 @@ Commit `feat: account for compaction provider deliveries`; report the same evide
 - Consumes: Task1/2 ledger/gateway/facade.
 - Produces: one session/run-bound ledger; no Agent-global mutable ledger. All main/aux observed usage, actual-model cost, ResultEvent/report totals and budget changes come from it.
 - Produces: optional UsageEvent source/call/logical/model metadata, omitted when absent; ResultEvent.usage_complete defaultTrue with legacy omission when true; RunReport propagation.
-- Produces: common receipt reference + sanitized primary disposition/reason for the later reliability module. That module never independently charges totals or budget.
-- Carries strict normalized message_start.model through AssistantAssembly privately; settle before AfterProviderCall control and accepted session append.
+- Produces: common receipt reference + sanitized primary disposition/reason for the later reliability module. Malformed native JSON/nonobject arguments drain a structurally valid message_end and settle rejected_native without fake arguments or tool execution; initially this is a terminal error. Reliability later selects bounded correction and never independently charges totals or budget.
+- Carries strict normalized message_start.model through AssistantAssembly privately; settle before AfterProviderCall control and accepted session append. Stage durable partial events per physical delivery until whole-response validation; discard rejected-native partials while retaining immediate live partial delivery and accepted-response ordering.
 
 - [ ] **Step 1: Add end-to-end RED assertions**
 
-Port the public-API reproduction into focused tests with long real history and actual DefaultCompaction. Assert uncapped usage444 input/66 output and spent510; with cap100 assert provider call kinds exactly [summary], total133, and budget terminal before main. Also assert main AfterProviderCall stop still reports/charges received Usage, hook mutation cannot rewrite it, mixed-model costs remain per receipt, every physical retry/fallback gets a new delivery ID, and primary-only event relative ordering remains intact.
+Port the public-API reproduction into focused tests with long real history and actual DefaultCompaction. Assert uncapped usage444 input/66 output and spent510; with cap100 assert provider call kinds exactly [summary], total133, and budget terminal before main. Also assert main AfterProviderCall stop still reports/charges received Usage, hook mutation cannot rewrite it, mixed-model costs remain per receipt, every physical retry/fallback gets a new delivery ID, malformed native JSON/nonobject arguments preserve valid final Usage while rejecting the whole batch before tools, stream_partials=True rejected/mixed batches leave no raw rejected arguments in SDK session/model-call/error/partial journals, and primary-only event relative ordering remains intact.
 
 - [ ] **Step 2: Verify RED**
 
@@ -157,7 +157,7 @@ Commit `feat: unify run usage and auxiliary budget admission`; independent revie
 - Produces: merged linch.model_calls.v1 namespace; receipt journal authoritative ahead of checkpoint; independent namespaces preserved.
 - Produces: active-primary logical/delivery/turn/snapshot/base/digest linkage and every frozen-replay branch from the Spec.
 - Produces: built-in projection_id/source/target fingerprint anchor in journal and optional provider snapshot; deterministic paid-result replay without inference or another charge.
-- Accounting codec/semantics/text bound/replay behavior are fingerprinted in RunContract.
+- Accounting codec/semantics/text bound/replay behavior are fingerprinted in RunContract. Rejected-native handling is terminal_error_v0 here; later reliability bounded_feedback_v1 is a distinct required contract fingerprint, never silently applied to old terminal runs.
 
 - [ ] **Step 1: Write crash-boundary RED tests**
 
@@ -173,7 +173,7 @@ Reconcile accounting and pending reliability state before provider_pending repla
 
 - [ ] **Step 4: Verify GREEN and cross-feature seams**
 
-Run durable store/resume/fork/compaction/model-input tests and the full suite once; lint/format/types. Existing malformed-native batch handling remains assigned to reliability, with its common receipt interface pinned by tests/manual review.
+Run durable store/resume/fork/compaction/model-input tests and the full suite once; lint/format/types. Minimal malformed-native drain/rejection is supplied by Task3; reliability later consumes its common receipt/private failure fact for correction. Pin that interface without adding a second accounting path.
 
 - [ ] **Step 5: Commit and report**
 

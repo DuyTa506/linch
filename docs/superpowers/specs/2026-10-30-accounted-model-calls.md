@@ -503,4 +503,20 @@ These private bindings make task boundaries concrete without adding public API.
 - The current provider contract requires valid message_start.model. There is no
   requested-model fallback. Malformed native arguments must drain a structurally
   valid message_end and preserve reported usage before whole-batch rejection,
-  using the later reliability implementation's private failure fact.
+  using a shared private failure fact produced by accounting stream assembly.
+  Accounting initially terminates that rejected batch; reliability later owns
+  bounded correction/recovery and consumes the same receipt.
+
+## Cross-session primary parser integration ruling
+
+The first accounting release handles malformed native JSON/nonobject arguments
+with sanitized rejected_native + terminal_error_v0, after draining a structurally
+valid message_end and settling its reported Usage once. Reliability later uses
+the same receipt with bounded_feedback_v1; RunContract fingerprints these
+distinct semantics so a terminal run cannot silently resume with correction.
+
+For stream_partials=True, stage durable partial events per physical delivery
+until whole-response validation. Discard staged events for rejected/mixed native
+batches. Keep immediate live partial delivery and accepted-response event order.
+Rejected raw arguments must not enter SDK session, model-call, error or partial
+journals; host-owned live-stream consumers are outside SDK persistence.
