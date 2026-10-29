@@ -4,9 +4,11 @@ resume recovery, and message-identity checks used on resume."""
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from html import escape
 from typing import Any, cast
 
+from ..errors import ConfigError
 from ..events import (
     AssistantEvent,
     BackgroundWorkerEvent,
@@ -23,6 +25,84 @@ from ..types import (
     ToolUseBlock,
     message_to_dict,
 )
+
+_MODEL_CALL_RUNTIME_NAMESPACE = "linch.model_calls.v1"
+_MODEL_CALL_RUNTIME_VERSION = 1
+_ACTIVE_PRIMARY_FIELDS = {
+    "version",
+    "logical_call_id",
+    "delivery_attempt_id",
+    "turn_index",
+    "snapshot_id",
+    "request_fingerprint",
+    "full_history_base_count",
+    "full_history_base_fingerprint",
+}
+
+
+def _model_call_runtime_from_extension(
+    extension_state: dict[str, Any],
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Decode the runner-owned accounting envelope, not the ledger snapshot.
+
+    The ledger validates its own nested snapshot during ``restore``.  Keeping
+    the outer validation here makes it impossible to accidentally feed the
+    active-primary binding or unrelated extension state into that API.
+    """
+    raw = extension_state.get(_MODEL_CALL_RUNTIME_NAMESPACE)
+    if raw is None:
+        return None, None
+    if not isinstance(raw, dict) or set(raw) != {"version", "ledger", "active_primary"}:
+        raise ConfigError("invalid model-call checkpoint runtime envelope")
+    if raw.get("version") != _MODEL_CALL_RUNTIME_VERSION or not isinstance(raw["ledger"], dict):
+        raise ConfigError("invalid model-call checkpoint runtime envelope")
+    active = raw["active_primary"]
+    if active is not None:
+        _validate_active_primary_binding(active)
+    return deepcopy(raw["ledger"]), deepcopy(active)
+
+
+def _model_call_runtime_to_extension(
+    extension_state: dict[str, Any],
+    *,
+    ledger_snapshot: dict[str, Any],
+    active_primary: dict[str, Any] | None,
+) -> None:
+    """Merge the versioned accounting runtime envelope into extension state."""
+    if not isinstance(extension_state, dict):
+        raise ConfigError("RunCheckpoint.extension_state must be a dict")
+    if not isinstance(ledger_snapshot, dict):
+        raise ConfigError("invalid model-call ledger snapshot")
+    if active_primary is not None:
+        _validate_active_primary_binding(active_primary)
+    extension_state[_MODEL_CALL_RUNTIME_NAMESPACE] = {
+        "version": _MODEL_CALL_RUNTIME_VERSION,
+        "ledger": deepcopy(ledger_snapshot),
+        "active_primary": deepcopy(active_primary),
+    }
+
+
+def _validate_active_primary_binding(raw: Any) -> None:
+    if not isinstance(raw, dict) or set(raw) != _ACTIVE_PRIMARY_FIELDS:
+        raise ConfigError("invalid active-primary checkpoint binding")
+    if raw.get("version") != _MODEL_CALL_RUNTIME_VERSION:
+        raise ConfigError("invalid active-primary checkpoint binding")
+    for name in (
+        "logical_call_id",
+        "delivery_attempt_id",
+        "request_fingerprint",
+        "full_history_base_fingerprint",
+    ):
+        value = raw.get(name)
+        if not isinstance(value, str) or not value.strip():
+            raise ConfigError("invalid active-primary checkpoint binding")
+    snapshot_id = raw.get("snapshot_id")
+    if snapshot_id is not None and (not isinstance(snapshot_id, str) or not snapshot_id.strip()):
+        raise ConfigError("invalid active-primary checkpoint binding")
+    for name in ("turn_index", "full_history_base_count"):
+        value = raw.get(name)
+        if type(value) is not int or value < 0:
+            raise ConfigError("invalid active-primary checkpoint binding")
 
 
 class RunEventBuffer:
