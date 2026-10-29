@@ -697,6 +697,131 @@ async def test_resume_rejects_an_unproven_legacy_offset_alongside_new_receipts()
     assert provider.calls == 0
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reuse_budget", [False, True], ids=["fresh-budget", "same-budget"])
+async def test_resume_merges_journal_after_receipt_backed_checkpoint_without_double_charge(
+    reuse_budget: bool,
+) -> None:
+    """A later durable receipt advances a receipt-backed checkpoint on resume."""
+    from linch import Agent, RunBudget
+    from linch.events import ResultEvent
+    from linch.loop.checkpoint import _model_call_runtime_to_extension
+    from linch.model_calls import ModelCallIntent, ModelCallReceipt, _ModelCallLedger
+    from linch.providers import BaseProvider
+    from linch.run_store import InMemoryRunStore, RunCheckpoint
+    from linch.session import RunOptions
+    from linch.sessions import InMemorySessionStore
+    from linch.types import Usage
+
+    class Provider(BaseProvider):
+        id = "journal-ahead-resume"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def context_window(self, model: str) -> int:
+            return 100_000
+
+        async def stream(self, req: Any) -> AsyncIterator[dict[str, Any]]:
+            self.calls += 1
+            yield {"type": "message_start", "model": req.model}
+            yield {"type": "text_delta", "text": "resumed"}
+            yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
+
+    session_store = InMemorySessionStore()
+    run_store = InMemoryRunStore()
+    await session_store.create(id=f"journal-ahead-{reuse_budget}")
+    run = await run_store.create_run(f"journal-ahead-{reuse_budget}")
+    owner_budget = RunBudget(max_tokens=100)
+    durable_after_checkpoint: list[Any] = []
+
+    async def persist(event: Any) -> None:
+        durable_after_checkpoint.append(event)
+
+    ledger = _ModelCallLedger(run.id, budget=owner_budget, persist=persist)
+
+    async def settle(delivery_id: str, input_tokens: int) -> None:
+        intent = ModelCallIntent(
+            logical_call_id="journal-ahead-logical",
+            delivery_attempt_id=delivery_id,
+            parent_logical_call_id=None,
+            kind="primary",
+            run_id=run.id,
+            turn_index=0,
+            requested_model="offline-model",
+            request_fingerprint=f"request-{delivery_id}",
+            strategy_id=None,
+        )
+        receipt = ModelCallReceipt(
+            logical_call_id=intent.logical_call_id,
+            delivery_attempt_id=intent.delivery_attempt_id,
+            kind=intent.kind,
+            run_id=intent.run_id,
+            turn_index=intent.turn_index,
+            actual_model="offline-model",
+            usage_status="reported",
+            usage=Usage(input_tokens=input_tokens),
+            cost_usd=None,
+            disposition="rejected",
+            rejection_reason="fixture",
+            accepted_text=None,
+            accepted_text_sha256=None,
+            duration_ms=0,
+            request_fingerprint=intent.request_fingerprint,
+            strategy_id=None,
+            source_context_fingerprint=None,
+        )
+        await ledger.begin(intent)
+        await ledger.mark_dispatch_started(intent)
+        await ledger.settle(receipt)
+
+    await settle("checkpoint-receipt", 1)
+    checkpoint_snapshot = ledger.snapshot()
+    checkpoint_event_count = len(durable_after_checkpoint)
+    await settle("journal-receipt", 2)
+    await run_store.append_events(run.id, durable_after_checkpoint[checkpoint_event_count:])
+
+    extension_state: dict[str, Any] = {}
+    _model_call_runtime_to_extension(
+        extension_state,
+        ledger_snapshot=checkpoint_snapshot,
+        active_primary=None,
+    )
+    await run_store.save_checkpoint(
+        run.id,
+        RunCheckpoint(
+            phase="turn_complete",
+            prompt="continue",
+            turn_index=0,
+            total_usage=Usage(input_tokens=1),
+            extension_state=extension_state,
+        ),
+    )
+
+    resumed_budget = owner_budget if reuse_budget else RunBudget(max_tokens=100)
+    provider = Provider()
+    agent = Agent(
+        model="offline-model",
+        provider=provider,
+        session_store=session_store,
+        run_store=run_store,
+        permissions={"mode": "skip-dangerous"},
+    )
+    session = await agent.session(id=f"journal-ahead-{reuse_budget}")
+    events = [
+        event
+        async for event in session.resume(
+            run.id,
+            RunOptions(allow_legacy_resume=True, budget=resumed_budget),
+        )
+    ]
+
+    result = next(event for event in events if isinstance(event, ResultEvent))
+    assert provider.calls == 1
+    assert result.total_usage == Usage(input_tokens=3)
+    assert resumed_budget.spent_tokens == 3
+
+
 def test_run_report_propagates_incomplete_usage_lower_bound() -> None:
     """The report must retain the terminal lower-bound marker verbatim."""
     from linch.events import ResultEvent

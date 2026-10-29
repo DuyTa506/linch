@@ -1177,23 +1177,30 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         for row in _stored_events
         if isinstance(getattr(row, "event", None), ModelCallEvent)
     ]
-    if _ledger_state is not None or _model_call_events:
-        await ledger.restore(_ledger_state, _model_call_events)
-        total = ledger.total_usage
-        running_cost = ledger.total_cost_usd
 
     # An aggregate-only legacy checkpoint cannot prove the identity, actual
     # model, or receipt status of its prior deliveries.  Do not turn it into a
     # synthetic charge or requested-model price: a nonzero aggregate fails
-    # closed.  Receipt-backed accounting checkpoints and journals restore
-    # normally above, but their reconstructed total must exactly explain a
-    # nonzero checkpoint aggregate (an older migration offset does not).
+    # closed.  Validate it against the receipt-derived total in the saved
+    # checkpoint snapshot *before* replaying newer durable journal records;
+    # those records legitimately advance the restored ledger after the
+    # checkpoint boundary.
     if resume_checkpoint is not None and resume_checkpoint.total_usage != Usage():
-        has_receipt_provenance = _ledger_state is not None or bool(_model_call_events)
-        if not has_receipt_provenance or resume_checkpoint.total_usage != ledger.total_usage:
+        if _ledger_state is None:
             raise ConfigError(
                 "Cannot resume checkpoint with nonzero aggregate usage without receipt provenance"
             )
+        checkpoint_ledger = _ModelCallLedger(run_id)
+        await checkpoint_ledger.restore(_ledger_state, [])
+        if resume_checkpoint.total_usage != checkpoint_ledger.total_usage:
+            raise ConfigError(
+                "Cannot resume checkpoint with nonzero aggregate usage without receipt provenance"
+            )
+
+    if _ledger_state is not None or _model_call_events:
+        await ledger.restore(_ledger_state, _model_call_events)
+        total = ledger.total_usage
+        running_cost = ledger.total_cost_usd
 
     def _sync_ledger_totals() -> None:
         nonlocal total, running_cost
