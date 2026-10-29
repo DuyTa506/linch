@@ -61,7 +61,6 @@ from ..model_calls import (
     _ModelCallLedger,
     _primary_active_binding,
 )
-from ..pricing import cost_usd as _cost_usd
 from ..run_store import (
     MODEL_INPUT_CODEC_VERSION,
     ModelInputSnapshotError,
@@ -1128,11 +1127,6 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
     # message — breaking provider-order. Deferred entries drain next turn.
     _align_defer_turn: int | None = None
     if resume_checkpoint is not None:
-        total = resume_checkpoint.total_usage
-        # Restore running_cost from the restored usage so the resumed run's cost
-        # covers the whole run, not just post-resume turns. cost_usd returns None
-        # for unknown models, preserving "None until first priced turn" semantics.
-        running_cost = _cost_usd(total, agent.model)
         if _guard is not None:
             _guard_state = _loop_guard_state_from_dict(resume_checkpoint.loop_guard_state)
             if _guard_state is None:
@@ -1188,28 +1182,23 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         total = ledger.total_usage
         running_cost = ledger.total_cost_usd
 
-    # Existing pre-accounting checkpoints have no receipt identity with which
-    # to reconstruct exact historical model prices. Keep their checkpointed
-    # aggregate only as a migration offset; every new physical delivery is
-    # ledger-owned and subsequent checkpoints carry the proper envelope.
-    _legacy_usage = (
-        resume_checkpoint.total_usage
-        if resume_checkpoint is not None and _ledger_state is None and not _model_call_events
-        else Usage()
-    )
-    _legacy_cost = _cost_usd(_legacy_usage, agent.model) if _legacy_usage != Usage() else None
+    # An aggregate-only legacy checkpoint cannot prove the identity, actual
+    # model, or receipt status of its prior deliveries.  Do not turn it into a
+    # synthetic charge or requested-model price: a nonzero aggregate fails
+    # closed.  Receipt-backed accounting checkpoints and journals restore
+    # normally above, but their reconstructed total must exactly explain a
+    # nonzero checkpoint aggregate (an older migration offset does not).
+    if resume_checkpoint is not None and resume_checkpoint.total_usage != Usage():
+        has_receipt_provenance = _ledger_state is not None or bool(_model_call_events)
+        if not has_receipt_provenance or resume_checkpoint.total_usage != ledger.total_usage:
+            raise ConfigError(
+                "Cannot resume checkpoint with nonzero aggregate usage without receipt provenance"
+            )
 
     def _sync_ledger_totals() -> None:
         nonlocal total, running_cost
-        ledger_usage = ledger.total_usage
-        total = _legacy_usage.add(ledger_usage)
-        ledger_cost = ledger.total_cost_usd
-        if _legacy_cost is None:
-            running_cost = ledger_cost
-        elif ledger_cost is None:
-            running_cost = _legacy_cost
-        else:
-            running_cost = _legacy_cost + ledger_cost
+        total = ledger.total_usage
+        running_cost = ledger.total_cost_usd
 
     def _sync_checkpoint_accounting() -> None:
         """Refresh the runner-owned envelope before any terminal store write."""
@@ -2216,6 +2205,17 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                             if isinstance(item, CompactionEvent):
                                 async for usage_event in _drain_auxiliary_usage():
                                     yield usage_event
+                                # A forced compaction may have settled enough
+                                # auxiliary spend to exhaust the run budget.
+                                # Save that receipt-backed state and gate here,
+                                # while the recovery generator is still paused
+                                # at its CompactionEvent, before it can rebuild
+                                # context/request state or begin a new primary.
+                                await _save_checkpoint(
+                                    checkpoint.phase,
+                                    turn_index=turn_index,
+                                )
+                                ledger.assert_may_start()
                                 await _maybe_save_provider_snapshot(session)
                             await _persist_event(session, run_id, item)
                             yield item

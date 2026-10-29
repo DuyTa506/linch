@@ -238,7 +238,10 @@ async def test_fallback_deliveries_get_fresh_ids_under_one_logical_operation() -
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("raw_input", ['{"secret": "native-leak"', '["native-leak"]'])
+@pytest.mark.parametrize(
+    "raw_input",
+    ['{"secret": "native-leak"', '["native-leak"]', "", "   "],
+)
 async def test_rejected_native_arguments_are_charged_but_never_durable(raw_input: str) -> None:
     """Malformed native input drains final usage without an SDK raw-argument leak."""
     import json
@@ -270,6 +273,11 @@ async def test_rejected_native_arguments_are_charged_but_never_durable(raw_input
             yield {"type": "tool_use_start", "id": "tool-1", "name": "NeverRun"}
             yield {"type": "tool_use_input_delta", "id": "tool-1", "json_delta": raw_input}
             yield {"type": "tool_use_end", "id": "tool-1"}
+            # A valid sibling must not escape the rejected-native terminal
+            # path when another native call had no valid JSON object.
+            yield {"type": "tool_use_start", "id": "tool-2", "name": "AlsoNeverRun"}
+            yield {"type": "tool_use_input_delta", "id": "tool-2", "json_delta": "{}"}
+            yield {"type": "tool_use_end", "id": "tool-2"}
             yield {
                 "type": "message_end",
                 "stop_reason": "tool_use",
@@ -312,6 +320,381 @@ async def test_rejected_native_arguments_are_charged_but_never_durable(raw_input
     assert "native-leak" not in json.dumps(
         [message_to_dict(message) for message in session.full_history], sort_keys=True
     )
+
+
+@pytest.mark.asyncio
+async def test_explicit_empty_native_object_remains_a_valid_tool_input() -> None:
+    """Only an explicit ``{}`` is accepted; an omitted delta is not guessed."""
+    from linch import Agent
+    from linch.events import ResultEvent
+    from linch.providers import BaseProvider
+    from linch.sessions import InMemorySessionStore
+    from linch.tools import ToolRegistry, ToolResult
+    from linch.types import Usage
+
+    calls: list[dict[str, object]] = []
+
+    class EmptyInputTool:
+        name = "EmptyInputTool"
+        description = "Accept an empty JSON object."
+        input_schema = {"type": "object"}
+        scope: Any = "read"
+        parallel = False
+
+        def validate(self, raw: dict[str, object]) -> dict[str, object]:
+            return raw
+
+        def summarize(self, input: dict[str, object]) -> str:
+            return "empty"
+
+        async def execute(self, input: dict[str, object], ctx: Any) -> ToolResult:
+            calls.append(input)
+            return ToolResult(content="accepted")
+
+    class Provider(BaseProvider):
+        id = "explicit-empty-native"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def context_window(self, model: str) -> int:
+            return 100_000
+
+        async def stream(self, req: Any) -> AsyncIterator[dict[str, Any]]:
+            self.calls += 1
+            yield {"type": "message_start", "model": req.model}
+            if self.calls == 1:
+                yield {"type": "tool_use_start", "id": "empty-1", "name": "EmptyInputTool"}
+                yield {"type": "tool_use_input_delta", "id": "empty-1", "json_delta": "{}"}
+                yield {"type": "tool_use_end", "id": "empty-1"}
+                yield {"type": "message_end", "stop_reason": "tool_use", "usage": Usage()}
+                return
+            yield {"type": "text_delta", "text": "done"}
+            yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
+
+    tools = ToolRegistry()
+    tools.register(EmptyInputTool())
+    provider = Provider()
+    agent = Agent(
+        model="offline-model",
+        provider=provider,
+        session_store=InMemorySessionStore(),
+        permissions={"mode": "skip-dangerous"},
+        tools=tools,
+    )
+    session = await agent.session()
+    events = [event async for event in session.run("go")]
+
+    assert calls == [{}]
+    assert provider.calls == 2
+    assert next(event for event in events if isinstance(event, ResultEvent)).subtype == "success"
+
+
+@pytest.mark.asyncio
+async def test_forced_compaction_budget_stops_before_rebuilding_main_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A paid forced summary must be drained and admitted before retry construction."""
+    from linch import Agent, RunBudget
+    from linch.context import ContextBuildResult
+    from linch.errors import ContextLengthError
+    from linch.events import BudgetEvent, ModelCallEvent, ResultEvent, SystemEvent
+    from linch.loop import streaming
+    from linch.providers import BaseProvider
+    from linch.run_store import InMemoryRunStore
+    from linch.session import RunOptions
+    from linch.sessions import InMemorySessionStore
+    from linch.types import SystemBlock, Usage
+
+    class ProbeHook:
+        resume_policy_id = "test.forced-compaction-budget"
+        resume_policy_version = "1"
+        resume_policy_config: dict[str, object] = {}
+
+        def __init__(self) -> None:
+            self.context_calls = 0
+            self.before_calls = 0
+            self.provider_start_calls = 0
+
+        async def build_context(self, session: Any, turn_index: int) -> ContextBuildResult | None:
+            self.context_calls += 1
+            return None
+
+        def on_before_provider_call(self, ctx: Any) -> None:
+            self.before_calls += 1
+
+        def on_provider_call_start(self, ctx: Any) -> None:
+            self.provider_start_calls += 1
+
+    class Provider(BaseProvider):
+        id = "forced-compaction-budget"
+
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def context_window(self, model: str) -> int:
+            return 100_000
+
+        async def stream(self, req: Any) -> AsyncIterator[dict[str, Any]]:
+            summary = any(block.text == "forced accounting summary" for block in req.system)
+            self.calls.append("summary" if summary else "main")
+            if not summary:
+                raise AssertionError("main provider must not start after the paid forced summary")
+            yield {"type": "message_start", "model": req.model}
+            yield {"type": "text_delta", "text": "summary"}
+            yield {
+                "type": "message_end",
+                "stop_reason": "end_turn",
+                "usage": Usage(input_tokens=111, output_tokens=22),
+            }
+
+    original_stream_turn = streaming.stream_turn
+    stream_attempts = 0
+
+    async def context_length_then_normal_stream(*args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+        nonlocal stream_attempts
+        stream_attempts += 1
+        if stream_attempts == 1:
+            raise ContextLengthError("force compaction")
+        async for item in original_stream_turn(*args, **kwargs):
+            yield item
+
+    async def paid_forced_compaction(
+        session: Any,
+        agent: Any,
+        signal: Any,
+        *,
+        model: str | None = None,
+        auxiliary_caller: Any = None,
+        logical_call_id: str | None = None,
+    ) -> bool:
+        assert auxiliary_caller is not None
+        await auxiliary_caller.text(
+            logical_call_id=logical_call_id or "forced-compaction",
+            model=model or agent.model,
+            system=[SystemBlock(text="forced accounting summary")],
+            messages=list(session.provider_view),
+            max_output_tokens=32,
+            signal=signal,
+        )
+        messages = len(session.provider_view)
+        session.last_compaction_info = {
+            "type": "compaction",
+            "messages_before": messages,
+            "messages_after": messages,
+            "tokens_before": 0,
+            "tokens_after": 0,
+            "strategy": "forced-accounting-test",
+            "model": model or agent.model,
+        }
+        return True
+
+    monkeypatch.setattr(streaming, "stream_turn", context_length_then_normal_stream)
+    monkeypatch.setattr(streaming, "run_forced_compaction", paid_forced_compaction)
+
+    provider = Provider()
+    hook = ProbeHook()
+    run_store = InMemoryRunStore()
+    budget = RunBudget(max_tokens=100)
+    agent = Agent(
+        model="offline-model",
+        provider=provider,
+        session_store=InMemorySessionStore(),
+        run_store=run_store,
+        permissions={"mode": "skip-dangerous"},
+        hooks=[hook],
+    )
+    session = await agent.session()
+    events = [event async for event in session.run("go", RunOptions(budget=budget))]
+    run_id = next(event.run_id for event in events if isinstance(event, SystemEvent))
+    rows = await run_store.load_events(run_id)
+
+    result = next(event for event in events if isinstance(event, ResultEvent))
+    primary_intents = [
+        row.event
+        for row in rows
+        if isinstance(row.event, ModelCallEvent)
+        and row.event.record_kind == "intent"
+        and row.event.record["kind"] == "primary"
+    ]
+
+    assert provider.calls == ["summary"]
+    assert budget.spent_tokens == 133
+    assert result.total_usage == Usage(input_tokens=111, output_tokens=22)
+    assert result.subtype == "error"
+    assert any(isinstance(event, BudgetEvent) and event.kind == "exceeded" for event in events)
+    # The first artificial context failure is before a primary stream.  A
+    # second context build/hook/intent proves the generator was resumed after
+    # compaction instead of stopped at the runner's admission boundary.
+    assert hook.context_calls == 1
+    assert hook.before_calls == 1
+    assert hook.provider_start_calls == 1
+    assert primary_intents == []
+
+
+@pytest.mark.asyncio
+async def test_legacy_nonzero_checkpoint_without_receipts_is_rejected_before_dispatch() -> None:
+    """Aggregate pre-accounting usage cannot be admitted or repriced on resume."""
+    from linch import Agent, RunBudget
+    from linch.errors import ConfigError
+    from linch.providers import BaseProvider
+    from linch.run_store import InMemoryRunStore, RunCheckpoint
+    from linch.session import RunOptions
+    from linch.sessions import InMemorySessionStore
+    from linch.types import Usage
+
+    class Provider(BaseProvider):
+        id = "legacy-resume-fence"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def context_window(self, model: str) -> int:
+            return 100_000
+
+        async def stream(self, req: Any) -> AsyncIterator[dict[str, Any]]:
+            self.calls += 1
+            raise AssertionError("legacy aggregate checkpoint must not dispatch a provider call")
+            yield {}  # pragma: no cover
+
+    session_store = InMemorySessionStore()
+    run_store = InMemoryRunStore()
+    await session_store.create(id="legacy-accounting")
+    run = await run_store.create_run("legacy-accounting", id="legacy-accounting-run")
+    await run_store.save_checkpoint(
+        run.id,
+        RunCheckpoint(
+            phase="turn_complete",
+            prompt="continue",
+            turn_index=0,
+            total_usage=Usage(input_tokens=9, output_tokens=4),
+        ),
+    )
+
+    provider = Provider()
+    budget = RunBudget(max_tokens=100)
+    agent = Agent(
+        model="claude-sonnet-4-6",
+        provider=provider,
+        session_store=session_store,
+        run_store=run_store,
+        permissions={"mode": "skip-dangerous"},
+    )
+    session = await agent.session(id="legacy-accounting")
+
+    with pytest.raises(ConfigError, match="receipt provenance"):
+        _ = [
+            event
+            async for event in session.resume(
+                run.id,
+                RunOptions(allow_legacy_resume=True, budget=budget),
+            )
+        ]
+
+    assert provider.calls == 0
+    assert budget.spent_tokens == 0
+    assert budget.spent_usd == 0.0
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_an_unproven_legacy_offset_alongside_new_receipts() -> None:
+    """A later ledger cannot legitimize a prior aggregate-only usage offset."""
+    from linch import Agent
+    from linch.errors import ConfigError
+    from linch.loop.checkpoint import _model_call_runtime_to_extension
+    from linch.model_calls import ModelCallIntent, ModelCallReceipt, _ModelCallLedger
+    from linch.providers import BaseProvider
+    from linch.run_store import InMemoryRunStore, RunCheckpoint
+    from linch.session import RunOptions
+    from linch.sessions import InMemorySessionStore
+    from linch.types import Usage
+
+    class Provider(BaseProvider):
+        id = "legacy-offset-fence"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def context_window(self, model: str) -> int:
+            return 100_000
+
+        async def stream(self, req: Any) -> AsyncIterator[dict[str, Any]]:
+            self.calls += 1
+            raise AssertionError("unproven aggregate offset must not dispatch a provider call")
+            yield {}  # pragma: no cover
+
+    session_store = InMemorySessionStore()
+    run_store = InMemoryRunStore()
+    await session_store.create(id="legacy-offset")
+    run = await run_store.create_run("legacy-offset", id="legacy-offset-run")
+
+    intent = ModelCallIntent(
+        logical_call_id="receipt-backed-logical",
+        delivery_attempt_id="receipt-backed-delivery",
+        parent_logical_call_id=None,
+        kind="primary",
+        run_id=run.id,
+        turn_index=0,
+        requested_model="offline-model",
+        request_fingerprint="receipt-backed-request",
+        strategy_id=None,
+    )
+    receipt = ModelCallReceipt(
+        logical_call_id=intent.logical_call_id,
+        delivery_attempt_id=intent.delivery_attempt_id,
+        kind=intent.kind,
+        run_id=intent.run_id,
+        turn_index=intent.turn_index,
+        actual_model="offline-model",
+        usage_status="reported",
+        usage=Usage(input_tokens=1),
+        cost_usd=None,
+        disposition="rejected",
+        rejection_reason="fixture",
+        accepted_text=None,
+        accepted_text_sha256=None,
+        duration_ms=0,
+        request_fingerprint=intent.request_fingerprint,
+        strategy_id=None,
+        source_context_fingerprint=None,
+    )
+    ledger = _ModelCallLedger(run.id)
+    await ledger.begin(intent)
+    await ledger.mark_dispatch_started(intent)
+    await ledger.settle(receipt)
+    extension_state: dict[str, Any] = {}
+    _model_call_runtime_to_extension(
+        extension_state,
+        ledger_snapshot=ledger.snapshot(),
+        active_primary=None,
+    )
+    await run_store.save_checkpoint(
+        run.id,
+        RunCheckpoint(
+            phase="turn_complete",
+            prompt="continue",
+            turn_index=0,
+            # This differs from the receipt-backed one-token ledger total,
+            # representing the former aggregate migration offset.
+            total_usage=Usage(input_tokens=10),
+            extension_state=extension_state,
+        ),
+    )
+
+    provider = Provider()
+    agent = Agent(
+        model="offline-model",
+        provider=provider,
+        session_store=session_store,
+        run_store=run_store,
+        permissions={"mode": "skip-dangerous"},
+    )
+    session = await agent.session(id="legacy-offset")
+
+    with pytest.raises(ConfigError, match="receipt provenance"):
+        _ = [event async for event in session.resume(run.id, RunOptions(allow_legacy_resume=True))]
+
+    assert provider.calls == 0
 
 
 def test_run_report_propagates_incomplete_usage_lower_bound() -> None:
