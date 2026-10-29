@@ -2362,10 +2362,16 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                                 await _maybe_save_provider_snapshot(session)
                             await _persist_event(session, run_id, item)
                             yield item
-                except _ModelCallError as exc:
+                except Exception as exc:
+                    # Ordinary error exits can still own settled auxiliary use.
+                    # BaseException shutdown/cancellation must not yield here.
                     async for usage_event in _drain_auxiliary_usage():
                         yield usage_event
-                    if exc.code == "budget_exceeded" and _budget is not None:
+                    if (
+                        isinstance(exc, _ModelCallError)
+                        and exc.code == "budget_exceeded"
+                        and _budget is not None
+                    ):
                         await _close_active_observer_spans(stop_reason="error")
                         async for event in _emit_budget_exhausted():
                             yield event

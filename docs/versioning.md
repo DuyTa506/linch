@@ -184,3 +184,7 @@ does not make a 2.x application adopt later reliability behavior implicitly.
   [Optional-extra dependencies](#optional-extra-dependencies-are-not-covered).
 - **Locking a build?** Use a lockfile (`uv.lock`, `poetry.lock`, `pip-compile`). It pins the
   extras' transitive dependencies too, which no `linch` specifier can do.
+
+Build release wheels and source distributions from a clean export of the intended
+commit's tracked files. Verify the export and packaged Python sources/docs against
+that commit, and inspect both artifacts for private workspace data before handoff.
