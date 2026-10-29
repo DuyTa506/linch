@@ -180,7 +180,7 @@ resolve scope after context build, fold only currently valid default-active
 state (no durable activation yet), apply name-only context/skill narrowing, and
 store an ordered descriptor snapshot before provider dispatch. Keep
 `_build_turn_request` synchronous by making it consume the prepared snapshot;
-thread async preparation through normal, fallback, and compaction-retry paths.
+thread async preparation through normal, fallback, and compaction-retry paths. Apply the shared control-field provider projection at the final normalized request boundary after request-hook mutation and before freeze/dispatch, so context replacement or hooks cannot leak guard blocks or activation fields; pin this with a captured-wire test.
 Scheduler must compare its calls against that snapshot before canonical input,
 permission, pipeline, hook, or execution.  Preserve legacy
 `current_turn_allowed_tools` behavior outside this feature.
@@ -309,7 +309,7 @@ together.  Root resolves integration conflicts with accounting/reliability.
 
 **Files:**
 - Modify: `docs/usage/agent.md`, `docs/usage/tools.md`, `docs/usage/skills.md`, `docs/architecture/tool-protocol.md`, `docs/architecture/compaction.md`, `docs/architecture/skills-subagents.md`, `docs/versioning.md`, `CHANGELOG.md`, `pyproject.toml`, `uv.lock`
-- Create: `docs/migration-3.0.md`
+- Modify: `docs/migration-3.0.md` (created by the prerequisite accounting release)
 - Modify/add examples and docs tests only where required to demonstrate the supported public API
 
 **Interfaces:**

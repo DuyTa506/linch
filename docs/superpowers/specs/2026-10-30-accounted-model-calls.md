@@ -162,7 +162,11 @@ linch.reliability, with a version inside its value; it is not
 linch.reliability.v1. Only the runner merges model_calls, reliability, and
 tool-surface namespaces.
 
-The model-call checkpoint snapshot contains:
+The namespace value is a runtime envelope with version=1, ledger (the private
+ledger snapshot below), and active_primary (the versioned active attempt
+binding or null). Runner/checkpoint helpers own this envelope; the ledger owns
+its nested snapshot. Do not pass unrelated runtime keys into ledger.restore.
+The model-call ledger snapshot contains:
 
 ~~~json
 {
@@ -327,8 +331,10 @@ attempt. Frozen replay reconciles against that exact attempt before dispatch:
 - A wrong snapshot, unexpected message suffix, or conflicting receipt identity
   fails closed rather than matching a different provider attempt.
 
-A receipt stores the durable message base boundary and normalized assistant
-digest where needed, not rejected raw arguments. A rejected diagnostic plus
+A receipt-linked durable primary binding stores the durable message base
+boundary and post-hook normalized assistant digest where needed, not rejected
+raw arguments. The immutable ModelCallReceipt fields remain unchanged; see the
+primary-append binding below. A rejected diagnostic plus
 feedback has an expected receipt-keyed two-message sequence: durable prefix
 states 0/1/2 append only the missing suffix; any mismatched durable suffix is
 an error.
@@ -520,3 +526,31 @@ until whole-response validation. Discard staged events for rejected/mixed native
 batches. Keep immediate live partial delivery and accepted-response event order.
 Rejected raw arguments must not enter SDK session, model-call, error or partial
 journals; host-owned live-stream consumers are outside SDK persistence.
+
+## Primary acceptance binding (supersedes digest-on-receipt wording)
+
+Before intent/dispatch, persist the active-primary checkpoint binding: logical
+ID, delivery ID, turn, exact snapshot ID, final-request fingerprint, durable
+full-history base count and base fingerprint. A failure to persist that binding
+prevents dispatch. Intent/dispatch/receipt journal ordering is otherwise unchanged.
+
+After settlement and AfterProviderCall mutation, but before session append,
+persist a strict ModelCallEvent projection variant with
+record.projection_kind=primary_append. It binds the same receipt/delivery,
+logical operation, snapshot/request identity and durable base to the POST-hook
+assistant digest. It is distinct from auxiliary compaction projections and
+reliability diagnostic/feedback actions, and is never emitted for a rejected
+native assembly. Provider Usage is copied before hooks and stays authoritative.
+
+On resume an exact matching durable assistant at that base continues without
+reinference; no assistant with unchanged base permits a NEW delivery/charge;
+wrong suffix, snapshot, digest or identity fails closed. This explicitly
+supersedes the earlier wording that placed the assistant digest on the receipt.
+No ModelCallReceipt field expansion is required.
+
+The first accounting prerelease uses terminal_error_v0 for rejected-native
+responses, reconstructing its safe terminal error from the receipt without
+inference. The later reliability feature owns bounded_feedback_v1 and its
+receipt-keyed diagnostic/feedback prefix0/1/2 actions. A shared prefix checker
+may be tested with fixed fixtures in accounting, but accounting does not enable
+reliability correction or append its feedback.

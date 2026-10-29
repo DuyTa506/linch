@@ -115,13 +115,16 @@ Commit `feat: account for compaction provider deliveries`; report the same evide
 **Files:**
 - Modify: src/linch/loop/runner.py, src/linch/loop/streaming.py, src/linch/loop/request.py, src/linch/loop/finalize.py and src/linch/loop/terminals.py only where accounting chokepoints require
 - Modify: src/linch/session.py, src/linch/events.py, src/linch/reports.py and src/linch/__init__.py as needed for the specified additive fields
+- Modify: src/linch/loop/checkpoint.py for the versioned accounting runtime envelope and ordinary snapshot/journal restore integration; src/linch/model_calls.py only if a narrowly necessary shared binding/helper requires it, with no second accounting path
 - Create: tests/loop/test_model_call_accounting.py
 
 **Interfaces:**
 - Consumes: Task1/2 ledger/gateway/facade.
-- Produces: one session/run-bound ledger; no Agent-global mutable ledger. All main/aux observed usage, actual-model cost, ResultEvent/report totals and budget changes come from it.
+- Produces: one session/run-bound ledger; no Agent-global mutable ledger. All main/aux observed usage, actual-model cost, ResultEvent/report totals and budget changes come from it. Preserve ordinary resume by restoring the existing ledger snapshot/journal through Task1 APIs; Task4 supplies full in-flight crash reconciliation proof.
+- Produces: checkpoint namespace runtime envelope {version:1, ledger:ledger.snapshot(), active_primary:<binding or null>}; runner/checkpoint owns envelope, ledger owns nested snapshot. Merge other namespaces. Preserve configured primary snapshot capture policy; do not silently enable request recording. Bind an existing snapshot identity when captured.
 - Produces: optional UsageEvent source/call/logical/model metadata, omitted when absent; ResultEvent.usage_complete defaultTrue with legacy omission when true; RunReport propagation.
 - Produces: common receipt reference + sanitized primary disposition/reason for the later reliability module. Malformed native JSON/nonobject arguments drain a structurally valid message_end and settle rejected_native without fake arguments or tool execution; initially this is a terminal error. Reliability later selects bounded correction and never independently charges totals or budget.
+- Persists active-primary logical/delivery/turn/snapshot/request fingerprint and durable full-history base binding before intent/dispatch; final durable acceptance proof belongs Task4.
 - Carries strict normalized message_start.model through AssistantAssembly privately; settle before AfterProviderCall control and accepted session append. Stage durable partial events per physical delivery until whole-response validation; discard rejected-native partials while retaining immediate live partial delivery and accepted-response ordering.
 
 - [ ] **Step 1: Add end-to-end RED assertions**
@@ -155,13 +158,13 @@ Commit `feat: unify run usage and auxiliary budget admission`; independent revie
 **Interfaces:**
 - Consumes: ledger.restore/snapshot and receipt event codec.
 - Produces: merged linch.model_calls.v1 namespace; receipt journal authoritative ahead of checkpoint; independent namespaces preserved.
-- Produces: active-primary logical/delivery/turn/snapshot/base/digest linkage and every frozen-replay branch from the Spec.
+- Produces: strict record.projection_kind=primary_append acceptance journal variant, linking same receipt/delivery/logical/snapshot/request/base to the POST-hook assistant digest before session append; never for rejected-native. Immutable receipt fields do not expand. Produces every frozen-replay branch from the Spec.
 - Produces: built-in projection_id/source/target fingerprint anchor in journal and optional provider snapshot; deterministic paid-result replay without inference or another charge.
 - Accounting codec/semantics/text bound/replay behavior are fingerprinted in RunContract. Rejected-native handling is terminal_error_v0 here; later reliability bounded_feedback_v1 is a distinct required contract fingerprint, never silently applied to old terminal runs.
 
 - [ ] **Step 1: Write crash-boundary RED tests**
 
-Use real InMemoryRunStore and SQLite reopen tests with injected write failures at intent, dispatch_started, receipt, projection, snapshot and checkpoint boundaries. Assert no provider dispatch before a successful dispatch marker; intent-only not_dispatched; started/no receipt fences; known receipt settles once; accepted main with matching assistant continues; accepted main without assistant uses a NEW charged delivery; rejected-native receipt reconstructs the safe pending prefix without raw arguments. Test prefix0/1/2 and mismatched suffix. Test projection-before-consumed and consumed-before-projection, cache loss, changed context/fork, fresh/same/mismatched budget owner, namespace preservation, and actual-model cost restoration.
+Use real InMemoryRunStore and SQLite reopen tests with injected write failures at intent, dispatch_started, receipt, projection, snapshot and checkpoint boundaries. Assert no provider dispatch before a successful dispatch marker; intent-only not_dispatched; started/no receipt fences; known receipt settles once; accepted main with matching assistant continues; accepted main without assistant uses a NEW charged delivery; rejected-native terminal_error_v0 receipt reconstructs a safe terminal error without inference or raw arguments. Test a shared receipt-keyed prefix checker with fixed prefix0/1/2 and mismatched-suffix fixtures for later bounded_feedback_v1; do not enable reliability feedback in accounting. Test projection-before-consumed and consumed-before-projection, cache loss, changed context/fork, fresh/same/mismatched budget owner, namespace preservation, and actual-model cost restoration.
 
 - [ ] **Step 2: Verify RED**
 
