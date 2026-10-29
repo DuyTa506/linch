@@ -18,3 +18,6 @@ learn-claude-code/
 
 # Linch Studio lives on the `studio` branch.
 linch_ui/
+
+# Local agent execution/review artifacts
+.superpowers/
