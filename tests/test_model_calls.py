@@ -949,3 +949,149 @@ async def test_predispatch_shared_budget_snapshots_keep_one_owner() -> None:
     assert budget.spent_tokens == 133
     assert sibling_checkpoint["budget_owner_id"] == first_checkpoint["budget_owner_id"]
     assert restored_sibling.snapshot()["budget_owner_id"] == first_checkpoint["budget_owner_id"]
+
+
+def _source_projection_for(intent: Any) -> dict[str, Any]:
+    from linch.model_calls import _projection_record
+
+    return _projection_record(
+        projection_kind="compaction_source",
+        run_id=intent.run_id,
+        logical_call_id=intent.logical_call_id,
+        delivery_attempt_id=intent.delivery_attempt_id,
+        turn_index=intent.turn_index,
+        request_fingerprint=intent.request_fingerprint,
+        strategy_id=intent.strategy_id,
+        strategy_config={
+            "implementation": "default_v1",
+            "keep_recent_turns": 10,
+            "max_output_tokens": 4096,
+            "prompt_sha256": "a" * 64,
+        },
+        source_context_fingerprint="b" * 64,
+        full_history_base_count=1,
+        full_history_base_fingerprint="c" * 64,
+        source_message_fingerprints=["d" * 64],
+        reminder_fingerprints=[],
+    )
+
+
+@pytest.mark.parametrize("phase", ["started", "settled", "abandoned", "not_dispatched"])
+@pytest.mark.parametrize("with_checkpoint", [False, True])
+@pytest.mark.parametrize("repeat_intent", [False, True])
+async def test_restore_rejects_first_source_after_delivery_phase(
+    phase: str,
+    with_checkpoint: bool,
+    repeat_intent: bool,
+) -> None:
+    """A replayed intent never resets a dispatched or closed delivery's source boundary."""
+    from linch.budget import RunBudget
+    from linch.events import ModelCallEvent
+    from linch.model_calls import _ModelCallError, _ModelCallLedger, intent_to_dict
+
+    intent, receipt = _records(source_context_fingerprint="b" * 64)
+    journal = []
+
+    async def persist(event: Any) -> None:
+        journal.append(event)
+
+    original = _ModelCallLedger(intent.run_id, persist=persist)
+    await original.begin(intent)
+    if phase != "not_dispatched":
+        await original.mark_dispatch_started(intent)
+    if phase == "settled":
+        await original.settle(receipt)
+    elif phase in {"abandoned", "not_dispatched"}:
+        await original.abandon(intent, reason="interrupted")
+    snapshot = original.snapshot() if with_checkpoint else None
+    if repeat_intent:
+        journal.append(ModelCallEvent(intent.run_id, "intent", intent_to_dict(intent)))
+    journal.append(ModelCallEvent(intent.run_id, "projection", _source_projection_for(intent)))
+    budget = RunBudget(max_tokens=1000)
+    restored = _ModelCallLedger(intent.run_id, budget=budget)
+    with pytest.raises(_ModelCallError, match="source.*before dispatch|source.*delivery phase"):
+        await restored.restore(snapshot, journal)
+    assert budget.spent_tokens == 0
+    assert restored.total_usage.input_tokens == restored.total_usage.output_tokens == 0
+
+
+@pytest.mark.parametrize("phase", ["started", "settled", "abandoned", "not_dispatched"])
+@pytest.mark.parametrize("repeat_intent", [False, True])
+async def test_started_checkpoint_cannot_admit_a_new_source_from_unproven_suffix(
+    phase: str,
+    repeat_intent: bool,
+) -> None:
+    """A checkpoint's later phase needs real forward replay proof, not a repeated intent."""
+    from linch.events import ModelCallEvent
+    from linch.model_calls import _ModelCallError, _ModelCallLedger, intent_to_dict
+
+    intent, receipt = _records(source_context_fingerprint="b" * 64)
+    original = _ModelCallLedger(intent.run_id)
+    await original.begin(intent)
+    if phase != "not_dispatched":
+        await original.mark_dispatch_started(intent)
+    if phase == "settled":
+        await original.settle(receipt)
+    elif phase in {"abandoned", "not_dispatched"}:
+        await original.abandon(intent, reason="interrupted")
+    suffix = (
+        [ModelCallEvent(intent.run_id, "intent", intent_to_dict(intent))] if repeat_intent else []
+    )
+    suffix.append(ModelCallEvent(intent.run_id, "projection", _source_projection_for(intent)))
+    with pytest.raises(_ModelCallError, match="source.*before dispatch|source.*delivery phase"):
+        await _ModelCallLedger(intent.run_id).restore(original.snapshot(), suffix)
+
+
+@pytest.mark.parametrize(
+    ("phase", "budget_mode"),
+    [
+        ("source", "fresh"),
+        ("source", "same"),
+        ("started", "fresh"),
+        ("settled", "fresh"),
+        ("settled", "same"),
+        ("abandoned", "fresh"),
+        ("abandoned", "same"),
+    ],
+)
+async def test_restore_preserves_proven_source_order_against_later_checkpoint(
+    phase: str,
+    budget_mode: str,
+) -> None:
+    """Full journal order outranks aggregate phase while exact source duplicates stay harmless."""
+    from linch.budget import RunBudget
+    from linch.events import ModelCallEvent
+    from linch.model_calls import _ModelCallLedger, intent_to_dict
+
+    intent, receipt = _records(source_context_fingerprint="b" * 64)
+    journal = []
+
+    async def persist(event: Any) -> None:
+        journal.append(event)
+
+    original_budget = RunBudget(max_tokens=1000)
+    original = _ModelCallLedger(intent.run_id, budget=original_budget, persist=persist)
+    await original.begin(intent)
+    source = _source_projection_for(intent)
+    await original.record_projection(source)
+    if phase != "source":
+        await original.mark_dispatch_started(intent)
+    if phase == "settled":
+        await original.settle(receipt)
+    elif phase == "abandoned":
+        await original.abandon(intent, reason="interrupted")
+    snapshot = original.snapshot()
+    journal.extend(
+        [
+            ModelCallEvent(intent.run_id, "intent", intent_to_dict(intent)),
+            ModelCallEvent(intent.run_id, "projection", source),
+        ]
+    )
+    budget = original_budget if budget_mode == "same" else RunBudget(max_tokens=1000)
+    restored = _ModelCallLedger(intent.run_id, budget=budget)
+    await restored.restore(snapshot, journal)
+    assert restored.projections("compaction_source") == [source]
+    assert budget.spent_tokens == (133 if phase == "settled" else 0)
+    assert restored.total_usage.input_tokens == (111 if phase == "settled" else 0)
+    await restored.restore(restored.snapshot(), journal)
+    assert budget.spent_tokens == (133 if phase == "settled" else 0)
