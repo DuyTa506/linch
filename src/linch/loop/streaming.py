@@ -707,7 +707,7 @@ async def _stream_turn(
             meta = tool_meta.pop(tool_id)
             raw = "".join(tool_inputs.pop(tool_id))
             try:
-                parsed = json.loads(raw) if raw else {}
+                parsed = json.loads(raw)
             except json.JSONDecodeError as exc:
                 if state is None:
                     raise protocol_error(f"tool {tool_id!r} input is invalid JSON: {exc}") from exc

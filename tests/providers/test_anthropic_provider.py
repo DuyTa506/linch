@@ -902,6 +902,97 @@ def test_stream_cache_tokens_not_double_counted():
     assert usage.output_tokens == 42
 
 
+def _collect_fake_anthropic_tool_stream(initial_input, deltas):
+    """Run one minimal native tool-use stream through the adapter."""
+    from types import SimpleNamespace
+
+    from linch.providers.anthropic import AnthropicProvider
+
+    class _FakeStream:
+        def __init__(self, events):
+            self._events = events
+
+        def __aiter__(self):
+            self._it = iter(self._events)
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self._it)
+            except StopIteration:
+                raise StopAsyncIteration from None
+
+    events = [
+        SimpleNamespace(
+            type="message_start",
+            message=SimpleNamespace(usage=SimpleNamespace(input_tokens=1)),
+        ),
+        SimpleNamespace(
+            type="content_block_start",
+            index=0,
+            content_block=SimpleNamespace(
+                type="tool_use",
+                id="tool-1",
+                name="NativeTool",
+                input=initial_input,
+            ),
+        ),
+        *[
+            SimpleNamespace(
+                type="content_block_delta",
+                index=0,
+                delta=SimpleNamespace(type="input_json_delta", partial_json=delta),
+            )
+            for delta in deltas
+        ],
+        SimpleNamespace(type="content_block_stop", index=0),
+    ]
+
+    class _FakeMessages:
+        async def create(self, **payload):
+            return _FakeStream(events)
+
+    provider = AnthropicProvider()
+    provider._client = SimpleNamespace(messages=_FakeMessages())
+
+    async def _run():
+        return [event async for event in provider.stream(_make_req())]
+
+    return asyncio.run(_run())
+
+
+def test_stream_normalizes_explicit_empty_tool_input_when_anthropic_sends_no_delta():
+    """An explicit native ``input: {}`` must become an explicit JSON delta."""
+    out = _collect_fake_anthropic_tool_stream({}, [])
+
+    tool_events = [event for event in out if event["type"].startswith("tool_use")]
+    assert tool_events == [
+        {"type": "tool_use_start", "id": "tool-1", "name": "NativeTool"},
+        {"type": "tool_use_input_delta", "id": "tool-1", "json_delta": "{}"},
+        {"type": "tool_use_end", "id": "tool-1"},
+    ]
+
+
+def test_stream_does_not_prefix_normal_anthropic_tool_deltas_with_initial_input():
+    """When the wire stream has deltas, pass exactly those deltas through."""
+    deltas = ['{"value":', '"streamed"}']
+    out = _collect_fake_anthropic_tool_stream({"unused": True}, deltas)
+
+    assert [
+        event["json_delta"] for event in out if event["type"] == "tool_use_input_delta"
+    ] == deltas
+
+
+@pytest.mark.parametrize("raw_delta", ["", "   "])
+def test_stream_preserves_empty_or_whitespace_anthropic_input_delta(raw_delta: str):
+    """A present malformed delta must reach the core parser unchanged and reject there."""
+    out = _collect_fake_anthropic_tool_stream({}, [raw_delta])
+
+    assert [event["json_delta"] for event in out if event["type"] == "tool_use_input_delta"] == [
+        raw_delta
+    ]
+
+
 async def test_stream_maps_aborted_mid_stream_cancel_to_abort_error() -> None:
     from types import SimpleNamespace
 

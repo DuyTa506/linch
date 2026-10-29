@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Literal, cast
@@ -137,6 +138,11 @@ class AnthropicProvider(BaseProvider):
         stop_reason: StopReason = "end_turn"
         # Maps content-block index → tool_use id for correlating deltas and stops.
         tool_idx: dict[int, str] = {}
+        # Anthropic sometimes carries a complete native tool object on the
+        # start frame and sends no input_json_delta. Keep that actual wire
+        # object so the normalized stream still has explicit JSON input.
+        tool_initial_inputs: dict[int, dict[str, Any]] = {}
+        tool_input_delta_seen: set[int] = set()
 
         try:
             raw_stream = await client.messages.create(**payload)
@@ -153,6 +159,9 @@ class AnthropicProvider(BaseProvider):
                     cb = event.content_block
                     if cb.type == "tool_use":
                         tool_idx[event.index] = cb.id
+                        initial_input = getattr(cb, "input", None)
+                        if isinstance(initial_input, dict):
+                            tool_initial_inputs[event.index] = initial_input
                         yield {"type": "tool_use_start", "id": cb.id, "name": cb.name}
                     elif cb.type == "redacted_thinking":
                         data = getattr(cb, "data", "")
@@ -166,6 +175,7 @@ class AnthropicProvider(BaseProvider):
                         yield {"type": "text_delta", "text": delta.text}
                     elif dtype == "input_json_delta":
                         tid = tool_idx.get(event.index, "")
+                        tool_input_delta_seen.add(event.index)
                         yield {
                             "type": "tool_use_input_delta",
                             "id": tid,
@@ -184,7 +194,20 @@ class AnthropicProvider(BaseProvider):
 
                 elif etype == "content_block_stop":
                     tid = tool_idx.pop(event.index, None)
+                    initial_input = tool_initial_inputs.pop(event.index, None)
+                    had_input_delta = event.index in tool_input_delta_seen
+                    tool_input_delta_seen.discard(event.index)
                     if tid is not None:
+                        if initial_input is not None and not had_input_delta:
+                            yield {
+                                "type": "tool_use_input_delta",
+                                "id": tid,
+                                "json_delta": json.dumps(
+                                    initial_input,
+                                    ensure_ascii=False,
+                                    separators=(",", ":"),
+                                ),
+                            }
                         yield {"type": "tool_use_end", "id": tid}
 
                 elif etype == "message_delta":
