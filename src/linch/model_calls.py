@@ -324,6 +324,14 @@ def _copy_model_call_record(
     return owned
 
 
+def _require_dispatched_receipt(receipt: ModelCallReceipt) -> None:
+    """Ledger receipts close dispatched deliveries; earlier exits are abandonments."""
+    if receipt.usage_status == "not_dispatched":
+        raise _ModelCallError(
+            "invalid_state", "pre-dispatch exits must be recorded as abandoned intents"
+        )
+
+
 def _match(intent: ModelCallIntent, receipt: ModelCallReceipt) -> None:
     if any(getattr(intent, field) != getattr(receipt, field) for field in _IDENTITY_FIELDS):
         raise _ModelCallError("identity_mismatch", "receipt does not match its dispatched intent")
@@ -464,6 +472,7 @@ class _ModelCallLedger:
         async with self._lock:
             self._healthy()
             owned = receipt_from_dict(receipt_to_dict(receipt))
+            _require_dispatched_receipt(owned)
             delivery_id = owned.delivery_attempt_id
             if delivery_id in self._receipts:
                 if receipt_to_dict(self._receipts[delivery_id]) != receipt_to_dict(owned):
@@ -518,6 +527,10 @@ class _ModelCallLedger:
             self._abandoned.add(delivery_id)
 
     def snapshot(self) -> dict[str, Any]:
+        # Expose one shared owner from the first checkpoint onward. Delaying
+        # binding until begin/snapshot keeps a newly constructed resume ledger's
+        # fresh budget eligible to adopt the checkpoint owner in restore().
+        self._bind_budget()
         result = {
             "version": _VERSION,
             "budget_owner_id": self._budget_owner_id,
@@ -635,6 +648,7 @@ class _LedgerRecovery:
         self._owner(_string(state["budget_owner_id"], "budget_owner_id"))
         for raw in self._list(state["receipts"]):
             receipt = receipt_from_dict(raw)
+            _require_dispatched_receipt(receipt)
             self._run(receipt.run_id)
             if receipt.delivery_attempt_id in self.receipts:
                 raise _invalid("duplicate receipt in accounting snapshot")
@@ -689,6 +703,7 @@ class _LedgerRecovery:
         raw, kind = event.record, event.record_kind
         if kind == "receipt":
             receipt = receipt_from_dict(raw)
+            _require_dispatched_receipt(receipt)
             delivery_id = receipt.delivery_attempt_id
             previous = self.receipts.get(delivery_id)
             if previous is not None:
