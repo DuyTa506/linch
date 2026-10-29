@@ -117,6 +117,7 @@ Commit `feat: account for compaction provider deliveries`; report the same evide
 - Modify: src/linch/session.py, src/linch/events.py, src/linch/reports.py and src/linch/__init__.py as needed for the specified additive fields
 - Modify: src/linch/loop/checkpoint.py for the versioned accounting runtime envelope and ordinary snapshot/journal restore integration; src/linch/model_calls.py only if a narrowly necessary shared binding/helper requires it, with no second accounting path
 - Create: tests/loop/test_model_call_accounting.py
+- Modify: src/linch/providers/anthropic.py and tests/providers/test_anthropic_provider.py only to normalize a genuine initial wire input object when NO input delta event occurs; empty/whitespace delta presence must never trigger a fallback
 
 **Interfaces:**
 - Consumes: Task1/2 ledger/gateway/facade.

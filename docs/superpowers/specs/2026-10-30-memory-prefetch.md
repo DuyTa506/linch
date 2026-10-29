@@ -99,9 +99,12 @@ credential, or connection string. Requiring it prevents accidental cache
 sharing when two stores have otherwise equal scopes and queries.
 
 `MemoryPrefetchConfig` rejects negative TTLs and non-positive entry, byte, or
-in-flight bounds. Its defaults cap a cache at 128 entries, 1 MiB of retained
-result data, and eight live refreshes. A host can set `fresh_ttl_s=0` to skip
-fresh reuse while retaining bounded stale refresh behavior.
+in-flight bounds. Its defaults cap the retained cache at 128 entries, a 1 MiB
+logical byte budget, and eight live refreshes. That byte budget charges the
+canonical full key as well as retained result data; it is not a cap on the
+caller input, an in-flight store response, remote payloads, or whole-process
+heap use. A host can set `fresh_ttl_s=0` to skip fresh reuse while retaining
+bounded stale refresh behavior.
 
 `ScopedMemoryStore` is a duck-typed `MemoryStore` wrapper: existing tools,
 hooks, and adapters can call its normal `search` and `upsert` methods without
@@ -210,11 +213,23 @@ the cache never uses a cross-scope fallback.
 
 ## 5. SWR, bounds, invalidation, and task ownership
 
-Entries use a monotonic-clock timestamp and an LRU order. Cache byte accounting
-uses retained result identifiers, namespaces, content, and strict-JSON metadata;
-an unserializable or oversized result is not retained. On insertion, remove
-expired entries and then evict least-recently-used entries until both
-`max_entries` and `max_bytes` hold.
+Entries use a monotonic-clock timestamp and an LRU order. The retained-byte
+charge is the UTF-8 byte length of the strict canonical full key (scope and
+policy revision, query, filter, limit, store identity, and generation) plus
+the retained result identifiers, namespaces, content, and strict-JSON metadata.
+It deliberately describes only retained cache state, not caller, task, store,
+remote-payload, or whole-process memory.
+
+Before scheduling a refresh, calculate the canonical key charge. If it alone
+exceeds `max_bytes`, return `saturated` with no result and do not schedule or
+issue a store search, and do not log raw key material. This consumes neither a
+cache entry nor an in-flight slot. `ScopedMemoryStore.search()` remains the
+unchanged, authoritative awaited path. An unserializable result, or a completed
+refresh whose key-plus-result charge exceeds `max_bytes`, is not retained and
+does not evict healthy entries merely to try to fit an impossible candidate.
+Otherwise remove expired entries, then evict
+least-recently-used entries until both `max_entries` and the total full-entry
+charge under `max_bytes` hold.
 
 For an exact key:
 
@@ -241,18 +256,28 @@ refreshes. A refresh captures its generation before its first `await`; after
 equals the current family generation and it remains the key's current task.
 Cancellation is not trusted as the fence: a late, cancellation-insensitive
 result still fails this check. A failed refresh never stores an error or
-replaces an existing stale value. `ScopedMemoryStore.upsert()` invalidates its
-scope before awaiting a write, so refreshes that began before or during the
-write cannot repopulate pre-write data. Out-of-band writes, erasure, credential
-rotation, or authorization changes must call `invalidate(scope)` before their
-external state transition.
+replaces an existing stale value. `ScopedMemoryStore.upsert()` must call
+`invalidate(scope)` immediately before it awaits the wrapped write and again
+in a `finally` immediately after that await settles, whether it succeeds,
+fails, or is cancelled. The first fence removes pre-write entries and
+refreshes. A read while the write is pending may start and consume a refresh
+of the pre-write store state; the final fence removes any such mid-write entry
+and advances its generation. Thus no cache entry created during the pending
+write may survive write completion, and a refresh that finishes after the
+write cannot insert.
+
+Out-of-band writes, erasure, credential rotation, or authorization changes
+must use the same trusted-host bracket: `invalidate(scope)`, await the external
+transition, then `invalidate(scope)` in `finally` on success, failure, or
+cancellation. This is required to clear hits and fence refreshes that begin
+while that external transition is pending.
 
 A direct write to the wrapped underlying store, or a write by another process,
-is not observed by this in-process cache. Until the trusted host invalidates
-that scope (or a future store-version hook is added), the only guarantee is the
-configured bounded stale window. Such a path is never valid for a permission,
-revocation, or scope transition: invalidate first and bind the new policy
-revision so the next request is a hard miss, never an SWR authorization read.
+is not observed by this in-process cache. Without the trusted-host bracket (or
+a future store-version hook), it has only the configured bounded stale
+semantics, not write-completion correctness. A permission, revocation, or
+scope transition must use that bracket and bind a new policy revision so the
+next request is a hard miss, never an SWR authorization read.
 
 The cache does not persist results, generations, in-flight work, or clocks.
 Reload/resume starts empty and does not recreate background work.
@@ -270,20 +295,27 @@ All tests are offline and use controllable async fake stores. They must pin:
 3. Fresh reuse performs no second store read. A stale hit returns the old
    detached result immediately and concurrent stale readers start only one
    refresh. TTL expiry, LRU entry eviction, byte eviction, and in-flight
-   saturation remain bounded.
+   saturation remain bounded. A huge valid query/filter whose canonical key
+   alone exceeds the budget returns `saturated` without a task or store call;
+   a key-plus-result candidate above the budget is not retained, and LRU
+   accounting includes both key and result bytes.
 4. Invalidation racing a paused refresh leaves no old result after the task
    finishes; a later lookup obtains only a post-fence refresh. A failed
    refresh neither becomes an entry nor overwrites a usable stale entry.
-5. `ScopedMemoryStore.upsert()` fences the cache before the delegated write.
-   `MemorySearchTool`/`MemoryUpsertTool` using the wrapper cannot cross the
+5. `ScopedMemoryStore.upsert()` fences immediately before and in `finally`
+   after the delegated write. With a held write, a refresh may start and finish
+   with old data while the write is pending, but releasing the write leaves a
+   cache miss. A refresh held until after write completion cannot insert; the
+   same final-fence miss holds when the write fails or is cancelled.
+6. `MemorySearchTool`/`MemoryUpsertTool` using the wrapper cannot cross the
    configured scope even when their raw input asks for another namespace.
-6. A session-owned paused refresh is cancelled and awaited by force release
+7. A session-owned paused refresh is cancelled and awaited by force release
    and by `Agent.close()` before dependent resources close; finished refresh
    tasks are removed from `session.background_tasks`.
-7. Context metadata exposes only the bounded cache state. Retrieved memory
+8. Context metadata exposes only the bounded cache state. Retrieved memory
    remains ephemeral and does not enter `session.provider_view`, run
    checkpoints, or durable session history.
-8. Public exports resolve through `linch.__all__`; no `MemoryStore` method,
+9. Public exports resolve through `linch.__all__`; no `MemoryStore` method,
    built-in store implementation, provider contract, or prompt changes are
    required.
 
