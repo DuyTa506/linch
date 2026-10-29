@@ -629,3 +629,36 @@ async def test_abort_after_observed_end_preserves_known_usage_and_rejects_output
     assert ledger.snapshot()["receipts"][0]["disposition"] == "rejected"
     assert provider.closed == 1
     assert limiter.held == 0
+
+
+async def test_abort_on_clean_completion_rejects_paid_output_and_charges_once() -> None:
+    from linch.budget import RunBudget
+    from linch.errors import AbortError
+    from linch.types import Usage
+
+    class AbortOnCompletion(_Provider):
+        async def stream(self, request: Any) -> AsyncIterator[dict[str, Any]]:
+            try:
+                for event in _events():
+                    yield event
+                request.signal.abort()
+            finally:
+                self.closed += 1
+
+    budget = RunBudget(max_tokens=1000)
+    provider, ledger, limiter, caller = _setup(provider=AbortOnCompletion(), budget=budget)
+    with pytest.raises(AbortError):
+        await _text(caller)
+
+    receipts = ledger.snapshot()["receipts"]
+    assert len(receipts) == 1
+    assert receipts[0]["usage_status"] == "reported"
+    assert receipts[0]["disposition"] == "rejected"
+    assert receipts[0]["accepted_text"] is None
+    assert receipts[0]["accepted_text_sha256"] is None
+    assert ledger.total_usage == Usage(111, 22)
+    assert ledger.usage_complete
+    assert budget.spent_tokens == 133
+    assert provider.closed == 1
+    assert limiter.acquired == limiter.released == ["requested-model"]
+    assert limiter.held == 0
