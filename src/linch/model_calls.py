@@ -1085,6 +1085,7 @@ class _AuxiliaryDelivery:
                     close = getattr(closed_iterator, "aclose", None)
                     if close is not None:
                         await close()
+                    self.signal.throw_if_aborted()
                     receipt = self._receipt(reported=True)
                     terminal_attempted = True
                     await ledger.settle(receipt)
