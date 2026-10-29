@@ -26,9 +26,8 @@ async for event in session.run("hello"):
         case "tool_call_end":     # tool finished, has .result
         case "tool_progress":     # transient progress from an in-flight tool
         case "permission_request": # user approval needed (mode="default")
-        case "usage":     # token counts for this turn
+        case "usage":     # primary or auxiliary token counts
         case "budget":    # RunBudget warning (90%) or exhaustion
-        case "model_call": # typed accounting journal envelope (journal observers)
         case "result":    # run finished — .subtype in ("success","error","aborted")
         case "error":     # provider/tool error details
         case "compaction": # context was summarised (or micro-compacted)
@@ -89,21 +88,27 @@ an empty, tool-using, non-text, or oversized compaction result is rejected but
 its reported usage is still charged once.
 
 `ModelCallEvent` is the public, immutable envelope for the private accounting
-journal. Use the type guard when consuming a store or journal observer:
+journal. It is not yielded by `session.run()`. With a configured `RunStore`,
+use `load_events()` and the type guard to inspect persisted accounting records:
 
 ```python
 from linch import ModelCallEvent, is_model_call_event
 
-if is_model_call_event(event):
-    assert isinstance(event, ModelCallEvent)
-    print(event.record_kind, event.run_id)
+# run_store is the configured RunStore; run_id comes from SystemEvent.run_id.
+cursor = 0
+for row in await run_store.load_events(run_id, after_seq=cursor):
+    event = row.event
+    if is_model_call_event(event):
+        assert isinstance(event, ModelCallEvent)
+        print(row.seq, event.record_kind, event.run_id)
+    cursor = row.seq
 ```
 
 The envelope carries a run ID, one of `intent`, `dispatch_started`, `receipt`,
 `abandoned`, or `projection`, and a detached JSON-safe record. Receipts,
 intents, and gateway details are private journal records; they are not extra
-names in `linch.__all__`. Ordinary primary model-call records are journal-only
-and are not additionally yielded by the normal `session.run()` stream. A
+names in `linch.__all__`. Model-call records are journal-only and are not
+yielded by the normal `session.run()` stream. A
 compaction receipt is surfaced through an additive `UsageEvent` instead:
 
 ```python

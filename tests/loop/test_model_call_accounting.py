@@ -841,3 +841,122 @@ def test_run_report_propagates_incomplete_usage_lower_bound() -> None:
     )
     assert report.final is not None
     assert report.final["usage_complete"] is False
+
+
+@pytest.mark.parametrize("with_ladder", [False, True], ids=["default-forced", "ladder-forced"])
+async def test_rejected_forced_compaction_yields_its_paid_usage_once(with_ladder: bool) -> None:
+    """A rejected paid summary remains visible before its original terminal error."""
+    from linch import Agent, RunBudget
+    from linch.compaction import CompactionLadder
+    from linch.errors import ContextLengthError
+    from linch.events import ModelCallEvent, ResultEvent, UsageEvent
+    from linch.pricing import cost_usd
+    from linch.providers import BaseProvider
+    from linch.run_store import InMemoryRunStore
+    from linch.sessions import InMemorySessionStore
+    from linch.types import Message, TextBlock, Usage
+
+    class ProbeHook:
+        resume_policy_id = "test.rejected-forced-compaction"
+        resume_policy_version = "1"
+        resume_policy_config: dict[str, Any] = {}
+
+        def __init__(self) -> None:
+            self.context_calls = self.before_calls = 0
+
+        async def build_context(self, session: Any, turn_index: int) -> None:
+            self.context_calls += 1
+
+        def on_before_provider_call(self, ctx: Any) -> None:
+            self.before_calls += 1
+
+    class RejectedSummaryProvider(BaseProvider):
+        id = "rejected-forced-compaction"
+
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def context_window(self, model: str) -> int:
+            return 100_000
+
+        async def stream(self, req: Any) -> AsyncIterator[dict[str, Any]]:
+            summary = any(
+                "Summarize the conversation so far." in block.text for block in req.system
+            )
+            self.calls.append("summary" if summary else "main")
+            if not summary:
+                raise ContextLengthError("force a paid compaction")
+            yield {"type": "message_start", "model": "claude-haiku-4-5"}
+            yield {"type": "text_delta", "text": ""}
+            yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage(111, 22)}
+
+    provider, hook = RejectedSummaryProvider(), ProbeHook()
+    runs, budget = InMemoryRunStore(), RunBudget()
+    agent = Agent(
+        model="offline-model",
+        provider=provider,
+        run_store=runs,
+        session_store=InMemorySessionStore(),
+        max_output_tokens=100,
+        permissions={"mode": "skip-dangerous"},
+        hooks=[hook],
+        budget=budget,
+        compaction_ladder=CompactionLadder(micro=False) if with_ladder else None,
+    )
+    session = await agent.session()
+    await session.append(
+        [
+            Message(
+                role="user" if index % 2 == 0 else "assistant",
+                content=[TextBlock(text=(f"seed-{index} " * 120).strip())],
+            )
+            for index in range(30)
+        ]
+    )
+    events = [event async for event in session.run("go")]
+    run_id = next(event.run_id for event in events if event.type == "system")
+    rows = await runs.load_events(run_id)
+    receipts = [
+        row.event.record
+        for row in rows
+        if isinstance(row.event, ModelCallEvent)
+        and row.event.record_kind == "receipt"
+        and row.event.record["kind"] == "compaction"
+    ]
+    usages = [
+        event for event in events if isinstance(event, UsageEvent) and event.source == "compaction"
+    ]
+    assert len(usages) == len(receipts) == 1
+    usage, receipt = usages[0], receipts[0]
+    assert receipt["disposition"] == "rejected"
+    assert receipt["rejection_reason"] == "empty_output"
+    assert usage.call_id == receipt["delivery_attempt_id"]
+    assert usage.logical_call_id == receipt["logical_call_id"]
+    assert usage.model == receipt["actual_model"] == "claude-haiku-4-5"
+    assert usage.usage == usage.cumulative == Usage(111, 22)
+    assert usage.cost_usd == receipt["cost_usd"] == cost_usd(Usage(111, 22), "claude-haiku-4-5")
+    result = next(event for event in events if isinstance(event, ResultEvent))
+    assert result.subtype == "error"
+    assert result.total_usage == Usage(111, 22)
+    assert result.total_cost_usd == usage.cost_usd
+    assert result.usage_complete is False  # the preceding primary dispatch has unknown usage
+    assert budget.spent_tokens == 133
+    assert budget.spent_usd == usage.cost_usd
+    assert provider.calls == ["main", "summary"]
+    assert hook.context_calls == hook.before_calls == 1
+    assert not any(event.type == "compaction" for event in events)
+    error_index = next(index for index, event in enumerate(events) if event.type == "error")
+    assert events.index(usage) < error_index < events.index(result)
+    assert events[error_index].error["name"] == "ProviderError"
+    assert events[error_index].error["retryable"] is False
+    assert "unusable summary" in events[error_index].error["message"]
+    assert (
+        sum(
+            isinstance(row.event, UsageEvent) and row.event.call_id == usage.call_id for row in rows
+        )
+        == 1
+    )
+    saved = await runs.load_run(run_id)
+    assert saved.checkpoint.extension_state["linch.model_calls.v1"]["ledger"][
+        "consumed_auxiliary_receipt_ids"
+    ] == [usage.call_id]
