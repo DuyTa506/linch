@@ -307,7 +307,10 @@ def _copy_model_call_record(
             raise _invalid("abandoned delivery has invalid usage status")
     else:
         _validate_projection(owned)
-        if owned["projection_kind"] == "primary_append" and owned["run_id"] != run_id:
+        if (
+            owned["projection_kind"] in ("primary_append", "compaction_source")
+            and owned["run_id"] != run_id
+        ):
             raise _ModelCallError("identity_mismatch", "projection belongs to another run")
         return owned
     if identity.run_id != run_id:
@@ -342,7 +345,16 @@ _COMPACTION_PROJECTION_FIELDS = {
     "target_context_fingerprint",
     "full_history_base_count",
     "full_history_base_fingerprint",
+    "source_message_fingerprints",
+    "reminder_fingerprints",
 }
+_COMPACTION_SOURCE_FIELDS = (
+    _COMPACTION_PROJECTION_FIELDS
+    - {
+        "source_receipt_ids",
+        "target_context_fingerprint",
+    }
+) | {"run_id", "logical_call_id", "delivery_attempt_id", "turn_index", "request_fingerprint"}
 
 
 def _digest(value: Any, name: str) -> str:
@@ -374,8 +386,16 @@ def _validate_projection(raw: Mapping[str, Any]) -> None:
             _digest(raw["control_message_sha256"], "control_message_sha256")
         elif raw["control_message_sha256"] is not None:
             raise _invalid("only a continue action may identify a control message")
-    elif kind == "compaction":
-        _versioned(raw, _COMPACTION_PROJECTION_FIELDS)
+    elif kind in ("compaction", "compaction_source"):
+        _versioned(
+            raw,
+            _COMPACTION_PROJECTION_FIELDS if kind == "compaction" else _COMPACTION_SOURCE_FIELDS,
+        )
+        if kind == "compaction_source":
+            for name in ("run_id", "logical_call_id", "delivery_attempt_id", "request_fingerprint"):
+                _string(raw[name], name)
+            if raw["turn_index"] is not None:
+                _integer(raw["turn_index"], "turn_index")
         _string(raw["strategy_id"], "strategy_id")
         config = raw["strategy_config"]
         if not isinstance(config, dict) or set(config) != {
@@ -392,11 +412,20 @@ def _validate_projection(raw: Mapping[str, Any]) -> None:
                 raise _invalid("compaction configuration must be positive")
         _digest(config["prompt_sha256"], "prompt_sha256")
         _digest(raw["source_context_fingerprint"], "source_context_fingerprint")
-        _digest(raw["target_context_fingerprint"], "target_context_fingerprint")
-        ids = raw["source_receipt_ids"]
-        if not isinstance(ids, list) or len(ids) != 1:
-            raise _invalid("built-in projection requires exactly one source receipt")
-        _string(ids[0], "source_receipt_id")
+        for name in ("source_message_fingerprints", "reminder_fingerprints"):
+            ids = raw[name]
+            if not isinstance(ids, list) or (name == "source_message_fingerprints" and not ids):
+                raise _invalid("invalid ordered compaction source digests")
+            for value in ids:
+                _digest(value, name)
+        if len(set(raw["reminder_fingerprints"])) != len(raw["reminder_fingerprints"]):
+            raise _invalid("duplicate compaction reminder digests")
+        if kind == "compaction":
+            _digest(raw["target_context_fingerprint"], "target_context_fingerprint")
+            ids = raw["source_receipt_ids"]
+            if not isinstance(ids, list) or len(ids) != 1:
+                raise _invalid("built-in projection requires exactly one source receipt")
+            _string(ids[0], "source_receipt_id")
     else:
         raise _invalid("unsupported projection kind")
     _integer(raw["full_history_base_count"], "full_history_base_count")
@@ -417,9 +446,34 @@ def _projection_record(**values: Any) -> dict[str, Any]:
 
 
 def _validate_projection_receipts(
-    raw: Mapping[str, Any], receipts: Mapping[str, ModelCallReceipt]
+    raw: Mapping[str, Any],
+    receipts: Mapping[str, ModelCallReceipt],
+    intents: Mapping[str, ModelCallIntent] | None = None,
 ) -> None:
-    if raw["projection_kind"] == "primary_append":
+    if raw["projection_kind"] == "compaction_source":
+        delivery_id = raw["delivery_attempt_id"]
+        identity = (intents or {}).get(delivery_id) or receipts.get(delivery_id)
+        if identity is None or identity.kind != "compaction":
+            raise _invalid("compaction source requires its physical intent")
+        for name in (
+            "run_id",
+            "logical_call_id",
+            "delivery_attempt_id",
+            "turn_index",
+            "request_fingerprint",
+            "strategy_id",
+        ):
+            if raw[name] != getattr(identity, name):
+                raise _ModelCallError("identity_mismatch", "compaction source and delivery differ")
+        receipt = receipts.get(delivery_id)
+        if (
+            receipt is not None
+            and raw["source_context_fingerprint"] != receipt.source_context_fingerprint
+        ):
+            raise _ModelCallError(
+                "identity_mismatch", "compaction source and receipt context differ"
+            )
+    elif raw["projection_kind"] == "primary_append":
         receipt = receipts.get(raw["delivery_attempt_id"])
         if receipt is None or receipt.kind != "primary" or receipt.disposition != "accepted":
             raise _invalid("primary acceptance projection requires its accepted receipt")
@@ -453,13 +507,43 @@ def _check_projection_conflict(
     def receipt_ids(value: Mapping[str, Any]) -> set[str]:
         return (
             {value["delivery_attempt_id"]}
-            if value["projection_kind"] == "primary_append"
+            if value["projection_kind"] in ("primary_append", "compaction_source")
             else set(value["source_receipt_ids"])
         )
 
     sources = receipt_ids(record)
-    if any(sources & receipt_ids(value) and value != record for value in projections.values()):
+    if any(
+        value["projection_kind"] == record["projection_kind"]
+        and sources & receipt_ids(value)
+        and value != record
+        for value in projections.values()
+    ):
         raise _invalid("conflicting receipt-linked projection")
+    if record["projection_kind"] == "compaction" and not any(
+        value["projection_kind"] == "compaction_source" and value["delivery_attempt_id"] in sources
+        for value in projections.values()
+    ):
+        raise _invalid("paid projection requires its matching physical source anchor")
+    for value in projections.values():
+        if {value["projection_kind"], record["projection_kind"]} != {
+            "compaction",
+            "compaction_source",
+        }:
+            continue
+        paid, source = (
+            (record, value) if record["projection_kind"] == "compaction" else (value, record)
+        )
+        if source["delivery_attempt_id"] in paid["source_receipt_ids"] and any(
+            paid[name] != source[name]
+            for name in _COMPACTION_PROJECTION_FIELDS
+            - {
+                "projection_kind",
+                "projection_id",
+                "source_receipt_ids",
+                "target_context_fingerprint",
+            }
+        ):
+            raise _invalid("paid projection differs from its ordered source recipe")
 
 
 def _accounting_contract() -> dict[str, Any]:
@@ -470,7 +554,7 @@ def _accounting_contract() -> dict[str, Any]:
         "model_source": "normalized_message_start_required_v1",
         "accepted_text_max_bytes": _ACCEPTED_TEXT_MAX_BYTES,
         "primary_replay": "receipt_post_hook_append_v1",
-        "compaction_replay": "deterministic_builtin_projection_v1",
+        "compaction_replay": "deterministic_builtin_ordered_source_v2",
         "native_rejection": "terminal_error_v0",
     }
 
@@ -638,6 +722,9 @@ class _ModelCallLedger:
                     "invalid_state", "receipt requires its matching started intent"
                 )
             _match(intent, owned)
+            for record in self.projections("compaction_source"):
+                if record["delivery_attempt_id"] == delivery_id:
+                    _validate_projection_receipts(record, {delivery_id: owned}, self._intents)
             next_usage = self._total_usage.add(owned.usage) if owned.usage else self.total_usage
             next_cost = self._total_cost_usd
             if owned.cost_usd is not None:
@@ -707,12 +794,17 @@ class _ModelCallLedger:
             owned = _copy_model_call_record(
                 self.run_id, "projection", record, self._budget_owner_id, _VERSION
             )
-            _validate_projection_receipts(owned, self._receipts)
+            _validate_projection_receipts(owned, self._receipts, self._intents)
             key = owned["projection_id"]
             if key in self._projections:
                 if self._projections[key] != owned:
                     raise _invalid("conflicting projection payload")
                 return
+            if owned["projection_kind"] == "compaction_source" and (
+                owned["delivery_attempt_id"] in self._started
+                or owned["delivery_attempt_id"] in self._receipts
+            ):
+                raise _invalid("compaction source must be durable before dispatch starts")
             _check_projection_conflict(owned, self._projections)
             await self._write("projection", owned)
             self._projections[key] = owned
@@ -923,6 +1015,12 @@ class _LedgerRecovery:
                 if delivery_id not in self.started or delivery_id in self.abandoned:
                     raise _ModelCallError("invalid_state", "journal receipt lacks a started intent")
                 _match(self.intents[delivery_id], receipt)
+                for source in self.projections.values():
+                    if (
+                        source["projection_kind"] == "compaction_source"
+                        and source["delivery_attempt_id"] == delivery_id
+                    ):
+                        _validate_projection_receipts(source, {delivery_id: receipt}, self.intents)
                 self.receipts[delivery_id] = receipt
         elif kind in ("intent", "dispatch_started", "abandoned"):
             intent = intent_from_dict(raw["intent"] if kind == "abandoned" else raw)
@@ -957,7 +1055,7 @@ class _LedgerRecovery:
                     self.abandoned.add(delivery_id)
                     self.abandoned_records[delivery_id] = raw
         else:
-            _validate_projection_receipts(raw, self.receipts)
+            _validate_projection_receipts(raw, self.receipts, self.intents)
             key = raw["projection_id"]
             if key in self.projections and self.projections[key] != raw:
                 raise _invalid("conflicting projection payload")
@@ -1184,9 +1282,14 @@ class _AccountedAuxiliaryCaller:
         self._turn_index = turn_index
         self._strategy_id = "compaction"
         self._source_context_fingerprint: str | None = None
+        self._compaction_source: dict[str, Any] | None = None
 
     def _for_compaction(
-        self, strategy_id: str, messages: Sequence[Message]
+        self,
+        strategy_id: str,
+        messages: Sequence[Message],
+        *,
+        source_recipe: dict[str, Any] | None = None,
     ) -> _AccountedAuxiliaryCaller:
         bound = _AccountedAuxiliaryCaller(
             self._provider,
@@ -1197,6 +1300,7 @@ class _AccountedAuxiliaryCaller:
         )
         bound._strategy_id = _string(strategy_id, "strategy_id")
         bound._source_context_fingerprint = _context_fingerprint(messages)
+        bound._compaction_source = deepcopy(source_recipe)
         return bound
 
     async def text(
@@ -1299,6 +1403,19 @@ class _AuxiliaryDelivery:
             acquired = True
 
         try:
+            if self.caller._compaction_source is not None:
+                await ledger.record_projection(
+                    _projection_record(
+                        projection_kind="compaction_source",
+                        run_id=self.intent.run_id,
+                        logical_call_id=self.intent.logical_call_id,
+                        delivery_attempt_id=self.intent.delivery_attempt_id,
+                        turn_index=self.intent.turn_index,
+                        request_fingerprint=self.intent.request_fingerprint,
+                        strategy_id=self.intent.strategy_id,
+                        **self.caller._compaction_source,
+                    )
+                )
             self.signal.throw_if_aborted()
             if limiter is not None:
                 await _await_auxiliary(acquire(), self.signal)

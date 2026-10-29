@@ -17,6 +17,7 @@ from .._version import get_version
 from ..compaction import (
     _builtin_compaction_config,
     _reconcile_paid_compactions,
+    _skill_listing_fingerprint,
     build_compaction_event,
     reset_read_tracker_after_compaction,
 )
@@ -830,6 +831,9 @@ def _build_run_contract(session: Session, prompt: str, opts: RunOptions) -> Any:
     policies: dict[str, Any] = {
         "runtime_version": get_version(),
         "model_call_accounting": _accounting_contract(),
+        "compaction_skill_listing_fingerprint": _skill_listing_fingerprint(
+            getattr(agent, "skill_listing_text", None)
+        ),
         "compaction_replay_config": _builtin_compaction_config(getattr(agent, "compaction", None)),
         "permissions": _permission_policy_contract(agent),
         "hooks": _hook_policy_contract(agent),
