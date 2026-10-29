@@ -938,7 +938,7 @@ wheels = [
 
 [[package]]
 name = "linch"
-version = "2.0.0"
+version = "3.0.0a1"
 source = { editable = "." }
 dependencies = [
     { name = "jsonschema" },

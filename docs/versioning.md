@@ -5,6 +5,13 @@ Linch 2.0 is the first release whose defaults enforce the SDK boundary: a bare
 project resources. See [Migrating to Linch 2.0](migration-2.0.md) for the
 required opt-ins and durable-run changes.
 
+The first 3.0 prerelease, `3.0.0a1`, adds Release-A model-call accounting. It
+settles reported primary and auxiliary usage by physical delivery, exposes the
+typed `ModelCallEvent` journal envelope, and makes durable built-in compaction
+replay fail closed when its ordered source cannot be proven. It does not ship
+the later reliability policy or other 3.0 roadmap lanes. See
+[Migrating to Linch 3.0](migration-3.0.md) for the incremental adoption notes.
+
 Linch versions `MAJOR.MINOR.PATCH` and never breaks `linch.__all__` outside a MAJOR.
 This page is the contract an embedder can pin to.
 
@@ -22,6 +29,7 @@ The supported public API is exactly the names exported from the top-level packag
 from linch import (
     Agent,
     EvalCase,
+    ModelCallEvent,
     RunBudget,
     ScriptedProvider,
     ToolRule,
@@ -29,6 +37,11 @@ from linch import (
     tool,
 )
 ```
+
+`is_model_call_event` is public alongside `ModelCallEvent`. The journal envelope
+is the only new top-level type in this prerelease; receipt, intent, ledger, and
+gateway types remain private. Ordinary primary records are journal-only, while
+auxiliary compaction usage is added to the existing `UsageEvent` metadata.
 
 Evaluation harness types/scorers and permission rules are part of that same
 top-level contract; callers do not need to depend on the `linch.evals` or
@@ -120,6 +133,13 @@ upgrade:
 A breaking wire-format change bumps `RUN_SCHEMA_VERSION`, independent of the package
 MAJOR/MINOR/PATCH.
 
+Model-call accounting has its own versioned journal records and binds durable
+resume to a `RunContract`. A run with an older in-flight accounting shape fails
+closed rather than guessing whether a dispatched delivery was billed; the
+legacy resume opt-in does not reinterpret that state. `ResultEvent.usage_complete`
+is `False` when a dispatched call has unknown final usage, so totals are an
+explicit lower bound rather than a fabricated zero.
+
 ## Deprecation policy
 
 A public name slated for removal is kept for at least one MINOR release with a
@@ -144,6 +164,18 @@ Pin tighter when you need the release to be inert:
 # review every release before taking it
 dependencies = ["linch==2.0.0"]
 ```
+
+To adopt the accounting prerelease, pin it explicitly while its incremental
+3.0 surface is under review:
+
+```toml
+dependencies = ["linch==3.0.0a1"]
+```
+
+Do not use the 2.x compatibility range above when you need the new accounting
+fields. Conversely, the `3.0.0a1` accounting slice keeps the existing neutral
+persona, prompts, default compaction strategy, and opt-in feature defaults; it
+does not make a 2.x application adopt later reliability behavior implicitly.
 
 - **Implementing a protocol?** Pin the exact version, or at least the MINOR. New optional
   methods the runtime probes with `getattr` can arrive in any release, and you will want to

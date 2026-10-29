@@ -270,6 +270,33 @@ from linch import Agent, DetailedCompaction
 agent = Agent(model="gpt-5", compaction=DetailedCompaction())
 ```
 
+### Accounting for compaction
+
+In a normal run, the configured strategy's provider delivery is an accounted
+auxiliary call. Its valid `Usage` is added to the same cumulative total as the
+primary turn, and its receipt settles before the summary is applied or another
+provider call starts. A summary that reaches the token or USD limit therefore
+stops the run before the main turn is dispatched. An unusable summary (empty,
+non-text, tool-using, or oversized) is rejected but still charged when valid
+final usage was observed.
+
+`DefaultCompaction` and `DetailedCompaction` have a deterministic paid-result
+replay seam for durable runs. Linch stores a bounded accepted summary, its
+receipt identity, and an ordered hash-only source recipe; after a crash, a
+matching durable source can apply that summary without another provider call or
+duplicate charge. Required invoked-skill bodies are flushed through the
+existing session store before that recipe is written. A changed source,
+strategy configuration, listing wrapper, or run contract fails closed rather
+than applying a stale summary.
+
+The public `CompactionStrategy` protocol remains unchanged. A custom strategy
+receives an accounted provider facade for calls made through Linch, including
+the run's cancellation and provider-slot/limiter guarantees. Opaque network
+calls outside that facade are not observable, and arbitrary multi-call or
+transform logic has no automatic deterministic paid-replay guarantee. The
+standalone `summarize_with_provider(...)` helper remains available with its
+existing direct-provider behavior; it is not a durable run receipt by itself.
+
 ### Compaction ladder
 
 `CompactionLadder` adds cheap, LLM-free recovery rungs before and around
@@ -359,8 +386,10 @@ print(budget.spent_tokens, budget.remaining_tokens, budget.exceeded)
 
 Behavior:
 
-- The loop charges the budget after every provider turn and checks it before the
-  next one. When exceeded it emits `BudgetEvent(kind="exceeded")`, an
+- The loop settles each physical provider delivery before it continues. This
+  includes the auxiliary compaction delivery, so its usage is charged before
+  the summary is applied and admission is checked again before the next
+  primary turn. When exceeded it emits `BudgetEvent(kind="exceeded")`, an
   `ErrorEvent` named `BudgetExceededError`, and a `ResultEvent(subtype="error")`
   — the session history stays intact and the session remains usable.
 - `BudgetEvent(kind="warning")` fires once per budget object when spending first
@@ -368,8 +397,22 @@ Behavior:
   across the whole tree, not once per run.
 - Precedence: `RunOptions(budget=...)` > a budget inherited from a parent
   session (subagents) > `Agent(budget=...)`.
-- Token counts sum all `Usage` buckets. USD costs come from `linch.pricing`;
-  unknown models charge `$0`, so for unpriced models only the token limit binds.
+- Token counts sum all `Usage` buckets from primary and auxiliary deliveries.
+  USD costs come from `linch.pricing`; unknown models do not receive a
+  synthetic price, so their known tokens remain in the total while cost is
+  partial and only a token limit can bind for that delivery.
+- If a dispatched delivery is cancelled or fails before valid final usage, its
+  usage is `unknown`, never zero. A capped run fails closed before another
+  provider call until the host resolves that accounting fence; an uncapped run
+  may finish with a lower-bound total and `ResultEvent.usage_complete=False`.
+- A live `RunBudget` object carries its receipt owner and charged delivery IDs
+  across the in-process agent/subagent tree. Resume may adopt a checkpoint only
+  with a fresh zero-spent budget; a fresh nonzero or owner-mismatched capped
+  budget fails closed rather than silently replaying charges.
+
+These ownership fences are intentionally in-process. They do not promise
+distributed-tree recovery, exactly-once external-provider billing, or a
+reservation against concurrently admitted deliveries.
 
 Verification retries (schema repair, [verifier hooks](./hooks.md)) and workflow
 subagents all draw from the same budget, so a strict gate can never loop

@@ -28,6 +28,7 @@ async for event in session.run("hello"):
         case "permission_request": # user approval needed (mode="default")
         case "usage":     # token counts for this turn
         case "budget":    # RunBudget warning (90%) or exhaustion
+        case "model_call": # typed accounting journal envelope (journal observers)
         case "result":    # run finished — .subtype in ("success","error","aborted")
         case "error":     # provider/tool error details
         case "compaction": # context was summarised (or micro-compacted)
@@ -77,6 +78,47 @@ The same event stream is mirrored to hooks at the `on_event_emit` chokepoint, so
 anything you can do in this loop you can also do in a reusable hook — see
 [Hooks](./hooks.md).
 
+## Model-call accounting
+
+In a normal run, Linch accounts for every physical provider delivery that reaches a normalized
+`message_end` with valid `Usage`, including the auxiliary provider delivery
+used by a model-backed compaction. A retry or fallback gets a fresh physical
+delivery ID and is accounted separately even when it belongs to the same
+logical operation. Valid usage is independent of whether the output is usable:
+an empty, tool-using, non-text, or oversized compaction result is rejected but
+its reported usage is still charged once.
+
+`ModelCallEvent` is the public, immutable envelope for the private accounting
+journal. Use the type guard when consuming a store or journal observer:
+
+```python
+from linch import ModelCallEvent, is_model_call_event
+
+if is_model_call_event(event):
+    assert isinstance(event, ModelCallEvent)
+    print(event.record_kind, event.run_id)
+```
+
+The envelope carries a run ID, one of `intent`, `dispatch_started`, `receipt`,
+`abandoned`, or `projection`, and a detached JSON-safe record. Receipts,
+intents, and gateway details are private journal records; they are not extra
+names in `linch.__all__`. Ordinary primary model-call records are journal-only
+and are not additionally yielded by the normal `session.run()` stream. A
+compaction receipt is surfaced through an additive `UsageEvent` instead:
+
+```python
+if event.type == "usage" and event.source == "compaction":
+    print(event.usage, event.call_id, event.logical_call_id, event.model)
+```
+
+The existing `UsageEvent` ordering and legacy fields remain compatible; the
+accounting metadata is additive. Its `usage` is
+the physical delivery's usage and `cumulative` is the run's cumulative known
+usage across primary and auxiliary deliveries. `ResultEvent.total_usage` and
+`RunReport` use the same cumulative lower-bound total. When a dispatched call
+is cancelled, fails, or ends before valid final usage, the total is not
+invented as zero: the terminal result sets `usage_complete=False`.
+
 ---
 
 ## Cost fields
@@ -92,14 +134,16 @@ async for event in session.run("Summarize this thread."):
         print(event.total_cost_usd)
 ```
 
-`usage` events report the cost of the turn (`cost_usd`) and the running total so
-far (`cumulative_cost_usd`); the terminal `result` event reports the run total
-(`total_cost_usd`).
+`usage` events report the cost of the physical delivery (`cost_usd`) and the
+running known total so far (`cumulative_cost_usd`); the terminal `result` event
+reports the run total (`total_cost_usd`). The cumulative token count includes a
+compaction delivery before the main turn that follows it.
 
 **Unknown model IDs report `None`** for every cost field rather than charging a
 synthetic price — this is deliberate so a private or self-hosted model never
-shows a misleading number. To attribute cost for such models, pass a custom
-table:
+shows a misleading number. Known token usage is retained, but the aggregate
+cost is partial and a USD cap cannot enforce an unknown price. To attribute cost
+for such models, pass a custom table:
 
 ```python
 # linch.pricing.cost_usd(usage, model, table=...) with a custom table
@@ -107,8 +151,25 @@ table:
 ```
 
 This matters for budgets too: with an unpriced model, only the token limit of a
-`RunBudget` binds (the cost limit can never trip). See
+`RunBudget` can bind for that delivery (the cost limit cannot trip on an
+unknown price). See
 [Agent](./agent.md) for budget configuration.
+
+### Budget fences and compaction
+
+The compaction delivery settles before its summary is applied, hooks continue,
+or the next provider request is constructed. The loop rechecks admission after
+that settlement, so a summary can exhaust a token/USD cap and prevent the main
+turn from dispatching. If a dispatched delivery has unknown usage, a capped run
+fails closed before another model call rather than claiming that the cap is
+enforced. An uncapped run may continue, but its result remains an explicit
+lower bound (`usage_complete=False`).
+
+The private receipt ledger shares a live `RunBudget` owner across sessions and
+subagents in the same in-process tree, so a sibling cannot continue past an
+unknown-use fence or replay an already charged delivery. This is not a
+distributed-tree guarantee and does not promise exactly-once billing at an
+external provider or a reservation against concurrent admissions.
 
 ---
 

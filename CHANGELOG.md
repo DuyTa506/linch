@@ -4,6 +4,57 @@ Notable changes to `linch`. Versioning follows the contract in
 [docs/versioning.md](docs/versioning.md): the public API is exactly `linch.__all__`,
 and persisted wire formats are versioned separately via `linch.RUN_SCHEMA_VERSION`.
 
+## 3.0.0a1 — 2026-10-30
+
+This is the first incremental 3.0 prerelease. It adds model-call accounting
+for the primary turn and context compaction while keeping the existing neutral
+defaults, persona, prompts, and opt-in compaction strategies unchanged. The
+later 3.0 reliability policy and other roadmap lanes are not part of this
+release.
+
+### Added
+
+- **Cumulative model-call usage.** Reported usage is settled once per physical
+  provider delivery and the run total now includes both primary deliveries and
+  auxiliary compaction deliveries. A rejected or unusable compaction response
+  still counts when the provider reached `message_end` with valid usage.
+- **Accounting journal surface.** `ModelCallEvent` and
+  `is_model_call_event` are public for typed journal envelopes. Ordinary
+  primary model-call records remain journal-only; auxiliary compaction usage is
+  represented by additive `UsageEvent` metadata (`source="compaction"`,
+  `call_id`, `logical_call_id`, and `model`).
+- **Budget-safe compaction.** A compaction receipt settles before hooks,
+  summary application, or the next dispatch. Admission is checked again after
+  compaction, so a summary that exhausts a token or USD cap prevents the main
+  turn from starting.
+- **Fail-closed unknown usage.** A dispatched delivery without valid final
+  usage is unknown, not zero. Capped runs stop before another model call until
+  the host resolves the accounting fence; uncapped runs may finish with a
+  lower-bound total and `usage_complete=False`.
+- **Durable built-in recovery.** With matching durable run/session state,
+  accepted `DefaultCompaction` and `DetailedCompaction` receipts carry a
+  bounded summary and ordered hash-only source anchor. Resume can apply that
+  paid result without another provider call or duplicate charge. A custom
+  strategy using Linch's supplied provider facade receives accounting,
+  cancellation, and limiter guarantees, but arbitrary external calls or
+  transformations do not gain deterministic paid replay.
+
+### Migration notes
+
+- No prompt, persona, default-strategy, or normal primary-input behavior
+  changes in this prerelease. Existing custom strategies remain supported when
+  they use the supplied provider facade for calls that should be accounted.
+- Unknown or unpriced models do not receive a synthetic USD price. Token usage
+  remains known when reported, while aggregate cost is partial and cost caps
+  cannot enforce an unknown price.
+- Receipt ownership is physical delivery ID, not logical operation ID. Retries
+  and fallbacks that reach final usage are separate billed deliveries.
+- Durable runs with an old in-flight accounting shape fail closed, including
+  when legacy resume is explicitly opted into; start a fresh run or migrate the
+  durable state under the matching contract.
+- This release does not promise distributed-tree cap recovery, exactly-once
+  external-provider billing, or reservations against concurrent admissions.
+
 ## 2.0.0 — 2026-09-14
 
 ### Dependencies

@@ -6,7 +6,11 @@
 
 1. Count tokens in `provider_view` via `agent.provider.context_window(agent.model)`.
 2. If within threshold — no-op.
-3. Otherwise submit a summarization request via `agent.provider.stream()` and record the summary as a **logged projection** — `session.session_log.record_projection(...)` appends a `ProjectionEntry` and rewrites the derived `provider_view` — emitting `CompactionEvent`.
+3. Otherwise submit a summarization request through the run's accounted
+   auxiliary gateway (which uses `agent.provider`), settle its physical
+   delivery receipt, and record the summary as a **logged projection** —
+   `session.session_log.record_projection(...)` appends a `ProjectionEntry`
+   and rewrites the derived `provider_view` — emitting `CompactionEvent`.
 
 **Invariant:** `full_history` is never modified. Only `provider_view` (a projection of the single append-only log) shrinks, and it shrinks by a *logged* projection, not an untracked in-place mutation. This covers session-owned model input; per-request `ContextInjectionHook`/RAG context is ephemeral and exists only in `ProviderRequest`. Compaction uses the configured `agent.provider` — never a hardcoded OpenAI call.
 
@@ -15,12 +19,18 @@ normalized provider stream contract as a normal turn, retain message/tool
 pairing, and do not assume a coding workspace. Malformed or missing durable
 snapshot state is treated as a cache miss and rebuilt from `full_history`.
 
+The direct `summarize_with_provider(...)` helper remains available for
+standalone callers with its existing provider-stream behavior. The normal run
+path wraps built-in strategies and compliant custom strategies in the
+accounting gateway so cancellation, one provider-slot acquisition, and receipt
+settlement are shared with the primary loop.
+
 ```mermaid
 flowchart TD
     A["Top of turn: maybe_compact()"] --> B{provider_view tokens<br/>within threshold?}
     B -- yes --> Z["no-op (byte-identical)"]
     B -- no --> C{compaction_ladder set?}
-    C -- no --> S["summarize old messages<br/>via agent.provider.stream()"]
+    C -- no --> S["accounted summary delivery<br/>via agent.provider"]
     C -- yes --> M["Rung 1: micro_compact<br/>elide old ToolResultBlocks<br/>(no LLM · copy-on-write)"]
     M --> D{enough freed?}
     D -- yes --> Z2["proceed"]
@@ -48,6 +58,39 @@ built-in prompt, so default behavior is unchanged. A ready-made domain-neutral p
 `GENERAL_SUMMARY_PROMPT` (public) for hosts that want a sensible non-coding
 default without writing their own:
 `Agent(compaction=DefaultCompaction(prompt=GENERAL_SUMMARY_PROMPT))`.
+
+### Accounting and durable paid-result recovery
+
+The run-scoped ledger is the source of cumulative model usage. A physical
+compaction delivery gets a fresh delivery ID, and a valid `message_end` usage is
+settled exactly once before the result can be accepted, rejected, applied to
+the provider view, or followed by another dispatch. Valid usage remains billed
+even when the summary is empty, non-text, tool-using, oversized, or otherwise
+unusable. A summary that exhausts a `RunBudget` is followed by an admission
+recheck, so the next primary request is not dispatched.
+
+For `DefaultCompaction` and `DetailedCompaction`, a durable accepted result is
+paired with its receipt and an ordered, hash-only `compaction_source` recipe.
+The recipe binds the physical delivery, request, strategy configuration,
+durable full-history boundary, ordered source messages, and provider-view-only
+reminders. Required invoked-skill bodies are flushed through the existing
+session store before the recipe is written. On resume, Linch reconstructs only
+from that verified historical source and applies the bounded accepted text
+without another provider call or duplicate charge. A changed source, missing
+skill body, changed listing wrapper, mismatched strategy/configuration, or
+legacy source-less paid record fails closed.
+
+The custom `CompactionStrategy` protocol is unchanged. Calls made through the
+supplied provider facade receive the run's accounting, cancellation, and
+limiter guarantees. Opaque calls outside the facade and arbitrary transforms
+are not observable, and custom strategies do not receive deterministic paid
+replay unless they provide an explicit deterministic result/commit seam.
+
+An unknown final usage is never treated as zero. Capped runs block subsequent
+model calls at the unknown-use fence; uncapped runs may report a known
+lower-bound total. Shared receipt ownership covers the live in-process budget
+tree only — it does not promise distributed cap recovery, exactly-once
+external billing, or reservations for concurrent admissions.
 
 ### Compaction ladder (opt-in)
 
