@@ -59,6 +59,7 @@ class FinalizeCtx:
     end_active_provider_call: Callable[..., Awaitable[None]]
     dispatch_before_final_answer: Callable[..., Awaitable[Any]]
     dispatch_stop: Callable[..., Awaitable[Any]]
+    usage_complete: Callable[[], bool]
 
 
 @dataclass(slots=True)
@@ -133,6 +134,7 @@ async def emit_error_terminal(
         duration_ms=dur,
         running_cost=running_cost,
         final_text_value=final_text_value,
+        usage_complete=ctx.usage_complete(),
     ):
         yield event
 
@@ -170,6 +172,7 @@ async def emit_success_terminal(
         final_text_value=proposed.final_text,
         structured_output=proposed.structured_output,
         structured_error=proposed.structured_error,
+        usage_complete=ctx.usage_complete(),
     ):
         yield event
 
@@ -295,6 +298,7 @@ async def finalize_final_tool_answer(
         structured_output=structured_output,
         structured_error=structured_error,
         total_cost_usd=running_cost,
+        usage_complete=ctx.usage_complete(),
     )
     proposed, hook_events, stop_action, feedback = await ctx.dispatch_stop(proposed, turn_index)
     for hook_event in hook_events:
@@ -424,6 +428,7 @@ async def finalize_text_answer(
         structured_output=structured_output,
         structured_error=structured_error,
         total_cost_usd=running_cost,
+        usage_complete=ctx.usage_complete(),
     )
     proposed, hook_events, stop_action, feedback = await ctx.dispatch_stop(proposed, turn_index)
     for hook_event in hook_events:

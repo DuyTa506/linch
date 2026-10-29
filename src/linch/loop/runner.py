@@ -29,6 +29,7 @@ from ..events import (
     ErrorEvent,
     Event,
     LoopGuardEvent,
+    ModelCallEvent,
     PermissionRequestEvent,
     PromptCacheAdvisoryEvent,
     ResultEvent,
@@ -51,6 +52,14 @@ from ..hooks import (
     ToolUseStopContext,
     TurnStartContext,
     TurnStopContext,
+)
+from ..model_calls import (
+    ModelCallIntent,
+    ModelCallReceipt,
+    _AccountedAuxiliaryCaller,
+    _ModelCallError,
+    _ModelCallLedger,
+    _primary_active_binding,
 )
 from ..pricing import cost_usd as _cost_usd
 from ..run_store import (
@@ -89,6 +98,8 @@ from .checkpoint import (
     _last_message_matches,
     _loop_guard_state_from_dict,
     _loop_guard_state_to_dict,
+    _model_call_runtime_from_extension,
+    _model_call_runtime_to_extension,
     _persist_event,
     _queue_crashed_worker_notifications,
     _recover_completed_tool_results,
@@ -121,6 +132,8 @@ from .request import (
     final_text,
 )
 from .streaming import (
+    _AccountedPrimaryAssembly,
+    _PrimaryPartial,
     _stream_turn_with_compaction_retry,
     _stream_turn_with_ladder,
     maybe_compact_resilient,
@@ -1027,6 +1040,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
     _model_input_store = _require_model_input_snapshot_store(agent) if _exact_model_input else None
     session.active_run_id = run_id
     _initial_event_seq = 0
+    _stored_events: list[Any] = []
     if resume_checkpoint is not None and agent.run_store is not None:
         _stored_events = await agent.run_store.load_events(run_id)
         _initial_event_seq = max((row.seq for row in _stored_events), default=0)
@@ -1152,6 +1166,63 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         total_usage=total,
     )
 
+    async def _persist_model_call(event: ModelCallEvent) -> None:
+        """Make each accounting record durable before its delivery advances."""
+        await _persist_event(session, run_id, event)
+        await _flush_events(session)
+
+    ledger = _ModelCallLedger(
+        run_id,
+        budget=_budget,
+        persist=_persist_model_call if agent.run_store is not None else None,
+    )
+    session._model_call_ledger = ledger
+    _ledger_state, active_primary = _model_call_runtime_from_extension(checkpoint.extension_state)
+    _model_call_events = [
+        row.event
+        for row in _stored_events
+        if isinstance(getattr(row, "event", None), ModelCallEvent)
+    ]
+    if _ledger_state is not None or _model_call_events:
+        await ledger.restore(_ledger_state, _model_call_events)
+        total = ledger.total_usage
+        running_cost = ledger.total_cost_usd
+
+    # Existing pre-accounting checkpoints have no receipt identity with which
+    # to reconstruct exact historical model prices. Keep their checkpointed
+    # aggregate only as a migration offset; every new physical delivery is
+    # ledger-owned and subsequent checkpoints carry the proper envelope.
+    _legacy_usage = (
+        resume_checkpoint.total_usage
+        if resume_checkpoint is not None and _ledger_state is None and not _model_call_events
+        else Usage()
+    )
+    _legacy_cost = _cost_usd(_legacy_usage, agent.model) if _legacy_usage != Usage() else None
+
+    def _sync_ledger_totals() -> None:
+        nonlocal total, running_cost
+        ledger_usage = ledger.total_usage
+        total = _legacy_usage.add(ledger_usage)
+        ledger_cost = ledger.total_cost_usd
+        if _legacy_cost is None:
+            running_cost = ledger_cost
+        elif ledger_cost is None:
+            running_cost = _legacy_cost
+        else:
+            running_cost = _legacy_cost + ledger_cost
+
+    def _sync_checkpoint_accounting() -> None:
+        """Refresh the runner-owned envelope before any terminal store write."""
+        _sync_ledger_totals()
+        if not isinstance(checkpoint.extension_state, dict):
+            raise ConfigError("RunCheckpoint.extension_state must be a dict")
+        _model_call_runtime_to_extension(
+            checkpoint.extension_state,
+            ledger_snapshot=ledger.snapshot(),
+            active_primary=active_primary,
+        )
+        checkpoint.total_usage = total
+
     async def _best_effort_snapshot_cleanup(
         *,
         snapshot_id: str | None = None,
@@ -1180,6 +1251,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         pending_tool_blocks: list[ToolUseBlock] | None | object = None,
         completed_tool_results: dict[str, ToolResultBlock] | None | object = None,
     ) -> None:
+        _sync_checkpoint_accounting()
         store = agent.run_store
         if run_record is None or store is None:
             return
@@ -1267,7 +1339,6 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         turn_index: int,
     ) -> ProviderRequest:
         if not _exact_model_input:
-            await _save_checkpoint("provider_pending", turn_index=turn_index)
             return request
         assert _model_input_store is not None
         # The live signal is process-local and intentionally excluded by the
@@ -1290,18 +1361,22 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             raise ConfigError("run_store returned an invalid model-input snapshot")
         checkpoint.provider_attempt = provider_attempt
         checkpoint.model_input_snapshot_id = snapshot.id
-        try:
-            await _save_checkpoint("provider_pending", turn_index=turn_index)
-        except Exception as exc:
-            # Do not delete here: a custom durable store may have committed the
-            # checkpoint and then lost its response. Keeping the payload makes
-            # that ambiguous outcome resumable; a later prune removes orphans.
-            raise ConfigError(
-                f"failed to checkpoint exact model input for provider attempt "
-                f"{provider_attempt}: {exc}"
-            ) from exc
+        # ``_bind_active_primary`` writes the one provider_pending checkpoint
+        # immediately before intent/dispatch. It carries this snapshot ID and
+        # the new physical delivery identity together, avoiding an ambiguous
+        # snapshot-only checkpoint and preserving the established save order.
         await _best_effort_snapshot_cleanup(keep_ids=(snapshot.id,))
         return request
+
+    async def _bind_active_primary(intent: ModelCallIntent) -> None:
+        """Durably bind a physical primary delivery before its intent starts."""
+        nonlocal active_primary
+        active_primary = _primary_active_binding(
+            intent,
+            snapshot_id=checkpoint.model_input_snapshot_id,
+            full_history=session.full_history,
+        )
+        await _save_checkpoint("provider_pending", turn_index=intent.turn_index)
 
     async def _load_pending_provider_request(signal: Any) -> ProviderRequest:
         if not _exact_model_input or _model_input_store is None:
@@ -1338,6 +1413,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         # Terminal path for a UserPromptSubmit hook that blocked the prompt.
         # It returns before the main try/finally, so the AgentStop lifecycle is
         # dispatched here — otherwise observers/telemetry never see on_run_end.
+        _sync_checkpoint_accounting()
         _dur = int((time.time() - started) * 1000)
         blocked_result = _RunResultInfo(
             run_id=run_id,
@@ -1361,6 +1437,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             total=total,
             duration_ms=_dur,
             running_cost=running_cost,
+            usage_complete=ledger.usage_complete,
         ):
             yield event
         await _dispatch_lifecycle(
@@ -1508,6 +1585,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
 
         Used at the loop exits that don't go through the finalizers (stop_when,
         budget, max-turns, abort, exception, finally)."""
+        _sync_ledger_totals()
         return build_run_result(
             run_id=run_id,
             session_id=session.id,
@@ -1540,6 +1618,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         end_active_provider_call=_end_active_provider_call,
         dispatch_before_final_answer=_dispatch_before_final_answer,
         dispatch_stop=_dispatch_stop,
+        usage_complete=lambda: ledger.usage_complete,
     )
 
     async def _emit_error_terminal(
@@ -1551,6 +1630,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         """Error exit shared by the provider/after/stop-hook and guard hard-stop
         paths. The caller still issues ``return`` after iterating this."""
         nonlocal _final_result
+        _sync_checkpoint_accounting()
         outcome = TerminalOutcome()
         async for event in emit_error_terminal(
             _fctx,
@@ -1570,6 +1650,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         final_block: ToolUseBlock,
     ) -> AsyncIterator[Event]:
         nonlocal _final_result
+        _sync_checkpoint_accounting()
         outcome = TerminalOutcome()
         async for event in finalize_final_tool_answer(
             _fctx,
@@ -1589,6 +1670,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         assembly: AssistantAssembly,
     ) -> AsyncIterator[Event]:
         nonlocal _final_result
+        _sync_checkpoint_accounting()
         outcome = TerminalOutcome()
         async for event in finalize_text_answer(
             _fctx,
@@ -1628,6 +1710,87 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             isinstance(block, TextBlock) and block.text == expected for block in message.content
         )
 
+    async def _drain_auxiliary_usage() -> AsyncIterator[Event]:
+        """Project settled compaction receipts after the strategy has returned.
+
+        The receipt is already accounted before this projection.  Publishing it
+        here preserves the primary public stream shape while making auxiliary
+        spend visible before a subsequent main delivery can be admitted.
+        """
+        for receipt in ledger.consume_auxiliary_receipts():
+            _sync_ledger_totals()
+            if receipt.usage is None:
+                continue
+            event: Event = UsageEvent(
+                usage=receipt.usage,
+                cumulative=total,
+                cost_usd=receipt.cost_usd,
+                cumulative_cost_usd=running_cost,
+                source="compaction",
+                call_id=receipt.delivery_attempt_id,
+                logical_call_id=receipt.logical_call_id,
+                model=receipt.actual_model,
+            )
+            await _persist_event(session, run_id, event)
+            yield event
+            if _budget is not None and _budget.take_warning():
+                warning: Event = BudgetEvent(
+                    kind="warning",
+                    spent_tokens=_budget.spent_tokens,
+                    spent_usd=_budget.spent_usd,
+                    max_tokens=_budget.max_tokens,
+                    max_cost_usd=_budget.max_cost_usd,
+                )
+                await _persist_event(session, run_id, warning)
+                yield warning
+
+    async def _emit_primary_usage(receipt: ModelCallReceipt) -> AsyncIterator[Event]:
+        """Publish the compatibility-shaped primary usage line once settled."""
+        _sync_ledger_totals()
+        if receipt.usage is None:
+            return
+        session.last_usage = receipt.usage
+        event: Event = UsageEvent(
+            usage=receipt.usage,
+            cumulative=total,
+            cost_usd=receipt.cost_usd,
+            cumulative_cost_usd=running_cost,
+        )
+        await _persist_event(session, run_id, event)
+        yield event
+        if _budget is not None and _budget.take_warning():
+            warning: Event = BudgetEvent(
+                kind="warning",
+                spent_tokens=_budget.spent_tokens,
+                spent_usd=_budget.spent_usd,
+                max_tokens=_budget.max_tokens,
+                max_cost_usd=_budget.max_cost_usd,
+            )
+            await _persist_event(session, run_id, warning)
+            yield warning
+
+    async def _emit_budget_exhausted() -> AsyncIterator[Event]:
+        """Finish through the legacy budget tail with ledger-owned totals."""
+        nonlocal _final_result
+        _sync_checkpoint_accounting()
+        if _budget is None:
+            raise RuntimeError("budget terminal requested without a budget")
+        duration_ms = int((time.time() - started) * 1000)
+        _final_result = _build_run_result("error", "error", duration_ms=duration_ms)
+        async for event in _budget_exhausted_tail(
+            session,
+            agent,
+            run_id=run_id,
+            run_record=run_record,
+            checkpoint=checkpoint,
+            budget=_budget,
+            total=total,
+            duration_ms=duration_ms,
+            running_cost=running_cost,
+            usage_complete=ledger.usage_complete,
+        ):
+            yield event
+
     start_turn = checkpoint.turn_index
     if resume_checkpoint is not None and checkpoint.phase in {
         "tool_results_appended",
@@ -1660,19 +1823,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             # gracefully (history intact, session reusable), mirroring the
             # max-turns tail below.
             if _budget is not None and _budget.exceeded:
-                _dur = int((time.time() - started) * 1000)
-                _final_result = _build_run_result("error", "error", duration_ms=_dur)
-                async for event in _budget_exhausted_tail(
-                    session,
-                    agent,
-                    run_id=run_id,
-                    run_record=run_record,
-                    checkpoint=checkpoint,
-                    budget=_budget,
-                    total=total,
-                    duration_ms=_dur,
-                    running_cost=running_cost,
-                ):
+                async for event in _emit_budget_exhausted():
                     yield event
                 return
             # A provider_pending resume continues an already-frozen turn. New
@@ -1692,12 +1843,14 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 )
                 _dur = int((time.time() - started) * 1000)
                 _final_result = _build_run_result("interrupted", "interrupted", duration_ms=_dur)
+                _sync_checkpoint_accounting()
                 event = ResultEvent(
                     subtype="interrupted",
                     stop_reason="interrupted",
                     total_usage=total,
                     duration_ms=_dur,
                     total_cost_usd=running_cost,
+                    usage_complete=ledger.usage_complete,
                 )
                 await _persist_event(session, run_id, event)
                 store = agent.run_store
@@ -1728,6 +1881,25 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             # forced final answer must bypass the verification gates.
             _forced_final_turn = _force_final_pending
             session.compaction_retry_used_this_turn = False
+            _primary_logical_call_id = str(uuid4())
+            if (
+                isinstance(active_primary, dict)
+                and active_primary.get("turn_index") == turn_index
+                and isinstance(active_primary.get("logical_call_id"), str)
+            ):
+                # Task 4 owns strict frozen-replay reconciliation. Retaining
+                # this operation ID here gives its later proof one stable
+                # parent while every physical delivery still gets a fresh UUID.
+                _primary_logical_call_id = active_primary["logical_call_id"]
+            _auxiliary_caller = _AccountedAuxiliaryCaller(
+                agent.provider,
+                ledger,
+                limiter=getattr(agent, "limiter", None),
+                parent_logical_call_id=_primary_logical_call_id,
+                turn_index=turn_index,
+            )
+            _proactive_compaction_logical_call_id = str(uuid4())
+            _forced_compaction_logical_call_id = str(uuid4())
 
             pending = session.pending_skill_overlay
             session.pending_skill_overlay = None
@@ -1782,22 +1954,44 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             )
             exact_pending_replay = frozen_pending_resume and not resumed_assistant
 
-            if (
-                not resumed_assistant
-                and not exact_pending_replay
-                and await maybe_compact_resilient(
-                    session,
-                    agent,
-                    signal,
-                    model=model_override or session.active_model or agent.model,
-                )
-            ):
+            _compacted = False
+            if not resumed_assistant and not exact_pending_replay:
+                try:
+                    _compacted = await maybe_compact_resilient(
+                        session,
+                        agent,
+                        signal,
+                        model=model_override or session.active_model or agent.model,
+                        auxiliary_caller=_auxiliary_caller,
+                        logical_call_id=_proactive_compaction_logical_call_id,
+                    )
+                except _ModelCallError as exc:
+                    async for event in _drain_auxiliary_usage():
+                        yield event
+                    if exc.code == "budget_exceeded" and _budget is not None:
+                        async for event in _emit_budget_exhausted():
+                            yield event
+                        return
+                    raise
+                async for event in _drain_auxiliary_usage():
+                    yield event
+            if _compacted:
                 reset_read_tracker_after_compaction(session, agent)
                 _re_inject_skill_context(session)
                 await _maybe_save_provider_snapshot(session)
                 event = build_compaction_event(session)
                 await _persist_event(session, run_id, event)
                 yield event
+
+            if not resumed_assistant and not exact_pending_replay:
+                try:
+                    ledger.assert_may_start()
+                except _ModelCallError as exc:
+                    if exc.code == "budget_exceeded" and _budget is not None:
+                        async for event in _emit_budget_exhausted():
+                            yield event
+                        return
+                    raise
 
             # ── Context building (RAG-per-turn, schema injection, …) ──────
             context_result = (
@@ -1892,6 +2086,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                                 yield event
                     _dur = int((time.time() - started) * 1000)
                     _final_result = _build_run_result("success", "end_turn", duration_ms=_dur)
+                    _sync_checkpoint_accounting()
                     await _end_active_turn()
                     async for event in _stop_when_tail(
                         session,
@@ -1902,6 +2097,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                         total=total,
                         duration_ms=_dur,
                         running_cost=running_cost,
+                        usage_complete=ledger.usage_complete,
                     ):
                         yield event
                     return
@@ -1926,6 +2122,10 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                     return
 
             assembly: AssistantAssembly | None = None
+            primary_receipt: ModelCallReceipt | None = None
+            primary_rejected_native = False
+            staged_partials: dict[str, list[Any]] = {}
+            accepted_partials: list[Any] = []
             if resumed_assistant:
                 assert checkpoint.assistant_message is not None
                 assembly = AssistantAssembly(
@@ -1966,6 +2166,11 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                         start_provider_call=_start_provider_call,
                         end_provider_call=_end_active_provider_call,
                         request_prepared=exact_pending_replay,
+                        ledger=ledger,
+                        logical_call_id=_primary_logical_call_id,
+                        bind_active_primary=_bind_active_primary,
+                        auxiliary_caller=_auxiliary_caller,
+                        compaction_logical_call_id=_forced_compaction_logical_call_id,
                     )
                 else:
                     # Ladder recovery: micro-compact, then capped forced compactions.
@@ -1982,23 +2187,85 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                         start_provider_call=_start_provider_call,
                         end_provider_call=_end_active_provider_call,
                         request_prepared=exact_pending_replay,
+                        ledger=ledger,
+                        logical_call_id=_primary_logical_call_id,
+                        bind_active_primary=_bind_active_primary,
+                        auxiliary_caller=_auxiliary_caller,
+                        compaction_logical_call_id=_forced_compaction_logical_call_id,
                     )
-                async for item in _provider_stream:
-                    if isinstance(item, AssistantAssembly):
-                        assembly = item
-                    else:
-                        if isinstance(item, CompactionEvent):
-                            await _maybe_save_provider_snapshot(session)
-                        await _persist_event(session, run_id, item)
-                        yield item
+                try:
+                    async for item in _provider_stream:
+                        if isinstance(item, _PrimaryPartial):
+                            if item.delivery_attempt_id is not None:
+                                staged_partials.setdefault(item.delivery_attempt_id, []).append(
+                                    item.event
+                                )
+                            # Live streaming remains immediate; durability waits
+                            # until the whole physical response validates.
+                            yield item.event
+                        elif isinstance(item, _AccountedPrimaryAssembly):
+                            assembly = item.assembly
+                            primary_receipt = item.receipt
+                            primary_rejected_native = item.rejected_native
+                            accepted_partials = staged_partials.pop(
+                                item.receipt.delivery_attempt_id, []
+                            )
+                        elif isinstance(item, AssistantAssembly):
+                            assembly = item
+                        else:
+                            if isinstance(item, CompactionEvent):
+                                async for usage_event in _drain_auxiliary_usage():
+                                    yield usage_event
+                                await _maybe_save_provider_snapshot(session)
+                            await _persist_event(session, run_id, item)
+                            yield item
+                except _ModelCallError as exc:
+                    async for usage_event in _drain_auxiliary_usage():
+                        yield usage_event
+                    if exc.code == "budget_exceeded" and _budget is not None:
+                        await _close_active_observer_spans(stop_reason="error")
+                        async for event in _emit_budget_exhausted():
+                            yield event
+                        return
+                    raise
 
             if assembly is None:
                 raise RuntimeError("provider stream ended without assistant assembly")
 
             if not resumed_assistant:
-                # Charge accounting from the provider's actual usage, captured
-                # before any AfterProviderCall hook can mutate the assembly.
-                _provider_usage = assembly.usage
+                if primary_receipt is None or primary_receipt.usage is None:
+                    raise RuntimeError("accounted primary stream ended without a reported receipt")
+                _provider_usage = primary_receipt.usage
+                _sync_ledger_totals()
+                if primary_rejected_native:
+                    # The normalized stream was structurally complete, so its
+                    # spend is settled. Its raw tool fragments are never made
+                    # durable or executable.
+                    await _save_checkpoint("provider_pending", turn_index=turn_index)
+                    async for event in _emit_primary_usage(primary_receipt):
+                        yield event
+                    event = ErrorEvent(
+                        error={
+                            "name": "ProviderError",
+                            "message": (
+                                "provider response contained malformed native tool arguments"
+                            ),
+                            "retryable": False,
+                        }
+                    )
+                    await _persist_event(session, run_id, event)
+                    yield event
+                    async for event in _emit_error_terminal(
+                        end_provider_call_usage=_provider_usage,
+                    ):
+                        yield event
+                    return
+
+                # A validated, accepted primary response may now commit its
+                # staged partials in the same relative order as the old path.
+                for partial_event in accepted_partials:
+                    await _persist_event(session, run_id, partial_event)
+
                 (
                     assembly,
                     hook_events,
@@ -2012,6 +2279,8 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                     await _persist_event(session, run_id, hook_event)
                     yield hook_event
                 if after_action == "stop":
+                    async for event in _emit_primary_usage(primary_receipt):
+                        yield event
                     async for event in _emit_error_terminal(
                         final_text_value=after_feedback,
                         end_provider_call_usage=_provider_usage,
@@ -2024,16 +2293,8 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 )
 
                 await session.append([assembly.message])
-                total = total.add(_provider_usage)
-                # req is guaranteed non-None here (not resumed_assistant branch);
-                # fall back to agent.model to satisfy the type checker.
-                _turn_model = req.model if req is not None else agent.model
-                _turn_cost = _cost_usd(_provider_usage, _turn_model)
-                if _turn_cost is not None:
-                    running_cost = (running_cost or 0.0) + _turn_cost
-                if _budget is not None:
-                    _budget.charge(_provider_usage, _turn_cost)
                 _force_final_pending = False
+                active_primary = None
                 await _save_checkpoint(
                     "assistant_appended",
                     turn_index=turn_index,
@@ -2043,24 +2304,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 event = AssistantEvent(message=assembly.message, stop_reason=assembly.stop_reason)
                 await _persist_event(session, run_id, event)
                 yield event
-                session.last_usage = _provider_usage
-                event = UsageEvent(
-                    usage=_provider_usage,
-                    cumulative=total,
-                    cost_usd=_turn_cost,
-                    cumulative_cost_usd=running_cost,
-                )
-                await _persist_event(session, run_id, event)
-                yield event
-                if _budget is not None and _budget.take_warning():
-                    event = BudgetEvent(
-                        kind="warning",
-                        spent_tokens=_budget.spent_tokens,
-                        spent_usd=_budget.spent_usd,
-                        max_tokens=_budget.max_tokens,
-                        max_cost_usd=_budget.max_cost_usd,
-                    )
-                    await _persist_event(session, run_id, event)
+                async for event in _emit_primary_usage(primary_receipt):
                     yield event
 
                 # AfterProviderCall hook requested another turn: the assistant
@@ -2355,6 +2599,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         # ── Max-turns exhausted ───────────────────────────────────────────
         _dur = int((time.time() - started) * 1000)
         _final_result = _build_run_result("error", "error", duration_ms=_dur)
+        _sync_checkpoint_accounting()
         async for event in _max_turns_tail(
             session,
             agent,
@@ -2365,12 +2610,14 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             total=total,
             duration_ms=_dur,
             running_cost=running_cost,
+            usage_complete=ledger.usage_complete,
         ):
             yield event
     except AbortError:
         await _cancel_background_workers(session)
         _dur = int((time.time() - started) * 1000)
         _final_result = _build_run_result("aborted", "error", duration_ms=_dur)
+        _sync_checkpoint_accounting()
         await _close_active_observer_spans(stop_reason="error")
         event = ResultEvent(
             subtype="aborted",
@@ -2378,6 +2625,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             total_usage=total,
             duration_ms=_dur,
             total_cost_usd=running_cost,
+            usage_complete=ledger.usage_complete,
         )
         await _persist_event(session, run_id, event)
         store = agent.run_store
@@ -2399,6 +2647,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         }
         _dur = int((time.time() - started) * 1000)
         _final_result = _build_run_result("error", "error", duration_ms=_dur, error=_err_dict)
+        _sync_checkpoint_accounting()
         await _close_active_observer_spans(stop_reason="error")
         event = ErrorEvent(error=_err_dict)
         await _persist_event(session, run_id, event)
@@ -2409,6 +2658,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             total_usage=total,
             duration_ms=_dur,
             total_cost_usd=running_cost,
+            usage_complete=ledger.usage_complete,
         )
         await _persist_event(session, run_id, event)
         store = agent.run_store

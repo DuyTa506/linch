@@ -529,6 +529,23 @@ class _ModelCallLedger:
             await self._write("abandoned", record)
             self._abandoned.add(delivery_id)
 
+    def consume_auxiliary_receipts(self) -> list[ModelCallReceipt]:
+        """Return newly settled compaction receipts exactly once per runtime.
+
+        The runner owns public ``UsageEvent`` projection.  The ledger only
+        remembers which auxiliary receipts have been handed to that projection,
+        so a checkpoint can resume without inventing a second accounting path.
+        This method intentionally has no await: receipts are inserted while the
+        same event loop is executing their delivery and are immutable copies.
+        """
+        result: list[ModelCallReceipt] = []
+        for delivery_id, receipt in self._receipts.items():
+            if receipt.kind != "compaction" or delivery_id in self._consumed_auxiliary_receipt_ids:
+                continue
+            self._consumed_auxiliary_receipt_ids.add(delivery_id)
+            result.append(receipt_from_dict(receipt_to_dict(receipt)))
+        return result
+
     def snapshot(self) -> dict[str, Any]:
         # Expose one shared owner from the first checkpoint onward. Delaying
         # binding until begin/snapshot keeps a newly constructed resume ledger's
@@ -783,6 +800,43 @@ def _auxiliary_request_fingerprint(request: ProviderRequest) -> str:
         asdict(request.output_schema) if request.output_schema is not None else None
     )
     return _model_call_fingerprint(payload)
+
+
+def _primary_request_fingerprint(request: ProviderRequest) -> str:
+    """Fingerprint a fully assembled primary request without retaining its input.
+
+    Primary requests may additionally have an exact-input snapshot owned by the
+    run store.  Accounting only needs the detached digest to bind that snapshot
+    to the physical delivery; it must never create a second raw-request copy.
+    """
+    return _auxiliary_request_fingerprint(request)
+
+
+def _primary_active_binding(
+    intent: ModelCallIntent,
+    *,
+    snapshot_id: str | None,
+    full_history: Sequence[Message],
+) -> dict[str, Any]:
+    """Return the compact durable identity required before a primary dispatch.
+
+    The runner/checkpoint own the surrounding namespace and lifecycle.  This
+    helper only derives the raw-input-free binding from the immutable intent.
+    """
+    if intent.kind != "primary":
+        raise _ModelCallError("invalid_state", "active-primary binding requires a primary intent")
+    if snapshot_id is not None:
+        _string(snapshot_id, "snapshot_id")
+    return {
+        "version": _VERSION,
+        "logical_call_id": intent.logical_call_id,
+        "delivery_attempt_id": intent.delivery_attempt_id,
+        "turn_index": intent.turn_index,
+        "snapshot_id": snapshot_id,
+        "request_fingerprint": intent.request_fingerprint,
+        "full_history_base_count": len(full_history),
+        "full_history_base_fingerprint": _context_fingerprint(full_history),
+    }
 
 
 async def _await_auxiliary(awaitable: Awaitable[_T], signal: AbortContext) -> _T:

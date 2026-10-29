@@ -108,6 +108,7 @@ async def _budget_exhausted_tail(
     total: Usage,
     duration_ms: int,
     running_cost: float | None,
+    usage_complete: bool = True,
 ) -> AsyncIterator[Event]:
     """Emit the graceful-stop event sequence for an exhausted RunBudget."""
     event: Event = BudgetEvent(
@@ -135,6 +136,7 @@ async def _budget_exhausted_tail(
         total_usage=total,
         duration_ms=duration_ms,
         total_cost_usd=running_cost,
+        usage_complete=usage_complete,
     )
     await _persist_event(session, run_id, event)
     store = agent.run_store
@@ -155,6 +157,7 @@ async def _stop_when_tail(
     total: Usage,
     duration_ms: int,
     running_cost: float | None,
+    usage_complete: bool = True,
 ) -> AsyncIterator[Event]:
     """Emit the graceful-stop event sequence for a met stop_when predicate."""
     event: Event = ResultEvent(
@@ -164,6 +167,7 @@ async def _stop_when_tail(
         duration_ms=duration_ms,
         final_text=_last_assistant_text(session),
         total_cost_usd=running_cost,
+        usage_complete=usage_complete,
     )
     await _persist_event(session, run_id, event)
     store = agent.run_store
@@ -185,6 +189,7 @@ async def _error_result_tail(
     duration_ms: int,
     running_cost: float | None,
     final_text_value: str | None = None,
+    usage_complete: bool = True,
 ) -> AsyncIterator[Event]:
     """Emit the error ResultEvent and mark the run failed.
 
@@ -196,6 +201,7 @@ async def _error_result_tail(
         duration_ms=duration_ms,
         final_text=final_text_value,
         total_cost_usd=running_cost,
+        usage_complete=usage_complete,
     )
     await _persist_event(session, run_id, event)
     store = agent.run_store
@@ -220,6 +226,7 @@ async def _success_result_tail(
     final_text_value: str | None = None,
     structured_output: dict[str, Any] | None = None,
     structured_error: str | None = None,
+    usage_complete: bool = True,
 ) -> AsyncIterator[Event]:
     """Emit the success ResultEvent and mark the run completed.
 
@@ -233,6 +240,7 @@ async def _success_result_tail(
         structured_output=structured_output,
         structured_error=structured_error,
         total_cost_usd=running_cost,
+        usage_complete=usage_complete,
     )
     await _persist_event(session, run_id, event)
     store = agent.run_store
@@ -254,6 +262,7 @@ async def _max_turns_tail(
     total: Usage,
     duration_ms: int,
     running_cost: float | None,
+    usage_complete: bool = True,
 ) -> AsyncIterator[Event]:
     """Emit the guard/error/result sequence for an exhausted max_turns."""
     turn_error = {
@@ -277,6 +286,7 @@ async def _max_turns_tail(
         total_usage=total,
         duration_ms=duration_ms,
         total_cost_usd=running_cost,
+        usage_complete=usage_complete,
     )
     await _persist_event(session, run_id, event)
     store = agent.run_store

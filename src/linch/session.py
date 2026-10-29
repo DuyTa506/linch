@@ -107,6 +107,8 @@ class Session:
     """Per-run ``RunEventBuffer`` (loop/checkpoint.py) that batches observational
     events between flush points. Set by the runner at run start, cleared in its
     finally. ``None`` outside an active durable run."""
+    _model_call_ledger: Any = None
+    """Run-bound receipt ledger, installed by the loop and cleared on exit."""
     _last_seq: int = 0
     """Highest stored-message ``seq`` observed (the provider-view snapshot
     watermark). Tracks the real seq returned by the store, so gaps are tolerated."""
@@ -279,6 +281,7 @@ class Session:
         self._reject_pending_alignment(ConfigError("run ended before alignment was applied"))
         self._active = False
         self.active_run_id = None
+        self._model_call_ledger = None
         self._idle.set()
 
     async def align(

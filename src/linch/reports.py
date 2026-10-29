@@ -315,6 +315,7 @@ def build_run_report(
                 "structured_error": event.structured_error,
                 "total_usage": usage_to_dict(event.total_usage),
                 "total_cost_usd": event.total_cost_usd,
+                "usage_complete": event.usage_complete,
             }
             if not status_from_run and status in {"unknown", "running"}:
                 status = "completed" if event.subtype == "success" else event.subtype
