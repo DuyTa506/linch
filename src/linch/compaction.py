@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import AsyncGenerator, Sequence
 from dataclasses import dataclass, replace
@@ -7,9 +8,15 @@ from typing import Any, Protocol, cast, runtime_checkable
 from uuid import uuid4
 
 from .abort import AbortContext
-from .errors import ProviderError
+from .errors import ConfigError, ProviderError
 from .events import CompactionEvent
-from .model_calls import _AccountedAuxiliaryCaller, _AuxiliaryDelivery
+from .model_calls import (
+    _AccountedAuxiliaryCaller,
+    _AuxiliaryDelivery,
+    _context_fingerprint,
+    _ModelCallLedger,
+    _projection_record,
+)
 from .providers.limiter import provider_slot
 from .types import (
     Message,
@@ -478,6 +485,183 @@ class DetailedCompaction:
 default_compaction = DefaultCompaction()
 
 
+_DEFAULT_COMPACT_IMPL = DefaultCompaction.compact
+_DETAILED_COMPACT_IMPL = DetailedCompaction.compact
+
+
+def _builtin_compaction_config(strategy: Any) -> dict[str, Any] | None:
+    """Only the unchanged concrete built-ins declare this deterministic seam.
+
+    A subclass, a matching id, or a replaced compact method proves nothing about
+    an arbitrary transformation. Such strategies retain facade accounting only.
+    """
+    strategy = default_compaction if strategy is None else strategy
+    compact = getattr(getattr(strategy, "compact", None), "__func__", None)
+    if type(strategy) is DefaultCompaction and compact is _DEFAULT_COMPACT_IMPL:
+        implementation, keep, cap = "default_v1", 10, 4096
+    elif type(strategy) is DetailedCompaction and compact is _DETAILED_COMPACT_IMPL:
+        implementation = "detailed_v1"
+        keep, cap = strategy.keep_recent_turns, strategy.max_output_tokens
+    else:
+        return None
+    return {
+        "implementation": implementation,
+        "keep_recent_turns": keep,
+        "max_output_tokens": cap,
+        "prompt_sha256": hashlib.sha256(strategy.prompt.encode("utf-8")).hexdigest(),
+    }
+
+
+def _builtin_paid_view(
+    messages: list[Message],
+    text: str,
+    config: dict[str, Any],
+) -> list[Message]:
+    recent = last_n_turn_boundaries(messages, config["keep_recent_turns"])
+    if len(recent) == len(messages):
+        raise ConfigError("paid compaction source has no summarizable prefix")
+    label = (
+        "summary of earlier conversation"
+        if config["implementation"] == "default_v1"
+        else "detailed summary of earlier conversation"
+    )
+    return strip_response_chaining(
+        [
+            Message(role="user", content=[TextBlock(text=f"<{label}>\n\n{text}")]),
+            *recent,
+        ]
+    )
+
+
+def _paid_projection(
+    receipt: Any,
+    config: dict[str, Any],
+    source: list[Message],
+    target: list[Message],
+    history: list[Message],
+) -> dict[str, Any]:
+    return _projection_record(
+        projection_kind="compaction",
+        source_receipt_ids=[receipt.delivery_attempt_id],
+        strategy_id=receipt.strategy_id,
+        strategy_config=config,
+        source_context_fingerprint=_context_fingerprint(source),
+        target_context_fingerprint=_context_fingerprint(target),
+        full_history_base_count=len(history),
+        full_history_base_fingerprint=_context_fingerprint(history),
+    )
+
+
+def _with_skill_context(messages: list[Message], session: Any, agent: Any) -> list[Message]:
+    """Rebuild the existing deterministic reminder suffix after a paid projection."""
+    from .skills.system_reminder import wrap_in_system_reminder
+
+    result = list(messages)
+    present = {
+        block.text
+        for message in result
+        for block in message.content
+        if isinstance(block, TextBlock)
+    }
+    texts = []
+    if agent.skill_listing_text:
+        texts.append(wrap_in_system_reminder(agent.skill_listing_text))
+    for record in session.invoked_skills:
+        texts.append(
+            wrap_in_system_reminder(
+                f"Below is the body of a previously invoked skill "
+                f"named '{record.name}'.\n\n{record.substituted_body}"
+            )
+        )
+    for text in texts:
+        if text not in present:
+            result.append(Message(role="user", content=[TextBlock(text=text)]))
+            present.add(text)
+    return result
+
+
+async def _reconcile_paid_compactions(
+    session: Any,
+    agent: Any,
+    ledger: _ModelCallLedger,
+    turn_index: int,
+) -> bool:
+    """Rebuild built-in projections from receipt text and verified durable history.
+
+    Consumption tracks UsageEvent delivery only. It is deliberately irrelevant
+    to paid-result application, including when either store is ahead of the other.
+    """
+    strategy = getattr(agent, "compaction", None) or default_compaction
+    config = _builtin_compaction_config(strategy)
+    projections = ledger.projections("compaction")
+    if config is None:
+        if projections:
+            raise ConfigError("paid compaction projection has no deterministic strategy seam")
+        return False
+    receipts = [receipt for receipt in ledger.receipts() if receipt.kind == "compaction"]
+    completed_current = any(receipt.turn_index == turn_index for receipt in receipts)
+    anchors = {record["source_receipt_ids"][0]: record for record in projections}
+    history, current = list(session.full_history), list(session.provider_view)
+    replay_fingerprints = {_context_fingerprint(history)}
+    previous: list[Message] = []
+    previous_count = 0
+    last_record: dict[str, Any] | None = None
+    for receipt in receipts:
+        if receipt.disposition != "accepted":
+            continue
+        if receipt.strategy_id != strategy.id:
+            raise ConfigError("paid compaction strategy does not match")
+        record = anchors.get(receipt.delivery_attempt_id)
+        count = record["full_history_base_count"] if record is not None else len(history)
+        if count < previous_count or count > len(history):
+            raise ConfigError("paid compaction durable source boundary does not match")
+        if record is not None and (
+            record["strategy_config"] != config
+            or _context_fingerprint(history[:count]) != record["full_history_base_fingerprint"]
+        ):
+            raise ConfigError("paid compaction durable source or configuration does not match")
+        source = [*previous, *history[previous_count:count]]
+        candidates = [source]
+        ladder = getattr(agent, "compaction_ladder", None)
+        if ladder is not None and ladder.micro:
+            candidates.append(micro_compact(source, keep_recent_turns=ladder.keep_recent_turns)[0])
+        tail_count = len(history) - count
+        cached_source = current[:-tail_count] if tail_count else current
+        candidates.append(cached_source)
+        source = next(
+            (
+                candidate
+                for candidate in candidates
+                if _context_fingerprint(candidate) == receipt.source_context_fingerprint
+            ),
+            None,
+        )
+        if source is None:
+            raise ConfigError("paid compaction source context does not match durable history")
+        assert receipt.accepted_text is not None
+        target = _builtin_paid_view(source, receipt.accepted_text, config)
+        derived = _paid_projection(receipt, config, source, target, history[:count])
+        if record is not None and derived != record:
+            raise ConfigError("paid compaction target or projection identity does not match")
+        if record is None:
+            await ledger.record_projection(derived)
+        previous = _with_skill_context(target, session, agent)
+        for view in (source, target, previous):
+            replay_fingerprints.add(_context_fingerprint([*view, *history[count:]]))
+        previous_count = count
+        last_record = derived
+    if last_record is not None:
+        rebuilt = [*previous, *history[previous_count:]]
+        # A cache is either an exact verified source/target (with the durable
+        # tail) or absent and reconstructed from full history. Other views are
+        # not overwritten with a stale paid result.
+        if _context_fingerprint(current) not in replay_fingerprints:
+            raise ConfigError("paid compaction recovery has an unexpected provider-view suffix")
+        session.session_log.record_projection(rebuilt, reason="paid-compaction-recovery")
+        session.last_compaction_info = {"projection_id": last_record["projection_id"]}
+    return completed_current
+
+
 def _compaction_hook_dispatcher(agent: Any) -> Any:
     """A live :class:`HookDispatcher` for *agent* iff it has active hooks, else None.
 
@@ -601,10 +785,30 @@ async def _run_compaction_impl(
         signal.throw_if_aborted()
         caller._ledger.assert_may_start()
     compacted = strip_response_chaining(compacted)
+    projection_id = None
+    config = _builtin_compaction_config(strategy)
+    if caller is not None and config is not None:
+        accepted = [
+            receipt
+            for receipt in caller._ledger.receipts()
+            if receipt.logical_call_id == operation_id and receipt.disposition == "accepted"
+        ]
+        if accepted:
+            receipt = accepted[-1]
+            assert receipt.accepted_text is not None
+            expected = _builtin_paid_view(snapshot, receipt.accepted_text, config)
+            if _context_fingerprint(expected) != _context_fingerprint(compacted):
+                raise ConfigError("built-in compaction result differs from its deterministic seam")
+            record = _paid_projection(
+                receipt, config, snapshot, compacted, list(session.session_log.full_history)
+            )
+            await caller._ledger.record_projection(record)
+            projection_id = record["projection_id"]
 
     changed = session.session_log.record_projection(compacted, reason="compaction")
 
     session.last_compaction_info = {
+        "projection_id": projection_id,
         "type": "compaction",
         "messages_before": messages_before,
         "messages_after": len(compacted),

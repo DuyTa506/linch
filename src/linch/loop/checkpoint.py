@@ -16,6 +16,7 @@ from ..events import (
     ToolCallEndEvent,
     ToolCallStartEvent,
 )
+from ..model_calls import _context_fingerprint, _model_call_fingerprint
 from ..run_store import RunCheckpoint
 from ..session import Session
 from ..types import (
@@ -54,7 +55,11 @@ def _model_call_runtime_from_extension(
         return None, None
     if not isinstance(raw, dict) or set(raw) != {"version", "ledger", "active_primary"}:
         raise ConfigError("invalid model-call checkpoint runtime envelope")
-    if raw.get("version") != _MODEL_CALL_RUNTIME_VERSION or not isinstance(raw["ledger"], dict):
+    if (
+        type(raw.get("version")) is not int
+        or raw.get("version") != _MODEL_CALL_RUNTIME_VERSION
+        or not isinstance(raw["ledger"], dict)
+    ):
         raise ConfigError("invalid model-call checkpoint runtime envelope")
     active = raw["active_primary"]
     if active is not None:
@@ -85,7 +90,7 @@ def _model_call_runtime_to_extension(
 def _validate_active_primary_binding(raw: Any) -> None:
     if not isinstance(raw, dict) or set(raw) != _ACTIVE_PRIMARY_FIELDS:
         raise ConfigError("invalid active-primary checkpoint binding")
-    if raw.get("version") != _MODEL_CALL_RUNTIME_VERSION:
+    if type(raw.get("version")) is not int or raw.get("version") != _MODEL_CALL_RUNTIME_VERSION:
         raise ConfigError("invalid active-primary checkpoint binding")
     for name in (
         "logical_call_id",
@@ -103,6 +108,61 @@ def _validate_active_primary_binding(raw: Any) -> None:
         value = raw.get(name)
         if type(value) is not int or value < 0:
             raise ConfigError("invalid active-primary checkpoint binding")
+
+
+def _message_digest(message: Message) -> str:
+    return _model_call_fingerprint(message_to_dict(message))
+
+
+def _receipt_message_prefix(
+    messages: list[Message],
+    *,
+    base_count: int,
+    base_fingerprint: str,
+    expected_digests: list[str],
+) -> int:
+    """Match only an ordered durable prefix at a receipt's exact history boundary.
+
+    Reliability can share this identity check for prefix0/1/2 without enabling
+    its feedback policy in terminal_error_v0 accounting runs.
+    """
+    if (
+        type(base_count) is not int
+        or base_count < 0
+        or len(messages) < base_count
+        or _context_fingerprint(messages[:base_count]) != base_fingerprint
+    ):
+        raise ConfigError("receipt recovery durable message base does not match")
+    suffix = messages[base_count:]
+    if len(suffix) > len(expected_digests) or any(
+        _message_digest(message) != expected_digests[index] for index, message in enumerate(suffix)
+    ):
+        raise ConfigError("receipt recovery has an unexpected durable message suffix")
+    return len(suffix)
+
+
+def _primary_control_message(message: Message, feedback: str | None) -> Message:
+    """The existing AfterProviderCall continue tail, derived without inference."""
+    from ..skills.system_reminder import wrap_in_system_reminder
+
+    tools = [block for block in message.content if isinstance(block, ToolUseBlock)]
+    if not tools:
+        return Message(
+            role="user", content=[TextBlock(text=wrap_in_system_reminder(feedback or ""))]
+        )
+    return Message(
+        role="user",
+        content=[
+            ToolResultBlock(
+                tool_use_id=block.id,
+                content=(feedback or "Provider hook requested another turn.")
+                if index == 0
+                else "Tool not executed; revise and resubmit your final answer.",
+                is_error=True,
+            )
+            for index, block in enumerate(tools)
+        ],
+    )
 
 
 class RunEventBuffer:

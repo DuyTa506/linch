@@ -15,6 +15,8 @@ from uuid import uuid4
 from .._prompt_cache import prompt_cache_advisories, tool_signature
 from .._version import get_version
 from ..compaction import (
+    _builtin_compaction_config,
+    _reconcile_paid_compactions,
     build_compaction_event,
     reset_read_tracker_after_compaction,
 )
@@ -57,9 +59,12 @@ from ..model_calls import (
     ModelCallIntent,
     ModelCallReceipt,
     _AccountedAuxiliaryCaller,
+    _accounting_contract,
     _ModelCallError,
     _ModelCallLedger,
     _primary_active_binding,
+    _primary_request_fingerprint,
+    _projection_record,
 )
 from ..run_store import (
     MODEL_INPUT_CODEC_VERSION,
@@ -97,10 +102,13 @@ from .checkpoint import (
     _last_message_matches,
     _loop_guard_state_from_dict,
     _loop_guard_state_to_dict,
+    _message_digest,
     _model_call_runtime_from_extension,
     _model_call_runtime_to_extension,
     _persist_event,
+    _primary_control_message,
     _queue_crashed_worker_notifications,
+    _receipt_message_prefix,
     _recover_completed_tool_results,
     _skill_overlay_from_dict,
     _skill_overlay_to_dict,
@@ -500,6 +508,7 @@ async def _maybe_save_provider_snapshot(session: Session) -> None:
     snapshot = ProviderViewSnapshot(
         provider_view=list(session.provider_view),
         covers_seq=getattr(session, "_last_seq", session.session_log.history_count),
+        projection_id=(session.last_compaction_info or {}).get("projection_id"),
     )
     try:
         await saver(session.id, snapshot)
@@ -820,6 +829,8 @@ def _build_run_contract(session: Session, prompt: str, opts: RunOptions) -> Any:
     )
     policies: dict[str, Any] = {
         "runtime_version": get_version(),
+        "model_call_accounting": _accounting_contract(),
+        "compaction_replay_config": _builtin_compaction_config(getattr(agent, "compaction", None)),
         "permissions": _permission_policy_contract(agent),
         "hooks": _hook_policy_contract(agent),
         "tool_pipeline": _tool_pipeline_contract(agent),
@@ -1247,6 +1258,9 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         pending_tool_blocks: list[ToolUseBlock] | None | object = None,
         completed_tool_results: dict[str, ToolResultBlock] | None | object = None,
     ) -> None:
+        nonlocal active_primary
+        if phase not in {"provider_pending", "assistant_appended"}:
+            active_primary = None
         _sync_checkpoint_accounting()
         store = agent.run_store
         if run_record is None or store is None:
@@ -1645,7 +1659,8 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         tool_blocks: list[ToolUseBlock],
         final_block: ToolUseBlock,
     ) -> AsyncIterator[Event]:
-        nonlocal _final_result
+        nonlocal _final_result, active_primary
+        active_primary = None
         _sync_checkpoint_accounting()
         outcome = TerminalOutcome()
         async for event in finalize_final_tool_answer(
@@ -1665,7 +1680,8 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         turn_index: int,
         assembly: AssistantAssembly,
     ) -> AsyncIterator[Event]:
-        nonlocal _final_result
+        nonlocal _final_result, active_primary
+        active_primary = None
         _sync_checkpoint_accounting()
         outcome = TerminalOutcome()
         async for event in finalize_text_answer(
@@ -1794,7 +1810,125 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
     }:
         start_turn = checkpoint.turn_index + 1
 
+    _recovered_primary_projection: dict[str, Any] | None = None
+    _recovered_primary_prefix = 0
+    _recovered_compaction = False
     try:
+        if resume_checkpoint is not None:
+            # Receipt reconciliation precedes frozen replay, budget admission,
+            # and any new host messages that could change the recorded base.
+            _recovered_compaction = await _reconcile_paid_compactions(
+                session, agent, ledger, checkpoint.turn_index
+            )
+            if _recovered_compaction:
+                await _maybe_save_provider_snapshot(session)
+            if checkpoint.phase in {"provider_pending", "assistant_appended"}:
+                if active_primary is None:
+                    if checkpoint.phase == "provider_pending":
+                        raise ConfigError(
+                            "provider_pending checkpoint lacks its active primary binding"
+                        )
+                else:
+                    if active_primary["turn_index"] != checkpoint.turn_index:
+                        raise ConfigError("active primary turn does not match its checkpoint")
+                    if checkpoint.phase == "provider_pending":
+                        if active_primary["snapshot_id"] != checkpoint.model_input_snapshot_id:
+                            raise ConfigError(
+                                "active primary snapshot does not match its checkpoint"
+                            )
+                        if _exact_model_input:
+                            frozen_request = await _load_pending_provider_request(signal)
+                            if (
+                                _primary_request_fingerprint(frozen_request)
+                                != active_primary["request_fingerprint"]
+                            ):
+                                raise ConfigError(
+                                    "active primary request does not match its frozen snapshot"
+                                )
+                    receipt = ledger.receipt_for(active_primary["delivery_attempt_id"])
+                    intent = ledger.intent_for(active_primary["delivery_attempt_id"])
+                    for identity in (receipt, intent):
+                        if identity is not None and any(
+                            getattr(identity, name) != active_primary[name]
+                            for name in (
+                                "logical_call_id",
+                                "delivery_attempt_id",
+                                "turn_index",
+                                "request_fingerprint",
+                            )
+                        ):
+                            raise ConfigError(
+                                "active primary identity differs from its receipt or intent"
+                            )
+                    matches = [
+                        value
+                        for value in ledger.projections("primary_append")
+                        if value["delivery_attempt_id"] == active_primary["delivery_attempt_id"]
+                    ]
+                    projection = matches[0] if matches else None
+                    if projection is not None:
+                        if any(
+                            projection[name] != value
+                            for name, value in active_primary.items()
+                            if name != "version"
+                        ):
+                            raise ConfigError(
+                                "primary acceptance projection differs from its active binding"
+                            )
+                        expected = (
+                            []
+                            if projection["after_action"] == "stop"
+                            else [projection["assistant_sha256"]]
+                        )
+                        if projection["after_action"] == "continue":
+                            expected.append(projection["control_message_sha256"])
+                    else:
+                        expected = []
+                    _recovered_primary_prefix = _receipt_message_prefix(
+                        list(session.full_history),
+                        base_count=active_primary["full_history_base_count"],
+                        base_fingerprint=active_primary["full_history_base_fingerprint"],
+                        expected_digests=expected,
+                    )
+                    if receipt is not None and receipt.disposition == "rejected_native":
+                        event = ErrorEvent(
+                            error={
+                                "name": "ProviderError",
+                                "message": (
+                                    "provider response contained malformed native tool arguments"
+                                ),
+                                "retryable": False,
+                            }
+                        )
+                        await _persist_event(session, run_id, event)
+                        yield event
+                        async for event in _emit_error_terminal():
+                            yield event
+                        return
+                    if projection is not None and projection["after_action"] == "stop":
+                        async for event in _emit_error_terminal(
+                            final_text_value=projection["after_feedback"]
+                        ):
+                            yield event
+                        return
+                    if _recovered_primary_prefix:
+                        assert projection is not None
+                        _recovered_primary_projection = projection
+                        checkpoint.assistant_message = session.full_history[
+                            active_primary["full_history_base_count"]
+                        ]
+                        checkpoint.assistant_stop_reason = projection["assistant_stop_reason"]
+                        if checkpoint.phase == "provider_pending":
+                            await _save_checkpoint(
+                                "assistant_appended",
+                                turn_index=checkpoint.turn_index,
+                                assistant_message=checkpoint.assistant_message,
+                                assistant_stop_reason=checkpoint.assistant_stop_reason,
+                            )
+
+            async for usage_event in _drain_auxiliary_usage():
+                yield usage_event
+
         # Crashed-worker notifications must yield from INSIDE the try so that a
         # caller closing the generator here (aclose -> GeneratorExit at the yield)
         # still runs the finally block that closes observer spans.
@@ -1812,13 +1946,20 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 _exact_model_input
                 and resume_checkpoint is not None
                 and turn_index == checkpoint.turn_index
-                and checkpoint.phase == "provider_pending"
+                and (
+                    checkpoint.phase == "provider_pending"
+                    or _recovered_primary_projection is not None
+                )
             )
             # ── Budget pre-call check ─────────────────────────────────────
             # Before any turn span opens: an exhausted budget stops the run
             # gracefully (history intact, session reusable), mirroring the
             # max-turns tail below.
-            if _budget is not None and _budget.exceeded:
+            if (
+                _budget is not None
+                and _budget.exceeded
+                and not (_recovered_primary_projection is not None and turn_index == start_turn)
+            ):
                 async for event in _emit_budget_exhausted():
                     yield event
                 return
@@ -1925,23 +2066,6 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             )
             if resumed_assistant:
                 session.current_turn_allowed_tools = checkpoint.current_turn_allowed_tools
-            if (
-                resume_checkpoint is not None
-                and not resumed_assistant
-                and turn_index == checkpoint.turn_index
-                and checkpoint.phase == "provider_pending"
-                and (_pending_last := session.last_provider_message()) is not None
-                and _pending_last.role == "assistant"
-            ):
-                last_assistant = _pending_last
-                checkpoint.assistant_message = last_assistant
-                checkpoint.assistant_stop_reason = (
-                    "tool_use"
-                    if any(isinstance(block, ToolUseBlock) for block in last_assistant.content)
-                    else "end_turn"
-                )
-                resumed_assistant = True
-
             frozen_pending_resume = (
                 _exact_model_input
                 and resume_checkpoint is not None
@@ -1951,7 +2075,11 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             exact_pending_replay = frozen_pending_resume and not resumed_assistant
 
             _compacted = False
-            if not resumed_assistant and not exact_pending_replay:
+            if (
+                not resumed_assistant
+                and not exact_pending_replay
+                and not (_recovered_compaction and turn_index == start_turn)
+            ):
                 try:
                     _compacted = await maybe_compact_resilient(
                         session,
@@ -2024,7 +2152,11 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             # Runs even when req is None (resumed-assistant turn) so stop-style
             # BeforeProviderCall hooks (e.g. StopPredicateHook) still fire on
             # resume; request mutation is simply ignored when there is no req.
-            if hook_dispatcher.active and not frozen_pending_resume:
+            if (
+                hook_dispatcher.active
+                and not frozen_pending_resume
+                and not (_recovered_primary_projection is not None and turn_index == start_turn)
+            ):
                 (
                     req,
                     hook_events,
@@ -2285,6 +2417,26 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 for hook_event in hook_events:
                     await _persist_event(session, run_id, hook_event)
                     yield hook_event
+                if active_primary is None:
+                    raise ConfigError("accepted primary response lacks its active binding")
+                control = (
+                    _primary_control_message(assembly.message, after_feedback)
+                    if after_action == "continue"
+                    else None
+                )
+                projection = _projection_record(
+                    projection_kind="primary_append",
+                    run_id=run_id,
+                    **{key: value for key, value in active_primary.items() if key != "version"},
+                    assistant_sha256=_message_digest(assembly.message),
+                    assistant_stop_reason=assembly.stop_reason,
+                    after_action=after_action,
+                    after_feedback=after_feedback,
+                    control_message_sha256=_message_digest(control)
+                    if control is not None
+                    else None,
+                )
+                await ledger.record_projection(projection)
                 if after_action == "stop":
                     async for event in _emit_primary_usage(primary_receipt):
                         yield event
@@ -2301,7 +2453,6 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
 
                 await session.append([assembly.message])
                 _force_final_pending = False
-                active_primary = None
                 await _save_checkpoint(
                     "assistant_appended",
                     turn_index=turn_index,
@@ -2314,32 +2465,31 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 async for event in _emit_primary_usage(primary_receipt):
                     yield event
 
-                # AfterProviderCall hook requested another turn: the assistant
-                # message + usage are already committed (consistent with the
-                # text-path retry), so inject feedback and loop.
-                if after_action == "continue":
-                    _after_tools = [
-                        block
-                        for block in assembly.message.content
-                        if isinstance(block, ToolUseBlock)
-                    ]
-                    if _after_tools:
-                        async for event in _final_tool_retry_tail(
-                            session,
-                            run_id=run_id,
-                            tool_blocks=_after_tools,
-                            final_id=_after_tools[0].id,
-                            feedback=after_feedback or "Provider hook requested another turn.",
-                        ):
-                            yield event
-                    else:
-                        async for event in _gate_retry_tail(
-                            session, run_id=run_id, feedback=after_feedback or ""
-                        ):
-                            yield event
-                    await _end_active_turn()
-                    await _save_checkpoint("turn_complete", turn_index=turn_index)
-                    continue
+            # Resume the post-hook decision itself: hooks are never rerun to
+            # guess an already accepted assistant's control flow.
+            _control_projection = (
+                projection if not resumed_assistant else _recovered_primary_projection
+            )
+            if (
+                _control_projection is not None
+                and _control_projection["after_action"] == "continue"
+            ):
+                if not resumed_assistant or _recovered_primary_prefix < 2:
+                    control = _primary_control_message(
+                        assembly.message, _control_projection["after_feedback"]
+                    )
+                    if _message_digest(control) != _control_projection["control_message_sha256"]:
+                        raise ConfigError(
+                            "primary control message differs from its acceptance projection"
+                        )
+                    await session.append([control])
+                    event = UserEvent(message=control)
+                    await _persist_event(session, run_id, event)
+                    yield event
+                await _end_active_turn()
+                await _save_checkpoint("turn_complete", turn_index=turn_index)
+                _recovered_primary_projection = None
+                continue
 
             # ── Check for final_tool (terminal tool-use) ──────────────────
             if effective_final_tool and assembly.stop_reason == "tool_use":
