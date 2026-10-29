@@ -10,13 +10,16 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import math
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
 from copy import deepcopy
-from dataclasses import dataclass, fields
-from typing import TYPE_CHECKING, Any, Literal, cast
+from dataclasses import asdict, dataclass, fields
+from time import monotonic
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast, get_args
 from uuid import uuid4
 
-from .types import Usage
+from .abort import AbortContext
+from .errors import AbortError, ProviderError
+from .types import Message, ProviderRequest, StopReason, SystemBlock, Usage, message_to_dict
 
 if TYPE_CHECKING:
     from .budget import RunBudget
@@ -750,3 +753,373 @@ class _LedgerRecovery:
             if not set(raw["source_receipt_ids"]) <= self.receipts.keys():
                 raise _invalid("projection references missing receipts")
         self.journal.append(event)
+
+
+_T = TypeVar("_T")
+_AUXILIARY_STOP_REASONS = frozenset(get_args(StopReason))
+
+
+def _model_call_fingerprint(value: Any) -> str:
+    from .durability import _strict_json
+
+    return hashlib.sha256(_strict_json(value, label="model-call input").encode("utf-8")).hexdigest()
+
+
+def _context_fingerprint(messages: Sequence[Message]) -> str:
+    return _model_call_fingerprint([message_to_dict(message) for message in messages])
+
+
+def _auxiliary_request_fingerprint(request: ProviderRequest) -> str:
+    # Only a digest is journaled: auxiliary calls never create a primary exact
+    # input snapshot or retain a second copy of the user's request in a receipt.
+    payload = {
+        field.name: getattr(request, field.name)
+        for field in fields(request)
+        if field.name not in {"signal", "messages", "system", "output_schema"}
+    }
+    payload["messages"] = [message_to_dict(message) for message in request.messages]
+    payload["system"] = [asdict(block) for block in request.system]
+    payload["output_schema"] = (
+        asdict(request.output_schema) if request.output_schema is not None else None
+    )
+    return _model_call_fingerprint(payload)
+
+
+async def _await_auxiliary(awaitable: Awaitable[_T], signal: AbortContext) -> _T:
+    """Make the run signal effective even for a provider that does not poll it."""
+    task = asyncio.ensure_future(awaitable)
+    abort = asyncio.create_task(signal.wait())
+    try:
+        done, _ = await asyncio.wait({task, abort}, return_when=asyncio.FIRST_COMPLETED)
+        # A completed read wins over a simultaneous abort so valid final Usage
+        # is never discarded. The next admission/read checks the signal again.
+        if task in done:
+            return await task
+        raise AbortError("operation aborted")
+    finally:
+        for pending in (task, abort):
+            if not pending.done():
+                pending.cancel()
+        await asyncio.gather(task, abort, return_exceptions=True)
+
+
+def _auxiliary_protocol_error(detail: str) -> ProviderError:
+    return ProviderError(f"invalid normalized provider stream: {detail}", retryable=False)
+
+
+class _AuxiliaryResponse:
+    """Validate normalized structure while retaining at most 1 MiB of text.
+
+    Tool use is unconditionally unusable for a summary. Its raw arguments are
+    never assembled or executed here; valid structure is still drained to Usage.
+    """
+
+    def __init__(self) -> None:
+        self.actual_model = ""
+        self.usage: Usage | None = None
+        self.text = bytearray()
+        self.rejection_reason: str | None = None
+        self.protocol_failure: ProviderError | None = None
+        self.open_tools: set[str] = set()
+        self.seen_tools: set[str] = set()
+
+    def reject(self, reason: str) -> None:
+        self.rejection_reason = self.rejection_reason or reason
+        self.text.clear()
+
+    def feed(self, event: Any) -> bool:
+        if not isinstance(event, dict) or not isinstance(event.get("type"), str):
+            raise _auxiliary_protocol_error("event must be a dict with a string type")
+        typ = event["type"]
+        if typ == "message_start":
+            if self.actual_model:
+                raise _auxiliary_protocol_error("duplicate message_start")
+            model = event.get("model")
+            if not isinstance(model, str) or not model.strip():
+                raise _auxiliary_protocol_error("message_start.model must be a nonblank string")
+            self.actual_model = model
+            return False
+        if not self.actual_model:
+            raise _auxiliary_protocol_error("first event must be message_start")
+        if typ in ("text_delta", "thinking_delta"):
+            text = event.get("text")
+            if not isinstance(text, str):
+                raise _auxiliary_protocol_error(f"{typ}.text must be a string")
+            if typ == "thinking_delta":
+                self.reject("non_text_output")
+            elif self.rejection_reason is None:
+                remaining = _ACCEPTED_TEXT_MAX_BYTES - len(self.text)
+                if len(text) > remaining:
+                    self.reject("oversized_output")
+                else:
+                    try:
+                        encoded = text.encode("utf-8")
+                    except UnicodeError:
+                        self.reject("invalid_text")
+                    else:
+                        if len(encoded) > remaining:
+                            self.reject("oversized_output")
+                        else:
+                            self.text.extend(encoded)
+        elif typ == "redacted_thinking":
+            self.reject("non_text_output")
+        elif typ == "tool_use_start":
+            tool_id, name = event.get("id"), event.get("name")
+            if not isinstance(tool_id, str) or not tool_id or tool_id in self.seen_tools:
+                raise _auxiliary_protocol_error("tool_use_start requires a fresh nonempty id")
+            if not isinstance(name, str) or not name:
+                raise _auxiliary_protocol_error("tool_use_start.name must be a nonempty string")
+            self.seen_tools.add(tool_id)
+            self.open_tools.add(tool_id)
+            self.reject("tool_use_output")
+        elif typ in ("tool_use_input_delta", "tool_use_end"):
+            tool_id = event.get("id")
+            if not isinstance(tool_id, str) or tool_id not in self.open_tools:
+                raise _auxiliary_protocol_error(f"{typ} references an unknown or closed id")
+            if typ == "tool_use_input_delta":
+                if not isinstance(event.get("json_delta"), str):
+                    raise _auxiliary_protocol_error(
+                        "tool_use_input_delta requires string json_delta"
+                    )
+            else:
+                self.open_tools.remove(tool_id)
+        elif typ == "message_end":
+            raw_usage = event.get("usage")
+            if not isinstance(raw_usage, Usage):
+                raise _auxiliary_protocol_error("message_end.usage must be valid Usage")
+            try:
+                self.usage = _copy_usage(raw_usage)
+            except _ModelCallError as exc:
+                raise _auxiliary_protocol_error("message_end.usage must be valid Usage") from exc
+            stop = event.get("stop_reason")
+            metadata = event.get("provider_metadata")
+            if (
+                self.open_tools
+                or not isinstance(stop, str)
+                or stop not in _AUXILIARY_STOP_REASONS
+                or (stop == "tool_use") != bool(self.seen_tools)
+                or (metadata is not None and not isinstance(metadata, dict))
+            ):
+                self.reject("invalid_stream")
+                self.protocol_failure = _auxiliary_protocol_error("invalid message_end structure")
+            return True
+        else:
+            raise _auxiliary_protocol_error("unknown event type")
+        return False
+
+    def accepted_text(self) -> str | None:
+        if self.rejection_reason is not None:
+            return None
+        text = self.text.decode("utf-8").strip()
+        if not text:
+            self.reject("empty_output")
+            return None
+        return text
+
+
+class _AccountedAuxiliaryCaller:
+    """Run-scoped gateway; one durable identity and one slot per delivery."""
+
+    def __init__(
+        self,
+        provider: Any,
+        ledger: _ModelCallLedger,
+        *,
+        limiter: Any = None,
+        parent_logical_call_id: str | None = None,
+        turn_index: int | None = None,
+    ) -> None:
+        self._provider = provider
+        self._ledger = ledger
+        self._limiter = limiter
+        self._parent_logical_call_id = parent_logical_call_id
+        self._turn_index = turn_index
+        self._strategy_id = "compaction"
+        self._source_context_fingerprint: str | None = None
+
+    def _for_compaction(
+        self, strategy_id: str, messages: Sequence[Message]
+    ) -> _AccountedAuxiliaryCaller:
+        bound = _AccountedAuxiliaryCaller(
+            self._provider,
+            self._ledger,
+            limiter=self._limiter,
+            parent_logical_call_id=self._parent_logical_call_id,
+            turn_index=self._turn_index,
+        )
+        bound._strategy_id = _string(strategy_id, "strategy_id")
+        bound._source_context_fingerprint = _context_fingerprint(messages)
+        return bound
+
+    async def text(
+        self,
+        *,
+        logical_call_id: str,
+        model: str,
+        system: list[SystemBlock],
+        messages: list[Message],
+        max_output_tokens: int,
+        signal: AbortContext,
+    ) -> AuxiliaryTextResult:
+        request = ProviderRequest(
+            model=model,
+            system=system,
+            tools=[],
+            messages=messages,
+            max_output_tokens=max_output_tokens,
+            signal=signal,
+        )
+        delivery = _AuxiliaryDelivery(self, request, logical_call_id, signal)
+        stream = delivery.stream()
+        try:
+            async for _ in stream:
+                pass
+        finally:
+            await stream.aclose()
+        signal.throw_if_aborted()
+        if delivery.receipt is None:
+            raise _ModelCallError("invalid_state", "auxiliary delivery did not produce a receipt")
+        return AuxiliaryTextResult(delivery.receipt, delivery.receipt.accepted_text)
+
+
+class _AuxiliaryDelivery:
+    def __init__(
+        self,
+        caller: _AccountedAuxiliaryCaller,
+        request: ProviderRequest,
+        logical_call_id: str,
+        signal: AbortContext,
+    ) -> None:
+        self.caller, self.request, self.signal = caller, request, signal
+        self.intent = ModelCallIntent(
+            logical_call_id=logical_call_id,
+            delivery_attempt_id=str(uuid4()),
+            parent_logical_call_id=caller._parent_logical_call_id,
+            kind="compaction",
+            run_id=caller._ledger.run_id,
+            turn_index=caller._turn_index,
+            requested_model=request.model,
+            request_fingerprint=_auxiliary_request_fingerprint(request),
+            strategy_id=caller._strategy_id,
+        )
+        self.response = _AuxiliaryResponse()
+        self.receipt: ModelCallReceipt | None = None
+        self.started_at = monotonic()
+
+    def _receipt(self, *, cancelled: bool = False, reported: bool = False) -> ModelCallReceipt:
+        from .pricing import cost_usd
+
+        response = self.response
+        text = response.accepted_text() if reported else None
+        usage = response.usage if reported else None
+        return ModelCallReceipt(
+            logical_call_id=self.intent.logical_call_id,
+            delivery_attempt_id=self.intent.delivery_attempt_id,
+            kind="compaction",
+            run_id=self.intent.run_id,
+            turn_index=self.intent.turn_index,
+            actual_model=response.actual_model,
+            usage_status="reported" if reported else "unknown",
+            usage=usage,
+            cost_usd=cost_usd(usage, response.actual_model) if usage is not None else None,
+            disposition=("accepted" if text is not None else "rejected")
+            if reported
+            else ("cancelled" if cancelled else "failed"),
+            rejection_reason=response.rejection_reason
+            if reported
+            else ("delivery_cancelled" if cancelled else "delivery_failed"),
+            accepted_text=text,
+            accepted_text_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest() if text else None,
+            duration_ms=max(0, int((monotonic() - self.started_at) * 1000)),
+            request_fingerprint=self.intent.request_fingerprint,
+            strategy_id=self.intent.strategy_id,
+            source_context_fingerprint=(
+                self.caller._source_context_fingerprint
+                or _context_fingerprint(self.request.messages)
+            ),
+        )
+
+    async def stream(self) -> AsyncGenerator[dict[str, Any], None]:
+        ledger, limiter = self.caller._ledger, self.caller._limiter
+        await ledger.begin(self.intent)
+        acquired = started = terminal_attempted = False
+        iterator: Any = None
+
+        async def acquire() -> None:
+            nonlocal acquired
+            await limiter.acquire(model=self.request.model)
+            acquired = True
+
+        try:
+            self.signal.throw_if_aborted()
+            if limiter is not None:
+                await _await_auxiliary(acquire(), self.signal)
+            self.signal.throw_if_aborted()
+            ledger.assert_may_start()
+            await ledger.mark_dispatch_started(self.intent)
+            started = True
+            # No await between these rechecks and the physical stream invocation.
+            self.signal.throw_if_aborted()
+            ledger.assert_may_start()
+            iterator = self.caller._provider.stream(self.request).__aiter__()
+            while True:
+                self.signal.throw_if_aborted()
+                try:
+                    event = await _await_auxiliary(iterator.__anext__(), self.signal)
+                except StopAsyncIteration as exc:
+                    raise _auxiliary_protocol_error("stream ended before message_end") from exc
+                if self.response.feed(event):
+                    # Buffer the terminal event until the normalized iterator
+                    # closes. A trailing event/failure rejects output while
+                    # retaining the already-copied valid final Usage.
+                    try:
+                        await _await_auxiliary(iterator.__anext__(), self.signal)
+                    except StopAsyncIteration:
+                        pass
+                    else:
+                        self.response.reject("invalid_stream")
+                        self.response.protocol_failure = _auxiliary_protocol_error(
+                            "event appeared after message_end"
+                        )
+                    closed_iterator, iterator = iterator, None
+                    close = getattr(closed_iterator, "aclose", None)
+                    if close is not None:
+                        await close()
+                    receipt = self._receipt(reported=True)
+                    terminal_attempted = True
+                    await ledger.settle(receipt)
+                    self.receipt = receipt
+                    if self.response.protocol_failure is not None:
+                        raise self.response.protocol_failure
+                    # Consumers may stop as soon as they see message_end. Spend
+                    # and durability must already be settled before exposing it.
+                    yield event
+                    return
+                yield event
+        except BaseException as exc:
+            if not terminal_attempted:
+                terminal_attempted = True
+                if isinstance(exc, _ModelCallError) and exc.code == "persistence_failed":
+                    pass
+                elif not started:
+                    await ledger.abandon(self.intent, reason="delivery_not_dispatched")
+                else:
+                    cancelled = isinstance(exc, (AbortError, asyncio.CancelledError, GeneratorExit))
+                    if self.response.usage is not None:
+                        self.response.reject(
+                            "delivery_cancelled" if cancelled else "delivery_failed"
+                        )
+                    receipt = self._receipt(
+                        cancelled=cancelled, reported=self.response.usage is not None
+                    )
+                    await ledger.settle(receipt)
+                    self.receipt = receipt
+            raise
+        finally:
+            try:
+                close = getattr(iterator, "aclose", None)
+                if close is not None:
+                    await close()
+            finally:
+                if acquired and limiter is not None:
+                    limiter.release(model=self.request.model)
