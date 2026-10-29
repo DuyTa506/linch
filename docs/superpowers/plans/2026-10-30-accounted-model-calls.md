@@ -161,6 +161,7 @@ Commit `feat: unify run usage and auxiliary budget admission`; independent revie
 - Produces: merged linch.model_calls.v1 namespace; receipt journal authoritative ahead of checkpoint; independent namespaces preserved.
 - Produces: strict record.projection_kind=primary_append acceptance journal variant, linking same receipt/delivery/logical/snapshot/request/base to the POST-hook assistant digest before session append; never for rejected-native. Immutable receipt fields do not expand. Produces every frozen-replay branch from the Spec.
 - Produces: built-in projection_id/source/target fingerprint anchor in journal and optional provider snapshot; deterministic paid-result replay without inference or another charge.
+- Produces: strict physical-delivery-bound compaction_source after intent and before dispatch_started, preserving ordered source/reminder digests without raw requests. Flush required invoked-skill bodies before recipe persistence; failure stops before dispatch. Bind the canonical wrapped listing reminder and ordered-source semantics in RunContract. Final paid targets require matching accepted receipt/source; repeated built-in chains retain historical reminder placement.
 - Accounting codec/semantics/text bound/replay behavior are fingerprinted in RunContract. Rejected-native handling is terminal_error_v0 here; later reliability bounded_feedback_v1 is a distinct required contract fingerprint, never silently applied to old terminal runs.
 
 - [ ] **Step 1: Write crash-boundary RED tests**

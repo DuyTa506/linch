@@ -554,3 +554,29 @@ inference. The later reliability feature owns bounded_feedback_v1 and its
 receipt-keyed diagnostic/feedback prefix0/1/2 actions. A shared prefix checker
 may be tested with fixed fixtures in accounting, but accounting does not enable
 reliability correction or append its feedback.
+
+## Ordered paid-source reconstruction binding
+
+Paid built-in replay must preserve the source order at each historical
+projection, including provider-view-only skill reminders. It must not inject
+the current complete reminder list into every historical target.
+
+After the matching physical intent and before dispatch_started, persist a
+strict hash-only compaction_source projection variant. Bind its ordered source
+message/reminder digests to the same run, logical operation, physical delivery,
+request, strategy/configuration and durable history. Required invoked-skill
+bodies must be durably flushed before this recipe is written; a failed flush
+or source write poisons continuation before provider dispatch. The recipe does
+not settle usage, consume a receipt, apply a view, or grant authority.
+
+A final paid compaction projection requires an accepted matching receipt and
+the same physical source anchor. Exact duplicate records per variant are
+idempotent; conflicting duplicates or cross-variant bindings fail closed.
+Intent-only, unknown or rejected attempts cannot apply a paid target. Every
+retry has a fresh physical source/delivery binding. A provider-view cache is
+not source authority, and no full auxiliary request is duplicated in a recipe.
+
+RunContract binds ordered-source replay semantics and the canonical wrapped
+skill-listing reminder digest. Resume regenerates listing bytes only under a
+matching contract and validates the source recipe before replay or dispatch.
+Old no-recipe semantics fail closed instead of being silently reinterpreted.
