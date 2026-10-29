@@ -564,7 +564,7 @@ def test_auxiliary_usage_metadata_and_incomplete_result_roundtrip() -> None:
 
 def test_all_model_call_journal_kinds_roundtrip() -> None:
     from linch.events import ModelCallEvent, event_from_dict, event_to_dict
-    from linch.model_calls import intent_to_dict, receipt_to_dict
+    from linch.model_calls import _projection_record, intent_to_dict, receipt_to_dict
 
     intent, receipt = _records()
     records = {
@@ -577,14 +577,21 @@ def test_all_model_call_journal_kinds_roundtrip() -> None:
             "reason": "cancelled",
             "usage_status": "unknown",
         },
-        "projection": {
-            "version": 1,
-            "projection_id": "projection-fixture",
-            "source_receipt_ids": ["delivery-fixture"],
-            "strategy_id": "default-v1",
-            "source_context_fingerprint": "source-fingerprint-fixture",
-            "target_context_fingerprint": "target-fingerprint-fixture",
-        },
+        "projection": _projection_record(
+            projection_kind="compaction",
+            source_receipt_ids=["delivery-fixture"],
+            strategy_id="default-v1",
+            strategy_config={
+                "implementation": "default_v1",
+                "keep_recent_turns": 10,
+                "max_output_tokens": 4096,
+                "prompt_sha256": "a" * 64,
+            },
+            source_context_fingerprint="b" * 64,
+            target_context_fingerprint="c" * 64,
+            full_history_base_count=1,
+            full_history_base_fingerprint="d" * 64,
+        ),
     }
     for kind, record in records.items():
         event = ModelCallEvent("run-fixture", kind, record)

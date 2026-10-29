@@ -306,25 +306,173 @@ def _copy_model_call_record(
         if owned["usage_status"] not in ("unknown", "not_dispatched"):
             raise _invalid("abandoned delivery has invalid usage status")
     else:
-        if type(owned.get("version")) is not int or owned["version"] != _VERSION:
-            raise _invalid("unsupported projection record version")
-        _string(owned.get("projection_id"), "projection_id")
-        _string(owned.get("strategy_id"), "strategy_id")
-        _string(owned.get("source_context_fingerprint"), "source_context_fingerprint")
-        _string(owned.get("target_context_fingerprint"), "target_context_fingerprint")
-        ids = owned.get("source_receipt_ids")
-        if (
-            not isinstance(ids, list)
-            or not ids
-            or any(not isinstance(x, str) or not x for x in ids)
-        ):
-            raise _invalid("projection must identify its source receipts")
-        if len(set(ids)) != len(ids):
-            raise _invalid("projection source receipts must be unique")
+        _validate_projection(owned)
+        if owned["projection_kind"] == "primary_append" and owned["run_id"] != run_id:
+            raise _ModelCallError("identity_mismatch", "projection belongs to another run")
         return owned
     if identity.run_id != run_id:
         raise _ModelCallError("identity_mismatch", "journal run and record run do not match")
     return owned
+
+
+_PRIMARY_PROJECTION_FIELDS = {
+    "projection_kind",
+    "projection_id",
+    "run_id",
+    "logical_call_id",
+    "delivery_attempt_id",
+    "turn_index",
+    "snapshot_id",
+    "request_fingerprint",
+    "full_history_base_count",
+    "full_history_base_fingerprint",
+    "assistant_sha256",
+    "assistant_stop_reason",
+    "after_action",
+    "after_feedback",
+    "control_message_sha256",
+}
+_COMPACTION_PROJECTION_FIELDS = {
+    "projection_kind",
+    "projection_id",
+    "source_receipt_ids",
+    "strategy_id",
+    "strategy_config",
+    "source_context_fingerprint",
+    "target_context_fingerprint",
+    "full_history_base_count",
+    "full_history_base_fingerprint",
+}
+
+
+def _digest(value: Any, name: str) -> str:
+    result = _string(value, name)
+    if len(result) != 64 or any(character not in "0123456789abcdef" for character in result):
+        raise _invalid(f"{name} must be a SHA-256 digest")
+    return result
+
+
+def _validate_projection(raw: Mapping[str, Any]) -> None:
+    kind = raw.get("projection_kind")
+    if kind == "primary_append":
+        _versioned(raw, _PRIMARY_PROJECTION_FIELDS)
+        for name in ("run_id", "logical_call_id", "delivery_attempt_id", "request_fingerprint"):
+            _string(raw[name], name)
+        _integer(raw["turn_index"], "turn_index")
+        _optional_string(raw["snapshot_id"], "snapshot_id")
+        _digest(raw["assistant_sha256"], "assistant_sha256")
+        if raw["assistant_stop_reason"] not in get_args(StopReason):
+            raise _invalid("invalid primary projection stop reason")
+        if raw["after_action"] not in (None, "continue", "stop"):
+            raise _invalid("invalid primary projection control action")
+        feedback = raw["after_feedback"]
+        if feedback is not None:
+            _string(feedback, "after_feedback", empty=True)
+            if len(feedback.encode("utf-8")) > _ACCEPTED_TEXT_MAX_BYTES:
+                raise _invalid("primary control feedback exceeds the byte bound")
+        if raw["after_action"] == "continue":
+            _digest(raw["control_message_sha256"], "control_message_sha256")
+        elif raw["control_message_sha256"] is not None:
+            raise _invalid("only a continue action may identify a control message")
+    elif kind == "compaction":
+        _versioned(raw, _COMPACTION_PROJECTION_FIELDS)
+        _string(raw["strategy_id"], "strategy_id")
+        config = raw["strategy_config"]
+        if not isinstance(config, dict) or set(config) != {
+            "implementation",
+            "keep_recent_turns",
+            "max_output_tokens",
+            "prompt_sha256",
+        }:
+            raise _invalid("invalid deterministic compaction configuration")
+        if config["implementation"] not in ("default_v1", "detailed_v1"):
+            raise _invalid("unsupported deterministic compaction implementation")
+        for name in ("keep_recent_turns", "max_output_tokens"):
+            if _integer(config[name], name) < 1:
+                raise _invalid("compaction configuration must be positive")
+        _digest(config["prompt_sha256"], "prompt_sha256")
+        _digest(raw["source_context_fingerprint"], "source_context_fingerprint")
+        _digest(raw["target_context_fingerprint"], "target_context_fingerprint")
+        ids = raw["source_receipt_ids"]
+        if not isinstance(ids, list) or len(ids) != 1:
+            raise _invalid("built-in projection requires exactly one source receipt")
+        _string(ids[0], "source_receipt_id")
+    else:
+        raise _invalid("unsupported projection kind")
+    _integer(raw["full_history_base_count"], "full_history_base_count")
+    _digest(raw["full_history_base_fingerprint"], "full_history_base_fingerprint")
+    _digest(raw["projection_id"], "projection_id")
+    expected = _model_call_fingerprint(
+        {key: value for key, value in raw.items() if key != "projection_id"}
+    )
+    if raw["projection_id"] != expected:
+        raise _invalid("projection identity digest does not match")
+
+
+def _projection_record(**values: Any) -> dict[str, Any]:
+    raw = {"version": _VERSION, **values}
+    raw["projection_id"] = _model_call_fingerprint(raw)
+    _validate_projection(raw)
+    return raw
+
+
+def _validate_projection_receipts(
+    raw: Mapping[str, Any], receipts: Mapping[str, ModelCallReceipt]
+) -> None:
+    if raw["projection_kind"] == "primary_append":
+        receipt = receipts.get(raw["delivery_attempt_id"])
+        if receipt is None or receipt.kind != "primary" or receipt.disposition != "accepted":
+            raise _invalid("primary acceptance projection requires its accepted receipt")
+        for name in (
+            "run_id",
+            "logical_call_id",
+            "delivery_attempt_id",
+            "turn_index",
+            "request_fingerprint",
+        ):
+            if raw[name] != getattr(receipt, name):
+                raise _ModelCallError("identity_mismatch", "primary projection and receipt differ")
+    else:
+        for receipt_id in raw["source_receipt_ids"]:
+            receipt = receipts.get(receipt_id)
+            if receipt is None or receipt.kind != "compaction" or receipt.disposition != "accepted":
+                raise _invalid("paid projection requires its accepted compaction receipt")
+            if (
+                receipt.strategy_id != raw["strategy_id"]
+                or receipt.source_context_fingerprint != raw["source_context_fingerprint"]
+            ):
+                raise _ModelCallError(
+                    "identity_mismatch", "compaction projection and receipt differ"
+                )
+
+
+def _check_projection_conflict(
+    record: Mapping[str, Any],
+    projections: Mapping[str, dict[str, Any]],
+) -> None:
+    def receipt_ids(value: Mapping[str, Any]) -> set[str]:
+        return (
+            {value["delivery_attempt_id"]}
+            if value["projection_kind"] == "primary_append"
+            else set(value["source_receipt_ids"])
+        )
+
+    sources = receipt_ids(record)
+    if any(sources & receipt_ids(value) and value != record for value in projections.values()):
+        raise _invalid("conflicting receipt-linked projection")
+
+
+def _accounting_contract() -> dict[str, Any]:
+    """Policy-bearing semantics, independent from optional exact-input snapshots."""
+    return {
+        "codec_version": _VERSION,
+        "receipt_semantics": "physical_delivery_v1",
+        "model_source": "normalized_message_start_required_v1",
+        "accepted_text_max_bytes": _ACCEPTED_TEXT_MAX_BYTES,
+        "primary_replay": "receipt_post_hook_append_v1",
+        "compaction_replay": "deterministic_builtin_projection_v1",
+        "native_rejection": "terminal_error_v0",
+    }
 
 
 def _require_dispatched_receipt(receipt: ModelCallReceipt) -> None:
@@ -375,6 +523,7 @@ class _ModelCallLedger:
         self._observed: dict[str, ModelCallReceipt] = {}
         self._consumed_auxiliary_receipt_ids: set[str] = set()
         self._journal: list[ModelCallEvent] = []
+        self._projections: dict[str, dict[str, Any]] = {}
         self._total_usage = Usage()
         self._total_cost_usd: float | None = None
         self._has_unknown_usage = False
@@ -529,6 +678,45 @@ class _ModelCallLedger:
             await self._write("abandoned", record)
             self._abandoned.add(delivery_id)
 
+    def receipts(self) -> list[ModelCallReceipt]:
+        return [receipt_from_dict(receipt_to_dict(value)) for value in self._receipts.values()]
+
+    def projections(self, kind: str) -> list[dict[str, Any]]:
+        return [
+            deepcopy(value)
+            for value in self._projections.values()
+            if value["projection_kind"] == kind
+        ]
+
+    def receipt_for(self, delivery_id: str) -> ModelCallReceipt | None:
+        value = self._receipts.get(delivery_id)
+        return receipt_from_dict(receipt_to_dict(value)) if value is not None else None
+
+    def intent_for(self, delivery_id: str) -> ModelCallIntent | None:
+        value = self._intents.get(delivery_id)
+        if value is not None:
+            return value
+        for event in self._journal:
+            if event.record_kind == "intent" and event.record["delivery_attempt_id"] == delivery_id:
+                return intent_from_dict(event.record)
+        return None
+
+    async def record_projection(self, record: dict[str, Any]) -> None:
+        async with self._lock:
+            self._healthy()
+            owned = _copy_model_call_record(
+                self.run_id, "projection", record, self._budget_owner_id, _VERSION
+            )
+            _validate_projection_receipts(owned, self._receipts)
+            key = owned["projection_id"]
+            if key in self._projections:
+                if self._projections[key] != owned:
+                    raise _invalid("conflicting projection payload")
+                return
+            _check_projection_conflict(owned, self._projections)
+            await self._write("projection", owned)
+            self._projections[key] = owned
+
     def consume_auxiliary_receipts(self) -> list[ModelCallReceipt]:
         """Return newly settled compaction receipts exactly once per runtime.
 
@@ -603,6 +791,7 @@ class _ModelCallLedger:
             self._has_unknown_usage = bool(unknown)
             self._total_usage, self._total_cost_usd = total_usage, total_cost
             self._journal = list(recovery.journal)
+            self._projections = recovery.projections
 
 
 class _LedgerRecovery:
@@ -618,6 +807,7 @@ class _LedgerRecovery:
         self.consumed: set[str] = set()
         self.journal: list[ModelCallEvent] = []
         self.abandoned_records: dict[str, dict[str, Any]] = {}
+        self.projections: dict[str, dict[str, Any]] = {}
 
     def _owner(self, owner: str | None) -> None:
         if owner is None:
@@ -767,8 +957,12 @@ class _LedgerRecovery:
                     self.abandoned.add(delivery_id)
                     self.abandoned_records[delivery_id] = raw
         else:
-            if not set(raw["source_receipt_ids"]) <= self.receipts.keys():
-                raise _invalid("projection references missing receipts")
+            _validate_projection_receipts(raw, self.receipts)
+            key = raw["projection_id"]
+            if key in self.projections and self.projections[key] != raw:
+                raise _invalid("conflicting projection payload")
+            _check_projection_conflict(raw, self.projections)
+            self.projections[key] = raw
         self.journal.append(event)
 
 
