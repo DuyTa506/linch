@@ -8,7 +8,7 @@ from uuid import uuid4
 from linch.durability import InboxDelivery, decode_inbox_message, encode_inbox_delivery
 from linch.errors import ConfigError
 from linch.sessions.tasks import CreateTaskInput, Task, TaskPatch
-from linch.types import Message
+from linch.types import Message, message_from_dict, message_to_dict
 
 from .store import (
     ProviderViewSnapshot,
@@ -33,6 +33,8 @@ class _InboxRow:
 
 
 class InMemorySessionStore:
+    runtime_control_block_codec_version = 1
+
     def __init__(self) -> None:
         self._sessions: dict[str, SessionRecord] = {}
         self._messages: dict[str, list[StoredMessage]] = {}
@@ -78,7 +80,14 @@ class InMemorySessionStore:
         return self._sessions.get(id)
 
     async def load_messages(self, id: str) -> list[StoredMessage]:
-        return list(self._messages.get(id, []))
+        return [
+            StoredMessage(
+                seq=row.seq,
+                appended_at=row.appended_at,
+                message=message_from_dict(message_to_dict(row.message)),
+            )
+            for row in self._messages.get(id, [])
+        ]
 
     async def append_messages(self, id: str, messages: list[Message]) -> list[StoredMessage]:
         if id not in self._sessions:
@@ -87,9 +96,19 @@ class InMemorySessionStore:
         bucket = self._messages[id]
         stored: list[StoredMessage] = []
         for message in messages:
-            row = StoredMessage(seq=len(bucket) + 1, appended_at=ts, message=message)
+            row = StoredMessage(
+                seq=len(bucket) + 1,
+                appended_at=ts,
+                message=message_from_dict(message_to_dict(message)),
+            )
             bucket.append(row)
-            stored.append(row)
+            stored.append(
+                StoredMessage(
+                    seq=row.seq,
+                    appended_at=row.appended_at,
+                    message=message_from_dict(message_to_dict(row.message)),
+                )
+            )
         rec = self._sessions[id]
         rec.updated_at = ts
         return stored

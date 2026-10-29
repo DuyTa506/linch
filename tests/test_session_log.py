@@ -14,7 +14,8 @@ from linch.session_log import (
     ProjectionEntry,
     SessionLog,
 )
-from linch.types import Message, TextBlock
+from linch.tool_surface import ToolSurfaceReaderGuard
+from linch.types import Message, TextBlock, ToolActivation, ToolResultBlock
 
 
 def _msg(text: str, role: Literal["user", "assistant"] = "user") -> Message:
@@ -31,6 +32,39 @@ def _text(message: Message) -> TextBlock:
     return block
 
 
+def _activation(*, schema_version: int = 1) -> ToolActivation:
+    return ToolActivation(
+        schema_version=schema_version,
+        name="deferred_tool",
+        activation_id="catalog:deferred_tool",
+        activation_version=None,
+        tool_contract_fingerprint="tool-fingerprint",
+        scope_id="scope-1",
+        scope_fingerprint="scope-fingerprint",
+        catalog_policy_id="catalog-policy",
+        catalog_policy_version="1",
+        activation_policy_id="activation-policy",
+        activation_policy_version="1",
+        source_loader_id="linch.tool_search.v1",
+        source_tool_use_id="search-call",
+    )
+
+
+def _control_message() -> Message:
+    return Message(
+        role="user",
+        content=[
+            ToolResultBlock(
+                tool_use_id="search-call",
+                content="activated",
+                tool_activations=(_activation(),),
+            ),
+            ToolSurfaceReaderGuard(required_reader_version=1, feature_version=1),
+        ],
+        provider_metadata={"unrelated": {"kept": True}},
+    )
+
+
 def test_append_populates_both_projections() -> None:
     log = SessionLog()
     a, b = _msg("a"), _msg("b")
@@ -38,6 +72,82 @@ def test_append_populates_both_projections() -> None:
     log.append(b)
     assert log.full_history == (a, b)
     assert log.provider_view == (a, b)
+
+
+def test_control_facts_remain_in_full_history_but_never_reach_provider_view() -> None:
+    log = SessionLog()
+    message = _control_message()
+
+    log.append(message)
+
+    full_result = log.full_history[0].content[0]
+    assert isinstance(full_result, ToolResultBlock)
+    assert full_result.tool_activations == (_activation(),)
+    assert isinstance(log.full_history[0].content[1], ToolSurfaceReaderGuard)
+
+    projected = log.provider_view[0]
+    projected_result = projected.content[0]
+    assert isinstance(projected_result, ToolResultBlock)
+    assert projected_result.tool_activations == ()
+    assert len(projected.content) == 1
+    assert projected.provider_metadata == {"unrelated": {"kept": True}}
+
+    projected_result.content = "tampered"
+    assert isinstance(log.full_history[0].content[0], ToolResultBlock)
+    assert log.full_history[0].content[0].content == "activated"
+
+
+def test_projection_drops_guard_only_messages_but_keeps_preexisting_empty_messages() -> None:
+    log = SessionLog()
+    guard_only = Message(
+        role="user",
+        content=[ToolSurfaceReaderGuard(required_reader_version=1, feature_version=1)],
+        provider_metadata={"guard": True},
+    )
+    existing_empty = Message(
+        role="assistant",
+        content=[],
+        provider_metadata={"empty": True},
+    )
+
+    log.append(guard_only)
+    log.append(existing_empty)
+
+    assert log.full_history == (guard_only, existing_empty)
+    assert log.provider_view == (existing_empty,)
+
+
+def test_seed_and_replacement_project_controls_before_storing_provider_view() -> None:
+    message = _control_message()
+
+    log = SessionLog.seed(historical=[message], visible=[message])
+    assert isinstance(log.full_history[0].content[1], ToolSurfaceReaderGuard)
+    assert len(log.provider_view[0].content) == 1
+    result = log.provider_view[0].content[0]
+    assert isinstance(result, ToolResultBlock)
+    assert result.tool_activations == ()
+
+    log.record_projection([message], reason="control-safety")
+    result = log.provider_view[0].content[0]
+    assert isinstance(result, ToolResultBlock)
+    assert result.tool_activations == ()
+
+
+def test_projection_refuses_to_hide_malformed_control_data() -> None:
+    log = SessionLog()
+    malformed = Message(
+        role="user",
+        content=[
+            ToolResultBlock(
+                tool_use_id="search-call",
+                content="activated",
+                tool_activations=(_activation(schema_version=True),),
+            )
+        ],
+    )
+
+    with pytest.raises(ValueError):
+        log.append(malformed)
 
 
 def test_append_many_is_both_projections() -> None:

@@ -254,6 +254,8 @@ class SqliteSessionStore:
     thread.
     """
 
+    runtime_control_block_codec_version = 1
+
     def __init__(self, path: str | Path = ".linch/sessions.db") -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
