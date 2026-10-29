@@ -591,6 +591,8 @@ def test_all_model_call_journal_kinds_roundtrip() -> None:
             target_context_fingerprint="c" * 64,
             full_history_base_count=1,
             full_history_base_fingerprint="d" * 64,
+            source_message_fingerprints=["e" * 64],
+            reminder_fingerprints=[],
         ),
     }
     for kind, record in records.items():

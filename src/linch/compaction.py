@@ -14,6 +14,8 @@ from .model_calls import (
     _AccountedAuxiliaryCaller,
     _AuxiliaryDelivery,
     _context_fingerprint,
+    _model_call_fingerprint,
+    _ModelCallError,
     _ModelCallLedger,
     _projection_record,
 )
@@ -539,6 +541,8 @@ def _paid_projection(
     source: list[Message],
     target: list[Message],
     history: list[Message],
+    *,
+    reminder_fingerprints: Sequence[str] = (),
 ) -> dict[str, Any]:
     return _projection_record(
         projection_kind="compaction",
@@ -549,35 +553,102 @@ def _paid_projection(
         target_context_fingerprint=_context_fingerprint(target),
         full_history_base_count=len(history),
         full_history_base_fingerprint=_context_fingerprint(history),
+        source_message_fingerprints=_source_message_fingerprints(source),
+        reminder_fingerprints=list(reminder_fingerprints),
     )
 
 
-def _with_skill_context(messages: list[Message], session: Any, agent: Any) -> list[Message]:
-    """Rebuild the existing deterministic reminder suffix after a paid projection."""
+def _source_message_fingerprints(messages: Sequence[Message]) -> list[str]:
+    return [_model_call_fingerprint(message_to_dict(message)) for message in messages]
+
+
+def _skill_listing_fingerprint(text: str | None) -> str | None:
+    """Fingerprint the canonical provider-only reminder, including its wrapper."""
+    if not text:
+        return None
     from .skills.system_reminder import wrap_in_system_reminder
 
-    result = list(messages)
-    present = {
-        block.text
-        for message in result
-        for block in message.content
-        if isinstance(block, TextBlock)
-    }
+    message = Message(role="user", content=[TextBlock(text=wrap_in_system_reminder(text))])
+    return _source_message_fingerprints([message])[0]
+
+
+def _skill_context_messages(session: Any, agent: Any) -> list[Message]:
+    """Content registry only; recipe digests determine historical reminder order."""
+    from .skills.system_reminder import wrap_in_system_reminder
+
     texts = []
-    if agent.skill_listing_text:
+    if getattr(agent, "skill_listing_text", ""):
         texts.append(wrap_in_system_reminder(agent.skill_listing_text))
-    for record in session.invoked_skills:
+    for record in getattr(session, "invoked_skills", ()):
         texts.append(
             wrap_in_system_reminder(
                 f"Below is the body of a previously invoked skill "
                 f"named '{record.name}'.\n\n{record.substituted_body}"
             )
         )
-    for text in texts:
-        if text not in present:
-            result.append(Message(role="user", content=[TextBlock(text=text)]))
-            present.add(text)
+    return [Message(role="user", content=[TextBlock(text=text)]) for text in dict.fromkeys(texts)]
+
+
+async def _persist_compaction_skill_context(session: Any, ledger: _ModelCallLedger) -> None:
+    """SkillTool persistence is best-effort; paid replay requires durable bodies."""
+    records = getattr(session, "invoked_skills", ())
+    if not records:
+        return
+    try:
+        await session.store.set_invoked_skills(
+            session.id,
+            [
+                {
+                    "name": record.name,
+                    "substituted_body": record.substituted_body,
+                    "invoked_at": record.invoked_at,
+                }
+                for record in records
+            ],
+        )
+    except BaseException as exc:
+        ledger._persistence_failed = True
+        if not isinstance(exc, Exception):
+            raise
+        raise _ModelCallError(
+            "persistence_failed", "compaction skill context durability failed"
+        ) from exc
+
+
+def _with_recorded_reminders(
+    messages: list[Message],
+    digests: Sequence[str],
+    reminders: dict[str, Message],
+) -> list[Message]:
+    result = list(messages)
+    present = set(_source_message_fingerprints(result))
+    for digest in digests:
+        if digest not in reminders:
+            raise ConfigError("paid compaction reminder body is not durably resolvable")
+        if digest not in present:
+            result.append(reminders[digest])
+            present.add(digest)
     return result
+
+
+def _ordered_compaction_source(
+    base: list[Message],
+    digests: Sequence[str],
+    reminders: dict[str, Message],
+) -> list[Message] | None:
+    """Insert only recipe-selected reminders between their original durable neighbors."""
+    result = []
+    base_digests = _source_message_fingerprints(base)
+    index = 0
+    for digest in digests:
+        if index < len(base) and base_digests[index] == digest:
+            result.append(base[index])
+            index += 1
+        elif digest in reminders:
+            result.append(reminders[digest])
+        else:
+            return None
+    return result if index == len(base) else None
 
 
 async def _reconcile_paid_compactions(
@@ -601,6 +672,13 @@ async def _reconcile_paid_compactions(
     receipts = [receipt for receipt in ledger.receipts() if receipt.kind == "compaction"]
     completed_current = any(receipt.turn_index == turn_index for receipt in receipts)
     anchors = {record["source_receipt_ids"][0]: record for record in projections}
+    sources = {
+        record["delivery_attempt_id"]: record for record in ledger.projections("compaction_source")
+    }
+    reminder_messages = _skill_context_messages(session, agent)
+    reminders = dict(
+        zip(_source_message_fingerprints(reminder_messages), reminder_messages, strict=True)
+    )
     history, current = list(session.full_history), list(session.provider_view)
     replay_fingerprints = {_context_fingerprint(history)}
     previous: list[Message] = []
@@ -612,12 +690,15 @@ async def _reconcile_paid_compactions(
         if receipt.strategy_id != strategy.id:
             raise ConfigError("paid compaction strategy does not match")
         record = anchors.get(receipt.delivery_attempt_id)
-        count = record["full_history_base_count"] if record is not None else len(history)
+        recipe = record if record is not None else sources.get(receipt.delivery_attempt_id)
+        if recipe is None:
+            raise ConfigError("paid compaction is missing its ordered source recipe")
+        count = recipe["full_history_base_count"]
         if count < previous_count or count > len(history):
             raise ConfigError("paid compaction durable source boundary does not match")
-        if record is not None and (
-            record["strategy_config"] != config
-            or _context_fingerprint(history[:count]) != record["full_history_base_fingerprint"]
+        if (
+            recipe["strategy_config"] != config
+            or _context_fingerprint(history[:count]) != recipe["full_history_base_fingerprint"]
         ):
             raise ConfigError("paid compaction durable source or configuration does not match")
         source = [*previous, *history[previous_count:count]]
@@ -630,9 +711,15 @@ async def _reconcile_paid_compactions(
         candidates.append(cached_source)
         source = next(
             (
-                candidate
+                ordered
                 for candidate in candidates
-                if _context_fingerprint(candidate) == receipt.source_context_fingerprint
+                if (
+                    ordered := _ordered_compaction_source(
+                        candidate, recipe["source_message_fingerprints"], reminders
+                    )
+                )
+                is not None
+                and _context_fingerprint(ordered) == receipt.source_context_fingerprint
             ),
             None,
         )
@@ -640,12 +727,19 @@ async def _reconcile_paid_compactions(
             raise ConfigError("paid compaction source context does not match durable history")
         assert receipt.accepted_text is not None
         target = _builtin_paid_view(source, receipt.accepted_text, config)
-        derived = _paid_projection(receipt, config, source, target, history[:count])
+        derived = _paid_projection(
+            receipt,
+            config,
+            source,
+            target,
+            history[:count],
+            reminder_fingerprints=recipe["reminder_fingerprints"],
+        )
         if record is not None and derived != record:
             raise ConfigError("paid compaction target or projection identity does not match")
         if record is None:
             await ledger.record_projection(derived)
-        previous = _with_skill_context(target, session, agent)
+        previous = _with_recorded_reminders(target, recipe["reminder_fingerprints"], reminders)
         for view in (source, target, previous):
             replay_fingerprints.add(_context_fingerprint([*view, *history[count:]]))
         previous_count = count
@@ -758,8 +852,22 @@ async def _run_compaction_impl(
             ),
         )
 
+    config = _builtin_compaction_config(strategy)
+    source_recipe = None
+    if auxiliary_caller is not None and config is not None:
+        await _persist_compaction_skill_context(session, auxiliary_caller._ledger)
+        source_recipe = {
+            "strategy_config": config,
+            "source_context_fingerprint": _context_fingerprint(snapshot),
+            "full_history_base_count": len(session.session_log.full_history),
+            "full_history_base_fingerprint": _context_fingerprint(session.session_log.full_history),
+            "source_message_fingerprints": _source_message_fingerprints(snapshot),
+            "reminder_fingerprints": _source_message_fingerprints(
+                _skill_context_messages(session, agent)
+            ),
+        }
     caller = (
-        auxiliary_caller._for_compaction(strategy.id, snapshot)
+        auxiliary_caller._for_compaction(strategy.id, snapshot, source_recipe=source_recipe)
         if auxiliary_caller is not None
         else None
     )
@@ -800,7 +908,14 @@ async def _run_compaction_impl(
             if _context_fingerprint(expected) != _context_fingerprint(compacted):
                 raise ConfigError("built-in compaction result differs from its deterministic seam")
             record = _paid_projection(
-                receipt, config, snapshot, compacted, list(session.session_log.full_history)
+                receipt,
+                config,
+                snapshot,
+                compacted,
+                list(session.session_log.full_history),
+                reminder_fingerprints=source_recipe["reminder_fingerprints"]
+                if source_recipe is not None
+                else (),
             )
             await caller._ledger.record_projection(record)
             projection_id = record["projection_id"]

@@ -34,6 +34,8 @@ class _FaultStore:
 
     async def append_event(self, run_id: str, event: Any) -> int:
         kind = getattr(event, "record_kind", event.type)
+        if kind == "projection" and event.record.get("projection_kind") == "compaction_source":
+            kind = "compaction_source"
         self._check(f"event:{kind}")
         return await self.store.append_event(run_id, event)
 
@@ -760,9 +762,6 @@ async def test_conflicting_paid_projection_for_one_receipt_fails_closed() -> Non
         "default",
         "a" * 64,
     )
-    await ledger.begin(intent)
-    await ledger.mark_dispatch_started(intent)
-    await ledger.settle(receipt)
     values = {
         "projection_kind": "compaction",
         "source_receipt_ids": ["delivery"],
@@ -777,8 +776,33 @@ async def test_conflicting_paid_projection_for_one_receipt_fails_closed() -> Non
         "target_context_fingerprint": "c" * 64,
         "full_history_base_count": 1,
         "full_history_base_fingerprint": "d" * 64,
+        "source_message_fingerprints": ["f" * 64],
+        "reminder_fingerprints": [],
     }
+    await ledger.begin(intent)
+    await ledger.record_projection(
+        _projection_record(
+            projection_kind="compaction_source",
+            run_id="run",
+            logical_call_id="operation",
+            delivery_attempt_id="delivery",
+            turn_index=0,
+            request_fingerprint="request",
+            **{
+                key: value
+                for key, value in values.items()
+                if key
+                not in {"projection_kind", "source_receipt_ids", "target_context_fingerprint"}
+            },
+        )
+    )
+    await ledger.mark_dispatch_started(intent)
+    await ledger.settle(receipt)
     first = _projection_record(**values)
+    no_source = _ModelCallLedger("run")
+    await no_source.restore(ledger.snapshot(), [])
+    with pytest.raises(_ModelCallError, match="physical source"):
+        await no_source.record_projection(first)
     await ledger.record_projection(first)
     values["target_context_fingerprint"] = "e" * 64
     with pytest.raises(_ModelCallError, match="conflicting"):
@@ -964,3 +988,309 @@ async def test_recovered_accepted_assistant_defers_new_inbox_delivery(tmp_path: 
     events = [event async for event in resumed.resume(run_id)]
     assert not any(event.type == "user" and event.subtype == "notification" for event in events)
     assert len(resumed.full_history) == 2
+
+
+@pytest.mark.parametrize("kind", ["memory", "sqlite"])
+@pytest.mark.parametrize("cache_present", [False, True])
+@pytest.mark.parametrize("consumed_before_projection", [False, True])
+@pytest.mark.parametrize("detailed", [False, True])
+async def test_repeated_paid_projection_preserves_later_skill_reminder_order(
+    kind: str,
+    cache_present: bool,
+    consumed_before_projection: bool,
+    detailed: bool,
+    tmp_path: Any,
+) -> None:
+    """A later skill reminder stays between its durable neighbors across two paid views."""
+    from linch import RunBudget
+    from linch.abort import AbortContext
+    from linch.compaction import DefaultCompaction, DetailedCompaction, _run_compaction_impl
+    from linch.loop.request import _re_inject_skill_context
+    from linch.loop.runner import _build_run_contract
+    from linch.model_calls import _AccountedAuxiliaryCaller, _ModelCallLedger
+    from linch.run_store import RunCheckpoint, run_meta_with_contract
+    from linch.session import RunOptions
+    from linch.sessions.store import ProviderViewSnapshot
+    from linch.types import InvokedSkillRecord, Message, TextBlock, Usage
+
+    sessions, runs = await _stores(kind, tmp_path)
+    strategy = DetailedCompaction(keep_recent_turns=3) if detailed else DefaultCompaction()
+    budget = RunBudget(max_tokens=1000)
+    agent = _agent(sessions, runs, _Provider(compact=True), compaction=strategy, budget=budget)
+    agent.skill_listing_text = "stable skill listing"
+    session = await agent.session(id="session")
+    await session.append(
+        [
+            Message(
+                role="user" if index % 2 == 0 else "assistant",
+                content=[TextBlock(text=f"seed {index} " * 120)],
+            )
+            for index in range(30)
+        ]
+    )
+    await runs.create_run(
+        "session",
+        id="run",
+        meta=run_meta_with_contract(_build_run_contract(session, "go", RunOptions())),
+    )
+    reject_projection = False
+
+    async def persist(event: Any) -> None:
+        if (
+            reject_projection
+            and event.record_kind == "projection"
+            and event.record.get("projection_kind") == "compaction"
+        ):
+            raise _Crash("second paid projection")
+        await runs.append_event("run", event)
+
+    ledger = _ModelCallLedger("run", budget=budget, persist=persist)
+    session._model_call_ledger = ledger
+    caller = _AccountedAuxiliaryCaller(agent.provider, ledger, turn_index=0)
+    signal = AbortContext()
+    await _run_compaction_impl(
+        session, agent, signal, strategy, auxiliary_caller=caller, logical_call_id="first"
+    )
+    _re_inject_skill_context(session)
+    first_snapshot = ledger.snapshot()
+    await session.append([Message(role="user", content=[TextBlock(text="before later skill")])])
+    session.invoked_skills.append(
+        InvokedSkillRecord(name="later", substituted_body="later skill body", invoked_at=1.0)
+    )
+    await sessions.set_invoked_skills(
+        "session", [{"name": "later", "substituted_body": "later skill body", "invoked_at": 1.0}]
+    )
+    _re_inject_skill_context(session)
+    await session.append(
+        [
+            Message(role="assistant", content=[TextBlock(text="after later skill")]),
+            Message(role="user", content=[TextBlock(text="latest durable user")]),
+        ]
+    )
+    reject_projection = consumed_before_projection
+    if consumed_before_projection:
+        with pytest.raises(_Crash):
+            await _run_compaction_impl(
+                session, agent, signal, strategy, auxiliary_caller=caller, logical_call_id="second"
+            )
+    else:
+        await _run_compaction_impl(
+            session, agent, signal, strategy, auxiliary_caller=caller, logical_call_id="second"
+        )
+        _re_inject_skill_context(session)
+    assert len(agent.provider.calls) == 2
+    checkpoint = RunCheckpoint(
+        phase="user_appended",
+        prompt="go",
+        turn_index=0,
+        total_usage=Usage(11, 2),
+        extension_state={
+            "linch.model_calls.v1": {
+                "version": 1,
+                "ledger": first_snapshot,
+                "active_primary": None,
+            },
+        },
+    )
+    if consumed_before_projection:
+        consumed = _ModelCallLedger("run")
+        await consumed.restore(None, [row.event for row in await runs.load_events("run")])
+        consumed.consume_auxiliary_receipts()
+        checkpoint.extension_state["linch.model_calls.v1"]["ledger"] = consumed.snapshot()
+        checkpoint.total_usage = consumed.total_usage
+    await runs.save_checkpoint("run", checkpoint)
+    if cache_present:
+        await sessions.save_provider_snapshot(
+            "session",
+            ProviderViewSnapshot(
+                provider_view=list(session.provider_view),
+                covers_seq=session._last_seq,
+                projection_id=(session.last_compaction_info or {}).get("projection_id"),
+            ),
+        )
+    sessions, runs = await _reopen(kind, tmp_path, sessions, runs)
+    try:
+        provider = _Provider(compact=True)
+        resumed_budget = RunBudget(max_tokens=1000)
+        resumed_agent = _agent(sessions, runs, provider, compaction=strategy, budget=resumed_budget)
+        resumed_agent.skill_listing_text = "stable skill listing"
+        resumed = await resumed_agent.session(id="session")
+        events = [event async for event in resumed.resume("run")]
+        assert events[-1].subtype == "success"
+        assert len(provider.calls) == 1
+        assert not any(
+            "Summarize the conversation so far." in block.text for block in provider.calls[0].system
+        )
+        assert events[-1].total_usage == Usage(33, 6)
+        assert resumed_budget.spent_tokens == 39
+        texts = [
+            block.text
+            for message in provider.calls[0].messages
+            for block in message.content
+            if isinstance(block, TextBlock)
+        ]
+        reminder = next(text for text in texts if "later skill body" in text)
+        assert (
+            texts.index("before later skill")
+            < texts.index(reminder)
+            < texts.index("after later skill")
+        )
+        assert texts.count(reminder) == 1
+        assert (
+            len(
+                [
+                    row
+                    for row in await runs.load_events("run")
+                    if getattr(row.event, "record_kind", None) == "receipt"
+                ]
+            )
+            == 3
+        )
+    finally:
+        await _close(sessions, runs)
+
+
+async def test_compaction_source_recipe_is_bound_to_the_pending_delivery() -> None:
+    """Ordered reminder metadata cannot become authority for another physical request."""
+    from linch.events import ModelCallEvent, event_from_dict, event_to_dict
+    from linch.model_calls import (
+        ModelCallIntent,
+        _ModelCallError,
+        _ModelCallLedger,
+        _projection_record,
+    )
+
+    intent = ModelCallIntent(
+        "operation", "delivery", None, "compaction", "run", 0, "model", "request", "default"
+    )
+    values = {
+        "projection_kind": "compaction_source",
+        "run_id": "run",
+        "logical_call_id": "operation",
+        "delivery_attempt_id": "delivery",
+        "turn_index": 0,
+        "request_fingerprint": "request",
+        "strategy_id": "default",
+        "strategy_config": {
+            "implementation": "default_v1",
+            "keep_recent_turns": 10,
+            "max_output_tokens": 4096,
+            "prompt_sha256": "a" * 64,
+        },
+        "full_history_base_count": 2,
+        "full_history_base_fingerprint": "b" * 64,
+        "source_context_fingerprint": "c" * 64,
+        "source_message_fingerprints": ["d" * 64, "e" * 64, "f" * 64],
+        "reminder_fingerprints": ["e" * 64],
+    }
+    source = _projection_record(**values)
+    event = ModelCallEvent("run", "projection", source)
+    assert event_to_dict(event_from_dict(event_to_dict(event))) == event_to_dict(event)
+    journal = []
+
+    async def persist(event: Any) -> None:
+        journal.append(event)
+
+    ledger = _ModelCallLedger("run", persist=persist)
+    with pytest.raises(_ModelCallError):
+        await ledger.record_projection(source)
+    await ledger.begin(intent)
+    await ledger.record_projection(source)
+    values["request_fingerprint"] = "different physical request"
+    with pytest.raises(_ModelCallError):
+        await ledger.record_projection(_projection_record(**values))
+    values["request_fingerprint"] = "request"
+    restored = _ModelCallLedger("run")
+    await restored.restore(ledger.snapshot(), journal)
+    assert restored.projections("compaction_source") == [source]
+    assert restored.total_usage.input_tokens == restored.total_usage.output_tokens == 0
+
+
+@pytest.mark.parametrize("kind", ["memory", "sqlite"])
+@pytest.mark.parametrize("boundary", ["skill_records", "source_recipe"])
+async def test_compaction_reminder_durability_failure_prevents_dispatch(
+    kind: str,
+    boundary: str,
+    tmp_path: Any,
+) -> None:
+    """A recipe never outlives missing reminder bodies or authorizes an unmarked dispatch."""
+    from linch.abort import AbortContext
+    from linch.compaction import DefaultCompaction, _run_compaction_impl
+    from linch.model_calls import _AccountedAuxiliaryCaller, _ModelCallError, _ModelCallLedger
+    from linch.types import InvokedSkillRecord, Message, TextBlock
+
+    sessions, runs = await _stores(kind, tmp_path)
+
+    class SkillWriteFailure:
+        def __getattr__(self, name: str) -> Any:
+            return getattr(sessions, name)
+
+        async def set_invoked_skills(self, session_id: str, skills: Any) -> None:
+            raise OSError("skill write failed")
+
+    provider = _Provider(compact=True)
+    agent = _agent(SkillWriteFailure() if boundary == "skill_records" else sessions, runs, provider)
+    session = await agent.session(id="session")
+    session.invoked_skills.append(InvokedSkillRecord("later", "body", 1.0))
+    await session.append(
+        [
+            Message(
+                role="user" if index % 2 == 0 else "assistant", content=[TextBlock(text=str(index))]
+            )
+            for index in range(30)
+        ]
+    )
+    await runs.create_run("session", id="run")
+
+    async def persist(event: Any) -> None:
+        if (
+            boundary == "source_recipe"
+            and event.record_kind == "projection"
+            and event.record.get("projection_kind") == "compaction_source"
+        ):
+            raise OSError("recipe write failed")
+        await runs.append_event("run", event)
+
+    ledger = _ModelCallLedger("run", persist=persist)
+    caller = _AccountedAuxiliaryCaller(provider, ledger)
+    try:
+        with pytest.raises(_ModelCallError, match="durability failed"):
+            await _run_compaction_impl(
+                session,
+                agent,
+                AbortContext(),
+                DefaultCompaction(),
+                auxiliary_caller=caller,
+                logical_call_id="operation",
+            )
+        assert provider.calls == []
+        journal = [row.event for row in await runs.load_events("run")]
+        assert not any(event.record_kind in {"dispatch_started", "receipt"} for event in journal)
+        assert not any(event.record_kind == "projection" for event in journal)
+        assert ledger.total_usage.input_tokens == ledger.total_usage.output_tokens == 0
+        with pytest.raises(_ModelCallError, match="durability failed"):
+            ledger.assert_may_start()
+    finally:
+        await _close(sessions, runs)
+
+
+async def test_changed_skill_listing_contract_blocks_resume(tmp_path: Any) -> None:
+    """Regenerated listing reminders must have the same durable execution identity."""
+    from linch.errors import ConfigError
+
+    sessions, runs = await _stores("memory", tmp_path)
+    agent = _agent(sessions, _FaultStore(runs, "event:intent"), _Provider())
+    agent.skill_listing_text = "original skill listing"
+    session = await agent.session(id="session")
+    run_id = ""
+    with pytest.raises(_Crash):
+        async for event in session.run("go"):
+            if event.type == "system":
+                run_id = event.run_id
+    provider = _Provider()
+    changed = _agent(sessions, runs, provider)
+    changed.skill_listing_text = "changed skill listing"
+    resumed = await changed.session(id="session")
+    with pytest.raises(ConfigError, match="Cannot safely resume"):
+        _ = [event async for event in resumed.resume(run_id)]
+    assert provider.calls == []
