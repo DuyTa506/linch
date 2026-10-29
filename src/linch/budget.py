@@ -15,10 +15,15 @@ The event loop is single-threaded, so plain counters are safe — no locks.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
+from uuid import uuid4
+
+from .errors import ConfigError
 
 if TYPE_CHECKING:
+    from .model_calls import ModelCallReceipt
     from .types import Usage
 
 
@@ -43,6 +48,19 @@ class RunBudget:
     spent_usd: float = 0.0
     _warn_emitted: bool = field(default=False, repr=False)
 
+    _budget_owner_id: str | None = field(default=None, init=False, repr=False, compare=False)
+    _charged_delivery_ids: set[str] = field(
+        default_factory=set, init=False, repr=False, compare=False
+    )
+    _receipt_charges: dict[str, tuple[Usage, float | None]] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
+    _unknown_delivery_ids: set[str] = field(
+        default_factory=set, init=False, repr=False, compare=False
+    )
+    _expected_spent_tokens: int = field(default=0, init=False, repr=False, compare=False)
+    _expected_spent_usd: float = field(default=0.0, init=False, repr=False, compare=False)
+
     def charge(self, usage: Usage, cost_usd: float | None) -> None:
         """Record one turn's spending. ``None`` cost (unknown model) charges 0."""
         self.spent_tokens += (
@@ -53,6 +71,115 @@ class RunBudget:
         )
         if cost_usd is not None:
             self.spent_usd += cost_usd
+        if self._budget_owner_id is not None:
+            self._expected_spent_tokens += (
+                usage.input_tokens
+                + usage.output_tokens
+                + usage.cache_read_tokens
+                + usage.cache_creation_tokens
+            )
+            self._expected_spent_usd += cost_usd or 0.0
+
+    @property
+    def _is_capped(self) -> bool:
+        return self.max_tokens is not None or self.max_cost_usd is not None
+
+    def _receipt_owner(self) -> str:
+        if self._budget_owner_id is None:
+            self._budget_owner_id = str(uuid4())
+            self._expected_spent_tokens = self.spent_tokens
+            self._expected_spent_usd = self.spent_usd
+        return self._budget_owner_id
+
+    def _check_receipt_counters(self) -> None:
+        if (
+            self.spent_tokens != self._expected_spent_tokens
+            or self.spent_usd != self._expected_spent_usd
+            or self._charged_delivery_ids != self._receipt_charges.keys()
+        ):
+            raise ConfigError("receipt budget counters or delivery IDs are inconsistent")
+
+    def _charge_receipt(
+        self,
+        delivery_attempt_id: str,
+        usage: Usage,
+        cost_usd: float | None,
+    ) -> bool:
+        from .model_calls import _copy_usage, _cost, _string
+
+        _string(delivery_attempt_id, "delivery_attempt_id")
+        owned, cost = _copy_usage(usage), _cost(cost_usd)
+        self._receipt_owner()
+        self._check_receipt_counters()
+        if delivery_attempt_id in self._charged_delivery_ids:
+            if self._receipt_charges[delivery_attempt_id] != (owned, cost):
+                raise ConfigError("duplicate budget receipt has conflicting spending")
+            return False
+        _cost(self.spent_usd + (cost or 0.0))
+        self.charge(owned, cost)
+        self._charged_delivery_ids.add(delivery_attempt_id)
+        self._receipt_charges[delivery_attempt_id] = (owned, cost)
+        return True
+
+    def _register_unresolved_delivery(self, delivery_attempt_id: str) -> None:
+        self._receipt_owner()
+        self._unknown_delivery_ids.add(delivery_attempt_id)
+
+    def _restore_receipts(
+        self,
+        budget_owner_id: str,
+        receipts: Sequence[ModelCallReceipt],
+    ) -> Literal["same_owner", "fresh_adopted"]:
+        from .model_calls import _string, receipt_from_dict, receipt_to_dict
+
+        _string(budget_owner_id, "budget_owner_id")
+        owned = [receipt_from_dict(receipt_to_dict(receipt)) for receipt in receipts]
+        if len({receipt.delivery_attempt_id for receipt in owned}) != len(owned):
+            raise ConfigError("duplicate delivery IDs in restored budget receipts")
+        fresh = (
+            self._budget_owner_id is None
+            and self.spent_tokens == 0
+            and self.spent_usd == 0
+            and not self._charged_delivery_ids
+            and not self._receipt_charges
+            and not self._unknown_delivery_ids
+        )
+        if self._budget_owner_id != budget_owner_id and not fresh:
+            raise ConfigError(
+                "receipt budget owner mismatch; reuse the owner budget "
+                "or supply a fresh zero budget"
+            )
+        if not fresh:
+            self._check_receipt_counters()
+            for receipt in owned:
+                if receipt.usage is not None:
+                    charge = (receipt.usage, receipt.cost_usd)
+                    if (
+                        receipt.delivery_attempt_id not in self._charged_delivery_ids
+                        or self._receipt_charges.get(receipt.delivery_attempt_id) != charge
+                    ):
+                        raise ConfigError("owner budget is missing a restored receipt charge")
+                elif (
+                    receipt.usage_status == "unknown"
+                    and receipt.delivery_attempt_id not in self._unknown_delivery_ids
+                ):
+                    raise ConfigError("owner budget is missing its unresolved-delivery fence")
+            return "same_owner"
+        self._budget_owner_id = budget_owner_id
+        self._expected_spent_tokens = self.spent_tokens
+        self._expected_spent_usd = self.spent_usd
+        for receipt in owned:
+            if receipt.usage is not None:
+                self._charge_receipt(receipt.delivery_attempt_id, receipt.usage, receipt.cost_usd)
+            elif receipt.usage_status == "unknown":
+                self._register_unresolved_delivery(receipt.delivery_attempt_id)
+        return "fresh_adopted"
+
+    def _restore_unresolved_deliveries(self, delivery_ids: set[str], *, fresh: bool) -> None:
+        if fresh:
+            self._unknown_delivery_ids.update(delivery_ids)
+        elif not delivery_ids <= self._unknown_delivery_ids:
+            raise ConfigError("owner budget is missing its unresolved-delivery fence")
 
     @property
     def remaining_tokens(self) -> int | None:

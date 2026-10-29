@@ -111,6 +111,39 @@ class UsageEvent:
     cumulative_cost_usd: float | None = None
     """Accumulated USD cost across all turns so far, or ``None`` if no priced
     turn has run yet."""
+    source: str | None = None
+    call_id: str | None = None
+    logical_call_id: str | None = None
+    model: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ModelCallEvent:
+    """Versioned accounting journal envelope with an isolated JSON record."""
+
+    run_id: str
+    record_kind: Literal["intent", "dispatch_started", "receipt", "abandoned", "projection"]
+    record: dict[str, Any]
+    budget_owner_id: str | None = None
+    schema_version: int = 1
+    type: Literal["model_call"] = "model_call"
+
+    def __post_init__(self) -> None:
+        from .model_calls import _copy_model_call_record, _invalid
+
+        if self.type != "model_call":
+            raise _invalid("model-call event has an invalid type")
+        object.__setattr__(
+            self,
+            "record",
+            _copy_model_call_record(
+                self.run_id,
+                self.record_kind,
+                self.record,
+                self.budget_owner_id,
+                self.schema_version,
+            ),
+        )
 
 
 @dataclass(slots=True)
@@ -147,6 +180,7 @@ class ResultEvent:
     pricing table.  Partial sums are possible for multi-model runs where only
     some turns have known pricing."""
     type: Literal["result"] = "result"
+    usage_complete: bool = True
 
 
 @dataclass(slots=True)
@@ -389,6 +423,7 @@ _KNOWN_EVENT_TYPES = frozenset(
         "hook",
         "loop_guard",
         "model_fallback",
+        "model_call",
         "partial_assistant",
         "permission_request",
         "prompt_cache_advisory",
@@ -528,6 +563,7 @@ Event: TypeAlias = (
     | PermissionRequestEvent
     | UsageEvent
     | BudgetEvent
+    | ModelCallEvent
     | CompactionEvent
     | ModelFallbackEvent
     | ContextBuildEvent
@@ -586,6 +622,10 @@ def is_usage_event(e: Event) -> bool:
 
 def is_ignorable_event(e: Event) -> bool:
     return isinstance(e, IgnorableEvent)
+
+
+def is_model_call_event(e: Event) -> bool:
+    return e.type == "model_call"  # type: ignore[comparison-overlap]
 
 
 def is_budget_event(e: Event) -> bool:
@@ -818,6 +858,23 @@ def event_to_dict(event: Event) -> dict[str, Any]:
     if isinstance(event, IgnorableEvent):
         # Re-serialize verbatim so a pass-through event round-trips unchanged.
         return _copy_ignorable_event_envelope(event.raw, original_type=event.original_type)
+    if isinstance(event, ModelCallEvent):
+        from .model_calls import _copy_model_call_record
+
+        return {
+            "type": event.type,
+            "run_id": event.run_id,
+            "record_kind": event.record_kind,
+            "record": _copy_model_call_record(
+                event.run_id,
+                event.record_kind,
+                event.record,
+                event.budget_owner_id,
+                event.schema_version,
+            ),
+            "budget_owner_id": event.budget_owner_id,
+            "schema_version": event.schema_version,
+        }
     if isinstance(event, SystemEvent):
         return {
             "type": event.type,
@@ -896,6 +953,10 @@ def event_to_dict(event: Event) -> dict[str, Any]:
             d_usage["cost_usd"] = event.cost_usd
         if event.cumulative_cost_usd is not None:
             d_usage["cumulative_cost_usd"] = event.cumulative_cost_usd
+        for name in ("source", "call_id", "logical_call_id", "model"):
+            value = getattr(event, name)
+            if value is not None:
+                d_usage[name] = value
         return d_usage
     if isinstance(event, BudgetEvent):
         return {
@@ -953,6 +1014,8 @@ def event_to_dict(event: Event) -> dict[str, Any]:
             d["structured_error"] = event.structured_error
         if event.total_cost_usd is not None:
             d["total_cost_usd"] = event.total_cost_usd
+        if not event.usage_complete:
+            d["usage_complete"] = False
         return d
     if isinstance(event, ErrorEvent):
         return {"type": event.type, "error": event.error}
@@ -1056,6 +1119,20 @@ def _required_discriminator(
     return value
 
 
+def _optional_usage_metadata(raw: dict[str, Any], name: str) -> str | None:
+    value = raw.get(name)
+    if value is not None and (not isinstance(value, str) or not value.strip()):
+        raise ValueError(f"usage {name} must be a nonblank string or null")
+    return value
+
+
+def _usage_complete(raw: dict[str, Any]) -> bool:
+    value = raw.get("usage_complete", True)
+    if type(value) is not bool:
+        raise ValueError("result usage_complete must be a boolean")
+    return value
+
+
 def event_from_dict(raw: dict[str, Any]) -> Event:
     if not isinstance(raw, dict):
         raise ValueError("event must be an object")
@@ -1065,6 +1142,14 @@ def event_from_dict(raw: dict[str, Any]) -> Event:
     # flag would otherwise decode as itself and bypass envelope validation.
     if raw.get("ignorable") is True and typ in _KNOWN_EVENT_TYPES:
         raise ValueError(f"known event type cannot be wrapped as ignorable: {typ!r}")
+    if typ == "model_call":
+        return ModelCallEvent(
+            run_id=cast(Any, raw.get("run_id")),
+            record_kind=cast(Any, raw.get("record_kind")),
+            record=cast(Any, raw.get("record")),
+            budget_owner_id=raw.get("budget_owner_id"),
+            schema_version=cast(Any, raw.get("schema_version")),
+        )
     if typ == "system":
         return SystemEvent(
             session_id=str(raw.get("session_id", "")),
@@ -1142,6 +1227,10 @@ def event_from_dict(raw: dict[str, Any]) -> Event:
             cumulative=usage_from_dict(dict(raw.get("cumulative", {}))),
             cost_usd=float(_cost) if isinstance(_cost, (int, float)) else None,
             cumulative_cost_usd=float(_cum_cost) if isinstance(_cum_cost, (int, float)) else None,
+            source=_optional_usage_metadata(raw, "source"),
+            call_id=_optional_usage_metadata(raw, "call_id"),
+            logical_call_id=_optional_usage_metadata(raw, "logical_call_id"),
+            model=_optional_usage_metadata(raw, "model"),
         )
     if typ == "budget":
         _max_tokens = raw.get("max_tokens")
@@ -1201,6 +1290,7 @@ def event_from_dict(raw: dict[str, Any]) -> Event:
             structured_output=dict(so_raw) if isinstance(so_raw, dict) else None,
             structured_error=str(se_raw) if isinstance(se_raw, str) else None,
             total_cost_usd=float(_total_cost) if isinstance(_total_cost, (int, float)) else None,
+            usage_complete=_usage_complete(raw),
         )
     if typ == "error":
         return ErrorEvent(error=dict(raw.get("error", {})))

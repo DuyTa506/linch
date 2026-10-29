@@ -137,3 +137,16 @@ assert module.DeepAgentProfile is not None
         check=False,
     )
     assert completed.returncode == 0, completed.stderr
+
+
+def test_model_call_public_surface_is_limited_to_journal_event() -> None:
+    events = importlib.import_module("linch.events")
+    assert {"ModelCallEvent", "is_model_call_event"} <= set(linch.__all__)
+    assert linch.ModelCallEvent is events.ModelCallEvent
+    assert linch.is_model_call_event is events.is_model_call_event
+    assert not {
+        "ModelCallIntent",
+        "ModelCallReceipt",
+        "AuxiliaryTextResult",
+        "_ModelCallLedger",
+    } & set(linch.__all__)
