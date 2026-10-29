@@ -858,6 +858,7 @@ class _ModelCallLedger:
             recovery = _LedgerRecovery(self.run_id, self._budget_owner_id)
             if state is not None:
                 recovery.load_snapshot(state)
+            recovery.prepare_source_replay(journal)
             for event in journal:
                 recovery.apply(event)
             unknown = {
@@ -900,6 +901,64 @@ class _LedgerRecovery:
         self.journal: list[ModelCallEvent] = []
         self.abandoned_records: dict[str, dict[str, Any]] = {}
         self.projections: dict[str, dict[str, Any]] = {}
+        self._checkpoint_late_deliveries: set[str] = set()
+        self._source_replay_proofs: set[str] = set()
+        self._journal_intents: set[str] = set()
+        self._journal_late_deliveries: set[str] = set()
+
+    def prepare_source_replay(self, journal: Sequence[ModelCallEvent]) -> None:
+        """Prove historical source order independently of a checkpoint's final phase.
+
+        A repeated intent alone cannot rewind a started checkpoint. Its source
+        must precede matching checkpoint-phase records later in the full journal.
+        Encountered journal phases remain monotonic during the forward replay.
+        """
+        from .events import ModelCallEvent
+
+        self._checkpoint_late_deliveries = self.started | self.receipts.keys() | self.abandoned
+        if not self._checkpoint_late_deliveries:
+            return
+        following: dict[str, set[str]] = {}
+        for event in reversed(journal):
+            if not isinstance(event, ModelCallEvent):
+                raise _invalid("accounting journal must contain ModelCallEvent records")
+            event = ModelCallEvent(
+                event.run_id,
+                event.record_kind,
+                event.record,
+                budget_owner_id=event.budget_owner_id,
+                schema_version=event.schema_version,
+            )
+            raw, kind = event.record, event.record_kind
+            if kind == "receipt":
+                receipt = receipt_from_dict(raw)
+                if receipt.delivery_attempt_id in self.receipts and raw == receipt_to_dict(
+                    self.receipts[receipt.delivery_attempt_id]
+                ):
+                    following.setdefault(receipt.delivery_attempt_id, set()).add(kind)
+            elif kind in {"dispatch_started", "abandoned"}:
+                intent = intent_from_dict(raw["intent"] if kind == "abandoned" else raw)
+                delivery_id = intent.delivery_attempt_id
+                if intent != self.intents.get(delivery_id):
+                    continue
+                if kind == "abandoned" and raw["usage_status"] != (
+                    "unknown" if delivery_id in self.started else "not_dispatched"
+                ):
+                    continue
+                following.setdefault(delivery_id, set()).add(kind)
+            elif kind == "projection" and raw["projection_kind"] == "compaction_source":
+                delivery_id = raw["delivery_attempt_id"]
+                required = {
+                    phase
+                    for phase, present in (
+                        ("dispatch_started", delivery_id in self.started),
+                        ("receipt", delivery_id in self.receipts),
+                        ("abandoned", delivery_id in self.abandoned),
+                    )
+                    if present
+                }
+                if required <= following.get(delivery_id, set()):
+                    self._source_replay_proofs.add(raw["projection_id"])
 
     def _owner(self, owner: str | None) -> None:
         if owner is None:
@@ -1022,6 +1081,7 @@ class _LedgerRecovery:
                     ):
                         _validate_projection_receipts(source, {delivery_id: receipt}, self.intents)
                 self.receipts[delivery_id] = receipt
+            self._journal_late_deliveries.add(delivery_id)
         elif kind in ("intent", "dispatch_started", "abandoned"):
             intent = intent_from_dict(raw["intent"] if kind == "abandoned" else raw)
             delivery_id = intent.delivery_attempt_id
@@ -1032,6 +1092,7 @@ class _LedgerRecovery:
                 _match(intent, self.receipts[delivery_id])
             if kind == "intent":
                 self.intents[delivery_id] = intent
+                self._journal_intents.add(delivery_id)
             else:
                 if previous_intent is None:
                     raise _ModelCallError("invalid_state", "journal marker lacks its intent")
@@ -1054,11 +1115,22 @@ class _LedgerRecovery:
                         raise _ModelCallError("conflicting_delivery", "abandonment payload differs")
                     self.abandoned.add(delivery_id)
                     self.abandoned_records[delivery_id] = raw
+                self._journal_late_deliveries.add(delivery_id)
         else:
             _validate_projection_receipts(raw, self.receipts, self.intents)
             key = raw["projection_id"]
             if key in self.projections and self.projections[key] != raw:
                 raise _invalid("conflicting projection payload")
+            if raw["projection_kind"] == "compaction_source" and key not in self.projections:
+                delivery_id = raw["delivery_attempt_id"]
+                if delivery_id in self._journal_late_deliveries or (
+                    delivery_id in self._checkpoint_late_deliveries
+                    and (
+                        delivery_id not in self._journal_intents
+                        or key not in self._source_replay_proofs
+                    )
+                ):
+                    raise _invalid("compaction source must precede its delivery phase")
             _check_projection_conflict(raw, self.projections)
             self.projections[key] = raw
         self.journal.append(event)
