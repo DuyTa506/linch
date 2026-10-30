@@ -16,17 +16,30 @@ Unlike a [workflow](./workflows.md), a deep agent is LLM-driven: the model itsel
 ## `create_deep_agent()`
 
 ```python
-from linch import create_deep_agent
+import os
+from linch import (
+    CompositeFileBackend, PostgresFileBackend, PostgresRunStore,
+    PostgresSessionStore, StateFileBackend, create_deep_agent,
+)
 from linch.providers import OpenAIChatCompletionsProvider
 
+dsn = os.environ["LINCH_POSTGRES_DSN"]
 agent = create_deep_agent(
     model="deepseek-v4-pro",
     provider=OpenAIChatCompletionsProvider(...),  # any provider
-    cwd=".",                           # workspace root
-    durable=True,                      # SQLite session + run + /memories stores
+    cwd=".",
+    durable=True,
+    session_store=PostgresSessionStore(dsn),
+    run_store=PostgresRunStore(dsn),
+    filesystem=CompositeFileBackend(
+        default=StateFileBackend(),
+        routes={"/memories/": PostgresFileBackend(dsn)},
+    ),
     permissions={"mode": "skip-dangerous"},
 )
 session = await agent.session()
+# At application shutdown:
+await agent.close()
 ```
 
 The default `profile="balanced"` is bounded to 64 turns and 1,000,000 tokens,
@@ -36,15 +49,21 @@ retains workers for continue, and enables durable state. Use
 controls. The factory explicitly enables the skills, subagents, and filesystem
 features it assembles; MCP is enabled only when servers are configured.
 
-`durable=True` sets up three persistent stores: `SqliteSessionStore`,
-`SqliteRunStore`, and a `CompositeFileBackend` with a persistent `/memories`
-partition (SQLite-backed). Everything else in the virtual filesystem is
-ephemeral (`StateFileBackend`). With `durable=False` all stores are in-memory.
-Durable checkpoints and session history can be resumed after a process restart;
-an active detached worker task and its in-memory completion notification cannot
-be reconstructed.
+`durable=True` requires explicit `session_store` and `run_store` adapters plus
+an explicit `filesystem` when that feature is enabled. There are no automatic
+persistent stores or implicit environment-based defaults. Missing configuration
+raises `ConfigError`; explicit InMemory adapters are accepted for host-controlled
+tests but provide only process-lifetime state. Use `durable=False` for an
+ephemeral demo. When filesystem features are disabled, no filesystem is required.
 
-Durability is what lets a deep-agent run survive a process restart and resume mid-task — the session state and run checkpoint are read back from SQLite. See [Agent configuration](./agent.md) for the underlying store types, and [Virtual filesystem](./filesystem.md) for how the `/memories` partition is routed inside the `CompositeFileBackend`.
+For restart durability, use the Postgres stores shown above. The composite
+filesystem keeps bulk offloads in ephemeral state and routes `/memories/` to
+Postgres. Configure the local database with the [Quickstart](./quickstart.md#5-keep-state-when-the-process-restarts).
+Session history and checkpoints can then resume after restart; active detached
+worker tasks and completion notifications cannot be reconstructed.
+
+See [Agent configuration](./agent.md) and [Virtual filesystem](./filesystem.md)
+for the underlying store and routing contracts.
 
 ---
 

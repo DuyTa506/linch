@@ -72,10 +72,13 @@ async def test_file_backend_contract_accepts_state_backend() -> None:
     await assert_file_backend_contract(StateFileBackend)
 
 
-async def test_file_backend_contract_accepts_sqlite_backend(tmp_path) -> None:
-    from linch import SqliteFileBackend, assert_file_backend_contract
+async def test_file_backend_contract_accepts_postgres_backend(
+    pg_dsn,
+) -> None:
+    from linch import assert_file_backend_contract
+    from linch.filesystem.postgres import PostgresFileBackend
 
-    await assert_file_backend_contract(lambda: SqliteFileBackend(tmp_path / "files.db"))
+    await assert_file_backend_contract(lambda: PostgresFileBackend(pg_dsn))
 
 
 async def test_file_backend_contract_accepts_disk_backend(tmp_path) -> None:
@@ -96,22 +99,10 @@ async def test_mailbox_contract_accepts_in_memory_mailbox() -> None:
     await assert_mailbox_contract(InMemoryMailbox)
 
 
-async def test_mailbox_contract_accepts_sqlite_mailbox(tmp_path) -> None:
-    from linch import SqliteMailbox, assert_mailbox_contract
-
-    await assert_mailbox_contract(lambda: SqliteMailbox(tmp_path / "mailbox.db"))
-
-
 async def test_schedule_store_contract_accepts_in_memory_store() -> None:
     from linch import InMemoryScheduleStore, assert_schedule_store_contract
 
     await assert_schedule_store_contract(InMemoryScheduleStore)
-
-
-async def test_schedule_store_contract_accepts_sqlite_store(tmp_path) -> None:
-    from linch import SqliteScheduleStore, assert_schedule_store_contract
-
-    await assert_schedule_store_contract(lambda: SqliteScheduleStore(tmp_path / "schedules.db"))
 
 
 def test_contract_helpers_are_public_top_level_api() -> None:

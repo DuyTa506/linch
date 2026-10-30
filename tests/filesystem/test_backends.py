@@ -5,10 +5,10 @@ import pytest
 from linch.filesystem import (
     CompositeFileBackend,
     DiskFileBackend,
-    SqliteFileBackend,
     StateFileBackend,
 )
 from linch.filesystem.backend import normalize_path
+from linch.filesystem.postgres import PostgresFileBackend
 
 
 def test_normalize_path() -> None:
@@ -44,10 +44,12 @@ async def test_state_backend() -> None:
     await _exercise(StateFileBackend())
 
 
-async def test_sqlite_backend() -> None:
-    backend = SqliteFileBackend(":memory:")
+async def test_postgres_backend(
+    pg_dsn,
+) -> None:
+    backend = PostgresFileBackend(pg_dsn)
     await _exercise(backend)
-    backend.close()
+    await backend.close()
 
 
 async def test_disk_backend(tmp_path) -> None:  # type: ignore[no-untyped-def]

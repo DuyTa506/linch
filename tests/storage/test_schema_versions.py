@@ -2,76 +2,11 @@
 
 from __future__ import annotations
 
-import sqlite3
 from importlib import import_module
 
 import pytest
 
 from linch._wire import UnsupportedWireVersionError
-
-_SQLITE = [
-    ("linch.run_store", "SqliteRunStore"),
-    ("linch.sessions.sqlite", "SqliteSessionStore"),
-    ("linch.filesystem.sqlite", "SqliteFileBackend"),
-    ("linch.coordination.mailbox.sqlite", "SqliteMailbox"),
-    ("linch.coordination.scheduling.sqlite", "SqliteScheduleStore"),
-]
-
-
-@pytest.fixture(params=_SQLITE, ids=[name for _, name in _SQLITE])
-def sqlite_type(request):
-    module, name = request.param
-    return getattr(import_module(module), name)
-
-
-async def test_sqlite_fresh_and_reopen_current_schema(tmp_path, sqlite_type):
-    path = tmp_path / "store.db"
-    for _ in range(2):
-        store = sqlite_type(path)
-        try:
-            assert (
-                await store._exec.run(
-                    lambda conn: conn.execute("pragma user_version").fetchone()[0]
-                )
-                == 3
-            )
-        finally:
-            await store._exec.close()
-
-
-@pytest.mark.parametrize("version", [0, 1, 2, 4, 999])
-async def test_sqlite_rejects_existing_incompatible_schema_unchanged(
-    tmp_path, sqlite_type, version
-):
-    path = tmp_path / "store.db"
-    with sqlite3.connect(path) as conn:
-        conn.execute("create table old_state (value text)")
-        conn.execute("insert into old_state values ('keep')")
-        conn.execute(f"pragma user_version={version}")
-        before = conn.execute("select name, sql from sqlite_master order by name").fetchall()
-    store = sqlite_type(path)
-    try:
-        with pytest.raises(UnsupportedWireVersionError, match="start a new run"):
-            await store._exec.run(lambda conn: None)
-    finally:
-        await store._exec.close()
-    with sqlite3.connect(path) as conn:
-        assert (
-            conn.execute("select name, sql from sqlite_master order by name").fetchall() == before
-        )
-        assert conn.execute("pragma user_version").fetchone()[0] == version
-        assert conn.execute("select value from old_state").fetchone()[0] == "keep"
-
-
-async def test_sqlite_current_file_can_host_all_builtin_stores(tmp_path):
-    path = tmp_path / "shared.db"
-    for module, name in _SQLITE:
-        store = getattr(import_module(module), name)(path)
-        try:
-            await store._exec.run(lambda conn: None)
-        finally:
-            await store._exec.close()
-
 
 _PG = [
     (
@@ -217,30 +152,6 @@ async def test_postgres_rejects_tampered_metadata_on_reopen(pg_schema, version):
     finally:
         await store.close()
     assert await conn.fetchval("SELECT id FROM runs") == "kept"
-
-
-@pytest.mark.parametrize(
-    "ddl",
-    ["create view old_view as select 'keep' as value", "create table sqliteXstate (value text)"],
-)
-async def test_sqlite_unversioned_schema_objects_are_not_a_fresh_database(tmp_path, ddl):
-    from linch.run_store import SqliteRunStore
-
-    path = tmp_path / "existing.db"
-    with sqlite3.connect(path) as conn:
-        conn.execute(ddl)
-        before = conn.execute("select name, sql from sqlite_master order by name").fetchall()
-    store = SqliteRunStore(path)
-    try:
-        with pytest.raises(UnsupportedWireVersionError):
-            await store.load_run("probe")
-    finally:
-        await store.close()
-    with sqlite3.connect(path) as conn:
-        assert conn.execute("pragma user_version").fetchone()[0] == 0
-        assert (
-            conn.execute("select name, sql from sqlite_master order by name").fetchall() == before
-        )
 
 
 async def test_postgres_rejects_present_null_metadata_without_owned_tables(pg_schema):

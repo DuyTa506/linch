@@ -60,13 +60,14 @@ agent = Agent(
 )
 
 # Ephemeral scratch + persistent /memories/ across sessions
-from linch.filesystem import CompositeFileBackend, SqliteFileBackend, StateFileBackend
+import os
+from linch import CompositeFileBackend, PostgresFileBackend, StateFileBackend
 agent = Agent(
     ...,
     features=FeatureFlags(filesystem=True),
     filesystem=CompositeFileBackend(
         default=StateFileBackend(),
-        routes={"/memories/": SqliteFileBackend(".linch/memories.db")},
+        routes={"/memories/": PostgresFileBackend(os.environ["LINCH_POSTGRES_DSN"])},
     ),
 )
 
@@ -85,16 +86,16 @@ The four backends differ only in where they persist and how they scope files:
 - **`DiskFileBackend(root=...)`** — real files under a sandboxed root (default
   `.linch/offload`, gitignored). Persistent and inspectable on disk, so you can
   open offloaded payloads in your editor while debugging.
-- **`SqliteFileBackend(path)`** — persistent across sessions in a SQLite file.
+- **`PostgresFileBackend(dsn)`** — persistent across sessions in Postgres.
   Use it when the model should read back files from earlier runs.
 - **`CompositeFileBackend(default=..., routes=...)`** — routes paths by prefix to
   different backends. The common pattern is ephemeral scratch on `StateFileBackend`
-  with a durable `/memories/` partition on `SqliteFileBackend`, so distilled notes
-  survive while bulk offloads stay cheap. The deep-agent preset wires exactly this
-  `/memories/` partition for you — see [./deep-agent.md](./deep-agent.md).
+  with a durable `/memories/` partition on `PostgresFileBackend`, so distilled notes
+  survive while bulk offloads stay cheap. Supply this
+  `/memories/` partition explicitly to the deep-agent preset — see [./deep-agent.md](./deep-agent.md).
 
-`DiskFileBackend` and `SqliteFileBackend` perform their I/O off the event loop on
-a bounded daemon thread, so persistence never blocks the agent loop.
+`DiskFileBackend` offloads disk I/O onto a bounded daemon thread;
+`PostgresFileBackend` uses asyncpg. Both keep I/O off the agent loop thread.
 
 ---
 

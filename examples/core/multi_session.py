@@ -1,7 +1,8 @@
 """Multi-session patterns — one Agent, many users / conversations.
 
 Run:
-    OPENAI_API_KEY=sk-... python examples/06_multi_session.py
+    Set OPENAI_API_KEY and LINCH_POSTGRES_DSN, then:
+    PYTHONPATH=src python examples/core/multi_session.py
 
 Demonstrates:
   1. Basic multi-user: one Agent, one session per user
@@ -23,11 +24,11 @@ from __future__ import annotations
 
 import asyncio
 import os
-from pathlib import Path
+from uuid import uuid4
 
 from linch import Agent, RunOptions
 from linch.config import FeatureFlags, SystemPromptConfig
-from linch.sessions import InMemorySessionStore, SqliteSessionStore
+from linch.sessions import InMemorySessionStore, PostgresSessionStore
 from linch.tools.base import ToolContext, ToolResult
 from linch.tools.registry import empty_tools
 
@@ -81,19 +82,19 @@ async def demo_multi_user() -> None:
             print(f"  Bob  → {event.final_text[:80]}")
 
 
-# ── 2. Persistent sessions (SQLite) ──────────────────────────────────────────
+# ── 2. Persistent sessions (Postgres) ──────────────────────────────────────────
 #
-# Use SqliteSessionStore so history survives process restarts.
+# Use PostgresSessionStore so history survives process restarts.
 # Pass the same session ID to resume an existing conversation.
 
 
-async def demo_persistent_sessions(db_path: Path) -> None:
-    print("\n── 2. Persistent sessions with SQLite ──")
+async def demo_persistent_sessions(dsn: str) -> None:
+    print("\n── 2. Persistent sessions with Postgres ──")
 
     agent = Agent(
         model=MODEL,
         openai_api_key=API_KEY,
-        session_store=SqliteSessionStore(db_path),
+        session_store=PostgresSessionStore(dsn),
         features=FeatureFlags(skills=False, subagents=False, mcp=False),
         system_prompt_config=SystemPromptConfig(
             replace_defaults=True,
@@ -102,20 +103,24 @@ async def demo_persistent_sessions(db_path: Path) -> None:
         tools=empty_tools(),
     )
 
-    SESSION_ID = "persistent-demo-001"
+    SESSION_ID = f"persistent-demo-{uuid4().hex}"
 
     # First "process" — create session and save a fact
-    session_a = await agent.session(id=SESSION_ID)
-    async for event in session_a.run("Remember: my favourite colour is purple."):
-        if event.type == "result":
-            print(f"  Turn 1: {event.final_text[:80]}")
+    try:
+        session_a = await agent.session(id=SESSION_ID)
+        async for event in session_a.run("Remember: my favourite colour is purple."):
+            if event.type == "result":
+                print(f"  Turn 1: {event.final_text[:80]}")
+
+    finally:
+        await agent.close()
 
     # Second "process" — load the same session ID and ask about the fact
     # (In a real app, this would be a new HTTP request or process restart)
     agent2 = Agent(
         model=MODEL,
         openai_api_key=API_KEY,
-        session_store=SqliteSessionStore(db_path),
+        session_store=PostgresSessionStore(dsn),
         features=FeatureFlags(skills=False, subagents=False, mcp=False),
         system_prompt_config=SystemPromptConfig(
             replace_defaults=True,
@@ -123,13 +128,14 @@ async def demo_persistent_sessions(db_path: Path) -> None:
         ),
         tools=empty_tools(),
     )
-    session_b = await agent2.session(id=SESSION_ID)
-    async for event in session_b.run("What is my favourite colour?"):
-        if event.type == "result":
-            print(f"  Turn 2 (resumed): {event.final_text[:80]}")
+    try:
+        session_b = await agent2.session(id=SESSION_ID)
+        async for event in session_b.run("What is my favourite colour?"):
+            if event.type == "result":
+                print(f"  Turn 2 (resumed): {event.final_text[:80]}")
 
-    await agent.close()
-    await agent2.close()
+    finally:
+        await agent2.close()
 
 
 # ── 3. Concurrent sessions ────────────────────────────────────────────────────
@@ -294,7 +300,7 @@ def get_agent() -> Agent:
         _AGENT = Agent(
             model=MODEL,
             openai_api_key=API_KEY,
-            session_store=SqliteSessionStore(Path("/tmp/demo_sessions.db")),
+            session_store=InMemorySessionStore(),
             features=FeatureFlags(skills=False, subagents=False, mcp=False),
             tools=empty_tools(),
             system_prompt_config=SystemPromptConfig(
@@ -356,7 +362,7 @@ async def main() -> None:
         print("Set OPENAI_API_KEY to run this example.")
         print("Showing patterns without live calls:")
         print("  1. multi_user     – one Agent, N sessions")
-        print("  2. persistent     – SqliteSessionStore, resume by ID")
+        print("  2. persistent     – PostgresSessionStore, resume by ID")
         print("  3. concurrent     – asyncio.gather across sessions")
         print("  4. per-run deps   – RunOptions(deps=tenant_db)")
         print("  5. metadata       – session.meta + update_meta()")
@@ -369,10 +375,7 @@ async def main() -> None:
     await demo_session_metadata()
     await demo_web_handler()
 
-    db = Path("/tmp/persistent_demo.db")
-    await demo_persistent_sessions(db)
-    if db.exists():
-        db.unlink()
+    await demo_persistent_sessions(os.environ["LINCH_POSTGRES_DSN"])
 
 
 if __name__ == "__main__":

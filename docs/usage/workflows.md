@@ -13,7 +13,8 @@ Use a directed workflow when you already know the shape of the orchestration (fa
 You pass an async function that receives a single `wf` context. Everything the function `await`s on `wf` becomes a step in the run; the function's return value becomes the workflow result.
 
 ```python
-from linch import Agent, RunBudget, SqliteRunStore
+import os
+from linch import Agent, RunBudget, PostgresRunStore
 
 async def review(wf):
     await wf.phase("Find")
@@ -28,7 +29,7 @@ async def review(wf):
     )
     return verdicts
 
-agent = Agent(model="gpt-5", run_store=SqliteRunStore("runs.db"))
+agent = Agent(model="gpt-5", run_store=PostgresRunStore(os.environ["LINCH_POSTGRES_DSN"]))
 result = await agent.run_workflow(
     review,
     budget=RunBudget(max_tokens=500_000),   # shared across every wf.agent child

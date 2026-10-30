@@ -33,19 +33,13 @@ from linch.events import (  # noqa: E402
     SystemEvent,
     ToolCallEndEvent,
 )
-from linch.run_store import SqliteRunStore, checkpoint_to_dict  # noqa: E402
-from linch.sessions import InMemorySessionStore, SqliteSessionStore  # noqa: E402
+from linch.run_store import checkpoint_to_dict  # noqa: E402
+from linch.sessions import InMemorySessionStore  # noqa: E402
 from linch.tools import ToolContext, ToolRegistry, ToolResult  # noqa: E402
 from linch.types import Usage  # noqa: E402
 
-# These are fixed-runner gates from docs/ROADMAP.md. Cases without a stable
-# absolute target still participate in --check through their correctness checks.
-DEFAULT_THRESHOLDS_MS: dict[str, float] = {
-    "sqlite_trivial_operation": 10.0,
-    "durable_sqlite_8_read_tools": 25.0,
-    "durable_sqlite_32_read_tools": 70.0,
-    "run_store_50_event_writes": 250.0,
-}
+# Memory cases validate correctness; no database-specific latency baseline applies.
+DEFAULT_THRESHOLDS_MS: dict[str, float] = {}
 
 
 class DeltaProvider:
@@ -224,27 +218,20 @@ def _tool_case(
 
 
 def build_cases(workdir: Path) -> dict[str, BenchmarkCase]:
-    sqlite_counter = 0
+    operation_store = InMemoryRunStore()
+    operation_run_id: str | None = None
+    event_write_store = InMemoryRunStore()
 
-    def sqlite_store() -> SqliteRunStore:
-        nonlocal sqlite_counter
-        sqlite_counter += 1
-        return SqliteRunStore(workdir / f"durable-{sqlite_counter}.db")
-
-    sqlite_operation_store = SqliteRunStore(workdir / "trivial.db")
-    sqlite_operation_run_id: str | None = None
-    event_write_store = SqliteRunStore(workdir / "event-writes.db")
-
-    async def sqlite_operation() -> Sample:
-        nonlocal sqlite_operation_run_id
-        if sqlite_operation_run_id is None:
-            run = await sqlite_operation_store.create_run("benchmark-session")
-            sqlite_operation_run_id = run.id
+    async def memory_operation() -> Sample:
+        nonlocal operation_run_id
+        if operation_run_id is None:
+            run = await operation_store.create_run("benchmark-session")
+            operation_run_id = run.id
         started = time.perf_counter()
-        loaded = await sqlite_operation_store.load_run(sqlite_operation_run_id)
+        loaded = await operation_store.load_run(operation_run_id)
         elapsed_ms = (time.perf_counter() - started) * 1000
-        if loaded is None or loaded.id != sqlite_operation_run_id:
-            raise AssertionError("SQLite trivial operation returned the wrong run")
+        if loaded is None or loaded.id != operation_run_id:
+            raise AssertionError("Memory operation returned the wrong run")
         return Sample(elapsed_ms=elapsed_ms)
 
     async def session_churn() -> Sample:
@@ -293,15 +280,15 @@ def build_cases(workdir: Path) -> dict[str, BenchmarkCase]:
         elapsed_ms = (time.perf_counter() - started) * 1000
 
         if sequences != list(range(1, 51)):
-            raise AssertionError(f"SQLite event sequences were not contiguous: {sequences!r}")
+            raise AssertionError(f"Memory event sequences were not contiguous: {sequences!r}")
         persisted = await event_write_store.load_events(run.id)
         persisted_models = [
             row.event.model if isinstance(row.event, SystemEvent) else None for row in persisted
         ]
         if [row.seq for row in persisted] != sequences:
-            raise AssertionError("SQLite persisted event sequences in the wrong order")
+            raise AssertionError("Memory persisted event sequences in the wrong order")
         if persisted_models != [f"write-{index}" for index in range(50)]:
-            raise AssertionError("SQLite persisted event payloads in the wrong order")
+            raise AssertionError("Memory persisted event payloads in the wrong order")
         return Sample(elapsed_ms=elapsed_ms, event_count=len(persisted))
 
     return {
@@ -310,13 +297,12 @@ def build_cases(workdir: Path) -> dict[str, BenchmarkCase]:
             _no_tool_case(),
             _tool_case(name="parallel_8_read_tools", count=8),
             _tool_case(
-                name="durable_memory_8_read_tools",
+                name="checkpoint_memory_8_read_tools",
                 count=8,
                 run_store_factory=InMemoryRunStore,
             ),
-            _tool_case(name="durable_sqlite_8_read_tools", count=8, run_store_factory=sqlite_store),
             _tool_case(
-                name="durable_sqlite_32_read_tools", count=32, run_store_factory=sqlite_store
+                name="checkpoint_memory_32_read_tools", count=32, run_store_factory=InMemoryRunStore
             ),
             _tool_case(
                 name="scheduler_maximal_16_read_tools",
@@ -325,7 +311,7 @@ def build_cases(workdir: Path) -> dict[str, BenchmarkCase]:
             ),
             BenchmarkCase("session_churn_25", session_churn),
             BenchmarkCase(
-                "sqlite_trivial_operation", sqlite_operation, close=sqlite_operation_store.close
+                "memory_trivial_operation", memory_operation, close=operation_store.close
             ),
             BenchmarkCase("run_store_50_event_writes", event_writes, close=event_write_store.close),
         )
@@ -428,7 +414,7 @@ class ScaleCase:
 def build_scale_cases() -> dict[str, ScaleCase]:
     return {
         case.name: case
-        for backend in ("memory", "sqlite")
+        for backend in ("memory",)
         for sessions, turns in ((200, 4), (1000, 4), (1, 50))
         for case in [ScaleCase(f"scale_{backend}_{sessions}x{turns}", backend, sessions, turns)]
     }
@@ -705,19 +691,13 @@ async def run_scale_case(
     *,
     progress_path: Path | None = None,
 ) -> dict[str, Any]:
-    if case.backend not in {"memory", "sqlite"} or case.sessions < 1 or case.turns < 4:
-        raise ValueError("scale cases need memory/sqlite, positive sessions, and at least 4 turns")
+    if case.backend != "memory" or case.sessions < 1 or case.turns < 4:
+        raise ValueError("scale cases need memory, positive sessions, and at least 4 turns")
     baseline_rss, initial_hwm = _rss_current(), _rss_high_water()
     workdir.mkdir(parents=True, exist_ok=True)
     metrics = ScaleStoreMetrics()
-    session_store = (
-        InMemorySessionStore()
-        if case.backend == "memory"
-        else SqliteSessionStore(workdir / "sessions.db")
-    )
-    run_store = (
-        InMemoryRunStore() if case.backend == "memory" else SqliteRunStore(workdir / "runs.db")
-    )
+    session_store = InMemorySessionStore()
+    run_store = InMemoryRunStore()
     active: dict[str, int] = {}
     overlaps: set[str] = set()
     tools = ToolRegistry()

@@ -286,14 +286,16 @@ async def test_failed_partial_fork_cleanup_is_logged(caplog: Any) -> None:
     await agent.close()
 
 
-async def test_sqlite_fork_survives_restart_without_snapshot_or_tasks(tmp_path: Any) -> None:
+async def test_postgres_fork_survives_restart_without_snapshot_or_tasks(
+    pg_dsn,
+) -> None:
     from linch import Agent
-    from linch.sessions import ProviderViewSnapshot, SqliteSessionStore
+    from linch.sessions import ProviderViewSnapshot
     from linch.sessions.fork import fork_session
+    from linch.sessions.postgres import PostgresSessionStore
     from linch.types import Message, TextBlock, message_to_dict
 
-    path = tmp_path / "sessions.db"
-    first_store = SqliteSessionStore(path)
+    first_store = PostgresSessionStore(pg_dsn)
     first_agent = Agent(model="test", provider=_provider(), session_store=first_store, cwd=".")
     source = await _seed(first_agent, first_store)
     await first_store.save_provider_snapshot(
@@ -307,13 +309,13 @@ async def test_sqlite_fork_survives_restart_without_snapshot_or_tasks(tmp_path: 
         message_to_dict(row.message) for row in await first_store.load_messages("source")
     ]
 
-    forked = await fork_session(first_agent, source, before_seq=5, id="sqlite-fork")
+    forked = await fork_session(first_agent, source, before_seq=5, id="postgres-fork")
     assert [record.name for record in forked.invoked_skills] == ["review"]
     await first_agent.close()
 
-    second_store = SqliteSessionStore(path)
+    second_store = PostgresSessionStore(pg_dsn)
     second_agent = Agent(model="test", provider=_provider(), session_store=second_store, cwd=".")
-    reopened = await second_agent.session(id="sqlite-fork")
+    reopened = await second_agent.session(id="postgres-fork")
 
     assert len(reopened.full_history) == 4
     assert [record.name for record in reopened.invoked_skills] == ["review"]

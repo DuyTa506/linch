@@ -6,7 +6,7 @@ workers can keep the interpreter alive at teardown in the managed test sandbox.
 
 ``run_blocking`` starts a daemon worker and resumes the awaiter via a future
 woken with ``loop.call_soon_threadsafe``.  A dormant event-loop timer guards
-against runtimes where the selector wakeup is lost after SQLite work in the
+against runtimes where the selector wakeup is lost after blocking work in the
 daemon thread; the normal path directly awaits the future and cancels the timer
 before it fires.
 """
@@ -90,7 +90,7 @@ async def run_blocking(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
 
         # If the awaiter is cancelled, the daemon thread still runs to completion;
         # its later call_soon_threadsafe is a no-op on the cancelled future. Some
-        # managed runtimes have lost the selector wake byte after SQLite work.
+        # managed runtimes have lost the selector wake byte after blocking work.
         # Keeping a short timer registered gives the selector a bounded fallback
         # deadline without wrapping every result in asyncio.wait(timeout=...),
         # which imposed the full polling interval on otherwise completed calls.

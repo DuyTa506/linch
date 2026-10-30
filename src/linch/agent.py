@@ -1366,7 +1366,7 @@ class Agent:
                 from .filesystem.backend import StateFileBackend
 
                 # If the caller passed a backend, use it as the session-level store.
-                # CompositeFileBackend and SqliteFileBackend are shared across sessions
+                # Explicit filesystem backends are shared across sessions
                 # by design; StateFileBackend is session-local by default.
                 session.filesystem = (
                     self._filesystem_default

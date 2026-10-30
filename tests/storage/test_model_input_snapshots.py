@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sqlite3
 from dataclasses import FrozenInstanceError, replace
 
 import pytest
@@ -11,12 +10,12 @@ from linch.run_store import (
     InMemoryRunStore,
     ModelInputSnapshotError,
     RunCheckpoint,
-    SqliteRunStore,
     checkpoint_from_dict,
     checkpoint_to_dict,
     create_model_input_snapshot,
     decode_model_input_snapshot,
 )
+from linch.run_stores.postgres import PostgresRunStore
 from linch.types import (
     ImageBlock,
     Message,
@@ -121,7 +120,6 @@ def test_snapshot_codec_round_trips_every_request_field_and_rebinds_signal() -> 
 
 
 def test_snapshot_codec_rejects_corruption_and_incompatible_version() -> None:
-    from linch._wire import UnsupportedWireVersionError
 
     snapshot = create_model_input_snapshot("run-1", 1, _request())
 
@@ -188,7 +186,7 @@ def test_checkpoint_snapshot_fields_are_always_written_and_round_trip() -> None:
     assert restored.model_input_snapshot_id == "snapshot-2"
 
 
-async def _exercise_snapshot_store(store: InMemoryRunStore | SqliteRunStore) -> None:
+async def _exercise_snapshot_store(store: InMemoryRunStore | PostgresRunStore) -> None:
     await store.create_run("session-1", id="run-1")
     first = await store.save("run-1", 1, _request(signal=object()))
     second = await store.save("run-1", 2, _request(signal=object()))
@@ -212,14 +210,15 @@ async def test_in_memory_model_input_snapshot_store() -> None:
     await _exercise_snapshot_store(InMemoryRunStore())
 
 
-async def test_sqlite_model_input_snapshot_store_persists_across_restart(tmp_path) -> None:
-    path = tmp_path / "runs.db"
-    store = SqliteRunStore(path)
+async def test_postgres_model_input_snapshot_store_persists_across_restart(
+    pg_dsn,
+) -> None:
+    store = PostgresRunStore(pg_dsn)
     await store.create_run("session-1", id="run-persist")
     snapshot = await store.save("run-persist", 4, _request(signal=object()))
     await store.close()
 
-    reopened = SqliteRunStore(path)
+    reopened = PostgresRunStore(pg_dsn)
     try:
         loaded = await reopened.load(snapshot.id)
         assert loaded == snapshot
@@ -229,80 +228,40 @@ async def test_sqlite_model_input_snapshot_store_persists_across_restart(tmp_pat
         await reopened.close()
 
 
-async def test_sqlite_model_input_snapshot_store_contract(tmp_path) -> None:
-    store = SqliteRunStore(tmp_path / "contract.db")
+async def test_postgres_model_input_snapshot_store_contract(
+    pg_dsn,
+) -> None:
+    store = PostgresRunStore(pg_dsn)
     try:
         await _exercise_snapshot_store(store)
     finally:
         await store.close()
 
 
-async def test_sqlite_load_fails_closed_for_corrupt_snapshot(tmp_path) -> None:
-    path = tmp_path / "corrupt.db"
-    store = SqliteRunStore(path)
+async def test_postgres_load_fails_closed_for_corrupt_snapshot(
+    pg_dsn,
+) -> None:
+    store = PostgresRunStore(pg_dsn)
     await store.create_run("session-1", id="run-1")
     snapshot = await store.save("run-1", 1, _request())
     await store.close()
 
-    conn = sqlite3.connect(path)
-    conn.execute(
-        "update model_input_snapshots set request_json = '{}' where id = ?",
-        (snapshot.id,),
-    )
-    conn.commit()
-    conn.close()
+    import asyncpg
 
-    reopened = SqliteRunStore(path)
+    conn = await asyncpg.connect(pg_dsn)
+    try:
+        await conn.execute(
+            "UPDATE model_input_snapshots SET request_json = '{}' WHERE id = $1", snapshot.id
+        )
+    finally:
+        await conn.close()
+
+    reopened = PostgresRunStore(pg_dsn)
     try:
         with pytest.raises(ModelInputSnapshotError, match="integrity"):
             await reopened.load(snapshot.id)
     finally:
         await reopened.close()
-
-
-async def test_sqlite_rejects_pre_snapshot_database(tmp_path) -> None:
-    path = tmp_path / "legacy.db"
-    conn = sqlite3.connect(path)
-    conn.executescript(
-        """
-        create table runs (
-          id text primary key,
-          session_id text not null,
-          status text not null,
-          created_at text not null,
-          updated_at text not null,
-          checkpoint text,
-          meta text not null
-        );
-        create table run_events (
-          run_id text not null,
-          seq integer not null,
-          appended_at text not null,
-          event text not null,
-          primary key (run_id, seq)
-        );
-        insert into runs values (
-          'legacy-run', 'legacy-session', 'running', 'before', 'before', null, '{}'
-        );
-        """
-    )
-    conn.commit()
-    conn.close()
-
-    store = SqliteRunStore(path)
-    try:
-        with pytest.raises(UnsupportedWireVersionError):
-            await store.load_run("legacy-run")
-        with sqlite3.connect(path) as conn:
-            assert conn.execute("select id from runs").fetchone()[0] == "legacy-run"
-            assert (
-                conn.execute(
-                    "select name from sqlite_master where name='model_input_snapshots'"
-                ).fetchone()
-                is None
-            )
-    finally:
-        await store.close()
 
 
 def test_snapshot_codec_preserves_golden_bytes_and_integrity_hash() -> None:

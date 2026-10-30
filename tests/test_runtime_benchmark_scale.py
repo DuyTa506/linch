@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import sqlite3
 import time
 from types import SimpleNamespace
 
@@ -20,10 +19,7 @@ def test_scale_suite_is_explicit_and_separate_from_default_cases(tmp_path):
     assert {(case.backend, case.sessions, case.turns) for case in cases.values()} == {
         ("memory", 200, 4),
         ("memory", 1000, 4),
-        ("sqlite", 200, 4),
-        ("sqlite", 1000, 4),
         ("memory", 1, 50),
-        ("sqlite", 1, 50),
     }
     assert not set(cases).intersection(benchmark.build_cases(tmp_path))
 
@@ -52,7 +48,7 @@ async def test_scale_provider_derives_each_session_turn_from_request_history():
     assert (await response(3))[-2] == {"type": "text_delta", "text": "scale:ok"}
 
 
-@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+@pytest.mark.parametrize("backend", ["memory"])
 @pytest.mark.asyncio
 async def test_scale_smoke_uses_one_shared_store_and_validates_five_runs(tmp_path, backend):
     benchmark = _load_script()
@@ -89,30 +85,26 @@ async def test_scale_smoke_uses_one_shared_store_and_validates_five_runs(tmp_pat
     assert result["rss"]["peak_delta_bytes_per_session"] >= 0
     assert result["rss"]["initial_high_water_bytes"] > 0
     assert json.loads(progress.read_text())["completed"] == 5
-    if backend == "sqlite":
-        with sqlite3.connect(tmp_path / backend / "sessions.db") as connection:
-            assert connection.execute("select count(*) from sessions").fetchone()[0] == 5
-        with sqlite3.connect(tmp_path / backend / "runs.db") as connection:
-            assert connection.execute("select count(*) from runs").fetchone()[0] == 5
 
 
 @pytest.mark.asyncio
-async def test_measured_store_preserves_capabilities_and_counts_terminal_payloads(tmp_path):
+async def test_measured_store_preserves_capabilities_and_counts_terminal_payloads(pg_dsn):
     benchmark = _load_script()
-    from linch.run_store import RunCheckpoint, SqliteRunStore
+    import asyncpg
+
+    from linch import PostgresRunStore, RunCheckpoint
     from linch.types import Message, ProviderRequest, Usage
 
     metrics = benchmark.ScaleStoreMetrics()
-    inner = SqliteRunStore(tmp_path / "runs.db")
+    inner = PostgresRunStore(pg_dsn)
+    connection = await asyncpg.connect(pg_dsn)
     store = benchmark.MeasuredStore(inner, "run", metrics)
     try:
         run = await store.create_run("s")
         checkpoint = RunCheckpoint("user_appended", "héllo", 0, Usage())
         await store.save_checkpoint(run.id, checkpoint)
-        with sqlite3.connect(tmp_path / "runs.db") as connection:
-            first_bytes = len(
-                connection.execute("select checkpoint from runs").fetchone()[0].encode("utf-8")
-            )
+        raw = await connection.fetchval("SELECT checkpoint FROM runs WHERE id = $1", run.id)
+        first_bytes = len(raw.encode("utf-8"))
         request = ProviderRequest(
             model="gpt-5", system=[], messages=[Message("user", [])], tools=[]
         )
@@ -121,18 +113,12 @@ async def test_measured_store_preserves_capabilities_and_counts_terminal_payload
         await store.delete(snapshot.id)
         assert await store.prune(run.id) == 0
         await store.mark_completed(run.id, checkpoint)
-        with sqlite3.connect(tmp_path / "runs.db") as connection:
-            terminal_bytes = len(
-                connection.execute("select checkpoint from runs").fetchone()[0].encode("utf-8")
-            )
+        raw = await connection.fetchval("SELECT checkpoint FROM runs WHERE id = $1", run.id)
+        terminal_bytes = len(raw.encode("utf-8"))
         other = await store.create_run("failed")
         await store.mark_failed(other.id, checkpoint)
-        with sqlite3.connect(tmp_path / "runs.db") as connection:
-            failed_bytes = len(
-                connection.execute("select checkpoint from runs where id = ?", (other.id,))
-                .fetchone()[0]
-                .encode("utf-8")
-            )
+        raw = await connection.fetchval("SELECT checkpoint FROM runs WHERE id = $1", other.id)
+        failed_bytes = len(raw.encode("utf-8"))
         await store.mark_failed(other.id)
         with pytest.raises(AttributeError):
             _ = store.not_a_capability
@@ -140,6 +126,7 @@ async def test_measured_store_preserves_capabilities_and_counts_terminal_payload
             await store.save_checkpoint("missing", checkpoint)
     finally:
         await store.close()
+        await connection.close()
 
     writes, payloads = metrics.summaries(turns=2)
     assert writes["by_store"]["run"] == {

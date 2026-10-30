@@ -20,7 +20,8 @@ from linch.events import (
     is_ignorable_event,
 )
 from linch.reports import build_run_report
-from linch.run_store import InMemoryRunStore, SqliteRunStore
+from linch.run_store import InMemoryRunStore
+from linch.run_stores.postgres import PostgresRunStore
 from linch.types import Message
 
 
@@ -174,7 +175,7 @@ def test_ignorable_event_keeps_report_timeline_wire_type() -> None:
     ]
 
 
-async def _assert_store_round_trip(store: InMemoryRunStore | SqliteRunStore) -> None:
+async def _assert_store_round_trip(store: InMemoryRunStore | PostgresRunStore) -> None:
     await store.create_run("session-1", id="run-1")
     raw = {"type": "future_event", "ignorable": True, "payload": {"k": 1}}
     assert await store.append_event("run-1", event_from_dict(raw)) == 1
@@ -191,8 +192,10 @@ async def test_ignorable_event_round_trips_through_in_memory_store() -> None:
     await _assert_store_round_trip(InMemoryRunStore())
 
 
-async def test_ignorable_event_round_trips_through_sqlite_store(tmp_path) -> None:
-    store = SqliteRunStore(tmp_path / "runs.db")
+async def test_ignorable_event_round_trips_through_postgres_store(
+    pg_dsn,
+) -> None:
+    store = PostgresRunStore(pg_dsn)
     try:
         await _assert_store_round_trip(store)
     finally:

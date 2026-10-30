@@ -58,12 +58,12 @@ fired = await loop.tick()    # returns the schedules that fired this tick
 
 `Schedule` takes exactly one of `cron` / `interval_s`; the cron expression is
 validated at creation, so an invalid expression is rejected before it can fire.
-`SqliteScheduleStore` makes schedules durable across restarts and supports atomic
-due claims: if two `SchedulerLoop`s share the same SQLite database, only one loop
-claims and fires a due schedule for a given tick. A `ScheduleEvent` is emitted on
-each fire for observers.
+The built-in `InMemoryScheduleStore` lives only for the current process. It
+supports atomic due claims within that process; it does not survive restart or
+coordinate separate processes. A `ScheduleEvent` is emitted on each fire.
+Durable scheduling is planned in WP6 with PgQueuer.
 
-With `DurabilityOptions(durable_inbox=True)`, the loop uses the optional
+For host-supplied adapters, `DurabilityOptions(durable_inbox=True)` uses the optional
 `LeasedScheduleStore` occurrence outbox: materialization and `next_run`
 advancement are atomic, delivery uses the stable occurrence ID, and an
 unacknowledged occurrence is reclaimed after its lease. Removing a schedule
@@ -123,22 +123,13 @@ c.resolve(MailboxMessage(sender="lead", recipient="alice",
 assert c.is_resolved("req-001")                      # requester checks on a later turn
 ```
 
-`InMemoryMailbox` is in-process (one agent, many workers). For cross-process teams
-or restart survival, use `SqliteMailbox`:
+`InMemoryMailbox` is the only built-in mailbox. Messages live for the current
+process (one agent, many workers), without restart survival or cross-process
+delivery. Mailbox functionality moves to `linch.ext` in WP10. Hosts needing
+external infrastructure can implement the `Mailbox` protocol — see
+[Extending](./extending.md).
 
-```python
-from linch import Agent, SqliteMailbox
-
-box = SqliteMailbox("coordination.db")
-agent = Agent(model="gpt-5", mailbox=box)
-```
-
-`SqliteMailbox` preserves FIFO order per recipient and makes `drain()` destructive
-inside one SQLite transaction, so two workers draining the same inbox do not both
-receive the same message. For Redis/SQS or other infrastructure, implement the
-same `Mailbox` protocol — see [Extending](./extending.md).
-
-Durable inbox mode uses the additive `ClaimableMailbox` lease protocol instead
+Host adapters supporting durable inbox mode use the optional `ClaimableMailbox` lease protocol instead
 of destructive drain: claim → enqueue by `mailbox:<message-id>` → acknowledge.
 A crash before enqueue permits reclaim; a crash after enqueue is deduplicated by
 the session inbox receipt. Legacy `send()`/`drain()` behavior remains unchanged.

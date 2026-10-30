@@ -255,13 +255,16 @@ report = build_run_report(events)
 Use `to_markdown()` for a human-readable dump (logs, PR comments) and
 `to_dict()` when you want to inspect or serialize specific facets.
 
-For a quick local report from a durable SQLite run store, use the bundled script:
+For a quick local report from a durable Postgres run store, use the bundled script:
 
 ```bash
-python scripts/run_report.py --runs-db .linch/runs.db <run_id>
-python scripts/run_report.py --runs-db .linch/runs.db --format markdown <run_id>
-python scripts/run_report.py --runs-db .linch/runs.db --format json <run_id>
+PYTHONPATH=src python scripts/run_report.py --dsn "$LINCH_POSTGRES_DSN" <run_id>
+PYTHONPATH=src python scripts/run_report.py --dsn "$LINCH_POSTGRES_DSN" --format markdown <run_id>
+PYTHONPATH=src python scripts/run_report.py --dsn "$LINCH_POSTGRES_DSN" --format json <run_id>
 ```
+
+The script accepts `--dsn` or defaults to `LINCH_POSTGRES_DSN`; it requires one
+of these to be set. See [local Postgres setup](./quickstart.md#5-keep-state-when-the-process-restarts).
 
 `payload["summary"]` is the compact observability surface: event counts,
 duration, total tokens/cost, cache-read ratio, tool latency and error rate,

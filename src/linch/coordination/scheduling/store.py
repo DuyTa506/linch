@@ -1,7 +1,7 @@
 """``ScheduleStore`` protocol + an in-memory implementation.
 
-Durable adapters (e.g. :class:`~linch.scheduling.sqlite.SqliteScheduleStore`)
-implement the same protocol so schedules survive a process restart.
+Host-supplied durable adapters can implement the same protocol so schedules
+survive a process restart.
 """
 
 from __future__ import annotations

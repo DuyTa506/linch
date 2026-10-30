@@ -1,7 +1,6 @@
 from .cron import cron_matches, next_cron_time, validate_cron
 from .loop import SchedulerLoop, render_schedule_message
 from .schedule import Schedule, ScheduleOccurrence
-from .sqlite import SqliteScheduleStore
 from .store import (
     ClaimingScheduleStore,
     InMemoryScheduleStore,
@@ -17,7 +16,6 @@ __all__ = [
     "LeasedScheduleStore",
     "ScheduleStore",
     "InMemoryScheduleStore",
-    "SqliteScheduleStore",
     "SchedulerLoop",
     "render_schedule_message",
     "schedule_tools",

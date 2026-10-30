@@ -13,15 +13,11 @@ time.
 from __future__ import annotations
 
 import asyncio
-import json
-import sqlite3
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
-
-from linch._wire import UnsupportedWireVersionError
 
 # ── cron utility ─────────────────────────────────────────────────────────────
 
@@ -306,105 +302,27 @@ async def test_fired_schedule_drains_as_user_event() -> None:
     assert "ping" in user_texts
 
 
-# ── durability ───────────────────────────────────────────────────────────────
-
-
-async def test_sqlite_store_survives_reload(tmp_path: Any) -> None:
-    from linch import Schedule, SqliteScheduleStore
-
-    db = tmp_path / "schedules.db"
-    schedule = Schedule(payload="durable", cron="*/5 * * * *", next_run=4242.0)
-    async with SqliteScheduleStore(db) as store:
-        await store.add(schedule)
-
-    # Reopen the same file → the schedule is still there, intact.
-    async with SqliteScheduleStore(db) as store2:
-        loaded = await store2.list()
-        assert len(loaded) == 1
-        assert loaded[0].id == schedule.id
-        assert loaded[0].cron == "*/5 * * * *"
-        assert loaded[0].next_run == 4242.0
-        assert await store2.remove(schedule.id) is True
-        assert await store2.list() == []
-
-
-async def test_sqlite_claim_due_is_atomic_across_store_instances(tmp_path: Any) -> None:
-    from linch import Schedule, SqliteScheduleStore
-
-    db = tmp_path / "schedules.db"
-    schedule = Schedule(payload="run once", interval_s=60, next_run=1000.0)
-    async with SqliteScheduleStore(db) as writer:
-        await writer.add(schedule)
-
-    first = SqliteScheduleStore(db)
-    second = SqliteScheduleStore(db)
-    try:
-        claimed_a, claimed_b = await asyncio.gather(
-            first.claim_due(1000.0),
-            second.claim_due(1000.0),
-        )
-    finally:
-        await first.aclose()
-        await second.aclose()
-
-    claimed = claimed_a + claimed_b
-    assert [s.id for s in claimed] == [schedule.id]
-
-    async with SqliteScheduleStore(db) as reader:
-        loaded = await reader.get(schedule.id)
-        assert loaded is not None
-        assert loaded.next_run == 1060.0
-
-
-async def test_two_scheduler_loops_do_not_double_fire_sqlite_schedule(tmp_path: Any) -> None:
-    from linch import Schedule, SchedulerLoop, SqliteScheduleStore
-
-    db = tmp_path / "schedules.db"
-    schedule = Schedule(payload="cluster tick", interval_s=60, next_run=1000.0)
-    async with SqliteScheduleStore(db) as writer:
-        await writer.add(schedule)
-
-    store_a = SqliteScheduleStore(db)
-    store_b = SqliteScheduleStore(db)
-    session_a = _FakeSession()
-    session_b = _FakeSession()
-    loop_a = SchedulerLoop(store_a, session_a, clock=lambda: 1000.0)
-    loop_b = SchedulerLoop(store_b, session_b, clock=lambda: 1000.0)
-    try:
-        fired_a, fired_b = await asyncio.gather(loop_a.tick(), loop_b.tick())
-    finally:
-        await store_a.aclose()
-        await store_b.aclose()
-
-    assert [s.id for s in fired_a + fired_b] == [schedule.id]
-    notifications = session_a.pending_notifications + session_b.pending_notifications
-    assert len(notifications) == 1
-    assert "cluster tick" in notifications[0].content[0].text
+# ── Claimed schedule delivery and occurrence leases ───────────────────────────
 
 
 async def test_claim_tick_isolates_a_failing_fire_from_sibling_schedules(tmp_path: Any) -> None:
     # Regression: with a claiming store, claim_due advances+commits every due
     # schedule's next_run before _fire runs. A raising on_event sink for one
     # claimed schedule must not abort delivery of the others claimed this tick.
-    from linch import Schedule, SchedulerLoop, SqliteScheduleStore
+    from linch import InMemoryScheduleStore, Schedule, SchedulerLoop
     from linch.events import ScheduleEvent
 
-    db = tmp_path / "schedules.db"
-    async with SqliteScheduleStore(db) as writer:
-        await writer.add(Schedule(id="a", payload="alpha", interval_s=60, next_run=1000.0))
-        await writer.add(Schedule(id="b", payload="bravo", interval_s=60, next_run=1000.0))
+    store = InMemoryScheduleStore()
+    await store.add(Schedule(id="a", payload="alpha", interval_s=60, next_run=1000.0))
+    await store.add(Schedule(id="b", payload="bravo", interval_s=60, next_run=1000.0))
 
     def explode_on_a(event: ScheduleEvent) -> None:
         if event.schedule_id == "a":
             raise RuntimeError("sink failed for a")
 
-    store = SqliteScheduleStore(db)
     session = _FakeSession()
     loop = SchedulerLoop(store, session, clock=lambda: 1000.0, on_event=explode_on_a)
-    try:
-        fired = await loop.tick()
-    finally:
-        await store.aclose()
+    fired = await loop.tick()
 
     # Both schedules were claimed and both deliveries landed despite a's sink
     # raising — the failure did not drop the sibling b.
@@ -413,17 +331,13 @@ async def test_claim_tick_isolates_a_failing_fire_from_sibling_schedules(tmp_pat
     assert "alpha" in payloads and "bravo" in payloads
 
 
-@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+@pytest.mark.parametrize("backend", ["memory"])
 async def test_occurrence_materialization_advances_atomically_and_survives_remove(
     backend: str, tmp_path: Any
 ) -> None:
-    from linch.coordination.scheduling import InMemoryScheduleStore, Schedule, SqliteScheduleStore
+    from linch.coordination.scheduling import InMemoryScheduleStore, Schedule
 
-    store = (
-        InMemoryScheduleStore()
-        if backend == "memory"
-        else SqliteScheduleStore(tmp_path / "occurrences.db")
-    )
+    store = InMemoryScheduleStore()
     try:
         schedule = Schedule(
             id="nightly",
@@ -457,17 +371,13 @@ async def test_occurrence_materialization_advances_atomically_and_survives_remov
             await close()
 
 
-@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+@pytest.mark.parametrize("backend", ["memory"])
 async def test_occurrence_lease_reclaim_and_stale_ack_are_token_fenced(
     backend: str, tmp_path: Any
 ) -> None:
-    from linch.coordination.scheduling import InMemoryScheduleStore, Schedule, SqliteScheduleStore
+    from linch.coordination.scheduling import InMemoryScheduleStore, Schedule
 
-    store = (
-        InMemoryScheduleStore()
-        if backend == "memory"
-        else SqliteScheduleStore(tmp_path / "occurrences.db")
-    )
+    store = InMemoryScheduleStore()
     try:
         await store.add(Schedule(id="tick", payload="p", interval_s=60, next_run=1000.0))
         original = await store.claim_due_occurrences(1000.0, owner="one", lease_s=10)
@@ -488,79 +398,6 @@ async def test_occurrence_lease_reclaim_and_stale_ack_are_token_fenced(
         close = getattr(store, "aclose", None)
         if close is not None:
             await close()
-
-
-async def test_sqlite_occurrence_claims_are_shared_and_persist_across_restart(
-    tmp_path: Any,
-) -> None:
-    from linch.coordination.scheduling import Schedule, SqliteScheduleStore
-
-    path = tmp_path / "occurrences.db"
-    async with SqliteScheduleStore(path) as writer:
-        await writer.add(Schedule(id="a", payload="a", interval_s=60, next_run=1000.0))
-        await writer.add(Schedule(id="b", payload="b", interval_s=60, next_run=1000.0))
-        first = await writer.claim_due_occurrences(1000.0, owner="first", lease_s=10, limit=1)
-
-    left = SqliteScheduleStore(path)
-    right = SqliteScheduleStore(path)
-    try:
-        # The active lease on one occurrence does not prevent another consumer
-        # from leasing a distinct materialized occurrence.
-        second, blocked = await asyncio.gather(
-            left.claim_due_occurrences(1001.0, owner="second", lease_s=10, limit=1),
-            right.claim_due_occurrences(1001.0, owner="third", lease_s=10, limit=1),
-        )
-        assert len(second + blocked) == 1
-        assert {first[0].id, (second + blocked)[0].id}.__len__() == 2
-
-        reclaimed = await left.claim_due_occurrences(1010.0, owner="reclaimer", lease_s=10)
-        assert {occurrence.id for occurrence in reclaimed} == {first[0].id}
-    finally:
-        await left.aclose()
-        await right.aclose()
-
-
-async def test_sqlite_schedule_rejects_pre_outbox_database(tmp_path: Any) -> None:
-    from linch.coordination.scheduling import SqliteScheduleStore
-
-    path = tmp_path / "legacy-schedules.db"
-    conn = sqlite3.connect(path)
-    conn.execute(
-        """
-        CREATE TABLE schedules (
-            id TEXT PRIMARY KEY,
-            payload TEXT NOT NULL,
-            cron TEXT,
-            interval_s REAL,
-            next_run REAL,
-            enabled INTEGER NOT NULL,
-            created_at REAL,
-            metadata TEXT NOT NULL
-        )
-        """
-    )
-    conn.execute(
-        """
-        INSERT INTO schedules(
-            id, payload, cron, interval_s, next_run, enabled, created_at, metadata
-        ) VALUES (?, ?, NULL, ?, ?, 1, NULL, ?)
-        """,
-        ("legacy", "old payload", 60.0, 1000.0, json.dumps({"old": True})),
-    )
-    conn.commit()
-    conn.close()
-
-    async with SqliteScheduleStore(path) as store:
-        with pytest.raises(UnsupportedWireVersionError):
-            await store.claim_due_occurrences(1000.0, owner="owner", lease_s=30)
-        with sqlite3.connect(path) as conn:
-            assert conn.execute("select next_run from schedules").fetchone()[0] == 1000.0
-            assert (
-                conn.execute(
-                    "select name from sqlite_master where name='schedule_occurrences'"
-                ).fetchone()
-                is None
-            )
 
 
 # ── tools ────────────────────────────────────────────────────────────────────
