@@ -39,6 +39,7 @@ remain the names in `linch.__all__`.
 - **P03:** `RunOptions.allow_legacy_resume` and contractless resume are removed; start a new run with a current execution contract.
 - **Resume:** Terminal runs and runs without checkpoints raise `RunNotResumableError` with `run_id` and `status`; start a new run.
 - **P04:** Cursorless assistant-boundary tool recovery is removed; tool recovery requires a valid `tool_batch_event_after_seq` cursor.
+- **WP8:** Runtime checkpoints use private journal-backed model-call and loop-guard state; old receipt-snapshot/guard-snapshot envelopes are rejected, so start a new run.
 - **P07:** Pre-3.0 permission readers and the null `updated_input` wire marker are removed; non-null persisted input rewrites and live approval rewrites remain rejected.
 - **P09:** Automatic SQLite/Postgres schema upgrades are removed; built-in database stores create complete version-3 schemas and reject old, missing, or unknown schema metadata on existing databases.
 - **P10:** Legacy scalar/malformed failure-history preservation is removed; failure writes append only to a valid current list of error objects, replacing malformed history.

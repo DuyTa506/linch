@@ -66,6 +66,45 @@ class ScriptProvider:
         yield {"type": "message_end", "stop_reason": "tool_use", "usage": Usage()}
 
 
+class _Crash(BaseException):
+    pass
+
+
+class _CheckpointCrashStore:
+    """Crash once at a selected checkpoint boundary, preserving prior writes."""
+
+    def __init__(self, store: Any) -> None:
+        self.store = store
+        self.boundary: str | None = None
+        self.crashed = False
+        self.drop_assistant_events = False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.store, name)
+
+    def reset(self, boundary: str | None) -> None:
+        self.boundary = boundary
+        self.crashed = False
+
+    async def save_checkpoint(self, run_id: str, checkpoint: Any, **kwargs: Any) -> Any:
+        if (
+            not self.crashed
+            and self.boundary is not None
+            and self.boundary == f"checkpoint:{checkpoint.phase}"
+        ):
+            self.crashed = True
+            raise _Crash(self.boundary)
+        return await self.store.save_checkpoint(run_id, checkpoint, **kwargs)
+
+    async def append_event(self, run_id: str, event: Any) -> int:
+        if self.drop_assistant_events and getattr(event, "type", None) == "assistant":
+            return 0
+        return await self.store.append_event(run_id, event)
+
+    async def append_events(self, run_id: str, events: list[Any]) -> list[int]:
+        return [await self.append_event(run_id, event) for event in events]
+
+
 class PricedScriptProvider:
     """Like ScriptProvider but emits non-zero usage so cost accumulates.
 
@@ -620,6 +659,269 @@ async def test_started_tool_recovered_as_interrupted_from_event_log() -> None:
     assert counts == {}
     assert any(event.type == "user" for event in resume_events)
     assert resume_events[-1].type == "result"
+
+
+async def test_interrupted_tool_guard_recovery_survives_two_resume_cuts() -> None:
+    """A recovered start without an end remains resumable after another crash."""
+    session_store = _memory_session_store()
+    run_store = _CheckpointCrashStore(_memory_run_store())
+    counts: dict[str, int] = {}
+    agent = _agent(
+        model="gpt-5",
+        provider=ScriptProvider(tool_names=["A"]),
+        tools=_registry(counts, "A"),
+        permissions={"mode": "skip-dangerous"},
+        session_store=session_store,
+        run_store=run_store,
+        cwd=".",
+    )
+    session = await agent.session(id="s1")
+    run_id, _ = await _run_until(session, "use tool", lambda event: event.type == "tool_call_start")
+
+    run_store.reset("checkpoint:turn_complete")
+    restarted = _agent(
+        model="gpt-5",
+        provider=ScriptProvider(),
+        tools=_registry(counts, "A"),
+        permissions={"mode": "skip-dangerous"},
+        session_store=session_store,
+        run_store=run_store,
+        cwd=".",
+    )
+    resumed = await restarted.session(id="s1")
+    with pytest.raises(_Crash):
+        await _collect(resumed.resume(run_id))
+
+    checkpointed = await run_store.load_run(run_id)
+    assert checkpointed is not None and checkpointed.checkpoint is not None
+    assert checkpointed.checkpoint.phase == "tool_results_appended"
+
+    run_store.reset(None)
+    restarted_again = _agent(
+        model="gpt-5",
+        provider=ScriptProvider(),
+        tools=_registry(counts, "A"),
+        permissions={"mode": "skip-dangerous"},
+        session_store=session_store,
+        run_store=run_store,
+        cwd=".",
+    )
+    resumed_again = await restarted_again.session(id="s1")
+    events = await _collect(resumed_again.resume(run_id))
+    assert counts == {}
+    assert events[-1].type == "result"
+
+
+async def test_guard_recovery_does_not_require_missing_assistant_observation() -> None:
+    """A checkpointed assistant may be durable before its observation event."""
+    session_store = _memory_session_store()
+    run_store = _CheckpointCrashStore(_memory_run_store())
+    run_store.drop_assistant_events = True
+    counts: dict[str, int] = {}
+    agent = _agent(
+        model="gpt-5",
+        provider=ScriptProvider(tool_names=["A"]),
+        tools=_registry(counts, "A"),
+        permissions={"mode": "skip-dangerous"},
+        session_store=session_store,
+        run_store=run_store,
+        cwd=".",
+    )
+    session = await agent.session(id="s1")
+    run_id, _ = await _run_until(session, "use tool", lambda event: event.type == "tool_call_start")
+    assert not any(row.event.type == "assistant" for row in await run_store.load_events(run_id))
+
+    run_store.reset("checkpoint:turn_complete")
+    restarted = _agent(
+        model="gpt-5",
+        provider=ScriptProvider(),
+        tools=_registry(counts, "A"),
+        permissions={"mode": "skip-dangerous"},
+        session_store=session_store,
+        run_store=run_store,
+        cwd=".",
+    )
+    resumed = await restarted.session(id="s1")
+    with pytest.raises(_Crash):
+        await _collect(resumed.resume(run_id))
+
+    run_store.reset(None)
+    restarted_again = _agent(
+        model="gpt-5",
+        provider=ScriptProvider(),
+        tools=_registry(counts, "A"),
+        permissions={"mode": "skip-dangerous"},
+        session_store=session_store,
+        run_store=run_store,
+        cwd=".",
+    )
+    resumed_again = await restarted_again.session(id="s1")
+    events = await _collect(resumed_again.resume(run_id))
+
+    assert counts == {}
+    assert events[-1].type == "result"
+
+
+async def test_guard_recovery_does_not_count_journal_ahead_batch_twice() -> None:
+    """A fact ahead of an in-flight checkpoint is re-evaluated exactly once."""
+    from linch import LoopGuard
+
+    session_store = _memory_session_store()
+    run_store = _CheckpointCrashStore(_memory_run_store())
+    counts: dict[str, int] = {}
+    agent = _agent(
+        model="gpt-5",
+        provider=ScriptProvider(tool_names=["A"]),
+        tools=_registry(counts, "A"),
+        loop_guard=LoopGuard(max_identical_tool_calls=2, max_consecutive_failures=0),
+        permissions={"mode": "skip-dangerous"},
+        session_store=session_store,
+        run_store=run_store,
+        cwd=".",
+    )
+    session = await agent.session(id="s1")
+    run_id, _ = await _run_until(session, "use tool", lambda event: event.type == "tool_call_end")
+
+    run_store.reset("checkpoint:tool_results_appended")
+    restarted = _agent(
+        model="gpt-5",
+        provider=ScriptProvider(),
+        tools=_registry(counts, "A"),
+        loop_guard=LoopGuard(max_identical_tool_calls=2, max_consecutive_failures=0),
+        permissions={"mode": "skip-dangerous"},
+        session_store=session_store,
+        run_store=run_store,
+        cwd=".",
+    )
+    resumed = await restarted.session(id="s1")
+    with pytest.raises(_Crash):
+        await _collect(resumed.resume(run_id))
+
+    run_store.reset(None)
+    restarted_again = _agent(
+        model="gpt-5",
+        provider=ScriptProvider(),
+        tools=_registry(counts, "A"),
+        loop_guard=LoopGuard(max_identical_tool_calls=2, max_consecutive_failures=0),
+        permissions={"mode": "skip-dangerous"},
+        session_store=session_store,
+        run_store=run_store,
+        cwd=".",
+    )
+    resumed_again = await restarted_again.session(id="s1")
+    events = await _collect(resumed_again.resume(run_id))
+
+    assert not any(event.type == "loop_guard" for event in events)
+    assert events[-1].type == "result"
+
+
+async def test_guard_delta_is_durable_but_never_yielded() -> None:
+    session_store = _memory_session_store()
+    run_store = _memory_run_store()
+    counts: dict[str, int] = {}
+    agent = _agent(
+        model="gpt-5",
+        provider=ScriptProvider(tool_names=["A"]),
+        tools=_registry(counts, "A"),
+        permissions={"mode": "skip-dangerous"},
+        session_store=session_store,
+        run_store=run_store,
+        cwd=".",
+    )
+    session = await agent.session(id="s1")
+    events = await _collect(session.run("use tool"))
+    run_id = next(event.run_id for event in events if event.type == "system")
+
+    assert not any(event.type == "loop_guard_delta" for event in events)
+    rows = await run_store.load_events(run_id)
+    assert sum(row.event.type == "loop_guard_delta" for row in rows) == 1
+    run = await run_store.load_run(run_id)
+    assert run is not None and run.checkpoint is not None
+    watermark = run.checkpoint.extension_state["linch.loop_guard.v1"]
+    assert watermark["evaluation_count"] == 1
+
+
+async def test_disabled_guard_does_not_write_guard_deltas() -> None:
+    from linch import LoopGuard
+
+    session_store = _memory_session_store()
+    run_store = _memory_run_store()
+    counts: dict[str, int] = {}
+    agent = _agent(
+        model="gpt-5",
+        provider=ScriptProvider(tool_names=["A"]),
+        tools=_registry(counts, "A"),
+        loop_guard=LoopGuard(max_identical_tool_calls=0, max_consecutive_failures=0),
+        permissions={"mode": "skip-dangerous"},
+        session_store=session_store,
+        run_store=run_store,
+        cwd=".",
+    )
+    session = await agent.session(id="s1")
+    events = await _collect(session.run("use tool"))
+    run_id = next(event.run_id for event in events if event.type == "system")
+
+    rows = await run_store.load_events(run_id)
+    assert not any(row.event.type == "loop_guard_delta" for row in rows)
+    run = await run_store.load_run(run_id)
+    assert run is not None and run.checkpoint is not None
+    assert "linch.loop_guard.v1" not in run.checkpoint.extension_state
+
+
+async def test_guard_trip_is_not_reemitted_after_durable_force_final_cut() -> None:
+    from linch import LoopGuard
+
+    session_store = _memory_session_store()
+    run_store = _CheckpointCrashStore(_memory_run_store())
+    counts: dict[str, int] = {}
+    guard = LoopGuard(
+        max_identical_tool_calls=1, max_consecutive_failures=0, force_final_answer=True
+    )
+    agent = _agent(
+        model="gpt-5",
+        provider=ScriptProvider(tool_names=["A"]),
+        tools=_registry(counts, "A"),
+        loop_guard=guard,
+        permissions={"mode": "skip-dangerous"},
+        session_store=session_store,
+        run_store=run_store,
+        cwd=".",
+    )
+    session = await agent.session(id="s1")
+    run_id, _ = await _run_until(session, "use tool", lambda event: event.type == "tool_call_end")
+
+    run_store.reset("checkpoint:turn_complete")
+    restarted = _agent(
+        model="gpt-5",
+        provider=ScriptProvider(),
+        tools=_registry(counts, "A"),
+        loop_guard=guard,
+        permissions={"mode": "skip-dangerous"},
+        session_store=session_store,
+        run_store=run_store,
+        cwd=".",
+    )
+    resumed = await restarted.session(id="s1")
+    with pytest.raises(_Crash):
+        await _collect(resumed.resume(run_id))
+
+    run_store.reset(None)
+    restarted_again = _agent(
+        model="gpt-5",
+        provider=ScriptProvider(),
+        tools=_registry(counts, "A"),
+        loop_guard=guard,
+        permissions={"mode": "skip-dangerous"},
+        session_store=session_store,
+        run_store=run_store,
+        cwd=".",
+    )
+    resumed_again = await restarted_again.session(id="s1")
+    events = await _collect(resumed_again.resume(run_id))
+
+    assert not any(event.type == "loop_guard" for event in events)
+    rows = await run_store.load_events(run_id)
+    assert sum(row.event.type == "loop_guard" for row in rows) == 1
 
 
 async def test_crash_between_permission_checkpoint_and_start_event_reruns_tool() -> None:

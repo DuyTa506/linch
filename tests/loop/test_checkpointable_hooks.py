@@ -90,13 +90,11 @@ async def test_checkpointable_hook_snapshots_session_scoped_json_state() -> None
     assert run.checkpoint.extension_state["test.durable-state"] == hook.state
     accounting = run.checkpoint.extension_state["linch.model_calls.v1"]
     assert accounting["version"] == 3
+    assert accounting["format"] == "journal-v1"
     assert accounting["active_primary"] is None
-    assert accounting["ledger"]["total_usage"] == {
-        "input_tokens": 0,
-        "output_tokens": 0,
-        "cache_read_tokens": 0,
-        "cache_creation_tokens": 0,
-    }
+    assert accounting["ledger"] is None
+    assert isinstance(accounting["journal_count"], int)
+    assert accounting["journal_count"] > 0
     assert hook.snapshots
     assert {session_id for session_id, _ in hook.snapshots} == {"session-1"}
     assert {saved_run_id for _, saved_run_id in hook.snapshots} == {run_id}
