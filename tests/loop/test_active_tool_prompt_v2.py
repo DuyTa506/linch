@@ -36,9 +36,9 @@ async def test_same_name_session_override_uses_override_prompt_contribution() ->
             return ToolResult(content=self.marker)
 
     parent = ToolRegistry()
-    parent.add(ContributingTool("PARENT"))
+    parent.register(ContributingTool("PARENT"))
     override = ToolRegistry()
-    override.add(ContributingTool("OVERRIDE"))
+    override.register(ContributingTool("OVERRIDE"))
     agent = Agent(
         model="test-model",
         provider=ScriptedProvider([TextTurn("done")]),

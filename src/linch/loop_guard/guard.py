@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from typing import Any, Literal
+
+from ..permissions.keys import permission_decision_key
 
 
 @dataclass(slots=True)
@@ -66,11 +67,6 @@ class LoopGuardDecision:
     detail: str
 
 
-def _canonical_sig(name: str, input: dict[str, Any]) -> str:
-    """Return a stable string signature for a tool name + input pair."""
-    return f"{name}:{json.dumps(input, sort_keys=True, separators=(',', ':'))}"
-
-
 def evaluate_loop_guard(
     guard: LoopGuard,
     state: LoopGuardState,
@@ -97,7 +93,7 @@ def evaluate_loop_guard(
     # ── Repeated identical tool-call check ────────────────────────────────
     if guard.max_identical_tool_calls > 0:
         for block in tool_blocks:
-            sig = _canonical_sig(block.name, block.input)
+            sig = permission_decision_key(block.name, block.input)
             state.call_counts[sig] = state.call_counts.get(sig, 0) + 1
             if state.call_counts[sig] >= guard.max_identical_tool_calls:
                 action: Literal["stop", "force_final"] = (

@@ -247,7 +247,7 @@ async def test_timeout_wrapper_preserves_inner_timeout_error() -> None:
     pipe.on_execute(timeout_wrapper(1))
 
     async def inner_timeout() -> str:
-        raise asyncio.TimeoutError("inner deadline")
+        raise TimeoutError("inner deadline")
 
     with pytest.raises(asyncio.TimeoutError, match="inner deadline"):
         await pipe.run_execute(_exec(), inner_timeout)

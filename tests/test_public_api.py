@@ -129,6 +129,43 @@ def test_all_has_no_duplicates() -> None:
     assert dupes == [], f"duplicate __all__ entries: {dupes}"
 
 
+def test_removed_legacy_names_are_not_public() -> None:
+    from linch.agent import Agent
+    from linch.middleware import MiddlewareContext, ToolCallMiddlewareInput
+    from linch.tools.base import ToolContext
+    from linch.tools.registry import ToolRegistry
+
+    removed = {
+        "AgentOptions",
+        "AgentMiddleware",
+        "coding_tools",
+        "defaultTools",
+        "default_tools",
+        "tools_from_defaults",
+    }
+    assert removed.isdisjoint(linch.__all__)
+    assert all(not hasattr(linch, name) for name in removed)
+    assert not hasattr(Agent, "openai")
+    assert not hasattr(ToolRegistry, "add")
+    assert not hasattr(ToolRegistry, "remove")
+    for cls, names in (
+        (
+            ToolContext,
+            (
+                "sessionId",
+                "runId",
+                "sessionStore",
+                "fileReadTracker",
+                "idempotencyKey",
+                "reportProgress",
+            ),
+        ),
+        (MiddlewareContext, ("sessionId", "runId", "turnIndex", "toolUseId", "toolName")),
+        (ToolCallMiddlewareInput, ("toolUseId", "toolName")),
+    ):
+        assert all(not hasattr(cls, name) for name in names)
+
+
 def test_no_undeclared_public_attributes() -> None:
     declared = set(linch.__all__)
     leaked = [

@@ -180,9 +180,9 @@ def end_events(events: list[Any]) -> list[ToolCallEndEvent]:
 async def test_timeout_produces_error_result_and_run_continues() -> None:
     """A timed-out tool returns is_error result; a subsequent tool still runs."""
     registry = ToolRegistry()
-    registry.add(SleepyTool("Slow", delay=0.2, scope="read"))
+    registry.register(SleepyTool("Slow", delay=0.2, scope="read"))
     # Fast write-scope tool queued after the slow one
-    registry.add(SleepyTool("Fast", delay=0.001, scope="write", parallel=False))
+    registry.register(SleepyTool("Fast", delay=0.001, scope="write", parallel=False))
 
     events = await collect_events(
         registry,
@@ -210,8 +210,8 @@ async def test_timeout_produces_error_result_and_run_continues() -> None:
 async def test_parallel_timeout_does_not_kill_sibling() -> None:
     """Timeout in one parallel task must not abort sibling tasks."""
     registry = ToolRegistry()
-    registry.add(SleepyTool("Slow", delay=0.2, scope="read", parallel=True))
-    registry.add(SleepyTool("Fast", delay=0.005, scope="read", parallel=True))
+    registry.register(SleepyTool("Slow", delay=0.2, scope="read", parallel=True))
+    registry.register(SleepyTool("Fast", delay=0.005, scope="read", parallel=True))
 
     events = await collect_events(
         registry,
@@ -232,7 +232,7 @@ async def test_parallel_timeout_does_not_kill_sibling() -> None:
 async def test_abort_not_masked_by_timeout() -> None:
     """AbortError must propagate out even when a timeout is configured."""
     registry = ToolRegistry()
-    registry.add(SleepyTool("Slow", delay=0.5, scope="read"))
+    registry.register(SleepyTool("Slow", delay=0.5, scope="read"))
 
     signal = AbortContext()
     signal.abort()  # abort immediately
@@ -251,7 +251,7 @@ async def test_per_tool_attribute_loosens_agent_default() -> None:
     """Per-tool execution_timeout_ms > agent default → tool succeeds."""
     registry = ToolRegistry()
     # Tool has its own 500ms limit; agent default is 10ms — tool's value wins
-    registry.add(SleepyTool("T", delay=0.05, scope="read", execution_timeout_ms=500))
+    registry.register(SleepyTool("T", delay=0.05, scope="read", execution_timeout_ms=500))
 
     events = await collect_events(
         registry,
@@ -267,7 +267,7 @@ async def test_per_tool_attribute_loosens_agent_default() -> None:
 async def test_per_tool_attribute_tightens_when_agent_default_is_none() -> None:
     """Per-tool execution_timeout_ms with no agent default → tool can time out."""
     registry = ToolRegistry()
-    registry.add(SleepyTool("T", delay=0.2, scope="read", execution_timeout_ms=10))
+    registry.register(SleepyTool("T", delay=0.2, scope="read", execution_timeout_ms=10))
 
     events = await collect_events(
         registry,
@@ -284,7 +284,7 @@ async def test_per_tool_attribute_tightens_when_agent_default_is_none() -> None:
 async def test_none_default_no_timeout_backcompat() -> None:
     """No tool_timeout_ms → slow tool completes normally (zero-overhead backcompat)."""
     registry = ToolRegistry()
-    registry.add(SleepyTool("T", delay=0.05, scope="read"))
+    registry.register(SleepyTool("T", delay=0.05, scope="read"))
 
     events = await collect_events(
         registry,
@@ -301,7 +301,7 @@ async def test_none_default_no_timeout_backcompat() -> None:
 async def test_per_tool_opt_out_zero_bypasses_agent_default() -> None:
     """execution_timeout_ms=0 on a tool opts out even when agent default is set."""
     registry = ToolRegistry()
-    registry.add(SleepyTool("T", delay=0.05, scope="read", execution_timeout_ms=0))
+    registry.register(SleepyTool("T", delay=0.05, scope="read", execution_timeout_ms=0))
 
     events = await collect_events(
         registry,
@@ -318,7 +318,7 @@ async def test_cleanup_runs_on_timeout_cancellation() -> None:
     """asyncio.wait_for cancels the coroutine → tool's finally block executes."""
     flag: list[bool] = []
     registry = ToolRegistry()
-    registry.add(SleepyTool("T", delay=0.2, scope="read", finally_flag=flag))
+    registry.register(SleepyTool("T", delay=0.2, scope="read", finally_flag=flag))
 
     await collect_events(
         registry,
@@ -339,7 +339,7 @@ async def test_transient_failure_retried_then_succeeds() -> None:
     """read-scope tool, fail_times=2, max_attempts=3 → succeeds on 3rd attempt."""
     tool = FlakyTool("F", fail_times=2, retryable=True)
     registry = ToolRegistry()
-    registry.add(tool)
+    registry.register(tool)
 
     events = await collect_events(
         registry,
@@ -357,7 +357,7 @@ async def test_retry_exhausted_then_errors() -> None:
     """fail_times=5, max_attempts=3 → is_error after 3 attempts."""
     tool = FlakyTool("F", fail_times=5, retryable=True)
     registry = ToolRegistry()
-    registry.add(tool)
+    registry.register(tool)
 
     events = await collect_events(
         registry,
@@ -401,7 +401,7 @@ async def test_timeout_is_retried_for_read_tool() -> None:
             return ToolResult(content="ok")
 
     registry = ToolRegistry()
-    registry.add(SlowThenFastTool())
+    registry.register(SlowThenFastTool())
 
     events = await collect_events(
         registry,
@@ -441,7 +441,7 @@ async def test_abort_error_not_retried() -> None:
             raise AbortError("tool says abort")
 
     registry = ToolRegistry()
-    registry.add(AbortingTool())
+    registry.register(AbortingTool())
 
     with pytest.raises(AbortError):
         await collect_events(
@@ -458,7 +458,7 @@ async def test_write_tool_not_retried_by_default() -> None:
     """Write-scope tool with no retryable opt-in: call_count stays 1."""
     tool = FlakyTool("W", fail_times=2, scope="write", parallel=False)
     registry = ToolRegistry()
-    registry.add(tool)
+    registry.register(tool)
 
     events = await collect_events(
         registry,
@@ -476,7 +476,7 @@ async def test_write_tool_retried_when_opted_in() -> None:
     """Write-scope tool with retryable=True IS retried."""
     tool = FlakyTool("W", fail_times=1, scope="write", parallel=False, retryable=True)
     registry = ToolRegistry()
-    registry.add(tool)
+    registry.register(tool)
 
     events = await collect_events(
         registry,
@@ -494,7 +494,7 @@ async def test_no_retry_by_default() -> None:
     """tool_retry=None (default) means a single attempt — no retry."""
     tool = FlakyTool("F", fail_times=1, retryable=True)
     registry = ToolRegistry()
-    registry.add(tool)
+    registry.register(tool)
 
     events = await collect_events(
         registry,

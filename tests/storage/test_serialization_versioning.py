@@ -26,8 +26,7 @@ from linch.run_store import (
     checkpoint_to_dict,
 )
 from linch.sessions.store import ProviderViewSnapshot, snapshot_from_dict, snapshot_to_dict
-from linch.tool_surface import ToolSurfaceReaderGuard
-from linch.types import Message, ToolActivation, ToolResultBlock, ToolUseBlock, Usage
+from linch.types import Message, ToolResultBlock, ToolUseBlock, Usage
 
 
 def _checkpoint() -> RunCheckpoint:
@@ -48,22 +47,7 @@ def test_checkpoint_dict_carries_schema_version() -> None:
     assert data["schema_version"] == SCHEMA_VERSION
 
 
-def test_provider_snapshot_preserves_identity_while_projecting_control_fields() -> None:
-    activation = ToolActivation(
-        schema_version=1,
-        name="deferred_tool",
-        activation_id="catalog:deferred_tool",
-        activation_version=None,
-        tool_contract_fingerprint="tool-fingerprint",
-        scope_id="scope-1",
-        scope_fingerprint="scope-fingerprint",
-        catalog_policy_id="catalog-policy",
-        catalog_policy_version="1",
-        activation_policy_id="activation-policy",
-        activation_policy_version="1",
-        source_loader_id="linch.tool_search.v1",
-        source_tool_use_id="search-call",
-    )
+def test_provider_snapshot_preserves_identity_and_messages() -> None:
     snapshot = ProviderViewSnapshot(
         provider_view=[
             Message(
@@ -72,9 +56,7 @@ def test_provider_snapshot_preserves_identity_while_projecting_control_fields() 
                     ToolResultBlock(
                         tool_use_id="search-call",
                         content="activated",
-                        tool_activations=(activation,),
                     ),
-                    ToolSurfaceReaderGuard(required_reader_version=1, feature_version=1),
                 ],
             )
         ],
@@ -87,7 +69,7 @@ def test_provider_snapshot_preserves_identity_while_projecting_control_fields() 
     assert restored.projection_id == "persisted-projection"
     result = restored.provider_view[0].content[0]
     assert isinstance(result, ToolResultBlock)
-    assert result.tool_activations == ()
+    assert result.content == "activated"
 
 
 def test_checkpoint_from_dict_tolerates_future_version_and_unknown_keys() -> None:
@@ -226,3 +208,41 @@ async def test_load_events_fails_closed_for_required_or_malformed_rows(
             await store.load_events("run-1")
     finally:
         await store.close()
+
+
+def test_removed_discovery_guard_is_rejected_as_unknown_content() -> None:
+    from linch.types import message_from_dict
+
+    with pytest.raises(ValueError, match="unknown content block type"):
+        message_from_dict(
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_surface_guard",
+                        "required_reader_version": 1,
+                        "feature_version": 1,
+                    }
+                ],
+            }
+        )
+
+
+@pytest.mark.parametrize("extra_field", ["tool_activations", "unknown_control"])
+def test_tool_result_rejects_unknown_fields_instead_of_discarding_facts(extra_field: str) -> None:
+    from linch.types import message_from_dict
+
+    with pytest.raises(ValueError, match="unknown tool_result fields"):
+        message_from_dict(
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "search-call",
+                        "content": "activated",
+                        extra_field: [{"schema_version": 1, "name": "deferred_tool"}],
+                    }
+                ],
+            }
+        )

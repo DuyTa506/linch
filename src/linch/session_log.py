@@ -26,7 +26,6 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Literal
 
-from .tool_surface import _project_message_for_provider, _project_messages_for_provider
 from .types import Message
 
 
@@ -73,14 +72,12 @@ class SessionLog:
 
     def append(self, message: Message, *, visible: bool = True, historical: bool = True) -> None:
         """Append one message, choosing which projections it joins."""
-        projected = _project_message_for_provider(message)
         owned = deepcopy(message)
-        effective_visible = visible and projected is not None
-        self._entries.append(MessageEntry(owned, visible=effective_visible, historical=historical))
+        self._entries.append(MessageEntry(owned, visible=visible, historical=historical))
         if historical:
             self._full.append(owned)
-        if visible and projected is not None:
-            self._derived.append(projected)
+        if visible:
+            self._derived.append(owned)
 
     def append_many(self, messages: Iterable[Message]) -> None:
         """Append normal messages (both projections)."""
@@ -93,10 +90,9 @@ class SessionLog:
         An equal replacement is a no-op and is not recorded. Returns whether the
         authoritative projection changed.
         """
-        projected = _project_messages_for_provider(replacement)
-        if projected == self._derived:
+        if list(replacement) == self._derived:
             return False
-        owned = deepcopy(projected)
+        owned = deepcopy(list(replacement))
         self._entries.append(ProjectionEntry(tuple(owned), reason))
         self._derived = owned
         return True
@@ -120,13 +116,6 @@ class SessionLog:
     def provider_view(self) -> Sequence[Message]:
         """A detached, immutable-sequence snapshot of the current provider view."""
         return tuple(deepcopy(self._derived))
-
-    def derive_messages(self) -> Sequence[Message]:
-        """Compatibility alias for :attr:`provider_view`.
-
-        Unlike the former mutable-list API, this never exposes live storage.
-        """
-        return self.provider_view
 
     @property
     def visible_count(self) -> int:
@@ -168,7 +157,6 @@ class SessionLog:
         log = cls()
         log.append_many(list(historical or []))
         if visible is not None:
-            projected = _project_messages_for_provider(visible)
-            if projected != log._derived:
-                log.record_projection(projected)
+            if list(visible) != log._derived:
+                log.record_projection(visible)
         return log

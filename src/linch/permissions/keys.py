@@ -1,7 +1,7 @@
 """Stable permission-decision keys for durable HITL approval.
 
 The key is ``"{tool_name}:{json.dumps(input, sort_keys=True, separators=(',',':'))}"``
-— identical to the LoopGuard canonicalisation (``loop_guard/guard.py:71``).  It is
+— shared with the LoopGuard canonicalisation. It is
 stable across provider calls because it is derived from the model's proposed
 ``input`` dict, not the ephemeral ``tool_use_id`` that changes each call.
 """

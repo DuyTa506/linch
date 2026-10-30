@@ -295,3 +295,15 @@ async def test_sqlite_schema_migrates_a_legacy_database_additively(tmp_path) -> 
         assert await store.load(snapshot.id) == snapshot
     finally:
         await store.close()
+
+
+def test_snapshot_codec_preserves_golden_bytes_and_integrity_hash() -> None:
+    import hashlib
+
+    snapshot = create_model_input_snapshot("run-1", 3, _request())
+    assert hashlib.sha256(snapshot.request_json.encode()).hexdigest() == (
+        "afcfb1aabbe427c33c50f4772e51c30c14c58a91e5d3d05439a34a752644b0a8"
+    )
+    assert snapshot.integrity_hash == (
+        "sha256:a99b94acb3dde086636081650393c70e4aae728e7bce3e9aa952bffd45855c95"
+    )

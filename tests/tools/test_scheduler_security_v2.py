@@ -55,7 +55,7 @@ def _agent(
     enable_background_tools: bool = False,
 ) -> SimpleNamespace:
     registry = ToolRegistry()
-    registry.add(tool)
+    registry.register(tool)
     return SimpleNamespace(
         cwd="/project",
         tools=registry,
@@ -80,6 +80,11 @@ def _session(**overrides: Any) -> SimpleNamespace:
         "pending_notifications": [],
         "pending_child_events": [],
     }
+
+    async def notify(message: Any, **kwargs: Any) -> None:
+        values["pending_notifications"].append(message)
+
+    values["notify"] = notify
     values.update(overrides)
     return SimpleNamespace(**values)
 
@@ -355,8 +360,8 @@ async def test_parallel_later_tool_progress_is_not_hidden_by_slow_first() -> Non
     first = ParallelTool("First", False)
     second = ParallelTool("Second", True)
     registry = ToolRegistry()
-    registry.add(first)
-    registry.add(second)
+    registry.register(first)
+    registry.register(second)
     agent = _agent(first, PermissionEngine(mode="skip-dangerous"))
     agent.tools = registry
     iterator = execute_tool_calls(
@@ -433,8 +438,8 @@ async def test_closing_parallel_event_stream_cancels_all_started_tools() -> None
     first = BlockingTool("First")
     second = BlockingTool("Second")
     registry = ToolRegistry()
-    registry.add(first)
-    registry.add(second)
+    registry.register(first)
+    registry.register(second)
     agent = _agent(first, PermissionEngine(mode="skip-dangerous"))
     agent.tools = registry
     iterator = execute_tool_calls(
@@ -539,3 +544,18 @@ async def test_background_audit_failure_logs_origin_and_worker(caplog: Any) -> N
     assert "origin_run_id=run-origin" in record.message
     assert "worker_id=bgtool_" in record.message
     assert record.exc_info is not None
+
+
+def test_legacy_parallel_safe_does_not_authorize_parallel_execution() -> None:
+    from linch.scheduler import _tool_parallel
+
+    tool = SimpleNamespace(scope="read", parallel_safe=True)
+    call = ResolvedCall(
+        id="legacy-call",
+        block=ToolUseBlock(id="legacy-call", name="LegacyRead", input={}),
+        input={},
+        tool=tool,
+        summary="legacy read",
+        is_immediate_error=False,
+    )
+    assert not _tool_parallel(call)

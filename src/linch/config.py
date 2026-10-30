@@ -65,10 +65,8 @@ class SystemPromptConfig:
 
     Attributes:
         append:
-            Text appended as a ``"User-provided instructions"`` block,
-            equivalent to the legacy ``system_prompt`` / ``systemPrompt``
-            parameter.  If both ``append`` and ``system_prompt`` are set,
-            ``append`` wins.
+            Text appended as a ``"User-provided instructions"`` block.  If
+            both ``append`` and ``system_prompt`` are set, ``append`` wins.
         blocks:
             Additional :class:`~linch.types.SystemBlock` objects to
             include.  When ``replace_defaults=False`` these are *prepended*

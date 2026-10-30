@@ -236,19 +236,11 @@ class BashTool:
     scope: ToolScope = "exec"
     parallel: bool = False
 
-    def __init__(self, *, backend: Any = None, execution: Any = None) -> None:
+    def __init__(self, *, execution: Any = None) -> None:
         from .execution import LocalBackend
 
-        if backend is not None and execution is not None:
-            raise ValueError("pass either backend= or execution= to BashTool, not both")
-        # An ExecutionBackend (capability seam) sources the shell half; an
-        # explicit legacy ``backend`` remains available for direct use.
-        if execution is not None:
-            self._backend: Any = execution.shell
-        elif backend is not None:
-            self._backend = backend
-        else:
-            self._backend = LocalBackend()
+        # An ExecutionBackend (capability seam) sources the shell half.
+        self._backend: Any = execution.shell if execution is not None else LocalBackend()
 
     def validate(self, raw: dict[str, object]) -> dict[str, object]:
         timeout = _to_int(raw.get("timeout_ms", 120000), 120000)
@@ -809,10 +801,7 @@ class GlobTool:
                 )
             files = [line.strip() for line in raw_out.split("\n") if line.strip()]
         else:
-            try:
-                entries = glob.glob(pattern, root_dir=root, recursive=True)
-            except TypeError:
-                entries = glob.glob(pattern, root_dir=root)
+            entries = glob.glob(pattern, root_dir=root, recursive=True)
             if include_dotfiles:
                 files = sorted(entries)
             else:

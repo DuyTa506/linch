@@ -5,7 +5,7 @@ import os
 import platform
 import warnings
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -67,11 +67,8 @@ class _RuntimeLimits:
 
 def _resolve_system_prompt(
     system_prompt: str | None,
-    system_prompt_alias: str | None,
     cfg: SystemPromptConfig | None,
 ) -> str | None:
-    if system_prompt_alias is not None:
-        system_prompt = system_prompt_alias
     if cfg is not None and cfg.append is not None:
         return cfg.append
     return system_prompt
@@ -372,59 +369,6 @@ def _build_tool_protocol_lines(
     return lines
 
 
-@dataclass(slots=True)
-class AgentOptions:
-    model: str
-    provider: BaseProvider | None = None
-    openai: OpenAIOptions = field(default_factory=OpenAIOptions)
-    reasoning: OpenAIReasoning | None = None
-    tools: ToolRegistry | None = None
-    permissions: dict[str, object] | None = None
-    session_store: SessionStore | None = None
-    run_store: RunStore | None = None
-    durability: DurabilityOptions | None = None
-    cwd: str | None = None
-    system_prompt: str | None = None
-    system_prompt_config: SystemPromptConfig | None = None
-    max_retries: int = 5
-    max_output_tokens: int | None = None
-    include_partial_messages: bool = False
-    max_turns: int | None = None
-    max_tool_concurrency: int | None = None
-    limiter: Any = None  # Limiter | None
-    max_provider_concurrency: int | None = None
-    tool_batching_strategy: str = "greedy"
-    tool_timeout_ms: float | None = None
-    tool_retry: Any = None  # RetryOptions | None
-    cache_ttl: str | None = None
-    config_dir: str | None = None
-    mcp_servers: dict[str, Any] | None = None
-    compaction: Any = None
-    compaction_ladder: Any = None  # CompactionLadder | None
-    truncation_recovery: TruncationRecovery | None = None
-    token_estimator: Any = None
-    budget: Any = None  # RunBudget | None
-    features: FeatureFlags | None = None
-    deps: Any = None
-    output_schema: Any = None  # OutputSchema | None
-    tool_choice: Any = None  # ToolChoice | None
-    final_tool_name: str | None = None
-    loop_guard: Any = None  # LoopGuard | None; None means "use default LoopGuard"
-    filesystem: Any = None  # FileBackend | None
-    result_offload: Any = None  # OffloadConfig | None; requires filesystem feature opt-in
-    hooks: Any = None
-    read_before_write: Any = False
-    extra_subagents: list[AgentDefinition] | None = None
-    enable_worker_tools: bool = False
-    retain_subagents: bool = False
-    enable_background_subagents: bool = False
-    enable_task_stop: bool = False
-    execution_backend: ExecutionBackend | ShellBackend | None = None
-    context: Context | None = None
-    tool_pipeline: ToolPipeline | None = None
-    max_idle_sessions: int | None = None
-
-
 class Agent:
     def __init__(
         self,
@@ -443,31 +387,20 @@ class Agent:
         durability: DurabilityOptions | None = None,
         cwd: str | None = None,
         system_prompt: str | None = None,
-        systemPrompt: str | None = None,
         system_prompt_config: SystemPromptConfig | None = None,
         max_retries: int = 5,
-        maxRetries: int | None = None,
         max_output_tokens: int | None = None,
-        maxOutputTokens: int | None = None,
         include_partial_messages: bool = False,
-        includePartialMessages: bool | None = None,
         max_turns: int | None = None,
-        maxTurns: int | None = None,
         max_tool_concurrency: int | None = None,
-        maxToolConcurrency: int | None = None,
         limiter: Limiter | None = None,
         max_provider_concurrency: int | None = None,
         tool_batching_strategy: str = "greedy",
-        toolBatchingStrategy: str | None = None,
         tool_timeout_ms: float | None = None,
-        toolTimeoutMs: float | None = None,
         tool_retry: Any = None,
         cache_ttl: str | None = None,
-        cacheTtl: str | None = None,
         config_dir: str | None = None,
-        configDir: str | None = None,
         mcp_servers: dict[str, Any] | None = None,
-        mcpServers: dict[str, Any] | None = None,
         compaction: Any = None,
         compaction_ladder: Any = None,
         truncation_recovery: TruncationRecovery | None = None,
@@ -481,7 +414,6 @@ class Agent:
         tool_choice: ToolChoice | None = None,
         final_tool_name: str | None = None,
         loop_guard: Any = _UNSET,
-        loopGuard: Any = _UNSET,
         filesystem: Any = None,
         result_offload: Any = _DEFAULT_OFFLOAD,
         mailbox: Any = None,
@@ -500,30 +432,9 @@ class Agent:
         tool_pipeline: ToolPipeline | None = None,
         ask_user: Any = None,
     ) -> None:
-        system_prompt = _resolve_system_prompt(system_prompt, systemPrompt, system_prompt_config)
-        if maxRetries is not None:
-            max_retries = maxRetries
-        if maxOutputTokens is not None:
-            max_output_tokens = maxOutputTokens
-        if includePartialMessages is not None:
-            include_partial_messages = includePartialMessages
-        if maxTurns is not None:
-            max_turns = maxTurns
-        if maxToolConcurrency is not None:
-            max_tool_concurrency = maxToolConcurrency
-        if toolBatchingStrategy is not None:
-            tool_batching_strategy = toolBatchingStrategy
+        system_prompt = _resolve_system_prompt(system_prompt, system_prompt_config)
         if tool_batching_strategy not in ("greedy", "maximal"):
             raise ConfigError('tool_batching_strategy must be "greedy" or "maximal"')
-        if toolTimeoutMs is not None:
-            tool_timeout_ms = toolTimeoutMs
-        if cacheTtl is not None:
-            cache_ttl = cacheTtl
-        if configDir is not None:
-            config_dir = configDir
-        if mcpServers is not None:
-            mcp_servers = mcpServers
-
         if not model:
             raise ConfigError("Agent requires a model")
         if max_retries < 0:
@@ -713,7 +624,7 @@ class Agent:
         self._system_prompt_config: SystemPromptConfig | None = system_prompt_config
         self._cached_system_blocks: list[SystemBlock] | None = None
         self._cached_system_blocks_signature: tuple[Any, ...] | None = None
-        self._configure_loop_guard(loop_guard, loopGuard)
+        self._configure_loop_guard(loop_guard)
         self._configure_hooks(
             hooks=hooks,
             read_before_write=read_before_write,
@@ -781,15 +692,14 @@ class Agent:
                 worker_tools.register(tool)
         self._subagent_tool_registry = worker_tools
 
-    def _configure_loop_guard(self, loop_guard: Any, loop_guard_alias: Any) -> None:
+    def _configure_loop_guard(self, loop_guard: Any) -> None:
         from .loop_guard import LoopGuard as _LoopGuard
         from .loop_guard import normalize_loop_guard as _normalize_loop_guard
 
-        effective_lg = loop_guard_alias if loop_guard_alias is not _UNSET else loop_guard
-        if effective_lg is _UNSET:
+        if loop_guard is _UNSET:
             self.loop_guard: _LoopGuard | None = _LoopGuard()
         else:
-            self.loop_guard = _normalize_loop_guard(effective_lg)
+            self.loop_guard = _normalize_loop_guard(loop_guard)
 
     def _configure_hooks(
         self,
@@ -1063,16 +973,6 @@ class Agent:
 
     @provider.setter
     def provider(self, value: BaseProvider) -> None:
-        self._provider = value
-        self._reset_provider_prepared()
-
-    @property
-    def openai(self) -> BaseProvider:
-        # Backward compatibility for older integrations.
-        return self._provider
-
-    @openai.setter
-    def openai(self, value: BaseProvider) -> None:
         self._provider = value
         self._reset_provider_prepared()
 

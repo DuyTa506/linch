@@ -3,19 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
-from inspect import signature
-from typing import Any, Literal, cast
+from typing import Literal
 
 import pytest
 
-from linch.session import Session
 from linch.session_log import (
     MessageEntry,
     ProjectionEntry,
     SessionLog,
 )
-from linch.tool_surface import ToolSurfaceReaderGuard
-from linch.types import Message, TextBlock, ToolActivation, ToolResultBlock
+from linch.types import Message, TextBlock
 
 
 def _msg(text: str, role: Literal["user", "assistant"] = "user") -> Message:
@@ -32,39 +29,6 @@ def _text(message: Message) -> TextBlock:
     return block
 
 
-def _activation(*, schema_version: int = 1) -> ToolActivation:
-    return ToolActivation(
-        schema_version=schema_version,
-        name="deferred_tool",
-        activation_id="catalog:deferred_tool",
-        activation_version=None,
-        tool_contract_fingerprint="tool-fingerprint",
-        scope_id="scope-1",
-        scope_fingerprint="scope-fingerprint",
-        catalog_policy_id="catalog-policy",
-        catalog_policy_version="1",
-        activation_policy_id="activation-policy",
-        activation_policy_version="1",
-        source_loader_id="linch.tool_search.v1",
-        source_tool_use_id="search-call",
-    )
-
-
-def _control_message() -> Message:
-    return Message(
-        role="user",
-        content=[
-            ToolResultBlock(
-                tool_use_id="search-call",
-                content="activated",
-                tool_activations=(_activation(),),
-            ),
-            ToolSurfaceReaderGuard(required_reader_version=1, feature_version=1),
-        ],
-        provider_metadata={"unrelated": {"kept": True}},
-    )
-
-
 def test_append_populates_both_projections() -> None:
     log = SessionLog()
     a, b = _msg("a"), _msg("b")
@@ -72,82 +36,6 @@ def test_append_populates_both_projections() -> None:
     log.append(b)
     assert log.full_history == (a, b)
     assert log.provider_view == (a, b)
-
-
-def test_control_facts_remain_in_full_history_but_never_reach_provider_view() -> None:
-    log = SessionLog()
-    message = _control_message()
-
-    log.append(message)
-
-    full_result = log.full_history[0].content[0]
-    assert isinstance(full_result, ToolResultBlock)
-    assert full_result.tool_activations == (_activation(),)
-    assert isinstance(log.full_history[0].content[1], ToolSurfaceReaderGuard)
-
-    projected = log.provider_view[0]
-    projected_result = projected.content[0]
-    assert isinstance(projected_result, ToolResultBlock)
-    assert projected_result.tool_activations == ()
-    assert len(projected.content) == 1
-    assert projected.provider_metadata == {"unrelated": {"kept": True}}
-
-    projected_result.content = "tampered"
-    assert isinstance(log.full_history[0].content[0], ToolResultBlock)
-    assert log.full_history[0].content[0].content == "activated"
-
-
-def test_projection_drops_guard_only_messages_but_keeps_preexisting_empty_messages() -> None:
-    log = SessionLog()
-    guard_only = Message(
-        role="user",
-        content=[ToolSurfaceReaderGuard(required_reader_version=1, feature_version=1)],
-        provider_metadata={"guard": True},
-    )
-    existing_empty = Message(
-        role="assistant",
-        content=[],
-        provider_metadata={"empty": True},
-    )
-
-    log.append(guard_only)
-    log.append(existing_empty)
-
-    assert log.full_history == (guard_only, existing_empty)
-    assert log.provider_view == (existing_empty,)
-
-
-def test_seed_and_replacement_project_controls_before_storing_provider_view() -> None:
-    message = _control_message()
-
-    log = SessionLog.seed(historical=[message], visible=[message])
-    assert isinstance(log.full_history[0].content[1], ToolSurfaceReaderGuard)
-    assert len(log.provider_view[0].content) == 1
-    result = log.provider_view[0].content[0]
-    assert isinstance(result, ToolResultBlock)
-    assert result.tool_activations == ()
-
-    log.record_projection([message], reason="control-safety")
-    result = log.provider_view[0].content[0]
-    assert isinstance(result, ToolResultBlock)
-    assert result.tool_activations == ()
-
-
-def test_projection_refuses_to_hide_malformed_control_data() -> None:
-    log = SessionLog()
-    malformed = Message(
-        role="user",
-        content=[
-            ToolResultBlock(
-                tool_use_id="search-call",
-                content="activated",
-                tool_activations=(_activation(schema_version=True),),
-            )
-        ],
-    )
-
-    with pytest.raises(ValueError):
-        log.append(malformed)
 
 
 def test_append_many_is_both_projections() -> None:
@@ -225,20 +113,6 @@ def test_provider_view_nested_mutation_does_not_reach_log() -> None:
     authoritative = log.provider_view[0]
     assert _text(authoritative).text == "owned"
     assert authoritative.provider_metadata == {"nested": {"source": "owned"}}
-
-
-def test_derive_messages_alias_is_detached_from_log_and_later_reads() -> None:
-    """The compatibility alias has the same mutation-isolation contract."""
-    log = SessionLog()
-    log.append(_msg("owned"))
-
-    inspected = log.derive_messages()[0]
-    _text(inspected).text = "tampered"
-    assert inspected.provider_metadata is not None
-    inspected.provider_metadata["nested"]["source"] = "tampered"
-
-    assert _text(log.derive_messages()[0]).text == "owned"
-    assert _text(log.provider_view[0]).text == "owned"
 
 
 def test_full_history_is_an_immutable_snapshot() -> None:
@@ -327,31 +201,6 @@ def test_equal_projection_is_not_logged() -> None:
 
     assert log.record_projection([original], reason="no-op") is False
     assert [entry.kind for entry in log.entries] == ["message"]
-
-
-def test_session_constructor_legacy_views_seed_canonical_log() -> None:
-    parameters = signature(Session).parameters
-    assert "provider_view" in parameters
-    assert "full_history" in parameters
-
-    provider = [_msg("summary")]
-    history = [_msg("original")]
-    constructor = cast(Any, Session)
-    with pytest.warns(DeprecationWarning, match="session_log=SessionLog.seed"):
-        session = constructor(
-            id="legacy",
-            created_at="now",
-            meta={},
-            agent=object(),
-            store=object(),
-            provider_view=provider,
-            full_history=history,
-        )
-
-    _text(provider[0]).text = "tampered-provider"
-    _text(history[0]).text = "tampered-history"
-    assert session.provider_view == (_msg("summary"),)
-    assert session.full_history == (_msg("original"),)
 
 
 def test_seed_equal_views_no_projection() -> None:

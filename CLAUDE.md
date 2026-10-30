@@ -57,7 +57,7 @@ These hold for *every* change, regardless of subsystem:
   directly; do not introduce a base class to inherit from.
 - **Registrations are reversible effects** — a registration returns a
   `Disposable` (`linch.Disposable`) whose call undoes exactly that registration,
-  and is idempotent. `ToolRegistry.add/register/replace` already follow this;
+  and is idempotent. `ToolRegistry.register/replace` already follow this;
   new registries and extension points do the same. See `docs/architecture/kernel.md`.
 - **New behavior hangs off kernel extension points, not loop edits** — extend
   tool execution through the pipeline seams (`tools/pre-execute` →

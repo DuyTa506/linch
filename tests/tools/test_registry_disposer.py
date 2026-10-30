@@ -147,9 +147,9 @@ async def test_unregister_breaks_replacement_restoration_chain() -> None:
 
 
 @pytest.mark.asyncio
-async def test_add_returns_disposer() -> None:
+async def test_register_returns_disposer() -> None:
     reg = ToolRegistry()
-    handle = reg.add(FakeTool("alpha"))
+    handle = reg.register(FakeTool("alpha"))
     assert isinstance(handle, Disposable)
     await handle.dispose()
     assert reg.get("alpha") is None

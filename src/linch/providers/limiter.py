@@ -57,8 +57,8 @@ class _SemaphoreLimiter:
     """Backs ``Agent(max_provider_concurrency=N)``.
 
     The semaphore is built on first acquire, not in ``__init__``: an ``Agent``
-    is routinely constructed outside a running loop, and on 3.10 a semaphore
-    built there binds to the wrong one.
+    is routinely constructed outside a running loop, so constructing it lazily
+    avoids binding to the wrong loop.
 
     It also binds to the loop of its first *contended* acquire, so an idle
     limiter reused from another loop is rebuilt — the same staleness rule the

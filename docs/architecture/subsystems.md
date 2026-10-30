@@ -55,7 +55,7 @@ flowchart TD
 - `ToolProgressEvent` is a bounded, coalesced **stream-only** observation. It is emitted
   after that call's `ToolCallStartEvent` and before its `ToolCallEndEvent`, never becomes
   provider history or a `ToolResult`, and must not be treated as durable execution state.
-- **Timeouts** — `Agent(tool_timeout_ms=N)` (env `AGENTKIT_TOOL_TIMEOUT_MS`) sets an agent-wide execution deadline. Per-tool override: `execution_timeout_ms` class attribute (`0` = opt-out). Timeout → `is_error=True` result, run continues. Uses `asyncio.wait_for` (Python 3.10 safe). `ToolTimeoutError` (`retryable=True`) is the typed exception class.
+- **Timeouts** — `Agent(tool_timeout_ms=N)` (env `AGENTKIT_TOOL_TIMEOUT_MS`) sets an agent-wide execution deadline. Per-tool override: `execution_timeout_ms` class attribute (`0` = opt-out). Timeout → `is_error=True` result, run continues. Uses `asyncio.wait_for`. `ToolTimeoutError` (`retryable=True`) is the typed exception class.
 - **Retry** — `Agent(tool_retry=RetryOptions(...))` enables opt-in exponential-backoff retry. Read-scope tools retry any exception; write/exec tools only retry when the tool sets `retryable = True`. `AbortError` is never retried.
 
 ---

@@ -217,7 +217,7 @@ async def demo_sequential_pipeline() -> None:
     from linch.config import FeatureFlags
     from linch.events import SubagentEvent
     from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import tools_from_defaults
+    from linch.tools.registry import workspace_tools
 
     with tempfile.TemporaryDirectory() as tmp:
         agents_dir = Path(tmp) / "agents"
@@ -229,7 +229,7 @@ async def demo_sequential_pipeline() -> None:
         agent = Agent(
             model="gpt-4o-mini",
             openai_api_key=os.environ.get("OPENAI_API_KEY"),
-            tools=tools_from_defaults(),
+            tools=workspace_tools(),
             session_store=InMemorySessionStore(),
             permissions={"mode": "skip-dangerous"},
             config_dir=tmp,
@@ -294,7 +294,7 @@ async def demo_parallel_analysts() -> None:
     from linch.config import FeatureFlags
     from linch.events import SubagentEvent
     from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import tools_from_defaults
+    from linch.tools.registry import workspace_tools
 
     SUBSYSTEMS = [
         ("tools", "tools/", "tool implementations"),
@@ -315,7 +315,7 @@ async def demo_parallel_analysts() -> None:
         agent = Agent(
             model="gpt-4o-mini",
             openai_api_key=os.environ.get("OPENAI_API_KEY"),
-            tools=tools_from_defaults(),
+            tools=workspace_tools(),
             session_store=InMemorySessionStore(),
             permissions={"mode": "skip-dangerous"},
             config_dir=tmp,
@@ -386,7 +386,7 @@ async def demo_subagent_with_offload() -> None:
     from linch.events import SubagentEvent
     from linch.filesystem import DiskFileBackend, OffloadConfig
     from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import tools_from_defaults
+    from linch.tools.registry import workspace_tools
 
     with tempfile.TemporaryDirectory() as tmp:
         agents_dir = Path(tmp) / "agents"
@@ -396,7 +396,7 @@ async def demo_subagent_with_offload() -> None:
         agent = Agent(
             model="gpt-4o-mini",
             openai_api_key=os.environ.get("OPENAI_API_KEY"),
-            tools=tools_from_defaults(),
+            tools=workspace_tools(),
             session_store=InMemorySessionStore(),
             permissions={"mode": "skip-dangerous"},
             config_dir=tmp,

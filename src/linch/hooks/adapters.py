@@ -96,7 +96,7 @@ class ToolMiddlewareHook:
                     raw = await raw
             except Exception as exc:
                 # Fail closed: a raising before_tool_call middleware blocks the
-                # call (matches the legacy dispatch_before_tool_call contract).
+                # call (matches the former middleware dispatch contract).
                 return HookResult.block(
                     f"Middleware before_tool_call failed: {exc}", input=current.input
                 )

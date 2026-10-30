@@ -83,9 +83,6 @@ class ToolRegistry:
         self._registrations: dict[str, _Registration] = {}
         self._generation = 0
 
-    def add(self, tool: Tool) -> Disposable:
-        return self.register(tool)
-
     @property
     def generation(self) -> int:
         """Monotonic structural revision used by prompt/request caches."""
@@ -106,15 +103,12 @@ class ToolRegistry:
         self._generation += 1
         return self._disposer(tool.name, registration)
 
-    def remove(self, name: str) -> Tool | None:
-        return self.unregister(name)
-
     def unregister(self, name: str) -> Tool | None:
         """Remove the tool with *name* and return it, or ``None`` if not found.
 
         Example — strip Bash from the default toolset::
 
-            registry = default_tools()
+            registry = workspace_tools()
             registry.unregister("Bash")
         """
         removed = self._tools.pop(name, None)
@@ -199,7 +193,7 @@ class ToolRegistry:
         Example — RAG agent with only a custom ``RetrieveDocs`` tool plus
         tasks::
 
-            registry = default_tools().subset(
+            registry = workspace_tools().subset(
                 include={"RetrieveDocs", "TaskCreate", "TaskGet"}
             )
         """
@@ -340,7 +334,11 @@ class ToolRegistry:
         )
 
 
-def workspace_tools() -> ToolRegistry:
+def workspace_tools(
+    *,
+    exclude: set[str] | None = None,
+    extra: Iterable[Tool] | None = None,
+) -> ToolRegistry:
     """Return Linch's explicit software-workspace tool preset.
 
     ``Agent`` no longer installs this registry implicitly.  Coding harnesses
@@ -349,53 +347,22 @@ def workspace_tools() -> ToolRegistry:
     site.
     """
     registry = ToolRegistry()
-    registry.register(ReadTool())
-    registry.register(WriteTool())
-    registry.register(EditTool())
-    registry.register(BashTool())
-    registry.register(GlobTool())
-    registry.register(GrepTool())
-    registry.register(TaskCreateTool())
-    registry.register(TaskListTool())
-    registry.register(TaskGetTool())
-    registry.register(TaskUpdateTool())
-    return registry
-
-
-def coding_tools() -> ToolRegistry:
-    """Alias for :func:`workspace_tools` with a coding-oriented name."""
-    return workspace_tools()
-
-
-def default_tools() -> ToolRegistry:
-    """Deprecated compatibility alias for :func:`workspace_tools`.
-
-    The name is retained for source compatibility, but these are no longer the
-    defaults of :class:`linch.Agent` in Linch 2.0.
-    """
-    return workspace_tools()
-
-
-def tools_from_defaults(
-    *,
-    exclude: set[str] | None = None,
-    extra: list[Tool] | None = None,
-) -> ToolRegistry:
-    """Return a modified copy of the default toolset.
-
-    Args:
-        exclude: Tool names to remove from the defaults.
-        extra: Additional tools to register (after removing *exclude*).
-
-    Example::
-
-        registry = tools_from_defaults(
-            exclude={"Bash", "Write"},
-            extra=[MySearchTool()],
-        )
-    """
-    registry = workspace_tools().subset(exclude=exclude)
-    for tool in extra or []:
+    for tool in (
+        ReadTool(),
+        WriteTool(),
+        EditTool(),
+        BashTool(),
+        GlobTool(),
+        GrepTool(),
+        TaskCreateTool(),
+        TaskListTool(),
+        TaskGetTool(),
+        TaskUpdateTool(),
+    ):
+        registry.register(tool)
+    if exclude:
+        registry = registry.subset(exclude=exclude)
+    for tool in extra or ():
         registry.register(tool)
     return registry
 

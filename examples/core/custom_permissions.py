@@ -31,7 +31,7 @@ from linch import Agent
 from linch.config import FeatureFlags
 from linch.permissions import BashRule, PathRule, ToolRule
 from linch.sessions import InMemorySessionStore
-from linch.tools.registry import default_tools, tools_from_defaults
+from linch.tools.registry import workspace_tools
 
 API_KEY = os.environ.get("OPENAI_API_KEY", "")
 MODEL = "gpt-5-nano-2025-08-07"
@@ -80,7 +80,7 @@ def make_edits_agent() -> Agent:
 def make_no_bash_agent() -> Agent:
     return Agent(
         **BASE_CFG,
-        tools=default_tools(),
+        tools=workspace_tools(),
         permissions={
             "mode": "skip-dangerous",
             "rules": [
@@ -99,7 +99,7 @@ def make_no_bash_agent() -> Agent:
 def make_sandboxed_agent(allowed_dir: str = "/tmp") -> Agent:
     return Agent(
         **BASE_CFG,
-        tools=default_tools(),
+        tools=workspace_tools(),
         cwd=allowed_dir,
         permissions={
             "mode": "skip-dangerous",
@@ -122,7 +122,7 @@ def make_sandboxed_agent(allowed_dir: str = "/tmp") -> Agent:
 def make_safe_bash_agent() -> Agent:
     return Agent(
         **BASE_CFG,
-        tools=default_tools(),
+        tools=workspace_tools(),
         permissions={
             "mode": "skip-dangerous",
             "rules": [
@@ -160,7 +160,7 @@ def my_sync_approval(request) -> dict:
 def make_readonly_agent() -> Agent:
     return Agent(
         **BASE_CFG,
-        tools=tools_from_defaults(exclude={"Write", "Edit"}),
+        tools=workspace_tools(exclude={"Write", "Edit"}),
         permissions={
             "mode": "default",
             "canUseTool": my_sync_approval,
@@ -189,7 +189,7 @@ async def my_async_approval(request) -> dict:
 def make_async_callback_agent() -> Agent:
     return Agent(
         **BASE_CFG,
-        tools=default_tools(),
+        tools=workspace_tools(),
         permissions={
             "mode": "default",
             "canUseTool": my_async_approval,  # async functions work directly
@@ -224,7 +224,7 @@ def make_interactive_agent() -> Agent:
 
     return Agent(
         **BASE_CFG,
-        tools=default_tools(),
+        tools=workspace_tools(),
         permissions={
             "mode": "default",
             "canUseTool": interactive_approval,
@@ -248,7 +248,7 @@ def make_production_agent(project_root: str = "/tmp/myproject") -> Agent:
 
     return Agent(
         **BASE_CFG,
-        tools=default_tools(),
+        tools=workspace_tools(),
         cwd=project_root,
         permissions={
             "mode": "default",

@@ -20,7 +20,7 @@ From a local checkout:
 pip install -e '.[dev,mcp,anthropic,gemini]'
 ```
 
-Linch targets Python 3.10+. Optional extras are intentionally split by feature;
+Linch targets Python 3.11+. Optional extras are intentionally split by feature;
 you only need provider extras when you use those providers.
 
 Prefer a ready-made project? `linch new my-agent` scaffolds a runnable,

@@ -8,7 +8,7 @@ in UTC. This is a *mechanism*: what a schedule triggers is embedder policy.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 # (low, high) inclusive bounds per field.
 _FIELD_BOUNDS = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 6))
@@ -81,7 +81,7 @@ def cron_matches(expr: str, when: datetime) -> bool:
     dom = _parse_field(fields[2], 1, 31, name="day-of-month")
     month = _parse_field(fields[3], 1, 12, name="month")
     dow = _parse_field(fields[4], 0, 6, name="day-of-week")
-    when = when.astimezone(timezone.utc)
+    when = when.astimezone(UTC)
     # Python weekday(): Monday=0..Sunday=6; cron: Sunday=0..Saturday=6.
     cron_dow = (when.weekday() + 1) % 7
     return (
@@ -96,7 +96,7 @@ def cron_matches(expr: str, when: datetime) -> bool:
 def next_cron_time(expr: str, after_epoch: float) -> float:
     """Epoch seconds of the next minute strictly after *after_epoch* matching *expr*."""
     validate_cron(expr)
-    start = datetime.fromtimestamp(after_epoch, tz=timezone.utc).replace(second=0, microsecond=0)
+    start = datetime.fromtimestamp(after_epoch, tz=UTC).replace(second=0, microsecond=0)
     candidate = start + timedelta(minutes=1)
     for _ in range(_MAX_SEARCH_MINUTES):
         if cron_matches(expr, candidate):

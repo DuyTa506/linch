@@ -44,7 +44,7 @@ from linch.sessions.store import (
 from linch.sessions.tasks import CreateTaskInput, Task, TaskPatch
 from linch.types import Message, message_from_dict, message_to_dict
 
-from ..storage._pg import _import_asyncpg
+from ..storage._pg import _import_asyncpg, close_pool, ensure_pool
 
 # ── DDL ─────────────────────────────────────────────────────────────────────
 
@@ -137,8 +137,6 @@ class PostgresSessionStore:
         max_size: Maximum pool connections.
     """
 
-    runtime_control_block_codec_version = 1
-
     def __init__(
         self,
         dsn: str,
@@ -156,31 +154,7 @@ class PostgresSessionStore:
         self._init_lock = asyncio.Lock()
 
     async def _ensure(self) -> Any:
-        """Return the pool, creating it and the schema on first call."""
-        if self._initialized:
-            return self._pool
-        async with self._init_lock:
-            if self._initialized:
-                return self._pool
-            asyncpg = _import_asyncpg()
-            if self._pool is None:
-                self._pool = await asyncpg.create_pool(
-                    self._dsn,
-                    min_size=self._min_size,
-                    max_size=self._max_size,
-                )
-            try:
-                async with self._pool.acquire() as conn:
-                    async with conn.transaction():
-                        await conn.execute(_SCHEMA)
-            except Exception:
-                # Schema creation failed — close and reset so the next caller
-                # retries from a clean state rather than reusing a partial pool.
-                pool, self._pool = self._pool, None
-                await pool.close()
-                raise
-            self._initialized = True
-        return self._pool
+        return await ensure_pool(self, _SCHEMA, _import_asyncpg)
 
     # ── SessionStore protocol ────────────────────────────────────────────────
 
@@ -725,9 +699,7 @@ class PostgresSessionStore:
                 return await _get_task_pg(conn, session_id, task_id)
 
     async def close(self) -> None:
-        if self._pool is not None:
-            await self._pool.close()
-            self._pool = None
+        await close_pool(self)
 
 
 # ── Async PG helpers (run within an acquired connection) ────────────────────

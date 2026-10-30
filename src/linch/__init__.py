@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     # skipped at runtime (TYPE_CHECKING is False), so `import linch` stays lazy —
     # the runtime resolution path is `__getattr__` below. Keep it in sync with
     # `_EXPORTS`/`_ALIASES`; drift surfaces as pyright/ruff errors.
-    from .agent import Agent, AgentOptions
+    from .agent import Agent
     from .budget import RunBudget
     from .compaction import (
         GENERAL_SUMMARY_PROMPT,
@@ -243,12 +243,7 @@ if TYPE_CHECKING:
         SqliteMemoryStore,
         TieredMemoryStore,
     )
-    from .middleware import (
-        AgentMiddleware,
-        MiddlewareContext,
-        ToolCallMiddlewareInput,
-        ToolCallMiddlewareResult,
-    )
+    from .middleware import MiddlewareContext, ToolCallMiddlewareInput, ToolCallMiddlewareResult
     from .observability import (
         BaseObserver,
         LoggingObserver,
@@ -378,12 +373,11 @@ if TYPE_CHECKING:
         ToolOutputError,
         ToolRegistry,
         ToolResult,
-        default_tools,
         tool,
     )
     from .tools.isolation import IsolationBackend, TempDirIsolation
     from .tools.pipeline import ToolExecution, ToolPipeline
-    from .tools.registry import empty_tools, tools_from_defaults, workspace_tools
+    from .tools.registry import empty_tools, workspace_tools
     from .tools.wrappers import metrics_wrapper, timeout_wrapper
     from .types import (
         ContentBlock,
@@ -418,13 +412,11 @@ if TYPE_CHECKING:
         WorkflowTimeoutError,
     )
 
-    defaultTools = default_tools
-
 # public name -> relative submodule that defines it (attribute name == public
 # name). Flattened into ``_LAZY`` below; ``_ALIASES`` covers the few names whose
 # source attribute differs from the exported name.
 _EXPORTS: dict[str, tuple[str, ...]] = {
-    ".agent": ("Agent", "AgentOptions"),
+    ".agent": ("Agent",),
     ".budget": ("RunBudget",),
     ".compaction": (
         "GENERAL_SUMMARY_PROMPT",
@@ -639,12 +631,7 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
         "SqliteMemoryStore",
         "TieredMemoryStore",
     ),
-    ".middleware": (
-        "AgentMiddleware",
-        "MiddlewareContext",
-        "ToolCallMiddlewareInput",
-        "ToolCallMiddlewareResult",
-    ),
+    ".middleware": ("MiddlewareContext", "ToolCallMiddlewareInput", "ToolCallMiddlewareResult"),
     ".observability": (
         "BaseObserver",
         "LoggingObserver",
@@ -771,13 +758,12 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
         "ToolOutputError",
         "ToolRegistry",
         "ToolResult",
-        "default_tools",
         "tool",
     ),
     ".tools.isolation": ("IsolationBackend", "TempDirIsolation"),
     ".tools.pipeline": ("ToolExecution", "ToolPipeline"),
     ".tools.wrappers": ("metrics_wrapper", "timeout_wrapper"),
-    ".tools.registry": ("empty_tools", "tools_from_defaults", "workspace_tools"),
+    ".tools.registry": ("empty_tools", "workspace_tools"),
     ".types": (
         "ContentBlock",
         "ImageBlock",
@@ -816,7 +802,6 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
 # from the attribute defined in the module.
 _ALIASES: dict[str, tuple[str, str]] = {
     "RUN_SCHEMA_VERSION": (".run_store", "SCHEMA_VERSION"),
-    "defaultTools": (".tools", "default_tools"),
 }
 
 _LAZY: dict[str, tuple[str, str]] = {
@@ -849,7 +834,6 @@ __all__ = [
     "AskUserTool",
     "Agent",
     "LinchError",
-    "AgentOptions",
     "Context",
     "Disposable",
     "IgnorableEvent",
@@ -889,7 +873,6 @@ __all__ = [
     "cron_matches",
     "next_cron_time",
     "validate_cron",
-    "AgentMiddleware",
     "ContextBudget",
     "ContextBuilder",
     "ContextBuilderChain",
@@ -921,7 +904,6 @@ __all__ = [
     "OutputSchema",
     "ToolChoice",
     "empty_tools",
-    "tools_from_defaults",
     "AssistantEvent",
     "CompactionEvent",
     "ContentBlock",
@@ -1127,8 +1109,6 @@ __all__ = [
     "normalize_verifiers",
     "connect_mcp_servers",
     "create_deep_agent",
-    "defaultTools",
-    "default_tools",
     "workspace_tools",
     "ensure_run_contract_compatible",
     "get_version",

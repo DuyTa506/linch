@@ -471,7 +471,7 @@ class WorkflowContext:
                 return await run()
             try:
                 return await asyncio.wait_for(run(), timeout=resolved / 1000.0)
-            except asyncio.TimeoutError as exc:
+            except TimeoutError as exc:
                 raise WorkflowTimeoutError(f"{label} timed out after {resolved:g}ms") from exc
 
         if retry is None:

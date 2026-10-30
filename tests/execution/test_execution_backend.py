@@ -46,10 +46,9 @@ def test_local_backend_satisfies_protocol() -> None:
 
 
 def test_public_execution_annotations_resolve_at_runtime() -> None:
-    from linch import Agent, AgentOptions
+    from linch import Agent
 
     targets = (
-        AgentOptions,
         Agent.__init__,
         Agent.session,
         ShellBackend.run,
@@ -143,13 +142,6 @@ async def test_bash_tool_default_backend_unchanged() -> None:
     ctx = ToolContext(cwd=".", session_id="s", run_id="r", session_store=None)
     result = await tool.execute({"command": "echo hi", "timeout_ms": 5000}, ctx)
     assert "hi" in result.content
-
-
-def test_bash_tool_rejects_backend_and_execution_together() -> None:
-    with pytest.raises(ValueError, match="either backend= or execution="):
-        BashTool(
-            backend=_FakeShell(), execution=RemoteExecutionBackend(shell=_FakeShell(), fs=_FakeFs())
-        )
 
 
 async def test_agent_owns_context_and_registers_pipeline(tmp_path: Any) -> None:

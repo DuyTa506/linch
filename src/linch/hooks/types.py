@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from ..tools import CanonicalToolOutput, ToolResult
 from ..types import AssistantAssembly, ProviderRequest
 
 
-class HookEvent(str, Enum):
+class HookEvent(StrEnum):
     AGENT_START = "AgentStart"
     AGENT_STOP = "AgentStop"
     USER_PROMPT_SUBMIT = "UserPromptSubmit"

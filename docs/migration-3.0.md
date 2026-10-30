@@ -1,9 +1,62 @@
-# Migrating to Linch 3.0.0a1
+# Migrating to Linch 3.0
 
-`3.0.0a1` is an incremental prerelease for Release-A model-call accounting.
-It keeps the Linch 2.x neutral `Agent` defaults, persona, prompts, and opt-in
-feature behavior. This guide covers only the accounting slice; the later 3.0
-reliability policy and other roadmap lanes are not shipped here.
+This guide tracks the ongoing 3.0 transition, including the original
+`3.0.0a1` Release-A accounting slice and subsequent API cleanup. Python 3.11+
+is required. During 3.0 development, compatibility breaks do not require a
+warning window or compatibility shim; start fresh runs rather than depending
+on pre-3.0 durable state. Some legacy readers remain pending separate cleanup,
+so this policy does not imply that all old data is already rejected.
+
+## API and internal cleanup
+
+Each item below records a removal or consolidation in the legacy sweep.
+Private helper names are listed for maintainers; supported application imports
+remain the names in `linch.__all__`.
+
+- **Python / K16:** Python 3.10 support and the CLI scaffold's `tomllib` import/line-scan fallbacks are removed; use Python 3.11+ and valid TOML.
+- **A01:** `Session(provider_view=..., full_history=...)` is removed; pass `session_log=SessionLog.seed(historical=..., visible=...)`.
+- **A02:** `SessionLog.derive_messages()` is removed; read `provider_view`.
+- **A04:** `BashTool(backend=...)` is removed; use `BashTool(execution=...)` with a coherent execution backend.
+- **A05:** Agent constructor aliases `systemPrompt`, `maxRetries`, `maxOutputTokens`, `includePartialMessages`, `maxTurns`, `maxToolConcurrency`, `toolBatchingStrategy`, `toolTimeoutMs`, `cacheTtl`, `configDir`, `mcpServers`, and `loopGuard` are removed; use their snake_case spellings.
+- **A06:** The `Agent.openai` provider property is removed; use `agent.provider`; the separate `Agent(openai=...)` configuration argument remains supported.
+- **A07:** The unused `AgentOptions` configuration DTO is removed; configure `Agent(...)` directly.
+- **A08:** `coding_tools`, `default_tools`, `defaultTools`, and `tools_from_defaults` are removed; use `workspace_tools(exclude=..., extra=...)` for the configurable workspace preset.
+- **A09:** `ToolRegistry.add/remove` are removed; use `register/unregister`; `register` and `replace` still return reversible `Disposable` handles.
+- **A10:** Tool-context aliases `sessionId`, `runId`, `sessionStore`, `fileReadTracker`, `idempotencyKey`, `reportProgress`, and middleware aliases `sessionId`, `runId`, `turnIndex`, `toolUseId`, `toolName` are removed; use snake_case attributes and `report_progress`.
+- **A11:** The unused `AgentMiddleware` base is removed; implement the duck-typed hooks consumed by `ToolMiddlewareHook`.
+- **D01:** Obsolete middleware outcome/dispatch helpers are removed; the active `ToolMiddlewareHook` adapter remains.
+- **D02:** Background-tool completion no longer appends directly to a duck session's notification list; custom session implementations must supply async `notify(...)`.
+- **D03:** The `parallel_safe` fallback is removed; read tools must declare `parallel` to opt into concurrent scheduling.
+- **D04:** The dormant runtime-control codec capability gate and store capability attributes are removed with deferred discovery support.
+- **P08:** `ToolActivation`, `ToolSurfaceReaderGuard`, `tool_activations`, and their discovery codecs/projection plumbing are removed; unknown message-block types and unknown tool-result fields fail closed, while ordinary message-copy isolation remains intact.
+- **D05:** The unused runtime `PermissionDecision.updated_input` field is removed; persisted non-null input rewrites are still rejected and the null wire marker remains.
+- **D06:** The unused private `add_usage` helper is removed; use `Usage.add`.
+- **D07:** The unused private `make_pool` factory is removed; Postgres stores own their pool configuration through the shared lifecycle helper.
+- **D09:** The obsolete `glob.glob` TypeError retry is removed; supported Python versions accept `root_dir` and `recursive` directly.
+- **M02:** Duplicate strict JSON traversals share a private traversal core with separate boundary adapters; serialized bytes, fingerprints, depth/error policies, and permissive metadata conversion are preserved.
+- **M03:** Compaction, context building, and offload share custom-estimator invocation; each retains its message/text counting and fallback policy.
+- **M04:** Loop-guard signatures use `permission_decision_key` instead of a duplicate canonicalizer; canonical JSON bytes and ASCII escaping are unchanged.
+- **M05:** Four Postgres stores share pool initialization/close helpers; locking, schema transactions, retry, supplied-pool handling, and run-store advisory-lock/reset policies remain unchanged.
+- **M06:** OpenAI Chat uses the existing async client-close helper; client fields still reset before closing and close errors propagate.
+- **M07:** Mailbox and scheduling claims share a neutral validator; validation order and error messages are unchanged.
+- **Studio leftovers:** The `linch_ui/` ignore rule and stale Studio branch/DeepSeek documentation references are removed.
+
+## Deferred loop cleanup
+
+WP9b owns the shell-only `Agent(execution_backend=...)` compatibility path
+(A03), unaccounted stream entry (D08), missing-`jsonschema` fallback (D10), and
+compaction retry consolidation (M01). These remain in current code. Its scope
+also includes the stale loop docstring reference to removed
+`BashTool(backend=...)`. Other persisted-reader categories outside this sweep
+retain their current validation and recovery behavior; no blanket reader
+removal is claimed here.
+
+## Accounting introduced in 3.0.0a1
+
+The following sections preserve the accounting contract introduced by the
+first prerelease. That slice kept the neutral Agent persona/prompts and the
+existing compaction strategies; it did not itself introduce later reliability
+or distributed accounting features.
 
 ## Pin the prerelease deliberately
 
@@ -14,8 +67,9 @@ semantics:
 dependencies = ["linch==3.0.0a1"]
 ```
 
-Keep the existing optional extras and their dependency floors. No unrelated
-dependency upgrade is required for this feature.
+Keep the optional extras needed by your application and resolve their declared
+dependency ranges in your lockfile. The accounting feature itself does not
+require an unrelated dependency upgrade.
 
 ## Accounted usage is cumulative
 
@@ -100,10 +154,11 @@ are partial (`None` where no price is known). A USD cap cannot enforce an
 unknown price; use a custom pricing table when the host knows the model's
 rates.
 
-This prerelease adds no reliability correction policy, bounded feedback,
-default-on reliability controls, distributed accounting, exact external
-billing, reservation protocol, or other later 3.0 feature lane. Existing
-neutral prompts/persona/default compaction behavior stays unchanged.
+The original accounting slice did not itself add reliability correction
+policy, bounded feedback, or default-on reliability controls. Its accounting
+contract does not promise distributed accounting, exact external billing, or a
+reservation protocol. Later 3.0 changes are tracked separately above and in
+the changelog.
 
 See [Events](usage/events.md), [Agent & session](usage/agent.md), and
 [Compaction architecture](architecture/compaction.md) for the operational

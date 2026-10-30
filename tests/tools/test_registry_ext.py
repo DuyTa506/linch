@@ -7,10 +7,7 @@ import pytest
 from linch.tools.base import ToolContext, ToolResult, ToolScope
 from linch.tools.registry import (
     ToolRegistry,
-    coding_tools,
-    default_tools,
     empty_tools,
-    tools_from_defaults,
     workspace_tools,
 )
 
@@ -40,7 +37,7 @@ class FakeTool:
 
 
 def test_unregister_removes_tool():
-    r = default_tools()
+    r = workspace_tools()
     assert r.get("Bash") is not None
     removed = r.unregister("Bash")
     assert removed is not None
@@ -70,7 +67,7 @@ def test_replace_registers_new_tool():
 
 
 def test_copy_is_independent():
-    r = default_tools()
+    r = workspace_tools()
     c = r.copy()
     c.unregister("Bash")
     assert r.get("Bash") is not None  # original unchanged
@@ -78,21 +75,21 @@ def test_copy_is_independent():
 
 
 def test_subset_include():
-    r = default_tools()
+    r = workspace_tools()
     sub = r.subset(include={"Read", "Write"})
     names = {t.name for t in sub.list()}
     assert names == {"Read", "Write"}
 
 
 def test_subset_exclude():
-    r = default_tools()
+    r = workspace_tools()
     sub = r.subset(exclude={"Bash"})
     assert sub.get("Bash") is None
     assert sub.get("Read") is not None
 
 
 def test_subset_include_and_exclude():
-    r = default_tools()
+    r = workspace_tools()
     r.register(FakeTool("CustomA"))
     sub = r.subset(include={"Read", "Bash", "CustomA"}, exclude={"Bash"})
     names = {t.name for t in sub.list()}
@@ -104,13 +101,10 @@ def test_empty_tools_no_args():
     assert r.list() == []
 
 
-def test_workspace_and_coding_presets_are_explicit_full_registries():
+def test_workspace_preset_is_explicit_full_registry():
     expected = {"Read", "Write", "Edit", "Bash", "Glob", "Grep"}
 
     assert expected <= {tool.name for tool in workspace_tools().list()}
-    assert expected <= {tool.name for tool in coding_tools().list()}
-    # Kept only as a 2.0 migration alias; Agent itself no longer calls it.
-    assert expected <= {tool.name for tool in default_tools().list()}
 
 
 def test_empty_tools_with_args():
@@ -120,16 +114,16 @@ def test_empty_tools_with_args():
     assert {t.name for t in r.list()} == {"A", "B"}
 
 
-def test_tools_from_defaults_exclude():
-    r = tools_from_defaults(exclude={"Bash", "Write"})
+def test_workspace_tools_exclude():
+    r = workspace_tools(exclude={"Bash", "Write"})
     assert r.get("Bash") is None
     assert r.get("Write") is None
     assert r.get("Read") is not None
 
 
-def test_tools_from_defaults_extra():
+def test_workspace_tools_extra():
     extra = FakeTool("MyTool")
-    r = tools_from_defaults(extra=[extra])
+    r = workspace_tools(extra=[extra])
     assert r.get("Bash") is not None
     assert r.get("MyTool") is extra
 
@@ -168,21 +162,12 @@ def test_replace_rejects_malformed_tool():
         r.replace(NoSummarizeTool("Incomplete"))
 
 
-def test_add_and_remove_aliases():
-    r = ToolRegistry()
-    tool = FakeTool("RuntimeTool")
-    r.add(tool)
-    assert r.get("RuntimeTool") is tool
-    assert r.remove("RuntimeTool") is tool
-    assert r.get("RuntimeTool") is None
-
-
 def test_select_by_names_and_tags():
     r = ToolRegistry()
     search = FakeTool("SearchDocs", tags=("rag", "search"))
     calc = FakeTool("Calculator", tags=("math",))
-    r.add(search)
-    r.add(calc)
+    r.register(search)
+    r.register(calc)
 
     selected = r.select(names={"Calculator"}, tags={"rag"})
     assert {tool.name for tool in selected.list()} == {"SearchDocs", "Calculator"}
@@ -197,7 +182,7 @@ def test_schemas_accept_v2_schema_attribute():
         }
 
     r = ToolRegistry()
-    r.add(SchemaTool("SearchDocs"))
+    r.register(SchemaTool("SearchDocs"))
 
     assert r.schemas() == [
         {

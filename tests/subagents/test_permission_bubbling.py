@@ -43,7 +43,7 @@ async def test_subagent_permission_request_surfaces_to_parent() -> None:
     from linch.subagents.runner import RunSubagentArgs, run_subagent
 
     registry = ToolRegistry()
-    registry.add(WriteThing())
+    registry.register(WriteThing())
     # Child consumes turns 0-1 (write call → permission ask → denied → text),
     # the parent consumes turn 2.
     provider = ScriptedProvider(

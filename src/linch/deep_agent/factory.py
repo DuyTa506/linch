@@ -182,7 +182,7 @@ def create_deep_agent(
     # skills/subagents and its virtual filesystem. MCP stays off unless servers
     # were actually configured, preventing an unrelated ambient connection.
     if features is None:
-        has_mcp = bool(agent_kwargs.get("mcp_servers") or agent_kwargs.get("mcpServers"))
+        has_mcp = bool(agent_kwargs.get("mcp_servers"))
         features = FeatureFlags(
             skills=True,
             subagents=True,
