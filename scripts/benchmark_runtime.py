@@ -4,11 +4,17 @@ import argparse
 import asyncio
 import json
 import math
+import os
+import platform
+import shlex
 import statistics
+import subprocess
 import sys
 import tempfile
 import time
+from collections import Counter, defaultdict
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -20,14 +26,16 @@ if str(SRC) not in sys.path:
 
 from linch import Agent, InMemoryRunStore  # noqa: E402
 from linch.events import (  # noqa: E402
+    AssistantEvent,
+    ErrorEvent,
     PartialAssistantEvent,
     ResultEvent,
     SystemEvent,
     ToolCallEndEvent,
 )
 from linch.memory import InMemoryKeywordMemoryStore, MemoryItem  # noqa: E402
-from linch.run_store import SqliteRunStore  # noqa: E402
-from linch.sessions import InMemorySessionStore  # noqa: E402
+from linch.run_store import SqliteRunStore, checkpoint_to_dict  # noqa: E402
+from linch.sessions import InMemorySessionStore, SqliteSessionStore  # noqa: E402
 from linch.tools import ToolContext, ToolRegistry, ToolResult  # noqa: E402
 from linch.types import Usage  # noqa: E402
 
@@ -439,6 +447,546 @@ def format_json(results: Sequence[BenchmarkResult], *, warmups: int, samples: in
     return json.dumps(payload, indent=2, sort_keys=True)
 
 
+# Scale cases are opt-in and each CLI case runs in a fresh process. The fake
+# provider is deliberately history-driven: sharing it cannot mix session turns.
+@dataclass(slots=True, frozen=True)
+class ScaleCase:
+    name: str
+    backend: str
+    sessions: int
+    turns: int
+
+
+def build_scale_cases() -> dict[str, ScaleCase]:
+    return {
+        case.name: case
+        for backend in ("memory", "sqlite")
+        for sessions, turns in ((200, 4), (1000, 4), (1, 50))
+        for case in [ScaleCase(f"scale_{backend}_{sessions}x{turns}", backend, sessions, turns)]
+    }
+
+
+class ScaleProvider:
+    id = "scale-bench"
+
+    def __init__(self, *, turns: int, delay: float = 0.002) -> None:
+        self.turns, self.delay = turns, delay
+
+    def context_window(self, model: str) -> int:
+        return 1_000_000
+
+    async def stream(self, req: Any) -> AsyncIterator[dict[str, object]]:
+        turn = sum(message.role == "assistant" for message in req.messages)
+        await asyncio.sleep(self.delay)
+        yield {"type": "message_start", "model": req.model}
+        if turn == self.turns - 1:
+            yield {"type": "text_delta", "text": "scale:ok"}
+            yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
+            return
+        names = (
+            ["rag_search", "sql_query"]
+            if turn == 0
+            else ["save_note"]
+            if turn == self.turns - 2
+            else ["rag_search"]
+        )
+        for name in names:
+            tool_id = f"{turn}-{name}"
+            yield {"type": "tool_use_start", "id": tool_id, "name": name}
+            yield {
+                "type": "tool_use_input_delta",
+                "id": tool_id,
+                "json_delta": json.dumps({"value": f"{turn}:{name}"}),
+            }
+            yield {"type": "tool_use_end", "id": tool_id}
+        yield {"type": "message_end", "stop_reason": "tool_use", "usage": Usage()}
+
+
+class ScaleTool:
+    description = "Offline scale benchmark tool."
+    input_schema = {"type": "object", "properties": {"value": {"type": "string"}}}
+
+    def __init__(self, name: str, active: dict[str, int], overlaps: set[str]) -> None:
+        self.name, self.active, self.overlaps = name, active, overlaps
+        self.scope = "write" if name == "save_note" else "read"
+        self.parallel = self.scope == "read"
+
+    def validate(self, raw: dict[str, Any]) -> dict[str, Any]:
+        return raw
+
+    def summarize(self, input: dict[str, Any]) -> str:
+        return self.name
+
+    async def execute(self, input: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        first_read = input["value"].startswith("0:") and self.scope == "read"
+        if first_read:
+            self.active[ctx.session_id] = self.active.get(ctx.session_id, 0) + 1
+            if self.active[ctx.session_id] == 2:
+                self.overlaps.add(ctx.session_id)
+        try:
+            await asyncio.sleep(0.002)
+            return ToolResult(content=f"{self.name}:{input['value']}:ok")
+        finally:
+            if first_read:
+                self.active[ctx.session_id] -= 1
+
+
+class ScaleStoreMetrics:
+    def __init__(self) -> None:
+        self.turn = ContextVar("scale_turn", default=-1)
+        self.writes: Counter[tuple[str, str, int]] = Counter()
+        self.payloads: dict[tuple[int, str], list[int]] = defaultdict(list)
+
+    def summaries(self, *, turns: int) -> tuple[dict[str, Any], dict[str, Any]]:
+        stores: dict[str, Counter[str]] = defaultdict(Counter)
+        by_turn: dict[int, Counter[str]] = defaultdict(Counter)
+        for (store, method, turn), count in self.writes.items():
+            stores[store][method] += count
+            by_turn[turn][f"{store}.{method}"] += count
+        writes = sum(self.writes.values())
+        payload_turns: dict[int, list[int]] = defaultdict(list)
+        phases: dict[str, list[int]] = defaultdict(list)
+        for (turn, phase), sizes in self.payloads.items():
+            payload_turns[turn].extend(sizes)
+            phases[phase].extend(sizes)
+
+        def sizes_summary(sizes: list[int]) -> dict[str, Any]:
+            return {
+                "count": len(sizes),
+                "total": sum(sizes),
+                "min": min(sizes),
+                "max": max(sizes),
+                "mean": statistics.mean(sizes),
+            }
+
+        total_bytes = sum(sum(sizes) for sizes in payload_turns.values())
+        return (
+            {
+                "total": writes,
+                "per_provider_turn": writes / turns if turns else None,
+                "by_store": {name: dict(methods) for name, methods in stores.items()},
+                "by_turn": [
+                    {"turn": turn, "total": sum(methods.values()), "methods": dict(methods)}
+                    for turn, methods in sorted(by_turn.items())
+                ],
+                "unit": "successful external mutation API calls, not SQL statements or rows",
+                "attribution": "-1: setup; then latest provider_pending checkpoint turn; "
+                "checkpoint calls use their own turn; cleanup uses final turn",
+            },
+            {
+                "total": total_bytes,
+                "per_provider_turn": total_bytes / turns if turns else None,
+                "by_turn": [
+                    {"turn": turn, **sizes_summary(sizes)}
+                    for turn, sizes in sorted(payload_turns.items())
+                ],
+                "by_phase": {phase: sizes_summary(sizes) for phase, sizes in phases.items()},
+                "encoding": "checkpoint_to_dict, json.dumps(allow_nan=False), UTF-8; "
+                "includes terminal checkpoint payloads; -1 is setup",
+            },
+        )
+
+
+class MeasuredStore:
+    """Expose exactly the wrapped store's capabilities, avoiding internal double counts."""
+
+    _mutations = {
+        "session": {
+            "create",
+            "create_if_absent",
+            "append_messages",
+            "enqueue_inbox",
+            "commit_inbox",
+            "save_provider_snapshot",
+            "update_meta",
+            "set_invoked_skills",
+            "delete",
+            "create_task",
+            "update_task",
+            "delete_task",
+            "claim_task",
+            "release_task",
+        },
+        "run": {
+            "create_run",
+            "save_checkpoint",
+            "append_event",
+            "append_events",
+            "mark_completed",
+            "mark_failed",
+            "save",
+            "delete",
+            "prune",
+        },
+    }
+
+    def __init__(self, inner: Any, name: str, metrics: ScaleStoreMetrics) -> None:
+        self.inner, self.name, self.metrics = inner, name, metrics
+
+    def __getattr__(self, name: str) -> Any:
+        method = getattr(self.inner, name)  # Missing optional capabilities stay missing.
+        if name not in self._mutations[self.name]:
+            return method
+
+        async def measured(*args: Any, **kwargs: Any) -> Any:
+            checkpoint = None
+            turn = self.metrics.turn.get()
+            if self.name == "run" and name in {"save_checkpoint", "mark_completed", "mark_failed"}:
+                checkpoint = args[1] if len(args) > 1 else kwargs.get("checkpoint")
+                if checkpoint is not None:
+                    turn = (
+                        -1
+                        if checkpoint.phase in {"started", "user_appended"}
+                        else checkpoint.turn_index
+                    )
+                    if checkpoint.phase == "provider_pending":
+                        self.metrics.turn.set(turn)
+            result = await method(*args, **kwargs)
+            self.metrics.writes[self.name, name, turn] += 1
+            if self.name == "run" and name in {"save_checkpoint", "mark_completed", "mark_failed"}:
+                persisted = result.checkpoint
+                if persisted is None:
+                    return result
+                size = len(
+                    json.dumps(checkpoint_to_dict(persisted), allow_nan=False).encode("utf-8")
+                )
+                self.metrics.payloads[turn, persisted.phase].append(size)
+            return result
+
+        return measured
+
+
+class LagSampler:
+    def __init__(self, *, interval: float = 0.01) -> None:
+        self.interval = interval
+        self.samples: list[float] = []
+        self.deadline = 0.0
+        self.peak_rss = _rss_current()
+        self.task: asyncio.Task[None] | None = None
+
+    async def start(self) -> None:
+        self.deadline = time.perf_counter() + self.interval
+        self.task = asyncio.create_task(self._run())
+        await asyncio.sleep(0)
+
+    def _capture(self) -> None:
+        self.peak_rss = max(self.peak_rss, _rss_current())
+        now = time.perf_counter()
+        if now >= self.deadline:
+            self.samples.append((now - self.deadline) * 1000)
+            self.deadline = now + self.interval
+
+    async def _run(self) -> None:
+        while True:
+            await asyncio.sleep(max(0, self.deadline - time.perf_counter()))
+            self._capture()
+
+    async def stop(self) -> dict[str, Any]:
+        # Capture synchronously before cancellation: a final blocking burst may
+        # finish the workload before the sleeping sampler gets another turn.
+        self._capture()
+        if self.task is not None:
+            self.task.cancel()
+            await asyncio.gather(self.task, return_exceptions=True)
+        return {
+            "interval": self.interval * 1000,
+            "samples": len(self.samples),
+            "p99": percentile(self.samples, 99) if self.samples else 0.0,
+            "max": max(self.samples, default=0.0),
+        }
+
+
+def _rss_high_water() -> int:
+    import resource
+
+    value = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return int(value if sys.platform == "darwin" else value * 1024)
+
+
+def _rss_current() -> int:
+    try:
+        return int(Path("/proc/self/statm").read_text().split()[1]) * os.sysconf("SC_PAGE_SIZE")
+    except (OSError, ValueError, IndexError):
+        return _rss_high_water()
+
+
+def scale_rss_summary(
+    *, baseline: int, initial_hwm: int, sampled_peak: int, final_hwm: int, sessions: int
+) -> dict[str, Any]:
+    # A fresh child can inherit an import-time HWM above current RSS. Only a
+    # new HWM proves a workload peak; otherwise use observed /proc RSS samples.
+    peak = max(sampled_peak, final_hwm if final_hwm > initial_hwm else baseline)
+    growth = max(0, peak - baseline)
+    return {
+        "baseline_current_bytes": baseline,
+        "initial_high_water_bytes": initial_hwm,
+        "peak_high_water_bytes": final_hwm,
+        "sampled_peak_rss_bytes": sampled_peak,
+        "peak_rss_bytes": peak,
+        "peak_delta_bytes": growth,
+        "peak_delta_bytes_per_session": growth / sessions,
+        "import_high_water_floor_bytes": max(0, initial_hwm - baseline),
+        "method": "10ms /proc current RSS samples including final RSS; use ru_maxrss "
+        "when it exceeds initial HWM; below import HWM brief unsampled peaks can be missed",
+    }
+
+
+async def run_scale_case(
+    case: ScaleCase,
+    workdir: Path,
+    *,
+    progress_path: Path | None = None,
+) -> dict[str, Any]:
+    if case.backend not in {"memory", "sqlite"} or case.sessions < 1 or case.turns < 4:
+        raise ValueError("scale cases need memory/sqlite, positive sessions, and at least 4 turns")
+    baseline_rss, initial_hwm = _rss_current(), _rss_high_water()
+    workdir.mkdir(parents=True, exist_ok=True)
+    metrics = ScaleStoreMetrics()
+    session_store = (
+        InMemorySessionStore()
+        if case.backend == "memory"
+        else SqliteSessionStore(workdir / "sessions.db")
+    )
+    run_store = (
+        InMemoryRunStore() if case.backend == "memory" else SqliteRunStore(workdir / "runs.db")
+    )
+    active: dict[str, int] = {}
+    overlaps: set[str] = set()
+    tools = ToolRegistry()
+    for name in ("rag_search", "sql_query", "save_note"):
+        tools.register(ScaleTool(name, active, overlaps))
+    agent = Agent(
+        model="gpt-5",
+        provider=ScaleProvider(turns=case.turns),
+        tools=tools,
+        session_store=MeasuredStore(session_store, "session", metrics),
+        run_store=MeasuredStore(run_store, "run", metrics),
+        permissions={"mode": "skip-dangerous"},
+        max_tool_concurrency=2,
+        max_turns=case.turns + 1,
+        result_offload=None,
+    )
+    result: dict[str, Any] = {
+        **asdict(case),
+        "pid": os.getpid(),
+        "completed": 0,
+        "failed": 0,
+        "errors": [],
+        "observed_provider_turns": 0,
+        "observed_tool_calls": 0,
+        "timed_out": False,
+    }
+    latencies: list[float] = []
+    started = time.perf_counter()
+    last_progress = 0.0
+
+    def progress(*, force: bool = False) -> None:
+        nonlocal last_progress
+        now = time.perf_counter()
+        if progress_path is not None and (force or now - last_progress >= 0.25):
+            partial = {**result, "elapsed_s": now - started}
+            partial["store_writes"], partial["checkpoint_bytes"] = metrics.summaries(
+                turns=result["observed_provider_turns"]
+            )
+            temporary = progress_path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(partial, allow_nan=False))
+            temporary.replace(progress_path)
+            last_progress = now
+
+    async def run_one() -> None:
+        metrics.turn.set(-1)
+        began = time.perf_counter()
+        turns, calls, results = 0, Counter(), []
+        try:
+            session = await agent.session()
+            async for event in session.run("offline scale benchmark"):
+                if isinstance(event, AssistantEvent):
+                    turns += 1
+                    result["observed_provider_turns"] += 1
+                elif isinstance(event, ToolCallEndEvent):
+                    calls[event.tool_name] += 1
+                    result["observed_tool_calls"] += 1
+                    if event.is_error:
+                        raise AssertionError(f"tool error: {event.tool_name}")
+                elif isinstance(event, ErrorEvent):
+                    raise AssertionError(f"run error: {event.error}")
+                elif isinstance(event, ResultEvent):
+                    results.append(event)
+                progress()
+            if turns != case.turns or calls != {
+                "rag_search": case.turns - 2,
+                "sql_query": 1,
+                "save_note": 1,
+            }:
+                raise AssertionError(f"wrong workload: turns={turns}, tools={dict(calls)}")
+            if (
+                len(results) != 1
+                or results[0].subtype != "success"
+                or results[0].final_text != "scale:ok"
+                or session.id not in overlaps
+            ):
+                raise AssertionError("invalid final result or first reads did not overlap")
+            latencies.append((time.perf_counter() - began) * 1000)
+            result["completed"] += 1
+        except Exception as exc:
+            result["failed"] += 1
+            if len(result["errors"]) < 20:
+                result["errors"].append(f"{type(exc).__name__}: {exc}")
+        progress()
+
+    sampler = LagSampler()
+    await sampler.start()
+    progress(force=True)
+    try:
+        started = time.perf_counter()
+        # All session/run admission tasks are queued before any starts running.
+        await asyncio.gather(*(run_one() for _ in range(case.sessions)))
+        elapsed = time.perf_counter() - started
+        lag = await sampler.stop()
+        final_hwm = _rss_high_water()
+        result.update(
+            correct=result["completed"] == case.sessions and result["failed"] == 0,
+            elapsed_s=elapsed,
+            runs_per_second=result["completed"] / elapsed,
+            run_latency_ms={
+                "p50": percentile(latencies, 50) if latencies else None,
+                "p99": percentile(latencies, 99) if latencies else None,
+                "samples": len(latencies),
+                "scope": "session creation plus run; successful runs only",
+            },
+            parallel_first_read_pairs=len(overlaps),
+            event_loop_lag_ms=lag,
+            rss=scale_rss_summary(
+                baseline=baseline_rss,
+                initial_hwm=initial_hwm,
+                sampled_peak=sampler.peak_rss,
+                final_hwm=final_hwm,
+                sessions=case.sessions,
+            ),
+        )
+        result["store_writes"], result["checkpoint_bytes"] = metrics.summaries(
+            turns=result["observed_provider_turns"]
+        )
+        progress(force=True)
+        return result
+    finally:
+        await sampler.stop()
+        await agent.close()
+
+
+async def run_scale_subprocess(case: ScaleCase, *, timeout_s: float = 600) -> dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="linch-scale-") as raw:
+        progress = Path(raw) / "progress.json"
+        command = [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "--scale-child",
+            json.dumps(asdict(case)),
+            "--scale-progress",
+            str(progress),
+        ]
+        started = time.perf_counter()
+        timed_out = False
+        # File-backed output and timer-driven, nonblocking poll avoid depending
+        # on asyncio child-transport / cross-thread wakeups during termination.
+        stdout_path, stderr_path = Path(raw) / "stdout", Path(raw) / "stderr"
+        with stdout_path.open("wb") as output, stderr_path.open("wb") as errors:
+            process = subprocess.Popen(command, stdout=output, stderr=errors)
+            try:
+                deadline = started + timeout_s
+                while process.poll() is None:
+                    remaining = deadline - time.perf_counter()
+                    if remaining <= 0:
+                        timed_out = True
+                        break
+                    await asyncio.sleep(min(0.01, remaining))
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    # Bounded reap also runs when the parent task is cancelled.
+                    process.wait(timeout=5)
+        stdout, stderr = stdout_path.read_bytes(), stderr_path.read_bytes()
+        if not timed_out and process.returncode == 0:
+            result = json.loads(stdout)
+        else:
+            result = (
+                json.loads(progress.read_text())
+                if progress.exists()
+                else {
+                    **asdict(case),
+                    "completed": 0,
+                    "failed": 0,
+                    "errors": [],
+                    "observed_provider_turns": 0,
+                    "observed_tool_calls": 0,
+                }
+            )
+            message = (
+                f"timeout after {timeout_s}s"
+                if timed_out
+                else f"child exited {process.returncode}: {stderr.decode(errors='replace')[-2000:]}"
+            )
+            result.update(correct=False, timed_out=timed_out)
+            result["errors"].append(message)
+        result.update(
+            child_command=command,
+            child_wall_s=time.perf_counter() - started,
+            timeout_s=timeout_s,
+            pid=process.pid,
+        )
+        return result
+
+
+def _scale_machine() -> dict[str, Any]:
+    return {
+        "python": sys.version,
+        "platform": platform.platform(),
+        "cpu_count": os.cpu_count(),
+        "machine": platform.machine(),
+    }
+
+
+async def _scale_main(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    if args.scale_child:
+        case = ScaleCase(**json.loads(args.scale_child))
+        progress = Path(args.scale_progress)
+        result = await run_scale_case(case, progress.parent / "stores", progress_path=progress)
+        print(json.dumps(result, allow_nan=False))
+        return 0
+    if args.scale_timeout <= 0 or not math.isfinite(args.scale_timeout):
+        parser.error("--scale-timeout must be finite and positive")
+    if args.cases or args.check or args.threshold:
+        parser.error("--scale uses --scale-case and does not use legacy thresholds")
+    cases = build_scale_cases()
+    results = [
+        await run_scale_subprocess(cases[name], timeout_s=args.scale_timeout)
+        for name in (args.scale_cases or list(cases))
+    ]
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "schema_version": 3,
+                    "suite": "scale",
+                    "machine": _scale_machine(),
+                    "command": shlex.join([sys.executable, *sys.argv]),
+                    "metrics": {result["name"]: result for result in results},
+                },
+                indent=2,
+                sort_keys=True,
+                allow_nan=False,
+            )
+        )
+    else:
+        for result in results:
+            print(
+                f"{result['name']}: {result['completed']}/{result['sessions']} completed, "
+                f"correct={result['correct']}, timeout={result['timed_out']}"
+            )
+            print(json.dumps(result, sort_keys=True, allow_nan=False))
+    return 0 if all(result["correct"] for result in results) else 1
+
+
 def _threshold(value: str) -> tuple[str, float]:
     try:
         name, raw_limit = value.rsplit("=", 1)
@@ -479,14 +1027,36 @@ def build_parser(case_names: Sequence[str]) -> argparse.ArgumentParser:
         metavar="CASE=MS",
         help="override or add a p95 threshold (used with --check)",
     )
+    parser.add_argument("--scale", action="store_true", help="run six isolated scale cases only")
+    parser.add_argument(
+        "--scale-case",
+        action="append",
+        choices=tuple(build_scale_cases()),
+        dest="scale_cases",
+        help="select a scale case (requires --scale)",
+    )
+    parser.add_argument(
+        "--scale-timeout",
+        type=float,
+        default=600,
+        help="hard timeout in seconds per scale child (default: 600)",
+    )
+    parser.add_argument("--scale-child", help=argparse.SUPPRESS)
+    parser.add_argument("--scale-progress", help=argparse.SUPPRESS)
     return parser
 
 
 async def async_main(argv: Sequence[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if "--scale" in argv or "--scale-child" in argv:
+        parser = build_parser(())
+        return await _scale_main(parser.parse_args(argv), parser)
     with tempfile.TemporaryDirectory(prefix="linch-runtime-bench-") as raw_workdir:
         all_cases = build_cases(Path(raw_workdir))
         parser = build_parser(tuple(all_cases))
         args = parser.parse_args(argv)
+        if args.scale_cases:
+            parser.error("--scale-case requires --scale")
         if args.warmups < 0:
             parser.error("--warmups must be non-negative")
         if args.samples < 1:
