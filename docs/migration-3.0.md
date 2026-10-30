@@ -195,3 +195,12 @@ the changelog.
 See [Events](usage/events.md), [Agent & session](usage/agent.md), and
 [Compaction architecture](architecture/compaction.md) for the operational
 details.
+
+## Coordination scope
+
+Built-in scheduling and mailboxes now provide only `InMemoryScheduleStore` and
+`InMemoryMailbox`: schedules and messages last for the process lifetime. They
+provide no built-in restart survival or cross-process delivery. Durable
+scheduling is planned in WP6 with PgQueuer; mailbox functionality moves to
+`linch.ext` in WP10. Hosts can still adapt the `Mailbox`, `ClaimableMailbox`,
+`ScheduleStore`, and `LeasedScheduleStore` protocols to external infrastructure.
