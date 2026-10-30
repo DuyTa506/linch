@@ -442,6 +442,10 @@ def scale_case_skip_reason(case: ScaleCase) -> str | None:
 _SCALE_SCHEMA = re.compile(r"linch_scale_[0-9a-f]{32}\Z")
 
 
+def _new_scale_schema() -> str:
+    return f"linch_scale_{uuid4().hex}"
+
+
 async def _drop_postgres_schema(raw_dsn: str, schema: str) -> None:
     """Drop exactly one validated scale schema using the unscoped DSN."""
     import asyncpg
@@ -464,6 +468,8 @@ async def _drop_postgres_schema(raw_dsn: str, schema: str) -> None:
 
 async def _fresh_postgres_dsn(
     raw_dsn: str,
+    *,
+    schema: str | None = None,
 ) -> tuple[str, Callable[[], Awaitable[None]], str]:
     """Create an isolated schema for one scale child and return its DSN."""
     import asyncpg
@@ -471,13 +477,20 @@ async def _fresh_postgres_dsn(
     parts = urlsplit(raw_dsn)
     base_query = [(key, value) for key, value in parse_qsl(parts.query) if key != "search_path"]
     base_dsn = urlunsplit(parts._replace(query=urlencode(base_query)))
-    schema = f"linch_scale_{uuid4().hex}"
+    schema = schema or _new_scale_schema()
+    if _SCALE_SCHEMA.fullmatch(schema) is None:
+        raise ValueError(f"invalid benchmark schema: {schema!r}")
     connection = await asyncpg.connect(base_dsn)
     created = False
     try:
         try:
             await connection.execute(f'CREATE SCHEMA "{schema}"')
             created = True
+            block_path = os.environ.get("LINCH_SCALE_BLOCK_AFTER_CREATE")
+            if block_path:
+                Path(block_path).write_text(schema)
+                while True:
+                    await asyncio.sleep(0.1)
         finally:
             await connection.close()
     except BaseException as exc:
@@ -548,21 +561,6 @@ def _write_scale_schema_marker(progress_path: Path | None, case: ScaleCase, sche
     temporary = progress_path.with_suffix(".schema.tmp")
     temporary.write_text(json.dumps(marker, allow_nan=False))
     temporary.replace(progress_path)
-
-
-async def _cleanup_scale_schema_from_progress(progress_path: Path) -> None:
-    """Best-effort parent cleanup for a child killed before its finally block."""
-    try:
-        payload = json.loads(progress_path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return
-    schema = payload.get("postgres_schema")
-    if not isinstance(schema, str) or _SCALE_SCHEMA.fullmatch(schema) is None:
-        return
-    raw_dsn = os.environ.get("AGENT_KIT_TEST_PG_DSN")
-    if not raw_dsn:
-        return
-    await _drop_postgres_schema(raw_dsn, schema)
 
 
 class ScaleProvider:
@@ -1148,6 +1146,7 @@ async def run_scale_case(
     workdir: Path,
     *,
     progress_path: Path | None = None,
+    postgres_schema: str | None = None,
 ) -> dict[str, Any]:
     if case.backend not in {"memory", "postgres"} or case.sessions < 1 or case.turns < 4:
         raise ValueError(
@@ -1160,7 +1159,10 @@ async def run_scale_case(
     workdir.mkdir(parents=True, exist_ok=True)
     metrics = ScaleStoreMetrics()
     postgres_cleanup: Callable[[], Awaitable[None]] | None = None
-    postgres_schema: str | None = None
+    if case.backend == "postgres":
+        postgres_schema = postgres_schema or _new_scale_schema()
+        if _SCALE_SCHEMA.fullmatch(postgres_schema) is None:
+            raise ValueError(f"invalid benchmark schema: {postgres_schema!r}")
     session_pool: Any | None = None
     run_pool: Any | None = None
 
@@ -1183,10 +1185,10 @@ async def run_scale_case(
         from linch.sessions.postgres import PostgresSessionStore
 
         try:
-            dsn, postgres_cleanup, postgres_schema = await _fresh_postgres_dsn(
-                os.environ["AGENT_KIT_TEST_PG_DSN"]
-            )
             _write_scale_schema_marker(progress_path, case, postgres_schema)
+            dsn, postgres_cleanup, postgres_schema = await _fresh_postgres_dsn(
+                os.environ["AGENT_KIT_TEST_PG_DSN"], schema=postgres_schema
+            )
             session_pool = await asyncpg.create_pool(
                 dsn,
                 min_size=1,
@@ -1387,6 +1389,7 @@ async def run_scale_case(
 async def run_scale_subprocess(case: ScaleCase, *, timeout_s: float = 600) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="linch-scale-") as raw:
         progress = Path(raw) / "progress.json"
+        postgres_schema = _new_scale_schema() if case.backend == "postgres" else None
         command = [
             sys.executable,
             str(Path(__file__).resolve()),
@@ -1395,9 +1398,10 @@ async def run_scale_subprocess(case: ScaleCase, *, timeout_s: float = 600) -> di
             "--scale-progress",
             str(progress),
         ]
+        if postgres_schema is not None:
+            command.extend(["--scale-schema", postgres_schema])
         started = time.perf_counter()
         timed_out = False
-        child_cleanup_needed = False
         child_cleanup_error: BaseException | None = None
         # File-backed output and timer-driven, nonblocking poll avoid depending
         # on asyncio child-transport / cross-thread wakeups during termination.
@@ -1410,21 +1414,19 @@ async def run_scale_subprocess(case: ScaleCase, *, timeout_s: float = 600) -> di
                     remaining = deadline - time.perf_counter()
                     if remaining <= 0:
                         timed_out = True
-                        child_cleanup_needed = True
                         break
                     await asyncio.sleep(min(0.01, remaining))
             except asyncio.CancelledError:
-                child_cleanup_needed = True
                 raise
             finally:
                 if process.poll() is None:
                     process.kill()
-                    child_cleanup_needed = True
                     # Bounded reap also runs when the parent task is cancelled.
                     process.wait(timeout=5)
-                if child_cleanup_needed:
+                raw_dsn = os.environ.get("AGENT_KIT_TEST_PG_DSN")
+                if postgres_schema is not None and raw_dsn:
                     try:
-                        await asyncio.shield(_cleanup_scale_schema_from_progress(progress))
+                        await asyncio.shield(_drop_postgres_schema(raw_dsn, postgres_schema))
                     except BaseException as exc:
                         child_cleanup_error = exc
         stdout, stderr = stdout_path.read_bytes(), stderr_path.read_bytes()
@@ -1477,7 +1479,12 @@ async def _scale_main(args: argparse.Namespace, parser: argparse.ArgumentParser)
     if args.scale_child:
         case = ScaleCase(**json.loads(args.scale_child))
         progress = Path(args.scale_progress)
-        result = await run_scale_case(case, progress.parent / "stores", progress_path=progress)
+        result = await run_scale_case(
+            case,
+            progress.parent / "stores",
+            progress_path=progress,
+            postgres_schema=args.scale_schema,
+        )
         print(json.dumps(result, allow_nan=False))
         return 0
     if args.scale_timeout <= 0 or not math.isfinite(args.scale_timeout):
@@ -1577,6 +1584,7 @@ def build_parser(case_names: Sequence[str]) -> argparse.ArgumentParser:
     )
     parser.add_argument("--scale-child", help=argparse.SUPPRESS)
     parser.add_argument("--scale-progress", help=argparse.SUPPRESS)
+    parser.add_argument("--scale-schema", help=argparse.SUPPRESS)
     return parser
 
 

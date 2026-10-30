@@ -318,9 +318,14 @@ async def test_scale_subprocess_hard_deadline_reports_observed_work():
 
 
 @pytest.mark.asyncio
-async def test_postgres_timeout_drops_child_schema(pg_dsn):
+async def test_postgres_timeout_drops_child_schema_after_create_before_close(
+    pg_dsn, tmp_path, monkeypatch
+):
     benchmark = _load_script()
     import asyncpg
+
+    created_marker = tmp_path / "created-schema"
+    monkeypatch.setenv("LINCH_SCALE_BLOCK_AFTER_CREATE", str(created_marker))
 
     async def scale_schemas(connection):
         return {
@@ -333,21 +338,27 @@ async def test_postgres_timeout_drops_child_schema(pg_dsn):
     connection = await asyncpg.connect(pg_dsn)
     try:
         before = await scale_schemas(connection)
+        unrelated_schema = await connection.fetchval("SELECT current_schema()")
     finally:
         await connection.close()
 
     result = await benchmark.run_scale_subprocess(
-        benchmark.ScaleCase("timeout_postgres", "postgres", sessions=1, turns=50),
-        timeout_s=0.5,
+        benchmark.ScaleCase("timeout_postgres", "postgres", sessions=1, turns=4),
+        timeout_s=1.0,
     )
     assert result["timed_out"] is True
+    assert created_marker.read_text() == result["postgres_schema"]
 
     connection = await asyncpg.connect(pg_dsn)
     try:
         after = await scale_schemas(connection)
+        unrelated_exists = await connection.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1)", unrelated_schema
+        )
     finally:
         await connection.close()
     assert after == before
+    assert unrelated_exists is True
 
 
 @pytest.mark.asyncio
