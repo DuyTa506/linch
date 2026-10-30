@@ -7,17 +7,19 @@ from __future__ import annotations
 import time
 from collections.abc import AsyncIterator
 from contextlib import aclosing
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 from .._telemetry import store_call, trace_run
 from .._wire import UnsupportedWireVersionError
 from ..errors import AbortError, ConfigError
-from ..events import Event, ResultEvent, UserEvent
+from ..events import ErrorEvent, Event, ResultEvent, UserEvent
 from ..hooks import (
     AgentStopContext,
+    HookDispatcher,
     HookEvent,
 )
+from ..hooks.contexts import _AgentResult
 from ..model_calls import (
     ModelCallIntent,
     _AccountedAuxiliaryCaller,
@@ -116,23 +118,82 @@ from .tool_batch import ToolBatchContext, run_tool_batch
 _MAX_FINAL_ANSWER_REENTRIES = 1
 
 
+async def _create_run_failure_tail(session: Session, exc: Exception) -> AsyncIterator[Event]:
+    """Surface a create-run write failure without inventing durable state."""
+    run_id = str(uuid4())
+    session.active_run_id = run_id
+    error: dict[str, object] = {
+        "name": exc.__class__.__name__,
+        "message": str(exc),
+        "retryable": getattr(exc, "retryable", False),
+    }
+    status = getattr(exc, "status", None)
+    if isinstance(status, int):
+        error["status"] = status
+    result = _AgentResult(
+        run_id=run_id,
+        session_id=session.id,
+        subtype="error",
+        stop_reason="error",
+        total_usage=Usage(),
+        duration_ms=0,
+        error=error,
+    )
+    # There is no run row to append to after create_run failed.  The caller
+    # still receives the complete typed tail and exactly one lifecycle stop.
+    error_event: Event = ErrorEvent(error=error)
+    result_event: Event = ResultEvent(
+        subtype="error",
+        stop_reason="error",
+        total_usage=Usage(),
+        duration_ms=0,
+        usage_complete=True,
+    )
+    dispatcher = HookDispatcher(getattr(session.agent, "hooks", None))
+    try:
+        yield error_event
+        yield result_event
+    finally:
+        await dispatcher.dispatch(
+            HookEvent.AGENT_STOP,
+            AgentStopContext(
+                session=session,
+                run_id=run_id,
+                turn_index=None,
+                deps=getattr(session, "run_deps", None),
+                result=result,
+            ),
+        )
+
+
 async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIterator[Event]:
     if _exact_model_input_enabled(session.agent):
         _require_model_input_snapshot_store(session.agent)
     await session.agent._ensure_provider_prepared()
     store = session.agent.run_store
-    run_record = (
-        await store_call(
-            session,
-            "run.create_run",
-            store.create_run(
-                session.id,
-                meta=run_meta_with_contract(_build_run_contract(session, prompt, opts)),
-            ),
-        )
+    run_meta = (
+        run_meta_with_contract(_build_run_contract(session, prompt, opts))
         if store is not None
         else None
     )
+    try:
+        run_record = (
+            await store_call(
+                session,
+                "run.create_run",
+                store.create_run(
+                    session.id,
+                    meta=run_meta,
+                ),
+            )
+            if store is not None
+            else None
+        )
+    except Exception as exc:
+        async with aclosing(cast(Any, _create_run_failure_tail(session, exc))) as tail:
+            async for event in tail:
+                yield event
+        return
     run_id = run_record.id if run_record is not None else str(uuid4())
     async with aclosing(
         _run_loop_impl(
@@ -213,7 +274,6 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
     run_record: RunRecord | None,
     resume_checkpoint: RunCheckpoint | None,
 ) -> AsyncIterator[Event]:
-    from ..hooks.contexts import _AgentResult
     from ..loop_guard import LoopGuardState
 
     _runtime = await RunRuntime.create(
@@ -317,6 +377,76 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         await _runtime.bind_active_primary(intent)
         active_primary = _runtime.active_primary
 
+    from ..abort import any_signal, throw_if_aborted
+
+    # Resolve the merged abort signal before startup persistence.  Startup
+    # writes are part of the run and must use the same cleanup path as later
+    # phases if a store rejects them.
+    max_turns = int(agent.max_turns) if isinstance(agent.max_turns, int) else 10**9
+    signal = (
+        any_signal(session._abort_controller, opts.signal)
+        if opts.signal is not None
+        else session._abort_controller
+    )
+    _runtime.signal = signal
+    _final_result: _AgentResult | None = None
+    agent_stop_dispatched = False
+
+    # Native lifecycle bookkeeping is needed by the startup failure path too.
+    _spans = _TurnLifecycle(session, run_id, _dispatch_lifecycle)
+    _start_turn = _spans.start_turn
+    _end_active_turn = _spans.end_active_turn
+    _start_provider_call = _spans.start_provider_call
+    _end_active_provider_call = _spans.end_active_provider_call
+    _close_active_spans = _spans.close_active_spans
+
+    _build_run_result = _runtime.build_run_result
+
+    async def _finish_run() -> None:
+        """Run cleanup and dispatch AgentStop exactly once."""
+        nonlocal agent_stop_dispatched
+        if (
+            _exact_model_input
+            and checkpoint.model_input_snapshot_id is not None
+            and checkpoint.phase != "provider_pending"
+        ):
+            await _best_effort_snapshot_cleanup(
+                snapshot_id=checkpoint.model_input_snapshot_id,
+                original=_runtime.terminal_exception,
+            )
+            checkpoint.model_input_snapshot_id = None
+        # A failed terminal flush already made its one best-effort attempt.
+        # Teardown must not retry the same write and obscure its root cause.
+        if not _runtime.terminal_flush_failed:
+            try:
+                await _flush_events(session)
+            except Exception:
+                pass
+        session._event_journal = None
+        if signal is not session._abort_controller:
+            signal.close()
+        try:
+            await _close_active_spans(stop_reason="error")
+        except Exception:
+            pass
+        _run_result = (
+            _final_result
+            or _runtime.terminal_result
+            or _build_run_result("error", "error", duration_ms=int((time.time() - started) * 1000))
+        )
+        if not agent_stop_dispatched:
+            agent_stop_dispatched = True
+            await _dispatch_lifecycle(
+                HookEvent.AGENT_STOP,
+                AgentStopContext(
+                    session=session,
+                    run_id=run_id,
+                    turn_index=_spans.active_turn_index,
+                    deps=getattr(session, "run_deps", None),
+                    result=_run_result,
+                ),
+            )
+
     _startup_ctx = RunStartupContext(
         runtime=_runtime,
         prompt=prompt,
@@ -327,21 +457,34 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         dispatch_user_prompt=_dispatch_user_prompt,
         dispatch_lifecycle=_dispatch_lifecycle,
     )
-    async for _startup_event in initialize_run(_startup_ctx):
-        yield _startup_event
+    startup_completed = False
+    startup_terminalized = False
+    try:
+        try:
+            async for _startup_event in initialize_run(_startup_ctx):
+                yield _startup_event
+            startup_completed = True
+        except Exception as exc:
+            startup_terminalized = True
+            try:
+                async for event in _runtime.emit_exception_terminal(
+                    exc,
+                    close_active_spans=_close_active_spans,
+                ):
+                    yield event
+            finally:
+                _final_result = _runtime.terminal_result
+                await _finish_run()
+            return
+    finally:
+        if not startup_completed and not startup_terminalized:
+            await _finish_run()
     if _startup_ctx.blocked:
+        # The blocked-prompt terminal dispatches AgentStop itself.  Cleanup
+        # still belongs here, but the shared finalizer must not dispatch again.
+        agent_stop_dispatched = True
+        await _finish_run()
         return
-
-    from ..abort import any_signal, throw_if_aborted
-
-    max_turns = int(agent.max_turns) if isinstance(agent.max_turns, int) else 10**9
-    signal = (
-        any_signal(session._abort_controller, opts.signal)
-        if opts.signal is not None
-        else session._abort_controller
-    )
-    _runtime.signal = signal
-    _final_result: _AgentResult | None = None
     # Closed-loop schema-repair state (per-run; not checkpointed — a resumed
     # run starts with fresh retry counters).
     _max_schema_retries = int(getattr(agent, "structured_output_retries", 0) or 0)
@@ -351,18 +494,6 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
     # the loop back every terminal until max_turns; the guard caps honored
     # retries at _MAX_FINAL_ANSWER_REENTRIES, then accepts the answer as-is.
     _final_answer_reentries = [0]
-
-    # Native lifecycle bookkeeping (turn + provider-call spans) lives in a
-    # small helper so the turn loop no longer threads its mutable span state
-    # through nonlocal closures. Local aliases keep the call sites unchanged.
-    _spans = _TurnLifecycle(session, run_id, _dispatch_lifecycle)
-    _start_turn = _spans.start_turn
-    _end_active_turn = _spans.end_active_turn
-    _start_provider_call = _spans.start_provider_call
-    _end_active_provider_call = _spans.end_active_provider_call
-    _close_active_spans = _spans.close_active_spans
-
-    _build_run_result = _runtime.build_run_result
 
     # Terminal-answer finalization lives in loop/finalize.py; FinalizeCtx bundles
     # this run's dependencies so the call sites below stay short. The thin
@@ -961,38 +1092,4 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             yield event
         _final_result = _runtime.terminal_result
     finally:
-        if (
-            _exact_model_input
-            and checkpoint.model_input_snapshot_id is not None
-            and checkpoint.phase != "provider_pending"
-        ):
-            await _best_effort_snapshot_cleanup(snapshot_id=checkpoint.model_input_snapshot_id)
-            checkpoint.model_input_snapshot_id = None
-        # Flush any events still buffered (best-effort) and drop the buffer so it
-        # never leaks into a later run on this session.
-        try:
-            await _flush_events(session)
-        except Exception:
-            pass
-        session._event_journal = None
-        # Release the merged-signal watcher when this run created one
-        # (opts.signal merged with the session controller); a plain session
-        # controller has no watcher and close() is a no-op.
-        if signal is not session._abort_controller:
-            signal.close()
-        await _close_active_spans(stop_reason="error")
-        _run_result = (
-            _final_result
-            or _runtime.terminal_result
-            or _build_run_result("error", "error", duration_ms=int((time.time() - started) * 1000))
-        )
-        await _dispatch_lifecycle(
-            HookEvent.AGENT_STOP,
-            AgentStopContext(
-                session=session,
-                run_id=run_id,
-                turn_index=_spans.active_turn_index,
-                deps=getattr(session, "run_deps", None),
-                result=_run_result,
-            ),
-        )
+        await _finish_run()

@@ -37,6 +37,41 @@ from ..types import (
 from .checkpoint import _flush_events, _persist_event
 from .request import final_text
 
+
+class _TerminalStatusWriteError(RuntimeError):
+    """Mark that a terminal status write was already attempted.
+
+    The runner may catch this failure and build a typed terminal tail.  Keeping
+    the marker on the exception, rather than in task/global state, makes the
+    one-attempt rule local to this terminal operation and preserves the
+    original store exception for the ErrorEvent.
+    """
+
+    status_already_attempted = True
+
+    def __init__(self, original: Exception) -> None:
+        self.original = original
+        super().__init__(str(original))
+
+
+async def _mark_failed_terminal(
+    session: Session,
+    store: Any,
+    run_id: str,
+    checkpoint: Any,
+    error: dict[str, object] | None = None,
+) -> None:
+    """Attempt one durable failed-status write and mark failures as terminal."""
+    try:
+        await store_call(
+            session,
+            "run.mark_failed",
+            store.mark_failed(run_id, checkpoint, error=error),
+        )
+    except Exception as exc:
+        raise _TerminalStatusWriteError(exc) from exc
+
+
 _FENCED_JSON_RE = re.compile(r"```(?:json)?\s*\n?(.*?)```", re.DOTALL | re.IGNORECASE)
 
 
@@ -142,9 +177,7 @@ async def _budget_exhausted_tail(
     if run_record is not None and store is not None:
         checkpoint.total_usage = total
         await _flush_events(session)
-        await store_call(
-            session, "run.mark_failed", store.mark_failed(run_id, checkpoint, error=budget_error)
-        )
+        await _mark_failed_terminal(session, store, run_id, checkpoint, error=budget_error)
     yield event
 
 
@@ -209,7 +242,7 @@ async def _error_result_tail(
     if run_record is not None and store is not None:
         checkpoint.total_usage = total
         await _flush_events(session)
-        await store_call(session, "run.mark_failed", store.mark_failed(run_id, checkpoint))
+        await _mark_failed_terminal(session, store, run_id, checkpoint)
     yield event
 
 
@@ -294,9 +327,7 @@ async def _max_turns_tail(
     if run_record is not None and store is not None:
         checkpoint.total_usage = total
         await _flush_events(session)
-        await store_call(
-            session, "run.mark_failed", store.mark_failed(run_id, checkpoint, error=turn_error)
-        )
+        await _mark_failed_terminal(session, store, run_id, checkpoint, error=turn_error)
     yield event
 
 
