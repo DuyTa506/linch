@@ -13,6 +13,7 @@ authors = [{ name = "CallMeZuy", email = "duyfaker01@gmail.com" }]
 dependencies = [
   "jsonschema>=4,<5",
   "openai>=1.0.0",
+  "opentelemetry-api>=1.20",
   "PyYAML>=6.0",
   "typing_extensions>=4.10",
 ]
@@ -34,10 +35,6 @@ mcp = [
 anthropic = [
   "anthropic>=0.30.0",
 ]
-otel = [
-  "opentelemetry-api>=1.20",
-  "opentelemetry-sdk>=1.20",
-]
 gemini = [
   "google-generativeai>=0.8.0",
 ]
@@ -45,6 +42,7 @@ postgres = [
   "asyncpg>=0.29",
 ]
 dev = [
+  "opentelemetry-sdk>=1.20",
   "pytest>=8.0,<9.0",
   "pytest-asyncio>=0.23,<1.0",
   "pytest-timeout>=2.3",
