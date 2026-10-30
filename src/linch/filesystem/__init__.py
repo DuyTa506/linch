@@ -20,6 +20,7 @@ write_file/edit_file tools.
 from .backend import (
     CompositeFileBackend,
     FileBackend,
+    ScopedFileBackend,
     StateFileBackend,
     normalize_path,
     resolve_filesystem_backend,
@@ -43,6 +44,7 @@ __all__ = [
     "LsTool",
     "OffloadConfig",
     "ReadFileTool",
+    "ScopedFileBackend",
     "SqliteFileBackend",
     "StateFileBackend",
     "WriteFileTool",

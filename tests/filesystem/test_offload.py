@@ -166,3 +166,44 @@ async def test_no_offload_when_disabled() -> None:
     events = [e async for e in session.run("search")]
     end = next(e for e in events if e.type == "tool_call_end" and e.tool_name == "big_search")
     assert end.result == BIG  # untouched
+
+
+async def test_scoped_run_offloads_and_reads_back_through_same_backend() -> None:
+    from linch import RunOptions, ScopedFileBackend
+    from linch.filesystem.tools import ReadFileTool
+
+    shared = StateFileBackend()
+    scoped = ScopedFileBackend(shared, "/tenants/alice")
+    agent = Agent(
+        model="gpt-5",
+        provider=FakeProvider(),
+        session_store=InMemorySessionStore(),
+        permissions={"mode": "skip-dangerous"},
+        tools=workspace_tools(extra=[BigTool()]),
+        features=FeatureFlags(filesystem=True),
+        filesystem=shared,
+        result_offload=OffloadConfig(threshold_tokens=10),
+    )
+    try:
+        session = await agent.session()
+        events = [
+            event async for event in session.run("search", RunOptions(deps={"filesystem": scoped}))
+        ]
+        assert events[-1].subtype == "success"
+        paths = await scoped.ls("/offload")
+        assert len(paths) == 1
+        result = await ReadFileTool().execute(
+            {"path": paths[0]},
+            ToolContext(
+                cwd=".",
+                session_id=session.id,
+                run_id="read-back",
+                session_store=session.store,
+                filesystem=shared,
+                deps={"filesystem": scoped},
+            ),
+        )
+        assert result.content == BIG
+        assert await shared.ls("/offload") == []
+    finally:
+        await agent.close()
