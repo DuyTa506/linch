@@ -196,6 +196,22 @@ See [Events](usage/events.md), [Agent & session](usage/agent.md), and
 [Compaction architecture](architecture/compaction.md) for the operational
 details.
 
+## Postgres-only durable state (WP17 / D13)
+
+- `SqliteRunStore` is removed; use `PostgresRunStore(dsn)` for durable runs or `InMemoryRunStore` for process-lifetime tests/dev.
+- `SqliteSessionStore` is removed; use `PostgresSessionStore(dsn)` for durable history or `InMemorySessionStore` for process-lifetime tests/dev.
+- `SqliteFileBackend` is removed; use `PostgresFileBackend(dsn)` for durable virtual files or `StateFileBackend` for ephemeral state.
+- `SqliteMailbox` is removed; use `InMemoryMailbox` for process-lifetime messaging or a host-owned `Mailbox` adapter for external infrastructure.
+- `SqliteScheduleStore` is removed; use `InMemoryScheduleStore` for process-lifetime scheduling; durable scheduling is planned in WP6 with PgQueuer.
+- `create_deep_agent(durable=True)` requires explicit `session_store`, `run_store`, and an explicit `filesystem` when enabled; supply Postgres adapters for restart durability or use `durable=False` for an ephemeral preset. Explicit InMemory overrides remain accepted.
+- `scripts/run_report.py --runs-db` is removed; pass `--dsn` or set `LINCH_POSTGRES_DSN`. `load_report` and `render_report` now take a Postgres DSN string.
+
+The SDK does not read DSNs from the environment automatically. Hosts read their
+configuration and construct the stores explicitly. Install `linch[postgres]`
+and follow the [local Docker Postgres setup](./usage/quickstart.md#5-keep-state-when-the-process-restarts).
+Existing incompatible persisted data is rejected; start fresh runs rather than
+attempting a legacy database upgrade.
+
 ## Coordination scope
 
 Built-in scheduling and mailboxes now provide only `InMemoryScheduleStore` and
