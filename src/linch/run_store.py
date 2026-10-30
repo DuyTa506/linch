@@ -57,7 +57,9 @@ MODEL_INPUT_CODEC_VERSION = WIRE_VERSION
 
 # "suspended" is a workflow parked at a wf.interrupt; distinct from
 # "waiting_permission", which belongs to the tool-permission flow.
-RunStatus = Literal["running", "waiting_permission", "suspended", "completed", "failed", "aborted"]
+RunStatus = Literal[
+    "pending", "running", "waiting_permission", "suspended", "completed", "failed", "aborted"
+]
 RunPhase = Literal[
     "started",
     "user_appended",
