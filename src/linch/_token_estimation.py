@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, cast
 
 from .types import Message
 
@@ -14,7 +14,7 @@ def custom_token_estimate(
     """Return a nonnegative estimate, or let the caller choose its fallback."""
     if callable(estimator):
         try:
-            return max(0, int(estimator(messages, model)))
+            return max(0, int(cast(Any, estimator(messages, model))))
         except Exception:
             pass
     return None
