@@ -81,8 +81,12 @@ These hold for *every* change, regardless of subsystem:
   and the unified `TimeoutError` are allowed.
 - **Dependencies earn their place** — a library may be added to core or an
   extra when it removes code or measurably speeds the hot path (e.g. fast JSON,
-  Postgres driver); say what it buys in the PR. Observability still reaches
-  Langfuse/LangSmith/etc. through the OpenTelemetry seam.
+  Postgres driver); say what it buys in the PR.
+- **Observability is OpenTelemetry** — core uses `opentelemetry-api` directly
+  (GenAI semantic conventions); hosts configure the SDK and exporter
+  (Langfuse, Tempo, Datadog...). No custom observer layer.
+- **Durable state is Postgres; InMemory is for tests and dev** — do not add
+  SQLite code (it is being removed, spec D13).
 - **Multi-tenant safe via per-agent `Context`** — no process-global mutable
   state; each `Agent` owns its own `Context` scope (`linch.Context`) holding its
   service registry, event bus, and effect scope, plus its registries and session
