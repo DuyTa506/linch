@@ -227,6 +227,20 @@ def test_provider_view_nested_mutation_does_not_reach_log() -> None:
     assert authoritative.provider_metadata == {"nested": {"source": "owned"}}
 
 
+def test_derive_messages_alias_is_detached_from_log_and_later_reads() -> None:
+    """The compatibility alias has the same mutation-isolation contract."""
+    log = SessionLog()
+    log.append(_msg("owned"))
+
+    inspected = log.derive_messages()[0]
+    _text(inspected).text = "tampered"
+    assert inspected.provider_metadata is not None
+    inspected.provider_metadata["nested"]["source"] = "tampered"
+
+    assert _text(log.derive_messages()[0]).text == "owned"
+    assert _text(log.provider_view[0]).text == "owned"
+
+
 def test_full_history_is_an_immutable_snapshot() -> None:
     log = SessionLog()
     hist = log.full_history
