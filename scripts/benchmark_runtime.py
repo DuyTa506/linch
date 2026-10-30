@@ -1163,6 +1163,7 @@ async def run_scale_case(
             model="gpt-5",
             provider=ScaleProvider(turns=case.turns),
             tools=tools,
+            cwd=os.environ.get("LINCH_SCALE_CWD", str(ROOT)),
             session_store=MeasuredStore(session_store, "session", metrics),
             run_store=MeasuredStore(run_store, "run", metrics),
             permissions={"mode": "skip-dangerous"},
