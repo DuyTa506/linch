@@ -1406,9 +1406,10 @@ async def run_scale_subprocess(case: ScaleCase, *, timeout_s: float = 600) -> di
         # File-backed output and timer-driven, nonblocking poll avoid depending
         # on asyncio child-transport / cross-thread wakeups during termination.
         stdout_path, stderr_path = Path(raw) / "stdout", Path(raw) / "stderr"
+        process: Any | None = None
         with stdout_path.open("wb") as output, stderr_path.open("wb") as errors:
-            process = subprocess.Popen(command, stdout=output, stderr=errors)
             try:
+                process = subprocess.Popen(command, stdout=output, stderr=errors)
                 deadline = started + timeout_s
                 while process.poll() is None:
                     remaining = deadline - time.perf_counter()
@@ -1419,7 +1420,7 @@ async def run_scale_subprocess(case: ScaleCase, *, timeout_s: float = 600) -> di
             except asyncio.CancelledError:
                 raise
             finally:
-                if process.poll() is None:
+                if process is not None and process.poll() is None:
                     process.kill()
                     # Bounded reap also runs when the parent task is cancelled.
                     process.wait(timeout=5)
@@ -1429,6 +1430,8 @@ async def run_scale_subprocess(case: ScaleCase, *, timeout_s: float = 600) -> di
                         await asyncio.shield(_drop_postgres_schema(raw_dsn, postgres_schema))
                     except BaseException as exc:
                         child_cleanup_error = exc
+        if process is None:
+            raise RuntimeError("scale child did not start")
         stdout, stderr = stdout_path.read_bytes(), stderr_path.read_bytes()
         if not timed_out and process.returncode == 0:
             result = json.loads(stdout)
