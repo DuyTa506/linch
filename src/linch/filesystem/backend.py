@@ -10,7 +10,7 @@ split:
 * :class:`CompositeFileBackend` — routes paths by prefix (e.g. ``/memories/``
   to a persistent backend, everything else to an ephemeral one).
 
-Persistent backends (see :mod:`linch.filesystem.sqlite`) implement the same
+Persistent backends (see :mod:`linch.filesystem.postgres`) implement the same
 protocol, so they compose freely under :class:`CompositeFileBackend`.
 """
 
@@ -139,6 +139,61 @@ class StateFileBackend:
 
     async def delete(self, path: str) -> None:
         self._files.pop(normalize_path(path), None)
+
+
+class ScopedFileBackend:
+    """Expose only ``root`` of a shared backend, using scope-relative paths.
+
+    Absolute virtual paths are rooted inside the scope. Traversal segments and
+    null bytes are rejected before reaching the inner backend. The host owns
+    the inner backend's lifetime; closing a run must not close a shared store.
+    """
+
+    def __init__(self, inner: FileBackend, root: str) -> None:
+        self._inner = inner
+        self._root = self._normalize(root)
+
+    @staticmethod
+    def _normalize(path: str) -> str:
+        if not isinstance(path, str) or "\x00" in path:
+            raise ValueError("path must be a string without null bytes")
+        parts = path.replace("\\", "/").split("/")
+        if ".." in parts:
+            raise ValueError("path may not contain '..'")
+        return "/" + "/".join(part for part in parts if part and part != ".")
+
+    def _map(self, path: str) -> str:
+        return self._root.rstrip("/") + self._normalize(path)
+
+    async def read(self, path: str, *, offset: int = 0, limit: int | None = None) -> str:
+        return await self._inner.read(self._map(path), offset=offset, limit=limit)
+
+    async def write(self, path: str, content: str) -> None:
+        await self._inner.write(self._map(path), content)
+
+    async def edit(self, path: str, old: str, new: str, *, replace_all: bool = False) -> int:
+        return await self._inner.edit(self._map(path), old, new, replace_all=replace_all)
+
+    async def exists(self, path: str) -> bool:
+        return await self._inner.exists(self._map(path))
+
+    async def delete(self, path: str) -> None:
+        await self._inner.delete(self._map(path))
+
+    async def ls(self, prefix: str = "") -> list[str]:
+        mapped = self._map(prefix).rstrip("/") or "/"
+        paths: set[str] = set()
+        root = self._root.rstrip("/")
+        for path in await self._inner.ls(mapped):
+            try:
+                path = self._normalize(path)
+            except ValueError:
+                continue
+            if root and path != root and not path.startswith(root + "/"):
+                continue
+            if path == mapped or path.startswith(mapped.rstrip("/") + "/"):
+                paths.add(path[len(root) :] or "/")
+        return sorted(paths)
 
 
 class CompositeFileBackend:

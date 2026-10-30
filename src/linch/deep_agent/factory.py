@@ -7,11 +7,11 @@ from typing import TYPE_CHECKING, Any, cast
 from ..agent import Agent
 from ..budget import RunBudget
 from ..config import FeatureFlags, SystemPromptConfig, SystemPromptSection
+from ..context import FileMemoryContextBuilder
 from ..errors import ConfigError
 from ..filesystem.backend import CompositeFileBackend, StateFileBackend
 from ..filesystem.sqlite import SqliteFileBackend
 from ..hooks import ContextInjectionHook
-from ..memory import MemoryContextBuilder, MemorySearchTool, MemoryUpsertTool
 from ..run_store import SqliteRunStore
 from ..sessions import SqliteSessionStore
 from ..tools.registry import workspace_tools
@@ -20,10 +20,9 @@ from .prompts import COORDINATOR_SYSTEM_PROMPT, DEEP_AGENT_SYSTEM_PROMPT
 from .subagents import DEEP_AGENT_SUBAGENTS
 
 if TYPE_CHECKING:
-    from ..memory import MemoryStore
     from ..run_store import RunStore
     from ..sessions import SessionStore
-    from ..tools import Tool, ToolRegistry
+    from ..tools import ToolRegistry
 
 # Tools removed from the coordinator parent so it cannot do heavy work itself.
 # Workers still receive full access via build_child_tools in the runner.
@@ -106,8 +105,6 @@ def create_deep_agent(
     run_store: RunStore | None = None,
     features: FeatureFlags | None = None,
     system_prompt_config: SystemPromptConfig | None = None,
-    memory_store: MemoryStore | None = None,
-    memory_namespace: str | None = None,
     budget: Any = None,
     max_turns: int | None = None,
     verifiers: Any = None,
@@ -154,9 +151,6 @@ def create_deep_agent(
         run_store: Run store override; ignored when durable=False.
         features: Feature flags; coordinator=True requires features.subagents=True.
         system_prompt_config: System prompt section config to merge with system_prompt.
-        memory_store: Memory backend; when set, wires context injection and
-            memory tools under memory_namespace.
-        memory_namespace: Namespace passed to memory_store and its tools.
         budget: RunBudget cap applied to this agent and its subagent tree.
         max_turns: Hard turn-count override; the profile supplies the default.
         verifiers: Verifiers checked before the final answer is accepted.
@@ -194,12 +188,7 @@ def create_deep_agent(
         raise ConfigError("create_deep_agent(coordinator=True) requires features.subagents=True")
 
     root = Path(cwd or ".").resolve()
-    worker_registry = _deep_agent_tools(
-        tools,
-        memory_store=memory_store,
-        namespace=memory_namespace,
-        features=features,
-    )
+    worker_registry = _deep_agent_tools(tools)
     registry = worker_registry.copy() if coordinator else worker_registry
     if coordinator:
         for name in _COORDINATOR_EXCLUDED_TOOLS:
@@ -210,20 +199,15 @@ def create_deep_agent(
     from ..hooks import normalize_hooks as _normalize_hooks
 
     hooks = _normalize_hooks(agent_kwargs.pop("hooks", None))
-    if memory_store is not None:
-        memory_hook = ContextInjectionHook(
-            MemoryContextBuilder(memory_store, namespace=memory_namespace)
-        )
+    if features.filesystem:
+        memory_hook = ContextInjectionHook(FileMemoryContextBuilder())
         # The factory owns this adapter's behavior, so it can make the durable
         # policy identity explicit. The store's changing data is runtime input,
         # like a database queried by a tool; the builder configuration is the
         # resume-critical policy.
-        cast(Any, memory_hook).resume_policy_id = "linch.deep-agent.memory-context"
+        cast(Any, memory_hook).resume_policy_id = "linch.deep-agent.file-memory-context"
         cast(Any, memory_hook).resume_policy_version = "1"
-        cast(Any, memory_hook).resume_policy_config = {
-            "namespace": memory_namespace,
-            "limit": 5,
-        }
+        cast(Any, memory_hook).resume_policy_config = {"path": "/memories/MEMORY.md", "lines": 200}
         hooks.append(memory_hook)
     if verifiers is not None:
         from ..hooks import FinalAnswerVerifierHook
@@ -272,24 +256,11 @@ def create_deep_agent(
     return agent
 
 
-def _deep_agent_tools(
-    tools: ToolRegistry | None,
-    *,
-    memory_store: MemoryStore | None,
-    namespace: str | None,
-    features: FeatureFlags | None = None,
-) -> ToolRegistry:
+def _deep_agent_tools(tools: ToolRegistry | None) -> ToolRegistry:
     registry = tools.copy() if tools is not None else workspace_tools()
     for tool in (TaskCreateTool(), TaskListTool(), TaskGetTool(), TaskUpdateTool()):
         if registry.get(tool.name) is None:
             registry.register(tool)
-    if memory_store is not None:
-        for tool in (
-            MemorySearchTool(memory_store, namespace=namespace),
-            MemoryUpsertTool(memory_store, namespace=namespace),
-        ):
-            if registry.get(tool.name) is None:
-                registry.register(cast("Tool", tool))
     return registry
 
 

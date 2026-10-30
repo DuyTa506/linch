@@ -211,24 +211,46 @@ async def test_deep_agent_loads_specialized_subagents(tmp_path: Path) -> None:
     assert {"researcher", "implementer", "verification"} <= names
 
 
-def test_deep_agent_memory_store_wires_tools_and_context_builder(tmp_path: Path) -> None:
-    from linch import InMemoryKeywordMemoryStore, MemoryContextBuilder, create_deep_agent
+def test_deep_agent_wires_file_memory_context_builder(tmp_path: Path) -> None:
+    from linch import FileMemoryContextBuilder, create_deep_agent
     from linch.hooks import ContextInjectionHook
 
-    store = InMemoryKeywordMemoryStore()
     agent = create_deep_agent(
         model="gpt-5",
         provider=FakeProvider(),
         cwd=str(tmp_path),
         durable=False,
-        memory_store=store,
-        memory_namespace="deep",
     )
     names = {tool.name for tool in agent.tools.list()}
     builders = [hook.builder for hook in agent.hooks if isinstance(hook, ContextInjectionHook)]
 
-    assert {"SearchMemory", "UpsertMemory"} <= names
-    assert any(isinstance(builder, MemoryContextBuilder) for builder in builders)
+    assert {"read_file", "write_file", "edit_file", "ls"} <= names
+    assert any(isinstance(builder, FileMemoryContextBuilder) for builder in builders)
+
+
+async def test_deep_agent_file_memory_reads_run_scoped_index(tmp_path: Path) -> None:
+    from linch import RunOptions, ScopedFileBackend, StateFileBackend, create_deep_agent
+
+    class RecordingProvider(FakeProvider):
+        async def stream(self, req):
+            self.system = [block.text for block in req.system]
+            async for event in super().stream(req):
+                yield event
+
+    provider = RecordingProvider()
+    agent = create_deep_agent(model="gpt-5", provider=provider, cwd=str(tmp_path), durable=False)
+    backend = StateFileBackend({"/users/alice/memories/MEMORY.md": "coffee.md: likes espresso"})
+    try:
+        session = await agent.session()
+        events = await _collect(
+            session.run(
+                "Hello", RunOptions(deps={"filesystem": ScopedFileBackend(backend, "/users/alice")})
+            )
+        )
+        assert events[-1].subtype == "success"
+        assert any("coffee.md: likes espresso" in text for text in provider.system)
+    finally:
+        await agent.close()
 
 
 async def test_deep_agent_durable_defaults_create_sqlite_stores(tmp_path: Path) -> None:

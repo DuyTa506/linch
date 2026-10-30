@@ -102,18 +102,6 @@ async def test_mailbox_contract_accepts_sqlite_mailbox(tmp_path) -> None:
     await assert_mailbox_contract(lambda: SqliteMailbox(tmp_path / "mailbox.db"))
 
 
-async def test_memory_store_contract_accepts_keyword_store() -> None:
-    from linch import InMemoryKeywordMemoryStore, assert_memory_store_contract
-
-    await assert_memory_store_contract(InMemoryKeywordMemoryStore)
-
-
-async def test_memory_store_contract_accepts_sqlite_store(tmp_path) -> None:
-    from linch import SqliteMemoryStore, assert_memory_store_contract
-
-    await assert_memory_store_contract(lambda: SqliteMemoryStore(tmp_path / "memory.db"))
-
-
 async def test_schedule_store_contract_accepts_in_memory_store() -> None:
     from linch import InMemoryScheduleStore, assert_schedule_store_contract
 
@@ -132,6 +120,5 @@ def test_contract_helpers_are_public_top_level_api() -> None:
     assert "assert_file_backend_contract" in linch.__all__
     assert "assert_isolation_backend_contract" in linch.__all__
     assert "assert_mailbox_contract" in linch.__all__
-    assert "assert_memory_store_contract" in linch.__all__
     assert "assert_schedule_store_contract" in linch.__all__
     assert "assert_tool_contract" in linch.__all__

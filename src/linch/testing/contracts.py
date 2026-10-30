@@ -9,7 +9,6 @@ from typing import Any, TypeVar
 from ..coordination.mailbox import Mailbox, MailboxMessage
 from ..coordination.scheduling import ClaimingScheduleStore, Schedule, ScheduleStore
 from ..filesystem import FileBackend
-from ..memory import MemoryItem, MemoryStore
 from ..tools.base import ResourceAccess, ToolContext, ToolResult
 from ..tools.isolation import IsolationBackend
 
@@ -152,104 +151,6 @@ async def assert_mailbox_contract(
         )
     finally:
         await _maybe_close(box)
-
-
-async def assert_memory_store_contract(
-    factory: Callable[[], MemoryStore | Awaitable[MemoryStore]],
-) -> None:
-    """Assert the core behavioral contract for a ``MemoryStore`` implementation."""
-
-    store = await _call_factory(factory)
-    try:
-        assert await store.search("anything", namespace="docs") == [], (
-            "fresh store must return no search results"
-        )
-        assert await store.search("", namespace="docs") == [], "empty query must return no results"
-        assert await store.search("anything", namespace="docs", limit=0) == [], (
-            "limit=0 must return no results"
-        )
-
-        await store.upsert(
-            [
-                MemoryItem(
-                    id="alpha",
-                    content="alpha shared memory",
-                    metadata={"kind": "guide"},
-                    namespace="docs",
-                ),
-                MemoryItem(
-                    id="beta",
-                    content="alpha private memory",
-                    metadata={"kind": "note"},
-                    namespace="private",
-                ),
-                MemoryItem(
-                    id="gamma",
-                    content="gamma unrelated",
-                    metadata={"kind": "guide"},
-                    namespace="docs",
-                ),
-            ]
-        )
-
-        hits = await store.search("alpha memory", namespace="docs")
-        assert [hit.item.id for hit in hits] == ["alpha"], (
-            "namespace filtering must exclude other namespaces"
-        )
-        assert hits[0].item.namespace == "docs"
-        assert hits[0].item.metadata == {"kind": "guide"}
-        assert hits[0].score is None or isinstance(hits[0].score, int | float)
-
-        private_hits = await store.search("alpha memory", namespace="private")
-        assert [hit.item.id for hit in private_hits] == ["beta"]
-
-        filtered = await store.search(
-            "alpha memory",
-            namespace="docs",
-            metadata_filter={"kind": "guide"},
-        )
-        assert [hit.item.id for hit in filtered] == ["alpha"]
-        assert (
-            await store.search("alpha memory", namespace="docs", metadata_filter={"kind": "note"})
-        ) == []
-
-        await store.upsert(
-            [
-                MemoryItem(
-                    id="alpha",
-                    content="replacement delta memory",
-                    metadata={"kind": "replacement"},
-                    namespace="docs",
-                )
-            ]
-        )
-        assert await store.search("shared", namespace="docs") == [], (
-            "upsert must replace an existing item with the same namespace and id"
-        )
-        replaced = await store.search("replacement delta", namespace="docs")
-        assert [hit.item.id for hit in replaced] == ["alpha"]
-        assert replaced[0].item.metadata == {"kind": "replacement"}
-
-        await store.upsert(
-            [
-                MemoryItem(id=f"limit-{index}", content="limit token", namespace="docs")
-                for index in range(3)
-            ]
-        )
-        limited = await store.search("limit token", namespace="docs", limit=1)
-        assert len(limited) == 1, "search must honor limit"
-
-        concurrent = [
-            MemoryItem(id=f"concurrent-{index}", content="concurrent token", namespace="docs")
-            for index in range(10)
-        ]
-        await asyncio.gather(*(store.upsert([item]) for item in concurrent))
-        concurrent_hits = await store.search("concurrent", namespace="docs", limit=20)
-        assert {hit.item.id for hit in concurrent_hits} == {item.id for item in concurrent}, (
-            "concurrent upserts must not drop items"
-        )
-    finally:
-        await _maybe_close(store)
 
 
 async def assert_schedule_store_contract(

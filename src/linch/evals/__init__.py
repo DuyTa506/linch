@@ -23,7 +23,6 @@ from .scorers import (
     context_not_trimmed,
     context_selected_tool,
     cost_under,
-    memory_recalled,
     recovery_succeeded,
     run_completed,
     schema_valid,
@@ -57,7 +56,6 @@ __all__ = [
     "context_selected_tool",
     "context_not_trimmed",
     "context_metadata_contains",
-    "memory_recalled",
     "recovery_succeeded",
     "run_completed",
 ]

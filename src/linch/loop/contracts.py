@@ -107,7 +107,6 @@ def _hook_policy_contract(agent: Any) -> list[dict[str, Any]]:
     adapter_policies = {
         "ContextInjectionHook",
         "FinalAnswerVerifierHook",
-        "MemoryExtractionHook",
         "StopPredicateHook",
         "ToolMiddlewareHook",
     }

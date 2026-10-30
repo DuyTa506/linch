@@ -182,7 +182,7 @@ by the rest of the loop.
 
 ### 3.4 Context Building Pipeline
 
-`ContextInjectionHook` fires before every provider call, injecting ephemeral context without mutating conversation history.
+`ContextInjectionHook` fires before every provider call, injecting ephemeral context without mutating conversation history. `FileMemoryContextBuilder` is the stable file-memory prefix; other builders remain per-turn.
 
 ```mermaid
 flowchart TD
@@ -190,7 +190,7 @@ flowchart TD
 
     subgraph Hook["Agent(hooks=[ContextInjectionHook(builder), ...])"]
         direction TB
-        B1["Hook 1: ContextInjectionHook(MemoryContextBuilder)\nrecall · system_blocks · messages"]
+        B1["Hook 1: ContextInjectionHook(FileMemoryContextBuilder)\nread index · system_blocks · messages"]
         B2["Hook 2: ContextInjectionHook(custom RAG builder)"]
         BN["Hook N"]
         B1 --> B2 --> BN
@@ -327,45 +327,42 @@ flowchart TD
 
 ### 3.7 Memory and RAG Layer
 
-Core ships a pluggable protocol with in-memory and durable reference implementations. Vector databases, embedding clients, and graph stores are host-owned and inject via the same protocol.
+Memory is file-backed in Linch 3.0. The virtual filesystem is the durable
+boundary; hosts provide a run-scoped `FileBackend` in `RunOptions(deps=...)` and
+the model uses the existing file tools to maintain facts. Semantic recall is an
+optional host recipe (see `examples/memory/mem0_recall.py`), not a core store.
 
 ```mermaid
-graph TD
-    subgraph Protocol["MemoryStore Protocol"]
-        MS["MemoryStore\nasync search(query, limit, namespace)\nasync upsert(items: list[MemoryItem])"]
-    end
+flowchart TD
+    DEPS["RunOptions(deps)\nfilesystem + optional mem0 client"]
+    INNER["Host FileBackend\nPostgres in production · InMemory in tests"]
+    SCOPE["ScopedFileBackend\nroot = tenant/user/agent\npath traversal fenced"]
+    INDEX["/memories/MEMORY.md\n≤ 200 lines\none line per fact file"]
+    BUILDER["FileMemoryContextBuilder\nread once per run\nContextBuildResult"]
+    TOOLS["Existing file tools\nls · read_file · write_file · edit_file"]
+    MODEL["Model request"]
+    MEM0["Optional mem0 recipe\nAsyncMemory-like search/add"]
 
-    subgraph Ref["Reference Implementations"]
-        IK["InMemoryKeywordMemoryStore\ncooperative keyword matching"]
-        SQ["SqliteMemoryStore\nasync via single-worker executor\n(storage._executor.SqliteExecutor)"]
-        PG["PostgresMemoryStore\noptional asyncpg backend\nlinch[postgres]"]
-        TM["TieredMemoryStore\nworking · episodic · semantic\nmerged search"]
-    end
-
-    subgraph Host["Host-Owned Adapters"]
-        VEC["Vector store\nembed + ANN search"]
-        GRF["Graph store"]
-        REM["Remote store\nAPI call"]
-    end
-
-    subgraph Integration["Integration Points"]
-        MCB["MemoryContextBuilder\nrecalls top-K items\nas ephemeral context per turn"]
-        MST["MemorySearchTool\nscope=read · parallel=True\nResourceAccess(memory:ns, read)"]
-        MUT["MemoryUpsertTool\nscope=write\nResourceAccess(memory:ns, write)"]
-    end
-
-    MS --> IK & SQ & PG & TM
-    MS --> VEC & GRF & REM
-    IK & SQ & PG & TM & VEC & GRF & REM --> MCB
-    IK & SQ & PG & TM & VEC & GRF & REM --> MST & MUT
+    DEPS --> SCOPE
+    DEPS --> MEM0
+    INNER --> SCOPE
+    SCOPE --> INDEX
+    INDEX --> BUILDER --> MODEL
+    MODEL --> TOOLS --> SCOPE
+    MEM0 -.-> BUILDER
 ```
 
-`TieredMemoryStore` is still a `MemoryStore`: it routes writes by
-`MemoryItem.metadata["tier"]` (`working`, `episodic`, or `semantic`) and merges
-search results across tiers with optional per-tier limits. Unknown or malformed
-tier metadata falls back to `working`. `MemorySearchTool` preserves result ids,
-tier counts, and citation tier metadata so run reports and eval scorers can
-measure recall behavior in long-running sessions.
+`FileMemoryContextBuilder` loads `/memories/MEMORY.md` at most once per run,
+keeps the first 200 lines, and injects a fixed instruction even when the index
+is absent: memories live under `/memories/`, one file per fact, `MEMORY.md` is a
+one-line-per-file index, and stale facts should be updated or deleted. The
+cached index keeps the request prefix stable across turns. Writes stay on the
+serialized, permission-checked, logged file-tool path.
+
+`ScopedFileBackend` normalizes every model-supplied path under its configured
+root and returns scope-relative paths from `ls`. Absolute paths, `..`, and odd
+segments cannot cross the run boundary. One `Agent` may therefore serve
+concurrent runs with disjoint tenant/user scopes.
 
 `RunReport.summary` exposes the compact observability surface from the event
 stream: event counts, duration, token/cost totals, tool latency/error rate,
@@ -373,13 +370,9 @@ cache-read ratio, context utilization, recovery counters for compaction, model
 fallback, verifier/hook retry, result offload, and risk counters.
 `RunReport.long_run` synthesizes
 long-horizon signals from the event stream and checkpoint: context trimming and
-selected tools, memory searches/upserts, recalled ids, tier counts, failed tool
-calls, recovery hints, completion, cost, and resume phase. The eval package
-includes companion scorers for context selection, context trimming, context
-metadata, memory recall, recovery after tool failures, and successful
-completion.
-
-Do not add vector database or embedding dependencies to core; adapters implement the protocol and live in examples.
+selected tools, failed tool calls, recovery hints, completion, cost, and resume
+phase. Hosts can record mem0 search/add metadata in their own hooks; core does
+not add vector database or embedding dependencies.
 
 ---
 

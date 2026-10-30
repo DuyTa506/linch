@@ -16,7 +16,6 @@ from .scorers import (
     context_not_trimmed,
     context_selected_tool,
     cost_under,
-    memory_recalled,
     recovery_succeeded,
     run_completed,
     schema_valid,
@@ -210,16 +209,6 @@ def _scorer_from_spec(raw: Any, idx: int) -> Scorer:
     if kind == "context_metadata_contains":
         key = _required_string(data.get("key"), f"scorers[{idx}].key")
         return context_metadata_contains(key, data.get("expected"))
-    if kind == "memory_recalled":
-        ids = data.get("ids", data.get("id"))
-        if isinstance(ids, str):
-            return memory_recalled(ids)
-        return memory_recalled(
-            [
-                _required_string(item, f"scorers[{idx}].ids[]")
-                for item in _list(ids, f"scorers[{idx}].ids")
-            ]
-        )
     if kind == "recovery_succeeded":
         tool = data.get("tool")
         return recovery_succeeded(_optional_string(tool) if tool is not None else None)

@@ -366,7 +366,7 @@ def test_report_diagnostics_ignore_missing_and_non_finite_values():
     ]
 
 
-def test_build_run_report_includes_long_run_memory_and_recovery_signals():
+def test_build_run_report_includes_long_run_context_and_recovery_signals():
     from linch import build_run_report
     from linch.events import (
         ContextBuildEvent,
@@ -374,48 +374,37 @@ def test_build_run_report_includes_long_run_memory_and_recovery_signals():
         ToolCallEndEvent,
         ToolCallStartEvent,
     )
-    from linch.tools import Citation, ToolResult
+    from linch.tools import ToolResult
     from linch.types import Usage
 
     events = [
         ContextBuildEvent(
             system_blocks=2,
             messages=8,
-            selected_tools=["SearchMemory", "Read"],
+            selected_tools=["SearchDocs", "read_file"],
             budget={"max_tokens": 1000, "used_tokens": 900, "remaining_tokens": 100},
-            metadata={"rag": "policy"},
+            metadata={"source": "docs"},
         ),
         ContextBuildEvent(
             system_blocks=1,
             messages=5,
-            selected_tools=["SearchMemory"],
+            selected_tools=["SearchDocs"],
             budget={"max_tokens": 500, "used_tokens": 520, "trimmed": True},
-            metadata={"memory_namespace": "tenant-a"},
+            metadata={"source": "docs"},
         ),
         ToolCallStartEvent(
             tool_use_id="m1",
-            tool_name="SearchMemory",
+            tool_name="SearchDocs",
             input={"query": "pto"},
-            summary="SearchMemory(pto)",
+            summary="SearchDocs(pto)",
         ),
         ToolCallEndEvent(
             tool_use_id="m1",
-            tool_name="SearchMemory",
+            tool_name="SearchDocs",
             is_error=False,
             tool_result=ToolResult(
-                content="[policy-1] PTO rolls over",
-                metadata={
-                    "namespace": "tenant-a",
-                    "result_ids": ["policy-1"],
-                    "tier_counts": {"semantic": 1},
-                },
-                citations=[
-                    Citation(
-                        id="policy-1",
-                        source="memory:tenant-a",
-                        metadata={"tier": "semantic"},
-                    )
-                ],
+                content="PTO rolls over",
+                metadata={"source": "docs"},
             ),
         ),
         ToolCallEndEvent(
@@ -443,13 +432,9 @@ def test_build_run_report_includes_long_run_memory_and_recovery_signals():
     assert report.long_run["context"]["trimmed_builds"] == 1
     assert report.long_run["context"]["max_used_tokens"] == 900
     assert report.long_run["context"]["selected_tool_counts"] == {
-        "Read": 1,
-        "SearchMemory": 2,
+        "read_file": 1,
+        "SearchDocs": 2,
     }
-    assert report.long_run["memory"]["searches"] == 1
-    assert report.long_run["memory"]["result_ids"] == ["policy-1"]
-    assert report.long_run["memory"]["namespaces"] == ["tenant-a"]
-    assert report.long_run["memory"]["tier_counts"] == {"semantic": 1}
     assert report.long_run["quality"]["failed_tool_calls"] == 1
     assert report.long_run["quality"]["recovery_hints"] == 1
     assert report.summary["tools"]["total"] == 2

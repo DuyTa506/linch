@@ -139,7 +139,6 @@ Supported scorer types map to the built-in scorers exported from `linch`:
 | `context_selected_tool` | `tool` |
 | `context_not_trimmed` | none |
 | `context_metadata_contains` | `key`, optional `expected` |
-| `memory_recalled` | `id` or `ids` |
 | `recovery_succeeded` | optional `tool` |
 | `run_completed` | none |
 
@@ -160,11 +159,11 @@ A tool-use turn is:
 ```json
 {
   "type": "tool_use",
-  "tool_name": "SearchMemory",
-  "tool_input": {"query": "PTO rollover"}
+  "tool_name": "read_file",
+  "tool_input": {"path": "/memories/MEMORY.md"}
 }
 ```
 
 The CLI intentionally wires scripted agents with `empty_tools()` so it is safe
 for CI smoke tests. Use the library API when a benchmark target needs a real
-tool registry, memory store, filesystem, hooks, or live provider.
+tool registry, file-memory dependencies, filesystem, hooks, or live provider.
