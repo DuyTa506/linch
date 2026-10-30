@@ -5,7 +5,7 @@ can re-implement and inject — no base class to inherit, just match the attribu
 methods. This page is the "implement your own" reference for the seams added in the
 roadmap, mirroring the patterns already documented for
 [`ExecutionBackend`](./tools.md#bash-execution-backend),
-[`Tool`](./tools.md#custom-tools), [`MemoryStore` and `ContextBuilder`](./context-and-memory.md),
+[`Tool`](./tools.md#custom-tools), [`FileBackend` and `ContextBuilder`](./context-and-memory.md),
 providers, and [hooks](./hooks.md).
 
 A protocol is satisfied structurally: implement the listed methods with matching
@@ -29,7 +29,6 @@ from linch import (
     assert_file_backend_contract,
     assert_isolation_backend_contract,
     assert_mailbox_contract,
-    assert_memory_store_contract,
     assert_schedule_store_contract,
     assert_tool_contract,
 )
@@ -47,10 +46,6 @@ async def test_my_mailbox_contract(tmp_path):
     await assert_mailbox_contract(lambda: MyMailbox(tmp_path / "mailbox.db"))
 
 @pytest.mark.asyncio
-async def test_my_memory_store_contract(tmp_path):
-    await assert_memory_store_contract(lambda: MyMemoryStore(tmp_path / "memory.db"))
-
-@pytest.mark.asyncio
 async def test_my_schedule_store_contract(tmp_path):
     await assert_schedule_store_contract(lambda: MyScheduleStore(tmp_path / "schedules.db"))
 
@@ -66,13 +61,13 @@ async def test_my_tool_contract():
 The helpers expect a factory that returns a fresh, empty adapter. They exercise
 the same behavioral guarantees Linch's built-in adapters rely on: file backend
 CRUD/list/edit semantics, distinct writable isolation workspaces, destructive
-mailbox drains, no dropped concurrent sends, memory upsert/search/filter
-behavior, schedule add/update/remove/list, atomic `claim_due` when the store
-implements it, and custom tool metadata/validation/execution/resource shape.
+mailbox drains, no dropped concurrent sends, schedule add/update/remove/list,
+atomic `claim_due` when the store implements it, and custom tool
+metadata/validation/execution/resource shape.
 
 Copyable starter files live in
-[`examples/extensions/`](../../examples/extensions/): provider, memory store,
-virtual filesystem backend, tool package, and hook package templates. They are
+[`examples/extensions/`](../../examples/extensions/): provider, virtual
+filesystem backend, tool package, and hook package templates. They are
 kept importable and smoke-tested so they track the public protocols.
 
 ---
@@ -424,49 +419,22 @@ need ordered static blocks with explicit cache boundaries.
 
 ---
 
-## Memory lifecycle — extraction + consolidation
+## File memory policy
 
-The memory *store* is one seam ([`MemoryStore`](./context-and-memory.md)); the
-*lifecycle* — what to remember and when to consolidate — is two more, both policy you
-supply over neutral wiring in `memory/lifecycle.py`.
-
-**`MemoryExtractor`** is a plain callable (no base class), run on a terminal turn to
-propose what to persist:
-
-```python
-from linch import MemoryExtractionContext, MemoryItem
-
-async def my_extractor(ctx: MemoryExtractionContext) -> list[MemoryItem]:
-    # ctx.history is the pre-trim full_history tail (the complete record, not the
-    # trimmed provider_view); ctx.store lets you read existing entries first.
-    facts = await infer_durable_facts(ctx.history)
-    return [MemoryItem(id=f.id, content=f.text, metadata={"tier": "semantic"}) for f in facts]
-```
-
-Wire it through `MemoryExtractionHook(my_extractor, store=...)` (the hooks layer). The
-prompt and what counts as a memory are entirely yours — Linch only runs the callable at
-the terminal-turn chokepoint and upserts what it returns.
-
-**`ConsolidationGate`** throttles an expensive consolidation pass on time + change-count
-+ an in-process single-flight lock:
-
-```python
-from linch import ConsolidationGate
-
-gate = ConsolidationGate(min_interval_s=300, min_changes=20)
-gate.record(n)                       # note n memories changed
-ran = await gate.run(consolidate)    # runs the thunk iff both gates pass; resets on run
-```
-
-`run()` returns `True` only when it actually fired (counters reset) and is single-flight
-within the process. A *multi-process* lock (a store lock row) is left to durable store
-adapters — add it in your `MemoryStore` if you consolidate from more than one process.
+File memory intentionally has no extraction hook or memory-store contract. Use
+the public `FileMemoryContextBuilder` with `ContextInjectionHook`, and keep the
+run's `ScopedFileBackend` in `RunOptions(deps=...)`. The model maintains
+`/memories/MEMORY.md` and one fact file per line with the existing filesystem
+tools; application policy can update or delete stale files through the backend.
+For semantic recall, adapt the recipe in
+[`examples/memory/mem0_recall.py`](../../examples/memory/mem0_recall.py) with a
+fake async client in unit tests.
 
 ---
 
 ## Related pages
 
 - [Tools](./tools.md) — `Tool`, `ExecutionBackend`, `FileBackend` seams.
-- [Context & memory](./context-and-memory.md) — `ContextBuilder`, `MemoryStore`.
+- [Context & memory](./context-and-memory.md) — `ContextBuilder`, file memory, and scoped backends.
 - [Hooks](./hooks.md) — the single dispatch layer the lifecycle/verifier/observer adapters ride on.
 - [Versioning](../versioning.md) — what a protocol change means for semver.

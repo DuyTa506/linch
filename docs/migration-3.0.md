@@ -33,6 +33,26 @@ remain the names in `linch.__all__`.
 - **D06:** The unused private `add_usage` helper is removed; use `Usage.add`.
 - **D07:** The unused private `make_pool` factory is removed; Postgres stores own their pool configuration through the shared lifecycle helper.
 - **D09:** The obsolete `glob.glob` TypeError retry is removed; supported Python versions accept `root_dir` and `recursive` directly.
+- **D12:** The `linch.memory` package and its `MemoryStore` contract are removed; use scoped file memory through `FileMemoryContextBuilder` and the existing `FileBackend` tools.
+- **D12:** `ConsolidationGate` is removed; application-owned file-memory policy can update or delete stale fact files through the backend.
+- **D12:** `InMemoryKeywordMemoryStore` is removed; use `StateFileBackend` for test memory files.
+- **D12:** `MemoryContextBuilder` is removed; use `FileMemoryContextBuilder` with `ContextInjectionHook`.
+- **D12:** `MemoryExtractionContext` is removed; terminal-turn extraction is application policy or an optional recipe.
+- **D12:** `MemoryExtractor` is removed; application hooks may write facts through the existing file tools.
+- **D12:** `MemoryItem` is removed; store one fact per filesystem file.
+- **D12:** `MemorySearchResult` is removed; semantic search result types belong to the host or optional plugin.
+- **D12:** `MemorySearchTool` is removed; the model uses the existing filesystem tools for memory files.
+- **D12:** `MemoryUpsertTool` is removed; the model uses the existing filesystem tools for memory files.
+- **D12:** `PostgresMemoryStore` is removed; configure the production `FileBackend` (typically Postgres-backed) in run dependencies.
+- **D12:** `SqliteMemoryStore` is removed; SQLite memory persistence is not supported in 3.0.
+- **D12:** `TieredMemoryStore` is removed; represent durable facts as files and apply host-specific policy around them.
+- **D12:** `format_memory_context` is removed with the memory package.
+- **D12:** `latest_user_text` is removed with the memory package.
+- **D12:** `resolve_memory_store` is removed with the memory package.
+- **D12:** `MemoryExtractionHook` is removed; use `ContextInjectionHook(FileMemoryContextBuilder())` or an application-owned hook.
+- **D12:** `assert_memory_store_contract` is removed from `linch.testing`; use the file-backend contract helper.
+- **D12:** The `memory_recalled` eval scorer is removed; score host-owned semantic recall or inspect file-memory events in application evals.
+- **D12:** Legacy `RunReport.long_run` memory-search, recalled-id, and tier-count metrics are removed; report host-owned file-memory or semantic-recall signals instead.
 - **M02:** Duplicate strict JSON traversals share a private traversal core with separate boundary adapters; serialized bytes, fingerprints, depth/error policies, and permissive metadata conversion are preserved.
 - **M03:** Compaction, context building, and offload share custom-estimator invocation; each retains its message/text counting and fallback policy.
 - **M04:** Loop-guard signatures use `permission_decision_key` instead of a duplicate canonicalizer; canonical JSON bytes and ASCII escaping are unchanged.

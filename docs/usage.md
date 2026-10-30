@@ -16,7 +16,7 @@ use the [usage guide index](./usage/README.md) or jump directly to a topic:
 | [Tools](./usage/tools.md) | `@tool`, `FunctionTool`, class tools, scheduler, timeouts/retry, Bash backend, deps, permissions |
 | [Structured output](./usage/structured-output.md) | `OutputSchema`, final-tool capture, schema repair |
 | [Hooks](./usage/hooks.md) | The canonical extension mechanism: chokepoints, `HookResult`, built-in adapters |
-| [Context & memory](./usage/context-and-memory.md) | Per-turn RAG context building, memory primitives, tiered memory |
+| [Context & memory](./usage/context-and-memory.md) | Per-turn RAG context, scoped file memory, and the optional mem0 recipe |
 | [Virtual filesystem](./usage/filesystem.md) | Large-result offloading and the virtual filesystem tools |
 | [Workflows](./usage/workflows.md) | Deterministic fleet loops (`run_workflow`), journaling, resume |
 | [Deep agent](./usage/deep-agent.md) | `create_deep_agent`, background workers, fork/continue, coordinator mode |

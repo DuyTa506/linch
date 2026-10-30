@@ -202,7 +202,8 @@ objects.
   token estimates, source recipes, and recovery fingerprints. Compaction may
   mutate these detached working lists, never the log.
 * `src/linch/hooks/adapters.py` passes a detached `provider_view` to context
-  builders; `src/linch/hooks/memory.py` takes a detached `full_history` tail.
+  builders; file memory reads its run-scoped backend through the same context
+  seam and does not inspect session history.
 * `src/linch/subagents/runner.py` copies the parent `provider_view` to seed a
   child session.
 
@@ -211,8 +212,8 @@ These files read related but already-derived durable snapshots rather than
 `ProviderViewSnapshot`, `src/linch/sessions/store.py` serializes one, and
 `src/linch/model_calls.py` receives a detached `full_history` argument.
 Field names and explanatory comments in `src/linch/loop/checkpoint.py`,
-`src/linch/memory/lifecycle.py`, `src/linch/coordination/send_message.py`, and
-`src/linch/scheduler.py` are not runtime getter reads.
+`src/linch/coordination/send_message.py`, and `src/linch/scheduler.py` are not
+runtime getter reads.
 
 Tests that exercise projection readers are in
 `tests/context/test_context_builder.py`, `tests/filesystem/test_offload.py`,
@@ -224,11 +225,10 @@ Tests that exercise projection readers are in
 `tests/loop/test_verification.py`, `tests/mailbox/test_mailbox_tool.py`,
 `tests/observability/test_observability.py`,
 `tests/providers/test_structured_output.py`,
-`tests/storage/test_memory_primitives.py`,
 `tests/storage/test_model_call_journal.py`,
 `tests/storage/test_provider_snapshot.py`,
 `tests/storage/test_serialization_versioning.py`,
-`tests/storage/test_session_fork.py`, `tests/storage/test_tiered_memory.py`,
+`tests/storage/test_session_fork.py`,
 `tests/test_compaction_accounting.py`,
 `tests/test_hooks.py`, `tests/test_session_log.py`, and
 `tests/tools/test_subagent_tool.py`, `tests/test_idle_sessions.py`, and
