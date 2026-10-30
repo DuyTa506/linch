@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -37,22 +37,22 @@ def test_validate_cron_accepts_and_rejects() -> None:
 def test_cron_matches_every_minute_and_business_hours() -> None:
     from linch import cron_matches
 
-    dt = datetime(2026, 6, 12, 14, 37, tzinfo=timezone.utc)  # a Friday
+    dt = datetime(2026, 6, 12, 14, 37, tzinfo=UTC)  # a Friday
     assert cron_matches("* * * * *", dt)
     assert cron_matches("37 14 * * *", dt)
     assert not cron_matches("38 14 * * *", dt)
     # Friday = cron weekday 5; Mon-Fri matches, Sat/Sun would not.
     assert cron_matches("* * * * 1-5", dt)
-    saturday = datetime(2026, 6, 13, 14, 37, tzinfo=timezone.utc)
+    saturday = datetime(2026, 6, 13, 14, 37, tzinfo=UTC)
     assert not cron_matches("* * * * 1-5", saturday)
 
 
 def test_next_cron_time_advances_one_minute() -> None:
     from linch import next_cron_time
 
-    base = datetime(2026, 6, 12, 14, 37, 30, tzinfo=timezone.utc).timestamp()
+    base = datetime(2026, 6, 12, 14, 37, 30, tzinfo=UTC).timestamp()
     nxt = next_cron_time("* * * * *", base)
-    nxt_dt = datetime.fromtimestamp(nxt, tz=timezone.utc)
+    nxt_dt = datetime.fromtimestamp(nxt, tz=UTC)
     assert (nxt_dt.hour, nxt_dt.minute, nxt_dt.second) == (14, 38, 0)
 
 

@@ -59,8 +59,6 @@ def timeout_wrapper(seconds: float) -> Callable[..., Any]:
         raise ValueError("seconds must be a finite positive number")
 
     async def wrapper(execution: ToolExecution, next: Callable[[], Any]) -> Any:
-        # ``asyncio.wait_for`` on Python 3.10 cannot reliably tell its own
-        # deadline from an asyncio.TimeoutError raised by the wrapped body.
         # Waiting on a separate task leaves the body's exception untouched and
         # lets only an actually-pending task become ToolTimeoutError.
         task = asyncio.ensure_future(next())

@@ -140,7 +140,7 @@ async def main() -> None:
             ),
             timeout=float(os.environ.get("LOOP_RUNNER_TIMEOUT_S", "60")),
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         print("LoopRunner tick timed out; check BASE_URL/model credentials and retry.")
         await agent.close()
         await _close_provider(provider)
@@ -166,7 +166,7 @@ async def _close_provider(provider: object) -> None:
         return
     try:
         await asyncio.wait_for(close(), timeout=5)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         pass
 
 

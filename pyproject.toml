@@ -7,7 +7,7 @@ name = "linch"
 version = "3.0.0a1"
 description = "Production grade agentic harnessing SDK."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "MIT"
 authors = [{ name = "CallMeZuy", email = "duyfaker01@gmail.com" }]
 dependencies = [
@@ -65,7 +65,7 @@ pythonpath = ["src"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
@@ -73,6 +73,6 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.pyright]
 # Follow-up: expand this gate to tests and examples after shipped src stays clean.
 include = ["src"]
-pythonVersion = "3.10"
+pythonVersion = "3.11"
 typeCheckingMode = "basic"
 reportMissingImports = false

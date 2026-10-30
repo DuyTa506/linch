@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from datetime import UTC
 
 import pytest
 
@@ -750,16 +751,14 @@ def test_error_mapping_context_length_without_status_is_not_retried():
 
 
 def test_error_mapping_retry_after_http_date():
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
     from email.utils import format_datetime
 
     from linch.errors import RateLimitError
     from linch.providers.anthropic import _map_anthropic_error
 
     class Resp:
-        headers = {
-            "retry-after": format_datetime(datetime.now(timezone.utc) + timedelta(seconds=5))
-        }
+        headers = {"retry-after": format_datetime(datetime.now(UTC) + timedelta(seconds=5))}
 
     class RateLimited(Exception):
         status_code = 429

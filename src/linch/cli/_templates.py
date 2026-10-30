@@ -20,7 +20,7 @@ build-backend = "hatchling.build"
 name = "${project}"
 version = "0.1.0"
 description = "A Linch agent."
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = ["linch"]
 
 [project.optional-dependencies]

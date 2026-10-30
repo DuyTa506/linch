@@ -139,7 +139,7 @@ async def run_background_worker(work_dir: str) -> None:
             if handle.task is not None and not handle.task.done():
                 try:
                     await asyncio.wait_for(asyncio.shield(handle.task), timeout=60.0)
-                except (asyncio.TimeoutError, asyncio.CancelledError):
+                except (TimeoutError, asyncio.CancelledError):
                     print(f"  worker {handle.worker_id} timed out or was cancelled")
         print(f"  pending notifications: {len(session.pending_notifications)}")
 

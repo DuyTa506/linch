@@ -55,8 +55,8 @@ the embedder supplies the domain implementation. For example,
   compatibility fallback.
 - Persisted wire formats remain forward-tolerant. Breaking shapes require an
   explicit schema-version migration.
-- Python 3.10 remains supported. Do not use newer runtime primitives without a
-  compatible implementation or backport.
+- Python 3.11 is the minimum supported runtime. Use its standard-library
+  primitives directly; do not add compatibility fallbacks for older Python.
 - The core dependency graph stays small. Heavy integrations belong in extras,
   examples, or separate packages.
 - Linch remains embeddable inside a host service. It does not become a daemon,
@@ -210,7 +210,7 @@ pyright
 
 CI expands to:
 
-- Correctness on Python 3.10, 3.11, 3.12, and 3.13.
+- Correctness on Python 3.11, 3.12, and 3.13.
 - A minimal-core installation that proves optional integrations remain lazy.
 - An all-extras smoke installation for MCP, Anthropic, Gemini, Postgres, and
   OpenTelemetry.
