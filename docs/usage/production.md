@@ -197,13 +197,24 @@ unlimited concurrency. Queues must be registered on a worker to execute.
 These limits cap runs; use host limiters for provider request/token quotas.
 
 The queue only dispatches. A job separately claims the D1 run lease using the
-worker ID, and renews it every **lease TTL / 3**. A failed renewal aborts the run's
-signal; stale writes raise `LeaseLostError`. Agent cleanup completes before lease
-release. Completed, failed and aborted runs are acknowledged without invocation.
+worker ID. Renewal starts immediately, then repeats every **lease TTL / 3**.
+Transient renewal failures retry within the last confirmed TTL; a hung renewal
+is bounded by that same deadline. `LeaseLostError` or expiry without a successful
+renewal cancels the run task without aborting its signal or writing a terminal
+status. Session work is quiesced before lease release. Completed, failed and
+aborted runs are acknowledged without invocation; every nonterminal exit,
+including cancellation and ownership loss, is retried from its checkpoint.
 An agent failure is a durable result, not a queue retry. Infrastructure errors
 such as an unreachable store or a competing live lease use
 `DatabaseRetryEntrypointExecutor` backoff; exhausted jobs are held for host
 inspection rather than discarded.
+
+PgQueuer 1.6 retries by queue job ID: it resets status to `queued`, increments
+attempts and clears `queue_manager_id` without checking the old queue owner. A
+stale worker's retry can therefore requeue a job another worker has re-picked.
+The D1 run lease still excludes concurrent execution of that run; retry claims
+that meet a live owner back off again. Queue ownership alone does not fence run
+writes. The worker acknowledges only a persisted terminal run.
 
 On process death, queue and lease heartbeats both stop. PgQueuer re-picks the
 stale `picked` job after `stall_timeout_s`, plus up to the polling interval. The

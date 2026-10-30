@@ -228,9 +228,8 @@ async def test_infrastructure_claim_failure_is_retried(pool):
         )
 
 
-async def test_lease_heartbeat_renews_then_aborts_on_loss(pool):
+async def test_lease_heartbeat_renews_then_cancels_on_loss(pool):
     from linch import PostgresRunStore
-    from linch.abort import AbortContext
     from linch.worker import Worker, enqueue_run
 
     async def factory(job):
@@ -240,20 +239,27 @@ async def test_lease_heartbeat_renews_then_aborts_on_loss(pool):
     rid = await enqueue_run(pool, "s", "hello")
     store = PostgresRunStore("", pool=pool)
     lease = await store.claim(rid, "owner", 0.3)
-    signal = AbortContext()
-    task = asyncio.create_task(worker._heartbeat(store, lease, signal))
+
+    async def blocked():
+        await asyncio.Event().wait()
+
+    run_task = asyncio.create_task(blocked())
+    task = asyncio.create_task(worker._heartbeat(store, lease, run_task))
     try:
-        await asyncio.sleep(0.45)  # More than a TTL: renewal must keep it alive.
-        assert not signal.aborted
+        await asyncio.sleep(0.45)
+        assert not run_task.done()
         assert await pool.fetchval(
             "SELECT lease_expires_at>$2 FROM runs WHERE id=$1", rid, lease.expires_at
         )
         await pool.execute("UPDATE runs SET lease_epoch=lease_epoch+1 WHERE id=$1", rid)
-        await asyncio.wait_for(signal.wait(), 1)
-        await task
+        await asyncio.wait_for(task, 1)
+        with pytest.raises(asyncio.CancelledError):
+            await run_task
+        assert await pool.fetchval("SELECT status FROM runs WHERE id=$1", rid) == "pending"
     finally:
         task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+        run_task.cancel()
+        await asyncio.gather(task, run_task, return_exceptions=True)
 
 
 async def test_named_queues_have_independent_fleet_limits(pool):
@@ -323,7 +329,7 @@ async def test_worker_preserves_a_contract_persisted_before_first_checkpoint(poo
     assert json.loads(row["meta"])["run_contract"] == original["run_contract"]
 
 
-async def test_lease_loss_during_failure_recording_does_not_requeue(pool):
+async def test_lease_loss_during_failure_recording_retries_nonterminal_run(pool):
     from linch.worker import Worker, enqueue_run
 
     rid = await enqueue_run(pool, "s", "hello")
@@ -332,13 +338,17 @@ async def test_lease_loss_during_failure_recording_does_not_requeue(pool):
     async def factory(job):
         nonlocal calls
         calls += 1
-        await pool.execute("UPDATE runs SET lease_epoch=lease_epoch+1 WHERE id=$1", rid)
-        raise ValueError("factory failed after ownership changed")
+        if calls == 1:
+            await pool.execute("UPDATE runs SET lease_epoch=lease_epoch+1 WHERE id=$1", rid)
+            raise ValueError("factory failed after ownership changed")
+        return make_agent(job)
 
     async with running(Worker(pool, factory, poll_interval_s=0.02, retry_delay_s=0.05)):
+        await wait_for(
+            lambda: pool.fetchval("SELECT status='completed' FROM runs WHERE id=$1", rid)
+        )
         await wait_for(lambda: pool.fetchval("SELECT count(*)=0 FROM pgqueuer"))
-    assert calls == 1
-    assert await pool.fetchval("SELECT status FROM runs WHERE id=$1", rid) == "pending"
+    assert calls == 2
 
 
 async def test_failed_model_run_is_acknowledged_without_retry(pool):
