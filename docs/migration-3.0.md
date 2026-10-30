@@ -37,6 +37,7 @@ remain the names in `linch.__all__`.
 - **P01:** Checkpoint field defaults on read are removed; every serialized current checkpoint field is required, including empty extension state and nullable fields.
 - **P02:** Default-version and missing-fingerprint run-contract readers are removed; current contracts require a verified fingerprint.
 - **P03:** `RunOptions.allow_legacy_resume` and contractless resume are removed; start a new run with a current execution contract.
+- **Resume:** Terminal runs and runs without checkpoints raise `RunNotResumableError` with `run_id` and `status`; start a new run.
 - **P04:** Cursorless assistant-boundary tool recovery is removed; tool recovery requires a valid `tool_batch_event_after_seq` cursor.
 - **P07:** Pre-3.0 permission readers and the null `updated_input` wire marker are removed; non-null persisted input rewrites and live approval rewrites remain rejected.
 - **P09:** Automatic SQLite/Postgres schema upgrades are removed; built-in database stores create complete version-3 schemas and reject old, missing, or unknown schema metadata on existing databases.

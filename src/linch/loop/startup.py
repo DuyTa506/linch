@@ -69,16 +69,15 @@ async def _emit_prompt_block(ctx: RunStartupContext, block_reason: str) -> Async
     yield event
     async for event in _error_result_tail(
         runtime.session,
-        runtime.agent,
+        runtime=runtime,
         run_id=runtime.run_id,
-        run_record=runtime.run_record,
-        checkpoint=runtime.checkpoint,
         total=runtime.total,
         duration_ms=duration_ms,
         running_cost=runtime.running_cost,
         usage_complete=runtime.ledger.usage_complete,
     ):
         yield event
+    ctx.blocked = True
     await ctx.dispatch_lifecycle(
         HookEvent.AGENT_STOP,
         AgentStopContext(
@@ -86,10 +85,9 @@ async def _emit_prompt_block(ctx: RunStartupContext, block_reason: str) -> Async
             run_id=runtime.run_id,
             turn_index=None,
             deps=getattr(runtime.session, "run_deps", None),
-            result=blocked_result,
+            result=runtime.terminal_result or blocked_result,
         ),
     )
-    ctx.blocked = True
 
 
 async def initialize_run(ctx: RunStartupContext) -> AsyncIterator[Event]:

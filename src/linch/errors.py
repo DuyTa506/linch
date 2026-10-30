@@ -1,3 +1,11 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .run_store import RunStatus
+
+
 class LinchError(Exception):
     kind = "linch"
     retryable = False
@@ -5,6 +13,17 @@ class LinchError(Exception):
 
 class ConfigError(LinchError):
     kind = "config"
+
+
+class RunNotResumableError(LinchError):
+    """A run is terminal or has no checkpoint from which to resume."""
+
+    kind = "run_not_resumable"
+
+    def __init__(self, run_id: str, status: RunStatus) -> None:
+        super().__init__(f"Run {run_id!r} cannot be resumed (status: {status})")
+        self.run_id = run_id
+        self.status = status
 
 
 class AuthError(LinchError):

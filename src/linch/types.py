@@ -10,6 +10,7 @@ StopReason: TypeAlias = Literal[
     "stop_sequence",
     "refusal",
     "error",
+    "lease_lost",
     "interrupted",
 ]
 PermissionMode: TypeAlias = Literal["default", "acceptEdits", "skip-dangerous"]
