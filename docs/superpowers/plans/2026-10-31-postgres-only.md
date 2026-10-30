@@ -68,6 +68,6 @@
 
 **Files:** `docs/migration-3.0.md`, `CHANGELOG.md`, this plan.
 
-- [ ] Add one migration line for each of the five removed public names and the deep-agent durable configuration change.
-- [ ] Add Unreleased changelog entry.
-- [ ] Run all four gates, review branch changes, report remaining historical mentions and LOC deltas; commit and leave worktree clean.
+- [x] Add one migration line for each of the five removed public names and the deep-agent durable configuration change.
+- [x] Add Unreleased changelog entry.
+- [x] Run all four gates, review branch changes, report remaining historical mentions and LOC deltas; commit and leave worktree clean.
