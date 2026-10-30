@@ -460,11 +460,12 @@ async def test_agent_replaces_bash_with_backend(tmp_path) -> None:
     assert result.is_error is False
 
 
-def test_agent_shell_only_backend_warns_for_compatibility(tmp_path) -> None:
-    """The deprecated shell-only Agent path remains covered explicitly."""
+def test_agent_rejects_shell_only_backend(tmp_path) -> None:
+    """An Agent needs a coherent shell and filesystem execution world."""
     from linch import Agent, workspace_tools
+    from linch.errors import ConfigError
 
-    with pytest.warns(DeprecationWarning, match="shell-only"):
+    with pytest.raises(ConfigError, match="shell.*fs"):
         Agent(
             model="claude-opus-4-8",
             cwd=str(tmp_path),

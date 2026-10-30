@@ -449,7 +449,7 @@ async def test_forced_compaction_budget_stops_before_rebuilding_main_request(
                 "usage": Usage(input_tokens=111, output_tokens=22),
             }
 
-    original_stream_turn = streaming.stream_turn
+    original_stream_turn = streaming._accounted_primary_stream
     stream_attempts = 0
 
     async def context_length_then_normal_stream(*args: Any, **kwargs: Any) -> AsyncIterator[Any]:
@@ -490,7 +490,7 @@ async def test_forced_compaction_budget_stops_before_rebuilding_main_request(
         }
         return True
 
-    monkeypatch.setattr(streaming, "stream_turn", context_length_then_normal_stream)
+    monkeypatch.setattr(streaming, "_accounted_primary_stream", context_length_then_normal_stream)
     monkeypatch.setattr(streaming, "run_forced_compaction", paid_forced_compaction)
 
     provider = Provider()

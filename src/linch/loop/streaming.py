@@ -1,5 +1,5 @@
 """Provider streaming: assemble one assistant turn from stream events, with
-ContextLengthError recovery (legacy single retry or compaction ladder)."""
+ContextLengthError recovery (single retry or compaction ladder)."""
 
 from __future__ import annotations
 
@@ -135,7 +135,7 @@ async def maybe_compact_resilient(
     failure is retried when raised from the main turn call. Since this call
     fires *before* the hard context limit is hit, a persistent failure here is
     not fatal: skip compaction for this turn and let the run proceed — the
-    reactive ``ContextLengthError`` ladder in ``_stream_turn_with_ladder``
+    reactive ``ContextLengthError`` ladder in ``_stream_turn_with_recovery``
     still has its own compaction+retry path if the turn call runs out of room.
     """
     attempts = [0]
@@ -184,7 +184,7 @@ def _apply_model_fallback(
     return ModelFallbackEvent(from_model=from_model, to_model=next_model, reason=str(exc))
 
 
-async def _stream_turn_with_ladder(
+async def _stream_turn_with_recovery(
     session: Session,
     agent: Any,
     opts: RunOptions,
@@ -197,65 +197,32 @@ async def _stream_turn_with_ladder(
     prepare_provider_call: Any,
     start_provider_call: Any,
     end_provider_call: Any,
+    ledger: _ModelCallLedger,
+    logical_call_id: str,
+    bind_active_primary: Any,
     request_prepared: bool = False,
-    ledger: _ModelCallLedger | None = None,
-    logical_call_id: str | None = None,
-    bind_active_primary: Any = None,
     auxiliary_caller: _AccountedAuxiliaryCaller | None = None,
     compaction_logical_call_id: str | None = None,
 ) -> AsyncIterator[Any]:
-    """Provider-call attempt loop with compaction-ladder recovery.
+    """Recover provider turns with a per-turn retry or a per-run ladder budget.
 
-    Yields the same items as :func:`stream_turn` (events + the final
-    ``AssistantAssembly``) plus recovery ``CompactionEvent``/
-    ``ContextBuildEvent`` items.  Nothing is persisted here — the caller
-    persists every non-assembly item it receives.
-
-    Rung 1: micro-compact (LLM-free, once per turn).  Rung 2: forced
-    compaction, capped per run by ``ladder.max_forced_compactions`` via the
-    *forced_used* one-element counter cell; once exhausted the
-    ``ContextLengthError`` surfaces.
+    Default recovery includes its second prepare/dispatch inside the retryable
+    ProviderError boundary. Ladder recovery occurs outside that boundary; only
+    its next dispatch re-enters it. Preserve that distinction as well as each
+    policy's compaction budget and observer end-call ordering.
     """
     micro_tried_this_turn = False
     same_model_retries = [0]
-    prepared = request_prepared
-    while True:
-        if prepared:
-            prepared = False
+
+    async def recover(exc: ContextLengthError) -> AsyncIterator[Any]:
+        nonlocal req, micro_tried_this_turn
+        if ladder is None and session.compaction_retry_used_this_turn:
+            raise exc
+        await end_provider_call(stop_reason="context_length_error")
+        recovered = False
+        if ladder is None:
+            session.mark_compaction_used()
         else:
-            req = await prepare_provider_call(req, turn_index)
-        await start_provider_call(turn_index, req.model)
-        try:
-            async for item in stream_turn(
-                session,
-                req,
-                ledger=ledger,
-                logical_call_id=logical_call_id,
-                turn_index=turn_index,
-                bind_active_primary=bind_active_primary,
-            ):
-                yield item
-            return
-        except ProviderError as exc:
-            # Provider overload (retryable): swap to the next fallback model for
-            # the rest of the run and retry; surface the error if none remain.
-            if not getattr(exc, "retryable", False):
-                raise
-            await end_provider_call(stop_reason="error")
-            fallback_event = _apply_model_fallback(session, agent, req, exc)
-            if fallback_event is not None:
-                yield fallback_event
-                continue
-            # No fallback model configured/left: retry the SAME model/request
-            # (bounded by agent.max_retries) instead of surfacing immediately —
-            # covers transport-level hiccups (e.g. a malformed mid-stream
-            # tool-call diff from an OpenAI-compatible server).
-            if await _retry_same_model(exc, same_model_retries, agent):
-                continue
-            raise
-        except ContextLengthError:
-            await end_provider_call(stop_reason="context_length_error")
-            recovered = False
             if ladder.micro and not micro_tried_this_turn:
                 micro_tried_this_turn = True
                 recovered = apply_micro_compaction(
@@ -266,69 +233,49 @@ async def _stream_turn_with_ladder(
                 )
             if not recovered:
                 if forced_used[0] >= ladder.max_forced_compactions:
-                    raise
+                    raise exc
                 forced_used[0] += 1
-                await run_forced_compaction(
-                    session,
-                    agent,
-                    signal,
-                    model=req.model,
-                    auxiliary_caller=auxiliary_caller,
-                    logical_call_id=compaction_logical_call_id,
-                )
-            reset_read_tracker_after_compaction(session, agent)
-            _re_inject_skill_context(session)
-            # Yield only after the provider view reaches its final post-
-            # compaction shape.  The runner persists a snapshot while this
-            # generator is suspended at the event.
-            yield build_compaction_event(session)
-            # Re-run context builders after compaction so fresh context lands.
-            context_result = await _build_context_result(session, turn_index)
-            if context_result is not None:
-                yield ContextBuildEvent(
-                    system_blocks=len(context_result.system_blocks),
-                    messages=len(context_result.messages),
-                    selected_tools=_context_selected_tool_names(context_result),
-                    budget=context_budget_to_dict(context_result.budget),
-                    metadata=dict(context_result.metadata),
-                )
-            req = _build_turn_request(
+        if not recovered:
+            await run_forced_compaction(
                 session,
-                opts,
-                context=context_result,
-                model_override=req.model,
+                agent,
+                signal,
+                model=req.model,
+                auxiliary_caller=auxiliary_caller,
+                logical_call_id=compaction_logical_call_id,
             )
+        if ladder is not None:
+            reset_read_tracker_after_compaction(session, agent)
+        _re_inject_skill_context(session)
+        # The runner snapshots the final provider view while suspended here.
+        yield build_compaction_event(session)
+        context_result = await _build_context_result(session, turn_index)
+        if context_result is not None:
+            yield ContextBuildEvent(
+                system_blocks=len(context_result.system_blocks),
+                messages=len(context_result.messages),
+                selected_tools=_context_selected_tool_names(context_result),
+                budget=context_budget_to_dict(context_result.budget),
+                metadata=dict(context_result.metadata),
+            )
+        req = _build_turn_request(
+            session,
+            opts,
+            context=context_result,
+            model_override=req.model,
+        )
 
+    async def dispatch() -> AsyncIterator[Any]:
+        async for item in _accounted_primary_stream(
+            session,
+            req,
+            ledger=ledger,
+            logical_call_id=logical_call_id,
+            turn_index=turn_index,
+            bind_active_primary=bind_active_primary,
+        ):
+            yield item
 
-async def _stream_turn_with_compaction_retry(
-    session: Session,
-    agent: Any,
-    opts: RunOptions,
-    req: Any,
-    *,
-    turn_index: int,
-    signal: Any,
-    prepare_provider_call: Any,
-    start_provider_call: Any,
-    end_provider_call: Any,
-    request_prepared: bool = False,
-    ledger: _ModelCallLedger | None = None,
-    logical_call_id: str | None = None,
-    bind_active_primary: Any = None,
-    auxiliary_caller: _AccountedAuxiliaryCaller | None = None,
-    compaction_logical_call_id: str | None = None,
-) -> AsyncIterator[Any]:
-    """Legacy provider-call path: a single forced-compaction retry per turn.
-
-    Yields the same items as :func:`stream_turn` plus recovery events; the
-    caller persists every non-assembly item.  Behavior is identical to the
-    pre-ladder inline code (pinned by tests/loop/test_compaction_ladder.py).
-    """
-    # The outer loop re-iterates on a successful model-fallback swap (overload
-    # recovery) or a same-model retry (see _retry_same_model); with neither
-    # configured/available it runs exactly once, keeping the legacy
-    # single-compaction-retry behavior byte-identical.
-    same_model_retries = [0]
     prepared = request_prepared
     while True:
         if prepared:
@@ -338,56 +285,16 @@ async def _stream_turn_with_compaction_retry(
         await start_provider_call(turn_index, req.model)
         try:
             try:
-                async for item in stream_turn(
-                    session,
-                    req,
-                    ledger=ledger,
-                    logical_call_id=logical_call_id,
-                    turn_index=turn_index,
-                    bind_active_primary=bind_active_primary,
-                ):
+                async for item in dispatch():
                     yield item
-            except ContextLengthError:
-                if session.compaction_retry_used_this_turn:
+            except ContextLengthError as exc:
+                if ladder is not None:
                     raise
-                await end_provider_call(stop_reason="context_length_error")
-                session.mark_compaction_used()
-                await run_forced_compaction(
-                    session,
-                    agent,
-                    signal,
-                    model=req.model,
-                    auxiliary_caller=auxiliary_caller,
-                    logical_call_id=compaction_logical_call_id,
-                )
-                _re_inject_skill_context(session)
-                yield build_compaction_event(session)
-                # Re-run context builders after compaction so fresh context lands.
-                context_result = await _build_context_result(session, turn_index)
-                if context_result is not None:
-                    yield ContextBuildEvent(
-                        system_blocks=len(context_result.system_blocks),
-                        messages=len(context_result.messages),
-                        selected_tools=_context_selected_tool_names(context_result),
-                        budget=context_budget_to_dict(context_result.budget),
-                        metadata=dict(context_result.metadata),
-                    )
-                req = _build_turn_request(
-                    session,
-                    opts,
-                    context=context_result,
-                    model_override=req.model,
-                )
+                async for item in recover(exc):
+                    yield item
                 req = await prepare_provider_call(req, turn_index)
                 await start_provider_call(turn_index, req.model)
-                async for item in stream_turn(
-                    session,
-                    req,
-                    ledger=ledger,
-                    logical_call_id=logical_call_id,
-                    turn_index=turn_index,
-                    bind_active_primary=bind_active_primary,
-                ):
+                async for item in dispatch():
                     yield item
         except ProviderError as exc:
             if not getattr(exc, "retryable", False):
@@ -400,40 +307,13 @@ async def _stream_turn_with_compaction_retry(
             if await _retry_same_model(exc, same_model_retries, agent):
                 continue
             raise
-        return
-
-
-async def stream_turn(
-    session: Session,
-    req: ProviderRequest,
-    *,
-    ledger: _ModelCallLedger | None = None,
-    logical_call_id: str | None = None,
-    turn_index: int | None = None,
-    bind_active_primary: Any = None,
-) -> AsyncIterator[Any]:
-    """Stream one physical primary delivery.
-
-    The legacy direct shape remains available for focused parser tests.  The
-    run loop passes its ledger so this boundary owns one intent, permit,
-    dispatch marker, and receipt for every retry/fallback delivery.
-    """
-    if ledger is None:
-        async with provider_slot(session.agent, req.model):
-            async for item in _stream_turn(session, req):
+        except ContextLengthError as exc:
+            if ladder is None:
+                raise
+            async for item in recover(exc):
                 yield item
+            continue
         return
-    if logical_call_id is None:
-        raise RuntimeError("accounted primary delivery requires a logical call id")
-    async for item in _accounted_primary_stream(
-        session,
-        req,
-        ledger=ledger,
-        logical_call_id=logical_call_id,
-        turn_index=turn_index,
-        bind_active_primary=bind_active_primary,
-    ):
-        yield item
 
 
 def _throw_if_aborted(signal: Any) -> None:

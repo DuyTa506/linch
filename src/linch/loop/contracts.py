@@ -193,8 +193,8 @@ def _tool_pipeline_contract(agent: Any) -> dict[str, Any] | None:
     }
 
 
-def _legacy_bash_backend_contract(backend: Any) -> dict[str, Any]:
-    """Preserve the shell-only contract and its established diagnostics."""
+def _shell_backend_contract(backend: Any) -> dict[str, Any]:
+    """Fingerprint a shell transport, including standalone BashTool execution."""
     policy_id = getattr(backend, "resume_policy_id", None)
     policy_version = getattr(backend, "resume_policy_version", None)
     try:
@@ -221,26 +221,17 @@ def _execution_backend_contract(tools: list[Any], configured_backend: Any) -> di
     """Fingerprint the effective execution world, including shell, fs, and confinement.
 
     Unified backends can affect filesystem tools even when Bash is not offered,
-    so their whole effective world participates in resume identity. The legacy
-    ``BashTool(backend=...)`` path retains its historical shell-only contract.
+    so their whole effective world participates in resume identity. A standalone
+    ``BashTool(execution=...)`` also fingerprints its effective shell transport.
     """
     bash_tool = next((tool for tool in tools if getattr(tool, "name", None) == "Bash"), None)
     bash_backend = getattr(bash_tool, "_backend", None) if bash_tool is not None else None
 
     if configured_backend is None:
-        return _legacy_bash_backend_contract(bash_backend) if bash_backend is not None else None
+        return _shell_backend_contract(bash_backend) if bash_backend is not None else None
 
-    if getattr(configured_backend, "legacy_shell_only", False):
-        shell = bash_backend or getattr(configured_backend, "shell", None)
-        return _legacy_bash_backend_contract(shell)
-
-    shell = getattr(configured_backend, "shell", None)
-    filesystem = getattr(configured_backend, "fs", None)
-    if shell is None or filesystem is None:
-        # A non-normalized shell backend can still reach this helper in tests
-        # or host-owned Agent-like objects. Keep the compatibility behavior.
-        backend = bash_backend or configured_backend
-        return _legacy_bash_backend_contract(backend)
+    shell = configured_backend.shell
+    filesystem = configured_backend.fs
     if bash_backend is not None and bash_backend is not shell:
         raise ConfigError(
             "durable execution world mismatch: the effective BashTool backend is not "
@@ -258,7 +249,7 @@ def _execution_backend_contract(tools: list[Any], configured_backend: Any) -> di
             "resume_policy_version); filesystem overrides must also expose "
             "stable resume policy metadata"
         )
-    shell_policy = _legacy_bash_backend_contract(shell)
+    shell_policy = _shell_backend_contract(shell)
     filesystem_policy = resume_policy_descriptor(filesystem)
     if filesystem_policy is None:
         raise ConfigError(

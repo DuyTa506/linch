@@ -67,7 +67,7 @@ async def test_public_api_has_provider_module() -> None:
 
 async def test_stream_turn_retains_an_omitted_claude_thinking_signature() -> None:
     """A signature-only thinking block must survive until a tool result round-trip."""
-    from linch.loop.streaming import stream_turn
+    from linch.loop.streaming import _stream_turn
     from linch.types import AssistantAssembly, ProviderRequest, ThinkingBlock
 
     class _SignatureOnlyProvider(BaseProvider):
@@ -93,7 +93,7 @@ async def test_stream_turn_retains_an_omitted_claude_thinking_signature() -> Non
     session = await agent.session()
     req = ProviderRequest(model=agent.model, system=[], tools=[], messages=[])
 
-    items = [item async for item in stream_turn(session, req)]
+    items = [item async for item in _stream_turn(session, req)]
     assembly = items[-1]
     assert isinstance(assembly, AssistantAssembly)
     thinking = next(block for block in assembly.message.content if isinstance(block, ThinkingBlock))
@@ -105,7 +105,7 @@ async def test_stream_turn_retains_an_omitted_claude_thinking_signature() -> Non
 async def test_stream_partials_request_override_suppresses_events_but_keeps_assembly() -> None:
     """A request can suppress raw deltas without altering provider assembly."""
     from linch.events import PartialAssistantEvent
-    from linch.loop.streaming import stream_turn
+    from linch.loop.streaming import _stream_turn
     from linch.types import (
         AssistantAssembly,
         ProviderRequest,
@@ -146,12 +146,12 @@ async def test_stream_partials_request_override_suppresses_events_but_keeps_asse
 
     legacy_items = [
         item
-        async for item in stream_turn(
+        async for item in _stream_turn(
             session,
             ProviderRequest(model=agent.model, system=[], tools=[], messages=[]),
         )
     ]
-    items = [item async for item in stream_turn(session, req)]
+    items = [item async for item in _stream_turn(session, req)]
 
     assert len([item for item in legacy_items if isinstance(item, PartialAssistantEvent)]) == 3
     assert [item for item in items if isinstance(item, PartialAssistantEvent)] == []
@@ -177,3 +177,48 @@ async def test_run_options_thread_stream_partial_policy_to_provider_request() ->
 
     assert _build_turn_request(session, RunOptions()).stream_partials is None
     assert _build_turn_request(session, RunOptions(stream_partials=False)).stream_partials is False
+
+
+def test_missing_core_jsonschema_cannot_accept_structured_output() -> None:
+    """A missing validation dependency must fail, never accept unchecked JSON."""
+    import os
+    import subprocess
+    import sys
+    import textwrap
+    from pathlib import Path
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent("""
+            import builtins
+            import sys
+            from types import SimpleNamespace
+
+            # Warm unrelated core imports, then fault only this validation module.
+            import linch.loop.terminals
+            del sys.modules["linch.loop.terminals"]
+            original_import = builtins.__import__
+            def import_without_jsonschema(name, *args, **kwargs):
+                if name == "jsonschema":
+                    raise ModuleNotFoundError("missing core jsonschema")
+                return original_import(name, *args, **kwargs)
+            builtins.__import__ = import_without_jsonschema
+
+            from linch.loop.terminals import _validate_structured_output
+            _validate_structured_output(
+                {"count": "invalid"},
+                SimpleNamespace(schema={"type": "object", "properties": {
+                    "count": {"type": "integer"}
+                }}),
+            )
+        """),
+        ],
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[2] / "src")},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0, "missing core validation dependency silently accepted output"
+    assert "ModuleNotFoundError: missing core jsonschema" in result.stderr

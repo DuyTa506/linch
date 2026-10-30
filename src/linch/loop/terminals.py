@@ -12,6 +12,8 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Literal
 
+import jsonschema  # type: ignore[import]
+
 from ..events import (
     BudgetEvent,
     ErrorEvent,
@@ -38,7 +40,7 @@ _FENCED_JSON_RE = re.compile(r"```(?:json)?\s*\n?(.*?)```", re.DOTALL | re.IGNOR
 
 
 def _parse_structured_output(text: str, schema: object) -> tuple[dict | None, str | None]:
-    """Try to parse *text* as JSON and optionally validate against *schema*.
+    """Try to parse *text* as JSON and validate against *schema*.
 
     Models — especially local/small ones — often wrap their final JSON answer
     in a ```json ... ``` fence, sometimes with leading prose. Try the raw text
@@ -75,13 +77,9 @@ def _try_json_loads(text: str) -> tuple[Any, str | None]:
 def _validate_structured_output(value: dict[str, Any], schema: object) -> str | None:
     """Validate a parsed structured-output object against *schema*."""
     try:
-        import jsonschema  # type: ignore[import]
-
         schema_dict = getattr(schema, "schema", None)
         if schema_dict:
             jsonschema.validate(value, schema_dict)
-    except ImportError:
-        return None  # jsonschema not installed — skip validation
     except Exception as exc:
         return f"Schema validation error: {exc}"
     return None

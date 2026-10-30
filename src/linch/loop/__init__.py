@@ -18,7 +18,6 @@ from .request import final_text as final_text
 from .runner import _run_loop_impl as _run_loop_impl
 from .runner import resume_loop as resume_loop
 from .runner import run_loop as run_loop
-from .streaming import stream_turn as stream_turn
 
 __all__ = [
     "apply_provider_capabilities",
@@ -26,5 +25,4 @@ __all__ = [
     "final_text",
     "resume_loop",
     "run_loop",
-    "stream_turn",
 ]

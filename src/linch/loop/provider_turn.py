@@ -29,8 +29,7 @@ from .request import _build_context_result, _build_turn_request, _context_select
 from .streaming import (
     _AccountedPrimaryAssembly,
     _PrimaryPartial,
-    _stream_turn_with_compaction_retry,
-    _stream_turn_with_ladder,
+    _stream_turn_with_recovery,
     maybe_compact_resilient,
 )
 
@@ -289,44 +288,25 @@ async def run_provider_turn(ctx: ProviderTurnContext) -> AsyncIterator[Event]:
         session._last_prompt_cache_model = req.model
         session._last_prompt_cache_tool_sig = _sig
         _ladder = getattr(agent, "compaction_ladder", None)
-        if _ladder is None:
-            _provider_stream = _stream_turn_with_compaction_retry(
-                session,
-                agent,
-                opts,
-                req,
-                turn_index=turn_index,
-                signal=signal,
-                prepare_provider_call=ctx.prepare_provider_call,
-                start_provider_call=ctx.start_provider_call,
-                end_provider_call=ctx.end_provider_call,
-                request_prepared=exact_pending_replay,
-                ledger=ledger,
-                logical_call_id=primary_logical_call_id,
-                bind_active_primary=ctx.bind_active_primary,
-                auxiliary_caller=auxiliary_caller,
-                compaction_logical_call_id=forced_compaction_logical_call_id,
-            )
-        else:
-            _provider_stream = _stream_turn_with_ladder(
-                session,
-                agent,
-                opts,
-                req,
-                turn_index=turn_index,
-                signal=signal,
-                ladder=_ladder,
-                forced_used=forced_compactions_used,
-                prepare_provider_call=ctx.prepare_provider_call,
-                start_provider_call=ctx.start_provider_call,
-                end_provider_call=ctx.end_provider_call,
-                request_prepared=exact_pending_replay,
-                ledger=ledger,
-                logical_call_id=primary_logical_call_id,
-                bind_active_primary=ctx.bind_active_primary,
-                auxiliary_caller=auxiliary_caller,
-                compaction_logical_call_id=forced_compaction_logical_call_id,
-            )
+        _provider_stream = _stream_turn_with_recovery(
+            session,
+            agent,
+            opts,
+            req,
+            turn_index=turn_index,
+            signal=signal,
+            ladder=_ladder,
+            forced_used=forced_compactions_used,
+            prepare_provider_call=ctx.prepare_provider_call,
+            start_provider_call=ctx.start_provider_call,
+            end_provider_call=ctx.end_provider_call,
+            request_prepared=exact_pending_replay,
+            ledger=ledger,
+            logical_call_id=primary_logical_call_id,
+            bind_active_primary=ctx.bind_active_primary,
+            auxiliary_caller=auxiliary_caller,
+            compaction_logical_call_id=forced_compaction_logical_call_id,
+        )
         try:
             async for item in _provider_stream:
                 if isinstance(item, _PrimaryPartial):
