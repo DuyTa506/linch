@@ -15,8 +15,8 @@
 | `config.py` | `FeatureFlags`, `SystemPromptConfig` |
 | `context/` | `ContextBuilder` protocol, `ContextBuildResult`, `ContextBudget`, `apply_context_budget`; consumed by `ContextInjectionHook` in `hooks/adapters.py` |
 | `loop_guard/` | `LoopGuard`, `LoopGuardState`, `LoopGuardDecision`, `evaluate_loop_guard`, `normalize_loop_guard` |
-| `memory/` | `MemoryStore` protocol, reference stores including `TieredMemoryStore`, `MemoryContextBuilder`, memory tools |
-| `filesystem/` | Explicit `FeatureFlags(filesystem=True)` capability: `FileBackend` protocol, `StateFileBackend`, `DiskFileBackend`, `SqliteFileBackend`, `CompositeFileBackend`, `OffloadConfig`, ls/read_file/write_file/edit_file tools |
+| `memory/` | *(removed in 3.0)* — file memory is `FileMemoryContextBuilder` in the context/hook path; semantic recall is host-owned (see the mem0 example) |
+| `filesystem/` | Explicit `FeatureFlags(filesystem=True)` capability: `FileBackend` protocol, `ScopedFileBackend`, `StateFileBackend`, `DiskFileBackend`, `SqliteFileBackend`, `CompositeFileBackend`, `OffloadConfig`, ls/read_file/write_file/edit_file tools |
 | `scheduler.py` | Canonical tool-call security pipeline (validate → offered-tool boundary → `PreToolUse` → revalidate → final permission), resource-aware bounded execution, stream-only tool progress, and enabled-filesystem offload at the result chokepoint |
 | `compaction.py` | Context-window management; calls `agent.provider` directly; `CompactionLadder` + `micro_compact` recovery rungs |
 | `budget.py` | `RunBudget` — token/USD spending caps shared across the agent tree; charged per turn in `loop/runner.py` |
@@ -45,8 +45,9 @@
   responsibility (orchestration / streaming / request assembly / terminals /
   checkpoint) for the same reason — the turn loop was too big to be one file.
 - **Protocols and implementations live together but stay separable.** A subsystem
-  exposes a protocol (`MemoryStore`, `FileBackend`, `SessionStore`, `BaseProvider`) plus
-  reference implementations; an embedder can supply its own without forking core.
+  exposes a protocol (`FileBackend`, `SessionStore`, `BaseProvider`) plus reference
+  implementations; an embedder can supply its own without forking core. File memory
+  composes with `FileBackend` rather than introducing a second store contract.
 - **Optional layers are physically grouped.** `coordination/` (and the optional
   `deep_agent/`, `workflow/`, `evals/`) sit apart from the always-on core, so the
   load-bearing loop is easy to find and the opt-in extras don't inflate the mental model

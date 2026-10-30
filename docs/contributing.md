@@ -285,8 +285,8 @@ src/linch/          core library
                         HookResult/HookDispatcher, built-in adapters
   _blocking.py          run_blocking: bounded daemon-thread offload for sync I/O
   context/              ContextBuilder protocol + budget/result types
-  memory/               MemoryStore protocol + reference RAG primitives
-  filesystem/           FileBackend protocol + State/Disk/SQLite/Composite backends
+  memory/               *(removed in 3.0; use file memory through context/hooks)*
+  filesystem/           FileBackend protocol + Scoped/State/Disk/SQLite/Composite backends
                         + ls/read_file/write_file/edit_file tools + OffloadConfig
   scheduler.py          resource-aware parallel tool execution
   compaction.py         context-window management

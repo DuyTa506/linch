@@ -73,7 +73,7 @@ Linch already contains the main runtime substrate:
   providers.
 - Tools, MCP wrapping, permissions, retries, timeouts, resource-aware
   scheduling, isolation, and background execution.
-- Context builders, compaction, memory stores, virtual filesystems, and result
+- Context builders, compaction, file memory, virtual filesystems, and result
   offload.
 - Durable sessions, run checkpoints, workflow journals, run reports, and resume.
 - Subagents, retained workers, workflows, mailbox coordination, and scheduling.
@@ -115,7 +115,7 @@ work.
 | Provider warm-up | Optional duck-typed `provider.prepare()` coalesced once before the first run; llama.cpp context discovery leaves the event loop | [architecture/provider-contract.md](./architecture/provider-contract.md) |
 | Session lifecycle | `agent.release_session(...)`, `session.aclose(force=...)`, and `Session` as an async context manager | [usage/agent.md](./usage/agent.md#releasing-a-single-session) |
 | Linear context trimming | Trimming is linear over message count; retained messages, order, estimator calls, and `ContextBudget` fields unchanged | [architecture/compaction.md](./architecture/compaction.md) |
-| Scalable reference memory | Namespace-partitioned in-memory store, chunked cooperative yields, bounded top-k, off-loop SQLite/Postgres scoring | [usage/context-and-memory.md](./usage/context-and-memory.md) |
+| File memory | Run-scoped `/memories/MEMORY.md` index, bounded to 200 lines and loaded once through `FileMemoryContextBuilder` | [usage/context-and-memory.md](./usage/context-and-memory.md) |
 | Scheduler parallelism | Provider-order results without the full-batch barrier; opt-in maximal-compatible batching, greedy default unchanged | [architecture/tool-protocol.md](./architecture/tool-protocol.md) |
 | Provider conformance | `assert_provider_contract` (`linch.testing`), transport `aclose()` on Anthropic/OpenAI Responses, Gemini tool-choice mapping | [architecture/provider-contract.md](./architecture/provider-contract.md) |
 | Lazy public exports | PEP 562 lazy export map keeps `import linch` off MCP/Uvicorn/unused provider SDKs; `linch.__all__` and star imports unchanged | `docs/versioning.md` |
@@ -234,8 +234,8 @@ verified independently from speed.
 | Hosted dashboard, daemon, or supervisor | Host service, deployment platform, or separate event/report consumer. |
 | Skill/tool marketplace | External registry or package manager with its own trust policy. |
 | Large SaaS, cloud, browser, database, or shell tool bundles | Optional tool packages or MCP servers. |
-| Vector database and embedding SDK dependencies | External `MemoryStore` adapters; examples may demonstrate the seam. |
-| Domain-specific memory formats and prompts | Host-owned memory adapters, context builders, or presets. |
+| Vector database and embedding SDK dependencies | External semantic-recall recipes such as mem0; examples may demonstrate the seam. |
+| Domain-specific memory formats and prompts | Host-owned file-memory layouts, context builders, or presets. |
 | Distributed queue, lease, or retry policy | Deployment-specific implementations behind existing protocols. |
 | Default PII, PHI, or security classifier | Host governance hooks and verifiers. |
 | Vendor-specific observability and authentication bundles | OpenTelemetry or external integration packages. |

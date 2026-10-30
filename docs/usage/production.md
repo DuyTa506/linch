@@ -143,7 +143,7 @@ Everything else is an extra and fails with an explicit
 | `linch[gemini]` | Gemini provider |
 | `linch[mcp]` | MCP tool servers (requires `mcp>=2.0.0`; 1.x is not supported) |
 | `linch[otel]` | OpenTelemetry observer |
-| `linch[postgres]` | Postgres session/memory/run stores |
+| `linch[postgres]` | Postgres session/run stores and filesystem backends |
 
 ---
 

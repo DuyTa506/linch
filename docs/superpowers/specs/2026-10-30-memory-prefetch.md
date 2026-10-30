@@ -1,3 +1,5 @@
+# Superseded by D12
+
 # Scoped, bounded SWR memory prefetch
 
 Status: implementation specification. This is an opt-in, Python-native memory

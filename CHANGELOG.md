@@ -16,6 +16,10 @@ and persisted wire formats are versioned separately via `linch.RUN_SCHEMA_VERSIO
   lifecycle, permission signatures, client close, and claim validation while
   preserving serialization bytes, fingerprints, and caller-specific policies.
 - Remove stale Studio ignore/documentation references.
+- Replace keyword, tiered, and database memory stores with run-scoped file
+  memory: `ScopedFileBackend` isolates paths, `FileMemoryContextBuilder` loads
+  `/memories/MEMORY.md` once per run (bounded to 200 lines), and the mem0
+  integration is documented as an optional example recipe.
 - Replace the old versioning exceptions with the unrestricted 3.0 transition
   policy and normal SemVer for releases after 3.0 stable.
 
