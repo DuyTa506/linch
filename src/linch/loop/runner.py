@@ -12,17 +12,19 @@ from uuid import uuid4
 
 from .._telemetry import store_call, trace_run
 from .._wire import UnsupportedWireVersionError
-from ..errors import AbortError, ConfigError
+from ..errors import AbortError, ConfigError, RunNotResumableError
 from ..events import Event, ResultEvent, UserEvent
 from ..hooks import (
     AgentStopContext,
     HookEvent,
 )
+from ..hooks.contexts import _AgentResult
 from ..model_calls import (
     ModelCallIntent,
     _AccountedAuxiliaryCaller,
 )
 from ..run_store import (
+    LeaseLostError,
     RunCheckpoint,
     RunContractMismatchError,
     RunRecord,
@@ -69,9 +71,7 @@ from .request import (
     final_text,
 )
 from .resume import ResumeContext, ResumeState, recover_resume
-from .runtime import (
-    RunRuntime,
-)
+from .runtime import RunRuntime
 from .runtime import (
     TurnLifecycle as _TurnLifecycle,
 )
@@ -162,10 +162,10 @@ async def resume_loop(session: Session, run_id: str, opts: RunOptions) -> AsyncI
     if run_record.session_id != session.id:
         raise ValueError(f"run {run_id} belongs to session {run_record.session_id}")
     if run_record.status in {"completed", "failed", "aborted"}:
-        return
+        raise RunNotResumableError(run_id, run_record.status)
     checkpoint = run_record.checkpoint
     if checkpoint is None:
-        return
+        raise RunNotResumableError(run_id, run_record.status)
     requested_contract = _build_run_contract(session, checkpoint.prompt, opts)
     try:
         stored_contract = run_contract_from_meta(run_record.meta)
@@ -214,7 +214,6 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
     run_record: RunRecord | None,
     resume_checkpoint: RunCheckpoint | None,
 ) -> AsyncIterator[Event]:
-    from ..hooks.contexts import _AgentResult
     from ..loop_guard import LoopGuardState
 
     _runtime = await RunRuntime.create(
@@ -307,7 +306,6 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         )
         _pull_runtime_state()
 
-    _best_effort_snapshot_cleanup = _runtime.best_effort_snapshot_cleanup
     _prepare_provider_call = _runtime.prepare_provider_call
     _load_pending_provider_request = _runtime.load_pending_provider_request
     checkpoint = _runtime.checkpoint
@@ -317,6 +315,28 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         _push_runtime_state()
         await _runtime.bind_active_primary(intent)
         active_primary = _runtime.active_primary
+
+    from ..abort import any_signal, throw_if_aborted
+
+    # Startup persistence shares the turn loop's signal and cleanup.
+    max_turns = int(agent.max_turns) if isinstance(agent.max_turns, int) else 10**9
+    signal = (
+        any_signal(session._abort_controller, opts.signal)
+        if opts.signal is not None
+        else session._abort_controller
+    )
+    _runtime.signal = signal
+    _final_result: _AgentResult | None = None
+
+    # Native lifecycle bookkeeping is needed by the startup failure path too.
+    _spans = _TurnLifecycle(session, run_id, _dispatch_lifecycle)
+    _start_turn = _spans.start_turn
+    _end_active_turn = _spans.end_active_turn
+    _start_provider_call = _spans.start_provider_call
+    _end_active_provider_call = _spans.end_active_provider_call
+    _close_active_spans = _spans.close_active_spans
+
+    _build_run_result = _runtime.build_run_result
 
     _startup_ctx = RunStartupContext(
         runtime=_runtime,
@@ -328,167 +348,145 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         dispatch_user_prompt=_dispatch_user_prompt,
         dispatch_lifecycle=_dispatch_lifecycle,
     )
-    async for _startup_event in initialize_run(_startup_ctx):
-        yield _startup_event
-    if _startup_ctx.blocked:
-        return
-
-    from ..abort import any_signal, throw_if_aborted
-
-    max_turns = int(agent.max_turns) if isinstance(agent.max_turns, int) else 10**9
-    signal = (
-        any_signal(session._abort_controller, opts.signal)
-        if opts.signal is not None
-        else session._abort_controller
-    )
-    _runtime.signal = signal
-    _final_result: _AgentResult | None = None
-    # Closed-loop schema-repair state (per-run; not checkpointed — a resumed
-    # run starts with fresh retry counters).
-    _max_schema_retries = int(getattr(agent, "structured_output_retries", 0) or 0)
-    _gate_attempts = [0]  # [schema_attempts]
-    # Re-entry guard: how many BeforeFinalAnswer-induced retries have been
-    # honored this run. A hook that *always* asks to retry would otherwise bounce
-    # the loop back every terminal until max_turns; the guard caps honored
-    # retries at _MAX_FINAL_ANSWER_REENTRIES, then accepts the answer as-is.
-    _final_answer_reentries = [0]
-
-    # Native lifecycle bookkeeping (turn + provider-call spans) lives in a
-    # small helper so the turn loop no longer threads its mutable span state
-    # through nonlocal closures. Local aliases keep the call sites unchanged.
-    _spans = _TurnLifecycle(session, run_id, _dispatch_lifecycle)
-    _start_turn = _spans.start_turn
-    _end_active_turn = _spans.end_active_turn
-    _start_provider_call = _spans.start_provider_call
-    _end_active_provider_call = _spans.end_active_provider_call
-    _close_active_spans = _spans.close_active_spans
-
-    _build_run_result = _runtime.build_run_result
-
-    # Terminal-answer finalization lives in loop/finalize.py; FinalizeCtx bundles
-    # this run's dependencies so the call sites below stay short. The thin
-    # wrappers copy the resolved _AgentResult back into _final_result, which the
-    # turn loop reads to choose between returning and continuing.
-    _fctx = FinalizeCtx(
-        session=session,
-        agent=agent,
-        run_id=run_id,
-        run_record=run_record,
-        checkpoint=checkpoint,
-        started=started,
-        opts=opts,
-        effective_final_tool=effective_final_tool,
-        max_schema_retries=_max_schema_retries,
-        max_final_answer_reentries=_MAX_FINAL_ANSWER_REENTRIES,
-        gate_attempts=_gate_attempts,
-        final_answer_reentries=_final_answer_reentries,
-        save_checkpoint=_save_checkpoint,
-        end_active_turn=_end_active_turn,
-        end_active_provider_call=_end_active_provider_call,
-        dispatch_before_final_answer=_dispatch_before_final_answer,
-        dispatch_stop=_dispatch_stop,
-        usage_complete=lambda: ledger.usage_complete,
-    )
-    _finalization = RunFinalization(_fctx, _runtime)
-
-    async def _emit_error_terminal(
-        *,
-        final_text_value: str | None = None,
-        duration_ms: int | None = None,
-        end_provider_call_usage: Usage | None = None,
-    ) -> AsyncIterator[Event]:
-        """Error exit shared by provider, hooks, and guard hard-stop paths."""
-        nonlocal _final_result
-        async for event in _finalization.emit_error(
-            final_text_value=final_text_value,
-            duration_ms=duration_ms,
-            end_provider_call_usage=end_provider_call_usage,
-        ):
-            yield event
-        _final_result = _finalization.result
-
-    async def _finalize_final_tool_answer(
-        turn_index: int,
-        tool_blocks: list[ToolUseBlock],
-        final_block: ToolUseBlock,
-    ) -> AsyncIterator[Event]:
-        nonlocal _final_result, active_primary
-        active_primary = None
-        _runtime.active_primary = None
-        async for event in _finalization.finalize_final_tool(
-            turn_index=turn_index,
-            tool_blocks=tool_blocks,
-            final_block=final_block,
-            forced_final_turn=_forced_final_turn,
-        ):
-            yield event
-        _final_result = _finalization.result
-
-    async def _finalize_text_answer(
-        turn_index: int,
-        assembly: AssistantAssembly,
-    ) -> AsyncIterator[Event]:
-        nonlocal _final_result, active_primary
-        active_primary = None
-        _runtime.active_primary = None
-        async for event in _finalization.finalize_text(
-            turn_index=turn_index,
-            assembly=assembly,
-            forced_final_turn=_forced_final_turn,
-        ):
-            yield event
-        _final_result = _finalization.result
-
-    def _assembly_with_truncation_prefix(assembly: AssistantAssembly) -> AssistantAssembly:
-        return assembly_with_truncation_prefix(assembly, _truncation_prefix)
-
-    def _last_user_message_is_feedback(feedback: str) -> bool:
-        return last_user_message_is_feedback(session, feedback)
-
-    _drain_auxiliary_usage = _runtime.drain_auxiliary_usage
-    _emit_primary_usage = _runtime.emit_primary_usage
-
-    async def _emit_budget_exhausted() -> AsyncIterator[Event]:
-        nonlocal _final_result
-        async for event in _runtime.emit_budget_exhausted():
-            yield event
-        _final_result = _runtime.terminal_result
-
-    start_turn = checkpoint.turn_index
-    if resume_checkpoint is not None and checkpoint.phase in {
-        "tool_results_appended",
-        "turn_complete",
-    }:
-        start_turn = checkpoint.turn_index + 1
-
-    _resume_state = ResumeState(
-        start_turn=(
-            checkpoint.turn_index + 1
-            if resume_checkpoint is not None
-            and checkpoint.phase in {"tool_results_appended", "turn_complete"}
-            else checkpoint.turn_index
-        )
-    )
-    _resume_ctx = ResumeContext(
-        session=session,
-        agent=agent,
-        run_id=run_id,
-        run_record=run_record,
-        checkpoint=checkpoint,
-        resume_checkpoint=resume_checkpoint,
-        ledger=ledger,
-        signal=signal,
-        exact_model_input=_exact_model_input,
-        active_primary=active_primary,
-        load_pending_provider_request=_load_pending_provider_request,
-        maybe_save_provider_snapshot=_maybe_save_provider_snapshot,
-        persist_event=lambda event: _persist_event(session, run_id, event),
-        emit_error_terminal=_emit_error_terminal,
-        drain_auxiliary_usage=_drain_auxiliary_usage,
-        save_checkpoint=_save_checkpoint,
-        state=_resume_state,
-    )
     try:
+        async for _startup_event in initialize_run(_startup_ctx):
+            yield _startup_event
+        if _startup_ctx.blocked:
+            return
+        # Closed-loop schema-repair state (per-run; not checkpointed — a resumed
+        # run starts with fresh retry counters).
+        _max_schema_retries = int(getattr(agent, "structured_output_retries", 0) or 0)
+        _gate_attempts = [0]  # [schema_attempts]
+        # Re-entry guard: how many BeforeFinalAnswer-induced retries have been
+        # honored this run. A hook that *always* asks to retry would otherwise bounce
+        # the loop back every terminal until max_turns; the guard caps honored
+        # retries at _MAX_FINAL_ANSWER_REENTRIES, then accepts the answer as-is.
+        _final_answer_reentries = [0]
+
+        # Terminal-answer finalization lives in loop/finalize.py; FinalizeCtx bundles
+        # this run's dependencies so the call sites below stay short. The thin
+        # wrappers copy the resolved _AgentResult back into _final_result, which the
+        # turn loop reads to choose between returning and continuing.
+        _fctx = FinalizeCtx(
+            session=session,
+            agent=agent,
+            run_id=run_id,
+            run_record=run_record,
+            checkpoint=checkpoint,
+            started=started,
+            opts=opts,
+            effective_final_tool=effective_final_tool,
+            runtime=_runtime,
+            max_schema_retries=_max_schema_retries,
+            max_final_answer_reentries=_MAX_FINAL_ANSWER_REENTRIES,
+            gate_attempts=_gate_attempts,
+            final_answer_reentries=_final_answer_reentries,
+            save_checkpoint=_save_checkpoint,
+            end_active_turn=_end_active_turn,
+            end_active_provider_call=_end_active_provider_call,
+            dispatch_before_final_answer=_dispatch_before_final_answer,
+            dispatch_stop=_dispatch_stop,
+            usage_complete=lambda: ledger.usage_complete,
+        )
+        _finalization = RunFinalization(_fctx, _runtime)
+
+        async def _emit_error_terminal(
+            *,
+            final_text_value: str | None = None,
+            duration_ms: int | None = None,
+            end_provider_call_usage: Usage | None = None,
+        ) -> AsyncIterator[Event]:
+            """Error exit shared by provider, hooks, and guard hard-stop paths."""
+            nonlocal _final_result
+            async for event in _finalization.emit_error(
+                final_text_value=final_text_value,
+                duration_ms=duration_ms,
+                end_provider_call_usage=end_provider_call_usage,
+            ):
+                yield event
+            _final_result = _finalization.result
+
+        async def _finalize_final_tool_answer(
+            turn_index: int,
+            tool_blocks: list[ToolUseBlock],
+            final_block: ToolUseBlock,
+        ) -> AsyncIterator[Event]:
+            nonlocal _final_result, active_primary
+            active_primary = None
+            _runtime.active_primary = None
+            async for event in _finalization.finalize_final_tool(
+                turn_index=turn_index,
+                tool_blocks=tool_blocks,
+                final_block=final_block,
+                forced_final_turn=_forced_final_turn,
+            ):
+                yield event
+            _final_result = _finalization.result
+
+        async def _finalize_text_answer(
+            turn_index: int,
+            assembly: AssistantAssembly,
+        ) -> AsyncIterator[Event]:
+            nonlocal _final_result, active_primary
+            active_primary = None
+            _runtime.active_primary = None
+            async for event in _finalization.finalize_text(
+                turn_index=turn_index,
+                assembly=assembly,
+                forced_final_turn=_forced_final_turn,
+            ):
+                yield event
+            _final_result = _finalization.result
+
+        def _assembly_with_truncation_prefix(assembly: AssistantAssembly) -> AssistantAssembly:
+            return assembly_with_truncation_prefix(assembly, _truncation_prefix)
+
+        def _last_user_message_is_feedback(feedback: str) -> bool:
+            return last_user_message_is_feedback(session, feedback)
+
+        _drain_auxiliary_usage = _runtime.drain_auxiliary_usage
+        _emit_primary_usage = _runtime.emit_primary_usage
+
+        async def _emit_budget_exhausted() -> AsyncIterator[Event]:
+            nonlocal _final_result
+            async for event in _runtime.emit_budget_exhausted():
+                yield event
+            _final_result = _runtime.terminal_result
+
+        start_turn = checkpoint.turn_index
+        if resume_checkpoint is not None and checkpoint.phase in {
+            "tool_results_appended",
+            "turn_complete",
+        }:
+            start_turn = checkpoint.turn_index + 1
+
+        _resume_state = ResumeState(
+            start_turn=(
+                checkpoint.turn_index + 1
+                if resume_checkpoint is not None
+                and checkpoint.phase in {"tool_results_appended", "turn_complete"}
+                else checkpoint.turn_index
+            )
+        )
+        _resume_ctx = ResumeContext(
+            session=session,
+            agent=agent,
+            run_id=run_id,
+            run_record=run_record,
+            checkpoint=checkpoint,
+            resume_checkpoint=resume_checkpoint,
+            ledger=ledger,
+            signal=signal,
+            exact_model_input=_exact_model_input,
+            active_primary=active_primary,
+            load_pending_provider_request=_load_pending_provider_request,
+            maybe_save_provider_snapshot=_maybe_save_provider_snapshot,
+            persist_event=lambda event: _persist_event(session, run_id, event),
+            emit_error_terminal=_emit_error_terminal,
+            drain_auxiliary_usage=_drain_auxiliary_usage,
+            save_checkpoint=_save_checkpoint,
+            state=_resume_state,
+        )
         async for _resume_event in recover_resume(_resume_ctx):
             yield _resume_event
         if _resume_state.terminal:
@@ -937,10 +935,8 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         _sync_checkpoint_accounting()
         async for event in _max_turns_tail(
             session,
-            agent,
             run_id=run_id,
-            run_record=run_record,
-            checkpoint=checkpoint,
+            runtime=_runtime,
             max_turns=max_turns,
             total=total,
             duration_ms=_dur,
@@ -953,47 +949,53 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             close_active_spans=_close_active_spans,
         ):
             yield event
-        _final_result = _runtime.terminal_result
-    except Exception as exc:
+    except LeaseLostError as exc:
+        _runtime.lease_lost = exc
         async for event in _runtime.emit_exception_terminal(
-            exc,
-            close_active_spans=_close_active_spans,
+            exc, close_active_spans=_close_active_spans
         ):
             yield event
-        _final_result = _runtime.terminal_result
-    finally:
-        if (
-            _exact_model_input
-            and checkpoint.model_input_snapshot_id is not None
-            and checkpoint.phase != "provider_pending"
+    except Exception as exc:
+        async for event in _runtime.emit_exception_terminal(
+            exc, close_active_spans=_close_active_spans
         ):
-            await _best_effort_snapshot_cleanup(snapshot_id=checkpoint.model_input_snapshot_id)
-            checkpoint.model_input_snapshot_id = None
-        # Flush any events still buffered (best-effort) and drop the buffer so it
-        # never leaks into a later run on this session.
+            yield event
+    finally:
         try:
-            await _flush_events(session)
+            if _runtime.lease_lost is None:
+                if (
+                    _exact_model_input
+                    and checkpoint.model_input_snapshot_id is not None
+                    and checkpoint.phase != "provider_pending"
+                ):
+                    await _runtime.best_effort_snapshot_cleanup(
+                        snapshot_id=checkpoint.model_input_snapshot_id
+                    )
+                    checkpoint.model_input_snapshot_id = None
+                await _flush_events(session)
+        except LeaseLostError as exc:
+            _runtime.lease_lost = exc
+            async for _ in _runtime.emit_exception_terminal(exc):
+                pass
         except Exception:
             pass
         session._event_journal = None
-        # Release the merged-signal watcher when this run created one
-        # (opts.signal merged with the session controller); a plain session
-        # controller has no watcher and close() is a no-op.
         if signal is not session._abort_controller:
             signal.close()
         await _close_active_spans(stop_reason="error")
         _run_result = (
-            _final_result
-            or _runtime.terminal_result
+            _runtime.terminal_result
+            or _final_result
             or _build_run_result("error", "error", duration_ms=int((time.time() - started) * 1000))
         )
-        await _dispatch_lifecycle(
-            HookEvent.AGENT_STOP,
-            AgentStopContext(
-                session=session,
-                run_id=run_id,
-                turn_index=_spans.active_turn_index,
-                deps=getattr(session, "run_deps", None),
-                result=_run_result,
-            ),
-        )
+        if not _startup_ctx.blocked:
+            await _dispatch_lifecycle(
+                HookEvent.AGENT_STOP,
+                AgentStopContext(
+                    session=session,
+                    run_id=run_id,
+                    turn_index=_spans.active_turn_index,
+                    deps=getattr(session, "run_deps", None),
+                    result=_run_result,
+                ),
+            )

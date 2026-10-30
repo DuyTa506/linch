@@ -282,8 +282,8 @@ async def test_snapshot_write_failure_makes_zero_provider_calls() -> None:
     events = [event async for event in session.run("hello")]
 
     error = next(event for event in events if event.type == "error")
-    assert error.error["name"] == "ConfigError"
-    assert "failed to save exact model input" in error.error["message"]
+    assert error.error["name"] == "OSError"
+    assert error.error["message"] == "snapshot disk unavailable"
     assert provider.requests == []
 
 

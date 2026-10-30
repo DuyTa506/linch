@@ -23,6 +23,7 @@ from .model_calls import (
     _projection_record,
 )
 from .providers.limiter import provider_slot
+from .run_store import LeaseLostError
 from .types import (
     Message,
     ProviderRequest,
@@ -606,6 +607,8 @@ async def _persist_compaction_skill_context(session: Any, ledger: _ModelCallLedg
                 ],
             ),
         )
+    except LeaseLostError:
+        raise
     except BaseException as exc:
         ledger._persistence_failed = True
         if not isinstance(exc, Exception):

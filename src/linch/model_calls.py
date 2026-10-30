@@ -22,6 +22,7 @@ from ._telemetry import ChatCall, in_span
 from ._wire import WIRE_VERSION, require_wire_version
 from .abort import AbortContext
 from .errors import AbortError, ProviderError
+from .run_store import LeaseLostError
 from .types import Message, ProviderRequest, StopReason, SystemBlock, Usage, message_to_dict
 
 if TYPE_CHECKING:
@@ -670,6 +671,8 @@ class _ModelCallLedger:
                         budget_owner_id=event.budget_owner_id,
                     )
                 )
+            except LeaseLostError:
+                raise
             except BaseException as exc:
                 self._persistence_failed = True
                 if not isinstance(exc, Exception):
@@ -1546,11 +1549,14 @@ class _AuxiliaryDelivery:
                     yield event
                     return
                 yield event
+        except LeaseLostError as exc:
+            error = exc
+            raise
         except BaseException as exc:
             error = exc
             if not terminal_attempted:
                 terminal_attempted = True
-                if isinstance(exc, _ModelCallError) and exc.code == "persistence_failed":
+                if ledger._persistence_failed:
                     pass
                 elif not started:
                     await ledger.abandon(self.intent, reason="delivery_not_dispatched")

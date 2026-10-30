@@ -22,6 +22,8 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
   host-mounted, reversible schedule tools. Add a runnable fleet example and
   local enqueue/NOTIFY measurements to the production guide.
 
+- Raise public `RunNotResumableError` with `run_id` and `status` when resuming
+  terminal runs or runs without checkpoints, replacing the silent no-op.
 - Remove all SQLite stores and their executor. Durable sessions, runs, and
   virtual files use Postgres; InMemory stores remain for tests and development.
   Built-in mailboxes now last only for the process lifetime.
