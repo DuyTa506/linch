@@ -8,16 +8,14 @@ repository's normal test environment does not install ``asyncpg``.  Set
 from __future__ import annotations
 
 import copy
-import importlib.util
-import os
 from dataclasses import dataclass
-from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
 from linch.events import UserEvent
-from linch.run_store import InMemoryRunStore, RunCheckpoint, SqliteRunStore
+from linch.run_store import InMemoryRunStore, RunCheckpoint
+from linch.run_stores.postgres import PostgresRunStore
 from linch.types import Message, TextBlock, Usage
 
 
@@ -26,13 +24,6 @@ class _StoreCase:
     name: str
     store: object
     peer: object
-
-
-def _postgres_store_type():
-    """Import the optional backend without importing asyncpg at collection time."""
-    from linch.run_stores.postgres import PostgresRunStore
-
-    return PostgresRunStore
 
 
 def _memory_peer(store: InMemoryRunStore) -> InMemoryRunStore:
@@ -46,30 +37,19 @@ def _memory_peer(store: InMemoryRunStore) -> InMemoryRunStore:
     return peer
 
 
-@pytest.fixture(params=["memory", "sqlite", "postgres"])
-async def store_case(request: pytest.FixtureRequest, tmp_path: Path):
+@pytest.fixture(params=["memory", "postgres"])
+async def store_case(request: pytest.FixtureRequest, pg_dsn):
     kind = request.param
     if kind == "memory":
         store: object = InMemoryRunStore()
         peer: object = _memory_peer(store)
-    elif kind == "sqlite":
-        store = SqliteRunStore(tmp_path / "runs.db")
-        peer = SqliteRunStore(tmp_path / "runs.db")
     else:
-        dsn = os.environ.get("AGENT_KIT_TEST_PG_DSN", "")
-        if not dsn:
-            pytest.skip("AGENT_KIT_TEST_PG_DSN not set")
-        if importlib.util.find_spec("asyncpg") is None:
-            pytest.skip("asyncpg not installed")
-        store_type = _postgres_store_type()
-        store = store_type(dsn)
-        peer = store_type(dsn)
+        store = PostgresRunStore(pg_dsn)
+        peer = PostgresRunStore(pg_dsn)
 
-    if kind in {"sqlite", "postgres"}:
+    if kind == "postgres":
         # Warm each backend separately so the conformance checks exercise
         # concurrent store operations rather than connection/pool startup.
-        # SQLite also avoids the shared executor's known cold WAL-mode switch
-        # race.
         await store.load_run("__conformance_fixture_probe__")
         await peer.load_run("__conformance_fixture_probe__")
 

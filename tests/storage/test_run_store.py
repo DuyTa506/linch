@@ -6,10 +6,10 @@ from linch.events import ToolCallEndEvent
 from linch.run_store import (
     InMemoryRunStore,
     RunCheckpoint,
-    SqliteRunStore,
     _json_safe,
     canonical_json,
 )
+from linch.run_stores.postgres import PostgresRunStore
 from linch.tools import Citation, ToolResult
 from linch.types import ToolResultBlock, ToolUseBlock, Usage
 
@@ -117,8 +117,10 @@ async def test_in_memory_run_store_round_trip() -> None:
     await _exercise_store(InMemoryRunStore())
 
 
-async def test_sqlite_run_store_round_trip(tmp_path) -> None:
-    store = SqliteRunStore(tmp_path / "runs.db")
+async def test_postgres_run_store_round_trip(
+    pg_dsn,
+) -> None:
+    store = PostgresRunStore(pg_dsn)
     try:
         await _exercise_store(store)
     finally:
@@ -158,8 +160,12 @@ def test_json_safe_handles_cycles_depth_collisions_and_aliases() -> None:
     assert canonical_json({"left": shared, "right": shared})
 
 
-async def test_run_stores_normalize_recursive_metadata(tmp_path) -> None:
-    stores = [InMemoryRunStore(), SqliteRunStore(tmp_path / "recursive-meta.db")]
+@pytest.mark.parametrize("kind", ["memory", "postgres"])
+async def test_run_stores_normalize_recursive_metadata(
+    kind,
+    pg_dsn,
+) -> None:
+    stores = [InMemoryRunStore() if kind == "memory" else PostgresRunStore(pg_dsn)]
     try:
         for index, store in enumerate(stores):
             meta: dict[str, object] = {"kind": "recursive"}
@@ -180,8 +186,9 @@ async def test_run_stores_normalize_recursive_metadata(tmp_path) -> None:
 @pytest.mark.parametrize(
     "history", ["legacy failure", ["legacy failure"], [{"message": "old"}, 7], {}]
 )
-async def test_run_stores_replace_malformed_error_history(tmp_path, history) -> None:
-    stores = [InMemoryRunStore(), SqliteRunStore(tmp_path / "legacy-errors.db")]
+@pytest.mark.parametrize("kind", ["memory", "postgres"])
+async def test_run_stores_replace_malformed_error_history(kind, pg_dsn, history) -> None:
+    stores = [InMemoryRunStore() if kind == "memory" else PostgresRunStore(pg_dsn)]
     try:
         for index, store in enumerate(stores):
             run_id = f"run-{index}"
@@ -207,8 +214,10 @@ async def test_run_stores_replace_malformed_error_history(tmp_path, history) -> 
             await store.close()
 
 
-async def test_sqlite_checkpoint_results_are_isolated_persisted_snapshots(tmp_path) -> None:
-    store = SqliteRunStore(tmp_path / "snapshot-results.db")
+async def test_postgres_checkpoint_results_are_isolated_persisted_snapshots(
+    pg_dsn,
+) -> None:
+    store = PostgresRunStore(pg_dsn)
     try:
         await store.create_run("session-1", id="run-1", meta={"labels": ("a", "b")})
         shared = {"items": [1]}
@@ -267,8 +276,12 @@ async def test_sqlite_checkpoint_results_are_isolated_persisted_snapshots(tmp_pa
         await store.close()
 
 
-async def test_run_stores_append_valid_current_error_history(tmp_path) -> None:
-    stores = [InMemoryRunStore(), SqliteRunStore(tmp_path / "current-errors.db")]
+@pytest.mark.parametrize("kind", ["memory", "postgres"])
+async def test_run_stores_append_valid_current_error_history(
+    kind,
+    pg_dsn,
+) -> None:
+    stores = [InMemoryRunStore() if kind == "memory" else PostgresRunStore(pg_dsn)]
     try:
         for store in stores:
             await store.create_run("session", id="run", meta={"errors": [{"message": "first"}]})

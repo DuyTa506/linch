@@ -1,20 +1,15 @@
-"""Lease fencing and SQLite serialization tests for run stores."""
+"""Lease fencing tests shared by in-memory and Postgres run stores."""
 
 from __future__ import annotations
 
 import asyncio
 import copy
-import importlib.util
-import os
-import sqlite3
-import threading
 import time
-from pathlib import Path
 
 import pytest
 
-from linch._wire import UnsupportedWireVersionError
-from linch.run_store import InMemoryRunStore, RunCheckpoint, SqliteRunStore
+from linch.run_store import InMemoryRunStore, RunCheckpoint
+from linch.run_stores.postgres import PostgresRunStore
 from linch.types import ProviderRequest, Usage
 
 
@@ -51,31 +46,16 @@ def _assert_no_local_leases(store: object) -> None:
         assert mapping == {}
 
 
-def _postgres_store_type():
-    from linch.run_stores.postgres import PostgresRunStore
-
-    return PostgresRunStore
-
-
-@pytest.fixture(params=["memory", "sqlite", "postgres"])
-async def lease_stores(request: pytest.FixtureRequest, tmp_path: Path):
+@pytest.fixture(params=["memory", "postgres"])
+async def lease_stores(request: pytest.FixtureRequest, pg_dsn):
     kind = request.param
     if kind == "memory":
         first = InMemoryRunStore()
         second = _memory_peer(first)
-    elif kind == "sqlite":
-        first = SqliteRunStore(tmp_path / "leases.db")
-        second = SqliteRunStore(tmp_path / "leases.db")
     else:
-        dsn = os.environ.get("AGENT_KIT_TEST_PG_DSN", "")
-        if not dsn:
-            pytest.skip("AGENT_KIT_TEST_PG_DSN not set")
-        if importlib.util.find_spec("asyncpg") is None:
-            pytest.skip("asyncpg not installed")
-        store_type = _postgres_store_type()
-        first = store_type(dsn)
-        second = store_type(dsn)
-    if kind in {"sqlite", "postgres"}:
+        first = PostgresRunStore(pg_dsn)
+        second = PostgresRunStore(pg_dsn)
+    if kind == "postgres":
         # Warm each backend separately so lease timing starts after connection
         # and pool setup, rather than during the claim/expiry window.
         await first.load_run("__lease_fixture_probe__")
@@ -290,159 +270,3 @@ async def test_expired_takeover_fence_then_stale_release_clears_only_old_holder(
     await live_holder.save_checkpoint(run_id, _checkpoint("live"))
     await live_holder.release(renewed)
     _assert_no_local_leases(live_holder)
-
-
-async def test_sqlite_claim_cancellation_keeps_committed_lease_fencing(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """Cancellation after COMMIT cannot lose the holder's local epoch."""
-    import linch.run_store as run_store_module
-    from linch.run_store import LeaseLostError
-
-    first = SqliteRunStore(tmp_path / "cancel-claim.db")
-    second = SqliteRunStore(tmp_path / "cancel-claim.db")
-    entered = threading.Event()
-    release_worker = threading.Event()
-    finished = threading.Event()
-    original = run_store_module._claim_sqlite
-    captured: list[object] = []
-
-    def delayed_callback(conn, run_id, owner, ttl_s, on_claim=None):
-        def delayed(lease):
-            captured.append(lease)
-            entered.set()
-            assert release_worker.wait(5.0)
-            if on_claim is not None:
-                on_claim(lease)
-            finished.set()
-
-        return original(conn, run_id, owner, ttl_s, on_claim=delayed)
-
-    monkeypatch.setattr(run_store_module, "_claim_sqlite", delayed_callback)
-    run_id = "cancelled-claim"
-    try:
-        await first.create_run("session-1", id=run_id)
-        claim_task = asyncio.create_task(first.claim(run_id, "owner-a", 0.2))
-        assert await asyncio.to_thread(entered.wait, 5.0)
-        claim_task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await claim_task
-        release_worker.set()
-        assert await asyncio.to_thread(finished.wait, 5.0)
-        assert captured
-        await asyncio.sleep(max(0.0, captured[0].expires_at - time.time()) + 0.03)
-
-        takeover = await second.claim(run_id, "owner-b", 1.0)
-        assert takeover.epoch >= 2
-        with pytest.raises(LeaseLostError):
-            await first.save_checkpoint(run_id, _checkpoint("stale"))
-    finally:
-        release_worker.set()
-        await first.close()
-        await second.close()
-
-
-async def test_sqlite_rejects_legacy_schema_without_lease_columns(tmp_path: Path) -> None:
-    path = tmp_path / "legacy.db"
-    with sqlite3.connect(path) as conn:
-        conn.executescript(
-            """
-            CREATE TABLE runs (
-              id TEXT PRIMARY KEY,
-              session_id TEXT NOT NULL,
-              status TEXT NOT NULL,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL,
-              checkpoint TEXT,
-              meta TEXT NOT NULL
-            );
-            CREATE TABLE run_events (
-              run_id TEXT NOT NULL,
-              seq INTEGER NOT NULL,
-              appended_at TEXT NOT NULL,
-              event TEXT NOT NULL,
-              PRIMARY KEY (run_id, seq)
-            );
-            INSERT INTO runs VALUES
-              ('legacy-run', 'session-1', 'running', '2026-01-01', '2026-01-01', NULL, '{}');
-            """
-        )
-    store = SqliteRunStore(path)
-    try:
-        with pytest.raises(UnsupportedWireVersionError):
-            await store.load_run("legacy-run")
-        with sqlite3.connect(path) as conn:
-            assert "lease_owner" not in {row[1] for row in conn.execute("pragma table_info(runs)")}
-            assert conn.execute("select id from runs").fetchone()[0] == "legacy-run"
-    finally:
-        await store.close()
-
-
-async def test_sqlite_concurrent_old_schema_open_is_rejected(tmp_path: Path) -> None:
-    path = tmp_path / "legacy-concurrent.db"
-    with sqlite3.connect(path) as conn:
-        conn.executescript(
-            """
-            CREATE TABLE runs (
-              id TEXT PRIMARY KEY,
-              session_id TEXT NOT NULL,
-              status TEXT NOT NULL,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL,
-              checkpoint TEXT,
-              meta TEXT NOT NULL
-            );
-            CREATE TABLE run_events (
-              run_id TEXT NOT NULL,
-              seq INTEGER NOT NULL,
-              appended_at TEXT NOT NULL,
-              event TEXT NOT NULL,
-              PRIMARY KEY (run_id, seq)
-            );
-            INSERT INTO runs VALUES
-              ('legacy-concurrent', 'session-1', 'running', '2026-01-01',
-               '2026-01-01', NULL, '{}');
-            """
-        )
-        # SqliteExecutor switches file-backed stores to WAL on first connect.
-        # Isolate version checks from the executor's cold WAL switch.
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.commit()
-    first = SqliteRunStore(path)
-    second = SqliteRunStore(path)
-    try:
-        records = await asyncio.gather(
-            first.load_run("legacy-concurrent"),
-            second.load_run("legacy-concurrent"),
-            return_exceptions=True,
-        )
-        assert all(isinstance(record, UnsupportedWireVersionError) for record in records)
-    finally:
-        await first.close()
-        await second.close()
-
-
-async def test_sqlite_snapshot_serialization_runs_off_event_loop(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """The expensive model-input encoding runs in SqliteExecutor's worker."""
-    import linch.run_store as run_store_module
-
-    store = SqliteRunStore(tmp_path / "snapshots.db")
-    try:
-        run = await store.create_run("session-1")
-        loop_thread = threading.get_ident()
-        seen: list[int] = []
-        original = run_store_module.create_model_input_snapshot
-
-        def recording_snapshot(*args, **kwargs):
-            seen.append(threading.get_ident())
-            return original(*args, **kwargs)
-
-        monkeypatch.setattr(run_store_module, "create_model_input_snapshot", recording_snapshot)
-        request = ProviderRequest(model="test", system=[], tools=[], messages=[])
-        await store.save(run.id, 1, request)
-        assert seen
-        assert seen[0] != loop_thread
-    finally:
-        await store.close()

@@ -27,7 +27,7 @@ def test_cold_import_does_not_pull_mcp_or_transports() -> None:
     out = _fresh_import(
         "import sys, linch\n"
         "_ = (linch.Agent, linch.Message, linch.Session, linch.ToolContext)\n"
-        "_ = (linch.InMemorySessionStore, linch.SqliteSessionStore)\n"
+        "_ = linch.InMemorySessionStore\n"
         "heavy = {m.split('.')[0] for m in sys.modules}\n"
         "offenders = sorted(heavy & {'mcp', 'uvicorn', 'starlette', 'fastapi'})\n"
         "print(offenders)\n"
@@ -62,10 +62,9 @@ def test_mcp_name_loads_mcp_on_demand() -> None:
 
 def test_session_store_types_exported_top_level() -> None:
     import linch
-    from linch.sessions import InMemorySessionStore, SqliteSessionStore
+    from linch.sessions import InMemorySessionStore
 
     assert linch.InMemorySessionStore is InMemorySessionStore
-    assert linch.SqliteSessionStore is SqliteSessionStore
 
 
 def test_lazy_access_caches_into_module_dict() -> None:

@@ -84,6 +84,7 @@ def test_create_deep_agent_is_public_and_returns_agent(tmp_path: Path) -> None:
         model="gpt-5",
         provider=FakeProvider(),
         cwd=str(tmp_path),
+        durable=False,
     )
 
     assert isinstance(agent, Agent)
@@ -253,18 +254,24 @@ async def test_deep_agent_file_memory_reads_run_scoped_index(tmp_path: Path) -> 
         await agent.close()
 
 
-async def test_deep_agent_durable_defaults_create_sqlite_stores(tmp_path: Path) -> None:
-    from linch import SqliteRunStore, create_deep_agent
-    from linch.sessions import SqliteSessionStore
+async def test_deep_agent_explicit_postgres_stores(pg_dsn, tmp_path: Path) -> None:
+    from linch import CompositeFileBackend, PostgresRunStore, StateFileBackend, create_deep_agent
+    from linch.filesystem.postgres import PostgresFileBackend
+    from linch.sessions.postgres import PostgresSessionStore
 
     agent = create_deep_agent(
         model="gpt-5",
         provider=FakeProvider(),
         cwd=str(tmp_path),
+        session_store=PostgresSessionStore(pg_dsn),
+        run_store=PostgresRunStore(pg_dsn),
+        filesystem=CompositeFileBackend(
+            default=StateFileBackend(), routes={"/memories/": PostgresFileBackend(pg_dsn)}
+        ),
     )
 
-    assert isinstance(agent.session_store, SqliteSessionStore)
-    assert isinstance(agent.run_store, SqliteRunStore)
+    assert isinstance(agent.session_store, PostgresSessionStore)
+    assert isinstance(agent.run_store, PostgresRunStore)
     await agent.close()
 
 
@@ -356,14 +363,20 @@ async def test_deep_agent_specialized_subagents_includes_planner(tmp_path: Path)
     assert {"researcher", "implementer", "verification", "planner"} <= names
 
 
-async def test_deep_agent_durable_creates_composite_filesystem(tmp_path: Path) -> None:
-    from linch import create_deep_agent
-    from linch.filesystem.backend import CompositeFileBackend
+async def test_deep_agent_preserves_explicit_composite_filesystem(pg_dsn, tmp_path: Path) -> None:
+    from linch import CompositeFileBackend, PostgresRunStore, StateFileBackend, create_deep_agent
+    from linch.filesystem.postgres import PostgresFileBackend
+    from linch.sessions.postgres import PostgresSessionStore
 
     agent = create_deep_agent(
         model="gpt-5",
         provider=FakeProvider(),
         cwd=str(tmp_path),
+        session_store=PostgresSessionStore(pg_dsn),
+        run_store=PostgresRunStore(pg_dsn),
+        filesystem=CompositeFileBackend(
+            default=StateFileBackend(), routes={"/memories/": PostgresFileBackend(pg_dsn)}
+        ),
     )
     session = await agent.session(id="s1")
     await agent.close()
@@ -371,14 +384,21 @@ async def test_deep_agent_durable_creates_composite_filesystem(tmp_path: Path) -
     assert isinstance(session.filesystem, CompositeFileBackend)
 
 
-async def test_deep_agent_memories_persist_across_agents(tmp_path: Path) -> None:
-    from linch import create_deep_agent
+async def test_deep_agent_memories_persist_across_agents(pg_dsn, tmp_path: Path) -> None:
+    from linch import CompositeFileBackend, PostgresRunStore, StateFileBackend, create_deep_agent
+    from linch.filesystem.postgres import PostgresFileBackend
+    from linch.sessions.postgres import PostgresSessionStore
 
     # Write to /memories via a session
     agent1 = create_deep_agent(
         model="gpt-5",
         provider=FakeProvider(),
         cwd=str(tmp_path),
+        session_store=PostgresSessionStore(pg_dsn),
+        run_store=PostgresRunStore(pg_dsn),
+        filesystem=CompositeFileBackend(
+            default=StateFileBackend(), routes={"/memories/": PostgresFileBackend(pg_dsn)}
+        ),
     )
     session1 = await agent1.session(id="s1")
     await session1.filesystem.write("/memories/plan.md", "my plan")
@@ -389,6 +409,11 @@ async def test_deep_agent_memories_persist_across_agents(tmp_path: Path) -> None
         model="gpt-5",
         provider=FakeProvider(),
         cwd=str(tmp_path),
+        session_store=PostgresSessionStore(pg_dsn),
+        run_store=PostgresRunStore(pg_dsn),
+        filesystem=CompositeFileBackend(
+            default=StateFileBackend(), routes={"/memories/": PostgresFileBackend(pg_dsn)}
+        ),
     )
     session2 = await agent2.session(id="s2")
     content = await session2.filesystem.read("/memories/plan.md")
@@ -422,6 +447,7 @@ async def test_deep_agent_explicit_filesystem_respected(tmp_path: Path) -> None:
         provider=FakeProvider(),
         cwd=str(tmp_path),
         filesystem=explicit_fs,
+        durable=False,
     )
     session = await agent.session(id="s1")
     await agent.close()
@@ -767,8 +793,10 @@ def test_non_coordinator_mode_preserves_full_tools(tmp_path: Path) -> None:
 # ── End Phase 3 tests ─────────────────────────────────────────────────────────
 
 
-async def test_deep_agent_can_resume_with_durable_defaults(tmp_path: Path) -> None:
-    from linch import create_deep_agent
+async def test_deep_agent_can_resume_with_postgres_stores(pg_dsn, tmp_path: Path) -> None:
+    from linch import CompositeFileBackend, PostgresRunStore, StateFileBackend, create_deep_agent
+    from linch.filesystem.postgres import PostgresFileBackend
+    from linch.sessions.postgres import PostgresSessionStore
 
     tool = FakeTool("Lookup")
     provider = FakeProvider(tool_name="Lookup")
@@ -776,6 +804,11 @@ async def test_deep_agent_can_resume_with_durable_defaults(tmp_path: Path) -> No
         model="gpt-5",
         provider=provider,
         cwd=str(tmp_path),
+        session_store=PostgresSessionStore(pg_dsn),
+        run_store=PostgresRunStore(pg_dsn),
+        filesystem=CompositeFileBackend(
+            default=StateFileBackend(), routes={"/memories/": PostgresFileBackend(pg_dsn)}
+        ),
         tools=None,
         durable=True,
     )
@@ -790,6 +823,11 @@ async def test_deep_agent_can_resume_with_durable_defaults(tmp_path: Path) -> No
         model="gpt-5",
         provider=FakeProvider(fail_on_call=True),
         cwd=str(tmp_path),
+        session_store=PostgresSessionStore(pg_dsn),
+        run_store=PostgresRunStore(pg_dsn),
+        filesystem=CompositeFileBackend(
+            default=StateFileBackend(), routes={"/memories/": PostgresFileBackend(pg_dsn)}
+        ),
         durable=True,
     )
     restarted.tools.replace(restarted_tool)
