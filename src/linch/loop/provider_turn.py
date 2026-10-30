@@ -65,7 +65,7 @@ class ProviderTurnContext:
     persist_event: Callable[..., Awaitable[None]]
     flush_events: Callable[..., Awaitable[Any]]
     maybe_save_provider_snapshot: Callable[..., Awaitable[None]]
-    close_active_observer_spans: Callable[..., Awaitable[None]]
+    close_active_spans: Callable[..., Awaitable[None]]
     sync_ledger_totals: Callable[[], None]
     active_primary: dict[str, Any] | None = None
     budget: Any = None
@@ -339,7 +339,7 @@ async def run_provider_turn(ctx: ProviderTurnContext) -> AsyncIterator[Event]:
                 and getattr(ctx, "budget", None) is not None
             ):
                 ctx.terminal = True
-                await ctx.close_active_observer_spans(stop_reason="error")
+                await ctx.close_active_spans(stop_reason="error")
                 async for event in ctx.emit_budget_exhausted():
                     yield event
                 return

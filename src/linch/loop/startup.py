@@ -15,7 +15,7 @@ from typing import Any
 from .._telemetry import store_call
 from ..events import ErrorEvent, Event, SkillsLoadedEvent, SystemEvent, UserEvent
 from ..hooks import AgentStartContext, AgentStopContext, HookEvent
-from ..observability import RunResultInfo
+from ..hooks.contexts import _AgentResult
 from ..types import TextBlock
 from .checkpoint import _last_message_matches, _persist_event
 from .request import build_user_message
@@ -54,7 +54,7 @@ async def _emit_prompt_block(ctx: RunStartupContext, block_reason: str) -> Async
     runtime = ctx.runtime
     runtime.sync_checkpoint_accounting()
     duration_ms = int((time.time() - runtime.started) * 1000)
-    blocked_result = RunResultInfo(
+    blocked_result = _AgentResult(
         run_id=runtime.run_id,
         session_id=runtime.session.id,
         subtype="error",

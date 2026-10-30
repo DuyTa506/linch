@@ -211,7 +211,7 @@ async def _stream_turn_with_recovery(
     Default recovery includes its second prepare/dispatch inside the retryable
     ProviderError boundary. Ladder recovery occurs outside that boundary; only
     its next dispatch re-enters it. Preserve that distinction as well as each
-    policy's compaction budget and observer end-call ordering.
+    policy's compaction budget and lifecycle end-call ordering.
     """
     micro_tried_this_turn = False
     same_model_retries = [0]
