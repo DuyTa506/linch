@@ -97,6 +97,30 @@ resume option. Persisted envelopes likewise require wire version 3; see the
 Postgres transactions serialize per-run event sequence allocation across store
 instances. Asyncpg performs database I/O asynchronously.
 
+## Failure semantics
+
+If a session-store or run-store write fails, the iterator ends with an
+`ErrorEvent` carrying the exception's class name and retryability, followed by
+a `ResultEvent(subtype="error")`. The loop attempts terminal persistence once;
+if that also fails, it logs the secondary failure with the run ID and keeps
+the terminal events available to the caller. Persistence is not retried by the
+loop, so the host must reconcile a run whose store stayed unavailable.
+
+`LeaseLostError` means another holder owns the run. The loop cancels background
+workers and stops writing immediately, including terminal persistence, buffered
+event flushing, and snapshot cleanup. The caller receives an in-memory
+`ErrorEvent` named `LeaseLostError`, then a
+`ResultEvent(subtype="error", stop_reason="lease_lost")`. Those events are not
+in the persisted reconnect log. `AgentStop` fires once for either failure.
+
+Resuming a terminal run, or a run without a checkpoint, raises the public
+`RunNotResumableError`. Its `run_id` and `status` identify the rejected run.
+
+The host owns lease renewal and releases the lease in `finally`, after all run
+work has stopped. A stale release can itself raise `LeaseLostError`; it cannot
+alter the current owner's run. If retention needs reconciliation, the host also
+owns snapshot cleanup for failed or closed runs.
+
 ## Reconnect using the persisted event sequence
 
 Every persisted event has a per-run monotonically increasing, 1-based `seq`.
