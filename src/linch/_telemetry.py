@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 from opentelemetry import metrics, trace
 
+from .types import Usage
+
 if TYPE_CHECKING:
     from .kernel.context import Context
 
@@ -56,7 +58,9 @@ def set_error(span: trace.Span, error: BaseException | str) -> None:
     span.set_status(trace.StatusCode.ERROR)
 
 
-async def in_span(iterator: AsyncIterator[_T], span: trace.Span) -> AsyncGenerator[_T, None]:
+async def in_span(
+    iterator: AsyncIterator[_T], span: trace.Span, *, end_on_exit: bool = True
+) -> AsyncGenerator[_T, None]:
     """Activate only while advancing/closing, never across a consumer yield."""
     try:
         while True:
@@ -80,14 +84,19 @@ async def in_span(iterator: AsyncIterator[_T], span: trace.Span) -> AsyncGenerat
                 close = getattr(iterator, "aclose", None)
                 if close is not None:
                     await close()
+        except BaseException as exc:
+            set_error(span, exc)
+            raise
         finally:
-            span.end()
+            if end_on_exit:
+                span.end()
 
 
 class Telemetry:
     """Agent-scoped API instruments resolved through the agent's Context."""
 
     def __init__(self, context: Context) -> None:
+        self._context = context
         self.tracer: trace.Tracer = context.get("tracer") or trace.get_tracer(
             "linch", tracer_provider=context.get("tracer_provider")
         )
@@ -113,7 +122,7 @@ class Telemetry:
 def telemetry_for(agent: Any) -> Telemetry:
     context = agent.context
     telemetry = context.get("_linch_telemetry")
-    if telemetry is None:
+    if telemetry is None or telemetry._context is not context:
         telemetry = Telemetry(context)
         context.register("_linch_telemetry", telemetry)
     return telemetry
@@ -245,12 +254,22 @@ def end_step(session: Any) -> None:
 
 
 async def chat_stream(
-    session: Any, request: Any, iterator: AsyncIterator[_T], *, agent: Any = None
+    session: Any,
+    request: Any,
+    iterator: AsyncIterator[_T],
+    *,
+    agent: Any = None,
+    primary_state: Any = None,
 ) -> AsyncGenerator[_T, None]:
     """One physical delivery, including normalized parsing and auxiliary calls."""
     if session is None and agent is None:
-        async for item in iterator:
-            yield item
+        try:
+            async for item in iterator:
+                yield item
+        finally:
+            close = getattr(iterator, "aclose", None)
+            if close is not None:
+                await close()
         return
     if agent is None:
         assert session is not None
@@ -270,7 +289,7 @@ async def chat_stream(
     error = None
     output: list[Any] = []
     started = perf_counter()
-    traced = in_span(iterator, span)
+    traced = in_span(iterator, span, end_on_exit=False)
     try:
         async for item in traced:
             assembly: Any = getattr(item, "assembly", item)
@@ -283,7 +302,9 @@ async def chat_stream(
                 if item.get("type") == "message_start":
                     span.set_attribute(RESPONSE_MODEL, item.get("model", request.model))
                 elif item.get("type") == "message_end":
-                    usage = item.get("usage")
+                    candidate = item.get("usage")
+                    if isinstance(candidate, Usage):
+                        usage = candidate
                     span.set_attribute(FINISH_REASONS, [item.get("stop_reason", "unknown")])
                     if capture:
                         span.set_attribute(OUTPUT_MESSAGES, _json(output))
@@ -293,28 +314,51 @@ async def chat_stream(
                 set_usage(span, usage)
             yield item
     except BaseException as exc:
-        error = type(exc).__name__
-        state = getattr(session, "_telemetry_run", None)
-        if state is not None and state.step is not None:
-            set_error(state.step, exc)
+        if not isinstance(exc, GeneratorExit):
+            error = type(exc).__name__
+            state = getattr(session, "_telemetry_run", None)
+            if state is not None and state.step is not None:
+                set_error(state.step, exc)
         raise
     finally:
-        # Raw auxiliary streams have no assembled Message; capture their normalized
-        # content only behind the same opt-in as primary messages and tool bodies.
-        await traced.aclose()
-        metric_attrs = {OPERATION: "chat", PROVIDER: attrs[PROVIDER], MODEL: request.model}
-        if error is not None:
-            metric_attrs[ERROR_TYPE] = error
-        telemetry.duration.record(perf_counter() - started, metric_attrs)
-        if usage is not None:
-            for kind, count in (("input", usage.input_tokens), ("output", usage.output_tokens)):
-                telemetry.tokens.record(count, {**metric_attrs, TOKEN_TYPE: kind})
+        try:
+            await traced.aclose()
+        except BaseException as exc:
+            error = type(exc).__name__
+            raise
+        finally:
+            try:
+                # Parsing can fail after a valid usage receipt or message_start.
+                # Those known facts remain observable even when output is rejected.
+                usage = usage or getattr(primary_state, "usage", None)
+                actual_model = getattr(primary_state, "actual_model", "")
+                if actual_model:
+                    span.set_attribute(RESPONSE_MODEL, actual_model)
+                if usage is not None:
+                    set_usage(span, usage)
+                metric_attrs = {OPERATION: "chat", PROVIDER: attrs[PROVIDER], MODEL: request.model}
+                if error is not None:
+                    metric_attrs[ERROR_TYPE] = error
+                telemetry.duration.record(perf_counter() - started, metric_attrs)
+                if usage is not None:
+                    for kind, count in (
+                        ("input", usage.input_tokens),
+                        ("output", usage.output_tokens),
+                    ):
+                        telemetry.tokens.record(count, {**metric_attrs, TOKEN_TYPE: kind})
+            finally:
+                span.end()
 
 
 def trace_chat(function: Any) -> Any:
     @wraps(function)
     async def wrapped(session: Any, request: Any, **kwargs: Any) -> AsyncIterator[Any]:
-        iterator = chat_stream(session, request, function(session, request, **kwargs))
+        iterator = chat_stream(
+            session,
+            request,
+            function(session, request, **kwargs),
+            primary_state=kwargs.get("state"),
+        )
         try:
             async for item in iterator:
                 yield item
