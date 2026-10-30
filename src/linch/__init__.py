@@ -52,7 +52,6 @@ if TYPE_CHECKING:
         Mailbox,
         MailboxClaim,
         MailboxMessage,
-        SqliteMailbox,
     )
     from .coordination.scheduling import (
         ClaimingScheduleStore,
@@ -62,7 +61,6 @@ if TYPE_CHECKING:
         ScheduleOccurrence,
         SchedulerLoop,
         ScheduleStore,
-        SqliteScheduleStore,
         cron_matches,
         next_cron_time,
         schedule_tools,
@@ -164,7 +162,6 @@ if TYPE_CHECKING:
         FileBackend,
         OffloadConfig,
         ScopedFileBackend,
-        SqliteFileBackend,
         StateFileBackend,
         filesystem_tools,
     )
@@ -295,7 +292,6 @@ if TYPE_CHECKING:
         RunLeaseStore,
         RunRecord,
         RunStore,
-        SqliteRunStore,
         StoredRunEvent,
         build_run_contract,
         compare_run_contract,
@@ -318,7 +314,6 @@ if TYPE_CHECKING:
         SessionInboxStore,
         SessionRecord,
         SessionStore,
-        SqliteSessionStore,
         StoredMessage,
     )
     from .subagents import (
@@ -425,7 +420,6 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
         "Mailbox",
         "MailboxClaim",
         "MailboxMessage",
-        "SqliteMailbox",
     ),
     ".coordination.scheduling": (
         "ClaimingScheduleStore",
@@ -435,7 +429,6 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
         "ScheduleOccurrence",
         "SchedulerLoop",
         "ScheduleStore",
-        "SqliteScheduleStore",
         "cron_matches",
         "next_cron_time",
         "schedule_tools",
@@ -537,7 +530,6 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
         "FileBackend",
         "OffloadConfig",
         "ScopedFileBackend",
-        "SqliteFileBackend",
         "StateFileBackend",
         "filesystem_tools",
     ),
@@ -664,7 +656,6 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
         "RunLeaseStore",
         "RunRecord",
         "RunStore",
-        "SqliteRunStore",
         "StoredRunEvent",
         "build_run_contract",
         "compare_run_contract",
@@ -687,7 +678,6 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
         "SessionRecord",
         "SessionInboxStore",
         "SessionStore",
-        "SqliteSessionStore",
         "StoredMessage",
     ),
     ".subagents": (
@@ -835,7 +825,6 @@ __all__ = [
     "ClaimingScheduleStore",
     "LeasedScheduleStore",
     "InMemoryScheduleStore",
-    "SqliteScheduleStore",
     "SchedulerLoop",
     "schedule_tools",
     "cron_matches",
@@ -861,7 +850,6 @@ __all__ = [
     "FileBackend",
     "OffloadConfig",
     "ScopedFileBackend",
-    "SqliteFileBackend",
     "StateFileBackend",
     "filesystem_tools",
     "InMemoryRunStore",
@@ -1011,7 +999,6 @@ __all__ = [
     "RunRecord",
     "RunStore",
     "SessionInboxStore",
-    "SqliteRunStore",
     "StoredRunEvent",
     "VLLMProvider",
     "VLLMProviderOptions",
@@ -1045,7 +1032,6 @@ __all__ = [
     "Mailbox",
     "MailboxClaim",
     "MailboxMessage",
-    "SqliteMailbox",
     "IsolationBackend",
     "TempDirIsolation",
     "ModelFallbackEvent",
@@ -1123,7 +1109,6 @@ __all__ = [
     # Session-store types (Phase 3.2): let canonical examples import the concrete
     # stores from the top-level package instead of the linch.sessions submodule.
     "InMemorySessionStore",
-    "SqliteSessionStore",
     # Provider conformance helper (Phase 3.1), alongside the other assert_*.
     "assert_provider_contract",
     # Store protocol + record types (WS4): let embedders type their own

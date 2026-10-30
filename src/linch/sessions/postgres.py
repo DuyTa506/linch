@@ -2,8 +2,7 @@
 
 Durable, multi-writer, and connection-pooled via ``asyncpg``.  Multiple
 worker processes can share the same Postgres database; each gets its own
-pool of connections so concurrent turns proceed in parallel (not serialised
-on a single connection like SQLite).
+pool of connections so concurrent turns proceed in parallel.
 
 Install::
 
