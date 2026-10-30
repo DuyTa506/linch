@@ -142,12 +142,16 @@ reports its delta.
 
 **D11 — Observability is OpenTelemetry.** Core depends on `opentelemetry-api`
 only; without a host-configured SDK the API is a no-op. The kernel opens spans
-where the work happens: `invoke_agent` per run, `chat` per provider call,
-`execute_tool` per tool, one span per loop phase. Attributes follow the GenAI
-semantic conventions (`gen_ai.*`, still experimental, so every attribute name
-lives in one module) plus `linch.*`; metrics are `gen_ai.client.token.usage`
-and `gen_ai.client.operation.duration`. Prompt and tool content is not recorded
-unless enabled. A run's trace id is the OTel trace id; `traceparent` travels in
+where I/O happens: `invoke_agent` per run, one step span per turn, `chat` per
+provider call, `execute_tool` per tool, one span per compaction. Store calls
+are not spans: they feed a `linch.store.duration` histogram (attribute: op).
+Attributes follow the GenAI semantic conventions (`gen_ai.*`, still
+experimental, so every attribute name lives in one module) plus `linch.*`;
+metrics are `gen_ai.client.token.usage` and `gen_ai.client.operation.duration`.
+Prompt and tool content is recorded only when the standard
+`OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` is true. Tracer and meter
+are resolved through the agent's `Context` (default: the global providers), so
+tests and tenants can inject their own without touching process globals. A run's trace id is the OTel trace id; `traceparent` travels in
 job payloads and into subagents. Removed: the Observer protocol,
 `ObserverDispatcher`, `LoggingObserver`, `SpanCollector`,
 `OpenTelemetryObserver`, `RunTelemetryHook`; tests use the SDK's
