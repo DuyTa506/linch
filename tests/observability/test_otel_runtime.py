@@ -64,6 +64,9 @@ async def test_text_run_tree_usage_metrics_and_caller_context(otel):
             assert trace.get_current_span() is host
             events.append(event)
     assert events[-1].subtype == "success"
+    assert all(
+        s.status.status_code is trace.StatusCode.UNSET for s in exporter.get_finished_spans()
+    )
     (run,) = operation_spans(exporter, "invoke_agent")
     (step,) = operation_spans(exporter, "step")
     (chat,) = operation_spans(exporter, "chat")
@@ -88,6 +91,11 @@ async def test_text_run_tree_usage_metrics_and_caller_context(otel):
         ("input", 11, 1),
         ("output", 5, 1),
     }
+    assert all(
+        "error.type" not in p.attributes
+        for p in metric_points(reader, "gen_ai.client.operation.duration")
+    )
+    assert all("error.type" not in p.attributes for p in points)
     assert all(
         p.sum > 0 and p.count == 1
         for p in metric_points(reader, "gen_ai.client.operation.duration")
@@ -392,6 +400,7 @@ async def test_run_close_failure_restores_state_and_ends_step(otel):
     assert session._telemetry_run is None
     assert len(operation_spans(exporter, "step")) == 1
     assert len(operation_spans(exporter, "invoke_agent")) == 1
+    assert operation_spans(exporter, "invoke_agent")[0].status.status_code is trace.StatusCode.ERROR
     await agent.close()
 
 
@@ -406,4 +415,102 @@ async def test_durable_inbox_store_call_is_measured(otel):
     await collect(session)
     points = metric_points(reader, "linch.store.duration")
     assert any(p.attributes["op"] == "session.commit_inbox" for p in points)
+    await agent.close()
+
+
+@pytest.mark.parametrize("resume", [False, True])
+async def test_public_iterator_close_finishes_before_session_becomes_idle(otel, resume):
+    from linch import InMemoryRunStore, RunCheckpoint, RunOptions, Usage
+    from linch.loop.contracts import _build_run_contract
+    from linch.run_store import run_meta_with_contract
+
+    context, exporter, _ = otel
+    store = InMemoryRunStore()
+    agent = agent_for(context, run_store=store)
+    session = await agent.session()
+    if resume:
+        record = await store.create_run(
+            session.id,
+            meta=run_meta_with_contract(_build_run_contract(session, "resume", RunOptions())),
+        )
+        await store.save_checkpoint(
+            record.id,
+            RunCheckpoint(
+                phase="turn_complete", prompt="resume", turn_index=0, total_usage=Usage()
+            ),
+        )
+        iterator = session.resume(record.id)
+    else:
+        iterator = session.run("go")
+    await anext(iterator)
+    await iterator.aclose()
+    assert session._idle.is_set()
+    assert session._telemetry_run is None
+    assert len(operation_spans(exporter, "invoke_agent")) == 1
+    await agent.close()
+
+
+async def test_child_context_overrides_ancestor_cached_instruments(otel):
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+    from linch import TextTurn, Usage
+
+    context, exporter, reader = otel
+    parent = agent_for(context, [TextTurn("parent", usage=Usage(1, 1))])
+    parent_session = await parent.session()
+    await collect(parent_session)
+    child_exporter = InMemorySpanExporter()
+    child_provider = TracerProvider()
+    child_provider.add_span_processor(SimpleSpanProcessor(child_exporter))
+    child_reader = InMemoryMetricReader()
+    child_meter = MeterProvider(metric_readers=[child_reader])
+    child_context = parent.context.scope("child tenant")
+    child_context.register("tracer_provider", child_provider)
+    child_context.register("meter_provider", child_meter)
+    child = agent_for(child_context, [TextTurn("child", usage=Usage(2, 2))])
+    child_session = await child.session()
+    try:
+        await collect(child_session)
+        assert {
+            s.attributes["gen_ai.conversation.id"] for s in child_exporter.get_finished_spans()
+        } == {child_session.id}
+        assert {s.attributes["gen_ai.conversation.id"] for s in exporter.get_finished_spans()} == {
+            parent_session.id
+        }
+        assert {p.sum for p in metric_points(reader, "gen_ai.client.token.usage")} == {1}
+        assert {p.sum for p in metric_points(child_reader, "gen_ai.client.token.usage")} == {2}
+    finally:
+        await child.close()
+        await parent.close()
+        child_provider.shutdown()
+        child_meter.shutdown()
+
+
+async def test_failed_primary_parse_keeps_known_usage_and_actual_model(otel):
+    from linch import Usage
+
+    context, exporter, reader = otel
+
+    class InvalidStopProvider:
+        id = "fake"
+
+        def context_window(self, model):
+            return 128_000
+
+        async def stream(self, req):
+            yield {"type": "message_start", "model": "actual-model"}
+            yield {"type": "message_end", "stop_reason": "invalid", "usage": Usage(7, 4)}
+
+    agent = agent_for(context, provider=InvalidStopProvider(), max_retries=0)
+    events = await collect(await agent.session())
+    assert events[-1].total_usage == Usage(7, 4)
+    (chat,) = operation_spans(exporter, "chat")
+    assert chat.attributes["gen_ai.usage.input_tokens"] == 7
+    assert chat.attributes["gen_ai.usage.output_tokens"] == 4
+    assert chat.attributes["gen_ai.response.model"] == "actual-model"
+    assert {
+        (p.attributes["gen_ai.token.type"], p.sum)
+        for p in metric_points(reader, "gen_ai.client.token.usage")
+    } == {("input", 7), ("output", 4)}
     await agent.close()

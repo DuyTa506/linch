@@ -322,6 +322,7 @@ async def test_retry_deliveries_are_fresh_with_stable_operation_and_fingerprint(
 def _compaction_fixture(*, strategy: Any, provider: Any, limiter: Any):
     from types import SimpleNamespace
 
+    from linch import Context
     from linch.session_log import SessionLog
     from linch.types import Message, TextBlock
 
@@ -336,18 +337,23 @@ def _compaction_fixture(*, strategy: Any, provider: Any, limiter: Any):
         max_output_tokens=None,
         token_estimator=None,
         hooks=None,
+        context=Context(),
     )
 
     class Session:
         session_log = SessionLog.seed(historical=messages)
         active_run_id = "run-fixture"
+        id = "session-fixture"
+        active_model = None
         last_compaction_info = None
 
         @property
         def provider_view(self):
             return self.session_log.provider_view
 
-    return Session(), agent
+    session = Session()
+    session.agent = agent
+    return session, agent
 
 
 @pytest.mark.parametrize("detailed", [False, True])

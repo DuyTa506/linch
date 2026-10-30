@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from typing import Any
 from uuid import uuid4
 
@@ -133,15 +134,18 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
         else None
     )
     run_id = run_record.id if run_record is not None else str(uuid4())
-    async for event in _run_loop_impl(
-        session,
-        prompt,
-        opts,
-        run_id=run_id,
-        run_record=run_record,
-        resume_checkpoint=None,
-    ):
-        yield event
+    async with aclosing(
+        _run_loop_impl(
+            session,
+            prompt,
+            opts,
+            run_id=run_id,
+            run_record=run_record,
+            resume_checkpoint=None,
+        )
+    ) as iterator:
+        async for event in iterator:
+            yield event
 
 
 async def resume_loop(session: Session, run_id: str, opts: RunOptions) -> AsyncIterator[Event]:
@@ -185,15 +189,18 @@ async def resume_loop(session: Session, run_id: str, opts: RunOptions) -> AsyncI
         raise
     except (RunContractMismatchError, TypeError, ValueError) as exc:
         raise ConfigError(f"Cannot safely resume run {run_id}: {exc}") from None
-    async for event in _run_loop_impl(
-        session,
-        checkpoint.prompt,
-        opts,
-        run_id=run_record.id,
-        run_record=run_record,
-        resume_checkpoint=checkpoint,
-    ):
-        yield event
+    async with aclosing(
+        _run_loop_impl(
+            session,
+            checkpoint.prompt,
+            opts,
+            run_id=run_record.id,
+            run_record=run_record,
+            resume_checkpoint=checkpoint,
+        )
+    ) as iterator:
+        async for event in iterator:
+            yield event
 
 
 @trace_run
