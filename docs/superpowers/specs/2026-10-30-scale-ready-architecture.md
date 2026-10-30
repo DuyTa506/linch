@@ -118,7 +118,23 @@ Wave 1 (parallel, disjoint files):
 
 Wave 2 (after WP3 merges): WP5 failure surfacing + lease-lost handling in the
 loop (D8); WP6 worker-pool recipe in `examples/recipes/` and a "scale out"
-section in `docs/usage/production.md`; WP7 reliability port onto the seams.
+section in `docs/usage/production.md`; WP7 reliability port onto the seams;
+WP8 hot path, driven by the WP1 baseline
+(`docs/superpowers/measurements/2026-10-30-scale-baseline.md`):
+- One process saturates near 35 four-turn runs/s with 2 ms fake I/O; at 1,000
+  concurrent sessions the in-memory case shows 4.3 s event-loop lag. CPU per
+  turn grows with history (1 × 50 turns ≈ 24 ms/turn).
+- Checkpoints are written ~6 times per turn and grow from 2.3 KB to 39 KB over
+  50 turns although `RunCheckpoint` holds no message history: find which field
+  grows and bound it. 16.5 store writes per turn: batch where the phase model
+  allows.
+- `SessionLog` getters deep-copy (3.2 ms/read at 50 turns, 14.8 ms at 200; see
+  `docs/architecture/session-log-performance.md`). The copy stays; cut the
+  number of whole-history reads per turn instead — e.g. an incremental history
+  digest maintained on append replaces re-fingerprinting `full_history` at
+  every checkpoint.
+- Profile (cProfile) the 200 × 4 and 1 × 50 cases first; every change reports
+  its delta against the baseline.
 
 ## Rules for every worker
 
