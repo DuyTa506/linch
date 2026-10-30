@@ -1326,16 +1326,21 @@ class InMemoryRunStore:
         return RunLease(lease.run_id, lease.owner, lease.epoch, renewed)
 
     async def release(self, lease: RunLease) -> None:
-        held = self._held_leases.get(lease.run_id)
-        current_owner, expires_at, epoch = self._lease_state.get(lease.run_id, (None, None, 0))
-        if (
-            held != lease.epoch
-            or epoch != lease.epoch
-            or current_owner != lease.owner
-            or expires_at is None
-        ):
-            raise _lease_lost(lease.run_id, lease.epoch, epoch)
-        self._lease_state[lease.run_id] = (None, None, lease.epoch + 1)
+        try:
+            held = self._held_leases.get(lease.run_id)
+            current_owner, expires_at, epoch = self._lease_state.get(lease.run_id, (None, None, 0))
+            if (
+                held != lease.epoch
+                or epoch != lease.epoch
+                or current_owner != lease.owner
+                or expires_at is None
+            ):
+                raise _lease_lost(lease.run_id, lease.epoch, epoch)
+            self._lease_state[lease.run_id] = (None, None, lease.epoch + 1)
+        finally:
+            self._held_leases.pop(lease.run_id, None)
+            self._lease_ttls.pop(lease.run_id, None)
+            self._lease_owners.pop(lease.run_id, None)
 
     def _check_lease(self, run_id: str) -> None:
         held = self._held_leases.get(run_id)
@@ -1555,10 +1560,15 @@ class SqliteRunStore:
         return renewed
 
     async def release(self, lease: RunLease) -> None:
-        held = self._held_leases.get(lease.run_id)
-        if held != lease.epoch or self._lease_owners.get(lease.run_id) != lease.owner:
-            raise _lease_lost(lease.run_id, lease.epoch)
-        await self._exec.run(lambda c: _release_sqlite(c, lease))
+        try:
+            held = self._held_leases.get(lease.run_id)
+            if held != lease.epoch or self._lease_owners.get(lease.run_id) != lease.owner:
+                raise _lease_lost(lease.run_id, lease.epoch)
+            await self._exec.run(lambda c: _release_sqlite(c, lease))
+        finally:
+            self._held_leases.pop(lease.run_id, None)
+            self._lease_ttls.pop(lease.run_id, None)
+            self._lease_owners.pop(lease.run_id, None)
 
     async def load_run(self, run_id: str) -> RunRecord | None:
         return await self._exec.run(lambda c: _load_run(c, run_id))
