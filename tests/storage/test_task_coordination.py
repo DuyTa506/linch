@@ -9,16 +9,14 @@ import asyncio
 
 import pytest
 
-from linch.sessions import InMemorySessionStore, SqliteSessionStore
+from linch.sessions import InMemorySessionStore
 from linch.sessions.tasks import CreateTaskInput, TaskPatch
 
-STORE_KINDS = ["memory", "sqlite"]
+STORE_KINDS = ["memory"]
 
 
 def _make_store(kind, tmp_path):
-    if kind == "memory":
-        return InMemorySessionStore()
-    return SqliteSessionStore(tmp_path / "sessions.db")
+    return InMemorySessionStore()
 
 
 @pytest.mark.parametrize("kind", STORE_KINDS)

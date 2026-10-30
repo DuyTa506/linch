@@ -20,10 +20,10 @@ from linch.events import IgnorableEvent, ToolCallStartEvent, event_to_dict
 from linch.run_store import (
     SCHEMA_VERSION,
     RunCheckpoint,
-    SqliteRunStore,
     checkpoint_from_dict,
     checkpoint_to_dict,
 )
+from linch.run_stores.postgres import PostgresRunStore
 from linch.sessions.store import ProviderViewSnapshot, snapshot_from_dict, snapshot_to_dict
 from linch.types import Message, ToolResultBlock, ToolUseBlock, Usage
 
@@ -164,8 +164,10 @@ def test_checkpoint_normalizes_malformed_pending_alignment() -> None:
     assert restored.pending_alignment == [{"prompt": "ok", "images": None}]
 
 
-async def test_load_events_preserves_explicitly_ignorable_future_events(tmp_path) -> None:
-    store = SqliteRunStore(tmp_path / "runs.db")
+async def test_load_events_preserves_explicitly_ignorable_future_events(
+    pg_dsn,
+) -> None:
+    store = PostgresRunStore(pg_dsn)
     try:
         await store.create_run("session-1", id="run-1")
         await store.append_event(
@@ -179,11 +181,10 @@ async def test_load_events_preserves_explicitly_ignorable_future_events(tmp_path
             "payload": 42,
         }
         stored_future = {"schema_version": SCHEMA_VERSION, "event": future_raw}
-        await store._exec.run(
-            lambda c: c.execute(
-                "insert into run_events (run_id, seq, appended_at, event) values (?, ?, ?, ?)",
-                ("run-1", 2, "2026-01-01T00:00:00Z", json.dumps(stored_future)),
-            )
+        pool = await store._ensure()
+        await pool.execute(
+            "INSERT INTO run_events (run_id, seq, appended_at, event) VALUES ($1, $2, $3, $4)",
+            *("run-1", 2, "2026-01-01T00:00:00Z", json.dumps(stored_future)),
         )
 
         events = await store.load_events("run-1")
@@ -228,16 +229,15 @@ async def test_load_events_preserves_explicitly_ignorable_future_events(tmp_path
     ],
 )
 async def test_load_events_fails_closed_for_required_or_malformed_rows(
-    tmp_path, encoded: str, error: str
+    pg_dsn, encoded: str, error: str
 ) -> None:
-    store = SqliteRunStore(tmp_path / "runs.db")
+    store = PostgresRunStore(pg_dsn)
     try:
         await store.create_run("session-1", id="run-1")
-        await store._exec.run(
-            lambda c: c.execute(
-                "insert into run_events (run_id, seq, appended_at, event) values (?, ?, ?, ?)",
-                ("run-1", 1, "2026-01-01T00:00:00Z", encoded),
-            )
+        pool = await store._ensure()
+        await pool.execute(
+            "INSERT INTO run_events (run_id, seq, appended_at, event) VALUES ($1, $2, $3, $4)",
+            *("run-1", 1, "2026-01-01T00:00:00Z", encoded),
         )
 
         with pytest.raises(ValueError, match=error):

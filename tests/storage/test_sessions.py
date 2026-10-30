@@ -1,4 +1,5 @@
-from linch.sessions import InMemorySessionStore, SqliteSessionStore
+from linch.sessions import InMemorySessionStore
+from linch.sessions.postgres import PostgresSessionStore
 from linch.sessions.tasks import CreateTaskInput
 from linch.types import (
     ImageBlock,
@@ -7,19 +8,6 @@ from linch.types import (
     ToolResultBlock,
     ToolUseBlock,
 )
-
-
-def _delete_task_counter(conn, session_id: str) -> None:
-    conn.execute("delete from task_counters where session_id = ?", (session_id,))
-    conn.commit()
-
-
-def _seed_orphan_task_counter(conn, session_id: str) -> None:
-    conn.execute(
-        "insert into task_counters (session_id, next_id) values (?, ?)",
-        (session_id, 9),
-    )
-    conn.commit()
 
 
 async def test_memory_store_round_trip() -> None:
@@ -85,8 +73,10 @@ async def test_memory_store_deeply_isolates_ordinary_message_graph_at_every_boun
     assert reloaded_tool.input == {"nested": {"image": {"data": "before"}}}
 
 
-async def test_sqlite_store_round_trip(tmp_path) -> None:
-    store = SqliteSessionStore(tmp_path / "sessions.db")
+async def test_postgres_store_round_trip(
+    pg_dsn,
+) -> None:
+    store = PostgresSessionStore(pg_dsn)
     rec = await store.create(meta={"title": "x"})
     await store.append_messages(rec.id, [Message(role="user", content=[TextBlock(text="hi")])])
 
@@ -110,13 +100,16 @@ async def test_memory_missing_task_counter_continues_after_highest_numeric_id() 
     assert [first.id, second.id, third.id] == ["1", "2", "3"]
 
 
-async def test_sqlite_missing_task_counter_continues_after_highest_numeric_id(tmp_path) -> None:
-    store = SqliteSessionStore(tmp_path / "missing-counter.db")
+async def test_postgres_missing_task_counter_continues_after_highest_numeric_id(
+    pg_dsn,
+) -> None:
+    store = PostgresSessionStore(pg_dsn)
     try:
         rec = await store.create()
         await store.create_task(rec.id, CreateTaskInput(subject="one", description=""))
         await store.create_task(rec.id, CreateTaskInput(subject="two", description=""))
-        await store._exec.run(lambda conn: _delete_task_counter(conn, rec.id))
+        pool = await store._ensure()
+        await pool.execute("DELETE FROM task_counters WHERE session_id = $1", rec.id)
 
         third = await store.create_task(rec.id, CreateTaskInput(subject="three", description=""))
 
@@ -125,10 +118,17 @@ async def test_sqlite_missing_task_counter_continues_after_highest_numeric_id(tm
         await store.close()
 
 
-async def test_sqlite_create_if_absent_tolerates_orphan_task_counter(tmp_path) -> None:
-    store = SqliteSessionStore(tmp_path / "orphan-counter.db")
+async def test_postgres_create_if_absent_tolerates_orphan_task_counter(
+    pg_dsn,
+) -> None:
+    store = PostgresSessionStore(pg_dsn)
     try:
-        await store._exec.run(lambda conn: _seed_orphan_task_counter(conn, "fork-target"))
+        pool = await store._ensure()
+        await pool.execute(
+            "INSERT INTO task_counters (session_id, next_id) VALUES ($1, $2)",
+            "fork-target",
+            9,
+        )
 
         created = await store.create_if_absent(id="fork-target", meta={})
 

@@ -45,9 +45,9 @@
 
 **Interfaces:** Conformance runs memory/Postgres; schema tests retain Postgres checks because memory has no schema. Reopen durability uses fresh Postgres instances; ordinary semantics use InMemory.
 
-- [ ] Remove backend-specific SQLite tests and migrate generic tests without weakening assertions.
-- [ ] Exercise Postgres reopen, concurrent holders, model input corruption and durable inbox behavior.
-- [ ] Run full pytest with supplied DSN, lint and format on tests; commit test migration.
+- [x] Remove backend-specific SQLite tests and migrate generic tests without weakening assertions.
+- [x] Exercise Postgres reopen, concurrent holders, model input corruption and durable inbox behavior.
+- [x] Run full pytest with supplied DSN, lint and format on tests; commit test migration.
 
 ### Task 3: Document coordination scope
 

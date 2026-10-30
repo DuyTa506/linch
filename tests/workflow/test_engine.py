@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -319,11 +318,11 @@ async def test_budget_shared_across_workflow_children() -> None:
     assert budget.spent_tokens == 200
 
 
-async def test_resume_replays_unchanged_prefix(tmp_path: Path) -> None:
-    from linch import SqliteRunStore
+async def test_resume_replays_unchanged_prefix(
+    pg_dsn,
+) -> None:
+    from linch import PostgresRunStore
     from linch.workflow import WorkflowError
-
-    store_path = str(tmp_path / "runs.db")
 
     async def flow(wf: Any) -> list[str]:
         one = await wf.agent("step one")
@@ -333,7 +332,7 @@ async def test_resume_replays_unchanged_prefix(tmp_path: Path) -> None:
 
     # First attempt: provider dies on the third subagent call.
     provider1 = CountingTextProvider(fail_on_call=3)
-    agent1 = _make_agent(provider1, run_store=SqliteRunStore(store_path))
+    agent1 = _make_agent(provider1, run_store=PostgresRunStore(pg_dsn))
     with pytest.raises(WorkflowError):
         await agent1.run_workflow(flow, run_id="wf-resume-1")
     assert provider1.calls == 3
@@ -342,8 +341,10 @@ async def test_resume_replays_unchanged_prefix(tmp_path: Path) -> None:
     assert saved.meta == {"schema_version": 3}
 
     # Resume: calls 1-2 replay from the journal; only call 3 hits the provider.
+    await agent1.close()
+
     provider2 = CountingTextProvider()
-    agent2 = _make_agent(provider2, run_store=SqliteRunStore(store_path))
+    agent2 = _make_agent(provider2, run_store=PostgresRunStore(pg_dsn))
     seen: list[Any] = []
     result = await agent2.run_workflow(flow, run_id="wf-resume-1", on_event=seen.append)
 
@@ -355,17 +356,19 @@ async def test_resume_replays_unchanged_prefix(tmp_path: Path) -> None:
     assert resumed is not None
     assert resumed.meta == {"schema_version": 3}
 
+    await agent2.close()
 
-async def test_changed_prompt_invalidates_cache(tmp_path: Path) -> None:
-    from linch import SqliteRunStore
 
-    store_path = str(tmp_path / "runs.db")
+async def test_changed_prompt_invalidates_cache(
+    pg_dsn,
+) -> None:
+    from linch import PostgresRunStore
 
     async def flow_v1(wf: Any) -> list[str]:
         return [await wf.agent("step one"), await wf.agent("step two")]
 
     provider1 = CountingTextProvider()
-    agent1 = _make_agent(provider1, run_store=SqliteRunStore(store_path))
+    agent1 = _make_agent(provider1, run_store=PostgresRunStore(pg_dsn))
     await agent1.run_workflow(flow_v1, run_id="wf-edit-1")
     assert provider1.calls == 2
 
@@ -373,12 +376,16 @@ async def test_changed_prompt_invalidates_cache(tmp_path: Path) -> None:
     async def flow_v2(wf: Any) -> list[str]:
         return [await wf.agent("step one"), await wf.agent("step two, reworded")]
 
+    await agent1.close()
+
     provider2 = CountingTextProvider()
-    agent2 = _make_agent(provider2, run_store=SqliteRunStore(store_path))
+    agent2 = _make_agent(provider2, run_store=PostgresRunStore(pg_dsn))
     result = await agent2.run_workflow(flow_v2, run_id="wf-edit-1")
 
     assert provider2.calls == 1
     assert result == ["result-1", "result-1"]
+
+    await agent2.close()
 
 
 @pytest.mark.parametrize("version", [None, 1, 2, 4, True, False, "3", 3.0])
@@ -951,13 +958,14 @@ async def test_step_replays_on_resume_without_reexecuting() -> None:
     assert len(replays) == 1
 
 
-async def test_step_and_agent_prefix_replay_together_after_failure(tmp_path: Path) -> None:
+async def test_step_and_agent_prefix_replay_together_after_failure(
+    pg_dsn,
+) -> None:
     """The double-execution hole: a resumed workflow must re-run neither its
     journaled agent calls nor its journaled code steps."""
-    from linch import SqliteRunStore
+    from linch import PostgresRunStore
     from linch.workflow import WorkflowError
 
-    store_path = str(tmp_path / "runs.db")
     side_effects: list[str] = []
 
     async def flow(wf: Any) -> list[Any]:
@@ -971,18 +979,22 @@ async def test_step_and_agent_prefix_replay_together_after_failure(tmp_path: Pat
         return [first, published, second]
 
     provider1 = CountingTextProvider(fail_on_call=2)
-    agent1 = _make_agent(provider1, run_store=SqliteRunStore(store_path))
+    agent1 = _make_agent(provider1, run_store=PostgresRunStore(pg_dsn))
     with pytest.raises(WorkflowError):
         await agent1.run_workflow(flow, run_id="wf-mixed-1")
     assert side_effects == ["published"]
 
+    await agent1.close()
+
     provider2 = CountingTextProvider()
-    agent2 = _make_agent(provider2, run_store=SqliteRunStore(store_path))
+    agent2 = _make_agent(provider2, run_store=PostgresRunStore(pg_dsn))
     result = await agent2.run_workflow(flow, run_id="wf-mixed-1")
 
     assert side_effects == ["published"]  # ran exactly once across both attempts
     assert provider2.calls == 1
     assert result == ["result-1", "ok", "result-1"]
+
+    await agent2.close()
 
 
 async def test_step_in_a_loop_replays_per_occurrence() -> None:
@@ -1015,19 +1027,17 @@ async def test_step_in_a_loop_replays_per_occurrence() -> None:
 
 
 async def test_adding_a_step_does_not_invalidate_the_existing_agent_journal(
-    tmp_path: Path,
+    pg_dsn,
 ) -> None:
     """Step keys live in their own hash domain, so introducing wf.step must not
     perturb the call_keys of agent calls already journaled by an in-flight run."""
-    from linch import SqliteRunStore
-
-    store_path = str(tmp_path / "runs.db")
+    from linch import PostgresRunStore
 
     async def flow_v1(wf: Any) -> list[str]:
         return [await wf.agent("step one"), await wf.agent("step two")]
 
     provider1 = CountingTextProvider()
-    agent1 = _make_agent(provider1, run_store=SqliteRunStore(store_path))
+    agent1 = _make_agent(provider1, run_store=PostgresRunStore(pg_dsn))
     await agent1.run_workflow(flow_v1, run_id="wf-add-step-1")
     assert provider1.calls == 2
 
@@ -1035,9 +1045,13 @@ async def test_adding_a_step_does_not_invalidate_the_existing_agent_journal(
         note = await wf.step("note", lambda: "added later")
         return [note, await wf.agent("step one"), await wf.agent("step two")]
 
+    await agent1.close()
+
     provider2 = CountingTextProvider()
-    agent2 = _make_agent(provider2, run_store=SqliteRunStore(store_path))
+    agent2 = _make_agent(provider2, run_store=PostgresRunStore(pg_dsn))
     result = await agent2.run_workflow(flow_v2, run_id="wf-add-step-1")
 
     assert provider2.calls == 0
     assert result == ["added later", "result-1", "result-2"]
+
+    await agent2.close()

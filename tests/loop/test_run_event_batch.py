@@ -7,11 +7,9 @@ unchanged; the method is an optional duck-typed capability.
 
 from __future__ import annotations
 
-import sqlite3
-from pathlib import Path
-
 from linch.events import UserEvent
-from linch.run_store import InMemoryRunStore, SqliteRunStore
+from linch.run_store import InMemoryRunStore
+from linch.run_stores.postgres import PostgresRunStore
 from linch.types import Message, TextBlock
 
 
@@ -59,8 +57,10 @@ async def test_inmemory_append_events_honors_append_event_override() -> None:
     assert _labels(await store.load_events(run.id)) == ["keep", "keep2"]
 
 
-async def test_sqlite_append_events_atomic_and_contiguous(tmp_path: Path) -> None:
-    store = SqliteRunStore(tmp_path / "runs.db")
+async def test_postgres_append_events_atomic_and_contiguous(
+    pg_dsn,
+) -> None:
+    store = PostgresRunStore(pg_dsn)
     try:
         run = await store.create_run("s1")
         seqs = await store.append_events(run.id, _events("a", "b", "c"))
@@ -72,22 +72,3 @@ async def test_sqlite_append_events_atomic_and_contiguous(tmp_path: Path) -> Non
         assert _labels(rows) == ["a", "b", "c", "d", "e"]
     finally:
         await store.close()
-
-
-async def test_sqlite_append_events_single_transaction(tmp_path: Path) -> None:
-    # One MAX lookup + executemany + one commit: after the batch the on-disk rows
-    # are exactly the batch with a contiguous (run_id, seq) primary key.
-    store = SqliteRunStore(tmp_path / "runs.db")
-    try:
-        run = await store.create_run("s1")
-        await store.append_events(run.id, _events("x", "y"))
-    finally:
-        await store.close()
-    conn = sqlite3.connect(tmp_path / "runs.db")
-    try:
-        rows = conn.execute(
-            "select seq from run_events where run_id = ? order by seq", (run.id,)
-        ).fetchall()
-        assert [r[0] for r in rows] == [1, 2]
-    finally:
-        conn.close()

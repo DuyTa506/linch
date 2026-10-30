@@ -14,7 +14,8 @@ from typing import Any
 
 import pytest
 
-from linch.sessions import InMemorySessionStore, SqliteSessionStore
+from linch.sessions import InMemorySessionStore
+from linch.sessions.postgres import PostgresSessionStore
 from linch.sessions.store import (
     SNAPSHOT_SCHEMA_VERSION,
     ProviderViewSnapshot,
@@ -54,9 +55,10 @@ async def test_inmemory_snapshot_roundtrip_and_delete() -> None:
     assert await store.load_provider_snapshot("s1") is None
 
 
-async def test_sqlite_snapshot_roundtrip_persists_across_reopen(tmp_path: Any) -> None:
-    path = tmp_path / "sessions.db"
-    store = SqliteSessionStore(path)
+async def test_postgres_snapshot_roundtrip_persists_across_reopen(
+    pg_dsn,
+) -> None:
+    store = PostgresSessionStore(pg_dsn)
     try:
         await store.create(id="s1")
         await store.save_provider_snapshot(
@@ -69,7 +71,7 @@ async def test_sqlite_snapshot_roundtrip_persists_across_reopen(tmp_path: Any) -
     finally:
         await store.close()
 
-    reopened = SqliteSessionStore(path)
+    reopened = PostgresSessionStore(pg_dsn)
     try:
         got = await reopened.load_provider_snapshot("s1")
         assert got is not None

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from linch import workspace_tools
-from linch.sessions import InMemorySessionStore, SqliteSessionStore
+from linch.sessions import InMemorySessionStore
 from linch.sessions.tasks import CreateTaskInput, TaskPatch
 
 
@@ -39,8 +39,8 @@ async def test_memory_store_persists_tasks_and_skills() -> None:
     assert updated.blocks == ["2"]
 
 
-async def test_sqlite_store_task_round_trip(tmp_path) -> None:
-    store = SqliteSessionStore(tmp_path / "sessions.db")
+async def test_memory_store_task_round_trip(tmp_path) -> None:
+    store = InMemorySessionStore()
     rec = await store.create(meta={"title": "x"})
     created = await store.create_task(rec.id, CreateTaskInput(subject="Task", description="Desc"))
     loaded = await store.get_task(rec.id, created.id)
