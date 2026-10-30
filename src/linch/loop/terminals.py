@@ -142,6 +142,7 @@ async def _budget_exhausted_tail(
         checkpoint.total_usage = total
         original = RuntimeError("terminal failed-status persistence")
         failure = await runtime._attempt("event flush", lambda: _flush_events(session), original)
+        session._event_journal = None
         status_failure = await runtime._attempt(
             "run.mark_failed",
             lambda: store_call(
@@ -219,6 +220,7 @@ async def _error_result_tail(
         checkpoint.total_usage = total
         original = RuntimeError("terminal failed-status persistence")
         failure = await runtime._attempt("event flush", lambda: _flush_events(session), original)
+        session._event_journal = None
         status_failure = await runtime._attempt(
             "run.mark_failed",
             lambda: store_call(
@@ -314,6 +316,7 @@ async def _max_turns_tail(
         checkpoint.total_usage = total
         original = RuntimeError("terminal failed-status persistence")
         failure = await runtime._attempt("event flush", lambda: _flush_events(session), original)
+        session._event_journal = None
         status_failure = await runtime._attempt(
             "run.mark_failed",
             lambda: store_call(

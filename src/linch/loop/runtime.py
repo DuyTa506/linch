@@ -576,10 +576,6 @@ class RunRuntime:
                 exc_info=(type(secondary), secondary, secondary.__traceback__),
             )
             return secondary
-        finally:
-            # A failed terminal batch is never retried by iterator teardown.
-            if operation == "event flush":
-                self.session._event_journal = None
         return None
 
     @classmethod
@@ -897,9 +893,11 @@ class RunRuntime:
             lambda event=event: _persist_event(self.session, self.run_id, event),
             original,
         )
-        failure = failure or await self._attempt(
-            "event flush", lambda: _flush_events(self.session), original
-        )
+        if failure is None:
+            failure = await self._attempt(
+                "event flush", lambda: _flush_events(self.session), original
+            )
+            self.session._event_journal = None
         store = self.agent.run_store
         if failure is None and self.run_record is not None and store is not None:
             self.checkpoint.phase = "aborted"
@@ -914,18 +912,6 @@ class RunRuntime:
                 original,
             )
         if failure is not None:
-            if self.run_record is not None and store is not None:
-                await self._attempt(
-                    "run.mark_failed",
-                    lambda: store_call(
-                        self.session,
-                        "run.mark_failed",
-                        store.mark_failed(
-                            self.run_id, self.checkpoint, error=_error_payload(failure)
-                        ),
-                    ),
-                    failure,
-                )
             async for item in self.emit_exception_terminal(failure):
                 yield item
         else:
@@ -937,7 +923,7 @@ class RunRuntime:
         *,
         close_active_spans: Callable[..., Awaitable[None]] | None = None,
     ) -> AsyncIterator[Event]:
-        """Persist the typed error pair; callers own their single status attempt."""
+        """Persist the typed error pair before making failed status visible."""
         await cancel_background_workers(self.session)
         original = self.lease_lost or exc
         error = _error_payload(original)
@@ -966,6 +952,18 @@ class RunRuntime:
                 original,
             )
         await self._attempt("event flush", lambda: _flush_events(self.session), original)
+        self.session._event_journal = None
+        store = self.agent.run_store
+        if self.run_record is not None and store is not None:
+            await self._attempt(
+                "run.mark_failed",
+                lambda: store_call(
+                    self.session,
+                    "run.mark_failed",
+                    store.mark_failed(self.run_id, self.checkpoint, error=error),
+                ),
+                original,
+            )
         if self.lease_lost is not None:
             error = _error_payload(self.lease_lost)
             error["retryable"] = False
