@@ -11,9 +11,7 @@ from uuid import uuid4
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from pgqueuer import Queries
 
-from ..run_store import _safe_meta
 from ..run_stores.postgres import PostgresRunStore
-from ..sessions.memory import now_iso
 
 
 class _BorrowedPool:
@@ -56,8 +54,8 @@ async def install(pool: Any) -> None:
     Run once at host startup. Existing PgQueuer schemas must already be current;
     migrations are host-owned. Safe for concurrent process startup.
     """
-    store = PostgresRunStore("", pool=_BorrowedPool(pool))
-    await store._ensure()
+    async with PostgresRunStore("", pool=_BorrowedPool(pool)):
+        pass
     async with pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute("SELECT pg_advisory_xact_lock($1)", 0x4C494E4348574B52)
@@ -84,27 +82,19 @@ async def _enqueue(conn: Any, requests: Sequence[RunRequest], traceparent: str |
     # Sorted row acquisition avoids deadlocks for overlapping batches. A run row
     # is the permanent dedupe receipt; PgQueuer dedupes only active queue rows.
     inserted: dict[str, RunRequest] = {}
+    store = PostgresRunStore("")
     for request in sorted(requests, key=lambda r: r.run_id):
         _entrypoint(request.queue)
         if not request.run_id or not request.session_id:
             raise ValueError("run_id and session_id must be non-empty")
-        row = await conn.fetchrow(
-            """
-            INSERT INTO runs (id, session_id, status, created_at, updated_at, meta)
-            VALUES ($1, $2, 'pending', $3, $3, $4)
-            ON CONFLICT (id) DO NOTHING RETURNING id
-        """,
-            request.run_id,
+        row = await store.create_pending_run(
+            conn,
             request.session_id,
-            now_iso(),
-            json.dumps(_safe_meta(request.meta), allow_nan=False),
+            id=request.run_id,
+            meta=request.meta,
         )
         if row is not None:
             inserted[request.run_id] = request
-        else:
-            target = await conn.fetchval("SELECT session_id FROM runs WHERE id=$1", request.run_id)
-            if target != request.session_id:
-                raise ValueError(f"run {request.run_id} belongs to session {target}")
     if inserted:
         values = list(inserted.values())
         await Queries.from_asyncpg_connection(conn).enqueue(

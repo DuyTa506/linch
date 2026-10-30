@@ -14,6 +14,7 @@ from uuid import uuid4
 
 from ..events import Event, _stored_event_from_dict
 from ..run_store import (
+    RUN_CONTRACT_META_KEY,
     LeaseLostError,
     ModelInputSnapshot,
     RunCheckpoint,
@@ -29,6 +30,8 @@ from ..run_store import (
     checkpoint_from_dict,
     checkpoint_to_dict,
     create_model_input_snapshot,
+    ensure_run_contract_compatible,
+    run_contract_from_meta,
 )
 from ..sessions.memory import now_iso
 from ..storage._pg import _import_asyncpg, close_pool, ensure_pool
@@ -160,12 +163,89 @@ class PostgresRunStore:
                 )
                 if row is None:
                     row = await conn.fetchrow(
-                        "SELECT id, session_id, status, created_at, updated_at, checkpoint, meta "
-                        "FROM runs WHERE id = $1",
+                        "SELECT id, session_id, status, created_at, updated_at, checkpoint, meta, "
+                        "lease_epoch, lease_owner, lease_expires_at "
+                        "FROM runs WHERE id = $1 FOR UPDATE",
                         rid,
                     )
+                else:
+                    return _row_record(row)
+                assert row is not None
+                if row["status"] != "pending":
+                    raise ValueError(f"run {rid} already exists")
+                if str(row["session_id"]) != session_id:
+                    raise ValueError(f"run {rid} belongs to session {row['session_id']}")
+                self._assert_fence(rid, row)
+                stored_meta = _safe_meta(
+                    json.loads(row["meta"]) if isinstance(row["meta"], str) else row["meta"]
+                )
+                stored_contract = stored_meta.get(RUN_CONTRACT_META_KEY)
+                requested_contract = safe_meta.get(RUN_CONTRACT_META_KEY)
+                if stored_contract is not None and requested_contract is not None:
+                    ensure_run_contract_compatible(
+                        run_contract_from_meta(stored_meta),
+                        run_contract_from_meta(safe_meta),
+                    )
+                merged_meta = dict(stored_meta)
+                merged_meta.update(safe_meta)
+                if stored_contract is not None:
+                    merged_meta[RUN_CONTRACT_META_KEY] = stored_contract
+                row = await conn.fetchrow(
+                    """
+                    UPDATE runs
+                    SET status = 'running', updated_at = $1, meta = $2
+                    WHERE id = $3
+                    RETURNING id, session_id, status, created_at, updated_at, checkpoint, meta
+                    """,
+                    ts,
+                    json.dumps(merged_meta, allow_nan=False),
+                    rid,
+                )
                 assert row is not None
                 return _row_record(row)
+
+    async def create_pending_run(
+        self,
+        conn: Any,
+        session_id: str,
+        *,
+        id: str,
+        meta: dict[str, object] | None = None,
+    ) -> RunRecord | None:
+        """Insert a pending run using a caller-owned asyncpg transaction.
+
+        The caller must initialize this store before opening the transaction.
+        A same-session existing row is left untouched and reported as ``None``;
+        an ID owned by another session is rejected.
+        """
+
+        safe_meta = _safe_meta(meta)
+        ts = now_iso()
+        row = await conn.fetchrow(
+            """
+            INSERT INTO runs
+                (id, session_id, status, created_at, updated_at, checkpoint, meta)
+            VALUES ($1, $2, 'pending', $3, $3, NULL, $4)
+            ON CONFLICT (id) DO NOTHING
+            RETURNING id, session_id, status, created_at, updated_at, checkpoint, meta
+            """,
+            id,
+            session_id,
+            ts,
+            json.dumps(safe_meta, allow_nan=False),
+        )
+        if row is not None:
+            return _row_record(row)
+        existing = await conn.fetchrow(
+            "SELECT id, session_id, status, created_at, updated_at, checkpoint, meta "
+            "FROM runs WHERE id = $1 FOR UPDATE",
+            id,
+        )
+        if existing is None:
+            raise KeyError(f"run not found: {id}")
+        if str(existing["session_id"]) != session_id:
+            raise ValueError(f"run {id} belongs to session {existing['session_id']}")
+        return None
 
     async def load_run(self, run_id: str) -> RunRecord | None:
         pool = await self._ensure()
