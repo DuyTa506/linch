@@ -216,8 +216,9 @@ idempotent. Retries use exponential backoff from `base_delay_ms`.
 
 ## Bash execution backend
 
-`Bash` uses `LocalBackend` by default. To run Bash through an injected backend,
-pass `execution_backend=...` to `Agent`. The agent only replaces an existing
+`Bash` uses the shell transport from `LocalExecutionBackend` by default. To
+inject a different execution world, pass a coherent `.shell`/`.fs` backend as
+`execution_backend=...` to `Agent`. The agent only replaces an existing
 `Bash` tool; it does not add shell access to a custom registry that deliberately
 omits `Bash`.
 
@@ -228,22 +229,33 @@ workspace mount, Docker's default network, no environment forwarding, and a
 normal container root filesystem. Its hardening controls are opt-in.
 
 ```python
+from linch import RemoteExecutionBackend
 from linch.tools.execution import DockerBackend
 
 agent = Agent(
     ...,
-    execution_backend=DockerBackend(
-        image="python:3.12-slim",
-        network="none",
-        read_only_root=True,
-        workspace_mount="rw",
-        tmpfs=("/tmp:rw,noexec,nosuid,nodev,size=64m",),
-        forward_env=(),
-        # Required for durable runs when env/forward_env is non-empty:
-        resume_fingerprint_key=my_host_secret,
+    execution_backend=RemoteExecutionBackend(
+        shell=DockerBackend(
+            image="python:3.12-slim",
+            network="none",
+            read_only_root=True,
+            workspace_mount="rw",
+            tmpfs=("/tmp:rw,noexec,nosuid,nodev,size=64m",),
+            forward_env=(),
+            # Required for durable runs when env/forward_env is non-empty:
+            resume_fingerprint_key=my_host_secret,
+        ),
+        fs=my_container_filesystem,  # host-supplied transport in the same world
     ),
 )
 ```
+
+`DockerBackend` is a shell transport; it cannot be passed directly as
+`Agent(execution_backend=...)`. The filesystem transport above must access the same
+container workspace and map the effective session cwd consistently. For durable
+runs, the remote world and its filesystem also need stable `resume_policy_id`
+and non-`None`, JSON-safe `resume_policy_config` (plus optional
+`resume_policy_version`). See [Extending](./extending.md).
 
 Use `workspace_mount="ro"` for read-only workspace inspection, `env={...}` for
 explicit container environment variables, `forward_env=(...)` to allowlist host
@@ -266,7 +278,9 @@ custom Bash backend on a durable run must expose
 when it truly has no configuration), and optionally `resume_policy_version`.
 That identity is the host's assertion: include every authority-relevant input
 and bump the version when backend behavior or remote sandbox policy changes;
-otherwise start a new run instead of resuming an old contract.
+otherwise start a new run instead of resuming an old contract. Standalone
+`BashTool(execution=...)` use also fingerprints its effective shell transport;
+it retains the same shell policy identity requirements.
 
 ---
 
