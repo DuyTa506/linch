@@ -43,7 +43,8 @@ flowchart TD
 
 **Rules:**
 - `scope="read"` + `parallel=True` → may run concurrently up to `Agent(max_tool_concurrency=N)` or env `AGENTKIT_MAX_TOOL_CONCURRENCY`.
-- `scope="write"` or `scope="exec"` → always serialize, regardless of `parallel` flag.
+- `scope="write"` or `scope="exec"` with a boolean concurrency flag → serialize even with `parallel=True`.
+- An input-aware `parallel(input)` predicate can prove that a particular invocation performs only read work. `SubagentTool` uses this existing seam for explicitly read-only named types; inherited/full tool access and any write-capable type serialize. Predicate failures serialize. The scheduler's scope rule is unchanged.
 - `ResourceAccess(resource, mode)` enables finer conflict detection: two `"read"` accesses on the same resource overlap freely; any `"write"` on a resource being read or written by another call serializes.
 - Result events are emitted in the **original provider tool-call order**, not completion order.
 - The security order is fixed: resolve and validate → reject a registered tool that was
@@ -262,6 +263,16 @@ Never mutate `provider_view`/`full_history` in place — they are derived views.
 stores persist the message/projection *snapshots* needed to reconstruct the two
 views; they do not persist the in-memory entry list as a replay journal. Loading
 a session therefore seeds a fresh log at that durable snapshot boundary.
+
+`Agent(max_idle_sessions=N)` optionally bounds the live idle-session cache.
+The existing session registry records recency on creation, reattachment, and run
+completion. After a run finishes, least recently used idle sessions are released
+through `release_session()`. Busy sessions and ownership trees containing active
+runs, unfinished background tasks, or queued notifications/child events are excluded.
+Task completion triggers another bound check; undelivered results stay live until
+their next-turn drain. Eviction reserves the idle ownership tree before awaiting teardown,
+so a descendant cannot start a run while recursive release is in progress.
+`None` preserves the default cache lifetime. Durable messages are preserved.
 
 ---
 

@@ -148,6 +148,43 @@ async def test_force_release_drains_owned_background_task() -> None:
     assert session.background_tasks == []
 
 
+async def test_completed_background_tasks_unregister_themselves() -> None:
+    agent = _agent()
+    session = await agent.session()
+    tasks = [asyncio.create_task(asyncio.sleep(0)) for _ in range(100)]
+    for task in tasks:
+        session.background_tasks.append(task)
+
+    await asyncio.gather(*tasks)
+
+    assert session.background_tasks == []
+    await agent.close()
+
+
+async def test_close_cancels_and_drains_registered_inflight_task() -> None:
+    agent = _agent()
+    session = await agent.session()
+    started = asyncio.Event()
+    finalized = asyncio.Event()
+
+    async def background() -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            finalized.set()
+
+    task = asyncio.create_task(background())
+    session.background_tasks.append(task)
+    await started.wait()
+
+    await agent.close()
+
+    assert task.cancelled()
+    assert finalized.is_set()
+    assert session.background_tasks == []
+
+
 async def test_agent_close_runs_task_finalizers_before_closing_provider() -> None:
     order: list[str] = []
     agent = _agent(provider=_Provider(order))

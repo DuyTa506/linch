@@ -25,7 +25,7 @@ class MyTool:
     description: str                               # shown to the model
     input_schema: dict                             # JSON Schema object
     scope: Literal["read", "write", "exec"]
-    parallel: bool                                 # V2 concurrency flag
+    parallel: bool | Callable[[dict], bool]         # concurrency declaration
 
     # Optional Phase-11 reliability attributes (all duck-typed via getattr)
     execution_timeout_ms: float                    # per-tool timeout; 0 = opt-out

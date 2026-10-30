@@ -329,7 +329,9 @@ class Tool(Protocol):
     description: str
     input_schema: dict[str, Any]
     scope: ToolScope
-    parallel: bool
+
+    @property
+    def parallel(self) -> bool | Callable[[dict[str, Any]], bool]: ...
 
     def validate(self, raw: dict[str, Any]) -> dict[str, Any]: ...
 
