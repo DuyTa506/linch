@@ -16,11 +16,12 @@ from typing import Any, Literal, Protocol, cast
 from uuid import UUID, uuid4
 
 from ._json import walk_json
+from ._wire import WIRE_VERSION, require_wire_version
 from .events import (
     IGNORABLE_MAX_DEPTH,
     Event,
-    event_from_dict,
-    event_to_dict,
+    _stored_event_from_dict,
+    _stored_event_to_dict,
     usage_from_dict,
     usage_to_dict,
 )
@@ -40,22 +41,21 @@ from .types import (
     message_to_dict,
 )
 
-# Wire-format version for the serialized RunCheckpoint and stored-event log.
-# Bump only on a breaking change to the persisted shape. `checkpoint_from_dict`
-# reads any version best-effort (unknown future keys are ignored). Stored events
-# are required on read unless their envelope explicitly declares them ignorable.
-SCHEMA_VERSION = 1
+# Wire-format version for serialized run state.  Keep this alias for the
+# existing top-level ``RUN_SCHEMA_VERSION`` export; the private module owns the
+# one actual version constant shared by every persisted envelope.
+SCHEMA_VERSION = WIRE_VERSION
 
 # A run contract is versioned independently from the checkpoint wire format.
 # Checkpoints describe *where* execution stopped; this contract describes the
 # execution inputs that must stay stable when that checkpoint is resumed.
-RUN_CONTRACT_SCHEMA_VERSION = 1
+RUN_CONTRACT_SCHEMA_VERSION = WIRE_VERSION
 RUN_CONTRACT_META_KEY = "run_contract"
 
 # Model input snapshots have their own codec version because their compatibility
 # requirement is stricter than the best-effort checkpoint/event readers.  A
 # pending provider request must either decode exactly or fail closed.
-MODEL_INPUT_CODEC_VERSION = 1
+MODEL_INPUT_CODEC_VERSION = WIRE_VERSION
 
 # "suspended" is a workflow parked at a wf.interrupt; distinct from
 # "waiting_permission", which belongs to the tool-permission flow.
@@ -609,11 +609,7 @@ def create_model_input_snapshot(
 
 
 def _validated_snapshot_payload(snapshot: ModelInputSnapshot) -> dict[str, Any]:
-    if snapshot.codec_version != MODEL_INPUT_CODEC_VERSION:
-        raise ModelInputSnapshotError(
-            "unsupported model-input snapshot codec version "
-            f"{snapshot.codec_version}; expected {MODEL_INPUT_CODEC_VERSION}"
-        )
+    require_wire_version(snapshot.codec_version)
     expected = _model_input_integrity_hash(snapshot.codec_version, snapshot.request_json)
     if snapshot.integrity_hash != expected:
         raise ModelInputSnapshotError(
@@ -872,6 +868,7 @@ def build_run_contract(
 def run_contract_to_dict(contract: RunContract) -> dict[str, Any]:
     """Encode a run contract with an integrity-checkable fingerprint."""
 
+    require_wire_version(contract.schema_version)
     payload = _json_safe(contract.payload, strict=True)
     return {
         "schema_version": contract.schema_version,
@@ -881,11 +878,12 @@ def run_contract_to_dict(contract: RunContract) -> dict[str, Any]:
 
 
 def run_contract_from_dict(raw: Mapping[str, Any]) -> RunContract:
-    """Decode old or future contract envelopes without rejecting extra keys."""
+    """Decode a current contract envelope while retaining its open payload."""
 
-    version_raw = raw.get("schema_version", 1)
-    if not isinstance(version_raw, int) or isinstance(version_raw, bool) or version_raw < 1:
-        raise ValueError("run contract schema_version must be a positive integer")
+    if not isinstance(raw, Mapping):
+        require_wire_version(None)
+    require_wire_version(raw.get("schema_version"))
+    version_raw = raw["schema_version"]
     payload_raw = raw.get("payload")
     if not isinstance(payload_raw, Mapping):
         raise ValueError("run contract payload must be a mapping")
@@ -919,7 +917,7 @@ def run_contract_from_meta(meta: Mapping[str, Any]) -> RunContract | None:
         return None
     raw = meta[RUN_CONTRACT_META_KEY]
     if not isinstance(raw, Mapping):
-        raise ValueError("persisted run_contract metadata must be a mapping")
+        require_wire_version(None)
     return run_contract_from_dict(raw)
 
 
@@ -1094,6 +1092,9 @@ def _extension_state_from_raw(value: Any) -> dict[str, Any]:
 
 
 def checkpoint_from_dict(raw: dict[str, Any]) -> RunCheckpoint:
+    if not isinstance(raw, dict):
+        require_wire_version(None)
+    require_wire_version(raw.get("schema_version"))
     assistant_raw = raw.get("assistant_message")
     pending_blocks: list[ToolUseBlock] = []
     for item in raw.get("pending_tool_blocks", []):
@@ -1213,9 +1214,9 @@ def _copy_record(record: RunRecord) -> RunRecord:
 
 
 def _copy_event(event: Event) -> Event:
-    raw = _json_safe(event_to_dict(event), strict=False)
+    raw = _json_safe(_stored_event_to_dict(event), strict=False)
     assert isinstance(raw, dict)
-    return event_from_dict(raw)
+    return _stored_event_from_dict(raw)
 
 
 def _validate_model_input_snapshot(snapshot: ModelInputSnapshot) -> ModelInputSnapshot:
@@ -1981,7 +1982,7 @@ def _append_events(
             run_id,
             base + index,
             ts,
-            json.dumps(_json_safe(event_to_dict(event), strict=False), allow_nan=False),
+            json.dumps(_json_safe(_stored_event_to_dict(event), strict=False), allow_nan=False),
         )
         for index, event in enumerate(events, start=1)
     ]
@@ -2006,7 +2007,7 @@ def _load_events(
         StoredRunEvent(
             seq=row[0],
             appended_at=row[1],
-            event=event_from_dict(json.loads(row[2])),
+            event=_stored_event_from_dict(json.loads(row[2])),
         )
         for row in rows
     ]

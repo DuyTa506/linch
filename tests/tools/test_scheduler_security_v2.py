@@ -160,6 +160,7 @@ async def test_checkpoint_restored_tool_allowlist_beats_stored_permission_replay
         current_turn_allowed_tools=["Read"],
         current_turn_permission_decisions={
             permission_decision_key("Bash", input): {
+                "schema_version": 3,
                 "decision": "allow",
                 "reason": None,
                 "updated_input": None,
@@ -214,6 +215,7 @@ async def test_legacy_updated_input_decision_is_not_replayed() -> None:
     session = _session(
         current_turn_permission_decisions={
             permission_decision_key("Write", final_input): {
+                "schema_version": 3,
                 "decision": "allow",
                 "reason": None,
                 "updated_input": {"file_path": "other.txt"},

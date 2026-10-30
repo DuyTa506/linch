@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 from uuid import uuid4
 
+from .._wire import UnsupportedWireVersionError
 from ..errors import AbortError, ConfigError
 from ..events import Event, ResultEvent, UserEvent
 from ..hooks import (
@@ -166,6 +167,8 @@ async def resume_loop(session: Session, run_id: str, opts: RunOptions) -> AsyncI
                 and checkpoint.model_input_snapshot_id is None
             ),
         )
+    except UnsupportedWireVersionError:
+        raise
     except (RunContractMismatchError, TypeError, ValueError) as exc:
         raise ConfigError(f"Cannot safely resume run {run_id}: {exc}") from None
     async for event in _run_loop_impl(

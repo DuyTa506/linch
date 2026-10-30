@@ -67,7 +67,7 @@ def test_strict_codec_roundtrip() -> None:
 
     intent, receipt = _records()
     encoded = receipt_to_dict(receipt)
-    assert encoded["version"] == 1
+    assert encoded["version"] == 3
     assert encoded["usage"] == {
         "input_tokens": 111,
         "output_tokens": 22,
@@ -84,8 +84,8 @@ def test_strict_codec_roundtrip() -> None:
 
 @pytest.mark.parametrize("record_kind", ["intent", "receipt"])
 def test_unknown_required_version_fails_closed(record_kind: str) -> None:
+    from linch._wire import UnsupportedWireVersionError
     from linch.model_calls import (
-        _ModelCallError,
         intent_from_dict,
         intent_to_dict,
         receipt_from_dict,
@@ -95,7 +95,7 @@ def test_unknown_required_version_fails_closed(record_kind: str) -> None:
     intent, receipt = _records()
     raw = intent_to_dict(intent) if record_kind == "intent" else receipt_to_dict(receipt)
     raw["version"] = 2
-    with pytest.raises(_ModelCallError):
+    with pytest.raises(UnsupportedWireVersionError):
         (intent_from_dict if record_kind == "intent" else receipt_from_dict)(raw)
 
 
@@ -511,7 +511,9 @@ async def test_model_call_event_codec_is_strict_and_detached() -> None:
     assert restored.record["usage"]["input_tokens"] == 111
     serialized = event_to_dict(event)
     serialized["schema_version"] = 2
-    with pytest.raises(_ModelCallError):
+    from linch._wire import UnsupportedWireVersionError
+
+    with pytest.raises(UnsupportedWireVersionError):
         event_from_dict(serialized)
     serialized = event_to_dict(event)
     serialized["run_id"] = "wrong-run"
@@ -572,7 +574,7 @@ def test_all_model_call_journal_kinds_roundtrip() -> None:
         "dispatch_started": intent_to_dict(intent),
         "receipt": receipt_to_dict(receipt),
         "abandoned": {
-            "version": 1,
+            "version": 3,
             "intent": intent_to_dict(intent),
             "reason": "cancelled",
             "usage_status": "unknown",
@@ -715,7 +717,7 @@ async def test_dispatch_after_abandonment_in_journal_fails_closed() -> None:
             intent.run_id,
             "abandoned",
             {
-                "version": 1,
+                "version": 3,
                 "intent": raw,
                 "reason": "cancelled",
                 "usage_status": "not_dispatched",
@@ -1109,5 +1111,5 @@ def test_journal_preserves_golden_bytes() -> None:
     )
     encoded = json.dumps(owned, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     assert hashlib.sha256(encoded.encode()).hexdigest() == (
-        "538a016ee0833092cc9a1f80af5d2484d4626e0084f04411ce65f762dc7e5c38"
+        "aae1c0d602774a14b851bf76ef076cc1c38b3b1e3030fea12132b8de612a83c0"
     )

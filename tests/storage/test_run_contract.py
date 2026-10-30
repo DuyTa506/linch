@@ -200,8 +200,8 @@ def test_contract_preserves_golden_bytes_and_fingerprint() -> None:
 
     contract = _contract()
     assert contract.fingerprint == (
-        "sha256:e1bdb68711b03c5078a41b6dcb4903efb73b0672b7a25f01c4b5a2dc097b76bc"
+        "sha256:3bfc7048fae97d9142d26766b98600703a75259c13cd17c4468fe5870e0e2e2f"
     )
     assert hashlib.sha256(canonical_json(run_contract_to_dict(contract)).encode()).hexdigest() == (
-        "0dcb825540ed156f718bd927eff81b3f9f9e1cabbf8a32a4fc4c7d210c711b2b"
+        "a53e0ae51aba48ad019aa7dead93e000aff803d2d880f7b7d1c0276a1d2c9632"
     )

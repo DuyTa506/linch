@@ -1,14 +1,13 @@
-"""Versioned serialization / resume forward-compat (ROADMAP Phase 5.3).
+"""Versioned serialization / resume wire contracts.
 
-The `RunCheckpoint` wire format and the stored-event log are a stable, versioned
-contract. A checkpoint dict carries an explicit `schema_version`; a loader from an
-older binary must tolerate a *newer* checkpoint (unknown future keys, a higher
-version) without crashing. Stored events are required on read unless a future
-event explicitly carries a valid ``ignorable: true`` envelope.
+The `RunCheckpoint` wire format and the stored-event log are a strict, versioned
+contract. Pre-3.0 and unknown-generation state is rejected. Stored events are
+required on read unless a future event explicitly carries a valid
+``ignorable: true`` envelope.
 
-Verify: the version stamp is present; `checkpoint_from_dict` round-trips a
-future-versioned dict; `load_events` preserves explicitly ignorable events and
-fails closed for required or malformed rows.
+Verify: the version stamp is present; `checkpoint_from_dict` rejects an
+incompatible-versioned dict; `load_events` preserves explicitly ignorable
+events and fails closed for required or malformed rows.
 """
 
 from __future__ import annotations
@@ -72,21 +71,16 @@ def test_provider_snapshot_preserves_identity_and_messages() -> None:
     assert result.content == "activated"
 
 
-def test_checkpoint_from_dict_tolerates_future_version_and_unknown_keys() -> None:
+def test_checkpoint_from_dict_rejects_future_version_before_field_defaults() -> None:
+    from linch._wire import UnsupportedWireVersionError
+
     data = checkpoint_to_dict(_checkpoint())
     # Simulate a checkpoint written by a NEWER binary: bumped version + new field.
     data["schema_version"] = SCHEMA_VERSION + 99
     data["some_future_field"] = {"nested": True}
 
-    restored = checkpoint_from_dict(data)
-
-    assert restored.phase == "tool_batch_pending"
-    assert restored.turn_index == 2
-    assert restored.pending_tool_blocks[0].name == "Search"
-    assert restored.total_usage.output_tokens == 4
-    assert restored.truncation_attempts == 1
-    assert restored.truncation_prefix == "chunk one"
-    assert restored.pending_truncation_feedback == "continue"
+    with pytest.raises(UnsupportedWireVersionError, match="start a new run"):
+        checkpoint_from_dict(data)
 
 
 def test_checkpoint_from_dict_defaults_missing_truncation_attempts() -> None:
@@ -161,11 +155,17 @@ async def test_load_events_preserves_explicitly_ignorable_future_events(tmp_path
             "run-1",
             ToolCallStartEvent(tool_use_id="t1", tool_name="Search", input={}, summary="s"),
         )
-        future_raw = {"type": "telepathy_event", "ignorable": True, "payload": 42}
+        future_raw = {
+            "type": "telepathy_event",
+            "ignorable": True,
+            "schema_version": 97,
+            "payload": 42,
+        }
+        stored_future = {"schema_version": SCHEMA_VERSION, "event": future_raw}
         await store._exec.run(
             lambda c: c.execute(
                 "insert into run_events (run_id, seq, appended_at, event) values (?, ?, ?, ?)",
-                ("run-1", 2, "2026-01-01T00:00:00Z", json.dumps(future_raw)),
+                ("run-1", 2, "2026-01-01T00:00:00Z", json.dumps(stored_future)),
             )
         )
 
@@ -184,10 +184,29 @@ async def test_load_events_preserves_explicitly_ignorable_future_events(tmp_path
 @pytest.mark.parametrize(
     ("encoded", "error"),
     [
-        (json.dumps({"type": "telepathy_event", "payload": 42}), "unknown event type"),
-        (json.dumps({"type": "", "ignorable": True}), "non-empty string"),
-        (json.dumps({"ignorable": True}), "non-empty string"),
-        (json.dumps([]), "event must be an object"),
+        (
+            json.dumps(
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "event": {"type": "telepathy_event", "payload": 42},
+                }
+            ),
+            "unknown event type",
+        ),
+        (
+            json.dumps(
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "event": {"type": "", "ignorable": True},
+                }
+            ),
+            "non-empty string",
+        ),
+        (
+            json.dumps({"schema_version": SCHEMA_VERSION, "event": {"ignorable": True}}),
+            "non-empty string",
+        ),
+        (json.dumps([]), "state was written by Linch < 3.0"),
         ("{", "Expecting property name"),
     ],
 )

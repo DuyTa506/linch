@@ -293,7 +293,10 @@ async def test_malformed_stored_permission_decision_reprompts() -> None:
         tools_override=None,
         current_turn_allowed_tools=None,
         current_turn_permission_decisions={
-            permission_decision_key("WriteDummy", {}): {"reason": "corrupt"}
+            permission_decision_key("WriteDummy", {}): {
+                "schema_version": 3,
+                "reason": "corrupt",
+            }
         },
     )
 
@@ -485,7 +488,7 @@ def test_permission_decision_from_dict_rejects_missing_decision() -> None:
     from linch.permissions.keys import permission_decision_from_dict
 
     with pytest.raises(ValueError, match="stored permission decision"):
-        permission_decision_from_dict({"reason": "corrupt"})
+        permission_decision_from_dict({"schema_version": 3, "reason": "corrupt"})
 
 
 def test_event_round_trip() -> None:

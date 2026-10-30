@@ -8,6 +8,7 @@ from copy import deepcopy
 from html import escape
 from typing import Any, cast
 
+from .._wire import WIRE_VERSION, require_wire_version
 from ..errors import ConfigError
 from ..events import (
     AssistantEvent,
@@ -28,7 +29,7 @@ from ..types import (
 )
 
 _MODEL_CALL_RUNTIME_NAMESPACE = "linch.model_calls.v1"
-_MODEL_CALL_RUNTIME_VERSION = 1
+_MODEL_CALL_RUNTIME_VERSION = WIRE_VERSION
 _ACTIVE_PRIMARY_FIELDS = {
     "version",
     "logical_call_id",
@@ -53,13 +54,12 @@ def _model_call_runtime_from_extension(
     raw = extension_state.get(_MODEL_CALL_RUNTIME_NAMESPACE)
     if raw is None:
         return None, None
-    if not isinstance(raw, dict) or set(raw) != {"version", "ledger", "active_primary"}:
+    if not isinstance(raw, dict):
+        require_wire_version(None)
+    require_wire_version(raw.get("version"))
+    if set(raw) != {"version", "ledger", "active_primary"}:
         raise ConfigError("invalid model-call checkpoint runtime envelope")
-    if (
-        type(raw.get("version")) is not int
-        or raw.get("version") != _MODEL_CALL_RUNTIME_VERSION
-        or not isinstance(raw["ledger"], dict)
-    ):
+    if not isinstance(raw["ledger"], dict):
         raise ConfigError("invalid model-call checkpoint runtime envelope")
     active = raw["active_primary"]
     if active is not None:
@@ -88,9 +88,10 @@ def _model_call_runtime_to_extension(
 
 
 def _validate_active_primary_binding(raw: Any) -> None:
-    if not isinstance(raw, dict) or set(raw) != _ACTIVE_PRIMARY_FIELDS:
-        raise ConfigError("invalid active-primary checkpoint binding")
-    if type(raw.get("version")) is not int or raw.get("version") != _MODEL_CALL_RUNTIME_VERSION:
+    if not isinstance(raw, dict):
+        require_wire_version(None)
+    require_wire_version(raw.get("version"))
+    if set(raw) != _ACTIVE_PRIMARY_FIELDS:
         raise ConfigError("invalid active-primary checkpoint binding")
     for name in (
         "logical_call_id",
