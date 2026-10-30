@@ -78,10 +78,15 @@ on the agent bus. Leaking a listener across runs is a tenant-isolation defect.
 `parallel=True`, but the scheduler only parallelizes `scope == "read"`, so
 subagents serialize. Do **not** widen the scheduler rule: write-scoped tools
 such as `tools/tasks.py` also declare `parallel = True` and share state, so a
-scope-independent bool would race them. Use the existing input-aware seam
-instead: `SubagentTool.parallel` becomes a callable that returns `True`
-(each child runs in its own session). `scheduler.py` stays unchanged; result
-ordering stays provider order.
+scope-independent bool would race them. Principle (owner): **only read work
+runs in parallel.** A subagent is "read" only when every tool it can use is
+read-scoped; two write-capable subagents in parallel would race on the same
+files/DB. So `SubagentTool.parallel` becomes an input-aware callable that
+returns `True` only when `subagent_type` resolves to a definition whose
+allowed tools are an explicit list, all resolvable, all `scope == "read"`.
+Anything else — general-purpose (full tool access), unknown type, inherited
+or unresolvable tools, background mode — returns `False` (fail closed).
+`scheduler.py` stays unchanged; result ordering stays provider order.
 
 **D8 — Failures are visible.** A run-store/session-store write failure during a
 run ends the run as `failed` with a typed `ErrorEvent`, never a silent stop.
