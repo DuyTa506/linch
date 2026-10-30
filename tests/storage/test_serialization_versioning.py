@@ -226,3 +226,23 @@ def test_removed_discovery_guard_is_rejected_as_unknown_content() -> None:
                 ],
             }
         )
+
+
+@pytest.mark.parametrize("extra_field", ["tool_activations", "unknown_control"])
+def test_tool_result_rejects_unknown_fields_instead_of_discarding_facts(extra_field: str) -> None:
+    from linch.types import message_from_dict
+
+    with pytest.raises(ValueError, match="unknown tool_result fields"):
+        message_from_dict(
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "search-call",
+                        "content": "activated",
+                        extra_field: [{"schema_version": 1, "name": "deferred_tool"}],
+                    }
+                ],
+            }
+        )

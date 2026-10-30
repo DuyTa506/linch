@@ -225,6 +225,9 @@ def block_from_dict(raw: dict[str, Any]) -> ContentBlock:
             id=str(raw["id"]), name=str(raw["name"]), input=dict(raw.get("input", {}))
         )
     if typ == "tool_result":
+        unknown_fields = raw.keys() - {"type", "tool_use_id", "content", "is_error"}
+        if unknown_fields:
+            raise ValueError(f"unknown tool_result fields: {sorted(unknown_fields)!r}")
         raw_content = raw.get("content", "")
         content: str | list[TextBlock | ImageBlock]
         if isinstance(raw_content, list):
