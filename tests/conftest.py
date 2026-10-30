@@ -76,17 +76,19 @@ async def pg_dsn(request):
         pytest.skip("AGENT_KIT_TEST_PG_DSN not set")
     asyncpg = pytest.importorskip("asyncpg")
     conn = await asyncpg.connect(dsn)
-    schema = f"linch_case_{uuid4().hex}"
-    await conn.execute(f'CREATE SCHEMA "{schema}"')
-    parts = urlsplit(dsn)
-    query = [
-        (key, value)
-        for key, value in parse_qsl(parts.query, keep_blank_values=True)
-        if key != "search_path"
-    ]
-    query.append(("search_path", schema))
     try:
-        yield urlunsplit(parts._replace(query=urlencode(query)))
+        schema = f"linch_case_{uuid4().hex}"
+        await conn.execute(f'CREATE SCHEMA "{schema}"')
+        try:
+            parts = urlsplit(dsn)
+            query = [
+                (key, value)
+                for key, value in parse_qsl(parts.query, keep_blank_values=True)
+                if key != "search_path"
+            ]
+            query.append(("search_path", schema))
+            yield urlunsplit(parts._replace(query=urlencode(query)))
+        finally:
+            await conn.execute(f'DROP SCHEMA "{schema}" CASCADE')
     finally:
-        await conn.execute(f'DROP SCHEMA "{schema}" CASCADE')
         await conn.close()
