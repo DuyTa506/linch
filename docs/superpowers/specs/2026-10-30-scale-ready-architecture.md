@@ -67,13 +67,21 @@ on the agent bus. Leaking a listener across runs is a tenant-isolation defect.
   keeps today's behavior). Sessions with an active run are never evicted.
 - `SessionLog` read projections stop deep-copying the whole history on every
   read: keep an immutable snapshot cached per log revision, invalidated on
-  append/projection. Model-visible state stays a logged projection.
+  append/projection. Model-visible state stays a logged projection. The deep
+  copy exists so callers cannot mutate the log: first measure its cost
+  (50 and 200 turns) and list every in-repo reader; a reader that mutates what
+  it reads copies just that part itself. Tests must prove that mutating a
+  returned value can change neither the log nor a later read. If no safe design
+  beats the deep copy measurably, keep it and report the numbers.
 
 **D7 — Subagents run in parallel.** `SubagentTool` is `scope="exec"` with
 `parallel=True`, but the scheduler only parallelizes `scope == "read"`, so
-subagents serialize. Fix so a tool that explicitly opts into parallelism
-(bool or callable) runs in parallel regardless of scope, while preserving
-today's result ordering and the default for tools that did not opt in.
+subagents serialize. Do **not** widen the scheduler rule: write-scoped tools
+such as `tools/tasks.py` also declare `parallel = True` and share state, so a
+scope-independent bool would race them. Use the existing input-aware seam
+instead: `SubagentTool.parallel` becomes a callable that returns `True`
+(each child runs in its own session). `scheduler.py` stays unchanged; result
+ordering stays provider order.
 
 **D8 — Failures are visible.** A run-store/session-store write failure during a
 run ends the run as `failed` with a typed `ErrorEvent`, never a silent stop.
@@ -99,7 +107,7 @@ Wave 1 (parallel, disjoint files):
 | WP | Branch | Decisions | Owns files |
 |---|---|---|---|
 | 1 | `scale/bench-baseline` | D10 | `scripts/benchmark_runtime.py`, its tests |
-| 2 | `scale/runtime-bounds` | D6, D7 | `agent.py`, `session.py`, `session_log.py`, `scheduler.py` (parallel predicate only), `tools/subagent.py` |
+| 2 | `scale/runtime-bounds` | D6, D7 | `agent.py`, `session.py`, `session_log.py`, `tools/subagent.py` |
 | 3 | `scale/loop-split` | D3, D4, D5 | `loop/` (runner split, new seam), hooks/kernel wiring for the seam |
 | 4 | `scale/durable-runs` | D1, D2, D9 | `run_store.py` (or a new `run_stores/` package), Postgres store, conformance tests; move `SqliteRunStore.save` serialization off the event loop |
 
