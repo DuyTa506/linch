@@ -381,7 +381,6 @@ class AgentOptions:
     tools: ToolRegistry | None = None
     permissions: dict[str, object] | None = None
     session_store: SessionStore | None = None
-    max_idle_sessions: int | None = None
     run_store: RunStore | None = None
     durability: DurabilityOptions | None = None
     cwd: str | None = None
@@ -423,6 +422,7 @@ class AgentOptions:
     execution_backend: ExecutionBackend | ShellBackend | None = None
     context: Context | None = None
     tool_pipeline: ToolPipeline | None = None
+    max_idle_sessions: int | None = None
 
 
 class Agent:
@@ -1535,7 +1535,12 @@ class Agent:
         self, session: Session, seen: set[str] | None = None
     ) -> list[Session] | None:
         """Return the releasable ownership tree, protecting all live work."""
-        if session._active or session._lifecycle_state != _OPEN:
+        if (
+            session._active
+            or session._lifecycle_state != _OPEN
+            or session.pending_notifications
+            or session.pending_child_events
+        ):
             return None
         seen = set() if seen is None else seen
         if session.id in seen:

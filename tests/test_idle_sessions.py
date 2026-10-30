@@ -40,6 +40,18 @@ def test_idle_session_bound_rejects_invalid_values(bound: Any) -> None:
         _agent(max_idle_sessions=bound)
 
 
+def test_agent_options_preserves_existing_positional_store_arguments() -> None:
+    from linch import AgentOptions, InMemoryRunStore, InMemorySessionStore, OpenAIOptions
+
+    session_store = InMemorySessionStore()
+    run_store = InMemoryRunStore()
+    options = AgentOptions("m", None, OpenAIOptions(), None, None, None, session_store, run_store)
+
+    assert options.session_store is session_store
+    assert options.run_store is run_store
+    assert options.max_idle_sessions is None
+
+
 async def test_idle_sessions_evict_in_last_use_order() -> None:
     agent = _agent(max_idle_sessions=2)
     a = await agent.session(id="a")
@@ -112,6 +124,47 @@ async def test_background_completion_reapplies_the_idle_bound(worker: bool) -> N
 
     assert set(agent._sessions) == {"newer"}
     assert busy._closed
+    await agent.close()
+
+
+@pytest.mark.parametrize("notification", [False, True])
+async def test_background_delivery_is_retained_until_the_next_run(notification: bool) -> None:
+    from linch.events import BackgroundWorkerEvent
+    from linch.types import Message, TextBlock
+
+    agent = _agent(max_idle_sessions=0)
+    session = await agent.session(id="background")
+    gate = asyncio.Event()
+
+    async def complete() -> None:
+        await gate.wait()
+        if notification:
+            await session.notify(Message(role="user", content=[TextBlock(text="completion")]))
+        else:
+            session.pending_child_events.append(
+                BackgroundWorkerEvent(worker_id="w", display_name="Worker", status="completed")
+            )
+
+    task = asyncio.create_task(complete())
+    session.background_tasks.append(task)
+    await _run(session)
+    gate.set()
+    await task
+    if agent._idle_prune_task is not None:
+        await agent._idle_prune_task
+
+    assert not session._closed
+    assert await agent.session(id=session.id) is session
+    events = [event async for event in session.run("collect completion")]
+    if notification:
+        assert any(
+            event.type == "user" and event.message.content == [TextBlock(text="completion")]
+            for event in events
+        )
+    else:
+        assert any(event.type == "background_worker" and event.worker_id == "w" for event in events)
+    assert session._closed
+    assert not agent._sessions
     await agent.close()
 
 
