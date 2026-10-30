@@ -4,6 +4,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
+from .._token_estimation import custom_token_estimate
 from ..types import Message, SystemBlock, TextBlock
 
 if TYPE_CHECKING:
@@ -193,20 +194,16 @@ def _estimate_context_tokens(
     model: str,
 ) -> int:
     system_tokens = _estimate_text("\n".join(block.text for block in system_blocks))
-    if callable(estimator):
-        try:
-            return system_tokens + max(0, int(cast(Any, estimator(messages, model))))
-        except Exception:
-            pass
+    estimate = custom_token_estimate(estimator, messages, model)
+    if estimate is not None:
+        return system_tokens + estimate
     return system_tokens + sum(_estimate_message(message) for message in messages)
 
 
 def _estimate_one_message(message: Message, estimator: Any, model: str) -> int:
-    if callable(estimator):
-        try:
-            return max(0, int(cast(Any, estimator([message], model))))
-        except Exception:
-            pass
+    estimate = custom_token_estimate(estimator, [message], model)
+    if estimate is not None:
+        return estimate
     return _estimate_message(message)
 
 
