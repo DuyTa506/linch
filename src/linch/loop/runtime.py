@@ -1085,7 +1085,14 @@ class RunRuntime:
         store = self.agent.run_store
         if self.run_record is None or store is None:
             return
-        await _flush_events(self.session)
+        buf = self.session._event_journal
+        atomic_checkpoint = (
+            phase in {"started", "user_appended", "provider_pending", "turn_complete"}
+            and buf is not None
+            and buf.can_flush_with_checkpoint
+        )
+        if not atomic_checkpoint:
+            await _flush_events(self.session)
         completed_snapshot_id = (
             self.checkpoint.model_input_snapshot_id
             if self.exact_model_input
@@ -1148,16 +1155,12 @@ class RunRuntime:
             for key in self.checkpointable_hooks:
                 self.checkpoint.extension_state.pop(key, None)
             self.checkpoint.extension_state.update(hook_state)
-        buf = self.session._event_journal
-        guard_prefix_committed = False
+        guard_prefix_committed = (
+            _loop_guard_is_active(self.guard)
+            and phase == "turn_complete"
+            and self.guard_evaluation_count > self.guard_committed_count
+        )
         if _loop_guard_is_active(self.guard):
-            if (
-                phase == "turn_complete"
-                and self.guard_evaluation_count > self.guard_committed_count
-            ):
-                self.guard_evaluation_seq = buf.last_seq if buf is not None else 0
-                self.guard_committed_count = self.guard_evaluation_count
-                guard_prefix_committed = True
             _loop_guard_runtime_to_extension(
                 self.checkpoint.extension_state,
                 evaluation_count=self.guard_committed_count,
@@ -1174,12 +1177,45 @@ class RunRuntime:
             self.checkpoint.tool_batch_event_after_seq = buf.last_seq if buf is not None else None
         elif phase not in ("permission_pending", "tool_executing", "tool_results_appended"):
             self.checkpoint.tool_batch_event_after_seq = None
-        await store_call(
-            self.session,
-            "run.save_checkpoint",
-            store.save_checkpoint(self.run_id, self.checkpoint, status=status),
+        # Only the candidate can see newly allocated cursors before commit.
+        # Keep the live marker and guard facts available if the batch rolls back.
+        candidate = (
+            replace(self.checkpoint, extension_state=dict(self.checkpoint.extension_state))
+            if atomic_checkpoint
+            else self.checkpoint
         )
+        committed_seq = self.guard_evaluation_seq
+
+        def prepare_checkpoint(last_seq: int) -> None:
+            nonlocal committed_seq
+            if guard_prefix_committed:
+                committed_seq = last_seq
+                _loop_guard_runtime_to_extension(
+                    candidate.extension_state,
+                    evaluation_count=self.guard_evaluation_count,
+                    evaluation_seq=last_seq,
+                )
+
+        batched = False
+        if atomic_checkpoint:
+            assert buf is not None
+            batched = await buf.flush_with_checkpoint(
+                candidate, status=status, prepare_checkpoint=prepare_checkpoint
+            )
+        if not batched:
+            if atomic_checkpoint:
+                await _flush_events(self.session)
+            prepare_checkpoint(buf.last_seq if buf is not None else 0)
+            await store_call(
+                self.session,
+                "run.save_checkpoint",
+                store.save_checkpoint(self.run_id, candidate, status=status),
+            )
+        if atomic_checkpoint:
+            self.checkpoint.extension_state = candidate.extension_state
         if guard_prefix_committed:
+            self.guard_committed_count = self.guard_evaluation_count
+            self.guard_evaluation_seq = committed_seq
             assert self.guard_evaluation_ids is not None
             assert self.guard_evaluation_facts is not None
             self.guard_evaluation_ids.clear()

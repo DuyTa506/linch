@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 from uuid import uuid4
 
@@ -309,6 +309,77 @@ class PostgresRunStore:
 
     async def append_event(self, run_id: str, event: Event) -> int:
         return (await self.append_events(run_id, [event]))[0]
+
+    @property
+    def save_checkpoint_with_events(
+        self,
+    ) -> Callable[..., Awaitable[tuple[RunRecord, list[int]]]] | None:
+        """Optional atomic capability, without bypassing custom write overrides.
+
+        A subclass overriding ordinary writes keeps the ordinary runtime path.
+        It can explicitly opt in by defining its own atomic capability.
+        """
+        for name in ("save_checkpoint", "append_event", "append_events", "mark_completed"):
+            implementation = getattr(getattr(self, name), "__func__", None)
+            if implementation is not getattr(PostgresRunStore, name):
+                return None
+        return self._save_checkpoint_with_events
+
+    async def _save_checkpoint_with_events(
+        self,
+        run_id: str,
+        checkpoint: RunCheckpoint,
+        events: list[Event],
+        *,
+        status: str = "running",
+        prepare_checkpoint: Callable[[int], None] | None = None,
+    ) -> tuple[RunRecord, list[int]]:
+        """Commit a phase's events and checkpoint under one lock and fence.
+
+        The synchronous callback binds checkpoint cursors to actual allocated
+        sequences before encoding. It must only prepare the candidate checkpoint;
+        callers publish their live watermarks after this transaction succeeds.
+        """
+        pool = await self._ensure()
+        encoded = [json.dumps(_json_safe_stored_event(event), allow_nan=False) for event in events]
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                row = await self._locked_run(conn, run_id)
+                self._assert_fence(run_id, row)
+                base = int(
+                    await conn.fetchval(
+                        "SELECT COALESCE(MAX(seq), 0) FROM run_events WHERE run_id = $1", run_id
+                    )
+                    or 0
+                )
+                seqs = [base + index for index in range(1, len(events) + 1)]
+                ts = now_iso()
+                if encoded:
+                    await conn.executemany(
+                        "INSERT INTO run_events (run_id, seq, appended_at, event) "
+                        "VALUES ($1, $2, $3, $4)",
+                        [
+                            (run_id, seq, ts, event_json)
+                            for seq, event_json in zip(seqs, encoded, strict=True)
+                        ],
+                    )
+                if prepare_checkpoint is not None:
+                    prepare_checkpoint(seqs[-1] if seqs else base)
+                payload = json.dumps(checkpoint_to_dict(checkpoint), allow_nan=False)
+                updated = await conn.fetchrow(
+                    """
+                    UPDATE runs SET updated_at = $1, status = $2, checkpoint = $3
+                    WHERE id = $4
+                    RETURNING id, session_id, status, created_at, updated_at, checkpoint, meta
+                    """,
+                    ts,
+                    status,
+                    payload,
+                    run_id,
+                )
+                assert updated is not None
+                result = _row_record(updated)
+        return result, seqs
 
     async def append_events(self, run_id: str, events: list[Event]) -> list[int]:
         if not events:

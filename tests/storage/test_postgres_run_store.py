@@ -6,6 +6,7 @@ import asyncio
 import importlib.util
 import os
 import sys
+import time
 from typing import Any
 from uuid import uuid4
 
@@ -230,3 +231,198 @@ async def test_postgres_claim_rollback_does_not_publish_local_lease(
         if real_pool is not None:
             first._pool = real_pool
         await asyncio.gather(first.close(), peer.close())
+
+
+def _atomic_checkpoint(label: str = "before"):
+    from linch.run_store import RunCheckpoint
+    from linch.types import Usage
+
+    return RunCheckpoint(phase="turn_complete", prompt=label, turn_index=1, total_usage=Usage())
+
+
+def _atomic_event(label: str):
+    from linch.events import UserEvent
+    from linch.types import Message, TextBlock
+
+    return UserEvent(message=Message(role="user", content=[TextBlock(text=label)]))
+
+
+class _InspectConnection:
+    def __init__(self, real: Any, pool: _InspectPool) -> None:
+        self._real, self._pool = real, pool
+
+    def transaction(self, *args: Any, **kwargs: Any) -> Any:
+        self._pool.transactions += 1
+        return self._real.transaction(*args, **kwargs)
+
+    async def fetchrow(self, query: str, *args: Any) -> Any:
+        if "UPDATE runs SET updated_at" in query:
+            if self._pool.before_update is not None:
+                await self._pool.before_update()
+            if self._pool.fail_update:
+                raise OSError("checkpoint update failed")
+        return await self._real.fetchrow(query, *args)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+
+class _InspectAcquire:
+    def __init__(self, real: Any, pool: _InspectPool) -> None:
+        self._real, self._pool = real, pool
+
+    async def __aenter__(self) -> _InspectConnection:
+        return _InspectConnection(await self._real.__aenter__(), self._pool)
+
+    async def __aexit__(self, *args: Any) -> Any:
+        return await self._real.__aexit__(*args)
+
+
+class _InspectPool:
+    def __init__(self, real: Any, *, before_update: Any = None, fail_update: bool = False):
+        self.real, self.before_update, self.fail_update = real, before_update, fail_update
+        self.transactions = 0
+
+    def acquire(self) -> _InspectAcquire:
+        return _InspectAcquire(self.real.acquire(), self)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.real, name)
+
+
+async def test_atomic_checkpoint_events_share_one_transaction_and_visibility(pg_dsn) -> None:
+    from linch.run_stores.postgres import PostgresRunStore
+
+    store, peer = PostgresRunStore(pg_dsn), PostgresRunStore(pg_dsn)
+    run_id = f"atomic-visible-{uuid4()}"
+    real_pool = None
+    try:
+        await store.create_run("session", id=run_id)
+        await store.save_checkpoint(run_id, _atomic_checkpoint())
+        await peer.append_event(run_id, _atomic_event("peer"))
+        real_pool = store._pool
+        observations = []
+
+        async def before_update() -> None:
+            record = await peer.load_run(run_id)
+            observations.append((record.checkpoint.prompt, len(await peer.load_events(run_id))))
+
+        inspected = _InspectPool(real_pool, before_update=before_update)
+        store._pool = inspected
+        capability = getattr(store, "save_checkpoint_with_events", None)
+        assert callable(capability), "Postgres must offer optional atomic persistence"
+        checkpoint = _atomic_checkpoint("after")
+        bound = []
+
+        def prepare(last_seq: int) -> None:
+            bound.append(last_seq)
+            checkpoint.extension_state["allocated_seq"] = last_seq
+
+        record, seqs = await capability(
+            run_id,
+            checkpoint,
+            [_atomic_event("one"), _atomic_event("two")],
+            status="completed",
+            prepare_checkpoint=prepare,
+        )
+        assert inspected.transactions == 1
+        assert observations == [("before", 1)]
+        assert seqs == [2, 3]
+        assert bound == [3]
+        assert record.checkpoint.extension_state == {"allocated_seq": 3}
+        assert record.status == "completed"
+        assert (await peer.load_run(run_id)).checkpoint.prompt == "after"
+        assert [row.seq for row in await peer.load_events(run_id)] == [1, 2, 3]
+        assert await peer.append_event(run_id, _atomic_event("next")) == 4
+    finally:
+        if real_pool is not None:
+            store._pool = real_pool
+        await asyncio.gather(store.close(), peer.close())
+
+
+@pytest.mark.parametrize("failure", ["update", "prepare", "commit", "cancelled"])
+async def test_atomic_checkpoint_failure_rolls_back_events_and_checkpoint(pg_dsn, failure) -> None:
+    from linch.run_stores.postgres import PostgresRunStore
+
+    store = PostgresRunStore(pg_dsn)
+    run_id = f"atomic-rollback-{uuid4()}"
+    real_pool = None
+    try:
+        await store.create_run("session", id=run_id)
+        await store.save_checkpoint(run_id, _atomic_checkpoint())
+        await store.append_event(run_id, _atomic_event("before"))
+        real_pool = store._pool
+        capability = getattr(store, "save_checkpoint_with_events", None)
+        assert callable(capability), "Postgres must offer optional atomic persistence"
+        failure_type = asyncio.CancelledError if failure == "cancelled" else RuntimeError
+        if failure == "update":
+            store._pool = _InspectPool(real_pool, fail_update=True)
+            failure_type = OSError
+        elif failure in {"commit", "cancelled"}:
+            store._pool = _RollbackPool(real_pool, failure_type)
+
+        def prepare(last_seq: int) -> None:
+            assert last_seq == 2
+            if failure == "prepare":
+                raise RuntimeError("prepare failed")
+
+        with pytest.raises(failure_type):
+            await capability(
+                run_id,
+                _atomic_checkpoint("after"),
+                [_atomic_event("after")],
+                status="completed",
+                prepare_checkpoint=prepare,
+            )
+        store._pool = real_pool
+        record = await store.load_run(run_id)
+        assert record.status == "running"
+        assert record.checkpoint.prompt == "before"
+        assert [row.seq for row in await store.load_events(run_id)] == [1]
+    finally:
+        if real_pool is not None:
+            store._pool = real_pool
+        await store.close()
+
+
+async def test_atomic_checkpoint_fencing_leaves_both_components_unchanged(pg_dsn) -> None:
+    from linch.run_store import LeaseLostError
+    from linch.run_stores.postgres import PostgresRunStore
+
+    store, peer = PostgresRunStore(pg_dsn), PostgresRunStore(pg_dsn)
+    run_id = f"atomic-fenced-{uuid4()}"
+    try:
+        await store.create_run("session", id=run_id)
+        await store.save_checkpoint(run_id, _atomic_checkpoint())
+        lease = await store.claim(run_id, "old", 0.01)
+        await asyncio.sleep(max(0, lease.expires_at - time.time()) + 0.02)
+        await peer.claim(run_id, "new", 30)
+        capability = getattr(store, "save_checkpoint_with_events", None)
+        assert callable(capability), "Postgres must offer optional atomic persistence"
+        with pytest.raises(LeaseLostError):
+            await capability(run_id, _atomic_checkpoint("zombie"), [_atomic_event("zombie")])
+        record = await peer.load_run(run_id)
+        assert record.checkpoint.prompt == "before"
+        assert await peer.load_events(run_id) == []
+        assert store._held_leases[run_id] == lease.epoch
+    finally:
+        await asyncio.gather(store.close(), peer.close())
+
+
+@pytest.mark.parametrize(
+    "primitive", ["save_checkpoint", "append_event", "append_events", "mark_completed"]
+)
+def test_inherited_atomic_capability_does_not_bypass_legacy_overrides(
+    primitive, monkeypatch
+) -> None:
+    import linch.run_stores.postgres as postgres_module
+    from linch.run_stores.postgres import PostgresRunStore
+
+    monkeypatch.setattr(postgres_module, "_import_asyncpg", lambda: None)
+
+    async def override(*args, **kwargs):
+        raise AssertionError("custom override")
+
+    custom = type("CustomStore", (PostgresRunStore,), {primitive: override})("unused")
+    assert getattr(custom, "save_checkpoint_with_events", None) is None
+    assert callable(getattr(PostgresRunStore("unused"), "save_checkpoint_with_events", None))
