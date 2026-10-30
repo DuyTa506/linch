@@ -446,6 +446,8 @@ async def _drop_postgres_schema(raw_dsn: str, schema: str) -> None:
     """Drop exactly one validated scale schema using the unscoped DSN."""
     import asyncpg
 
+    if _SCALE_SCHEMA.fullmatch(schema) is None:
+        raise ValueError(f"invalid benchmark schema: {schema!r}")
     parts = urlsplit(raw_dsn)
     base_query = [
         (key, value)
