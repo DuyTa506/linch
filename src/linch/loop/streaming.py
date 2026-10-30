@@ -6,11 +6,13 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from dataclasses import dataclass
 from time import monotonic
 from typing import Any, cast, get_args
 from uuid import uuid4
 
+from .._telemetry import trace_chat
 from ..compaction import (
     apply_micro_compaction,
     build_compaction_event,
@@ -403,29 +405,32 @@ async def _accounted_primary_stream(
             # The marker is durable before the physical iterator can advance.
             _throw_if_aborted(req.signal)
             ledger.assert_may_start()
-            async for item in _stream_turn(session, req, state=state, stage_partials=True):
-                if isinstance(item, _ParsedPrimaryAssembly):
-                    receipt = _primary_receipt(
-                        intent,
-                        state,
-                        started_at=started_at,
-                        reported=True,
-                    )
-                    terminal_attempted = True
-                    await ledger.settle(receipt)
-                    yield _AccountedPrimaryAssembly(
-                        assembly=item.assembly,
-                        receipt=receipt,
-                        rejected_native=state.native_failure is not None,
-                    )
-                    return
-                if isinstance(item, _PrimaryPartial):
-                    yield _PrimaryPartial(
-                        event=item.event,
-                        delivery_attempt_id=intent.delivery_attempt_id,
-                    )
-                else:
-                    raise RuntimeError("accounted primary parser yielded an unexpected item")
+            async with aclosing(
+                _stream_turn(session, req, state=state, stage_partials=True)
+            ) as stream:
+                async for item in stream:
+                    if isinstance(item, _ParsedPrimaryAssembly):
+                        receipt = _primary_receipt(
+                            intent,
+                            state,
+                            started_at=started_at,
+                            reported=True,
+                        )
+                        terminal_attempted = True
+                        await ledger.settle(receipt)
+                        yield _AccountedPrimaryAssembly(
+                            assembly=item.assembly,
+                            receipt=receipt,
+                            rejected_native=state.native_failure is not None,
+                        )
+                        return
+                    if isinstance(item, _PrimaryPartial):
+                        yield _PrimaryPartial(
+                            event=item.event,
+                            delivery_attempt_id=intent.delivery_attempt_id,
+                        )
+                    else:
+                        raise RuntimeError("accounted primary parser yielded an unexpected item")
     except BaseException as exc:
         if not terminal_attempted:
             terminal_attempted = True
@@ -460,6 +465,7 @@ async def _accounted_primary_stream(
         raise
 
 
+@trace_chat
 async def _stream_turn(
     session: Session,
     req: ProviderRequest,

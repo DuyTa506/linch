@@ -123,6 +123,8 @@ def make_agent(
     tool_timeout_ms: float | None = None,
     tool_retry: RetryOptions | None = None,
 ) -> SimpleNamespace:
+    from linch import Context
+
     return SimpleNamespace(
         cwd=".",
         tools=registry,
@@ -131,6 +133,7 @@ def make_agent(
         tool_concurrency=8,
         tool_timeout_ms=tool_timeout_ms,
         tool_retry=tool_retry,
+        context=Context(),
     )
 
 

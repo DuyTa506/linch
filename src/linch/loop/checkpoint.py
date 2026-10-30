@@ -8,6 +8,7 @@ from copy import deepcopy
 from html import escape
 from typing import Any, cast
 
+from .._telemetry import store_call
 from .._wire import WIRE_VERSION, require_wire_version
 from ..errors import ConfigError
 from ..events import (
@@ -174,10 +175,13 @@ class RunEventBuffer:
     the session for one run), never process-global.
     """
 
-    __slots__ = ("store", "run_id", "_pending", "_last_seq")
+    __slots__ = ("store", "run_id", "_pending", "_last_seq", "session")
 
-    def __init__(self, store: Any, run_id: str, *, initial_seq: int = 0) -> None:
+    def __init__(
+        self, store: Any, run_id: str, *, initial_seq: int = 0, session: Any = None
+    ) -> None:
         self.store = store
+        self.session = session
         self.run_id = run_id
         self._pending: list[Event] = []
         self._last_seq = max(0, initial_seq)
@@ -199,7 +203,9 @@ class RunEventBuffer:
         appender = getattr(self.store, "append_events", None)
         if appender is not None:
             try:
-                seqs = await appender(self.run_id, pending)
+                seqs = await store_call(
+                    self.session, "run.append_events", appender(self.run_id, pending)
+                )
             except BaseException:
                 self._pending = pending + self._pending
                 raise
@@ -207,7 +213,11 @@ class RunEventBuffer:
             seqs = []
             for index, event in enumerate(pending):
                 try:
-                    seq = await self.store.append_event(self.run_id, event)
+                    seq = await store_call(
+                        self.session,
+                        "run.append_event",
+                        self.store.append_event(self.run_id, event),
+                    )
                 except BaseException:
                     self._pending = pending[index:] + self._pending
                     raise
@@ -227,7 +237,7 @@ async def _persist_event(session: Session, run_id: str, event: Event) -> None:
         return
     store = session.agent.run_store
     if store is not None:
-        await store.append_event(run_id, event)
+        await store_call(session, "run.append_event", store.append_event(run_id, event))
 
 
 async def _flush_events(session: Session) -> None:
@@ -456,7 +466,9 @@ async def _recover_completed_tool_results(
     recovered = dict(completed)
     started: dict[str, ToolCallStartEvent] = {}
     ended: set[str] = set()
-    for stored in await store.load_events(run_id, after_seq=after_seq):
+    for stored in await store_call(
+        session, "run.load_events", store.load_events(run_id, after_seq=after_seq)
+    ):
         event = stored.event
         if (
             isinstance(event, ToolCallStartEvent)

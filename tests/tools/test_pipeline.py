@@ -504,6 +504,7 @@ async def test_dispatch_allows_signal_and_result_mutation() -> None:
 async def test_pipeline_cannot_mutate_away_v2_normalization_boundary() -> None:
     from types import SimpleNamespace
 
+    from linch import Context
     from linch.abort import AbortContext
     from linch.events import ToolCallEndEvent
     from linch.permissions import PermissionEngine
@@ -537,6 +538,7 @@ async def test_pipeline_cannot_mutate_away_v2_normalization_boundary() -> None:
         hooks=[],
         result_offload=None,
         tool_pipeline=pipeline,
+        context=Context(),
     )
     session = SimpleNamespace(
         id="s",

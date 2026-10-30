@@ -12,6 +12,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+from .._telemetry import store_call
 from ..events import ErrorEvent, Event, SkillsLoadedEvent, SystemEvent, UserEvent
 from ..hooks import AgentStartContext, AgentStopContext, HookEvent
 from ..observability import RunResultInfo
@@ -158,7 +159,7 @@ async def initialize_run(ctx: RunStartupContext) -> AsyncIterator[Event]:
                 yield event
             return
         user_message = _prompt_message(ctx, prompt, images)
-        await session.append([user_message])
+        await store_call(session, "session.append", session.append([user_message]))
         await ctx.save_checkpoint("user_appended")
         event = UserEvent(message=user_message, subtype="prompt")
         await _persist_event(session, runtime.run_id, event)
@@ -176,7 +177,7 @@ async def initialize_run(ctx: RunStartupContext) -> AsyncIterator[Event]:
             return
         user_message = _prompt_message(ctx, prompt, images)
         if not _last_message_matches(session, user_message):
-            await session.append([user_message])
+            await store_call(session, "session.append", session.append([user_message]))
         await ctx.save_checkpoint("user_appended")
         event = UserEvent(message=user_message, subtype="prompt")
         await _persist_event(session, runtime.run_id, event)

@@ -13,6 +13,8 @@ from linch.types import ToolUseBlock
 
 
 def _agent(registry: ToolRegistry, *, hooks=(), retry: RetryOptions | None = None):
+    from linch import Context
+
     return SimpleNamespace(
         cwd=".",
         model="m",
@@ -23,6 +25,7 @@ def _agent(registry: ToolRegistry, *, hooks=(), retry: RetryOptions | None = Non
         tool_retry=retry,
         hooks=list(hooks),
         result_offload=None,
+        context=Context(),
     )
 
 

@@ -24,6 +24,13 @@ from linch.tools.builtin import BashTool, GlobTool, GrepTool, WriteTool
 from linch.types import ToolUseBlock, Usage
 
 
+def _context():
+    """Resolve Context at call time so module-reload tests use the live class."""
+    from linch import Context
+
+    return Context()
+
+
 class SleepTool:
     name = "SleepTool"
     description = "Sleep for scheduler duration testing."
@@ -185,6 +192,7 @@ async def test_scheduler_emits_non_zero_duration() -> None:
         tools=registry,
         permission_engine=PermissionEngine(mode="skip-dangerous"),
         tool_concurrency=2,
+        context=_context(),
     )
     session = SimpleNamespace(
         id="s1",
@@ -235,6 +243,7 @@ async def test_scheduler_propagates_abort_from_permission_resolve() -> None:
         tools=registry,
         permission_engine=PermissionEngine(mode="default", can_use_tool=aborting_callback),
         tool_concurrency=2,
+        context=_context(),
     )
     session = SimpleNamespace(
         id="s1",
@@ -285,6 +294,7 @@ async def test_malformed_stored_permission_decision_reprompts() -> None:
             can_use_tool=lambda _req: {"behavior": "allow"},
         ),
         tool_concurrency=2,
+        context=_context(),
     )
     session = SimpleNamespace(
         id="s1",
@@ -324,6 +334,7 @@ async def test_read_tools_with_parallel_flag_run_in_parallel() -> None:
         tools=registry,
         permission_engine=PermissionEngine(mode="skip-dangerous"),
         tool_concurrency=2,
+        context=_context(),
     )
     session = SimpleNamespace(
         id="s1",
@@ -360,6 +371,7 @@ async def test_direct_resource_access_return_is_respected_for_conflicts() -> Non
         tools=registry,
         permission_engine=PermissionEngine(mode="skip-dangerous"),
         tool_concurrency=2,
+        context=_context(),
     )
     session = SimpleNamespace(
         id="s1",

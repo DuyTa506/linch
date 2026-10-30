@@ -14,6 +14,7 @@ from typing import Any, Literal
 
 import jsonschema  # type: ignore[import]
 
+from .._telemetry import store_call
 from ..events import (
     BudgetEvent,
     ErrorEvent,
@@ -141,7 +142,9 @@ async def _budget_exhausted_tail(
     if run_record is not None and store is not None:
         checkpoint.total_usage = total
         await _flush_events(session)
-        await store.mark_failed(run_id, checkpoint, error=budget_error)
+        await store_call(
+            session, "run.mark_failed", store.mark_failed(run_id, checkpoint, error=budget_error)
+        )
     yield event
 
 
@@ -172,7 +175,7 @@ async def _stop_when_tail(
     if run_record is not None and store is not None:
         checkpoint.total_usage = total
         await _flush_events(session)
-        await store.mark_completed(run_id, checkpoint)
+        await store_call(session, "run.mark_completed", store.mark_completed(run_id, checkpoint))
     yield event
 
 
@@ -206,7 +209,7 @@ async def _error_result_tail(
     if run_record is not None and store is not None:
         checkpoint.total_usage = total
         await _flush_events(session)
-        await store.mark_failed(run_id, checkpoint)
+        await store_call(session, "run.mark_failed", store.mark_failed(run_id, checkpoint))
     yield event
 
 
@@ -245,7 +248,7 @@ async def _success_result_tail(
     if run_record is not None and store is not None:
         checkpoint.total_usage = total
         await _flush_events(session)
-        await store.mark_completed(run_id, checkpoint)
+        await store_call(session, "run.mark_completed", store.mark_completed(run_id, checkpoint))
     yield event
 
 
@@ -291,7 +294,9 @@ async def _max_turns_tail(
     if run_record is not None and store is not None:
         checkpoint.total_usage = total
         await _flush_events(session)
-        await store.mark_failed(run_id, checkpoint, error=turn_error)
+        await store_call(
+            session, "run.mark_failed", store.mark_failed(run_id, checkpoint, error=turn_error)
+        )
     yield event
 
 
@@ -305,7 +310,7 @@ async def _gate_retry_tail(
     from ..skills.system_reminder import wrap_in_system_reminder
 
     message = Message(role="user", content=[TextBlock(text=wrap_in_system_reminder(feedback))])
-    await session.append([message])
+    await store_call(session, "session.append", session.append([message]))
     event: Event = UserEvent(message=message)
     await _persist_event(session, run_id, event)
     yield event
@@ -348,7 +353,7 @@ async def _final_tool_retry_tail(
                 )
             )
     message = Message(role="user", content=content)
-    await session.append([message])
+    await store_call(session, "session.append", session.append([message]))
     event: Event = UserEvent(message=message)
     await _persist_event(session, run_id, event)
     yield event

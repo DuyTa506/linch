@@ -3,10 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import AsyncGenerator, Sequence
+from contextlib import aclosing
 from dataclasses import dataclass, replace
 from typing import Any, Protocol, runtime_checkable
 from uuid import uuid4
 
+from ._telemetry import _TelemetryProvider, store_call, trace_compaction
 from ._token_estimation import custom_token_estimate
 from .abort import AbortContext
 from .errors import ConfigError, ProviderError
@@ -313,11 +315,12 @@ async def summarize_with_provider(
     )
 
     text = ""
-    async for ev in provider.stream(req):
-        if ev["type"] == "text_delta":
-            text += ev["text"]
-        elif ev["type"] == "message_end":
-            break
+    async with aclosing(provider.stream(req)) as stream:
+        async for ev in stream:
+            if ev["type"] == "text_delta":
+                text += ev["text"]
+            elif ev["type"] == "message_end":
+                break
 
     return text.strip()
 
@@ -588,16 +591,20 @@ async def _persist_compaction_skill_context(session: Any, ledger: _ModelCallLedg
     if not records:
         return
     try:
-        await session.store.set_invoked_skills(
-            session.id,
-            [
-                {
-                    "name": record.name,
-                    "substituted_body": record.substituted_body,
-                    "invoked_at": record.invoked_at,
-                }
-                for record in records
-            ],
+        await store_call(
+            session,
+            "session.set_invoked_skills",
+            session.store.set_invoked_skills(
+                session.id,
+                [
+                    {
+                        "name": record.name,
+                        "substituted_body": record.substituted_body,
+                        "invoked_at": record.invoked_at,
+                    }
+                    for record in records
+                ],
+            ),
         )
     except BaseException as exc:
         ledger._persistence_failed = True
@@ -803,6 +810,7 @@ def strip_response_chaining(messages: list[Message]) -> list[Message]:
     return out
 
 
+@trace_compaction
 async def _run_compaction_impl(
     session: Any,
     agent: Any,
@@ -876,7 +884,7 @@ async def _run_compaction_impl(
         # Standalone legacy execution retains its gate. Accounted deliveries
         # acquire inside the gateway, once for each physical provider stream.
         async with provider_slot(agent, resolved_model):
-            compacted = await strategy.compact(ctx, agent.provider)
+            compacted = await strategy.compact(ctx, _TelemetryProvider(session, agent.provider))
     else:
         facade = _AccountedCompactionProvider(caller, operation_id, signal)
         try:

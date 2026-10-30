@@ -246,6 +246,8 @@ def test_detailed_prompt_is_domain_neutral():
 @pytest.mark.asyncio
 async def test_maybe_compact_uses_provider_context_window():
     """maybe_compact calls agent.provider.context_window, not openai_responses.context_window."""
+    from linch import Context
+
     fake_provider = _FakeNonOpenAIProvider()
     # fake_provider.context_window returns 1024, so with big messages compaction fires
 
@@ -256,6 +258,7 @@ async def test_maybe_compact_uses_provider_context_window():
         max_output_tokens = None
         compaction = None
         token_estimator = None
+        context = Context()
 
     class FakeSession(_LoggedViews):
         last_usage: object
@@ -265,6 +268,8 @@ async def test_maybe_compact_uses_provider_context_window():
         def __init__(self):
             # Many big messages to exceed 80% of the 1024 token limit
             self._seed_views(_make_messages(40))
+            self.id = "fake-session"
+            self.active_model = None
             self.last_usage = object()  # non-None so maybe_compact proceeds
             self.last_compaction_info = None
 
@@ -273,6 +278,9 @@ async def test_maybe_compact_uses_provider_context_window():
 
     agent = FakeAgent()
     session = FakeSession()
+    # Source-level compaction telemetry resolves provider metadata from the
+    # owning session, just like a real Session object does.
+    session.agent = agent
     signal = AbortContext()
 
     fired = await maybe_compact(session, agent, signal)
@@ -294,7 +302,10 @@ async def test_maybe_compact_estimates_without_last_usage():
         token_estimator = None
 
         def __init__(self, provider):
+            from linch import Context
+
             self.provider = provider
+            self.context = Context()
 
     class FakeSession(_LoggedViews):
         last_usage = None
@@ -305,9 +316,12 @@ async def test_maybe_compact_estimates_without_last_usage():
             self._seed_views(_make_messages(40))
 
     session = FakeSession()
+    agent = FakeAgent(provider)
+    session.agent = agent
+    session.id = "fake-session"
     history_before = list(session.full_history)
 
-    fired = await maybe_compact(session, FakeAgent(provider), AbortContext())
+    fired = await maybe_compact(session, agent, AbortContext())
 
     assert fired is True
     assert provider._stream_calls[0].model == "model-x"
@@ -327,7 +341,10 @@ async def test_maybe_compact_missing_usage_below_estimated_threshold_is_noop():
         token_estimator = staticmethod(lambda messages, model: 1)
 
         def __init__(self, provider):
+            from linch import Context
+
             self.provider = provider
+            self.context = Context()
 
     class FakeSession:
         provider_view = _make_messages(2)
@@ -365,7 +382,10 @@ async def test_compaction_uses_active_fallback_model_consistently():
         compaction_ladder = None
 
         def __init__(self, provider):
+            from linch import Context
+
             self.provider = provider
+            self.context = Context()
 
         @staticmethod
         def token_estimator(messages, model):
@@ -388,9 +408,12 @@ async def test_compaction_uses_active_fallback_model_consistently():
         def __init__(self):
             self._seed_views(_make_messages(40))
 
+    agent = FakeAgent(provider)
     session = FakeSession()
+    session.agent = agent
+    session.id = "fake-session"
 
-    fired = await maybe_compact(session, FakeAgent(provider), AbortContext())
+    fired = await maybe_compact(session, agent, AbortContext())
 
     assert fired is True
     assert provider.window_models == ["fallback-model"]
@@ -408,12 +431,17 @@ class _FakeAgent:
     token_estimator = None
 
     def __init__(self, provider):
+        from linch import Context
+
         self.provider = provider
+        self.context = Context()
 
 
 class _FakeSession(_LoggedViews):
     def __init__(self, n_messages: int = 40):
         self._seed_views(_make_messages(n_messages))
+        self.id = "fake-session"
+        self.active_model = None
         self.last_usage = object()  # non-None so maybe_compact proceeds
         self.last_compaction_info = None
         self.compaction_retry_used_this_turn = False
@@ -458,6 +486,7 @@ async def test_maybe_compact_resilient_retries_transient_provider_error():
     provider = _FlakyThenOkProvider(fail_times=2)
     agent = _FakeAgent(provider)
     session = _FakeSession()
+    session.agent = agent
     signal = AbortContext()
 
     fired = await maybe_compact_resilient(session, agent, signal)
@@ -476,6 +505,7 @@ async def test_maybe_compact_resilient_skips_compaction_when_exhausted():
     agent = _FakeAgent(provider)
     agent.max_retries = 2  # keep the test fast
     session = _FakeSession()
+    session.agent = agent
     original_view = list(session.provider_view)
     signal = AbortContext()
 
@@ -525,6 +555,7 @@ async def test_maybe_compact_resilient_resets_read_tracker_after_partial_micro_e
     agent.compaction_ladder = CompactionLadder(keep_recent_turns=2)
 
     session = _FakeSession()
+    session.agent = agent
     # 12 turns, keep_recent_turns=2 -> 10 old tool results elided but the 2 kept
     # (2000 chars each) still push the projection back over the 0.8*1024 limit,
     # so maybe_compact falls through to the (always-failing) summarization call.

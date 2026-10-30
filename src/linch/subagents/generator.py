@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import re
+from contextlib import aclosing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import yaml  # type: ignore[reportMissingModuleSource]
 
+from .._telemetry import chat_stream
 from ..errors import ConfigError, ProviderError
 from ..types import Message, OutputSchema, ProviderRequest, SystemBlock, TextBlock
 from .loader import AGENT_NAME_RE, load_agents_from_dir, normalize_tools
@@ -260,28 +262,31 @@ async def _query_definition(agent: Agent, user_text: str, *, signal: Any = None)
     text_parts: list[str] = []
     tool_inputs: dict[str, list[str]] = {}
     tool_names: dict[str, str] = {}
-    async for event in agent.provider.stream(req):
-        typ = event.get("type")
-        if typ == "text_delta":
-            text_parts.append(str(event.get("text", "")))
-        elif typ == "tool_use_start":
-            tool_id = str(event["id"])
-            tool_names[tool_id] = str(event.get("name", ""))
-            tool_inputs[tool_id] = []
-        elif typ == "tool_use_input_delta":
-            tool_id = str(event["id"])
-            tool_inputs.setdefault(tool_id, []).append(str(event.get("json_delta", "")))
-        elif typ == "tool_use_end":
-            tool_id = str(event["id"])
-            if tool_names.get(tool_id) == _GENERATOR_SCHEMA.name:
-                raw = "".join(tool_inputs.get(tool_id, []))
-                try:
-                    parsed = json.loads(raw) if raw else {}
-                except json.JSONDecodeError as exc:
-                    raise ProviderError(f"generated subagent tool JSON was invalid: {exc}") from exc
-                if not isinstance(parsed, dict):
-                    raise ProviderError("generated subagent tool output must be a JSON object")
-                return parsed
+    async with aclosing(chat_stream(None, req, agent.provider.stream(req), agent=agent)) as stream:
+        async for event in stream:
+            typ = event.get("type")
+            if typ == "text_delta":
+                text_parts.append(str(event.get("text", "")))
+            elif typ == "tool_use_start":
+                tool_id = str(event["id"])
+                tool_names[tool_id] = str(event.get("name", ""))
+                tool_inputs[tool_id] = []
+            elif typ == "tool_use_input_delta":
+                tool_id = str(event["id"])
+                tool_inputs.setdefault(tool_id, []).append(str(event.get("json_delta", "")))
+            elif typ == "tool_use_end":
+                tool_id = str(event["id"])
+                if tool_names.get(tool_id) == _GENERATOR_SCHEMA.name:
+                    raw = "".join(tool_inputs.get(tool_id, []))
+                    try:
+                        parsed = json.loads(raw) if raw else {}
+                    except json.JSONDecodeError as exc:
+                        raise ProviderError(
+                            f"generated subagent tool JSON was invalid: {exc}"
+                        ) from exc
+                    if not isinstance(parsed, dict):
+                        raise ProviderError("generated subagent tool output must be a JSON object")
+                    return parsed
 
     raw_text = "".join(text_parts).strip()
     if raw_text == "":

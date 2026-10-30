@@ -66,6 +66,7 @@ class AppendMiddleware:
 
 
 def make_agent(registry: Any, middleware: Any = None) -> SimpleNamespace:
+    from linch import Context
     from linch.hooks import ToolMiddlewareHook
     from linch.permissions import PermissionEngine
 
@@ -77,6 +78,7 @@ def make_agent(registry: Any, middleware: Any = None) -> SimpleNamespace:
         max_tool_concurrency=1,
         tool_concurrency=1,
         hooks=hooks,
+        context=Context(),
     )
 
 
@@ -217,6 +219,8 @@ async def test_rewritten_result_enters_provider_history() -> None:
             return ToolResult(content="raw secret")
 
     class FakeProvider(BaseProvider):
+        id = "fake-provider"
+
         def __init__(self) -> None:
             self.requests: list[Any] = []
 

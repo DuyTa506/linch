@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .._prompt_cache import prompt_cache_advisories, tool_signature
+from .._telemetry import store_call
 from ..compaction import build_compaction_event, reset_read_tracker_after_compaction
 from ..context import context_budget_to_dict
 from ..errors import ConfigError
@@ -419,7 +420,7 @@ async def run_provider_turn(ctx: ProviderTurnContext) -> AsyncIterator[Event]:
                 yield event
             return
         await ctx.end_provider_call(stop_reason=assembly.stop_reason, usage=_provider_usage)
-        await session.append([assembly.message])
+        await store_call(session, "session.append", session.append([assembly.message]))
         ctx.force_final_pending = False
         await ctx.save_checkpoint(
             "assistant_appended",
