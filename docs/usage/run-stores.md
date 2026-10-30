@@ -7,8 +7,7 @@ when conversation history and resumable runs must survive a restart.
 | Store | Lifetime | Deployment |
 |---|---|---|
 | `InMemoryRunStore` | Process memory | Tests and local experiments |
-| `SqliteRunStore(path)` | SQLite file | Local durable runs |
-| `PostgresRunStore(dsn)` | Postgres database | Multiple host workers |
+| `PostgresRunStore(dsn)` | Postgres database | Local durability and multiple host workers |
 
 Install the Postgres backend with `pip install 'linch[postgres]'`. Importing
 `PostgresRunStore` does not import asyncpg; constructing it checks the optional
@@ -88,22 +87,15 @@ Instances that never claimed a particular run retain their existing write
 behavior, including when another instance has a lease. All competing host
 workers must opt into claiming for ownership protection.
 
-Built-in SQLite and Postgres stores create complete version-3 schemas,
+Built-in Postgres stores create complete version-3 schemas,
 including run lease columns, on fresh databases. Existing databases with old,
 missing, or unknown schema metadata are rejected without alteration; use fresh
 databases and start new runs. There is no automatic schema upgrade or legacy
 resume option. Persisted envelopes likewise require wire version 3; see the
 [3.0 migration guide](../migration-3.0.md).
 
-SQLite write transactions serialize event sequence allocation across store
-instances sharing the file. Model-input snapshot serialization and SQLite I/O
-run on the existing storage executor, outside the event-loop thread.
-
-Initialize one SQLite store before concurrently opening peers against a
-database that has not enabled WAL. The shared executor can fail with
-`database is locked` during simultaneous initial WAL switches, before schema
-initialization; this existing executor limitation is separate from lease
-transaction locking.
+Postgres transactions serialize per-run event sequence allocation across store
+instances. Asyncpg performs database I/O asynchronously.
 
 ## Reconnect using the persisted event sequence
 

@@ -19,7 +19,7 @@ Backends shown:
   - StateFileBackend     — ephemeral, in-memory, one per session (default).
   - DiskFileBackend      — real files under .linch/offload (inspectable,
                            but kept OUT of your working dir / repo).
-  - CompositeFileBackend — route /memories/ to a persistent SQLite store,
+  - CompositeFileBackend — route /memories/ to separate in-memory state,
                            everything else to ephemeral state.
 
 Run:
@@ -38,7 +38,6 @@ from linch.filesystem import (
     CompositeFileBackend,
     DiskFileBackend,
     OffloadConfig,
-    SqliteFileBackend,
     StateFileBackend,
 )
 from linch.filesystem.offload import maybe_offload
@@ -90,7 +89,7 @@ async def demo_offline() -> None:
     disk = DiskFileBackend(root=".linch/offload")  # real files, but tucked away
     composite = CompositeFileBackend(
         default=StateFileBackend(),
-        routes={"/memories/": SqliteFileBackend(":memory:")},
+        routes={"/memories/": StateFileBackend()},
     )
 
     big = "\n".join(f"line {i}: some verbose tool output" for i in range(500))
@@ -113,7 +112,7 @@ async def demo_offline() -> None:
         print(f"  [{name}] read_file(offset=10, limit=3):\n    " + window.replace("\n", "\n    "))
         assert recovered == big  # nothing lost
 
-    # CompositeFileBackend: /memories/ persists, everything else is ephemeral.
+    # CompositeFileBackend: separate /memories/ and scratch namespaces, both ephemeral.
     await composite.write("/memories/user_pref.txt", "prefers concise answers")
     await composite.write("/scratch/tmp.txt", "throwaway")
     print("\n  composite ls():", await composite.ls())

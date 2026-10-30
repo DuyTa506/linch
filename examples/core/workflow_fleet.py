@@ -13,18 +13,18 @@ With ``Agent(run_store=...)`` and a ``run_id``, every ``wf.agent`` result is
 journaled: re-running the same workflow after a crash replays the unchanged
 prefix from the journal instead of re-running subagents.
 
-Offline demo — two parts:
+Fake-provider demo (set LINCH_POSTGRES_DSN for Postgres durability) — two parts:
 1. a research fan-out with phases, parallel agents, and a shared budget;
 2. a crash + resume showing journal replay (no provider calls for the prefix).
 """
 
 import asyncio
-import tempfile
+import os
 from collections.abc import AsyncIterator
-from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
-from linch import Agent, RunBudget, SqliteRunStore, WorkflowError
+from linch import Agent, PostgresRunStore, RunBudget, WorkflowError
 from linch.sessions import InMemorySessionStore
 from linch.types import Usage
 
@@ -54,7 +54,7 @@ class TextProvider:
         }
 
 
-def make_agent(provider: TextProvider, run_store: SqliteRunStore | None = None) -> Agent:
+def make_agent(provider: TextProvider, run_store: PostgresRunStore | None = None) -> Agent:
     return Agent(
         model="gpt-5",
         provider=provider,
@@ -85,16 +85,18 @@ async def fan_out_demo() -> None:
         )
         return {"findings": deepened, "tokens_spent": wf.budget.spent_tokens}
 
-    result = await agent.run_workflow(
-        research,
-        budget=budget,
-        on_event=lambda e: e.type == "workflow" and print(f"  [{e.kind}] {e.title}"),
-    )
-    print(f"  result: {result}")
-    await agent.close()
+    try:
+        result = await agent.run_workflow(
+            research,
+            budget=budget,
+            on_event=lambda e: e.type == "workflow" and print(f"  [{e.kind}] {e.title}"),
+        )
+        print(f"  result: {result}")
+    finally:
+        await agent.close()
 
 
-async def resume_demo(store_path: str) -> None:
+async def resume_demo(dsn: str) -> None:
     print("── crash + journal resume ──")
 
     async def flow(wf: Any) -> list[str]:
@@ -103,33 +105,36 @@ async def resume_demo(store_path: str) -> None:
         three = await wf.agent("step three")
         return [one, two, three]
 
+    run_id = f"wf-demo-{uuid4().hex}"
     crashing = TextProvider(fail_on_call=3)
-    agent1 = make_agent(crashing, run_store=SqliteRunStore(store_path))
+    agent1 = make_agent(crashing, run_store=PostgresRunStore(dsn))
     try:
-        await agent1.run_workflow(flow, run_id="wf-demo")
+        await agent1.run_workflow(flow, run_id=run_id)
     except WorkflowError as exc:
         print(f"  first attempt failed on call 3: {exc}")
-    await agent1.close()
+    finally:
+        await agent1.close()
 
     healthy = TextProvider()
-    agent2 = make_agent(healthy, run_store=SqliteRunStore(store_path))
-    result = await agent2.run_workflow(
-        flow,
-        run_id="wf-demo",
-        on_event=lambda e: (
-            e.type == "workflow"
-            and e.kind == "agent_replayed"
-            and print(f"  replayed from journal: occurrence {e.occurrence}")
-        ),
-    )
-    print(f"  resumed result: {result} (provider calls on resume: {healthy.calls})")
-    await agent2.close()
+    agent2 = make_agent(healthy, run_store=PostgresRunStore(dsn))
+    try:
+        result = await agent2.run_workflow(
+            flow,
+            run_id=run_id,
+            on_event=lambda e: (
+                e.type == "workflow"
+                and e.kind == "agent_replayed"
+                and print(f"  replayed from journal: occurrence {e.occurrence}")
+            ),
+        )
+        print(f"  resumed result: {result} (provider calls on resume: {healthy.calls})")
+    finally:
+        await agent2.close()
 
 
 async def main() -> None:
     await fan_out_demo()
-    with tempfile.TemporaryDirectory() as tmp:
-        await resume_demo(str(Path(tmp) / "runs.db"))
+    await resume_demo(os.environ["LINCH_POSTGRES_DSN"])
 
 
 if __name__ == "__main__":

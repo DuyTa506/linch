@@ -7,7 +7,8 @@ Showcases the full deep agent preset:
   4. Coordinator mode — pure orchestrator that delegates all heavy work
 
 Run with:
-    DEEPSEEK_API_KEY=sk-... python3 examples/core/deep_agent_resume.py
+    Set DEEPSEEK_API_KEY and LINCH_POSTGRES_DSN, then:
+    PYTHONPATH=src python3 examples/core/deep_agent_resume.py
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import asyncio
 import os
 import sys
 import tempfile
+from uuid import uuid4
 
 DEEPSEEK_BASE = "https://api.deepseek.com"
 MODEL = "deepseek-v4-pro"
@@ -45,19 +47,38 @@ def _provider():
 async def run_durable_planning(work_dir: str) -> None:
     """Deep agent creates a plan via the planner subagent, saves it to /memories,
     and can be resumed after an interruption."""
-    from linch import create_deep_agent
+    from linch import (
+        CompositeFileBackend,
+        PostgresFileBackend,
+        PostgresRunStore,
+        PostgresSessionStore,
+        StateFileBackend,
+        create_deep_agent,
+    )
+
+    dsn = os.environ["LINCH_POSTGRES_DSN"]
+    session_id = f"demo-planning-{uuid4().hex}"
+
+    def durable_agent():
+        return create_deep_agent(
+            model=MODEL,
+            provider=_provider(),
+            cwd=work_dir,
+            session_store=PostgresSessionStore(dsn),
+            run_store=PostgresRunStore(dsn),
+            filesystem=CompositeFileBackend(
+                default=StateFileBackend(),
+                routes={"/memories/": PostgresFileBackend(dsn)},
+            ),
+            permissions={"mode": "skip-dangerous"},
+        )
 
     print("[deep/planning] first run …")
-    agent = create_deep_agent(
-        model=MODEL,
-        provider=_provider(),
-        cwd=work_dir,
-        permissions={"mode": "skip-dangerous"},
-    )
-    session = await agent.session(id="demo-planning")
+    agent = durable_agent()
     run_id = ""
 
     try:
+        session = await agent.session(id=session_id)
         async for event in session.run(
             "Use the planner subagent to create a 3-step plan for building "
             "a Python CLI calculator. Save the plan to /memories/calc-plan.md "
@@ -81,16 +102,11 @@ async def run_durable_planning(work_dir: str) -> None:
     if not run_id:
         return
 
-    # Simulate a process restart: fresh agent instance, same cwd → same SQLite stores.
+    # Simulate a process restart: fresh agent instance, same explicit Postgres DSN.
     print("\n[deep/planning] restarted — resuming …")
-    agent2 = create_deep_agent(
-        model=MODEL,
-        provider=_provider(),
-        cwd=work_dir,
-        permissions={"mode": "skip-dangerous"},
-    )
+    agent2 = durable_agent()
     try:
-        resumed = await agent2.session(id="demo-planning")
+        resumed = await agent2.session(id=session_id)
         async for event in resumed.resume(run_id):
             if event.type == "tool_call_start":
                 print(f"  (resumed) → {event.tool_name}")

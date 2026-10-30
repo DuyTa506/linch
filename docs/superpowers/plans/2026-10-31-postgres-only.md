@@ -60,9 +60,9 @@
 
 **Files:** SQLite callers in `examples/`, `scripts/benchmark_runtime.py`, `scripts/run_report.py`, related tests; current architecture/usage/docs/README references.
 
-- [ ] Use InMemory for transient demonstrations and environment Postgres DSNs for restart/report durability.
-- [ ] Document local Postgres via Docker or pgserver, keep historical spec/measurement records unchanged.
-- [ ] Run script tests, compile examples, verify current references and commit.
+- [x] Use InMemory for transient demonstrations and environment Postgres DSNs for restart/report durability.
+- [x] Document local Postgres via Docker or pgserver, keep historical spec/measurement records unchanged.
+- [x] Run script tests, compile examples, verify current references and commit.
 
 ### Task 5: Migration record and final verification
 
