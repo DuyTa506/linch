@@ -1005,6 +1005,48 @@ class MeasuredStore:
 
     def __getattr__(self, name: str) -> Any:
         method = getattr(self.inner, name)  # Missing optional capabilities stay missing.
+        if name == "save_checkpoint_with_events":
+            # Postgres exposes this optional capability as ``None`` when a
+            # subclass overrides one of the primitive methods it requires.
+            # Preserve that sentinel (and any other non-callable value) so
+            # callers see exactly the wrapped store's capability surface.
+            if method is None or not callable(method):
+                return method
+
+            async def measured_atomic(*args: Any, **kwargs: Any) -> Any:
+                checkpoint = args[1] if len(args) > 1 else kwargs.get("checkpoint")
+                turn = self.metrics.turn.get()
+                if checkpoint is not None:
+                    turn = (
+                        -1
+                        if checkpoint.phase in {"started", "user_appended"}
+                        else checkpoint.turn_index
+                    )
+                    if checkpoint.phase == "provider_pending":
+                        self.metrics.turn.set(turn)
+                events = args[2] if len(args) > 2 else kwargs.get("events", [])
+                result = await method(*args, **kwargs)
+                self.metrics.writes[self.name, name, turn] += 1
+                if self.metrics.capture_payload_bytes:
+                    self.metrics.event_payloads[turn].extend(
+                        len(
+                            json.dumps(_json_safe_stored_event(event), allow_nan=False).encode(
+                                "utf-8"
+                            )
+                        )
+                        for event in events
+                    )
+                    persisted = result[0].checkpoint
+                    if persisted is not None:
+                        size = len(
+                            json.dumps(checkpoint_to_dict(persisted), allow_nan=False).encode(
+                                "utf-8"
+                            )
+                        )
+                        self.metrics.payloads[turn, persisted.phase].append(size)
+                return result
+
+            return measured_atomic
         if name not in self._mutations[self.name]:
             return method
 

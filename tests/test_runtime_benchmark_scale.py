@@ -277,6 +277,72 @@ async def test_measured_store_preserves_capabilities_and_counts_terminal_payload
 
 
 @pytest.mark.asyncio
+async def test_measured_store_wraps_atomic_checkpoint_capability_and_final_payload():
+    benchmark = _load_script()
+    from types import SimpleNamespace
+
+    from linch import RunCheckpoint
+    from linch.events import ToolCallEndEvent
+    from linch.types import Usage
+
+    checkpoint = RunCheckpoint("provider_pending", "before", 3, Usage())
+    event = ToolCallEndEvent(tool_use_id="fixed-call", tool_name="read")
+    calls: list[tuple[str, RunCheckpoint, list[object], str]] = []
+
+    class AtomicStore:
+        async def save_checkpoint_with_events(
+            self,
+            run_id,
+            candidate,
+            events,
+            *,
+            status="running",
+            prepare_checkpoint=None,
+        ):
+            calls.append((run_id, candidate, events, status))
+            assert prepare_checkpoint is not None
+            prepare_checkpoint(42)
+            candidate.prompt = "prepared"
+            return SimpleNamespace(checkpoint=candidate), [17]
+
+    metrics = benchmark.ScaleStoreMetrics()
+    store = benchmark.MeasuredStore(AtomicStore(), "run", metrics)
+
+    result = await store.save_checkpoint_with_events(
+        "run-id", checkpoint, [event], prepare_checkpoint=lambda seq: None
+    )
+
+    assert result[1] == [17]
+    assert calls == [("run-id", checkpoint, [event], "running")]
+    assert metrics.writes["run", "save_checkpoint_with_events", 3] == 1
+    expected_checkpoint_bytes = len(
+        json.dumps(benchmark.checkpoint_to_dict(result[0].checkpoint), allow_nan=False).encode(
+            "utf-8"
+        )
+    )
+    assert metrics.payloads[3, "provider_pending"] == [expected_checkpoint_bytes]
+    expected_event_bytes = len(
+        json.dumps(benchmark._json_safe_stored_event(event), allow_nan=False).encode("utf-8")
+    )
+    assert metrics.event_payloads[3] == [expected_event_bytes]
+
+
+def test_measured_store_preserves_optional_atomic_capability_none_and_absence():
+    benchmark = _load_script()
+    from linch import InMemoryRunStore
+
+    class LegacyStore:
+        save_checkpoint_with_events = None
+
+    metrics = benchmark.ScaleStoreMetrics()
+    assert (
+        benchmark.MeasuredStore(LegacyStore(), "run", metrics).save_checkpoint_with_events is None
+    )
+    with pytest.raises(AttributeError):
+        _ = benchmark.MeasuredStore(InMemoryRunStore(), "run", metrics).save_checkpoint_with_events
+
+
+@pytest.mark.asyncio
 async def test_lag_sampler_records_final_blocking_burst():
     benchmark = _load_script()
     sampler = benchmark.LagSampler(interval=0.01)
