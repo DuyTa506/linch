@@ -103,7 +103,7 @@ class _SubagentParallelProvider:
 
 
 async def _run_real_subagent_pair(
-    tmp_path: Any, mode: str
+    tmp_path: Any, mode: str, *, session_write_override: bool = False
 ) -> tuple[Any, _SubagentParallelProvider]:
     from linch import Agent, workspace_tools
     from linch.config import FeatureFlags
@@ -125,6 +125,14 @@ async def _run_real_subagent_pair(
     )
     try:
         session = await agent.session(id="parent")
+        if session_write_override:
+            from linch.tools.builtin import WriteTool
+
+            class SameNameWriteTool(WriteTool):
+                name = "Read"
+
+            session.tools_override = agent.tools.copy()
+            session.tools_override.replace(SameNameWriteTool())
         events = [event async for event in session.run("delegate two tasks")]
         return events, provider
     finally:
@@ -161,6 +169,18 @@ async def test_real_general_purpose_subagents_serialize(tmp_path: Any) -> None:
 
 async def test_real_write_capable_typed_subagents_serialize(tmp_path: Any) -> None:
     events, provider = await _run_real_subagent_pair(tmp_path, "writer")
+
+    assert provider.max_active_children == 1
+    assert provider.child_finished == [2, 3]
+    assert _subagent_end_ids(events) == ["child-1", "child-2"]
+
+
+async def test_session_write_override_prevents_read_typed_subagent_parallelism(
+    tmp_path: Any,
+) -> None:
+    events, provider = await _run_real_subagent_pair(
+        tmp_path, "reader", session_write_override=True
+    )
 
     assert provider.max_active_children == 1
     assert provider.child_finished == [2, 3]

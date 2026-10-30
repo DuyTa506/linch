@@ -27,7 +27,9 @@ to `scope="read"` may overlap another tool call. An explicit empty list is safe;
 `None` or `"*"` inherits tool access and serializes. General-purpose, unknown,
 unresolvable, write-capable, and background subagents serialize too. Lookup or
 scope errors fail closed. The predicate resolves the current worker catalog,
-including coordinator catalogs installed after the tool is registered. Child
+including coordinator catalogs installed after the tool is registered. An active
+parent exposing this tool through a session-specific registry also serializes:
+the predicate cannot identify the invoking session from input alone. Child
 completion may arrive out of order; result events and provider tool results
 retain the original provider call order. `SubagentContinueTool` and `TaskStopTool`
 keep their existing concurrency declarations.
