@@ -4,885 +4,112 @@ execution, guards, gates, budgets, and durable checkpoints."""
 
 from __future__ import annotations
 
-import json
-import logging
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
-from functools import partial
-from typing import Any, cast
+from collections.abc import AsyncIterator
+from typing import Any
 from uuid import uuid4
 
-from .._prompt_cache import prompt_cache_advisories, tool_signature
-from .._version import get_version
-from ..compaction import (
-    _builtin_compaction_config,
-    _reconcile_paid_compactions,
-    _skill_listing_fingerprint,
-    build_compaction_event,
-    reset_read_tracker_after_compaction,
-)
-from ..context import context_budget_to_dict
 from ..errors import AbortError, ConfigError
-from ..events import (
-    AssistantEvent,
-    BackgroundWorkerEvent,
-    BudgetEvent,
-    CompactionEvent,
-    ContextBuildEvent,
-    ErrorEvent,
-    Event,
-    LoopGuardEvent,
-    ModelCallEvent,
-    PermissionRequestEvent,
-    PromptCacheAdvisoryEvent,
-    ResultEvent,
-    SkillsLoadedEvent,
-    SystemEvent,
-    ToolCallEndEvent,
-    ToolCallStartEvent,
-    ToolProgressEvent,
-    UsageEvent,
-    UserEvent,
-)
+from ..events import Event, ResultEvent, UserEvent
 from ..hooks import (
-    AgentStartContext,
     AgentStopContext,
-    HookDispatcher,
     HookEvent,
-    ProviderCallStartContext,
-    ProviderCallStopContext,
-    ToolUseStartContext,
-    ToolUseStopContext,
-    TurnStartContext,
-    TurnStopContext,
 )
 from ..model_calls import (
     ModelCallIntent,
-    ModelCallReceipt,
     _AccountedAuxiliaryCaller,
-    _accounting_contract,
-    _ModelCallError,
-    _ModelCallLedger,
-    _primary_active_binding,
-    _primary_request_fingerprint,
-    _projection_record,
 )
 from ..run_store import (
-    MODEL_INPUT_CODEC_VERSION,
-    ModelInputSnapshotError,
     RunCheckpoint,
     RunContractMismatchError,
     RunRecord,
-    build_run_contract,
-    decode_model_input_snapshot,
     ensure_run_contract_compatible,
     run_contract_from_meta,
     run_meta_with_contract,
 )
-from ..scheduler import execute_tool_calls
 from ..session import RunOptions, Session
 from ..types import (
     AssistantAssembly,
-    ContentBlock,
     Message,
-    ProviderRequest,
-    StopReason,
-    TextBlock,
     ToolResultBlock,
     ToolUseBlock,
     Usage,
 )
 from .checkpoint import (
-    RunEventBuffer,
     _alignment_entries_from_checkpoint,
-    _alignment_queue_to_dicts,
-    _background_workers_to_dict,
     _flush_events,
-    _interrupted_tool_result_block,
-    _last_message_has_tool_results,
-    _last_message_matches,
     _loop_guard_state_from_dict,
-    _loop_guard_state_to_dict,
     _message_digest,
-    _model_call_runtime_from_extension,
-    _model_call_runtime_to_extension,
     _persist_event,
     _primary_control_message,
-    _queue_crashed_worker_notifications,
-    _receipt_message_prefix,
-    _recover_completed_tool_results,
     _skill_overlay_from_dict,
-    _skill_overlay_to_dict,
-    _tool_result_block_from_end,
 )
-from .dispatch import (
-    dispatch_after_provider_call,
-    dispatch_before_final_answer,
-    dispatch_before_provider_call,
-    dispatch_lifecycle,
-    dispatch_stop,
-    dispatch_user_prompt,
+from .contracts import (
+    _build_run_contract,
+    _effective_final_tool_name,
+    _exact_model_input_enabled,
 )
 from .finalize import (
     FinalizeCtx,
-    TerminalOutcome,
-    build_run_result,
-    emit_error_terminal,
-    finalize_final_tool_answer,
-    finalize_text_answer,
+    RunFinalization,
+    assembly_with_truncation_prefix,
+    last_user_message_is_feedback,
+)
+from .provider_turn import (
+    ProviderPreparationContext,
+    ProviderTurnContext,
+    prepare_provider_turn,
+    run_provider_turn,
 )
 from .request import (
-    _build_context_result,
-    _build_turn_request,
-    _context_selected_tool_names,
-    _re_inject_skill_context,
-    build_user_message,
     final_text,
 )
-from .streaming import (
-    _AccountedPrimaryAssembly,
-    _PrimaryPartial,
-    _stream_turn_with_compaction_retry,
-    _stream_turn_with_ladder,
-    maybe_compact_resilient,
+from .resume import ResumeContext, ResumeState, recover_resume
+from .runtime import (
+    RunRuntime,
 )
+from .runtime import (
+    SpanLifecycle as _SpanLifecycle,
+)
+from .runtime import (
+    checkpoint_extension_state as _checkpoint_extension_state,
+)
+from .runtime import (
+    checkpointable_hooks as _checkpointable_hooks,
+)
+from .runtime import (
+    drain_alignment as _drain_alignment,
+)
+from .runtime import (
+    drain_child_events as _drain_child_events,
+)
+from .runtime import (
+    drain_mailbox as _drain_mailbox,
+)
+from .runtime import (
+    drain_pending_notifications as _drain_pending_notifications,
+)
+from .runtime import (
+    maybe_save_provider_snapshot as _maybe_save_provider_snapshot,
+)
+from .runtime import (
+    require_model_input_snapshot_store as _require_model_input_snapshot_store,
+)
+from .runtime import (
+    restore_checkpointable_hooks as _restore_checkpointable_hooks,
+)
+from .startup import RunStartupContext, initialize_run
 from .terminals import (
-    _budget_exhausted_tail,
-    _error_result_tail,
     _final_tool_retry_tail,
     _gate_retry_tail,
     _max_turns_tail,
     _stop_when_tail,
 )
+from .tool_batch import ToolBatchContext, run_tool_batch
 
 # Max BeforeFinalAnswer-induced retries honored per run before the answer is
 # accepted as-is. Keeps a perpetually-blocking final-answer hook from looping.
 _MAX_FINAL_ANSWER_REENTRIES = 1
-
-
-def _exact_model_input_enabled(agent: Any) -> bool:
-    return bool(getattr(getattr(agent, "durability", None), "exact_model_input", False))
-
-
-def _require_model_input_snapshot_store(agent: Any) -> Any:
-    store = getattr(agent, "run_store", None)
-    if store is None:
-        raise ConfigError("exact_model_input requires a run_store")
-    missing = [
-        name
-        for name in ("save", "load", "delete", "prune")
-        if not callable(getattr(store, name, None))
-    ]
-    if missing:
-        raise ConfigError(
-            "exact_model_input requires run_store model-input snapshot capabilities: "
-            + ", ".join(missing)
-        )
-    return store
-
-
-def _checkpointable_hooks(hooks: list[Any]) -> dict[str, Any]:
-    """Return checkpoint-capable hooks keyed by their stable namespace.
-
-    Hooks are intentionally duck-typed.  A hook exposing either persistence
-    method opts in to this contract and must expose the complete, unambiguous
-    shape; accepting a partial implementation would make a resumed run silently
-    diverge from the checkpointed one.
-    """
-    out: dict[str, Any] = {}
-    for hook in hooks:
-        snapshot = getattr(hook, "checkpoint_state", None)
-        restore = getattr(hook, "restore_checkpoint_state", None)
-        if snapshot is None and restore is None:
-            continue
-        name = str(getattr(hook, "name", hook.__class__.__name__))
-        if not callable(snapshot) or not callable(restore):
-            raise ConfigError(
-                f"checkpointable hook {name!r} must implement both "
-                "checkpoint_state(session, run_id) and "
-                "restore_checkpoint_state(state, session, run_id)"
-            )
-        key = getattr(hook, "checkpoint_key", None)
-        if not isinstance(key, str) or not key:
-            raise ConfigError(
-                f"checkpointable hook {name!r} must define a non-empty string checkpoint_key"
-            )
-        if key in out:
-            raise ConfigError(f"duplicate checkpoint_key {key!r} on agent hooks")
-        out[key] = hook
-    return out
-
-
-def _checkpoint_extension_state(
-    checkpointable_hooks: dict[str, Any], session: Session, run_id: str
-) -> dict[str, dict[str, Any]]:
-    """Capture JSON-safe state from checkpointable hooks.
-
-    Serializing immediately both makes the in-memory store match durable stores
-    (no shared mutable state) and rejects unsupported values before a checkpoint
-    can claim to have captured them.
-    """
-    state_by_key: dict[str, dict[str, Any]] = {}
-    for key, hook in checkpointable_hooks.items():
-        try:
-            state = hook.checkpoint_state(session, run_id)
-        except Exception as exc:
-            raise RuntimeError(f"checkpointable hook {key!r} failed to save state") from exc
-        if not isinstance(state, dict) or not all(isinstance(name, str) for name in state):
-            raise ConfigError(f"checkpointable hook {key!r} must return a dict with string keys")
-        # An empty state means the extension has not established durable run
-        # state yet (for example before a hook has anything to persist at the
-        # first provider request). Omit its namespace so a resume can follow
-        # normal fresh-run initialization rather than treating `{}` as a
-        # malformed snapshot.
-        if not state:
-            continue
-        try:
-            # A JSON round-trip validates values (including NaN/Infinity) and
-            # gives InMemoryRunStore the same snapshot semantics as SQLite.
-            serialized = json.dumps(state, allow_nan=False)
-            restored = json.loads(serialized)
-        except (TypeError, ValueError) as exc:
-            raise ConfigError(
-                f"checkpointable hook {key!r} returned non-JSON-safe checkpoint state"
-            ) from exc
-        if not isinstance(restored, dict):  # Defensive; json of a dict is always an object.
-            raise RuntimeError(f"checkpointable hook {key!r} produced invalid checkpoint state")
-        state_by_key[key] = restored
-    return state_by_key
-
-
-def _restore_checkpointable_hooks(
-    checkpointable_hooks: dict[str, Any],
-    extension_state: dict[str, Any],
-    session: Session,
-    run_id: str,
-) -> None:
-    """Restore only active hook namespaces from a checkpoint.
-
-    Unknown extension namespaces stay untouched for a later extension to use.
-    A malformed payload for an active hook is an incompatibility, not an empty
-    state: fail closed instead of continuing with an untrusted runtime profile.
-    """
-    for key, hook in checkpointable_hooks.items():
-        if key not in extension_state:
-            continue
-        state = extension_state[key]
-        if not isinstance(state, dict) or not all(isinstance(name, str) for name in state):
-            raise ConfigError(f"checkpoint state for hook {key!r} must be a dict with string keys")
-        try:
-            hook.restore_checkpoint_state(dict(state), session, run_id)
-        except Exception as exc:
-            raise RuntimeError(f"checkpointable hook {key!r} failed to restore state") from exc
-
-
-async def _drain_pending_notifications(
-    session: Session,
-    run_id: str,
-) -> AsyncIterator[Event]:
-    """Inject pending background-worker notifications into provider_view and yield UserEvents."""
-    durability = getattr(session.agent, "durability", None)
-    if getattr(durability, "durable_inbox", False):
-        notifications = getattr(session, "pending_notifications", None)
-        if notifications:
-            raise ConfigError(
-                "durable_inbox cannot consume pending_notifications; use await Session.notify(...)"
-            )
-        commit = getattr(session.store, "commit_inbox", None)
-        enqueue = getattr(session.store, "enqueue_inbox", None)
-        if not callable(commit) or not callable(enqueue):
-            raise ConfigError(
-                "durable_inbox requires a SessionStore implementing "
-                "enqueue_inbox() and commit_inbox()"
-            )
-        stored = await cast(Any, commit)(session.id, after_seq=session._last_seq)
-        if not stored:
-            return
-        session._track_seqs(stored)
-        for row in stored:
-            note = row.message
-            session.session_log.append(note)
-            event: Event = UserEvent(message=note, subtype="notification")
-            await _persist_event(session, run_id, event)
-            yield event
-        return
-    notifications = getattr(session, "pending_notifications", None)
-    if not notifications:
-        return
-    to_drain = list(notifications)
-    notifications.clear()
-    for note in to_drain:
-        await session.append([note])
-        event: Event = UserEvent(message=note, subtype="notification")
-        await _persist_event(session, run_id, event)
-        yield event
-
-
-def _render_peer_message(message: Any) -> Message:
-    """Wrap a drained :class:`MailboxMessage` as a ``<peer-message>`` user message."""
-    from xml.sax.saxutils import escape
-
-    parts = [
-        "<peer-message>",
-        f"<from>{escape(message.sender)}</from>",
-        f"<type>{escape(message.type)}</type>",
-    ]
-    if message.request_id:
-        parts.append(f"<request-id>{escape(message.request_id)}</request-id>")
-    if message.in_reply_to:
-        parts.append(f"<in-reply-to>{escape(message.in_reply_to)}</in-reply-to>")
-    parts.append(f"<content>{escape(message.content)}</content>")
-    parts.append("</peer-message>")
-    return Message(role="user", content=[TextBlock(text="".join(parts))])
-
-
-async def _drain_mailbox(session: Session, run_id: str) -> AsyncIterator[Event]:
-    """Drain peer messages for this session's address into provider_view.
-
-    No-op (byte-identical) unless the agent has a ``mailbox`` and the session has
-    a ``mailbox_address``. Mirrors :func:`_drain_pending_notifications`.
-    """
-    mailbox = getattr(session.agent, "mailbox", None)
-    address = getattr(session, "mailbox_address", None)
-    if mailbox is None or not address:
-        return
-    durability = getattr(session.agent, "durability", None)
-    if getattr(durability, "durable_inbox", False):
-        claim = getattr(mailbox, "claim", None)
-        ack = getattr(mailbox, "ack", None)
-        release = getattr(mailbox, "release", None)
-        if not all(callable(method) for method in (claim, ack, release)):
-            raise ConfigError(
-                "durable_inbox with mailbox requires ClaimableMailbox claim(), ack(), and release()"
-            )
-        claims = await cast(Any, claim)(
-            address,
-            owner=f"session:{session.id}",
-            lease_s=cast(Any, durability).delivery_lease_s,
-        )
-        delivered = []
-        try:
-            for claimed in claims:
-                message = claimed.message
-                note = _render_peer_message(message)
-                await session.notify(
-                    note,
-                    delivery_id=f"mailbox:{message.id}",
-                    source="mailbox",
-                    metadata={"message_id": message.id, "recipient": message.recipient},
-                )
-                await cast(Any, ack)([claimed])
-                delivered.append(claimed)
-        except BaseException:
-            pending = [item for item in claims if item not in delivered]
-            if pending:
-                await cast(Any, release)(pending)
-            raise
-        # The inbox commit below is the single insertion chokepoint. This also
-        # recovers a prior enqueue whose mailbox ack response was lost.
-        async for event in _drain_pending_notifications(session, run_id):
-            yield event
-        return
-    messages = await mailbox.drain(address)
-    for message in messages:
-        note = _render_peer_message(message)
-        await session.append([note])
-        event: Event = UserEvent(message=note, subtype="notification")
-        await _persist_event(session, run_id, event)
-        yield event
-
-
-async def _drain_alignment(
-    session: Session,
-    run_id: str,
-    dispatch_user_prompt_fn: Callable[
-        [str, list[dict[str, str]] | None, str],
-        Awaitable[tuple[str, list[dict[str, str]] | None, list[Event], str | None]],
-    ],
-) -> AsyncIterator[Event]:
-    queue = getattr(session, "alignment_queue", None)
-    if not queue:
-        return
-    entries = list(queue)
-    queue.clear()
-    for entry in entries:
-        try:
-            prompt, images, hook_events, block_reason = await dispatch_user_prompt_fn(
-                entry.prompt,
-                entry.images,
-                "align",
-            )
-            for hook_event in hook_events:
-                await _persist_event(session, run_id, hook_event)
-                yield hook_event
-            if block_reason is not None:
-                # Hook blocked this align: drop only this message (reject its
-                # promise), no ErrorEvent — remaining queued messages still
-                # inject. The block was already surfaced via hook_events above.
-                if not entry.future.done():
-                    entry.future.set_exception(ConfigError(block_reason))
-                continue
-            user_message = build_user_message(prompt, images)
-            await session.append([user_message])
-            event: Event = UserEvent(message=user_message, subtype="alignment")
-            await _persist_event(session, run_id, event)
-            if not entry.future.done():
-                entry.future.set_result(None)
-            yield event
-        except Exception as exc:
-            # Unexpected fault applying this align (dispatch/build/append/persist).
-            # Notify the align() caller AND surface it on the event stream — even
-            # when the future is already done — so it is never silently dropped.
-            if not entry.future.done():
-                entry.future.set_exception(exc)
-            error_event: Event = ErrorEvent(
-                error={"name": type(exc).__name__, "message": str(exc), "retryable": False}
-            )
-            await _persist_event(session, run_id, error_event)
-            yield error_event
-
-
-async def _drain_child_events(session: Session, run_id: str) -> AsyncIterator[Event]:
-    """Surface accumulated subagent events to the parent's event stream.
-
-    Foreground/background subagents append their events (wrapped as
-    ``SubagentEvent``) to ``session.pending_child_events``. Yielding them here —
-    at the same top-of-turn chokepoint as the other drains — bubbles a child's
-    ``PermissionRequestEvent`` (and every other child event) up to the parent
-    caller's iterator instead of leaving it in a buffer only host UIs can poll.
-    These are observational and are *not* injected into ``provider_view`` (the
-    subagent's tool result already represents the work). No-op (byte-identical)
-    when no subagent has run.
-    """
-    pending = getattr(session, "pending_child_events", None)
-    if not pending:
-        return
-    to_drain = list(pending)
-    pending.clear()
-    for event in to_drain:
-        # Detached completions are already best-effort persisted against the
-        # run that launched them. Keep this later-turn drain as a live stream
-        # projection; persisting it again would duplicate/misattribute audit
-        # telemetry under an unrelated run id.
-        if not isinstance(event, BackgroundWorkerEvent):
-            await _persist_event(session, run_id, event)
-        yield event
-
-
-async def _cancel_background_workers(session: Session) -> None:
-    """Cancel and await this run's worker/background tasks so their finalizers
-    complete before the run's teardown proceeds (abort/error cleanup)."""
-    import asyncio
-
-    tasks: list[asyncio.Task[Any]] = []
-    workers = getattr(session, "workers", None)
-    for handle in (workers or {}).values():
-        task = getattr(handle, "task", None)
-        if isinstance(task, asyncio.Task):
-            tasks.append(task)
-    for task in getattr(session, "background_tasks", None) or []:
-        if isinstance(task, asyncio.Task):
-            tasks.append(task)
-    for task in tasks:
-        if not task.done():
-            task.cancel()
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-
-async def _maybe_save_provider_snapshot(session: Session) -> None:
-    """Persist the just-compacted ``provider_view`` when the store supports it.
-
-    Best-effort (Phase 3.3): a snapshot only accelerates the next reload, so a
-    persistence failure is logged and swallowed rather than aborting the run. The
-    watermark is the highest stored-message ``seq`` observed (``session._last_seq``),
-    which tolerates gaps. Caching is skipped when the store returned non-increasing
-    seqs (``_seq_cacheable`` false), since the watermark can no longer be trusted.
-    """
-    saver = getattr(session.store, "save_provider_snapshot", None)
-    if saver is None:
-        return
-    if not getattr(session, "_seq_cacheable", True):
-        return
-    from ..sessions.store import ProviderViewSnapshot
-
-    snapshot = ProviderViewSnapshot(
-        provider_view=list(session.provider_view),
-        covers_seq=getattr(session, "_last_seq", session.session_log.history_count),
-        projection_id=(session.last_compaction_info or {}).get("projection_id"),
-    )
-    try:
-        await saver(session.id, snapshot)
-    except Exception as exc:
-        logging.getLogger(__name__).warning(
-            "Failed to persist provider-view snapshot for session %s: %s", session.id, exc
-        )
-
-
-def _effective_final_tool_name(agent: Any, opts: RunOptions) -> str | None:
-    """Resolve the terminal structured-output tool for this run."""
-    explicit = opts.final_tool_name or getattr(agent, "final_tool_name", None)
-    if explicit is not None:
-        return explicit
-    schema = opts.output_schema or getattr(agent, "output_schema", None)
-    if schema is None or not hasattr(agent.provider, "capabilities"):
-        return None
-    caps = agent.provider.capabilities(agent.model)
-    return schema.name if getattr(caps, "structured_output_terminal_tool", False) else None
-
-
-def _contract_registry(session: Session) -> Any:
-    """Return the intended baseline tool surface for a durable run.
-
-    A pending skill overlay is already known at run creation and therefore
-    participates in identity.  Per-turn context selection is ephemeral and is
-    captured in the checkpointed request phase rather than by eagerly running
-    context hooks here.
-    """
-    registry = session.tools_override or session.agent.tools
-    pending = getattr(session, "pending_skill_overlay", None)
-    allowed = getattr(pending, "allowed_tools", None)
-    if allowed is not None:
-        return registry.select(names={str(name) for name in allowed})
-    return registry
-
-
-def _permission_rule_contract(rule: Any) -> dict[str, Any]:
-    kind = str(getattr(rule, "kind", rule.__class__.__name__))
-    out: dict[str, Any] = {"kind": kind, "decision": getattr(rule, "decision", None)}
-    for name in ("tool", "arg", "tools", "paths", "pattern"):
-        if hasattr(rule, name):
-            out[name] = getattr(rule, name)
-    return out
-
-
-def _permission_policy_contract(agent: Any) -> dict[str, Any]:
-    engine = agent.permission_engine
-    layered: list[dict[str, Any]] = []
-    rule_set = getattr(engine, "rule_set", None)
-    for layer in getattr(rule_set, "layers", ()) or ():
-        layered.append(
-            {
-                "name": getattr(layer, "name", None),
-                "rules": [_permission_rule_contract(rule) for rule in layer.rules],
-            }
-        )
-    callback = getattr(engine, "can_use_tool", None)
-    callback_identity = None
-    if callback is not None:
-        policy_id = getattr(callback, "resume_policy_id", getattr(callback, "policy_id", None))
-        policy_version = getattr(
-            callback,
-            "resume_policy_version",
-            getattr(callback, "policy_version", None),
-        )
-        if not isinstance(policy_id, str) or not policy_id:
-            raise ConfigError(
-                "durable runs with can_use_tool require callback.resume_policy_id "
-                "(and optionally resume_policy_version)"
-            )
-        callback_identity = {
-            "type": f"{callback.__class__.__module__}.{callback.__class__.__qualname__}",
-            "name": getattr(callback, "__qualname__", getattr(callback, "__name__", None)),
-            "policy_id": policy_id,
-            "policy_version": policy_version,
-            "config": getattr(callback, "resume_policy_config", None),
-        }
-    return {
-        "mode": engine.mode,
-        "project_root": engine.project_root,
-        "rules": [_permission_rule_contract(rule) for rule in engine.rules],
-        "layers": layered,
-        "layer_project_root": getattr(rule_set, "project_root", None),
-        "callback": callback_identity,
-        "policy_id": getattr(engine, "policy_id", None),
-        "policy_version": getattr(engine, "policy_version", None),
-    }
-
-
-def _hook_policy_contract(agent: Any) -> list[dict[str, Any]]:
-    identities: list[dict[str, Any]] = []
-    adapter_policies = {
-        "ContextInjectionHook",
-        "FinalAnswerVerifierHook",
-        "MemoryExtractionHook",
-        "StopPredicateHook",
-        "ToolMiddlewareHook",
-    }
-    for hook in getattr(agent, "hooks", ()) or ():
-        module = hook.__class__.__module__
-        class_name = hook.__class__.__name__
-        policy_id = getattr(hook, "resume_policy_id", getattr(hook, "policy_id", None))
-        policy_version = getattr(
-            hook,
-            "resume_policy_version",
-            getattr(hook, "policy_version", None),
-        )
-        checkpoint_key = getattr(hook, "checkpoint_key", None)
-        custom_or_adapter_policy = not module.startswith("linch.") or class_name in adapter_policies
-        if custom_or_adapter_policy and not (isinstance(policy_id, str) and policy_id):
-            raise ConfigError(
-                f"durable runs with custom hook {hook.__class__.__qualname__!r} require "
-                "hook.resume_policy_id (plus optional resume_policy_version/"
-                "resume_policy_config); checkpoint_key alone identifies state storage, "
-                "not policy behavior"
-            )
-        config = getattr(hook, "resume_policy_config", None)
-        if config is None:
-            config = getattr(hook, "config", getattr(hook, "_cfg", None))
-        identities.append(
-            {
-                "type": f"{module}.{hook.__class__.__qualname__}",
-                "name": getattr(hook, "name", None),
-                "checkpoint_key": checkpoint_key,
-                "policy_id": policy_id,
-                "policy_version": policy_version,
-                # Built-in policy hooks expose dataclass configs; the run
-                # contract serializer handles those canonically.
-                "config": config,
-            }
-        )
-    return identities
-
-
-def _tool_pipeline_contract(agent: Any) -> dict[str, Any] | None:
-    """Return the stable identity of active tool-pipeline policy.
-
-    The pipeline is optional and duck typed so Agent construction remains
-    decoupled from the tools package. An inactive pipeline has no execution
-    effect and is omitted. Active custom implementations and every listener in
-    the built-in pipeline must expose host-stable resume policy metadata.
-    """
-    pipeline = getattr(agent, "tool_pipeline", None)
-    if pipeline is None:
-        return None
-    has_listeners = getattr(pipeline, "has_listeners", None)
-    if not callable(has_listeners) or not has_listeners():
-        return None
-
-    policy_id = getattr(pipeline, "resume_policy_id", None)
-    policy_version = getattr(pipeline, "resume_policy_version", None)
-    if not isinstance(policy_id, str) or not policy_id:
-        raise ConfigError(
-            "durable runs with an active tool pipeline require "
-            "pipeline.resume_policy_id (plus optional resume_policy_version/"
-            "resume_policy_config)"
-        )
-    try:
-        config = getattr(pipeline, "resume_policy_config", None)
-    except Exception as exc:
-        raise ConfigError(f"cannot build durable tool pipeline contract: {exc}") from exc
-    if config is None:
-        raise ConfigError(
-            "durable runs with an active tool pipeline require non-None "
-            "pipeline.resume_policy_config"
-        )
-    try:
-        json.dumps(config, allow_nan=False, separators=(",", ":"), sort_keys=True)
-    except (TypeError, ValueError) as exc:
-        raise ConfigError(
-            f"durable tool pipeline resume_policy_config must be JSON-safe: {exc}"
-        ) from exc
-    return {
-        "type": f"{pipeline.__class__.__module__}.{pipeline.__class__.__qualname__}",
-        "policy_id": policy_id,
-        "policy_version": policy_version,
-        "config": config,
-    }
-
-
-def _legacy_bash_backend_contract(backend: Any) -> dict[str, Any]:
-    """Preserve the shell-only contract and its established diagnostics."""
-    policy_id = getattr(backend, "resume_policy_id", None)
-    policy_version = getattr(backend, "resume_policy_version", None)
-    try:
-        config = getattr(backend, "resume_policy_config", None)
-    except Exception as exc:
-        raise ConfigError(
-            f"cannot build durable execution shell backend resume_policy_config: {exc}"
-        ) from exc
-    if not isinstance(policy_id, str) or not policy_id or config is None:
-        raise ConfigError(
-            "durable runs with a custom Bash execution backend require "
-            "backend.resume_policy_id and non-None backend.resume_policy_config "
-            "(plus optional resume_policy_version)"
-        )
-    return {
-        "type": f"{backend.__class__.__module__}.{backend.__class__.__qualname__}",
-        "policy_id": policy_id,
-        "policy_version": policy_version,
-        "config": config,
-    }
-
-
-def _execution_backend_contract(tools: list[Any], configured_backend: Any) -> dict[str, Any] | None:
-    """Fingerprint the effective execution world, including shell, fs, and confinement.
-
-    Unified backends can affect filesystem tools even when Bash is not offered,
-    so their whole effective world participates in resume identity. The legacy
-    ``BashTool(backend=...)`` path retains its historical shell-only contract.
-    """
-    bash_tool = next((tool for tool in tools if getattr(tool, "name", None) == "Bash"), None)
-    bash_backend = getattr(bash_tool, "_backend", None) if bash_tool is not None else None
-
-    if configured_backend is None:
-        return _legacy_bash_backend_contract(bash_backend) if bash_backend is not None else None
-
-    if getattr(configured_backend, "legacy_shell_only", False):
-        shell = bash_backend or getattr(configured_backend, "shell", None)
-        return _legacy_bash_backend_contract(shell)
-
-    shell = getattr(configured_backend, "shell", None)
-    filesystem = getattr(configured_backend, "fs", None)
-    if shell is None or filesystem is None:
-        # A non-normalized shell backend can still reach this helper in tests
-        # or host-owned Agent-like objects. Keep the compatibility behavior.
-        backend = bash_backend or configured_backend
-        return _legacy_bash_backend_contract(backend)
-    if bash_backend is not None and bash_backend is not shell:
-        raise ConfigError(
-            "durable execution world mismatch: the effective BashTool backend is not "
-            "agent.execution_backend.shell; configure one coherent shell/filesystem world"
-        )
-
-    from ..execution.backend import resume_policy_descriptor
-
-    world = resume_policy_descriptor(configured_backend)
-    if world is None:
-        raise ConfigError(
-            "durable runs with a custom execution world require "
-            "execution_backend.resume_policy_id and non-None "
-            "execution_backend.resume_policy_config (plus optional "
-            "resume_policy_version); filesystem overrides must also expose "
-            "stable resume policy metadata"
-        )
-    shell_policy = _legacy_bash_backend_contract(shell)
-    filesystem_policy = resume_policy_descriptor(filesystem)
-    if filesystem_policy is None:
-        raise ConfigError(
-            "durable runs with a custom execution world require its filesystem backend "
-            "to expose resume_policy_id and non-None resume_policy_config"
-        )
-    try:
-        confinement = getattr(configured_backend, "confinement", None)
-    except Exception as exc:
-        raise ConfigError(f"cannot build durable execution world confinement: {exc}") from exc
-
-    return {
-        "world": world,
-        "shell": shell_policy,
-        "filesystem": filesystem_policy,
-        "confinement": confinement,
-        "sandboxed": bool(getattr(configured_backend, "sandboxed", False)),
-    }
-
-
-def _build_run_contract(session: Session, prompt: str, opts: RunOptions) -> Any:
-    """Build the normalized, resume-safe identity for one run."""
-    agent = session.agent
-    registry = _contract_registry(session)
-    tools = list(registry.list())
-    tool_schemas: list[dict[str, Any]] = []
-    for tool, schema in zip(tools, registry.schemas(), strict=True):
-        tool_schemas.append(
-            {
-                **schema,
-                # Scope is a security property even though providers do not
-                # receive it.  A write->read downgrade must invalidate resume.
-                "scope": getattr(tool, "scope", None),
-                "parallel": bool(getattr(tool, "parallel", True)),
-                **(
-                    {
-                        "output_schema": tool.output_schema,
-                        "renderer_id": getattr(tool, "renderer_id", None),
-                        "renderer_version": getattr(tool, "renderer_version", None),
-                    }
-                    if getattr(tool, "output_schema", None) is not None
-                    else {}
-                ),
-            }
-        )
-    if session.system_blocks_override is not None:
-        system_blocks = list(session.system_blocks_override)
-    else:
-        active_names = [tool.name for tool in tools]
-        tool_sections = registry.system_prompt_sections(active_names=active_names)
-        private_builder = getattr(agent, "_build_system_blocks", None)
-        builder = getattr(agent, "build_system_blocks_for_tool_names", None)
-        system_blocks = (
-            list(cast(Any, private_builder)(active_names, tool_sections=tool_sections))
-            if callable(private_builder)
-            else (
-                list(cast(Any, builder)(active_names))
-                if callable(builder)
-                else list(agent.system_blocks)
-            )
-        )
-    budget = (
-        opts.budget or getattr(session, "inherited_budget", None) or getattr(agent, "budget", None)
-    )
-    loop_guard = getattr(agent, "loop_guard", None)
-    ladder = getattr(agent, "compaction_ladder", None)
-    truncation = getattr(agent, "truncation_recovery", None)
-    backend_identity = _execution_backend_contract(
-        tools,
-        getattr(agent, "execution_backend", None),
-    )
-    policies: dict[str, Any] = {
-        "runtime_version": get_version(),
-        "model_call_accounting": _accounting_contract(),
-        "compaction_skill_listing_fingerprint": _skill_listing_fingerprint(
-            getattr(agent, "skill_listing_text", None)
-        ),
-        "compaction_replay_config": _builtin_compaction_config(getattr(agent, "compaction", None)),
-        "permissions": _permission_policy_contract(agent),
-        "hooks": _hook_policy_contract(agent),
-        "tool_pipeline": _tool_pipeline_contract(agent),
-        "features": getattr(agent, "features", None),
-        "execution_backend": backend_identity,
-        "max_turns": None if agent.max_turns == float("inf") else agent.max_turns,
-        "structured_output_retries": agent.structured_output_retries,
-        "loop_guard": loop_guard,
-        "compaction": getattr(getattr(agent, "compaction", None), "id", None),
-        "compaction_ladder": ladder,
-        "truncation_recovery": truncation,
-    }
-    durability = getattr(agent, "durability", None)
-    if getattr(durability, "durable_inbox", False) or _exact_model_input_enabled(agent):
-        policies["durability"] = {
-            "durable_inbox": bool(getattr(durability, "durable_inbox", False)),
-            "exact_model_input": _exact_model_input_enabled(agent),
-            **(
-                {"model_input_codec_version": MODEL_INPUT_CODEC_VERSION}
-                if _exact_model_input_enabled(agent)
-                else {}
-            ),
-        }
-    return build_run_contract(
-        primary_model=agent.model,
-        fallback_models=getattr(agent, "fallback_models", None),
-        system_blocks=system_blocks,
-        tool_schemas=tool_schemas,
-        input_payload={"prompt": prompt, "images": opts.images},
-        output_schema=opts.output_schema or getattr(agent, "output_schema", None),
-        final_tool_name=_effective_final_tool_name(agent, opts),
-        run_options={
-            "max_output_tokens": opts.max_output_tokens or agent.max_output_tokens,
-            "temperature": opts.temperature,
-            "stream_partials": (
-                agent.include_partial_messages
-                if opts.stream_partials is None
-                else opts.stream_partials
-            ),
-            "thinking": opts.thinking,
-            "effort": opts.effort,
-            "tool_choice": opts.tool_choice or agent.tool_choice,
-            "cache_ttl": agent.cache_ttl,
-            "max_retries": agent.max_retries,
-        },
-        budget=budget,
-        policies=policies,
-    )
 
 
 async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIterator[Event]:
@@ -952,94 +179,6 @@ async def resume_loop(session: Session, run_id: str, opts: RunOptions) -> AsyncI
         yield event
 
 
-class _SpanLifecycle:
-    """Tracks the open turn/provider-call observer spans for one run.
-
-    Owns the two pieces of mutable span state (`active_turn_index`,
-    `active_provider_call`) that the turn loop previously threaded through
-    `nonlocal` closures, and dispatches the matching lifecycle hook events
-    via the run's `_dispatch_lifecycle` callback.
-    """
-
-    def __init__(
-        self,
-        session: Session,
-        run_id: str,
-        dispatch: Callable[[HookEvent, Any], Awaitable[None]],
-    ) -> None:
-        self._session = session
-        self._run_id = run_id
-        self._dispatch = dispatch
-        self.active_turn_index: int | None = None
-        self.active_provider_call: tuple[int, str, float] | None = None
-
-    async def start_turn(self, turn_index: int) -> None:
-        await self._dispatch(
-            HookEvent.TURN_START,
-            TurnStartContext(
-                session=self._session,
-                run_id=self._run_id,
-                turn_index=turn_index,
-                deps=getattr(self._session, "run_deps", None),
-            ),
-        )
-        self.active_turn_index = turn_index
-
-    async def end_active_turn(self) -> None:
-        if self.active_turn_index is None:
-            return
-        turn_index = self.active_turn_index
-        self.active_turn_index = None
-        await self._dispatch(
-            HookEvent.TURN_STOP,
-            TurnStopContext(
-                session=self._session,
-                run_id=self._run_id,
-                turn_index=turn_index,
-                deps=getattr(self._session, "run_deps", None),
-            ),
-        )
-
-    async def start_provider_call(self, turn_index: int, model: str) -> None:
-        started_at = time.perf_counter()
-        await self._dispatch(
-            HookEvent.PROVIDER_CALL_START,
-            ProviderCallStartContext(
-                session=self._session,
-                run_id=self._run_id,
-                turn_index=turn_index,
-                deps=getattr(self._session, "run_deps", None),
-                model=model,
-            ),
-        )
-        self.active_provider_call = (turn_index, model, started_at)
-
-    async def end_active_provider_call(
-        self, *, stop_reason: str, usage: Usage | None = None
-    ) -> None:
-        if self.active_provider_call is None:
-            return
-        turn_index, model, started_at = self.active_provider_call
-        self.active_provider_call = None
-        await self._dispatch(
-            HookEvent.PROVIDER_CALL_STOP,
-            ProviderCallStopContext(
-                session=self._session,
-                run_id=self._run_id,
-                turn_index=turn_index,
-                deps=getattr(self._session, "run_deps", None),
-                model=model,
-                stop_reason=stop_reason,
-                usage=usage or Usage(),
-                duration_ms=int((time.perf_counter() - started_at) * 1000),
-            ),
-        )
-
-    async def close_active_observer_spans(self, *, stop_reason: str = "error") -> None:
-        await self.end_active_provider_call(stop_reason=stop_reason)
-        await self.end_active_turn()
-
-
 async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
     session: Session,
     prompt: str,
@@ -1049,208 +188,76 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
     run_record: RunRecord | None,
     resume_checkpoint: RunCheckpoint | None,
 ) -> AsyncIterator[Event]:
-    agent = session.agent
-    _exact_model_input = _exact_model_input_enabled(agent)
-    _model_input_store = _require_model_input_snapshot_store(agent) if _exact_model_input else None
-    session.active_run_id = run_id
-    _initial_event_seq = 0
-    _stored_events: list[Any] = []
-    if resume_checkpoint is not None and agent.run_store is not None:
-        _stored_events = await agent.run_store.load_events(run_id)
-        _initial_event_seq = max((row.seq for row in _stored_events), default=0)
-    # Per-run event buffer: observational events batch between flush points; the
-    # runner flushes tool start/end per-event to keep them durable at the yield.
-    session._event_journal = RunEventBuffer(agent.run_store, run_id, initial_seq=_initial_event_seq)
-    # Reset run-level model-fallback state so each run starts on the primary model.
-    session.active_model = None
-    session.fallback_index = 0
-    if resume_checkpoint is not None:
-        _core_state = resume_checkpoint.extension_state.get("linch.core", {})
-        if isinstance(_core_state, dict):
-            _active_model = _core_state.get("active_model")
-            _fallback_index = _core_state.get("fallback_index")
-            session.active_model = _active_model if isinstance(_active_model, str) else None
-            session.fallback_index = (
-                max(0, _fallback_index) if isinstance(_fallback_index, int) else 0
-            )
-    started = time.time()
-    total = Usage()
-    running_cost: float | None = None  # accumulated USD cost; None until first priced turn
-    # Per-run circuit breaker for ladder-driven forced compactions (Agent(
-    # compaction_ladder=...)); one-element cell shared with the recovery
-    # generator.  Unused when no ladder is configured.
-    _forced_compactions_used = [0]
-
+    from ..loop_guard import LoopGuardState
     from ..observability import RunResultInfo as _RunResultInfo
 
-    _hooks = list(getattr(agent, "hooks", None) or [])
-    checkpointable_hooks = _checkpointable_hooks(_hooks)
-    hook_dispatcher = HookDispatcher(_hooks)
-
-    # Bind the hook-dispatch wrappers (in loop/dispatch.py) to this run's
-    # dispatcher/session/run_id so the call sites below stay argument-light.
-    _dispatch_user_prompt = partial(dispatch_user_prompt, hook_dispatcher, session, run_id)
-    _dispatch_lifecycle = partial(dispatch_lifecycle, hook_dispatcher)
-    _dispatch_before_provider_call = partial(
-        dispatch_before_provider_call, hook_dispatcher, session, run_id
+    _runtime = await RunRuntime.create(
+        session,
+        prompt,
+        opts,
+        run_id=run_id,
+        run_record=run_record,
+        resume_checkpoint=resume_checkpoint,
+        exact_model_input_enabled=_exact_model_input_enabled,
+        require_model_input_snapshot_store=_require_model_input_snapshot_store,
+        checkpointable_hooks=_checkpointable_hooks,
+        restore_checkpointable_hooks=_restore_checkpointable_hooks,
+        checkpoint_extension_state=_checkpoint_extension_state,
+        effective_final_tool_name=_effective_final_tool_name,
+        loop_guard_state_factory=LoopGuardState,
+        loop_guard_state_from_dict=_loop_guard_state_from_dict,
+        skill_overlay_from_dict=_skill_overlay_from_dict,
+        alignment_entries_from_checkpoint=_alignment_entries_from_checkpoint,
     )
-    _dispatch_after_provider_call = partial(
-        dispatch_after_provider_call, hook_dispatcher, session, run_id
-    )
-    _dispatch_before_final_answer = partial(
-        dispatch_before_final_answer, hook_dispatcher, session, run_id
-    )
-    _dispatch_stop = partial(dispatch_stop, hook_dispatcher, session, run_id)
+    agent = _runtime.agent
+    _exact_model_input = _runtime.exact_model_input
+    started = _runtime.started
+    total = _runtime.total
+    running_cost = _runtime.running_cost
+    _forced_compactions_used = _runtime.forced_compactions_used
+    hook_dispatcher = _runtime.hook_dispatcher
+    _dispatch_user_prompt = _runtime.dispatch_user_prompt
+    _dispatch_lifecycle = _runtime.dispatch_lifecycle
+    _dispatch_before_provider_call = _runtime.dispatch_before_provider_call
+    _dispatch_after_provider_call = _runtime.dispatch_after_provider_call
+    _dispatch_before_final_answer = _runtime.dispatch_before_final_answer
+    _dispatch_stop = _runtime.dispatch_stop
+    _budget = _runtime.budget
+    effective_final_tool = _runtime.effective_final_tool
+    _guard = _runtime.guard
+    _guard_state = _runtime.guard_state
+    _truncation_recovery = _runtime.truncation_recovery
+    _truncation_attempts = _runtime.truncation_attempts
+    _truncation_prefix = _runtime.truncation_prefix
+    _pending_truncation_feedback = _runtime.pending_truncation_feedback
+    _force_final_pending = _runtime.force_final_pending
+    _align_defer_turn = _runtime.align_defer_turn
+    checkpoint = _runtime.checkpoint
+    ledger = _runtime.ledger
+    active_primary = _runtime.active_primary
 
-    # Resolve per-run deps: RunOptions.deps wins over Agent.deps
-    session.run_deps = opts.deps if opts.deps is not None else getattr(agent, "deps", None)
-    if resume_checkpoint is not None:
-        _restore_checkpointable_hooks(
-            checkpointable_hooks,
-            resume_checkpoint.extension_state,
-            session,
-            run_id,
-        )
+    def _push_runtime_state() -> None:
+        _runtime.active_primary = active_primary
+        _runtime.force_final_pending = _force_final_pending
+        _runtime.truncation_attempts = _truncation_attempts
+        _runtime.truncation_prefix = _truncation_prefix
+        _runtime.pending_truncation_feedback = _pending_truncation_feedback
 
-    # Resolve the run budget: RunOptions.budget > inherited-from-parent
-    # (subagent child sessions) > Agent.budget.  All runs in an agent tree
-    # share one RunBudget object, so child spending is visible here.
-    _budget = (
-        opts.budget or getattr(session, "inherited_budget", None) or getattr(agent, "budget", None)
-    )
-    session.active_budget = _budget
-
-    # Resolve final_tool_name: RunOptions wins over Agent
-    effective_final_tool = _effective_final_tool_name(agent, opts)
-
-    # Loop guard — detects repeated identical tool calls and consecutive
-    # failure streaks.  On by default (Agent sets self.loop_guard = LoopGuard()
-    # unless the caller passes loop_guard=None).
-    from ..loop_guard import LoopGuardState, evaluate_loop_guard
-
-    _guard = getattr(agent, "loop_guard", None)
-    _guard_state = LoopGuardState() if _guard is not None else None
-    # Opt-in output-truncation recovery (None = off, byte-identical default).
-    _truncation_recovery = getattr(agent, "truncation_recovery", None)
-    _truncation_attempts = 0
-    _truncation_prefix = ""
-    _pending_truncation_feedback: str | None = None
-    _force_final_pending = False
-    # Turn whose top-of-turn alignment drain must be skipped: a mid-turn resume
-    # re-processes its pending tool batch first, and draining before that would
-    # inject a user message between assistant(tool_use) and the tool-results
-    # message — breaking provider-order. Deferred entries drain next turn.
-    _align_defer_turn: int | None = None
-    if resume_checkpoint is not None:
-        if _guard is not None:
-            _guard_state = _loop_guard_state_from_dict(resume_checkpoint.loop_guard_state)
-            if _guard_state is None:
-                _guard_state = LoopGuardState()
-        _force_final_pending = resume_checkpoint.force_final_pending
-        session.pending_skill_overlay = _skill_overlay_from_dict(
-            resume_checkpoint.pending_skill_overlay
-        )
-        session.current_turn_allowed_tools = resume_checkpoint.current_turn_allowed_tools
-        session.current_turn_permission_decisions = dict(resume_checkpoint.permission_decisions)
-        _truncation_attempts = resume_checkpoint.truncation_attempts
-        _truncation_prefix = resume_checkpoint.truncation_prefix
-        _pending_truncation_feedback = resume_checkpoint.pending_truncation_feedback
-        if resume_checkpoint.pending_alignment:
-            session.alignment_queue.extend(
-                _alignment_entries_from_checkpoint(resume_checkpoint.pending_alignment)
-            )
-        if resume_checkpoint.phase in (
-            "provider_pending",
-            "assistant_appended",
-            "permission_pending",
-            "tool_batch_pending",
-            "tool_executing",
-        ):
-            _align_defer_turn = resume_checkpoint.turn_index
-
-    checkpoint = resume_checkpoint or RunCheckpoint(
-        phase="started",
-        prompt=prompt,
-        turn_index=0,
-        total_usage=total,
-    )
-
-    async def _persist_model_call(event: ModelCallEvent) -> None:
-        """Make each accounting record durable before its delivery advances."""
-        await _persist_event(session, run_id, event)
-        await _flush_events(session)
-
-    ledger = _ModelCallLedger(
-        run_id,
-        budget=_budget,
-        persist=_persist_model_call if agent.run_store is not None else None,
-    )
-    session._model_call_ledger = ledger
-    _ledger_state, active_primary = _model_call_runtime_from_extension(checkpoint.extension_state)
-    _model_call_events = [
-        row.event
-        for row in _stored_events
-        if isinstance(getattr(row, "event", None), ModelCallEvent)
-    ]
-
-    # An aggregate-only legacy checkpoint cannot prove the identity, actual
-    # model, or receipt status of its prior deliveries.  Do not turn it into a
-    # synthetic charge or requested-model price: a nonzero aggregate fails
-    # closed.  Validate it against the receipt-derived total in the saved
-    # checkpoint snapshot *before* replaying newer durable journal records;
-    # those records legitimately advance the restored ledger after the
-    # checkpoint boundary.
-    if resume_checkpoint is not None and resume_checkpoint.total_usage != Usage():
-        if _ledger_state is None:
-            raise ConfigError(
-                "Cannot resume checkpoint with nonzero aggregate usage without receipt provenance"
-            )
-        checkpoint_ledger = _ModelCallLedger(run_id)
-        await checkpoint_ledger.restore(_ledger_state, [])
-        if resume_checkpoint.total_usage != checkpoint_ledger.total_usage:
-            raise ConfigError(
-                "Cannot resume checkpoint with nonzero aggregate usage without receipt provenance"
-            )
-
-    if _ledger_state is not None or _model_call_events:
-        await ledger.restore(_ledger_state, _model_call_events)
-        total = ledger.total_usage
-        running_cost = ledger.total_cost_usd
+    def _pull_runtime_state() -> None:
+        nonlocal active_primary, total, running_cost
+        active_primary = _runtime.active_primary
+        total = _runtime.total
+        running_cost = _runtime.running_cost
 
     def _sync_ledger_totals() -> None:
-        nonlocal total, running_cost
-        total = ledger.total_usage
-        running_cost = ledger.total_cost_usd
+        _push_runtime_state()
+        _runtime.sync_ledger_totals()
+        _pull_runtime_state()
 
     def _sync_checkpoint_accounting() -> None:
-        """Refresh the runner-owned envelope before any terminal store write."""
-        _sync_ledger_totals()
-        if not isinstance(checkpoint.extension_state, dict):
-            raise ConfigError("RunCheckpoint.extension_state must be a dict")
-        _model_call_runtime_to_extension(
-            checkpoint.extension_state,
-            ledger_snapshot=ledger.snapshot(),
-            active_primary=active_primary,
-        )
-        checkpoint.total_usage = total
-
-    async def _best_effort_snapshot_cleanup(
-        *,
-        snapshot_id: str | None = None,
-        keep_ids: tuple[str, ...] = (),
-    ) -> None:
-        if _model_input_store is None:
-            return
-        logger = logging.getLogger(__name__)
-        if snapshot_id is not None:
-            try:
-                await _model_input_store.delete(snapshot_id)
-            except Exception as exc:
-                logger.warning("Failed to delete model-input snapshot %s: %s", snapshot_id, exc)
-        try:
-            await _model_input_store.prune(run_id, keep_ids=keep_ids)
-        except Exception as exc:
-            logger.warning("Failed to prune model-input snapshots for run %s: %s", run_id, exc)
+        _push_runtime_state()
+        _runtime.sync_checkpoint_accounting()
+        _pull_runtime_state()
 
     async def _save_checkpoint(
         phase: str,
@@ -1262,302 +269,43 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         pending_tool_blocks: list[ToolUseBlock] | None | object = None,
         completed_tool_results: dict[str, ToolResultBlock] | None | object = None,
     ) -> None:
-        nonlocal active_primary
-        if phase not in {"provider_pending", "assistant_appended"}:
-            active_primary = None
-        _sync_checkpoint_accounting()
-        store = agent.run_store
-        if run_record is None or store is None:
-            return
-        # Every buffered event preceding this checkpoint must be durable before
-        # the checkpoint that accounts for it.
-        await _flush_events(session)
-        nonlocal checkpoint
-        completed_snapshot_id = (
-            checkpoint.model_input_snapshot_id
-            if _exact_model_input
-            and phase != "provider_pending"
-            and checkpoint.model_input_snapshot_id is not None
-            else None
+        _push_runtime_state()
+        await _runtime.save_checkpoint(
+            phase,
+            status=status,
+            turn_index=turn_index,
+            assistant_message=assistant_message,
+            assistant_stop_reason=assistant_stop_reason,
+            pending_tool_blocks=pending_tool_blocks,
+            completed_tool_results=completed_tool_results,
         )
-        if completed_snapshot_id is not None:
-            # The first durable non-pending checkpoint supersedes the frozen
-            # request. Clear its reference in that same commit, then remove the
-            # payload only after the commit returns successfully.
-            checkpoint.model_input_snapshot_id = None
-        checkpoint.phase = phase  # type: ignore[assignment]
-        if turn_index is not None:
-            checkpoint.turn_index = turn_index
-        checkpoint.total_usage = total
-        if assistant_message is not None:
-            checkpoint.assistant_message = (
-                assistant_message if isinstance(assistant_message, Message) else None
-            )
-        if assistant_stop_reason is not None:
-            checkpoint.assistant_stop_reason = (
-                assistant_stop_reason if isinstance(assistant_stop_reason, str) else None
-            )
-        if pending_tool_blocks is not None:
-            checkpoint.pending_tool_blocks = (
-                list(pending_tool_blocks) if isinstance(pending_tool_blocks, list) else []
-            )
-        if completed_tool_results is not None:
-            checkpoint.completed_tool_results = (
-                dict(completed_tool_results) if isinstance(completed_tool_results, dict) else {}
-            )
-        checkpoint.force_final_pending = _force_final_pending
-        checkpoint.loop_guard_state = _loop_guard_state_to_dict(_guard_state)
-        checkpoint.pending_skill_overlay = _skill_overlay_to_dict(session.pending_skill_overlay)
-        checkpoint.current_turn_allowed_tools = session.current_turn_allowed_tools
-        checkpoint.permission_decisions = dict(session.current_turn_permission_decisions)
-        checkpoint.background_workers = _background_workers_to_dict(
-            session, checkpoint.background_workers
-        )
-        checkpoint.truncation_attempts = _truncation_attempts
-        checkpoint.truncation_prefix = _truncation_prefix
-        checkpoint.pending_truncation_feedback = _pending_truncation_feedback
-        # Snapshot undrained align() entries so steering intent survives a crash
-        # (restored on resume; empty again after the drain).
-        checkpoint.pending_alignment = _alignment_queue_to_dicts(session)
-        if not isinstance(checkpoint.extension_state, dict):
-            raise ConfigError("RunCheckpoint.extension_state must be a dict")
-        if session.active_model is not None or session.fallback_index:
-            checkpoint.extension_state["linch.core"] = {
-                "active_model": session.active_model,
-                "fallback_index": session.fallback_index,
-            }
-        else:
-            checkpoint.extension_state.pop("linch.core", None)
-        if checkpointable_hooks:
-            # Preserve namespaces owned by inactive/unknown extensions; only
-            # the active hooks replace their own durable snapshot.
-            hook_state = _checkpoint_extension_state(checkpointable_hooks, session, run_id)
-            for key in checkpointable_hooks:
-                checkpoint.extension_state.pop(key, None)
-            checkpoint.extension_state.update(hook_state)
-        # Tool-batch event cursor: capture the watermark just before this turn's
-        # tool starts at tool_batch_pending; permission_pending/tool_executing
-        # inherit it (they are saved before any start is emitted); reset it
-        # otherwise so recovery only bounds-scans a genuine tool batch.
-        _buf = session._event_journal
-        if phase == "tool_batch_pending":
-            checkpoint.tool_batch_event_after_seq = _buf.last_seq if _buf is not None else None
-        elif phase not in ("permission_pending", "tool_executing"):
-            checkpoint.tool_batch_event_after_seq = None
-        await store.save_checkpoint(run_id, checkpoint, status=status)
-        if completed_snapshot_id is not None:
-            await _best_effort_snapshot_cleanup(snapshot_id=completed_snapshot_id)
+        _pull_runtime_state()
 
-    async def _prepare_provider_call(
-        request: ProviderRequest,
-        turn_index: int,
-    ) -> ProviderRequest:
-        if not _exact_model_input:
-            return request
-        assert _model_input_store is not None
-        # The live signal is process-local and intentionally excluded by the
-        # codec. Bind it only after all request hooks have run and immediately
-        # before freezing/dispatching the effective attempt.
-        request.signal = signal
-        provider_attempt = checkpoint.provider_attempt + 1
-        try:
-            snapshot = await _model_input_store.save(run_id, provider_attempt, request)
-        except Exception as exc:
-            raise ConfigError(
-                f"failed to save exact model input for provider attempt {provider_attempt}: {exc}"
-            ) from exc
-        if (
-            not isinstance(getattr(snapshot, "id", None), str)
-            or not snapshot.id
-            or getattr(snapshot, "run_id", None) != run_id
-            or getattr(snapshot, "provider_attempt", None) != provider_attempt
-        ):
-            raise ConfigError("run_store returned an invalid model-input snapshot")
-        checkpoint.provider_attempt = provider_attempt
-        checkpoint.model_input_snapshot_id = snapshot.id
-        # ``_bind_active_primary`` writes the one provider_pending checkpoint
-        # immediately before intent/dispatch. It carries this snapshot ID and
-        # the new physical delivery identity together, avoiding an ambiguous
-        # snapshot-only checkpoint and preserving the established save order.
-        await _best_effort_snapshot_cleanup(keep_ids=(snapshot.id,))
-        return request
+    _best_effort_snapshot_cleanup = _runtime.best_effort_snapshot_cleanup
+    _prepare_provider_call = _runtime.prepare_provider_call
+    _load_pending_provider_request = _runtime.load_pending_provider_request
+    checkpoint = _runtime.checkpoint
 
     async def _bind_active_primary(intent: ModelCallIntent) -> None:
-        """Durably bind a physical primary delivery before its intent starts."""
         nonlocal active_primary
-        active_primary = _primary_active_binding(
-            intent,
-            snapshot_id=checkpoint.model_input_snapshot_id,
-            full_history=session.full_history,
-        )
-        await _save_checkpoint("provider_pending", turn_index=intent.turn_index)
+        _push_runtime_state()
+        await _runtime.bind_active_primary(intent)
+        active_primary = _runtime.active_primary
 
-    async def _load_pending_provider_request(signal: Any) -> ProviderRequest:
-        if not _exact_model_input or _model_input_store is None:
-            raise ConfigError("exact model-input replay is not configured")
-        snapshot_id = checkpoint.model_input_snapshot_id
-        if not snapshot_id:
-            raise ConfigError("provider_pending checkpoint is missing model_input_snapshot_id")
-        if checkpoint.provider_attempt < 1:
-            raise ConfigError("provider_pending checkpoint is missing a valid provider_attempt")
-        try:
-            snapshot = await _model_input_store.load(snapshot_id)
-        except Exception as exc:
-            raise ConfigError(
-                f"failed to load exact model input snapshot {snapshot_id!r}: {exc}"
-            ) from exc
-        if snapshot is None:
-            raise ConfigError(f"exact model input snapshot {snapshot_id!r} is missing")
-        if (
-            snapshot.run_id != run_id
-            or snapshot.provider_attempt != checkpoint.provider_attempt
-            or snapshot.id != snapshot_id
-        ):
-            raise ConfigError(
-                f"exact model input snapshot {snapshot_id!r} does not match its checkpoint"
-            )
-        try:
-            return decode_model_input_snapshot(snapshot, signal=signal)
-        except ModelInputSnapshotError as exc:
-            raise ConfigError(
-                f"exact model input snapshot {snapshot_id!r} cannot be decoded: {exc}"
-            ) from exc
-
-    async def _handle_prompt_block(block_reason: str) -> AsyncIterator[Event]:
-        # Terminal path for a UserPromptSubmit hook that blocked the prompt.
-        # It returns before the main try/finally, so the AgentStop lifecycle is
-        # dispatched here — otherwise observers/telemetry never see on_run_end.
-        _sync_checkpoint_accounting()
-        _dur = int((time.time() - started) * 1000)
-        blocked_result = _RunResultInfo(
-            run_id=run_id,
-            session_id=session.id,
-            subtype="error",
-            stop_reason="error",
-            total_usage=total,
-            duration_ms=_dur,
-        )
-        event: Event = ErrorEvent(
-            error={"name": "HookBlockedPrompt", "message": block_reason, "retryable": False}
-        )
-        await _persist_event(session, run_id, event)
-        yield event
-        async for event in _error_result_tail(
-            session,
-            agent,
-            run_id=run_id,
-            run_record=run_record,
-            checkpoint=checkpoint,
-            total=total,
-            duration_ms=_dur,
-            running_cost=running_cost,
-            usage_complete=ledger.usage_complete,
-        ):
-            yield event
-        await _dispatch_lifecycle(
-            HookEvent.AGENT_STOP,
-            AgentStopContext(
-                session=session,
-                run_id=run_id,
-                turn_index=None,
-                deps=getattr(session, "run_deps", None),
-                result=blocked_result,
-            ),
-        )
-
-    await _dispatch_lifecycle(
-        HookEvent.AGENT_START,
-        AgentStartContext(
-            session=session,
-            run_id=run_id,
-            turn_index=None,
-            deps=getattr(session, "run_deps", None),
-            model=agent.model,
-            prompt=prompt,
-            tools=tuple(sorted(tool.name for tool in agent.tools.list())),
-        ),
+    _startup_ctx = RunStartupContext(
+        runtime=_runtime,
+        prompt=prompt,
+        opts=opts,
+        checkpoint=checkpoint,
+        resume_checkpoint=resume_checkpoint,
+        save_checkpoint=_save_checkpoint,
+        dispatch_user_prompt=_dispatch_user_prompt,
+        dispatch_lifecycle=_dispatch_lifecycle,
     )
-
-    if resume_checkpoint is None:
-        await _save_checkpoint("started")
-        event = SystemEvent(
-            session_id=session.id,
-            run_id=run_id,
-            model=agent.model,
-            tools=sorted(tool.name for tool in agent.tools.list()),
-            permission_mode=agent.permission_engine.mode,
-            cwd=agent.cwd,
-        )
-        await _persist_event(session, run_id, event)
-        yield event
-
-        if not session.skills_loaded_emitted and agent.skills:
-            session.skills_loaded_emitted = True
-            skills_data = [
-                {
-                    "name": s.name,
-                    "description": s.frontmatter.description,
-                    **(
-                        {"when_to_use": s.frontmatter.when_to_use}
-                        if s.frontmatter.when_to_use
-                        else {}
-                    ),
-                    **(
-                        {"argument_hint": s.frontmatter.argument_hint}
-                        if s.frontmatter.argument_hint
-                        else {}
-                    ),
-                }
-                for s in sorted(agent.skills.values(), key=lambda x: x.name)
-            ]
-            event = SkillsLoadedEvent(skills=skills_data)
-            await _persist_event(session, run_id, event)
-            yield event
-
-        prompt, images, hook_events, block_reason = await _dispatch_user_prompt(
-            prompt, opts.images, "run"
-        )
-        for hook_event in hook_events:
-            await _persist_event(session, run_id, hook_event)
-            yield hook_event
-        if block_reason is not None:
-            async for event in _handle_prompt_block(block_reason):
-                yield event
-            return
-        user_message = build_user_message(prompt, images)
-        if agent.skill_listing_text and not session.tools_override:
-            from ..skills.system_reminder import wrap_in_system_reminder
-
-            reminder = wrap_in_system_reminder(agent.skill_listing_text)
-            user_message.content.insert(0, TextBlock(text=reminder))
-        await session.append([user_message])
-        await _save_checkpoint("user_appended")
-        event = UserEvent(message=user_message, subtype="prompt")
-        await _persist_event(session, run_id, event)
-        yield event
-    elif checkpoint.phase == "started":
-        prompt, images, hook_events, block_reason = await _dispatch_user_prompt(
-            prompt, opts.images, "run"
-        )
-        for hook_event in hook_events:
-            await _persist_event(session, run_id, hook_event)
-            yield hook_event
-        if block_reason is not None:
-            async for event in _handle_prompt_block(block_reason):
-                yield event
-            return
-        user_message = build_user_message(prompt, images)
-        if agent.skill_listing_text and not session.tools_override:
-            from ..skills.system_reminder import wrap_in_system_reminder
-
-            reminder = wrap_in_system_reminder(agent.skill_listing_text)
-            user_message.content.insert(0, TextBlock(text=reminder))
-        if not _last_message_matches(session, user_message):
-            await session.append([user_message])
-        await _save_checkpoint("user_appended")
-        event = UserEvent(message=user_message, subtype="prompt")
-        await _persist_event(session, run_id, event)
-        yield event
+    async for _startup_event in initialize_run(_startup_ctx):
+        yield _startup_event
+    if _startup_ctx.blocked:
+        return
 
     from ..abort import any_signal, throw_if_aborted
 
@@ -1567,6 +315,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         if opts.signal is not None
         else session._abort_controller
     )
+    _runtime.signal = signal
     _final_result: _RunResultInfo | None = None
     # Closed-loop schema-repair state (per-run; not checkpointed — a resumed
     # run starts with fresh retry counters).
@@ -1588,27 +337,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
     _end_active_provider_call = _spans.end_active_provider_call
     _close_active_observer_spans = _spans.close_active_observer_spans
 
-    def _build_run_result(
-        subtype: str,
-        stop_reason: str,
-        *,
-        duration_ms: int,
-        error: dict[str, Any] | None = None,
-    ) -> _RunResultInfo:
-        """Build the run's terminal :class:`RunResultInfo` from current run state.
-
-        Used at the loop exits that don't go through the finalizers (stop_when,
-        budget, max-turns, abort, exception, finally)."""
-        _sync_ledger_totals()
-        return build_run_result(
-            run_id=run_id,
-            session_id=session.id,
-            subtype=subtype,
-            stop_reason=stop_reason,
-            total=total,
-            duration_ms=duration_ms,
-            error=error,
-        )
+    _build_run_result = _runtime.build_run_result
 
     # Terminal-answer finalization lives in loop/finalize.py; FinalizeCtx bundles
     # this run's dependencies so the call sites below stay short. The thin
@@ -1634,6 +363,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         dispatch_stop=_dispatch_stop,
         usage_complete=lambda: ledger.usage_complete,
     )
+    _finalization = RunFinalization(_fctx, _runtime)
 
     async def _emit_error_terminal(
         *,
@@ -1641,22 +371,15 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         duration_ms: int | None = None,
         end_provider_call_usage: Usage | None = None,
     ) -> AsyncIterator[Event]:
-        """Error exit shared by the provider/after/stop-hook and guard hard-stop
-        paths. The caller still issues ``return`` after iterating this."""
+        """Error exit shared by provider, hooks, and guard hard-stop paths."""
         nonlocal _final_result
-        _sync_checkpoint_accounting()
-        outcome = TerminalOutcome()
-        async for event in emit_error_terminal(
-            _fctx,
-            total=total,
-            running_cost=running_cost,
-            outcome=outcome,
+        async for event in _finalization.emit_error(
             final_text_value=final_text_value,
             duration_ms=duration_ms,
             end_provider_call_usage=end_provider_call_usage,
         ):
             yield event
-        _final_result = outcome.result
+        _final_result = _finalization.result
 
     async def _finalize_final_tool_answer(
         turn_index: int,
@@ -1665,20 +388,15 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
     ) -> AsyncIterator[Event]:
         nonlocal _final_result, active_primary
         active_primary = None
-        _sync_checkpoint_accounting()
-        outcome = TerminalOutcome()
-        async for event in finalize_final_tool_answer(
-            _fctx,
+        _runtime.active_primary = None
+        async for event in _finalization.finalize_final_tool(
             turn_index=turn_index,
             tool_blocks=tool_blocks,
             final_block=final_block,
-            total=total,
-            running_cost=running_cost,
             forced_final_turn=_forced_final_turn,
-            outcome=outcome,
         ):
             yield event
-        _final_result = outcome.result
+        _final_result = _finalization.result
 
     async def _finalize_text_answer(
         turn_index: int,
@@ -1686,126 +404,29 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
     ) -> AsyncIterator[Event]:
         nonlocal _final_result, active_primary
         active_primary = None
-        _sync_checkpoint_accounting()
-        outcome = TerminalOutcome()
-        async for event in finalize_text_answer(
-            _fctx,
+        _runtime.active_primary = None
+        async for event in _finalization.finalize_text(
             turn_index=turn_index,
             assembly=assembly,
-            total=total,
-            running_cost=running_cost,
             forced_final_turn=_forced_final_turn,
-            outcome=outcome,
         ):
             yield event
-        _final_result = outcome.result
+        _final_result = _finalization.result
 
     def _assembly_with_truncation_prefix(assembly: AssistantAssembly) -> AssistantAssembly:
-        if not _truncation_prefix:
-            return assembly
-        text = final_text(assembly.message)
-        if text is None:
-            return assembly
-        merged = Message(
-            role="assistant",
-            content=[TextBlock(text=f"{_truncation_prefix}{text}")],
-            provider_metadata=assembly.message.provider_metadata,
-        )
-        return AssistantAssembly(
-            message=merged, stop_reason=assembly.stop_reason, usage=assembly.usage
-        )
+        return assembly_with_truncation_prefix(assembly, _truncation_prefix)
 
     def _last_user_message_is_feedback(feedback: str) -> bool:
-        from ..skills.system_reminder import wrap_in_system_reminder
+        return last_user_message_is_feedback(session, feedback)
 
-        message = session.last_provider_message()
-        if message is None or message.role != "user":
-            return False
-        expected = wrap_in_system_reminder(feedback)
-        return any(
-            isinstance(block, TextBlock) and block.text == expected for block in message.content
-        )
-
-    async def _drain_auxiliary_usage() -> AsyncIterator[Event]:
-        """Project settled compaction receipts after the strategy has returned.
-
-        The receipt is already accounted before this projection.  Publishing it
-        here preserves the primary public stream shape while making auxiliary
-        spend visible before a subsequent main delivery can be admitted.
-        """
-        for receipt in ledger.consume_auxiliary_receipts():
-            _sync_ledger_totals()
-            if receipt.usage is None:
-                continue
-            event: Event = UsageEvent(
-                usage=receipt.usage,
-                cumulative=total,
-                cost_usd=receipt.cost_usd,
-                cumulative_cost_usd=running_cost,
-                source="compaction",
-                call_id=receipt.delivery_attempt_id,
-                logical_call_id=receipt.logical_call_id,
-                model=receipt.actual_model,
-            )
-            await _persist_event(session, run_id, event)
-            yield event
-            if _budget is not None and _budget.take_warning():
-                warning: Event = BudgetEvent(
-                    kind="warning",
-                    spent_tokens=_budget.spent_tokens,
-                    spent_usd=_budget.spent_usd,
-                    max_tokens=_budget.max_tokens,
-                    max_cost_usd=_budget.max_cost_usd,
-                )
-                await _persist_event(session, run_id, warning)
-                yield warning
-
-    async def _emit_primary_usage(receipt: ModelCallReceipt) -> AsyncIterator[Event]:
-        """Publish the compatibility-shaped primary usage line once settled."""
-        _sync_ledger_totals()
-        if receipt.usage is None:
-            return
-        session.last_usage = receipt.usage
-        event: Event = UsageEvent(
-            usage=receipt.usage,
-            cumulative=total,
-            cost_usd=receipt.cost_usd,
-            cumulative_cost_usd=running_cost,
-        )
-        await _persist_event(session, run_id, event)
-        yield event
-        if _budget is not None and _budget.take_warning():
-            warning: Event = BudgetEvent(
-                kind="warning",
-                spent_tokens=_budget.spent_tokens,
-                spent_usd=_budget.spent_usd,
-                max_tokens=_budget.max_tokens,
-                max_cost_usd=_budget.max_cost_usd,
-            )
-            await _persist_event(session, run_id, warning)
-            yield warning
+    _drain_auxiliary_usage = _runtime.drain_auxiliary_usage
+    _emit_primary_usage = _runtime.emit_primary_usage
 
     async def _emit_budget_exhausted() -> AsyncIterator[Event]:
-        """Finish through the legacy budget tail with ledger-owned totals."""
         nonlocal _final_result
-        _sync_checkpoint_accounting()
-        if _budget is None:
-            raise RuntimeError("budget terminal requested without a budget")
-        duration_ms = int((time.time() - started) * 1000)
-        _final_result = _build_run_result("error", "error", duration_ms=duration_ms)
-        async for event in _budget_exhausted_tail(
-            session,
-            agent,
-            run_id=run_id,
-            run_record=run_record,
-            checkpoint=checkpoint,
-            budget=_budget,
-            total=total,
-            duration_ms=duration_ms,
-            running_cost=running_cost,
-            usage_complete=ledger.usage_complete,
-        ):
+        async for event in _runtime.emit_budget_exhausted():
             yield event
+        _final_result = _runtime.terminal_result
 
     start_turn = checkpoint.turn_index
     if resume_checkpoint is not None and checkpoint.phase in {
@@ -1814,135 +435,42 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
     }:
         start_turn = checkpoint.turn_index + 1
 
-    _recovered_primary_projection: dict[str, Any] | None = None
-    _recovered_primary_prefix = 0
-    _recovered_compaction = False
+    _resume_state = ResumeState(
+        start_turn=(
+            checkpoint.turn_index + 1
+            if resume_checkpoint is not None
+            and checkpoint.phase in {"tool_results_appended", "turn_complete"}
+            else checkpoint.turn_index
+        )
+    )
+    _resume_ctx = ResumeContext(
+        session=session,
+        agent=agent,
+        run_id=run_id,
+        run_record=run_record,
+        checkpoint=checkpoint,
+        resume_checkpoint=resume_checkpoint,
+        ledger=ledger,
+        signal=signal,
+        exact_model_input=_exact_model_input,
+        active_primary=active_primary,
+        load_pending_provider_request=_load_pending_provider_request,
+        maybe_save_provider_snapshot=_maybe_save_provider_snapshot,
+        persist_event=lambda event: _persist_event(session, run_id, event),
+        emit_error_terminal=_emit_error_terminal,
+        drain_auxiliary_usage=_drain_auxiliary_usage,
+        save_checkpoint=_save_checkpoint,
+        state=_resume_state,
+    )
     try:
-        if resume_checkpoint is not None:
-            # Receipt reconciliation precedes frozen replay, budget admission,
-            # and any new host messages that could change the recorded base.
-            _recovered_compaction = await _reconcile_paid_compactions(
-                session, agent, ledger, checkpoint.turn_index
-            )
-            if _recovered_compaction:
-                await _maybe_save_provider_snapshot(session)
-            if checkpoint.phase in {"provider_pending", "assistant_appended"}:
-                if active_primary is None:
-                    if checkpoint.phase == "provider_pending":
-                        raise ConfigError(
-                            "provider_pending checkpoint lacks its active primary binding"
-                        )
-                else:
-                    if active_primary["turn_index"] != checkpoint.turn_index:
-                        raise ConfigError("active primary turn does not match its checkpoint")
-                    if checkpoint.phase == "provider_pending":
-                        if active_primary["snapshot_id"] != checkpoint.model_input_snapshot_id:
-                            raise ConfigError(
-                                "active primary snapshot does not match its checkpoint"
-                            )
-                        if _exact_model_input:
-                            frozen_request = await _load_pending_provider_request(signal)
-                            if (
-                                _primary_request_fingerprint(frozen_request)
-                                != active_primary["request_fingerprint"]
-                            ):
-                                raise ConfigError(
-                                    "active primary request does not match its frozen snapshot"
-                                )
-                    receipt = ledger.receipt_for(active_primary["delivery_attempt_id"])
-                    intent = ledger.intent_for(active_primary["delivery_attempt_id"])
-                    for identity in (receipt, intent):
-                        if identity is not None and any(
-                            getattr(identity, name) != active_primary[name]
-                            for name in (
-                                "logical_call_id",
-                                "delivery_attempt_id",
-                                "turn_index",
-                                "request_fingerprint",
-                            )
-                        ):
-                            raise ConfigError(
-                                "active primary identity differs from its receipt or intent"
-                            )
-                    matches = [
-                        value
-                        for value in ledger.projections("primary_append")
-                        if value["delivery_attempt_id"] == active_primary["delivery_attempt_id"]
-                    ]
-                    projection = matches[0] if matches else None
-                    if projection is not None:
-                        if any(
-                            projection[name] != value
-                            for name, value in active_primary.items()
-                            if name != "version"
-                        ):
-                            raise ConfigError(
-                                "primary acceptance projection differs from its active binding"
-                            )
-                        expected = (
-                            []
-                            if projection["after_action"] == "stop"
-                            else [projection["assistant_sha256"]]
-                        )
-                        if projection["after_action"] == "continue":
-                            expected.append(projection["control_message_sha256"])
-                    else:
-                        expected = []
-                    _recovered_primary_prefix = _receipt_message_prefix(
-                        list(session.full_history),
-                        base_count=active_primary["full_history_base_count"],
-                        base_fingerprint=active_primary["full_history_base_fingerprint"],
-                        expected_digests=expected,
-                    )
-                    if receipt is not None and receipt.disposition == "rejected_native":
-                        event = ErrorEvent(
-                            error={
-                                "name": "ProviderError",
-                                "message": (
-                                    "provider response contained malformed native tool arguments"
-                                ),
-                                "retryable": False,
-                            }
-                        )
-                        await _persist_event(session, run_id, event)
-                        yield event
-                        async for event in _emit_error_terminal():
-                            yield event
-                        return
-                    if projection is not None and projection["after_action"] == "stop":
-                        async for event in _emit_error_terminal(
-                            final_text_value=projection["after_feedback"]
-                        ):
-                            yield event
-                        return
-                    if _recovered_primary_prefix:
-                        assert projection is not None
-                        _recovered_primary_projection = projection
-                        checkpoint.assistant_message = session.full_history[
-                            active_primary["full_history_base_count"]
-                        ]
-                        checkpoint.assistant_stop_reason = projection["assistant_stop_reason"]
-                        if checkpoint.phase == "provider_pending":
-                            await _save_checkpoint(
-                                "assistant_appended",
-                                turn_index=checkpoint.turn_index,
-                                assistant_message=checkpoint.assistant_message,
-                                assistant_stop_reason=checkpoint.assistant_stop_reason,
-                            )
-
-            async for usage_event in _drain_auxiliary_usage():
-                yield usage_event
-
-        # Crashed-worker notifications must yield from INSIDE the try so that a
-        # caller closing the generator here (aclose -> GeneratorExit at the yield)
-        # still runs the finally block that closes observer spans.
-        if resume_checkpoint is not None:
-            for worker_event in await _queue_crashed_worker_notifications(
-                session, checkpoint, run_id
-            ):
-                yield worker_event
-            if checkpoint.background_workers:
-                await _save_checkpoint(checkpoint.phase, turn_index=checkpoint.turn_index)
+        async for _resume_event in recover_resume(_resume_ctx):
+            yield _resume_event
+        if _resume_state.terminal:
+            return
+        _recovered_primary_projection = _resume_state.recovered_primary_projection
+        _recovered_primary_prefix = _resume_state.recovered_primary_prefix
+        _recovered_compaction = _resume_state.recovered_compaction
+        start_turn = _resume_state.start_turn
 
         for turn_index in range(start_turn, max_turns):
             throw_if_aborted(signal)
@@ -2028,9 +556,8 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 and active_primary.get("turn_index") == turn_index
                 and isinstance(active_primary.get("logical_call_id"), str)
             ):
-                # Task 4 owns strict frozen-replay reconciliation. Retaining
-                # this operation ID here gives its later proof one stable
-                # parent while every physical delivery still gets a fresh UUID.
+                # Keep one stable parent operation across a frozen replay while
+                # every physical delivery receives a fresh identity.
                 _primary_logical_call_id = active_primary["logical_call_id"]
             _auxiliary_caller = _AccountedAuxiliaryCaller(
                 agent.provider,
@@ -2042,116 +569,45 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             _proactive_compaction_logical_call_id = str(uuid4())
             _forced_compaction_logical_call_id = str(uuid4())
 
-            pending = session.pending_skill_overlay
-            session.pending_skill_overlay = None
-            model_override = None
-            if pending is not None:
-                session.current_turn_allowed_tools = pending.allowed_tools
-                model_override = pending.model_override
-            else:
-                session.current_turn_allowed_tools = None
-            # Clear per-turn permission decisions on every fresh turn.
-            # Preserve them only when resuming the exact checkpointed turn so
-            # Seam A can replay stored allow/deny without re-prompting.
-            if resume_checkpoint is None or turn_index != checkpoint.turn_index:
-                session.current_turn_permission_decisions = {}
-
-            resumed_assistant = (
-                resume_checkpoint is not None
-                and turn_index == checkpoint.turn_index
-                and checkpoint.phase
-                in {
-                    "assistant_appended",
-                    "permission_pending",
-                    "tool_batch_pending",
-                    "tool_executing",
-                }
-                and checkpoint.assistant_message is not None
+            _prep_ctx = ProviderPreparationContext(
+                session=session,
+                agent=agent,
+                opts=opts,
+                turn_index=turn_index,
+                run_id=run_id,
+                signal=signal,
+                checkpoint=checkpoint,
+                resume_checkpoint=resume_checkpoint,
+                start_turn=start_turn,
+                exact_model_input=_exact_model_input,
+                force_final_pending=_force_final_pending,
+                forced_final_turn=_forced_final_turn,
+                recovered_compaction=_recovered_compaction,
+                recovered_primary_projection=_recovered_primary_projection,
+                hook_dispatcher_active=hook_dispatcher.active,
+                ledger=ledger,
+                budget=_budget,
+                auxiliary_caller=_auxiliary_caller,
+                primary_logical_call_id=_primary_logical_call_id,
+                proactive_compaction_logical_call_id=_proactive_compaction_logical_call_id,
+                forced_compaction_logical_call_id=_forced_compaction_logical_call_id,
+                load_pending_provider_request=_load_pending_provider_request,
+                dispatch_before_provider_call=_dispatch_before_provider_call,
+                persist_event=lambda event: _persist_event(session, run_id, event),
+                drain_auxiliary_usage=_drain_auxiliary_usage,
+                save_checkpoint=_save_checkpoint,
+                emit_budget_exhausted=_emit_budget_exhausted,
+                maybe_save_provider_snapshot=_maybe_save_provider_snapshot,
             )
-            if resumed_assistant:
-                session.current_turn_allowed_tools = checkpoint.current_turn_allowed_tools
-            frozen_pending_resume = (
-                _exact_model_input
-                and resume_checkpoint is not None
-                and turn_index == checkpoint.turn_index
-                and checkpoint.phase == "provider_pending"
-            )
-            exact_pending_replay = frozen_pending_resume and not resumed_assistant
-
-            _compacted = False
-            if (
-                not resumed_assistant
-                and not exact_pending_replay
-                and not (_recovered_compaction and turn_index == start_turn)
-            ):
-                try:
-                    _compacted = await maybe_compact_resilient(
-                        session,
-                        agent,
-                        signal,
-                        model=model_override or session.active_model or agent.model,
-                        auxiliary_caller=_auxiliary_caller,
-                        logical_call_id=_proactive_compaction_logical_call_id,
-                    )
-                except _ModelCallError as exc:
-                    async for event in _drain_auxiliary_usage():
-                        yield event
-                    if exc.code == "budget_exceeded" and _budget is not None:
-                        async for event in _emit_budget_exhausted():
-                            yield event
-                        return
-                    raise
-                async for event in _drain_auxiliary_usage():
-                    yield event
-            if _compacted:
-                reset_read_tracker_after_compaction(session, agent)
-                _re_inject_skill_context(session)
-                await _maybe_save_provider_snapshot(session)
-                event = build_compaction_event(session)
-                await _persist_event(session, run_id, event)
-                yield event
-
-            if not resumed_assistant and not exact_pending_replay:
-                try:
-                    ledger.assert_may_start()
-                except _ModelCallError as exc:
-                    if exc.code == "budget_exceeded" and _budget is not None:
-                        async for event in _emit_budget_exhausted():
-                            yield event
-                        return
-                    raise
-
-            # ── Context building (RAG-per-turn, schema injection, …) ──────
-            context_result = (
-                None
-                if resumed_assistant or frozen_pending_resume
-                else await _build_context_result(session, turn_index)
-            )
-            if context_result is not None:
-                event = ContextBuildEvent(
-                    system_blocks=len(context_result.system_blocks),
-                    messages=len(context_result.messages),
-                    selected_tools=_context_selected_tool_names(context_result),
-                    budget=context_budget_to_dict(context_result.budget),
-                    metadata=dict(context_result.metadata),
-                )
-                await _persist_event(session, run_id, event)
-                yield event
-
-            if resumed_assistant:
-                req = None
-            elif exact_pending_replay:
-                req = await _load_pending_provider_request(signal)
-            else:
-                req = _build_turn_request(
-                    session, opts, context=context_result, model_override=model_override
-                )
-
-            # If the previous turn tripped the guard with force_final, strip
-            # all tools so the model must produce a text response.
-            if req is not None and _force_final_pending and not exact_pending_replay:
-                req.tools = []
-                req.tool_choice = None
+            async for _prep_event in prepare_provider_turn(_prep_ctx):
+                yield _prep_event
+            if _prep_ctx.terminal:
+                return
+            req = _prep_ctx.outcome_req
+            context_result = _prep_ctx.outcome_context
+            resumed_assistant = _prep_ctx.resumed_assistant
+            frozen_pending_resume = _prep_ctx.frozen_pending_resume
+            exact_pending_replay = _prep_ctx.exact_pending_replay
 
             # Runs even when req is None (resumed-assistant turn) so stop-style
             # BeforeProviderCall hooks (e.g. StopPredicateHook) still fire on
@@ -2252,228 +708,76 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                     async for event in _emit_error_terminal(final_text_value=provider_feedback):
                         yield event
                     return
+            _provider_ctx = ProviderTurnContext(
+                session=session,
+                agent=agent,
+                opts=opts,
+                turn_index=turn_index,
+                run_id=run_id,
+                signal=signal,
+                req=req,
+                checkpoint=checkpoint,
+                ledger=ledger,
+                auxiliary_caller=_auxiliary_caller,
+                exact_pending_replay=exact_pending_replay,
+                resumed_assistant=resumed_assistant,
+                forced_compactions_used=_forced_compactions_used,
+                primary_logical_call_id=_primary_logical_call_id,
+                forced_compaction_logical_call_id=_forced_compaction_logical_call_id,
+                prepare_provider_call=_prepare_provider_call,
+                start_provider_call=_start_provider_call,
+                end_provider_call=_end_active_provider_call,
+                bind_active_primary=_bind_active_primary,
+                save_checkpoint=_save_checkpoint,
+                drain_auxiliary_usage=_drain_auxiliary_usage,
+                emit_primary_usage=_emit_primary_usage,
+                emit_error_terminal=_emit_error_terminal,
+                emit_budget_exhausted=_emit_budget_exhausted,
+                dispatch_after_provider_call=_dispatch_after_provider_call,
+                persist_event=lambda event: _persist_event(session, run_id, event),
+                flush_events=lambda: _flush_events(session),
+                maybe_save_provider_snapshot=_maybe_save_provider_snapshot,
+                close_active_observer_spans=_close_active_observer_spans,
+                sync_ledger_totals=_sync_ledger_totals,
+                active_primary=active_primary,
+                budget=_budget,
+                force_final_pending=_force_final_pending,
+            )
 
-            assembly: AssistantAssembly | None = None
-            primary_receipt: ModelCallReceipt | None = None
-            primary_rejected_native = False
-            staged_partials: dict[str, list[Any]] = {}
-            accepted_partials: list[Any] = []
-            if resumed_assistant:
-                assert checkpoint.assistant_message is not None
-                assembly = AssistantAssembly(
-                    message=checkpoint.assistant_message,
-                    stop_reason=cast(StopReason, checkpoint.assistant_stop_reason or "tool_use"),
-                    usage=Usage(),
-                )
-            else:
-                assert req is not None
-                # Prompt-cache advisory: compare this request's final tool set and
-                # model against the previous provider call on this session and warn
-                # (observationally) when the cached prefix was invalidated. Computed
-                # after force_final/hook mutations so it reflects what is actually
-                # sent. No baseline on the first call → no advisory.
-                _sig = tool_signature(req.tools)
-                for _reason, _detail in prompt_cache_advisories(
-                    prev_model=session._last_prompt_cache_model,
-                    prev_signature=session._last_prompt_cache_tool_sig,
-                    model=req.model,
-                    signature=_sig,
-                ):
-                    _adv: Event = PromptCacheAdvisoryEvent(reason=_reason, detail=_detail)
-                    await _persist_event(session, run_id, _adv)
-                    yield _adv
-                session._last_prompt_cache_model = req.model
-                session._last_prompt_cache_tool_sig = _sig
-                _ladder = getattr(agent, "compaction_ladder", None)
-                if _ladder is None:
-                    # Legacy path: one forced-compaction retry per turn.
-                    _provider_stream = _stream_turn_with_compaction_retry(
-                        session,
-                        agent,
-                        opts,
-                        req,
-                        turn_index=turn_index,
-                        signal=signal,
-                        prepare_provider_call=_prepare_provider_call,
-                        start_provider_call=_start_provider_call,
-                        end_provider_call=_end_active_provider_call,
-                        request_prepared=exact_pending_replay,
-                        ledger=ledger,
-                        logical_call_id=_primary_logical_call_id,
-                        bind_active_primary=_bind_active_primary,
-                        auxiliary_caller=_auxiliary_caller,
-                        compaction_logical_call_id=_forced_compaction_logical_call_id,
-                    )
-                else:
-                    # Ladder recovery: micro-compact, then capped forced compactions.
-                    _provider_stream = _stream_turn_with_ladder(
-                        session,
-                        agent,
-                        opts,
-                        req,
-                        turn_index=turn_index,
-                        signal=signal,
-                        ladder=_ladder,
-                        forced_used=_forced_compactions_used,
-                        prepare_provider_call=_prepare_provider_call,
-                        start_provider_call=_start_provider_call,
-                        end_provider_call=_end_active_provider_call,
-                        request_prepared=exact_pending_replay,
-                        ledger=ledger,
-                        logical_call_id=_primary_logical_call_id,
-                        bind_active_primary=_bind_active_primary,
-                        auxiliary_caller=_auxiliary_caller,
-                        compaction_logical_call_id=_forced_compaction_logical_call_id,
-                    )
-                try:
-                    async for item in _provider_stream:
-                        if isinstance(item, _PrimaryPartial):
-                            if item.delivery_attempt_id is not None:
-                                staged_partials.setdefault(item.delivery_attempt_id, []).append(
-                                    item.event
-                                )
-                            # Live streaming remains immediate; durability waits
-                            # until the whole physical response validates.
-                            yield item.event
-                        elif isinstance(item, _AccountedPrimaryAssembly):
-                            assembly = item.assembly
-                            primary_receipt = item.receipt
-                            primary_rejected_native = item.rejected_native
-                            accepted_partials = staged_partials.pop(
-                                item.receipt.delivery_attempt_id, []
-                            )
-                        elif isinstance(item, AssistantAssembly):
-                            assembly = item
-                        else:
-                            if isinstance(item, CompactionEvent):
-                                async for usage_event in _drain_auxiliary_usage():
-                                    yield usage_event
-                                # A forced compaction may have settled enough
-                                # auxiliary spend to exhaust the run budget.
-                                # Save that receipt-backed state and gate here,
-                                # while the recovery generator is still paused
-                                # at its CompactionEvent, before it can rebuild
-                                # context/request state or begin a new primary.
-                                await _save_checkpoint(
-                                    checkpoint.phase,
-                                    turn_index=turn_index,
-                                )
-                                ledger.assert_may_start()
-                                await _maybe_save_provider_snapshot(session)
-                            await _persist_event(session, run_id, item)
-                            yield item
-                except Exception as exc:
-                    # Ordinary error exits can still own settled auxiliary use.
-                    # BaseException shutdown/cancellation must not yield here.
-                    async for usage_event in _drain_auxiliary_usage():
-                        yield usage_event
-                    if (
-                        isinstance(exc, _ModelCallError)
-                        and exc.code == "budget_exceeded"
-                        and _budget is not None
-                    ):
-                        await _close_active_observer_spans(stop_reason="error")
-                        async for event in _emit_budget_exhausted():
-                            yield event
-                        return
-                    raise
+            async def _bind_provider_primary(
+                intent: ModelCallIntent,
+                _provider_ctx: ProviderTurnContext = _provider_ctx,
+            ) -> None:
+                await _bind_active_primary(intent)
+                _provider_ctx.active_primary = _runtime.active_primary
 
+            _provider_ctx.bind_active_primary = _bind_provider_primary
+
+            async def _save_provider_checkpoint(
+                phase: str,
+                *,
+                _provider_ctx: ProviderTurnContext = _provider_ctx,
+                **kwargs: Any,
+            ) -> None:
+                nonlocal _force_final_pending
+                # The provider phase may change this flag immediately before
+                # its assistant checkpoint.  Adopt that phase-local value
+                # before the shared runtime serializes the checkpoint.
+                _force_final_pending = _provider_ctx.force_final_pending
+                await _save_checkpoint(phase, **kwargs)
+
+            _provider_ctx.save_checkpoint = _save_provider_checkpoint
+            async for _provider_event in run_provider_turn(_provider_ctx):
+                yield _provider_event
+            assembly = _provider_ctx.assembly
+            projection = _provider_ctx.projection
+            control = _provider_ctx.control
+            active_primary = _provider_ctx.active_primary
+            _force_final_pending = _provider_ctx.force_final_pending
+            if _provider_ctx.terminal:
+                return
             if assembly is None:
                 raise RuntimeError("provider stream ended without assistant assembly")
-
-            if not resumed_assistant:
-                if primary_receipt is None or primary_receipt.usage is None:
-                    raise RuntimeError("accounted primary stream ended without a reported receipt")
-                _provider_usage = primary_receipt.usage
-                _sync_ledger_totals()
-                if primary_rejected_native:
-                    # The normalized stream was structurally complete, so its
-                    # spend is settled. Its raw tool fragments are never made
-                    # durable or executable.
-                    await _save_checkpoint("provider_pending", turn_index=turn_index)
-                    async for event in _emit_primary_usage(primary_receipt):
-                        yield event
-                    event = ErrorEvent(
-                        error={
-                            "name": "ProviderError",
-                            "message": (
-                                "provider response contained malformed native tool arguments"
-                            ),
-                            "retryable": False,
-                        }
-                    )
-                    await _persist_event(session, run_id, event)
-                    yield event
-                    async for event in _emit_error_terminal(
-                        end_provider_call_usage=_provider_usage,
-                    ):
-                        yield event
-                    return
-
-                # A validated, accepted primary response may now commit its
-                # staged partials in the same relative order as the old path.
-                for partial_event in accepted_partials:
-                    await _persist_event(session, run_id, partial_event)
-
-                (
-                    assembly,
-                    hook_events,
-                    after_action,
-                    after_feedback,
-                ) = await _dispatch_after_provider_call(
-                    assembly,
-                    turn_index,
-                )
-                for hook_event in hook_events:
-                    await _persist_event(session, run_id, hook_event)
-                    yield hook_event
-                if active_primary is None:
-                    raise ConfigError("accepted primary response lacks its active binding")
-                control = (
-                    _primary_control_message(assembly.message, after_feedback)
-                    if after_action == "continue"
-                    else None
-                )
-                projection = _projection_record(
-                    projection_kind="primary_append",
-                    run_id=run_id,
-                    **{key: value for key, value in active_primary.items() if key != "version"},
-                    assistant_sha256=_message_digest(assembly.message),
-                    assistant_stop_reason=assembly.stop_reason,
-                    after_action=after_action,
-                    after_feedback=after_feedback,
-                    control_message_sha256=_message_digest(control)
-                    if control is not None
-                    else None,
-                )
-                await ledger.record_projection(projection)
-                if after_action == "stop":
-                    async for event in _emit_primary_usage(primary_receipt):
-                        yield event
-                    async for event in _emit_error_terminal(
-                        final_text_value=after_feedback,
-                        end_provider_call_usage=_provider_usage,
-                    ):
-                        yield event
-                    return
-                await _end_active_provider_call(
-                    stop_reason=assembly.stop_reason,
-                    usage=_provider_usage,
-                )
-
-                await session.append([assembly.message])
-                _force_final_pending = False
-                await _save_checkpoint(
-                    "assistant_appended",
-                    turn_index=turn_index,
-                    assistant_message=assembly.message,
-                    assistant_stop_reason=assembly.stop_reason,
-                )
-                event = AssistantEvent(message=assembly.message, stop_reason=assembly.stop_reason)
-                await _persist_event(session, run_id, event)
-                yield event
-                async for event in _emit_primary_usage(primary_receipt):
-                    yield event
 
             # Resume the post-hook decision itself: hooks are never rerun to
             # guess an already accepted assistant's control flow.
@@ -2556,209 +860,44 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 _pending_truncation_feedback = None
                 continue
 
-            tool_blocks = [b for b in assembly.message.content if isinstance(b, ToolUseBlock)]
-            # Only the interrupted turn needs event-log recovery; a fresh turn has
-            # no prior tool results, so skip the whole-log scan on the happy path.
-            completed_tool_results: dict[str, ToolResultBlock] = (
-                await _recover_completed_tool_results(
-                    session,
-                    run_id,
-                    checkpoint.completed_tool_results,
-                    tool_blocks,
-                    after_seq=checkpoint.tool_batch_event_after_seq,
-                    assistant_message=checkpoint.assistant_message,
-                )
-                if resume_checkpoint is not None and turn_index == checkpoint.turn_index
-                else {}
-            )
-            _recovery_hints: dict[str, str] = {}
-            missing_tool_blocks = [
-                block for block in tool_blocks if block.id not in completed_tool_results
-            ]
-            await _save_checkpoint(
-                "tool_batch_pending",
+            _tool_ctx = ToolBatchContext(
+                session=session,
+                agent=agent,
+                signal=signal,
+                run_id=run_id,
                 turn_index=turn_index,
-                assistant_message=assembly.message,
-                assistant_stop_reason=assembly.stop_reason,
-                pending_tool_blocks=tool_blocks,
-                completed_tool_results=completed_tool_results,
+                assembly=assembly,
+                checkpoint=checkpoint,
+                resume_checkpoint=resume_checkpoint,
+                guard=_guard,
+                guard_state=_guard_state,
+                save_checkpoint=_save_checkpoint,
+                flush_events=lambda: _flush_events(session),
+                persist_event=lambda event: _persist_event(session, run_id, event),
+                dispatch_lifecycle=_dispatch_lifecycle,
+                emit_error_terminal=_emit_error_terminal,
+                force_final_pending=_force_final_pending,
             )
 
-            async def _checkpoint_tool_executing(
-                _assembly: AssistantAssembly = assembly,
-                _tool_blocks: list[ToolUseBlock] = tool_blocks,
-                _completed: dict[str, ToolResultBlock] = completed_tool_results,
-                _turn_index: int = turn_index,
+            async def _save_tool_checkpoint(
+                phase: str,
+                *,
+                _tool_ctx: ToolBatchContext = _tool_ctx,
+                **kwargs: Any,
             ) -> None:
-                # Once-per-batch durability seam (fired by the scheduler after
-                # permissions resolve, before any tool runs): persist the resolved
-                # permission decisions and the tool_executing phase a single time.
-                # Per-tool start/end checkpoint saves are gone; the durable event
-                # log is the recovery source for tool execution instead. Loop
-                # variables are bound as defaults so the callback snapshots this
-                # turn's state (and satisfies flake8-bugbear B023).
-                await _save_checkpoint(
-                    "tool_executing",
-                    turn_index=_turn_index,
-                    assistant_message=_assembly.message,
-                    assistant_stop_reason=_assembly.stop_reason,
-                    pending_tool_blocks=_tool_blocks,
-                    completed_tool_results=_completed,
-                )
+                nonlocal _force_final_pending
+                # The loop-guard reminder sets this in the tool phase before
+                # the turn-complete checkpoint is written.
+                _force_final_pending = _tool_ctx.force_final_pending
+                await _save_checkpoint(phase, **kwargs)
 
-            async for event in execute_tool_calls(
-                missing_tool_blocks,
-                agent,
-                session,
-                signal,
-                turn_index=turn_index,
-                on_permissions_resolved=_checkpoint_tool_executing,
-            ):
-                # Progress is an intentionally transient live projection.  It
-                # may contain high-frequency or sensitive UI detail, so do not
-                # write it into the durable run journal.
-                if not isinstance(event, ToolProgressEvent):
-                    await _persist_event(session, run_id, event)
-                if isinstance(event, (ToolCallStartEvent, ToolCallEndEvent)):
-                    # Recovery-critical: keep tool start/end durable at the yield
-                    # boundary (a consumer can crash at the yield below).
-                    await _flush_events(session)
-                if isinstance(event, PermissionRequestEvent):
-                    await _save_checkpoint(
-                        "permission_pending",
-                        turn_index=turn_index,
-                        assistant_message=assembly.message,
-                        assistant_stop_reason=assembly.stop_reason,
-                        pending_tool_blocks=tool_blocks,
-                        completed_tool_results=completed_tool_results,
-                        status="waiting_permission",
-                    )
-                elif isinstance(event, ToolCallStartEvent):
-                    # The start event is now durable in the event log (persisted
-                    # above); a started-but-unfinished tool is recovered as
-                    # interrupted from the log on resume. This in-memory placeholder
-                    # only keeps result_blocks total if no end event ever arrives.
-                    completed_tool_results.setdefault(
-                        event.tool_use_id,
-                        _interrupted_tool_result_block(event),
-                    )
-                elif isinstance(event, ToolCallEndEvent):
-                    block = _tool_result_block_from_end(event)
-                    completed_tool_results[event.tool_use_id] = block
-                    if (
-                        event.is_error
-                        and event.tool_result is not None
-                        and event.tool_result.recovery_hint
-                    ):
-                        _recovery_hints[event.tool_use_id] = event.tool_result.recovery_hint
-                yield event
-                if isinstance(event, ToolCallStartEvent):
-                    await _dispatch_lifecycle(
-                        HookEvent.TOOL_USE_START,
-                        ToolUseStartContext(
-                            session=session,
-                            run_id=run_id,
-                            turn_index=turn_index,
-                            deps=getattr(session, "run_deps", None),
-                            tool_use_id=event.tool_use_id,
-                            tool_name=event.tool_name,
-                            input=event.input,
-                            summary=event.summary,
-                        ),
-                    )
-                elif isinstance(event, ToolCallEndEvent):
-                    await _dispatch_lifecycle(
-                        HookEvent.TOOL_USE_STOP,
-                        ToolUseStopContext(
-                            session=session,
-                            run_id=run_id,
-                            turn_index=turn_index,
-                            deps=getattr(session, "run_deps", None),
-                            tool_use_id=event.tool_use_id,
-                            tool_name=event.tool_name,
-                            is_error=event.is_error,
-                            duration_ms=event.duration_ms,
-                            result=event.result,
-                            tool_result=event.tool_result,
-                        ),
-                    )
-            result_blocks: list[ContentBlock] = [
-                completed_tool_results[block.id] for block in tool_blocks
-            ]
-            # Feature E — inject recovery hint when ALL tools in the batch failed.
-            # Partial failures are left to the model to resolve on its own.
-            if (
-                result_blocks
-                and all(
-                    getattr(b, "type", None) == "tool_result" and getattr(b, "is_error", False)
-                    for b in result_blocks
-                )
-                and _recovery_hints
-            ):
-                _hint_text = "All tool calls failed. Recovery hints:\n" + "\n".join(
-                    f"- {hint}" for hint in _recovery_hints.values()
-                )
-                _hint_msg = Message(role="user", content=[TextBlock(text=_hint_text)])
-                await session.append([_hint_msg])
-                _hint_event: Event = UserEvent(message=_hint_msg, subtype="notification")
-                await _persist_event(session, run_id, _hint_event)
-                yield _hint_event
-            result_message = Message(role="user", content=result_blocks)
-            already_appended = (
-                resume_checkpoint is not None
-                and turn_index == checkpoint.turn_index
-                and _last_message_has_tool_results(session, tool_blocks)
-            )
-            if not already_appended:
-                await session.append([result_message])
-            await _save_checkpoint(
-                "tool_results_appended",
-                turn_index=turn_index,
-                assistant_message=assembly.message,
-                assistant_stop_reason=assembly.stop_reason,
-                pending_tool_blocks=tool_blocks,
-                completed_tool_results=completed_tool_results,
-            )
-            event = UserEvent(message=result_message, subtype="tool_result")
-            await _persist_event(session, run_id, event)
-            yield event
+            _tool_ctx.save_checkpoint = _save_tool_checkpoint
 
-            # ── Loop guard evaluation ─────────────────────────────────────
-            if _guard is not None and _guard_state is not None:
-                _decision = evaluate_loop_guard(_guard, _guard_state, tool_blocks, result_blocks)
-                if _decision.action != "continue":
-                    event = LoopGuardEvent(
-                        reason=_decision.reason,
-                        detail=_decision.detail,
-                        action=_decision.action,
-                    )
-                    await _persist_event(session, run_id, event)
-                    yield event
-                    if _decision.action == "force_final":
-                        # Inject a reminder so the model knows to summarise
-                        # without further tool calls, then let the loop run
-                        # one more tools-disabled turn.
-                        from ..skills.system_reminder import wrap_in_system_reminder
-
-                        _reminder_text = wrap_in_system_reminder(
-                            "You appear to be stuck in a loop or repeatedly "
-                            "encountering failures. Please provide your final "
-                            "answer now without making further tool calls."
-                        )
-                        _reminder_msg = Message(
-                            role="user", content=[TextBlock(text=_reminder_text)]
-                        )
-                        await session.append([_reminder_msg])
-                        _force_final_pending = True
-                        await _save_checkpoint("turn_complete", turn_index=turn_index)
-                        event = UserEvent(message=_reminder_msg, subtype="notification")
-                        await _persist_event(session, run_id, event)
-                        yield event
-                    else:
-                        # Hard stop — emit error result and exit.
-                        async for event in _emit_error_terminal():
-                            yield event
-                        return
+            async for _tool_event in run_tool_batch(_tool_ctx):
+                yield _tool_event
+            _force_final_pending = _tool_ctx.force_final_pending
+            if _tool_ctx.terminal:
+                return
             # Natural end of turn body (guard said "continue" or "force_final").
             await _end_active_turn()
             await _save_checkpoint("turn_complete", turn_index=turn_index)
@@ -2781,59 +920,18 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         ):
             yield event
     except AbortError:
-        await _cancel_background_workers(session)
-        _dur = int((time.time() - started) * 1000)
-        _final_result = _build_run_result("aborted", "error", duration_ms=_dur)
-        _sync_checkpoint_accounting()
-        await _close_active_observer_spans(stop_reason="error")
-        event = ResultEvent(
-            subtype="aborted",
-            stop_reason="error",
-            total_usage=total,
-            duration_ms=_dur,
-            total_cost_usd=running_cost,
-            usage_complete=ledger.usage_complete,
-        )
-        await _persist_event(session, run_id, event)
-        store = agent.run_store
-        if run_record is not None and store is not None:
-            checkpoint.phase = "aborted"
-            checkpoint.total_usage = total
-            await _flush_events(session)
-            await store.save_checkpoint(run_id, checkpoint, status="aborted")
-        yield event
+        async for event in _runtime.emit_abort_terminal(
+            close_active_observer_spans=_close_active_observer_spans,
+        ):
+            yield event
+        _final_result = _runtime.terminal_result
     except Exception as exc:
-        await _cancel_background_workers(session)
-        retryable = getattr(exc, "retryable", False)
-        status = getattr(exc, "status", None)
-        _err_dict: dict[str, object] = {
-            "name": exc.__class__.__name__,
-            "message": str(exc),
-            "retryable": retryable,
-            **({"status": status} if isinstance(status, int) else {}),
-        }
-        _dur = int((time.time() - started) * 1000)
-        _final_result = _build_run_result("error", "error", duration_ms=_dur, error=_err_dict)
-        _sync_checkpoint_accounting()
-        await _close_active_observer_spans(stop_reason="error")
-        event = ErrorEvent(error=_err_dict)
-        await _persist_event(session, run_id, event)
-        yield event
-        event = ResultEvent(
-            subtype="error",
-            stop_reason="error",
-            total_usage=total,
-            duration_ms=_dur,
-            total_cost_usd=running_cost,
-            usage_complete=ledger.usage_complete,
-        )
-        await _persist_event(session, run_id, event)
-        store = agent.run_store
-        if run_record is not None and store is not None:
-            checkpoint.total_usage = total
-            await _flush_events(session)
-            await store.mark_failed(run_id, checkpoint, error=_err_dict)
-        yield event
+        async for event in _runtime.emit_exception_terminal(
+            exc,
+            close_active_observer_spans=_close_active_observer_spans,
+        ):
+            yield event
+        _final_result = _runtime.terminal_result
     finally:
         if (
             _exact_model_input
@@ -2855,8 +953,10 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         if signal is not session._abort_controller:
             signal.close()
         await _close_active_observer_spans(stop_reason="error")
-        _run_result = _final_result or _build_run_result(
-            "error", "error", duration_ms=int((time.time() - started) * 1000)
+        _run_result = (
+            _final_result
+            or _runtime.terminal_result
+            or _build_run_result("error", "error", duration_ms=int((time.time() - started) * 1000))
         )
         await _dispatch_lifecycle(
             HookEvent.AGENT_STOP,

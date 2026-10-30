@@ -23,7 +23,7 @@ from ..errors import ProviderError
 from ..events import Event, ResultEvent
 from ..observability import RunResultInfo
 from ..session import Session
-from ..types import AssistantAssembly, ToolUseBlock, Usage
+from ..types import AssistantAssembly, Message, TextBlock, ToolUseBlock, Usage
 from .checkpoint import _persist_event
 from .request import final_text
 from .terminals import (
@@ -70,6 +70,111 @@ class TerminalOutcome:
     the answer back for another turn) and set when the run should end."""
 
     result: RunResultInfo | None = None
+
+
+@dataclass(slots=True)
+class RunFinalization:
+    """Run-bound adapters for the terminal-answer phase.
+
+    ``FinalizeCtx`` contains the hook and checkpoint dependencies specific to
+    answer gates.  This adapter supplies the shared ledger/runtime state and
+    keeps those details out of the turn choreography in ``runner.py``.
+    """
+
+    ctx: FinalizeCtx
+    runtime: Any
+    result: RunResultInfo | None = None
+
+    async def emit_error(
+        self,
+        *,
+        final_text_value: str | None = None,
+        duration_ms: int | None = None,
+        end_provider_call_usage: Usage | None = None,
+    ) -> AsyncIterator[Event]:
+        self.runtime.sync_checkpoint_accounting()
+        outcome = TerminalOutcome()
+        async for event in emit_error_terminal(
+            self.ctx,
+            total=self.runtime.total,
+            running_cost=self.runtime.running_cost,
+            outcome=outcome,
+            final_text_value=final_text_value,
+            duration_ms=duration_ms,
+            end_provider_call_usage=end_provider_call_usage,
+        ):
+            yield event
+        self.result = outcome.result
+
+    async def finalize_final_tool(
+        self,
+        turn_index: int,
+        tool_blocks: list[ToolUseBlock],
+        final_block: ToolUseBlock,
+        *,
+        forced_final_turn: bool,
+    ) -> AsyncIterator[Event]:
+        self.runtime.sync_checkpoint_accounting()
+        outcome = TerminalOutcome()
+        async for event in finalize_final_tool_answer(
+            self.ctx,
+            turn_index=turn_index,
+            tool_blocks=tool_blocks,
+            final_block=final_block,
+            total=self.runtime.total,
+            running_cost=self.runtime.running_cost,
+            forced_final_turn=forced_final_turn,
+            outcome=outcome,
+        ):
+            yield event
+        self.result = outcome.result
+
+    async def finalize_text(
+        self,
+        turn_index: int,
+        assembly: AssistantAssembly,
+        *,
+        forced_final_turn: bool,
+    ) -> AsyncIterator[Event]:
+        self.runtime.sync_checkpoint_accounting()
+        outcome = TerminalOutcome()
+        async for event in finalize_text_answer(
+            self.ctx,
+            turn_index=turn_index,
+            assembly=assembly,
+            total=self.runtime.total,
+            running_cost=self.runtime.running_cost,
+            forced_final_turn=forced_final_turn,
+            outcome=outcome,
+        ):
+            yield event
+        self.result = outcome.result
+
+
+def assembly_with_truncation_prefix(assembly: AssistantAssembly, prefix: str) -> AssistantAssembly:
+    """Prepend recovered truncated text to a terminal assistant assembly."""
+    if not prefix:
+        return assembly
+    text = final_text(assembly.message)
+    if text is None:
+        return assembly
+    merged = Message(
+        role="assistant",
+        content=[TextBlock(text=f"{prefix}{text}")],
+        provider_metadata=assembly.message.provider_metadata,
+    )
+    return AssistantAssembly(message=merged, stop_reason=assembly.stop_reason, usage=assembly.usage)
+
+
+def last_user_message_is_feedback(session: Session, feedback: str) -> bool:
+    """Return whether the current provider history already contains feedback."""
+    from ..skills.system_reminder import wrap_in_system_reminder
+
+    message = session.last_provider_message()
+    if message is None or message.role != "user":
+        return False
+    expected = wrap_in_system_reminder(feedback)
+    return any(isinstance(block, TextBlock) and block.text == expected for block in message.content)
 
 
 def build_run_result(
