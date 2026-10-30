@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from typing import Any, cast
+from typing import Any
 
+from .._wire import WIRE_VERSION, require_wire_version
 from ..errors import ConfigError, WorkflowSuspended, WorkflowTimeoutError
 from ..events import Event
 from .context import SNAPSHOT_NAMESPACE, WorkflowContext, workflow_checkpoint
-from .journal import CURRENT_FINGERPRINT_VERSION, WorkflowJournal
+from .journal import WorkflowJournal
 
 
 async def run_workflow(
@@ -58,6 +59,9 @@ async def run_workflow(
         raise ConfigError("run_workflow(run_id=...) requires Agent(run_store=...)")
     # Durable journaling only when both a store and a run_id are present.
     store = raw_store if (raw_store is not None and run_id is not None) else None
+    existing = await store.load_run(run_id) if store is not None and run_id is not None else None
+    if existing is not None:
+        require_wire_version(existing.meta.get("schema_version"))
 
     host = await agent.session(
         meta={"workflow": getattr(fn, "__name__", "workflow")},
@@ -67,20 +71,17 @@ async def run_workflow(
 
     journal = WorkflowJournal()
     if store is not None and run_id is not None:
-        existing = await store.load_run(run_id)
         if existing is not None:
-            fingerprint_version = existing.meta.get("journal_fingerprint_version", 1)
             snapshot, after_seq = _stored_snapshot(existing)
             journal = WorkflowJournal.from_stored_events(
                 await store.load_events(run_id, after_seq=after_seq),
-                fingerprint_version=cast(int, fingerprint_version),
                 snapshot=snapshot,
             )
         else:
             await store.create_run(
                 host.id,
                 id=run_id,
-                meta={"journal_fingerprint_version": CURRENT_FINGERPRINT_VERSION},
+                meta={"schema_version": WIRE_VERSION},
             )
 
     resolved_budget = budget if budget is not None else getattr(agent, "budget", None)

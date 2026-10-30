@@ -163,9 +163,8 @@ def test_snapshot_round_trips_every_record() -> None:
     journal.record(step, 0, '"ok"', record_kind="step")
 
     rows = journal.snapshot()
-    restored = WorkflowJournal.from_stored_events([], snapshot=rows, fingerprint_version=2)
+    restored = WorkflowJournal.from_stored_events([], snapshot=rows)
 
-    assert restored.fingerprint_version == 2
     assert restored.lookup(agent, 0) == "finding"
     assert restored.lookup_record(agent, 0).structured_output == {"n": 1}
     assert restored.lookup(agent, 1) == "another"
