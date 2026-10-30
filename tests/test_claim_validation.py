@@ -7,7 +7,6 @@ from typing import Any
 import pytest
 
 
-@pytest.mark.parametrize("kind", ["mailbox", "schedule"])
 @pytest.mark.parametrize(
     ("invalid", "message"),
     [
@@ -23,16 +22,10 @@ import pytest
         ({"limit": -1}, "limit must be a non-negative integer or None"),
     ],
 )
-async def test_claim_validation_error_order(
-    kind: str, invalid: dict[str, Any], message: str
-) -> None:
+async def test_claim_validation_error_order(invalid: dict[str, Any], message: str) -> None:
     from linch.coordination.mailbox.core import InMemoryMailbox
-    from linch.coordination.scheduling.store import InMemoryScheduleStore
 
     args = {"owner": "worker", "lease_s": 30, "now": 100, "limit": None, **invalid}
     with pytest.raises(ValueError) as error:
-        if kind == "mailbox":
-            await InMemoryMailbox().claim("recipient", **args)
-        else:
-            await InMemoryScheduleStore().claim_due_occurrences(**args)
+        await InMemoryMailbox().claim("recipient", **args)
     assert str(error.value) == message

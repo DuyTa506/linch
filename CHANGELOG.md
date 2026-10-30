@@ -7,9 +7,24 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
 
 ## Unreleased
 
+- Add `RunOptions.run_id` to start or adopt a pending run through the ordinary session API.
+
+- Retry nonterminal worker exits after ownership loss or cancellation. Retry
+  transient lease renewal failures within the last confirmed TTL; cancel the
+  run task on lease loss/expiry without writing a terminal aborted status.
+  Protect teardown from queue callback cancellation. Move pending-run inserts
+  and contract-checked adoption into the run stores with shared conformance tests.
+
+- Add explicit `linch.worker` (`worker` extra): atomic pending-run dispatch and
+  batching through PgQueuer, fleet queue limits, lease heartbeats, checkpoint
+  recovery, W3C trace propagation, and deferred cron/interval schedule jobs.
+  Replace coordination scheduling and `Agent(schedule_store=...)` with
+  host-mounted, reversible schedule tools. Add a runnable fleet example and
+  local enqueue/NOTIFY measurements to the production guide.
+
 - Remove all SQLite stores and their executor. Durable sessions, runs, and
   virtual files use Postgres; InMemory stores remain for tests and development.
-  Built-in mailboxes and scheduling now last only for the process lifetime.
+  Built-in mailboxes now last only for the process lifetime.
 - Require explicit session/run stores and an explicit enabled filesystem for
   `create_deep_agent(durable=True)`; use `durable=False` for an ephemeral preset.
 - Read durable run reports from Postgres via `scripts/run_report.py --dsn` or

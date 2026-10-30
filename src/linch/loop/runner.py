@@ -127,6 +127,7 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
             "run.create_run",
             store.create_run(
                 session.id,
+                id=opts.run_id,
                 meta=run_meta_with_contract(_build_run_contract(session, prompt, opts)),
             ),
         )
