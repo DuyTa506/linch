@@ -102,6 +102,7 @@ class Session:
     _close_task: asyncio.Task[None] | None = None
     _idle: asyncio.Event = field(default_factory=_set_event)
     """Set only when the run iterator and all of its finalizers are finished."""
+    _telemetry_run: Any = field(default=None, repr=False)
     active_run_id: str | None = None
     _active_gen: Any = None
     """The async generator driving the in-flight ``run``/``resume`` iterator.

@@ -25,8 +25,9 @@ pip install -e "/path/to/linch[mcp,anthropic,gemini,postgres]"
 ```
 
 Once published, `pip install linch` will work directly. Extras are opt-in:
-`anthropic`, `gemini`, `postgres`, `mcp`, and `otel` each pull in only the
-dependencies that feature needs.
+`anthropic`, `gemini`, `postgres`, and `mcp` each pull in only the dependencies
+that feature needs. OpenTelemetry's API is part of the core install; hosts add
+the SDK and an exporter when they want to collect traces or metrics.
 
 ---
 

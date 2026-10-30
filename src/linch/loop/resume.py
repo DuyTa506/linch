@@ -96,7 +96,7 @@ async def recover_resume(ctx: ResumeContext) -> AsyncIterator[Event]:
         yield usage_event
 
     # Keep this yield inside the caller's try/finally.  A consumer can close
-    # exactly at a worker notification and still get observer cleanup.
+    # exactly at a worker notification and still get lifecycle cleanup.
     for worker_event in await _queue_crashed_worker_notifications(
         ctx.session,
         ctx.checkpoint,

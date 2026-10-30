@@ -1705,8 +1705,7 @@ class Agent:
             await self._close_resource_once(self._provider)
             self._teardown_complete.add("provider")
 
-        # Close hooks that expose a closer (e.g. RunTelemetryHook flushes its
-        # wrapped observers). Successful hooks are remembered across retries.
+        # Close hooks that expose a closer. Successful hooks are remembered across retries.
         # Also close any hooks that were replaced via the hooks setter so their
         # resources (e.g. OTel exporters) are not orphaned.
         for hook in [*self._hooks, *self._replaced_hooks]:

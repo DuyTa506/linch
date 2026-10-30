@@ -54,6 +54,8 @@ def _agent(
     run_store: Any = None,
     enable_background_tools: bool = False,
 ) -> SimpleNamespace:
+    from linch import Context
+
     registry = ToolRegistry()
     registry.register(tool)
     return SimpleNamespace(
@@ -65,6 +67,7 @@ def _agent(
         hooks=hooks or [],
         run_store=run_store,
         enable_background_tools=enable_background_tools,
+        context=Context(),
     )
 
 

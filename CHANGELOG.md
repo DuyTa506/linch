@@ -15,6 +15,14 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
 - Read durable run reports from Postgres via `scripts/run_report.py --dsn` or
   `LINCH_POSTGRES_DSN`; remove `--runs-db`. Runtime benchmarks use memory stores
   and no longer apply former database latency thresholds.
+- Replace the custom observer protocol, dispatchers, collectors and
+  `RunTelemetryHook` with direct OpenTelemetry source instrumentation. The API
+  is a core dependency; the SDK/exporter is host-owned and test/dev-only here.
+  Inject providers through Agent Context for tenant isolation. Emit run, step,
+  chat, tool and compaction spans plus token, operation and store histograms;
+  message/tool content requires the standard OTel capture environment switch.
+  No-op spans pass streamed iterators through unchanged; metrics-only hosts and
+  valid sampled-out trace contexts retain instrumentation.
 
 - Require Python 3.11+; remove the Python 3.10 scaffold TOML fallbacks.
 - Require shared wire version 3 for all persisted envelopes, including workflow
@@ -26,7 +34,7 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
 - Always validate configured structured-output schemas with core `jsonschema`;
   remove the missing-dependency bypass.
 - Use one compaction recovery driver, preserving default per-turn retry and
-  ladder per-run limits, accounting, and observer ordering.
+  ladder per-run limits, accounting, and lifecycle-hook ordering.
 - Remove legacy public API aliases, unused configuration/middleware types,
   and camelCase properties/arguments. Use the configurable `workspace_tools`
   preset and `ToolRegistry.register/unregister`.

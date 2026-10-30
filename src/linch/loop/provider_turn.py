@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .._prompt_cache import prompt_cache_advisories, tool_signature
+from .._telemetry import store_call
 from ..compaction import build_compaction_event, reset_read_tracker_after_compaction
 from ..context import context_budget_to_dict
 from ..errors import ConfigError
@@ -64,7 +65,7 @@ class ProviderTurnContext:
     persist_event: Callable[..., Awaitable[None]]
     flush_events: Callable[..., Awaitable[Any]]
     maybe_save_provider_snapshot: Callable[..., Awaitable[None]]
-    close_active_observer_spans: Callable[..., Awaitable[None]]
+    close_active_spans: Callable[..., Awaitable[None]]
     sync_ledger_totals: Callable[[], None]
     active_primary: dict[str, Any] | None = None
     budget: Any = None
@@ -338,7 +339,7 @@ async def run_provider_turn(ctx: ProviderTurnContext) -> AsyncIterator[Event]:
                 and getattr(ctx, "budget", None) is not None
             ):
                 ctx.terminal = True
-                await ctx.close_active_observer_spans(stop_reason="error")
+                await ctx.close_active_spans(stop_reason="error")
                 async for event in ctx.emit_budget_exhausted():
                     yield event
                 return
@@ -419,7 +420,7 @@ async def run_provider_turn(ctx: ProviderTurnContext) -> AsyncIterator[Event]:
                 yield event
             return
         await ctx.end_provider_call(stop_reason=assembly.stop_reason, usage=_provider_usage)
-        await session.append([assembly.message])
+        await store_call(session, "session.append", session.append([assembly.message]))
         ctx.force_final_pending = False
         await ctx.save_checkpoint(
             "assistant_appended",

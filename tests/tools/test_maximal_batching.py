@@ -177,6 +177,8 @@ def _session() -> SimpleNamespace:
 
 
 def _agent(registry: ToolRegistry, strategy: str) -> SimpleNamespace:
+    from linch import Context
+
     return SimpleNamespace(
         cwd=".",
         tools=registry,
@@ -184,6 +186,7 @@ def _agent(registry: ToolRegistry, strategy: str) -> SimpleNamespace:
         max_tool_concurrency=8,
         tool_concurrency=8,
         tool_batching_strategy=strategy,
+        context=Context(),
     )
 
 

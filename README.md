@@ -203,8 +203,9 @@ linch streams the loop as events instead of hiding execution behind a blocking f
 Hooks are the canonical extension mechanism for the agent loop. Register Python hook objects with `Agent(hooks=[...])` to inspect or control the run at typed chokepoints: agent start/stop, prompt submit, turn start/stop, provider calls, pre/post tool use, final answer, stop, subagent start/stop, and event emission.
 
 Built-in adapters are available when you want a standard extension as a hook:
-`ContextInjectionHook`, `ToolMiddlewareHook`, `RunTelemetryHook`,
-`FinalAnswerVerifierHook`, and `StopPredicateHook`.
+`ContextInjectionHook`, `ToolMiddlewareHook`,
+`FinalAnswerVerifierHook`, and `StopPredicateHook`. Runtime telemetry uses OpenTelemetry
+directly; hosts configure the SDK and OTLP exporters through the agent Context.
 
 ```python
 from linch import Agent, HookResult, workspace_tools
@@ -339,12 +340,11 @@ Examples are organized by subsystem under `examples/`.
 |---|---|
 | `memory/mem0_recall.py` | Optional mem0 recipe using public context and hook APIs with run-scoped `user_id` filtering |
 
-**`examples/observability/`** — telemetry hooks and tracing
+**`examples/observability/`** — OpenTelemetry traces and metrics
 
 | File | What it shows |
 |---|---|
-| `observability/observability_agent.py` | RunTelemetryHook with LoggingObserver + optional OpenTelemetryObserver |
-| `observability/custom_observer.py` | Custom observer: latency tracking, error counts per tool |
+| `observability/observability_agent.py` | OTel SDK console exporters with per-agent Context injection |
 
 **`examples/providers/`** — provider-specific features
 

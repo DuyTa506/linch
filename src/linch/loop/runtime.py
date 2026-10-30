@@ -1,4 +1,4 @@
-"""Run-scoped persistence, top-of-turn drains, and observer lifecycle helpers.
+"""Run-scoped persistence, top-of-turn drains, and lifecycle helpers.
 
 The mutable run state itself remains assembled by ``runner.py`` for now; this
 module owns the low-level operations that are shared by each loop phase and
@@ -14,6 +14,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from functools import partial
 from typing import Any, cast
 
+from .._telemetry import end_step, start_step, store_call
 from .._wire import UnsupportedWireVersionError
 from ..errors import ConfigError
 from ..events import (
@@ -34,12 +35,12 @@ from ..hooks import (
     TurnStartContext,
     TurnStopContext,
 )
+from ..hooks.contexts import _AgentResult
 from ..model_calls import (
     ModelCallIntent,
     _ModelCallLedger,
     _primary_active_binding,
 )
-from ..observability import RunResultInfo
 from ..run_store import (
     ModelInputSnapshotError,
     RunCheckpoint,
@@ -177,7 +178,11 @@ async def drain_pending_notifications(session: Session, run_id: str) -> AsyncIte
                 "durable_inbox requires a SessionStore implementing "
                 "enqueue_inbox() and commit_inbox()"
             )
-        stored = await cast(Any, commit)(session.id, after_seq=session._last_seq)
+        stored = await store_call(
+            session,
+            "session.commit_inbox",
+            cast(Any, commit)(session.id, after_seq=session._last_seq),
+        )
         if not stored:
             return
         session._track_seqs(stored)
@@ -194,7 +199,7 @@ async def drain_pending_notifications(session: Session, run_id: str) -> AsyncIte
     to_drain = list(notifications)
     notifications.clear()
     for note in to_drain:
-        await session.append([note])
+        await store_call(session, "session.append", session.append([note]))
         event: Event = UserEvent(message=note, subtype="notification")
         await _persist_event(session, run_id, event)
         yield event
@@ -243,11 +248,15 @@ async def drain_mailbox(session: Session, run_id: str) -> AsyncIterator[Event]:
             for claimed in claims:
                 message = claimed.message
                 note = render_peer_message(message)
-                await session.notify(
-                    note,
-                    delivery_id=f"mailbox:{message.id}",
-                    source="mailbox",
-                    metadata={"message_id": message.id, "recipient": message.recipient},
+                await store_call(
+                    session,
+                    "session.enqueue_inbox",
+                    session.notify(
+                        note,
+                        delivery_id=f"mailbox:{message.id}",
+                        source="mailbox",
+                        metadata={"message_id": message.id, "recipient": message.recipient},
+                    ),
                 )
                 await cast(Any, ack)([claimed])
                 delivered.append(claimed)
@@ -262,7 +271,7 @@ async def drain_mailbox(session: Session, run_id: str) -> AsyncIterator[Event]:
     messages = await mailbox.drain(address)
     for message in messages:
         note = render_peer_message(message)
-        await session.append([note])
+        await store_call(session, "session.append", session.append([note]))
         event: Event = UserEvent(message=note, subtype="notification")
         await _persist_event(session, run_id, event)
         yield event
@@ -297,7 +306,7 @@ async def drain_alignment(
                     entry.future.set_exception(ConfigError(block_reason))
                 continue
             user_message = build_user_message(prompt, images)
-            await session.append([user_message])
+            await store_call(session, "session.append", session.append([user_message]))
             event: Event = UserEvent(message=user_message, subtype="alignment")
             await _persist_event(session, run_id, event)
             if not entry.future.done():
@@ -359,15 +368,15 @@ async def maybe_save_provider_snapshot(session: Session) -> None:
         projection_id=(session.last_compaction_info or {}).get("projection_id"),
     )
     try:
-        await saver(session.id, snapshot)
+        await store_call(session, "session.save_provider_snapshot", saver(session.id, snapshot))
     except Exception as exc:
         logging.getLogger(__name__).warning(
             "Failed to persist provider-view snapshot for session %s: %s", session.id, exc
         )
 
 
-class SpanLifecycle:
-    """Track the open turn/provider-call observer spans for one run."""
+class TurnLifecycle:
+    """Track the open turn/provider-call lifecycle callbacks for one run."""
 
     def __init__(
         self,
@@ -382,6 +391,7 @@ class SpanLifecycle:
         self.active_provider_call: tuple[int, str, float] | None = None
 
     async def start_turn(self, turn_index: int) -> None:
+        start_step(self._session, turn_index)
         await self._dispatch(
             HookEvent.TURN_START,
             TurnStartContext(
@@ -398,6 +408,7 @@ class SpanLifecycle:
             return
         turn_index = self.active_turn_index
         self.active_turn_index = None
+        end_step(self._session)
         await self._dispatch(
             HookEvent.TURN_STOP,
             TurnStopContext(
@@ -443,7 +454,7 @@ class SpanLifecycle:
             ),
         )
 
-    async def close_active_observer_spans(self, *, stop_reason: str = "error") -> None:
+    async def close_active_spans(self, *, stop_reason: str = "error") -> None:
         await self.end_active_provider_call(stop_reason=stop_reason)
         await self.end_active_turn()
 
@@ -493,7 +504,7 @@ class RunRuntime:
         self.truncation_prefix = ""
         self.pending_truncation_feedback: str | None = None
         self.force_final_pending = False
-        self.terminal_result: RunResultInfo | None = None
+        self.terminal_result: _AgentResult | None = None
         self.align_defer_turn: int | None = None
         self.forced_compactions_used = [0]
         self.checkpointable_hooks: dict[str, Any] = {}
@@ -545,12 +556,15 @@ class RunRuntime:
         session.active_run_id = run_id
         initial_event_seq = 0
         if resume_checkpoint is not None and agent.run_store is not None:
-            runtime.stored_events = await agent.run_store.load_events(run_id)
+            runtime.stored_events = await store_call(
+                session, "run.load_events", agent.run_store.load_events(run_id)
+            )
             initial_event_seq = max((row.seq for row in runtime.stored_events), default=0)
         session._event_journal = RunEventBuffer(
             agent.run_store,
             run_id,
             initial_seq=initial_event_seq,
+            session=session,
         )
         session.active_model = None
         session.fallback_index = 0
@@ -708,10 +722,10 @@ class RunRuntime:
         *,
         duration_ms: int,
         error: dict[str, Any] | None = None,
-    ) -> RunResultInfo:
+    ) -> _AgentResult:
         """Build a terminal result from the ledger-owned run totals."""
         self.sync_ledger_totals()
-        return RunResultInfo(
+        return _AgentResult(
             run_id=self.run_id,
             session_id=self.session.id,
             subtype=subtype,
@@ -799,14 +813,14 @@ class RunRuntime:
     async def emit_abort_terminal(
         self,
         *,
-        close_active_observer_spans: Callable[..., Awaitable[None]],
+        close_active_spans: Callable[..., Awaitable[None]],
     ) -> AsyncIterator[Event]:
         """Persist and project the abort terminal while preserving event order."""
         await cancel_background_workers(self.session)
         duration_ms = int((time.time() - self.started) * 1000)
         self.terminal_result = self.build_run_result("aborted", "error", duration_ms=duration_ms)
         self.sync_checkpoint_accounting()
-        await close_active_observer_spans(stop_reason="error")
+        await close_active_spans(stop_reason="error")
         event: Event = ResultEvent(
             subtype="aborted",
             stop_reason="error",
@@ -821,14 +835,18 @@ class RunRuntime:
             self.checkpoint.phase = "aborted"
             self.checkpoint.total_usage = self.total
             await _flush_events(self.session)
-            await store.save_checkpoint(self.run_id, self.checkpoint, status="aborted")
+            await store_call(
+                self.session,
+                "run.save_checkpoint",
+                store.save_checkpoint(self.run_id, self.checkpoint, status="aborted"),
+            )
         yield event
 
     async def emit_exception_terminal(
         self,
         exc: Exception,
         *,
-        close_active_observer_spans: Callable[..., Awaitable[None]],
+        close_active_spans: Callable[..., Awaitable[None]],
     ) -> AsyncIterator[Event]:
         """Persist and project an exception terminal while preserving ordering."""
         await cancel_background_workers(self.session)
@@ -845,7 +863,7 @@ class RunRuntime:
             "error", "error", duration_ms=duration_ms, error=error
         )
         self.sync_checkpoint_accounting()
-        await close_active_observer_spans(stop_reason="error")
+        await close_active_spans(stop_reason="error")
         event: Event = ErrorEvent(error=error)
         await _persist_event(self.session, self.run_id, event)
         yield event
@@ -862,7 +880,11 @@ class RunRuntime:
         if self.run_record is not None and store is not None:
             self.checkpoint.total_usage = self.total
             await _flush_events(self.session)
-            await store.mark_failed(self.run_id, self.checkpoint, error=error)
+            await store_call(
+                self.session,
+                "run.mark_failed",
+                store.mark_failed(self.run_id, self.checkpoint, error=error),
+            )
         yield event
 
     async def best_effort_snapshot_cleanup(
@@ -875,13 +897,19 @@ class RunRuntime:
             return
         if snapshot_id is not None:
             try:
-                await self.model_input_store.delete(snapshot_id)
+                await store_call(
+                    self.session, "run.delete", self.model_input_store.delete(snapshot_id)
+                )
             except Exception as exc:
                 logging.getLogger(__name__).warning(
                     "Failed to delete model-input snapshot %s: %s", snapshot_id, exc
                 )
         try:
-            await self.model_input_store.prune(self.run_id, keep_ids=keep_ids)
+            await store_call(
+                self.session,
+                "run.prune",
+                self.model_input_store.prune(self.run_id, keep_ids=keep_ids),
+            )
         except Exception as exc:
             logging.getLogger(__name__).warning(
                 "Failed to prune model-input snapshots for run %s: %s", self.run_id, exc
@@ -979,7 +1007,11 @@ class RunRuntime:
             self.checkpoint.tool_batch_event_after_seq = buf.last_seq if buf is not None else None
         elif phase not in ("permission_pending", "tool_executing", "tool_results_appended"):
             self.checkpoint.tool_batch_event_after_seq = None
-        await store.save_checkpoint(self.run_id, self.checkpoint, status=status)
+        await store_call(
+            self.session,
+            "run.save_checkpoint",
+            store.save_checkpoint(self.run_id, self.checkpoint, status=status),
+        )
         if completed_snapshot_id is not None:
             await self.best_effort_snapshot_cleanup(snapshot_id=completed_snapshot_id)
 
@@ -994,7 +1026,11 @@ class RunRuntime:
         request.signal = self.signal
         provider_attempt = self.checkpoint.provider_attempt + 1
         try:
-            snapshot = await self.model_input_store.save(self.run_id, provider_attempt, request)
+            snapshot = await store_call(
+                self.session,
+                "run.save",
+                self.model_input_store.save(self.run_id, provider_attempt, request),
+            )
         except Exception as exc:
             raise ConfigError(
                 f"failed to save exact model input for provider attempt {provider_attempt}: {exc}"
@@ -1028,7 +1064,9 @@ class RunRuntime:
         if self.checkpoint.provider_attempt < 1:
             raise ConfigError("provider_pending checkpoint is missing a valid provider_attempt")
         try:
-            snapshot = await self.model_input_store.load(snapshot_id)
+            snapshot = await store_call(
+                self.session, "run.load", self.model_input_store.load(snapshot_id)
+            )
         except UnsupportedWireVersionError:
             raise
         except Exception as exc:
