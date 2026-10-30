@@ -28,3 +28,4 @@ summarized in the [migration guide](../migration-2.0.md).
 | 13. [Kernel](./kernel.md) | The IoC/effect kernel: `Context` scopes, reversible `Disposable` effects, the event bus (emit/serial/waterfall), the open tool pipeline, and capability seams |
 | 14. [Development Principles](./development_principles.md) | Scope, extension, durability, compatibility, async, and security rules for contributors |
 | 15. [Key Invariants](./invariants.md) | Key invariants the whole system upholds |
+| 16. [Session-log read performance](./session-log-performance.md) | D6 benchmark, compatibility analysis, and projection-reader inventory |
