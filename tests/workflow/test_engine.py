@@ -337,6 +337,9 @@ async def test_resume_replays_unchanged_prefix(tmp_path: Path) -> None:
     with pytest.raises(WorkflowError):
         await agent1.run_workflow(flow, run_id="wf-resume-1")
     assert provider1.calls == 3
+    saved = await agent1.run_store.load_run("wf-resume-1")
+    assert saved is not None
+    assert saved.meta == {"schema_version": 3}
 
     # Resume: calls 1-2 replay from the journal; only call 3 hits the provider.
     provider2 = CountingTextProvider()
@@ -348,6 +351,9 @@ async def test_resume_replays_unchanged_prefix(tmp_path: Path) -> None:
     replays = [e for e in seen if e.type == "workflow" and e.kind == "agent_replayed"]
     assert len(replays) == 2
     assert result == ["result-1", "result-2", "result-1"]
+    resumed = await agent2.run_store.load_run("wf-resume-1")
+    assert resumed is not None
+    assert resumed.meta == {"schema_version": 3}
 
 
 async def test_changed_prompt_invalidates_cache(tmp_path: Path) -> None:
@@ -375,56 +381,48 @@ async def test_changed_prompt_invalidates_cache(tmp_path: Path) -> None:
     assert result == ["result-1", "result-1"]
 
 
-async def test_resume_replays_prefix_predating_tool_aware_fingerprint(tmp_path: Path) -> None:
-    """A run persisted before the tools-aware fingerprint (no fingerprint version
-    stamped in its meta) must still replay its unchanged prefix on resume, not
-    silently re-execute it under the new, differently-keyed formula."""
-    from linch import SqliteRunStore
+@pytest.mark.parametrize("version", [None, 1, 2, 4, True, False, "3", 3.0])
+@pytest.mark.parametrize("with_events", [False, True])
+async def test_resume_rejects_incompatible_workflow_version(
+    version: object, with_events: bool
+) -> None:
+    from linch import InMemoryRunStore
+    from linch._wire import UnsupportedWireVersionError
     from linch.events import WorkflowEvent
-    from linch.subagents.registry import AgentRegistry
-    from linch.subagents.types import AgentDefinition, AgentFrontmatter
-    from linch.workflow.context import _run_options_fingerprint
     from linch.workflow.journal import call_key
 
-    store_path = str(tmp_path / "runs.db")
-    store = SqliteRunStore(store_path)
-
-    # Simulate a run persisted by pre-upgrade code: create_run() never stamped a
-    # fingerprint version, and the "reviewer" subagent's tools frontmatter was
-    # never folded into the key (the legacy formula only fingerprints run_options).
-    run = await store.create_run("host-session", id="wf-legacy-resume")
-    assert "journal_fingerprint_version" not in run.meta
-    legacy_key = call_key("reviewer", "same prompt", _run_options_fingerprint(None))
-    await store.append_event(
-        "wf-legacy-resume",
-        WorkflowEvent(
-            kind="agent_end",
-            title="agent",
-            call_key=legacy_key,
-            occurrence=0,
-            result_text="result-1",
-        ),
+    store = InMemoryRunStore()
+    await store.create_run(
+        "host-session",
+        id="wf-old-resume",
+        meta={} if version is None else {"schema_version": version},
     )
-
-    definition = AgentDefinition(
-        name="reviewer",
-        file_path="<test>",
-        source="disk",
-        frontmatter=AgentFrontmatter(name="reviewer", description="Review.", tools=["Read"]),
-        body="Review the result.",
-    )
+    if with_events:
+        # Current event envelopes cannot bless an incompatible workflow row.
+        await store.append_event(
+            "wf-old-resume",
+            WorkflowEvent(
+                kind="agent_end",
+                title="agent",
+                call_key=call_key("general-purpose", "same prompt"),
+                occurrence=0,
+                result_text="old result",
+            ),
+        )
     provider = CountingTextProvider()
     agent = _make_agent(provider, run_store=store)
-    agent.subagent_registry = AgentRegistry([definition])
-    agent._subagents_loaded = True
+    invoked = False
 
     async def flow(wf: Any) -> str:
-        return await wf.agent("same prompt", name="reviewer")
+        nonlocal invoked
+        invoked = True
+        return await wf.agent("same prompt", tools=[])
 
-    result = await agent.run_workflow(flow, run_id="wf-legacy-resume")
+    with pytest.raises(UnsupportedWireVersionError, match="start a new run"):
+        await agent.run_workflow(flow, run_id="wf-old-resume")
 
+    assert invoked is False
     assert provider.calls == 0
-    assert result == "result-1"
 
 
 async def test_run_id_without_run_store_raises_config_error() -> None:
