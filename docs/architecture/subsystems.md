@@ -268,8 +268,9 @@ a session therefore seeds a fresh log at that durable snapshot boundary.
 The existing session registry records recency on creation, reattachment, and run
 completion. After a run finishes, least recently used idle sessions are released
 through `release_session()`. Busy sessions and ownership trees containing active
-runs or unfinished background tasks are excluded. Task completion triggers another
-bound check. Eviction reserves the idle ownership tree before awaiting teardown,
+runs, unfinished background tasks, or queued notifications/child events are excluded.
+Task completion triggers another bound check; undelivered results stay live until
+their next-turn drain. Eviction reserves the idle ownership tree before awaiting teardown,
 so a descendant cannot start a run while recursive release is in progress.
 `None` preserves the default cache lifetime. Durable messages are preserved.
 
