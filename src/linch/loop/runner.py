@@ -898,10 +898,17 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 guard_state=_guard_state,
                 guard_evaluation_ids=_runtime.guard_evaluation_ids,
                 guard_evaluation_facts=_runtime.guard_evaluation_facts,
-                record_guard_evaluation=lambda: setattr(
-                    _runtime,
-                    "guard_evaluation_count",
-                    _runtime.guard_evaluation_count + 1,
+                record_guard_evaluation=(
+                    (
+                        lambda: setattr(
+                            _runtime,
+                            "guard_evaluation_count",
+                            _runtime.guard_evaluation_count + 1,
+                        )
+                    )
+                    if _runtime.guard_evaluation_ids is not None
+                    and _runtime.guard_evaluation_facts is not None
+                    else None
                 ),
                 save_checkpoint=_save_checkpoint,
                 flush_events=lambda: _flush_events(session),

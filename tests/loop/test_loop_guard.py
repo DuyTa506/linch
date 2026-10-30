@@ -321,6 +321,95 @@ async def test_guard_force_final_answer():
 
 
 @pytest.mark.asyncio
+async def test_nondurable_guard_skips_recovery_fact_work(monkeypatch):
+    from linch.loop.runtime import RunRuntime
+    from linch.loop.tool_batch import ToolBatchContext
+    from linch.loop.tool_batch import _loop_guard_batch_id as real_batch_id
+    from linch.loop.tool_batch import _LoopGuardEvaluationEvent as real_fact_type
+    from linch.loop_guard import LoopGuard
+
+    batch_ids: list[str] = []
+    fact_count = 0
+    created: list[RunRuntime] = []
+    contexts: list[dict[str, object]] = []
+    original_init = RunRuntime.__init__
+    original_context = ToolBatchContext
+
+    def capture_runtime(runtime, *args, **kwargs):
+        original_init(runtime, *args, **kwargs)
+        created.append(runtime)
+
+    def capture_batch_id(*args, **kwargs):
+        batch_id = real_batch_id(*args, **kwargs)
+        batch_ids.append(batch_id)
+        return batch_id
+
+    def capture_fact(*args, **kwargs):
+        nonlocal fact_count
+        fact_count += 1
+        return real_fact_type(*args, **kwargs)
+
+    def capture_context(*args, **kwargs):
+        contexts.append(kwargs)
+        return original_context(*args, **kwargs)
+
+    monkeypatch.setattr(RunRuntime, "__init__", capture_runtime)
+    monkeypatch.setattr("linch.loop.runner.ToolBatchContext", capture_context)
+    monkeypatch.setattr("linch.loop.tool_batch._loop_guard_batch_id", capture_batch_id)
+    monkeypatch.setattr("linch.loop.tool_batch._LoopGuardEvaluationEvent", capture_fact)
+
+    provider = LoopingProvider(tool_input={"ok": True})
+    agent = _make_agent(
+        provider,
+        loop_guard=LoopGuard(max_identical_tool_calls=0, max_consecutive_failures=3),
+    )
+    agent.max_turns = 4
+    session = await agent.session()
+    await _collect(session)
+
+    assert created
+    assert created[0].guard_evaluation_ids is None
+    assert created[0].guard_evaluation_facts is None
+    assert created[0].guard_evaluation_count == 0
+    assert contexts
+    assert contexts[0]["record_guard_evaluation"] is None
+    assert batch_ids == []
+    assert fact_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("force_final", "expected_action", "expected_subtype"),
+    [(False, "stop", "error"), (True, "force_final", "success")],
+)
+async def test_nondurable_guard_still_enforces_stop_or_force_final(
+    force_final, expected_action, expected_subtype
+):
+    from linch.events import LoopGuardEvent, ResultEvent
+    from linch.loop_guard import LoopGuard
+
+    provider = LoopingProvider(tool_input={"same": True})
+    agent = _make_agent(
+        provider,
+        loop_guard=LoopGuard(
+            max_identical_tool_calls=2,
+            max_consecutive_failures=0,
+            force_final_answer=force_final,
+        ),
+    )
+    session = await agent.session()
+    events = await _collect(session)
+
+    guard_events = [event for event in events if isinstance(event, LoopGuardEvent)]
+    result_events = [event for event in events if isinstance(event, ResultEvent)]
+    repeated = [event for event in guard_events if event.reason == "repeated_tool_call"]
+
+    assert len(repeated) == 1
+    assert repeated[0].action == expected_action
+    assert result_events[-1].subtype == expected_subtype
+
+
+@pytest.mark.asyncio
 async def test_guard_disabled_via_none():
     """loop_guard=None disables all guard checks; loop runs until max_turns."""
     from linch.events import LoopGuardEvent

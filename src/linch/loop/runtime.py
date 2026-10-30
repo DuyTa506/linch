@@ -698,8 +698,9 @@ class RunRuntime:
         runtime.guard = getattr(agent, "loop_guard", None)
         if _loop_guard_is_active(runtime.guard):
             runtime.guard_state = loop_guard_state_factory()
-            runtime.guard_evaluation_ids = set()
-            runtime.guard_evaluation_facts = {}
+            if agent.run_store is not None and run_record is not None:
+                runtime.guard_evaluation_ids = set()
+                runtime.guard_evaluation_facts = {}
         else:
             runtime.guard_state = None
         runtime.truncation_recovery = getattr(agent, "truncation_recovery", None)
@@ -710,7 +711,8 @@ class RunRuntime:
             total_usage=runtime.total,
         )
         if resume_checkpoint is not None:
-            if _loop_guard_is_active(runtime.guard):
+            if _loop_guard_is_active(runtime.guard) and runtime.guard_evaluation_ids is not None:
+                assert runtime.guard_evaluation_facts is not None
                 if resume_checkpoint.loop_guard_state is not None:
                     raise ConfigError("runtime checkpoint contains an unsupported guard snapshot")
                 (
