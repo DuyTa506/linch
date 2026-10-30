@@ -7,6 +7,8 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
 
 ## Unreleased
 
+- Add `RunOptions.run_id` to start or adopt a pending run through the ordinary session API.
+
 - Retry nonterminal worker exits after ownership loss or cancellation. Retry
   transient lease renewal failures within the last confirmed TTL; cancel the
   run task on lease loss/expiry without writing a terminal aborted status.

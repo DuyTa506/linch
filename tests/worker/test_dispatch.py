@@ -294,21 +294,28 @@ async def test_named_queues_have_independent_fleet_limits(pool):
             release.set()
 
 
-async def test_job_store_refuses_writes_after_worker_releases_lease(pool):
-    from linch import ErrorEvent, LeaseLostError
+async def test_worker_hands_factory_plain_store_and_releases_after_run(pool):
+    from linch import PostgresRunStore
     from linch.worker import Worker, enqueue_run
 
     bound = []
 
     async def factory(job):
         bound.append(job.run_store)
+        assert (
+            await pool.fetchval("SELECT lease_owner FROM runs WHERE id=$1", job.run.id)
+            == worker.worker_id
+        )
         return make_agent(job)
 
     rid = await enqueue_run(pool, "s", "hello")
-    async with running(Worker(pool, factory, poll_interval_s=0.02)):
+    worker = Worker(pool, factory, poll_interval_s=0.02)
+    async with running(worker):
         await wait_for(lambda: pool.fetchval("SELECT count(*)=0 FROM pgqueuer"))
-    with pytest.raises(LeaseLostError):
-        await bound[0].append_event(rid, ErrorEvent(error="too late"))
+    assert len(bound) == 1 and type(bound[0]) is PostgresRunStore
+    assert await pool.fetchval("SELECT lease_owner FROM runs WHERE id=$1", rid) is None
+    assert await pool.fetchval("SELECT status FROM runs WHERE id=$1", rid) == "completed"
+    assert not pool.is_closing()
 
 
 async def test_worker_preserves_a_contract_persisted_before_first_checkpoint(pool):
