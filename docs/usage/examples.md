@@ -53,11 +53,7 @@ Runnable example code lives in the `examples/` directory, organized by subsystem
 
 | File | What it shows |
 |------|---------------|
-| `memory/memory_agent.py` | Core memory primitives with search/upsert tools and citations |
-| `memory/sqlite_memory_agent.py` | SqliteMemoryStore — persistent memory, round-trip, upsert update |
-| `memory/faiss_adapter.py` | FAISS vector-memory adapter recipe using the existing `MemoryStore` seam |
-| `memory/pgvector_memory.py` | pgvector adapter recipe for Postgres semantic search |
-| `memory/qdrant_adapter.py` | Qdrant vector-memory adapter recipe |
+| `memory/mem0_recall.py` | Optional mem0 recipe: run-scoped semantic recall and terminal-turn writes using public context and hook APIs |
 
 ---
 
@@ -93,7 +89,6 @@ Runnable example code lives in the `examples/` directory, organized by subsystem
 | File | What it shows |
 |------|---------------|
 | `extensions/provider_template.py` | Minimal `BaseProvider` adapter with normalized streaming events |
-| `extensions/memory_store_template.py` | Duck-typed `MemoryStore` with search/upsert signatures |
 | `extensions/filesystem_backend_template.py` | Virtual `FileBackend` path operations |
 | `extensions/tool_package_template.py` | `@tool` first, with an advanced class-shaped tool plus registry factory |
 | `extensions/hook_package_template.py` | Hook object with dispatcher method names and `HookResult` actions |

@@ -160,7 +160,6 @@ class RunReport:
                     )
         if self.long_run:
             context = self.long_run.get("context", {})
-            memory = self.long_run.get("memory", {})
             quality = self.long_run.get("quality", {})
             lines.extend(
                 [
@@ -168,8 +167,6 @@ class RunReport:
                     "## Long-Run Signals",
                     f"- context trimmed builds: {context.get('trimmed_builds', 0)}",
                     f"- max context tokens: {context.get('max_used_tokens')}",
-                    f"- memory searches: {memory.get('searches', 0)}",
-                    f"- memory result ids: {', '.join(memory.get('result_ids', []))}",
                     f"- recovery hints: {quality.get('recovery_hints', 0)}",
                 ]
             )
@@ -399,54 +396,15 @@ def _long_run_summary(
             if isinstance(used, int):
                 max_used_tokens = used if max_used_tokens is None else max(max_used_tokens, used)
 
-    memory_result_ids: set[str] = set()
-    memory_namespaces: set[str] = set()
-    memory_tier_counts: dict[str, int] = {}
-    memory_searches = 0
-    memory_upserts = 0
     recovery_hints = 0
 
     for call in tool_calls:
-        tool_name = str(call.get("tool_name", ""))
         tool_result = call.get("tool_result")
         if not isinstance(tool_result, dict):
             tool_result = {}
-        metadata = tool_result.get("metadata")
-        if not isinstance(metadata, dict):
-            metadata = {}
 
         if tool_result.get("recovery_hint"):
             recovery_hints += 1
-
-        if tool_name == "SearchMemory":
-            memory_searches += 1
-            _add_strings(memory_result_ids, metadata.get("result_ids"))
-            namespace = metadata.get("namespace")
-            if isinstance(namespace, str):
-                memory_namespaces.add(namespace)
-            has_tool_tier_counts = isinstance(metadata.get("tier_counts"), dict)
-            _merge_counts(memory_tier_counts, metadata.get("tier_counts"))
-            citations = tool_result.get("citations")
-            if isinstance(citations, list):
-                for citation in citations:
-                    if not isinstance(citation, dict):
-                        continue
-                    citation_id = citation.get("id")
-                    if isinstance(citation_id, str):
-                        memory_result_ids.add(citation_id)
-                    citation_metadata = citation.get("metadata")
-                    if isinstance(citation_metadata, dict) and not has_tool_tier_counts:
-                        tier = citation_metadata.get("tier")
-                        if isinstance(tier, str):
-                            memory_tier_counts[tier] = memory_tier_counts.get(tier, 0) + 1
-        elif tool_name == "UpsertMemory":
-            memory_upserts += 1
-            item_id = metadata.get("id")
-            if isinstance(item_id, str):
-                memory_result_ids.add(item_id)
-            namespace = metadata.get("namespace")
-            if isinstance(namespace, str):
-                memory_namespaces.add(namespace)
 
     return {
         "context": {
@@ -455,13 +413,6 @@ def _long_run_summary(
             "max_used_tokens": max_used_tokens,
             "selected_tool_counts": dict(sorted(selected_tool_counts.items())),
             "metadata_keys": sorted(metadata_keys),
-        },
-        "memory": {
-            "searches": memory_searches,
-            "upserts": memory_upserts,
-            "result_ids": sorted(memory_result_ids),
-            "namespaces": sorted(memory_namespaces),
-            "tier_counts": dict(sorted(memory_tier_counts.items())),
         },
         "quality": {
             "failed_tool_calls": sum(1 for call in tool_calls if call.get("is_error") is True),
@@ -825,20 +776,3 @@ def _maybe_int(value: Any) -> int | None:
     if isinstance(value, float):
         return int(value) if math.isfinite(value) else None
     return value if isinstance(value, int) else None
-
-
-def _add_strings(target: set[str], value: Any) -> None:
-    if isinstance(value, str):
-        target.add(value)
-    elif isinstance(value, list):
-        for item in value:
-            if isinstance(item, str):
-                target.add(item)
-
-
-def _merge_counts(target: dict[str, int], value: Any) -> None:
-    if not isinstance(value, dict):
-        return
-    for key, count in value.items():
-        if isinstance(key, str) and isinstance(count, int):
-            target[key] = target.get(key, 0) + count

@@ -120,12 +120,8 @@ def test_new_cases_registered(tmp_path):
     benchmark = _load_script()
     cases = benchmark.build_cases(tmp_path)
 
-    assert "memory_100k_search" in cases
     assert "scheduler_maximal_16_read_tools" in cases
     assert "session_churn_25" in cases
-    # The 100k memory scan is observational (no absolute gate); it validates
-    # ranking correctness, not a sub-20ms latency the scan can't hit in CPython.
-    assert "memory_100k_search" not in benchmark.DEFAULT_THRESHOLDS_MS
     # Existing SQLite gates are retained.
     assert benchmark.DEFAULT_THRESHOLDS_MS["durable_sqlite_8_read_tools"] == 25.0
     assert benchmark.DEFAULT_THRESHOLDS_MS["durable_sqlite_32_read_tools"] == 70.0

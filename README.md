@@ -9,7 +9,7 @@ Linch 2.0 is intentionally an SDK rather than a coding-agent product: a bare
 Choose a tool registry or preset explicitly. Upgrading from 1.x? Read the
 [2.0 migration guide](docs/migration-2.0.md).
 
-It gives you the runtime pieces that production agents usually need but simple tool-calling wrappers leave to you: streamed events, tool scheduling, context/RAG, tiered memory, virtual filesystem offloading, structured outputs, permissions, retries, provider adapters, cost tracking, evals, MCP, skills, and subagents.
+It gives you the runtime pieces that production agents usually need but simple tool-calling wrappers leave to you: streamed events, tool scheduling, context/RAG, scoped file memory, virtual filesystem offloading, structured outputs, permissions, retries, provider adapters, cost tracking, evals, MCP, skills, and subagents.
 
 Use linch when you want to build your own domain workflow — not force it into a hosted assistant, a rigid graph DSL, or a black-box multi-agent abstraction.
 
@@ -58,7 +58,7 @@ linch is designed for application developers building agentic features such as:
 | Tools | Duck-typed tools, runtime registries, parallel scheduling, resource locks, local or Docker-backed Bash execution |
 | Reliability | Per-tool timeout, opt-in retry, structured tool errors, recovery hints |
 | Context | `ContextBuilder`, RAG context injection, context budgets, compaction ladder (micro-compact, reactive recovery, circuit breaker) |
-| Memory | Search/upsert tools, flat and tiered memory stores, persistent memory examples |
+| Memory | Run-scoped `/memories/MEMORY.md` index, file-per-fact tools, optional mem0 recipe |
 | Filesystem | Virtual filesystem, automatic large-result offloading, disk/state/sqlite backends |
 | Safety | Permission engine, tool/path/bash rules, dangerous-action skipping |
 | Budgets | `RunBudget` token/USD caps shared across the subagent tree, warning + exceeded events, graceful stop |
@@ -167,9 +167,7 @@ These examples exercise useful local code paths without requiring a live provide
 python3 examples/tools/parallel_search_agent.py
 python3 examples/tools/runtime_tools.py
 python3 examples/context/rag_context_builder.py
-python3 examples/memory/memory_agent.py
 python3 examples/tools/tool_reliability_agent.py
-python3 examples/memory/sqlite_memory_agent.py
 
 # Filesystem offload — fully offline, no API key needed
 python3 examples/tools/filesystem_offload.py
@@ -181,7 +179,7 @@ python3 examples/tools/filesystem_offload.py
 
 ### Agent and Session
 
-An `Agent` owns shared configuration: model, provider, tools, permissions, hooks, memory, and session store.
+An `Agent` owns shared configuration: model, provider, tools, permissions, hooks, and session store. File memory is attached with `FileMemoryContextBuilder` and a run-scoped filesystem dependency.
 
 A `Session` represents one conversation or workflow run. One agent can serve many sessions.
 
@@ -253,7 +251,7 @@ agent = Agent(
 
 ### Memory
 
-linch includes memory primitives and tools for searching and upserting reusable facts. Memory can be in-memory, sqlite-backed, tiered by working/episodic/semantic buckets, or replaced with your own store.
+Linch file memory loads `/memories/MEMORY.md` once per run and keeps one fact per file. Scope it with `ScopedFileBackend` in `RunOptions(deps=...)`; use the optional mem0 recipe for semantic recall.
 
 ### Virtual filesystem
 
@@ -335,13 +333,11 @@ Examples are organized by subsystem under `examples/`.
 | `context/context_injection.py` | ContextInjectionHook patterns: RAG per-turn, budget, selected tools |
 | `context/rag_context_builder.py` | ContextInjectionHook RAG with metadata and budget reporting |
 
-**`examples/memory/`** — memory primitives
+**`examples/memory/`** — optional semantic recall
 
 | File | What it shows |
 |---|---|
-| `memory/memory_agent.py` | Core memory primitives with search/upsert tools and citations |
-| `memory/sqlite_memory_agent.py` | SqliteMemoryStore — persistent memory, round-trip, upsert update |
-| `memory/pgvector_memory.py` | Postgres memory example with optional vector-style retrieval |
+| `memory/mem0_recall.py` | Optional mem0 recipe using public context and hook APIs with run-scoped `user_id` filtering |
 
 **`examples/observability/`** — telemetry hooks and tracing
 

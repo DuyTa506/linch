@@ -64,6 +64,13 @@ class ContextInjectionHook:
             model=agent.model,
         )
 
+    async def on_agent_stop(self, ctx: AgentStopContext) -> None:
+        cleanup = getattr(self.builder, "on_agent_stop", None)
+        if cleanup is not None:
+            result = cleanup(ctx)
+            if inspect.isawaitable(result):
+                await result
+
 
 class ToolMiddlewareHook:
     name = "tool_middleware"

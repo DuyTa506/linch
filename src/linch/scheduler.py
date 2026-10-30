@@ -112,9 +112,15 @@ async def _maybe_offload_block(
 
     Returns *result* unchanged when offload is disabled or not applicable
     (``maybe_offload`` is a no-op on error / filesystem-tool results)."""
-    _fs = getattr(session, "filesystem", None)
     _offload_cfg = getattr(agent, "result_offload", None)
-    if _fs is None or _offload_cfg is None:
+    if _offload_cfg is None:
+        return result
+    from .filesystem.backend import resolve_filesystem_backend
+
+    _fs = resolve_filesystem_backend(getattr(session, "run_deps", None))
+    if _fs is None:
+        _fs = getattr(session, "filesystem", None)
+    if _fs is None:
         return result
     from .filesystem.offload import maybe_offload
 

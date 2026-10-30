@@ -30,7 +30,6 @@ from .contexts import (
     UserPromptSubmitContext,
 )
 from .dispatcher import HookDispatcher, HookDispatchResult, normalize_hooks
-from .memory import MemoryExtractionHook
 from .read_before_write import ReadBeforeWriteConfig, ReadBeforeWriteHook
 from .redaction import RedactionConfig, RedactionHook, RedactionRule
 from .tool_cache import ToolCacheConfig, ToolCacheHook
@@ -71,7 +70,6 @@ __all__ = [
     "FinalAnswerVerifierHook",
     "StopPredicateHook",
     "RunTelemetryHook",
-    "MemoryExtractionHook",
     "ReadBeforeWriteHook",
     "ReadBeforeWriteConfig",
     "RedactionHook",

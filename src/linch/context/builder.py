@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, cast
@@ -8,6 +9,7 @@ from .._token_estimation import custom_token_estimate
 from ..types import Message, SystemBlock, TextBlock
 
 if TYPE_CHECKING:
+    from ..hooks.contexts import AgentStopContext
     from ..session import Session
 
 
@@ -62,6 +64,20 @@ class ContextBuilderChain:
             merged.budget.trimmed = merged.budget.trimmed or result.budget.trimmed
             merged.metadata.update(result.metadata)
         return merged
+
+    async def on_agent_stop(self, ctx: AgentStopContext) -> None:
+        errors: list[Exception] = []
+        for builder in self.builders:
+            cleanup = getattr(builder, "on_agent_stop", None)
+            if cleanup is not None:
+                try:
+                    result = cleanup(ctx)
+                    if inspect.isawaitable(result):
+                        await result
+                except Exception as exc:
+                    errors.append(exc)
+        if errors:
+            raise ExceptionGroup("Context builder cleanup failed", errors)
 
 
 def normalize_context_builder(

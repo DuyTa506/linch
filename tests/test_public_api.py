@@ -42,7 +42,6 @@ PROMOTED_EVAL_NAMES = frozenset(
         "cost_under",
         "load_eval_suite",
         "load_scripted_turns",
-        "memory_recalled",
         "recovery_succeeded",
         "run_completed",
         "run_eval",

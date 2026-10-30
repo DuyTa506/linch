@@ -295,38 +295,17 @@ def test_long_run_context_scorers():
         ContextBuildEvent(
             system_blocks=1,
             messages=2,
-            selected_tools=["SearchMemory", "Read"],
+            selected_tools=["SearchDocs", "read_file"],
             budget={"trimmed": False},
-            metadata={"memory_namespace": "tenant-a"},
+            metadata={"source": "docs"},
         )
     ]
 
-    assert context_selected_tool("SearchMemory")(events=events) is True
+    assert context_selected_tool("SearchDocs")(events=events) is True
+    assert context_selected_tool("read_file")(events=events) is True
     assert context_selected_tool("Bash")(events=events) is False
     assert context_not_trimmed()(events=events) is True
-    assert context_metadata_contains("memory_namespace", "tenant-a")(events=events) is True
-
-
-def test_memory_recalled_scorer():
-    from linch.evals import memory_recalled
-    from linch.events import ToolCallEndEvent
-    from linch.tools import Citation, ToolResult
-
-    events = [
-        ToolCallEndEvent(
-            tool_use_id="m1",
-            tool_name="SearchMemory",
-            tool_result=ToolResult(
-                content="[policy-1] PTO rolls over",
-                metadata={"result_ids": ["policy-1"]},
-                citations=[Citation(id="policy-2", source="memory:tenant")],
-            ),
-        )
-    ]
-
-    assert memory_recalled(["policy-1", "policy-2"])(events=events) is True
-    assert memory_recalled("missing")(events=events) is False
-    assert memory_recalled("policy-1")(events=[]) is None
+    assert context_metadata_contains("source", "docs")(events=events) is True
 
 
 def test_recovery_and_completion_scorers():
@@ -351,20 +330,18 @@ def test_recovery_and_completion_scorers():
 
 
 def test_scorer_factories_have_distinct_names():
-    from linch.evals import context_selected_tool, cost_under, memory_recalled, text_contains
+    from linch.evals import context_selected_tool, cost_under, text_contains
 
     names = {
         text_contains("Paris").__name__,
         cost_under(0.05).__name__,
-        context_selected_tool("SearchMemory").__name__,
-        memory_recalled("pref-1").__name__,
+        context_selected_tool("SearchDocs").__name__,
     }
 
     assert names == {
         "text_contains:Paris",
         "cost_under:0.05",
-        "context_selected_tool:SearchMemory",
-        "memory_recalled:pref-1",
+        "context_selected_tool:SearchDocs",
     }
 
 

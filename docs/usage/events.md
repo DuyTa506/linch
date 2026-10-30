@@ -271,8 +271,8 @@ requests, loop guards, errors, and recovery hints.
 
 `payload["long_run"]` summarizes signals that matter in long-horizon sessions:
 context build counts, trimmed context builds, max used context tokens, selected
-tool counts, memory searches/upserts, recalled memory ids, tier counts, failed
-tool calls, recovery hints, completion status, total cost, and checkpoint phase.
+tool counts, failed tool calls, recovery hints, completion status, total cost,
+and checkpoint phase.
 
 ---
 
@@ -289,7 +289,6 @@ from linch.evals import (
     context_not_trimmed,
     context_selected_tool,
     cost_under,
-    memory_recalled,
     recovery_succeeded,
     run_completed,
     run_eval,
@@ -299,10 +298,8 @@ result = await run_eval(
     agent,
     cases,
     scorers=[
-        context_selected_tool("SearchMemory"),
-        context_metadata_contains("memory_namespace", "user:42"),
+        context_selected_tool("SearchPolicy"),
         context_not_trimmed(),
-        memory_recalled("pref-1"),
         recovery_succeeded(),
         cost_under(0.05),
         run_completed(),

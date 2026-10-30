@@ -33,7 +33,6 @@ from linch.events import (  # noqa: E402
     SystemEvent,
     ToolCallEndEvent,
 )
-from linch.memory import InMemoryKeywordMemoryStore, MemoryItem  # noqa: E402
 from linch.run_store import SqliteRunStore, checkpoint_to_dict  # noqa: E402
 from linch.sessions import InMemorySessionStore, SqliteSessionStore  # noqa: E402
 from linch.tools import ToolContext, ToolRegistry, ToolResult  # noqa: E402
@@ -248,36 +247,6 @@ def build_cases(workdir: Path) -> dict[str, BenchmarkCase]:
             raise AssertionError("SQLite trivial operation returned the wrong run")
         return Sample(elapsed_ms=elapsed_ms)
 
-    memory_store_cell: list[InMemoryKeywordMemoryStore | None] = [None]
-
-    async def memory_100k_search() -> Sample:
-        # 100k-entry keyword-memory heartbeat (WS3 online bounded heap): observed,
-        # not gated. The heap bounds retained results to `limit` (memory) and keeps
-        # tie-order identical to nlargest; it does not make a 100k pure-Python scan
-        # sub-20ms (an inverted index was out of scope). Tokens are cached at
-        # construction, so this measures the scan + heap, not tokenizing.
-        store = memory_store_cell[0]
-        if store is None:
-            words = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta"]
-            items = [
-                MemoryItem(
-                    id=f"m{i}",
-                    content=f"{words[i % 8]} {words[(i + 1) % 8]} {words[(i + 3) % 8]}",
-                )
-                for i in range(100_000)
-            ]
-            store = InMemoryKeywordMemoryStore(items)
-            memory_store_cell[0] = store
-        started = time.perf_counter()
-        results = await store.search("alpha beta", limit=10)
-        elapsed_ms = (time.perf_counter() - started) * 1000
-        if len(results) != 10:
-            raise AssertionError(f"expected 10 memory hits, got {len(results)}")
-        scores = [result.score or 0.0 for result in results]
-        if scores != sorted(scores, reverse=True):
-            raise AssertionError("memory search results were not ranked by descending score")
-        return Sample(elapsed_ms=elapsed_ms, event_count=len(results))
-
     async def session_churn() -> Sample:
         # Lifecycle churn (WS1): create/run/release many sessions on one agent
         # without leaking registry entries or work.
@@ -354,7 +323,6 @@ def build_cases(workdir: Path) -> dict[str, BenchmarkCase]:
                 count=16,
                 tool_batching_strategy="maximal",
             ),
-            BenchmarkCase("memory_100k_search", memory_100k_search),
             BenchmarkCase("session_churn_25", session_churn),
             BenchmarkCase(
                 "sqlite_trivial_operation", sqlite_operation, close=sqlite_operation_store.close

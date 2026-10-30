@@ -38,7 +38,7 @@ graph TD
         end
 
         subgraph Knowledge["Knowledge"]
-            MEM["MemoryStore\nkeyword · sqlite · postgres · tiered · custom"]
+            MEM["File memory\nFileMemoryContextBuilder\n/memories/MEMORY.md"]
         end
 
         subgraph Filesystem["Filesystem"]
@@ -66,7 +66,7 @@ graph TD
     RunLoop -.->|"AsyncIterator[Event]"| Caller
     Session <-->|"persist / load"| SS
     RunLoop <-->|"checkpoint / resume"| RS
-    CB <-->|"recall / upsert"| MEM
+    CB <-->|"read index once per run"| MEM
     Agent <--> MCP & SKILLS & SUBA
     SCHED <-->|"offload / read"| FS
     OFF -.->|"config"| SCHED
