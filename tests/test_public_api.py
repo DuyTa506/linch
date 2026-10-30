@@ -22,6 +22,8 @@ import types
 from collections import Counter
 from pathlib import Path
 
+import pytest
+
 import linch
 
 PROMOTED_EVAL_NAMES = frozenset(
@@ -213,3 +215,28 @@ def test_model_call_public_surface_is_limited_to_journal_event() -> None:
         "AuxiliaryTextResult",
         "_ModelCallLedger",
     } & set(linch.__all__)
+
+
+def test_custom_observer_surface_is_removed() -> None:
+    removed = {
+        "BaseObserver",
+        "LoggingObserver",
+        "ObserverDispatcher",
+        "OpenTelemetryObserver",
+        "ProviderCallInfo",
+        "ProviderCallResult",
+        "RunInfo",
+        "RunObserver",
+        "RunResultInfo",
+        "Span",
+        "SpanCollector",
+        "ToolInfo",
+        "ToolResultInfo",
+        "TurnInfo",
+        "normalize_observers",
+        "RunTelemetryHook",
+    }
+    assert not removed.intersection(linch.__all__)
+    assert not any(hasattr(linch, name) for name in removed)
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("linch.observability")

@@ -72,7 +72,7 @@ from .runtime import (
     RunRuntime,
 )
 from .runtime import (
-    SpanLifecycle as _SpanLifecycle,
+    TurnLifecycle as _TurnLifecycle,
 )
 from .runtime import (
     checkpoint_extension_state as _checkpoint_extension_state,
@@ -206,8 +206,8 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
     run_record: RunRecord | None,
     resume_checkpoint: RunCheckpoint | None,
 ) -> AsyncIterator[Event]:
+    from ..hooks.contexts import _AgentResult
     from ..loop_guard import LoopGuardState
-    from ..observability import RunResultInfo as _RunResultInfo
 
     _runtime = await RunRuntime.create(
         session,
@@ -334,7 +334,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         else session._abort_controller
     )
     _runtime.signal = signal
-    _final_result: _RunResultInfo | None = None
+    _final_result: _AgentResult | None = None
     # Closed-loop schema-repair state (per-run; not checkpointed — a resumed
     # run starts with fresh retry counters).
     _max_schema_retries = int(getattr(agent, "structured_output_retries", 0) or 0)
@@ -345,21 +345,21 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
     # retries at _MAX_FINAL_ANSWER_REENTRIES, then accepts the answer as-is.
     _final_answer_reentries = [0]
 
-    # Observer/hook span bookkeeping (turn + provider-call spans) lives in a
+    # Native lifecycle bookkeeping (turn + provider-call spans) lives in a
     # small helper so the turn loop no longer threads its mutable span state
     # through nonlocal closures. Local aliases keep the call sites unchanged.
-    _spans = _SpanLifecycle(session, run_id, _dispatch_lifecycle)
+    _spans = _TurnLifecycle(session, run_id, _dispatch_lifecycle)
     _start_turn = _spans.start_turn
     _end_active_turn = _spans.end_active_turn
     _start_provider_call = _spans.start_provider_call
     _end_active_provider_call = _spans.end_active_provider_call
-    _close_active_observer_spans = _spans.close_active_observer_spans
+    _close_active_spans = _spans.close_active_spans
 
     _build_run_result = _runtime.build_run_result
 
     # Terminal-answer finalization lives in loop/finalize.py; FinalizeCtx bundles
     # this run's dependencies so the call sites below stay short. The thin
-    # wrappers copy the resolved RunResultInfo back into _final_result, which the
+    # wrappers copy the resolved _AgentResult back into _final_result, which the
     # turn loop reads to choose between returning and continuing.
     _fctx = FinalizeCtx(
         session=session,
@@ -758,7 +758,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 persist_event=lambda event: _persist_event(session, run_id, event),
                 flush_events=lambda: _flush_events(session),
                 maybe_save_provider_snapshot=_maybe_save_provider_snapshot,
-                close_active_observer_spans=_close_active_observer_spans,
+                close_active_spans=_close_active_spans,
                 sync_ledger_totals=_sync_ledger_totals,
                 active_primary=active_primary,
                 budget=_budget,
@@ -942,14 +942,14 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             yield event
     except AbortError:
         async for event in _runtime.emit_abort_terminal(
-            close_active_observer_spans=_close_active_observer_spans,
+            close_active_spans=_close_active_spans,
         ):
             yield event
         _final_result = _runtime.terminal_result
     except Exception as exc:
         async for event in _runtime.emit_exception_terminal(
             exc,
-            close_active_observer_spans=_close_active_observer_spans,
+            close_active_spans=_close_active_spans,
         ):
             yield event
         _final_result = _runtime.terminal_result
@@ -973,7 +973,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         # controller has no watcher and close() is a no-op.
         if signal is not session._abort_controller:
             signal.close()
-        await _close_active_observer_spans(stop_reason="error")
+        await _close_active_spans(stop_reason="error")
         _run_result = (
             _final_result
             or _runtime.terminal_result

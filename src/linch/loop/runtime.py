@@ -1,4 +1,4 @@
-"""Run-scoped persistence, top-of-turn drains, and observer lifecycle helpers.
+"""Run-scoped persistence, top-of-turn drains, and lifecycle helpers.
 
 The mutable run state itself remains assembled by ``runner.py`` for now; this
 module owns the low-level operations that are shared by each loop phase and
@@ -35,12 +35,12 @@ from ..hooks import (
     TurnStartContext,
     TurnStopContext,
 )
+from ..hooks.contexts import _AgentResult
 from ..model_calls import (
     ModelCallIntent,
     _ModelCallLedger,
     _primary_active_binding,
 )
-from ..observability import RunResultInfo
 from ..run_store import (
     ModelInputSnapshotError,
     RunCheckpoint,
@@ -375,8 +375,8 @@ async def maybe_save_provider_snapshot(session: Session) -> None:
         )
 
 
-class SpanLifecycle:
-    """Track the open turn/provider-call observer spans for one run."""
+class TurnLifecycle:
+    """Track the open turn/provider-call lifecycle callbacks for one run."""
 
     def __init__(
         self,
@@ -454,7 +454,7 @@ class SpanLifecycle:
             ),
         )
 
-    async def close_active_observer_spans(self, *, stop_reason: str = "error") -> None:
+    async def close_active_spans(self, *, stop_reason: str = "error") -> None:
         await self.end_active_provider_call(stop_reason=stop_reason)
         await self.end_active_turn()
 
@@ -504,7 +504,7 @@ class RunRuntime:
         self.truncation_prefix = ""
         self.pending_truncation_feedback: str | None = None
         self.force_final_pending = False
-        self.terminal_result: RunResultInfo | None = None
+        self.terminal_result: _AgentResult | None = None
         self.align_defer_turn: int | None = None
         self.forced_compactions_used = [0]
         self.checkpointable_hooks: dict[str, Any] = {}
@@ -722,10 +722,10 @@ class RunRuntime:
         *,
         duration_ms: int,
         error: dict[str, Any] | None = None,
-    ) -> RunResultInfo:
+    ) -> _AgentResult:
         """Build a terminal result from the ledger-owned run totals."""
         self.sync_ledger_totals()
-        return RunResultInfo(
+        return _AgentResult(
             run_id=self.run_id,
             session_id=self.session.id,
             subtype=subtype,
@@ -813,14 +813,14 @@ class RunRuntime:
     async def emit_abort_terminal(
         self,
         *,
-        close_active_observer_spans: Callable[..., Awaitable[None]],
+        close_active_spans: Callable[..., Awaitable[None]],
     ) -> AsyncIterator[Event]:
         """Persist and project the abort terminal while preserving event order."""
         await cancel_background_workers(self.session)
         duration_ms = int((time.time() - self.started) * 1000)
         self.terminal_result = self.build_run_result("aborted", "error", duration_ms=duration_ms)
         self.sync_checkpoint_accounting()
-        await close_active_observer_spans(stop_reason="error")
+        await close_active_spans(stop_reason="error")
         event: Event = ResultEvent(
             subtype="aborted",
             stop_reason="error",
@@ -846,7 +846,7 @@ class RunRuntime:
         self,
         exc: Exception,
         *,
-        close_active_observer_spans: Callable[..., Awaitable[None]],
+        close_active_spans: Callable[..., Awaitable[None]],
     ) -> AsyncIterator[Event]:
         """Persist and project an exception terminal while preserving ordering."""
         await cancel_background_workers(self.session)
@@ -863,7 +863,7 @@ class RunRuntime:
             "error", "error", duration_ms=duration_ms, error=error
         )
         self.sync_checkpoint_accounting()
-        await close_active_observer_spans(stop_reason="error")
+        await close_active_spans(stop_reason="error")
         event: Event = ErrorEvent(error=error)
         await _persist_event(self.session, self.run_id, event)
         yield event

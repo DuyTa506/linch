@@ -252,7 +252,9 @@ async def chat_stream(
         async for item in iterator:
             yield item
         return
-    agent = session.agent if agent is None else agent
+    if agent is None:
+        assert session is not None
+        agent = session.agent
     telemetry = telemetry_for(agent)
     attrs = attributes(session, "chat", model=request.model, agent=agent)
     span = telemetry.tracer.start_span(

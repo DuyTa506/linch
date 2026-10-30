@@ -1,7 +1,6 @@
 from .adapters import (
     ContextInjectionHook,
     FinalAnswerVerifierHook,
-    RunTelemetryHook,
     StopPredicateHook,
     ToolMiddlewareHook,
 )
@@ -69,7 +68,6 @@ __all__ = [
     "ToolMiddlewareHook",
     "FinalAnswerVerifierHook",
     "StopPredicateHook",
-    "RunTelemetryHook",
     "ReadBeforeWriteHook",
     "ReadBeforeWriteConfig",
     "RedactionHook",
