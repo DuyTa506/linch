@@ -202,7 +202,7 @@ async def test_permission_callback_updated_input_is_rejected() -> None:
     assert "updatedInput is unsupported" in (decision.reason or "")
 
 
-async def test_legacy_updated_input_decision_is_not_replayed() -> None:
+async def test_current_updated_input_decision_is_not_replayed() -> None:
     tool = _RecordingTool()
     callback_calls = 0
 
@@ -561,3 +561,14 @@ def test_legacy_parallel_safe_does_not_authorize_parallel_execution() -> None:
         is_immediate_error=False,
     )
     assert not _tool_parallel(call)
+
+
+def test_permission_writer_records_only_current_decision_fields() -> None:
+    from linch.permissions.engine import PermissionDecision
+    from linch.permissions.keys import permission_decision_to_dict
+
+    assert permission_decision_to_dict(PermissionDecision(decision="allow", reason="approved")) == {
+        "schema_version": 3,
+        "decision": "allow",
+        "reason": "approved",
+    }

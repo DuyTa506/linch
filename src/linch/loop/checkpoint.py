@@ -11,14 +11,13 @@ from typing import Any, cast
 from .._wire import WIRE_VERSION, require_wire_version
 from ..errors import ConfigError
 from ..events import (
-    AssistantEvent,
     BackgroundWorkerEvent,
     Event,
     ToolCallEndEvent,
     ToolCallStartEvent,
 )
 from ..model_calls import _context_fingerprint, _model_call_fingerprint
-from ..run_store import RunCheckpoint
+from ..run_store import RunCheckpoint, _require_tool_recovery_cursor
 from ..session import Session
 from ..types import (
     Message,
@@ -419,29 +418,6 @@ def _last_message_has_tool_results(session: Session, tool_blocks: list[ToolUseBl
     return {block.tool_use_id for block in results} == {block.id for block in tool_blocks}
 
 
-async def _legacy_batch_boundary_seq(
-    store: Any,
-    run_id: str,
-    assistant_message: Message | None,
-) -> int | None:
-    """Bound a legacy (cursor-less) recovery scan to this turn's tool batch.
-
-    Locates the latest ``AssistantEvent`` matching the checkpoint's assistant
-    message; the batch's tool events are strictly after it. Returns ``None`` when
-    no unambiguous boundary exists (so recovery trusts the checkpoint only rather
-    than scanning the whole run by id — which would mis-attribute a tool-use id
-    that recurs across turns)."""
-    if assistant_message is None:
-        return None
-    target = message_to_dict(assistant_message)
-    boundary: int | None = None
-    for stored in await store.load_events(run_id):
-        event = stored.event
-        if isinstance(event, AssistantEvent) and message_to_dict(event.message) == target:
-            boundary = stored.seq  # latest match wins
-    return boundary
-
-
 async def _recover_completed_tool_results(
     session: Session,
     run_id: str,
@@ -449,7 +425,6 @@ async def _recover_completed_tool_results(
     tool_blocks: list[ToolUseBlock],
     *,
     after_seq: int | None,
-    assistant_message: Message | None = None,
 ) -> dict[str, ToolResultBlock]:
     """Reconstruct a resumed turn's completed tool results from durable state.
 
@@ -467,9 +442,7 @@ async def _recover_completed_tool_results(
     Args:
         completed: Results already present on the resumed checkpoint.
         tool_blocks: The current turn's tool-use blocks (the membership set).
-        after_seq: Event-seq cursor from the checkpoint; ``None`` triggers the
-            legacy assistant-boundary fallback.
-        assistant_message: The checkpoint's assistant message (legacy boundary).
+        after_seq: Required non-negative event-seq cursor from the checkpoint.
 
     Returns:
         The tool_use_id → result-block map for the current tool batch, merging the
@@ -478,10 +451,7 @@ async def _recover_completed_tool_results(
     store = session.agent.run_store
     if store is None:
         return dict(completed)
-    if after_seq is None:
-        after_seq = await _legacy_batch_boundary_seq(store, run_id, assistant_message)
-        if after_seq is None:
-            return dict(completed)
+    after_seq = _require_tool_recovery_cursor(after_seq)
     membership = {block.id: block.name for block in tool_blocks}
     recovered = dict(completed)
     started: dict[str, ToolCallStartEvent] = {}
