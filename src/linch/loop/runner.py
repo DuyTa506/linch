@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 from uuid import uuid4
 
+from .._telemetry import store_call, trace_run
 from .._wire import UnsupportedWireVersionError
 from ..errors import AbortError, ConfigError
 from ..events import Event, ResultEvent, UserEvent
@@ -120,9 +121,13 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
     await session.agent._ensure_provider_prepared()
     store = session.agent.run_store
     run_record = (
-        await store.create_run(
-            session.id,
-            meta=run_meta_with_contract(_build_run_contract(session, prompt, opts)),
+        await store_call(
+            session,
+            "run.create_run",
+            store.create_run(
+                session.id,
+                meta=run_meta_with_contract(_build_run_contract(session, prompt, opts)),
+            ),
         )
         if store is not None
         else None
@@ -146,7 +151,7 @@ async def resume_loop(session: Session, run_id: str, opts: RunOptions) -> AsyncI
     store = session.agent.run_store
     if store is None:
         raise RuntimeError("Agent has no run_store configured")
-    run_record = await store.load_run(run_id)
+    run_record = await store_call(session, "run.load_run", store.load_run(run_id))
     if run_record is None:
         raise KeyError(f"run not found: {run_id}")
     if run_record.session_id != session.id:
@@ -191,6 +196,7 @@ async def resume_loop(session: Session, run_id: str, opts: RunOptions) -> AsyncI
         yield event
 
 
+@trace_run
 async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
     session: Session,
     prompt: str,
@@ -538,7 +544,9 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 if run_record is not None and store is not None:
                     checkpoint.total_usage = total
                     await _flush_events(session)
-                    await store.mark_completed(run_id, checkpoint)
+                    await store_call(
+                        session, "run.mark_completed", store.mark_completed(run_id, checkpoint)
+                    )
                 yield event
                 return
             if turn_index != _align_defer_turn:
@@ -574,6 +582,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             _auxiliary_caller = _AccountedAuxiliaryCaller(
                 agent.provider,
                 ledger,
+                session=session,
                 limiter=getattr(agent, "limiter", None),
                 parent_logical_call_id=_primary_logical_call_id,
                 turn_index=turn_index,
@@ -808,7 +817,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                         raise ConfigError(
                             "primary control message differs from its acceptance projection"
                         )
-                    await session.append([control])
+                    await store_call(session, "session.append", session.append([control]))
                     event = UserEvent(message=control)
                     await _persist_event(session, run_id, event)
                     yield event

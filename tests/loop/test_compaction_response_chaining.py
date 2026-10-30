@@ -74,12 +74,20 @@ async def test_chokepoint_strips_even_for_a_passthrough_strategy():
         async def compact(self, ctx, provider):
             return list(ctx.messages)  # response_id metadata intact
 
+    class _Provider:
+        id = "fake-provider"
+
     class _FakeAgent:
         model = "model-x"
-        provider = None
+        provider = _Provider()
         token_estimator = None
         hooks = None
         compaction = None
+
+        def __init__(self) -> None:
+            from linch import Context
+
+            self.context = Context()
 
     class _FakeSession:
         def __init__(self) -> None:
@@ -87,13 +95,17 @@ async def test_chokepoint_strips_even_for_a_passthrough_strategy():
             self.active_run_id = "run-1"
             self.run_deps = None
             self.last_compaction_info = None
+            self.id = "fake-session"
+            self.active_model = None
 
         @property
         def provider_view(self):
             return self.session_log.provider_view
 
     session = _FakeSession()
-    await _run_compaction_impl(session, _FakeAgent(), AbortContext(), _PassthroughStrategy())
+    agent = _FakeAgent()
+    session.agent = agent
+    await _run_compaction_impl(session, agent, AbortContext(), _PassthroughStrategy())
 
     assert session.provider_view  # still has the message
     for m in session.provider_view:

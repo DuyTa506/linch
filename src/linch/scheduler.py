@@ -10,6 +10,7 @@ from typing import Any, Literal, cast
 from uuid import uuid4
 from xml.sax.saxutils import escape
 
+from ._telemetry import trace_tool
 from ._wire import UnsupportedWireVersionError
 from .abort import AbortContext, throw_if_aborted
 from .errors import AbortError, ToolExecutionError, ToolTimeoutError
@@ -75,6 +76,7 @@ class ToolExecutionOutcome:
     tool_result: ToolResult
     duration_ms: int
     tool_output: CanonicalToolOutput | None = None
+    error_type: str | None = None
 
 
 @dataclass(slots=True)
@@ -148,6 +150,7 @@ def _execution_outcome(
     block_result: ToolResult | None = None,
     *,
     tool_output: CanonicalToolOutput | None = None,
+    error_type: str | None = None,
 ) -> ToolExecutionOutcome:
     provider_result = block_result or tool_result
     return ToolExecutionOutcome(
@@ -159,6 +162,7 @@ def _execution_outcome(
         tool_result=tool_result,
         duration_ms=tool_result.duration_ms,
         tool_output=tool_output,
+        error_type=error_type,
     )
 
 
@@ -218,6 +222,7 @@ def _v2_contract_error(
     return _execution_outcome(
         call.id,
         _tool_result_error(f"Tool output invalid: {exc}", duration_ms),
+        error_type=type(exc).__name__,
     )
 
 
@@ -418,6 +423,7 @@ def _skill_name_from_input(call: ResolvedCall, input: dict[str, Any]) -> str | N
     return raw[1:] if raw.startswith("/") else raw
 
 
+@trace_tool
 async def _execute_one(
     call: ResolvedCall,
     decision: PermissionDecision,
@@ -667,6 +673,7 @@ async def _execute_tool_attempts(
                     ),
                     duration_ms,
                 ),
+                error_type="ToolTimeoutError",
             )
         except ToolOutputContractError as exc:
             duration_ms = int((time.perf_counter() - started) * 1000)
@@ -679,6 +686,7 @@ async def _execute_tool_attempts(
             return _execution_outcome(
                 call.id,
                 _tool_result_error(f"Tool failed: {exc}", duration_ms),
+                error_type=type(exc).__name__,
             )
 
     # Defensive fallback — all attempts exhausted (should be unreachable because

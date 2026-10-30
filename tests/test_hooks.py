@@ -791,13 +791,21 @@ async def test_compaction_dispatches_pre_and_post_compact_hooks() -> None:
         def on_post_compact(self, ctx):
             recorder.append(("post", ctx.messages_before, ctx.messages_after))
 
+    class Provider:
+        id = "fake-provider"
+
     class FakeAgent:
         model = "m"
-        provider = object()
+        provider = Provider()
         hooks = [Hooks()]
         compaction = FakeStrategy()
         token_estimator = None
         max_output_tokens = None
+
+        def __init__(self) -> None:
+            from linch import Context
+
+            self.context = Context()
 
     class FakeSession:
         active_run_id = "r"
@@ -809,13 +817,17 @@ async def test_compaction_dispatches_pre_and_post_compact_hooks() -> None:
                 ]
             )
             self.last_compaction_info: dict[str, Any] | None = None
+            self.id = "fake-session"
+            self.active_model = None
 
         @property
         def provider_view(self) -> Sequence[Message]:
             return self.session_log.provider_view
 
     session = FakeSession()
-    await run_forced_compaction(session, FakeAgent(), AbortContext())
+    agent = FakeAgent()
+    session.agent = agent
+    await run_forced_compaction(session, agent, AbortContext())
 
     assert [r[0] for r in recorder] == ["pre", "post"]
     assert recorder[0][1] == 5  # pre: messages observed before compaction

@@ -227,25 +227,23 @@ async def test_terminal_close_preserves_agent_stop_result(
 ) -> None:
     """Closing at the first terminal-tail yield must retain its run result."""
     from linch import RunBudget, RunOptions
-    from linch.hooks import RunTelemetryHook
     from linch.loop import _run_loop_impl
-    from linch.observability.protocol import BaseObserver
     from linch.run_store import InMemoryRunStore
     from linch.sessions import InMemorySessionStore
 
-    class _Observer(BaseObserver):
+    class _AgentStopHook:
         def __init__(self) -> None:
             self.results: list[Any] = []
 
-        def on_run_end(self, info: Any) -> None:
-            self.results.append(info)
+        def on_agent_stop(self, ctx: Any) -> None:
+            self.results.append(ctx.result)
 
     providers = {
         "abort": _AbortProvider,
         "provider_error": _ErrorProvider,
         "budget": _BudgetProvider,
     }
-    observer = _Observer()
+    observer = _AgentStopHook()
     session_store = InMemorySessionStore()
     run_store = InMemoryRunStore()
     provider = providers[case]()
@@ -253,7 +251,7 @@ async def test_terminal_close_preserves_agent_stop_result(
         provider,
         session_store=session_store,
         run_store=run_store,
-        hooks=[RunTelemetryHook([observer])],
+        hooks=[observer],
     )
     session = await agent.session(id=f"close-{case}")
     run = await run_store.create_run(session.id)

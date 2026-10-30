@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast, get_args
 from uuid import uuid4
 
 from ._json import walk_json
+from ._telemetry import chat_stream
 from ._wire import WIRE_VERSION, require_wire_version
 from .abort import AbortContext
 from .errors import AbortError, ProviderError
@@ -1341,10 +1342,12 @@ class _AccountedAuxiliaryCaller:
         provider: Any,
         ledger: _ModelCallLedger,
         *,
+        session: Any = None,
         limiter: Any = None,
         parent_logical_call_id: str | None = None,
         turn_index: int | None = None,
     ) -> None:
+        self._session = session
         self._provider = provider
         self._ledger = ledger
         self._limiter = limiter
@@ -1364,6 +1367,7 @@ class _AccountedAuxiliaryCaller:
         bound = _AccountedAuxiliaryCaller(
             self._provider,
             self._ledger,
+            session=self._session,
             limiter=self._limiter,
             parent_logical_call_id=self._parent_logical_call_id,
             turn_index=self._turn_index,
@@ -1496,7 +1500,9 @@ class _AuxiliaryDelivery:
             # No await between these rechecks and the physical stream invocation.
             self.signal.throw_if_aborted()
             ledger.assert_may_start()
-            iterator = self.caller._provider.stream(self.request).__aiter__()
+            iterator = chat_stream(
+                self.caller._session, self.request, self.caller._provider.stream(self.request)
+            ).__aiter__()
             while True:
                 self.signal.throw_if_aborted()
                 try:
