@@ -420,26 +420,30 @@ class PostgresRunStore:
         return _lease_from_row(row, lease.run_id, lease.owner)
 
     async def release(self, lease: RunLease) -> None:
-        held = self._held_leases.get(lease.run_id)
-        if held != lease.epoch:
-            raise LeaseLostError(f"lease lost for run {lease.run_id}")
-        pool = await self._ensure()
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                UPDATE runs
-                SET lease_owner = NULL,
-                    lease_expires_at = NULL,
-                    lease_epoch = COALESCE(lease_epoch, 0) + 1
-                WHERE id = $1 AND lease_owner = $2 AND COALESCE(lease_epoch, 0) = $3
-                RETURNING id
-                """,
-                lease.run_id,
-                lease.owner,
-                lease.epoch,
-            )
-        if row is None:
-            raise LeaseLostError(f"lease lost for run {lease.run_id}")
+        try:
+            held = self._held_leases.get(lease.run_id)
+            if held != lease.epoch:
+                raise LeaseLostError(f"lease lost for run {lease.run_id}")
+            pool = await self._ensure()
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """
+                    UPDATE runs
+                    SET lease_owner = NULL,
+                        lease_expires_at = NULL,
+                        lease_epoch = COALESCE(lease_epoch, 0) + 1
+                    WHERE id = $1 AND lease_owner = $2 AND COALESCE(lease_epoch, 0) = $3
+                    RETURNING id
+                    """,
+                    lease.run_id,
+                    lease.owner,
+                    lease.epoch,
+                )
+            if row is None:
+                raise LeaseLostError(f"lease lost for run {lease.run_id}")
+        finally:
+            self._held_leases.pop(lease.run_id, None)
+            self._lease_ttls.pop(lease.run_id, None)
 
     async def save(
         self,

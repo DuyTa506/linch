@@ -35,6 +35,21 @@ def _memory_peer(store: InMemoryRunStore) -> InMemoryRunStore:
     return peer
 
 
+def _local_lease_maps(store: object) -> list[dict[str, object]]:
+    """Return holder-local maps, allowing Postgres to omit ``_lease_owners``."""
+    maps: list[dict[str, object]] = []
+    for name in ("_held_leases", "_lease_ttls", "_lease_owners"):
+        value = getattr(store, name, None)
+        if isinstance(value, dict):
+            maps.append(value)
+    return maps
+
+
+def _assert_no_local_leases(store: object) -> None:
+    for mapping in _local_lease_maps(store):
+        assert mapping == {}
+
+
 def _postgres_store_type():
     from linch.run_stores.postgres import PostgresRunStore
 
@@ -100,14 +115,15 @@ async def test_lease_claim_conflict_renew_expiry_takeover_and_fencing(lease_stor
     with pytest.raises(LeaseLostError):
         await first.renew(lease_a)
     with pytest.raises(LeaseLostError):
-        await first.release(lease_a)
-
-    with pytest.raises(LeaseLostError):
         await first.save_checkpoint(run_id, _checkpoint())
     with pytest.raises(LeaseLostError):
         await first.append_event(run_id, _event())
     with pytest.raises(LeaseLostError):
         await first.mark_completed(run_id, _checkpoint("done"))
+
+    with pytest.raises(LeaseLostError):
+        await first.release(lease_a)
+    _assert_no_local_leases(first)
 
     await second.release(lease_b)
 
@@ -234,6 +250,45 @@ async def test_stale_writes_are_fenced_without_mutating_persisted_state(lease_st
         (row.seq, row.event.type) for row in before_events
     ]
     assert after_snapshot == before_snapshot
+
+
+async def test_repeated_claim_write_release_clears_holder_local_state(lease_stores) -> None:
+    first, _second = lease_stores
+    prefix = f"lease-cycle-{id(first)}-{time.monotonic_ns()}"
+    for index in range(1000):
+        run_id = f"{prefix}-{index}"
+        await first.create_run("session-1", id=run_id)
+        lease = await first.claim(run_id, "cycle-owner", 30.0)
+        await first.save_checkpoint(run_id, _checkpoint(str(index)))
+        await first.release(lease)
+    _assert_no_local_leases(first)
+
+
+async def test_expired_takeover_fence_then_stale_release_clears_only_old_holder(
+    lease_stores,
+) -> None:
+    from linch.run_store import LeaseLostError
+
+    old_holder, live_holder = lease_stores
+    run_id = f"lease-stale-release-{id(old_holder)}-{time.monotonic_ns()}"
+    await old_holder.create_run("session-1", id=run_id)
+    old_lease = await old_holder.claim(run_id, "old-owner", 0.2)
+    await asyncio.sleep(max(0.0, old_lease.expires_at - time.time()) + 0.03)
+    live_lease = await live_holder.claim(run_id, "live-owner", 30.0)
+
+    with pytest.raises(LeaseLostError):
+        await old_holder.save_checkpoint(run_id, _checkpoint("fenced"))
+    held = old_holder._held_leases
+    assert held.get(run_id) == old_lease.epoch
+
+    with pytest.raises(LeaseLostError):
+        await old_holder.release(old_lease)
+    _assert_no_local_leases(old_holder)
+
+    renewed = await live_holder.renew(live_lease)
+    await live_holder.save_checkpoint(run_id, _checkpoint("live"))
+    await live_holder.release(renewed)
+    _assert_no_local_leases(live_holder)
 
 
 async def test_sqlite_claim_cancellation_keeps_committed_lease_fencing(

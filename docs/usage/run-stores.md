@@ -47,10 +47,12 @@ async def handle_job():
         # Another worker owns the live lease; leave the job for that worker.
         return
 
-    # The host schedules heartbeats while it drives or resumes the run.
-    lease = await runs.renew(lease)
-    # After stopping all work for this run:
-    await runs.release(lease)
+    try:
+        # The host schedules heartbeats while it drives or resumes the run.
+        lease = await runs.renew(lease)
+    finally:
+        # Stop all work for this run before ending ownership.
+        await runs.release(lease)
 ```
 
 `RunLease` is immutable and carries `run_id`, `owner`, `epoch`, and
@@ -68,10 +70,16 @@ write raises `LeaseLostError`. The failed write changes no persisted state.
 Expiry alone permits takeover; writes are fenced by epoch, not by a local
 clock check. An expired lease cannot be renewed.
 
-Release clears ownership and advances the epoch. An instance that released or
-lost a lease continues to fence its delayed writes until it successfully claims
-the run again. Renewing or releasing a stale lease raises `LeaseLostError` and
-does not affect the current owner.
+Release clears ownership and advances the epoch when the lease still matches.
+Every release attempt also removes this instance's holder-local state for the
+run, including when it raises `LeaseLostError` after a takeover. Releasing a
+stale lease does not affect the current owner. A fenced write retains its local
+lease state until the host calls release, so further zombie writes stay fenced.
+
+Hosts call release in `finally` after stopping all work for the run. Release
+ends fencing for that run on this instance; do not write to it after releasing
+it. The local ownership maps therefore track active ownership rather than
+growing with every run a long-lived worker has ever claimed.
 
 The host owns claiming, renewal, and stopping work after lease loss; the agent
 loop does not start a heartbeat. A lease fences the run store's writes. Host
