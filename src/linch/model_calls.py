@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast, get_args
 from uuid import uuid4
 
 from ._json import walk_json
-from ._telemetry import chat_stream
+from ._telemetry import ChatCall, in_span
 from ._wire import WIRE_VERSION, require_wire_version
 from .abort import AbortContext
 from .errors import AbortError, ProviderError
@@ -1233,6 +1233,7 @@ class _AuxiliaryResponse:
 
     def __init__(self) -> None:
         self.actual_model = ""
+        self.stop_reason: str | None = None
         self.usage: Usage | None = None
         self.text = bytearray()
         self.rejection_reason: str | None = None
@@ -1309,6 +1310,9 @@ class _AuxiliaryResponse:
             except _ModelCallError as exc:
                 raise _auxiliary_protocol_error("message_end.usage must be valid Usage") from exc
             stop = event.get("stop_reason")
+            self.stop_reason = (
+                stop if isinstance(stop, str) and stop in _AUXILIARY_STOP_REASONS else None
+            )
             metadata = event.get("provider_metadata")
             if (
                 self.open_tools
@@ -1470,6 +1474,8 @@ class _AuxiliaryDelivery:
         await ledger.begin(self.intent)
         acquired = started = terminal_attempted = False
         iterator: Any = None
+        chat: ChatCall | None = None
+        error: BaseException | None = None
 
         async def acquire() -> None:
             nonlocal acquired
@@ -1500,8 +1506,9 @@ class _AuxiliaryDelivery:
             # No await between these rechecks and the physical stream invocation.
             self.signal.throw_if_aborted()
             ledger.assert_may_start()
-            iterator = chat_stream(
-                self.caller._session, self.request, self.caller._provider.stream(self.request)
+            chat = ChatCall(self.caller._session, self.request, self.response)
+            iterator = in_span(
+                self.caller._provider.stream(self.request), chat.span, end_on_exit=False
             ).__aiter__()
             while True:
                 self.signal.throw_if_aborted()
@@ -1526,6 +1533,7 @@ class _AuxiliaryDelivery:
                     close = getattr(closed_iterator, "aclose", None)
                     if close is not None:
                         await close()
+                    chat.finish(self.response.protocol_failure)
                     self.signal.throw_if_aborted()
                     receipt = self._receipt(reported=True)
                     terminal_attempted = True
@@ -1539,6 +1547,7 @@ class _AuxiliaryDelivery:
                     return
                 yield event
         except BaseException as exc:
+            error = exc
             if not terminal_attempted:
                 terminal_attempted = True
                 if isinstance(exc, _ModelCallError) and exc.code == "persistence_failed":
@@ -1562,6 +1571,13 @@ class _AuxiliaryDelivery:
                 close = getattr(iterator, "aclose", None)
                 if close is not None:
                     await close()
+            except BaseException as exc:
+                error = exc
+                raise
             finally:
-                if acquired and limiter is not None:
-                    limiter.release(model=self.request.model)
+                try:
+                    if chat is not None:
+                        chat.finish(error)
+                finally:
+                    if acquired and limiter is not None:
+                        limiter.release(model=self.request.model)

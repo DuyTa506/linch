@@ -8,13 +8,14 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable
+from collections.abc import AsyncGenerator, Awaitable
 from dataclasses import asdict, is_dataclass
 from functools import wraps
 from time import perf_counter
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from opentelemetry import metrics, trace
+from opentelemetry.metrics._internal import _ProxyMeterProvider
 
 from .types import Usage
 
@@ -58,38 +59,61 @@ def set_error(span: trace.Span, error: BaseException | str) -> None:
     span.set_status(trace.StatusCode.ERROR)
 
 
-async def in_span(
-    iterator: AsyncIterator[_T], span: trace.Span, *, end_on_exit: bool = True
-) -> AsyncGenerator[_T, None]:
-    """Activate only while advancing/closing, never across a consumer yield."""
-    try:
-        while True:
-            with trace.use_span(
-                span, end_on_exit=False, record_exception=False, set_status_on_exception=False
-            ):
-                try:
-                    item = await anext(iterator)
-                except StopAsyncIteration:
-                    return
-            yield item
-    except BaseException as exc:
-        if not isinstance(exc, GeneratorExit):
-            set_error(span, exc)
-        raise
-    finally:
+def in_span(
+    iterator: Any,
+    span: trace.Span,
+    *,
+    end_on_exit: bool = True,
+    session: Any = None,
+    run_id: str | None = None,
+) -> Any:
+    """Activate valid contexts only; invalid spans return the exact raw iterator."""
+    if not span.get_span_context().is_valid:
+        return iterator
+
+    async def activated() -> AsyncGenerator[Any, None]:
+        previous = getattr(session, "_telemetry_run", None)
+        run = _RunTrace(span, run_id) if session is not None and run_id is not None else None
+        if run is not None and session is not None:
+            session._telemetry_run = run
         try:
-            with trace.use_span(
-                span, end_on_exit=False, record_exception=False, set_status_on_exception=False
-            ):
-                close = getattr(iterator, "aclose", None)
-                if close is not None:
-                    await close()
+            while True:
+                with trace.use_span(
+                    span, end_on_exit=False, record_exception=False, set_status_on_exception=False
+                ):
+                    try:
+                        item = await anext(iterator)
+                    except StopAsyncIteration:
+                        return
+                if run is not None:
+                    run.observe(item)
+                yield item
         except BaseException as exc:
-            set_error(span, exc)
+            if not isinstance(exc, GeneratorExit):
+                set_error(span, exc)
             raise
         finally:
-            if end_on_exit:
-                span.end()
+            try:
+                with trace.use_span(
+                    span, end_on_exit=False, record_exception=False, set_status_on_exception=False
+                ):
+                    close = getattr(iterator, "aclose", None)
+                    if close is not None:
+                        await close()
+            except BaseException as exc:
+                set_error(span, exc)
+                raise
+            finally:
+                try:
+                    if run is not None and run.step is not None:
+                        run.step.end()
+                finally:
+                    if run is not None and session is not None:
+                        session._telemetry_run = previous
+                    if end_on_exit:
+                        span.end()
+
+    return activated()
 
 
 class Telemetry:
@@ -107,7 +131,19 @@ class Telemetry:
         self.duration = meter.create_histogram(OPERATION_DURATION, unit="s")
         self.store_duration = meter.create_histogram(STORE_DURATION, unit="s")
 
+    @property
+    def metrics_enabled(self) -> bool:
+        meter = self._context.get("meter")
+        if meter is not None:
+            return not isinstance(meter, metrics.NoOpMeter)
+        provider = self._context.get("meter_provider") or metrics.get_meter_provider()
+        # The API has no instrument enabled flag. Its deferred default provider
+        # is inactive until a host installs one; recheck so late setup still works.
+        return not isinstance(provider, metrics.NoOpMeterProvider | _ProxyMeterProvider)
+
     async def store_call(self, op: str, awaitable: Awaitable[_T]) -> _T:
+        if not self.metrics_enabled:
+            return await awaitable
         started = perf_counter()
         attributes = {STORE_OP: op}
         try:
@@ -208,7 +244,7 @@ class _RunTrace:
 
 def trace_run(function: Any) -> Any:
     @wraps(function)
-    async def wrapped(session: Any, prompt: str, opts: Any, **kwargs: Any) -> AsyncIterator[Any]:
+    def wrapped(session: Any, prompt: str, opts: Any, **kwargs: Any) -> Any:
         telemetry = telemetry_for(session.agent)
         attrs = attributes(session, "invoke_agent")
         attrs[RUN_ID] = kwargs["run_id"]
@@ -216,21 +252,12 @@ def trace_run(function: Any) -> Any:
         span = telemetry.tracer.start_span("invoke_agent", attributes=attrs)
         if span.is_recording() and capture_content():
             span.set_attribute(INPUT_MESSAGES, _json(prompt))
-        previous = getattr(session, "_telemetry_run", None)
-        state = _RunTrace(span, kwargs["run_id"])
-        session._telemetry_run = state
-        iterator = in_span(function(session, prompt, opts, **kwargs), span)
-        try:
-            async for event in iterator:
-                state.observe(event)
-                yield event
-        finally:
-            try:
-                await iterator.aclose()
-            finally:
-                if state.step is not None:
-                    state.step.end()
-                session._telemetry_run = previous
+        return in_span(
+            function(session, prompt, opts, **kwargs),
+            span,
+            session=session,
+            run_id=kwargs["run_id"],
+        )
 
     return wrapped
 
@@ -253,119 +280,85 @@ def end_step(session: Any) -> None:
         state.step = None
 
 
-async def chat_stream(
-    session: Any,
-    request: Any,
-    iterator: AsyncIterator[_T],
-    *,
-    agent: Any = None,
-    primary_state: Any = None,
-) -> AsyncGenerator[_T, None]:
-    """One physical delivery, including normalized parsing and auxiliary calls."""
-    if session is None and agent is None:
-        try:
-            async for item in iterator:
-                yield item
-        finally:
-            close = getattr(iterator, "aclose", None)
-            if close is not None:
-                await close()
-        return
-    if agent is None:
-        assert session is not None
-        agent = session.agent
-    telemetry = telemetry_for(agent)
-    attrs = attributes(session, "chat", model=request.model, agent=agent)
-    span = telemetry.tracer.start_span(
-        f"chat {request.model}",
-        context=parent_context(session),
-        kind=trace.SpanKind.CLIENT,
-        attributes=attrs,
-    )
-    capture = span.is_recording() and capture_content()
-    if capture:
-        span.set_attribute(INPUT_MESSAGES, _json(request.messages))
-    usage = None
-    error = None
-    output: list[Any] = []
-    started = perf_counter()
-    traced = in_span(iterator, span, end_on_exit=False)
-    try:
-        async for item in traced:
-            assembly: Any = getattr(item, "assembly", item)
-            if hasattr(assembly, "usage") and hasattr(assembly, "message"):
-                usage = assembly.usage
-                span.set_attribute(FINISH_REASONS, [assembly.stop_reason])
-                if capture:
-                    span.set_attribute(OUTPUT_MESSAGES, _json([assembly.message]))
-            elif isinstance(item, dict):
-                if item.get("type") == "message_start":
-                    span.set_attribute(RESPONSE_MODEL, item.get("model", request.model))
-                elif item.get("type") == "message_end":
-                    candidate = item.get("usage")
-                    if isinstance(candidate, Usage):
-                        usage = candidate
-                    span.set_attribute(FINISH_REASONS, [item.get("stop_reason", "unknown")])
-                    if capture:
-                        span.set_attribute(OUTPUT_MESSAGES, _json(output))
-                elif capture:
-                    output.append(item)
-            if usage is not None:
-                set_usage(span, usage)
-            yield item
-    except BaseException as exc:
-        if not isinstance(exc, GeneratorExit):
-            error = type(exc).__name__
-            state = getattr(session, "_telemetry_run", None)
-            if state is not None and state.step is not None:
-                set_error(state.step, exc)
-        raise
-    finally:
-        try:
-            await traced.aclose()
-        except BaseException as exc:
-            error = type(exc).__name__
-            raise
-        finally:
-            try:
-                # Parsing can fail after a valid usage receipt or message_start.
-                # Those known facts remain observable even when output is rejected.
-                usage = usage or getattr(primary_state, "usage", None)
-                actual_model = getattr(primary_state, "actual_model", "")
-                if actual_model:
-                    span.set_attribute(RESPONSE_MODEL, actual_model)
-                if usage is not None:
-                    set_usage(span, usage)
-                metric_attrs = {OPERATION: "chat", PROVIDER: attrs[PROVIDER], MODEL: request.model}
-                if error is not None:
-                    metric_attrs[ERROR_TYPE] = error
-                telemetry.duration.record(perf_counter() - started, metric_attrs)
-                if usage is not None:
-                    for kind, count in (
-                        ("input", usage.input_tokens),
-                        ("output", usage.output_tokens),
-                    ):
-                        telemetry.tokens.record(count, {**metric_attrs, TOKEN_TYPE: kind})
-            finally:
-                span.end()
+class ChatCall:
+    """Call-boundary tracing and metrics; consumers own their existing stream loop."""
 
-
-def trace_chat(function: Any) -> Any:
-    @wraps(function)
-    async def wrapped(session: Any, request: Any, **kwargs: Any) -> AsyncIterator[Any]:
-        iterator = chat_stream(
-            session,
-            request,
-            function(session, request, **kwargs),
-            primary_state=kwargs.get("state"),
+    def __init__(self, session: Any, request: Any, state: Any = None, *, agent: Any = None):
+        self.session, self.state = session, state
+        self.usage: Usage | None = None
+        self.actual_model = ""
+        self.stop_reason: str | None = None
+        self.message: Any = None
+        self.finished = False
+        self.telemetry = telemetry_for(agent or session.agent) if agent or session else None
+        self.attrs = (
+            attributes(session, "chat", model=request.model, agent=agent) if self.telemetry else {}
         )
-        try:
-            async for item in iterator:
-                yield item
-        finally:
-            await iterator.aclose()
+        self.span = (
+            self.telemetry.tracer.start_span(
+                f"chat {request.model}",
+                context=parent_context(session),
+                kind=trace.SpanKind.CLIENT,
+                attributes=self.attrs,
+            )
+            if self.telemetry
+            else trace.INVALID_SPAN
+        )
+        self.capture = self.span.is_recording() and capture_content()
+        if self.capture:
+            self.span.set_attribute(INPUT_MESSAGES, _json(request.messages))
+        self.record_metrics = self.telemetry is not None and self.telemetry.metrics_enabled
+        self.started = perf_counter() if self.record_metrics else 0
 
-    return wrapped
+    def __enter__(self) -> ChatCall:
+        return self
+
+    def __exit__(self, exc_type: Any, error: BaseException | None, tb: Any) -> None:
+        self.finish(error)
+
+    def finish(self, error: BaseException | None = None) -> None:
+        if self.finished:
+            return
+        self.finished = True
+        if self.telemetry is None:
+            return
+        if not self.record_metrics and not self.span.is_recording():
+            self.span.end()
+            return
+        result = self.state if self.state is not None else self
+        usage = result.usage
+        attrs = {OPERATION: "chat", PROVIDER: self.attrs[PROVIDER], MODEL: self.attrs[MODEL]}
+        try:
+            if error is not None and not isinstance(error, GeneratorExit):
+                attrs[ERROR_TYPE] = type(error).__name__
+                set_error(self.span, error)
+                run = getattr(self.session, "_telemetry_run", None)
+                if run is not None and run.step is not None:
+                    set_error(run.step, error)
+            if self.span.is_recording():
+                if result.actual_model:
+                    self.span.set_attribute(RESPONSE_MODEL, result.actual_model)
+                reason = getattr(result, "stop_reason", None)
+                if reason:
+                    self.span.set_attribute(FINISH_REASONS, [reason])
+                if usage is not None:
+                    set_usage(self.span, usage)
+                if self.capture:
+                    content = getattr(result, "message", None)
+                    if content is None:
+                        content = getattr(result, "text", b"")
+                        if isinstance(content, bytes | bytearray):
+                            content = content.decode("utf-8")
+                    self.span.set_attribute(OUTPUT_MESSAGES, _json(content))
+            if self.record_metrics:
+                self.telemetry.duration.record(perf_counter() - self.started, attrs)
+                if usage is not None:
+                    self.telemetry.tokens.record(usage.input_tokens, {**attrs, TOKEN_TYPE: "input"})
+                    self.telemetry.tokens.record(
+                        usage.output_tokens, {**attrs, TOKEN_TYPE: "output"}
+                    )
+        finally:
+            self.span.end()
 
 
 def trace_compaction(function: Any) -> Any:
@@ -376,6 +369,8 @@ def trace_compaction(function: Any) -> Any:
         span = telemetry_for(agent).tracer.start_span(
             "compaction", context=parent_context(session), attributes=attrs
         )
+        if not span.get_span_context().is_valid:
+            return await function(session, agent, signal, strategy, **kwargs)
         with trace.use_span(
             span, end_on_exit=True, record_exception=False, set_status_on_exception=False
         ):
@@ -414,6 +409,8 @@ def trace_tool(function: Any) -> Any:
         span = telemetry_for(agent).tracer.start_span(
             f"execute_tool {attrs[TOOL_NAME]}", context=parent_context(session), attributes=attrs
         )
+        if not span.get_span_context().is_valid:
+            return await function(call, decision, agent, session, signal, **kwargs)
         capture = span.is_recording() and capture_content()
         if capture:
             span.set_attribute(
@@ -446,5 +443,39 @@ class _TelemetryProvider:
     def __getattr__(self, name: str) -> Any:
         return getattr(self._provider, name)
 
-    def stream(self, request: Any) -> AsyncGenerator[Any, None]:
-        return chat_stream(self._session, request, self._provider.stream(request))
+    def stream(self, request: Any) -> Any:
+        iterator = self._provider.stream(request)
+        telemetry = telemetry_for(self._session.agent)
+        if not telemetry.metrics_enabled and (
+            isinstance(telemetry.tracer, trace.NoOpTracer)
+            or (
+                isinstance(telemetry.tracer, trace.ProxyTracer)
+                and isinstance(trace.get_tracer_provider(), trace.ProxyTracerProvider)
+            )
+        ):
+            return iterator
+
+        async def activated() -> AsyncGenerator[Any, None]:
+            with ChatCall(self._session, request) as chat:
+                output: list[Any] = []
+                if chat.capture:
+                    chat.message = output
+                stream = in_span(iterator, chat.span, end_on_exit=False)
+                try:
+                    async for event in stream:
+                        kind = event.get("type")
+                        if kind == "message_start":
+                            chat.actual_model = event.get("model", request.model)
+                        elif kind == "message_end":
+                            usage = event.get("usage")
+                            chat.usage = usage if isinstance(usage, Usage) else None
+                            chat.stop_reason = event.get("stop_reason")
+                        elif chat.capture:
+                            output.append(event)
+                        yield event
+                finally:
+                    close = getattr(stream, "aclose", None)
+                    if close is not None:
+                        await close()
+
+        return activated()
