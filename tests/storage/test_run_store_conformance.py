@@ -1,0 +1,195 @@
+"""Shared run-store conformance checks for the local and Postgres backends.
+
+The Postgres parameter is intentionally part of this suite even though the
+repository's normal test environment does not install ``asyncpg``.  Set
+``AGENT_KIT_TEST_PG_DSN`` and install the ``postgres`` extra to exercise it.
+"""
+
+from __future__ import annotations
+
+import copy
+import importlib.util
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from uuid import uuid4
+
+import pytest
+
+from linch.events import UserEvent
+from linch.run_store import InMemoryRunStore, RunCheckpoint, SqliteRunStore
+from linch.types import Message, TextBlock, Usage
+
+
+@dataclass
+class _StoreCase:
+    name: str
+    store: object
+    peer: object
+
+
+def _postgres_store_type():
+    """Import the optional backend without importing asyncpg at collection time."""
+    from linch.run_stores.postgres import PostgresRunStore
+
+    return PostgresRunStore
+
+
+def _memory_peer(store: InMemoryRunStore) -> InMemoryRunStore:
+    """Create another holder sharing storage but with independent lease state."""
+    peer = copy.copy(store)
+    # ``copy.copy`` shares the durable dictionaries, including ``_lease_state``.
+    # Lease ownership is process-local, so each peer gets independent copies of
+    # the holder's maps only.
+    for name in ("_held_leases", "_lease_ttls", "_lease_owners"):
+        setattr(peer, name, dict(getattr(store, name)))
+    return peer
+
+
+@pytest.fixture(params=["memory", "sqlite", "postgres"])
+async def store_case(request: pytest.FixtureRequest, tmp_path: Path):
+    kind = request.param
+    if kind == "memory":
+        store: object = InMemoryRunStore()
+        peer: object = _memory_peer(store)
+    elif kind == "sqlite":
+        store = SqliteRunStore(tmp_path / "runs.db")
+        peer = SqliteRunStore(tmp_path / "runs.db")
+    else:
+        dsn = os.environ.get("AGENT_KIT_TEST_PG_DSN", "")
+        if not dsn:
+            pytest.skip("AGENT_KIT_TEST_PG_DSN not set")
+        if importlib.util.find_spec("asyncpg") is None:
+            pytest.skip("asyncpg not installed")
+        store_type = _postgres_store_type()
+        store = store_type(dsn)
+        peer = store_type(dsn)
+
+    if kind in {"sqlite", "postgres"}:
+        # Warm each backend separately so the conformance checks exercise
+        # concurrent store operations rather than connection/pool startup.
+        # SQLite also avoids the shared executor's known cold WAL-mode switch
+        # race.
+        await store.load_run("__conformance_fixture_probe__")
+        await peer.load_run("__conformance_fixture_probe__")
+
+    case = _StoreCase(kind, store, peer)
+    try:
+        yield case
+    finally:
+        await store.close()  # type: ignore[attr-defined]
+        if peer is not store:
+            await peer.close()  # type: ignore[attr-defined]
+
+
+def _checkpoint(prompt: str = "hello") -> RunCheckpoint:
+    return RunCheckpoint(
+        phase="started",
+        prompt=prompt,
+        turn_index=1,
+        total_usage=Usage(input_tokens=2, output_tokens=3),
+        extension_state={"nested": {"labels": ["a", "b"]}},
+    )
+
+
+def _event(label: str) -> UserEvent:
+    return UserEvent(message=Message(role="user", content=[TextBlock(text=label)]))
+
+
+async def test_run_store_round_trip_status_and_reconnect(store_case: _StoreCase) -> None:
+    run_id = f"conformance-{uuid4()}"
+    store = store_case.store
+    await store.create_run("session-1", id=run_id, meta={"source": "test"})
+
+    saved = await store.save_checkpoint(run_id, _checkpoint())
+    assert saved.status == "running"
+    assert saved.checkpoint is not None
+    assert saved.checkpoint.prompt == "hello"
+
+    # A returned checkpoint is an isolated snapshot, so caller mutation cannot
+    # alter the durable record.
+    saved.checkpoint.extension_state["nested"]["labels"].append("caller")
+    loaded = await store.load_run(run_id)
+    assert loaded is not None
+    assert loaded.checkpoint is not None
+    assert loaded.checkpoint.extension_state["nested"]["labels"] == ["a", "b"]
+
+    seqs = await store.append_events(run_id, [_event("one"), _event("two")])
+    assert seqs == [1, 2]
+    assert await store.append_event(run_id, _event("three")) == 3
+    rows = await store.load_events(run_id)
+    assert [row.seq for row in rows] == [1, 2, 3]
+    assert [row.event.message.content[0].text for row in rows] == ["one", "two", "three"]
+    resumed = await store.load_events(run_id, after_seq=1)
+    assert [row.seq for row in resumed] == [2, 3]
+
+    done = await store.mark_completed(run_id, _checkpoint("done"))
+    assert done.status == "completed"
+    assert done.checkpoint is not None
+    assert done.checkpoint.phase == "completed"
+
+    failed_id = f"conformance-failed-{uuid4()}"
+    await store.create_run("session-1", id=failed_id)
+    failed = await store.mark_failed(failed_id, _checkpoint("failed"), {"message": "boom"})
+    assert failed.status == "failed"
+    failed_loaded = await store.load_run(failed_id)
+    assert failed_loaded is not None
+    assert failed_loaded.status == "failed"
+    assert failed_loaded.meta["errors"] == [{"message": "boom"}]
+
+
+async def test_run_store_event_sequence_is_monotonic_under_concurrent_appends(
+    store_case: _StoreCase,
+) -> None:
+    import asyncio
+
+    run_id = f"conformance-concurrent-{uuid4()}"
+    store = store_case.store
+    await store.create_run("session-1", id=run_id)
+    returned = await asyncio.gather(
+        *(
+            (store if index % 2 == 0 else store_case.peer).append_event(run_id, _event(str(index)))
+            for index in range(32)
+        )
+    )
+    assert sorted(returned) == list(range(1, 33))
+    rows = await store.load_events(run_id)
+    assert [row.seq for row in rows] == list(range(1, 33))
+
+    other_run_id = f"conformance-concurrent-other-{uuid4()}"
+    await store.create_run("session-1", id=other_run_id)
+    assert await store.append_event(other_run_id, _event("independent")) == 1
+
+
+async def test_run_store_concurrent_claim_has_one_winner(store_case: _StoreCase) -> None:
+    import asyncio
+
+    from linch.run_store import RunLeaseConflictError
+
+    run_id = f"conformance-claim-{uuid4()}"
+    store = store_case.store
+    peer = store_case.peer
+    await store.create_run("session-1", id=run_id)
+    results = await asyncio.gather(
+        store.claim(run_id, "owner-a", 30.0),  # type: ignore[attr-defined]
+        peer.claim(run_id, "owner-b", 30.0),  # type: ignore[attr-defined]
+        return_exceptions=True,
+    )
+    winners = [result for result in results if not isinstance(result, Exception)]
+    conflicts = [result for result in results if isinstance(result, RunLeaseConflictError)]
+    assert len(winners) == 1
+    assert len(conflicts) == 1
+
+
+async def test_run_store_concurrent_create_same_id_is_idempotent(store_case: _StoreCase) -> None:
+    import asyncio
+
+    run_id = f"conformance-create-{uuid4()}"
+    results = await asyncio.gather(
+        store_case.store.create_run("session-1", id=run_id, meta={"owner": "first"}),
+        store_case.peer.create_run("session-1", id=run_id, meta={"owner": "second"}),
+        return_exceptions=True,
+    )
+    errors = [result for result in results if isinstance(result, Exception)]
+    assert errors == [], errors
+    assert [result.id for result in results] == [run_id, run_id]
