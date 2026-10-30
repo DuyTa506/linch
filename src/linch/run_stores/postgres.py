@@ -31,7 +31,7 @@ from ..run_store import (
     create_model_input_snapshot,
 )
 from ..sessions.memory import now_iso
-from ..storage._pg import _import_asyncpg
+from ..storage._pg import _import_asyncpg, close_pool, ensure_pool
 from ..types import ProviderRequest
 
 _SCHEMA = """
@@ -126,32 +126,13 @@ class PostgresRunStore:
         self._lease_ttls: dict[str, float] = {}
 
     async def _ensure(self) -> Any:
-        if self._initialized:
-            return self._pool
-        async with self._init_lock:
-            if self._initialized:
-                return self._pool
-            asyncpg = _import_asyncpg()
-            if self._pool is None:
-                self._pool = await asyncpg.create_pool(
-                    self._dsn,
-                    min_size=self._min_size,
-                    max_size=self._max_size,
-                )
-            try:
-                async with self._pool.acquire() as conn:
-                    async with conn.transaction():
-                        await conn.execute(
-                            "SELECT pg_advisory_xact_lock($1::bigint)", _SCHEMA_LOCK_KEY
-                        )
-                        await conn.execute(_SCHEMA)
-            except Exception:
-                pool, self._pool = self._pool, None
-                if pool is not None:
-                    await pool.close()
-                raise
-            self._initialized = True
-        return self._pool
+        return await ensure_pool(
+            self,
+            _SCHEMA,
+            _import_asyncpg,
+            advisory_lock_key=_SCHEMA_LOCK_KEY,
+            allow_missing_pool_on_error=True,
+        )
 
     async def create_run(
         self,
@@ -539,10 +520,7 @@ class PostgresRunStore:
             return 0
 
     async def close(self) -> None:
-        if self._pool is not None:
-            await self._pool.close()
-            self._pool = None
-            self._initialized = False
+        await close_pool(self, reset_initialized=True)
 
     async def __aenter__(self) -> PostgresRunStore:
         await self._ensure()
