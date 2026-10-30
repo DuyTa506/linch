@@ -18,6 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from .._token_estimation import custom_token_estimate
 from ..tools.base import ToolResult
 from .backend import FileBackend, normalize_path
 
@@ -69,8 +70,9 @@ def estimate_tokens(text: str, estimator: Any = None, model: str | None = None) 
             from ..types import Message, TextBlock
 
             msg = Message(role="user", content=[TextBlock(text=text)])
-            value: Any = estimator([msg], model)
-            return max(0, int(value))
+            estimate = custom_token_estimate(estimator, [msg], model)
+            if estimate is not None:
+                return estimate
         except Exception:
             pass
     return len(text) // _CHARS_PER_TOKEN
