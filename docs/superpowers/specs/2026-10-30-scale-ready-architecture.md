@@ -25,8 +25,8 @@ SQL, and a few read/write tools with per-tenant dependencies via
 Linch stays embeddable, but (owner decision 2026-10-31) it may ship an
 optional runtime module: `linch.worker` — claim/renew/release loop over a
 leasing RunStore, graceful drain, resume of orphaned runs — so every host does
-not rebuild it. The HTTP API and queue choice stay with the host (example
-only). Dependencies may be added when they pay for themselves (CLAUDE.md).
+not rebuild it. The HTTP API stays with the host; the job queue is PgQueuer
+inside `linch.worker` (D14). Dependencies may be added when they pay for themselves (CLAUDE.md).
 
 Compatibility: 3.0 breaks freely (CLAUDE.md "3.0 compatibility policy").
 Pre-3.0 runs and checkpoints are rejected rather than read through legacy
@@ -58,10 +58,9 @@ an untracked draft) runs against InMemory, Sqlite, and Postgres (Postgres tests 
 cleanly without `AGENT_KIT_TEST_PG_DSN`, the existing convention in `tests/storage/test_postgres.py`). NoSQL is not used; Redis appears
 only in examples.
 
-SQLite stays as the zero-dependency single-host backend (local, CLI, tests,
-one-process apps) and keeps passing the conformance suite, but it is not on the
-scale path: multi-worker deployments use Postgres, and no further scale work
-targets SQLite.
+~~SQLite stays as the single-host backend.~~ Superseded by D13 (2026-10-31):
+SQLite is removed; durable state is Postgres only, InMemory serves tests and
+dev.
 
 The runtime's hot path is write-heavy (WP1: ~16.5 store calls per turn), and a
 checkpoint must be durable before the side effects it guards. Therefore **no
@@ -141,6 +140,65 @@ latency, max event-loop lag, peak RSS per session, checkpoint bytes per turn,
 and store writes per turn. A baseline is recorded first; each work package
 reports its delta.
 
+**D11 — Observability is OpenTelemetry.** Core depends on `opentelemetry-api`
+only; without a host-configured SDK the API is a no-op. The kernel opens spans
+where the work happens: `invoke_agent` per run, `chat` per provider call,
+`execute_tool` per tool, one span per loop phase. Attributes follow the GenAI
+semantic conventions (`gen_ai.*`, still experimental, so every attribute name
+lives in one module) plus `linch.*`; metrics are `gen_ai.client.token.usage`
+and `gen_ai.client.operation.duration`. Prompt and tool content is not recorded
+unless enabled. A run's trace id is the OTel trace id; `traceparent` travels in
+job payloads and into subagents. Removed: the Observer protocol,
+`ObserverDispatcher`, `LoggingObserver`, `SpanCollector`,
+`OpenTelemetryObserver`, `RunTelemetryHook`; tests use the SDK's
+`InMemorySpanExporter`. The no-op cost is measured with `--scale` and reported.
+
+**D12 — Memory is files.** Each scope (tenant, user, agent) owns
+`/memories/<scope>/` with `MEMORY.md` as its index (at most 200 lines) and one
+file per fact, stored on the filesystem backend (Postgres in production). The
+index is loaded into the system prompt when a session opens (a stable,
+cacheable prefix); the model reads and writes memory with the existing file
+tools, so writes are write-scoped, serialized, permission-checked and logged.
+Semantic recall is an optional plugin (extra `mem0`: mem0 `AsyncMemory` scoped
+by `user_id`/`agent_id`/`run_id` on pgvector), off by default because every
+`add` calls an LLM. Removed: the keyword memory stores, `TieredMemoryStore`,
+`MemoryContextBuilder`, memory lifecycle, memory tools and hook.
+
+**D13 — Durable state is Postgres only.** Backends are Postgres (production)
+and InMemory (tests, dev). Every SQLite store (sessions, runs, files, memory,
+mailbox, scheduling) and `storage/_executor.py` are removed; conformance suites
+run InMemory + Postgres. Local durable development uses Docker Postgres or
+pgserver. Cost accepted by the owner: durability needs Postgres even on one
+machine.
+
+**D14 — Run dispatch and cron use PgQueuer.** `linch.worker` (extra `worker`)
+runs PgQueuer on the stores' asyncpg pool: one job per run, dequeued with
+`FOR UPDATE SKIP LOCKED` and woken by LISTEN/NOTIFY; a per-entrypoint
+`concurrency_limit` (enforced in the database across the fleet) caps
+per-provider or per-tenant concurrency; retries use
+`DatabaseRetryEntrypointExecutor`; cron uses `@schedule`. The D1 lease still
+fences writes — the queue only dispatches. Core never imports PgQueuer. The
+hand-written scheduling package (cron parser, stores, loop) is removed;
+`schedule_*` tools enqueue jobs. NOTIFY takes a global lock at commit: WP6
+measures it, and stream readers can fall back to polling `run_events` by seq.
+
+**D15 — msgspec for persisted types, only if measured.** The hand-written
+event/receipt/checkpoint codecs (about 1,330 lines of
+`to_dict`/`from_dict`/validation) move to msgspec Structs (a tagged union for
+events) only if `--scale` shows a clear encode/decode CPU win; otherwise they
+are consolidated without the dependency. Semantic validation stays
+hand-written; fingerprints stay deterministic.
+
+**D16 — Small kernel, extensions outside it.** The kernel is `kernel/`,
+`loop/`, tools, providers, sessions, run store, permissions, hooks and
+filesystem. Workflow, evals, deep_agent, reports, the CLI scaffold and the
+mailbox move to `linch.ext.*`: imported explicitly, absent from
+`linch.__all__`. Gemini moves to `google-genai` (the `google-generativeai` SDK
+is deprecated).
+
+Design page for D11–D16 (approved by the owner 2026-10-31):
+https://claude.ai/artifact/2rwtNaRU62hv6Dk9wG3h58
+
 ## Work packages
 
 Wave 1 (parallel, disjoint files):
@@ -152,9 +210,20 @@ Wave 1 (parallel, disjoint files):
 | 3 | `scale/loop-split` | D3, D4, D5 | `loop/` (runner split, new seam), hooks/kernel wiring for the seam |
 | 4 | `scale/durable-runs` | D1, D2, D9 | `run_store.py` (or a new `run_stores/` package), Postgres store, conformance tests; move `SqliteRunStore.save` serialization off the event loop |
 
-Wave 2 (after WP3 merges): WP5 failure surfacing + lease-lost handling in the
-loop (D8); WP6 worker-pool recipe in `examples/recipes/` and a "scale out"
-section in `docs/usage/production.md`; WP7 reliability port onto the seams;
+Merged into `integration/3.0`: WP1, WP2, WP4, WP3 (loop split only; see D4
+status), WP9a. Order from here, one merge at a time:
+
+| WP | Branch | Decisions | Scope |
+|---|---|---|---|
+| 9b | `scale/wire-3` | 3.0 policy | one `WIRE_VERSION = 3`, reject pre-3.0 data, delete legacy readers, loop legacy items (running) |
+| 16 | `scale/file-memory` | D12 | memory package, memory hook, memory exports/docs (may run beside WP9b: disjoint files) |
+| 17 | `scale/postgres-only` | D13 | delete SQLite stores and executor; conformance on InMemory + Postgres |
+| 15 | `scale/otel` | D11 | `observability/`, `RunTelemetryHook`, spans at loop phases |
+| 5 | `scale/failures` | D8 | failure surfacing, `LeaseLostError` in the loop |
+| 6 | `scale/worker` | D14 | `linch.worker` on PgQueuer, scheduling package replaced, "scale out" section in `docs/usage/production.md` |
+| 8 | `scale/hot-path` | D15 + below | profile-driven hot path |
+| 7 | `scale/reliability` | D4 | reliability port onto the seams (brings the slim `turn-stopping` event) |
+
 WP8 hot path, driven by the WP1 baseline
 (`docs/superpowers/measurements/2026-10-30-scale-baseline.md`):
 - One process saturates near 35 four-turn runs/s with 2 ms fake I/O; at 1,000
@@ -174,6 +243,9 @@ WP8 hot path, driven by the WP1 baseline
 - Add Postgres cases to the `--scale` benchmark (skipped without a DSN) and
   report store round-trips and bytes per turn on Postgres, since that is the
   production backend.
+- Session projections as pure folds with a cached state and tail replay
+  (DeepSeek Harness idea below), so reads and checkpoints cost O(new entries).
+- D15: msgspec codecs only with a measured win.
 
 ## Wave 3 — harness kernel surface (owner target, 2026-10-31)
 
@@ -189,12 +261,11 @@ one runtime serves many domains. Gaps against today's code:
 | Plugin mount/unmount + dependency resolution | `Context`, `Disposable`, scattered per-kind registration APIs; no plugin unit (0 hits for a plugin/use API); `Agent.__init__` takes 70 parameters | WP10: `Plugin` protocol (name, version, provides, requires, `setup(ctx) -> Disposable`), `agent.use(plugin, config)`; a plugin activates when its required services exist and is disposed when one disappears; built-in tools/hooks/providers/memory/skills become plugins; most constructor parameters move into plugins/profile |
 | Domain Profile | `DeepAgentProfile` only (authority/retention presets) | WP11: versioned declarative profile (role/prompt, knowledge scope, plugin set + config, tool permissions, workflow/subagents, output schema, limits) selected per run (`RunOptions(profile=...)`); profile id + version recorded in the RunContract so resume pins the version (controlled rollout/rollback) |
 | Typed events / lifecycle | typed run events, string-named EventBus, separate HookDispatcher | WP12: one typed lifecycle (run start/end, turn request/response, tool pre/execute/post, pre-finalize) on the kernel bus, keeping typed security ordering; built on WP3 seams |
-| Run state / trace boundary | run_id, OTel observer; no `trace_id` anywhere | WP12: a trace id per run propagated into events, store rows, `ToolContext`, logs and OTel spans |
+| Run state / trace boundary | run_id, OTel observer; no `trace_id` anywhere | WP15 (D11) makes the run's trace id the OTel trace id; WP12 propagates it into events, store rows, `ToolContext` and logs |
 | Policy & Security (RBAC, approvals) | rule-based permissions + durable approvals; no per-run principal/role | WP13: per-run principal (tenant, user, roles) in `RunOptions`, permission rules over roles, approval routing as a plugin |
 | RAG Connector with grounding | memory/RAG hooks, citation events in reports | WP14: RAG connector protocol returning sourced chunks with ids; grounding check as a pre-finalize plugin (answer must cite retrieved sources) |
 
-Order: WP3 → WP9b → WP10 → WP11 → WP12 → WP13/WP14 (parallel). WP5/WP6/WP8 run
-alongside where files do not overlap. Plugins and profiles are tested with
+Order: after Wave 2, WP10 (with D16) → WP11 → WP12 → WP13/WP14. Plugins and profiles are tested with
 `linch.evals` business scenarios before a profile version is promoted.
 
 ### Ideas borrowed from DeepSeek Harness (ideas, not code)
@@ -227,7 +298,7 @@ market, desktop/web UI, Remote/Typert gateway, JSONL file sessions.
   minimal and say why in the report.
 - TDD: a failing test first for each behavior change; pure refactors prove
   equivalence with existing tests.
-- Follow `CLAUDE.md`/`AGENTS.md` constraints (async only, Python 3.10, public
+- Follow `CLAUDE.md`/`AGENTS.md` constraints (async only, Python 3.11+, public
   API = `linch.__all__`, opt-in zero overhead, registrations return
   `Disposable`, no module globals).
 - Gates, run from the worktree with the main checkout's venv
