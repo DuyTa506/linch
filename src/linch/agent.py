@@ -1290,15 +1290,31 @@ class Agent:
             self.subagent_registry = registry
 
             get_session = lambda sid: self._sessions.get(sid)  # noqa: E731
+
+            def _parallel_tool_catalog() -> ToolRegistry | None:
+                # parallel(input) has no session argument. If an active parent
+                # exposes this tool through an override, its effective catalog
+                # cannot be inferred from the agent catalog: fail closed. Child
+                # registries strip Subagent, so they do not disable sibling work.
+                for session in self._sessions.values():
+                    override = session.tools_override
+                    if (
+                        session._active
+                        and override is not None
+                        and override.get(subagent_tool.name) is subagent_tool
+                    ):
+                        return None
+                return (
+                    self._subagent_tool_registry
+                    if self._subagent_tool_registry is not None
+                    else self.tools
+                )
+
             subagent_tool = SubagentTool(
                 registry=registry,
                 get_session=get_session,
                 next_default_display_name=self._next_default_display_name,
-                tool_registry=lambda: (
-                    self._subagent_tool_registry
-                    if self._subagent_tool_registry is not None
-                    else self.tools
-                ),
+                tool_registry=_parallel_tool_catalog,
                 retain_subagents=self.retain_subagents,
                 enable_background_subagents=self.enable_background_subagents,
             )
