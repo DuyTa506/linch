@@ -77,6 +77,9 @@ class RunOptions:
     """Spending cap for this run (and its subagent tree).  Overrides
     ``Agent.budget`` when set.  See :class:`~linch.budget.RunBudget`."""
 
+    run_id: str | None = None
+    """Adopt this pending run ID when starting a queued run."""
+
 
 @dataclass(slots=True)
 class AlignmentEntry:

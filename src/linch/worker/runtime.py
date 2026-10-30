@@ -18,19 +18,9 @@ from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapProp
 from pgqueuer import AsyncpgPoolDriver, DatabaseRetryEntrypointExecutor, Job, Queries, QueueManager
 
 from ..agent import Agent
-from ..run_store import (
-    RUN_CONTRACT_META_KEY,
-    LeaseLostError,
-    RunLease,
-    RunLeaseConflictError,
-    RunRecord,
-    _safe_meta,
-    ensure_run_contract_compatible,
-    run_contract_from_meta,
-)
-from ..run_stores.postgres import PostgresRunStore, _row_record
+from ..run_store import LeaseLostError, RunLease, RunLeaseConflictError, RunRecord
+from ..run_stores.postgres import PostgresRunStore
 from ..session import RunOptions, Session
-from ..sessions.memory import now_iso
 from .dispatch import _BorrowedPool, _entrypoint, install
 
 _TERMINAL = frozenset({"completed", "failed", "aborted"})
@@ -41,60 +31,6 @@ _INFRASTRUCTURE = (
     TimeoutError,
     RunLeaseConflictError,
 )
-
-
-class _JobRunStore(PostgresRunStore):
-    def __init__(self, pool: Any, run_id: str, session_id: str) -> None:
-        super().__init__("", pool=_BorrowedPool(pool))
-        self._initialized = True  # Worker.run initialized this pool's schema.
-        self._run_id = run_id
-        self._session_id = session_id
-
-    async def close(self) -> None:
-        # Worker owns this per-job handle and releases only after agent teardown.
-        # The host owns the underlying pool.
-        pass
-
-    def _assert_fence(self, run_id: str, row: Any) -> None:
-        if run_id == self._run_id and run_id not in self._held_leases:
-            raise LeaseLostError(f"job no longer owns run {run_id}")
-        super()._assert_fence(run_id, row)
-
-    async def create_run(
-        self, session_id: str, *, id: str | None = None, meta: dict[str, object] | None = None
-    ) -> RunRecord:
-        if session_id != self._session_id:
-            return await super().create_run(session_id, id=id, meta=meta)
-        if id is not None and id != self._run_id:
-            raise ValueError("queued run ID cannot change")
-        # The ordinary Session.run path builds the execution contract. Bind it
-        # to the dispatch receipt rather than silently creating a second run.
-        async with self._pool.acquire() as conn:
-            async with conn.transaction():
-                row = await self._locked_run(conn, self._run_id)
-                self._assert_fence(self._run_id, row)
-                existing = _row_record(row)
-                if existing.session_id != session_id or existing.status in _TERMINAL:
-                    raise ValueError("queued run is no longer startable")
-                if existing.checkpoint is not None:
-                    raise ValueError("checkpointed runs must be resumed")
-                incoming = _safe_meta(meta)
-                if RUN_CONTRACT_META_KEY in existing.meta:
-                    ensure_run_contract_compatible(
-                        run_contract_from_meta(existing.meta), run_contract_from_meta(incoming)
-                    )
-                    incoming[RUN_CONTRACT_META_KEY] = existing.meta[RUN_CONTRACT_META_KEY]
-                merged = existing.meta | incoming
-                updated = await conn.fetchrow(
-                    """
-                    UPDATE runs SET status='running', meta=$2, updated_at=$3
-                    WHERE id=$1 RETURNING *
-                """,
-                    self._run_id,
-                    json.dumps(merged, allow_nan=False),
-                    now_iso(),
-                )
-                return _row_record(updated)
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,7 +174,7 @@ class Worker:
         if execution.agent.run_store is not store:
             raise ValueError("agent factory must use WorkerJob.run_store")
         execution.session = await execution.agent.session(id=record.session_id)
-        options = RunOptions()
+        options = RunOptions(run_id=record.id)
         iterator = (
             execution.session.resume(record.id, options)
             if record.checkpoint is not None
@@ -278,7 +214,7 @@ class Worker:
     async def _run_job(self, job: Job, execution: _Execution) -> None:
         payload = json.loads(job.payload or b"{}")
         rid, sid = payload["run_id"], payload["session_id"]
-        store = _JobRunStore(self._pool, rid, sid)
+        store = PostgresRunStore("", pool=_BorrowedPool(self._pool))
         record = await store.load_run(rid)
         if record is None:
             raise KeyError(f"run not found: {rid}")

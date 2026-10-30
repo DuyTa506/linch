@@ -190,6 +190,10 @@ transaction. The job JSON includes run/session IDs, prompt, optional queue and
 the caller's W3C `traceparent`. The worker restores it before execution, so the
 kernel's `invoke_agent` span joins the caller's trace.
 
+The worker passes its plain `PostgresRunStore` to the factory and starts pending
+runs with `RunOptions(run_id=run_id)`. Runs with a checkpoint use
+`session.resume(run_id)` instead; both paths keep the store's claimed lease.
+
 Each named run queue is a PgQueuer entrypoint with a database-enforced
 `concurrency_limit` across the **whole fleet**. Configure the same limits on
 all workers. `0` means unlimited; the default is one `default` run queue with
