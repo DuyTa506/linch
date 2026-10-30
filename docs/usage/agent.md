@@ -74,6 +74,31 @@ A forced release aborts the run, drains owned background work so finalizers run,
 and recursively releases retained child sessions. Durable history in the session
 store is always preserved — a released session can be reattached later by id.
 
+### Bounding cached idle sessions
+
+Long-lived hosts can opt into automatic release of idle conversations:
+
+```python
+agent = Agent(model="gpt-5", session_store=store, max_idle_sessions=100)
+session = await agent.session(id="user-42")
+async for event in session.run("hello"):
+    ...
+```
+
+`max_idle_sessions=None` (the default) keeps all live sessions until explicitly
+released. A non-negative integer bounds cached idle sessions; `0` releases each
+session once its run iterator finishes. Run completion and reattachment by id
+refresh recency. When the bound is exceeded, Linch releases the least recently
+used idle sessions through `release_session()`, preserving stored history.
+
+Active runs, detached tool tasks, and background workers are protected and do
+not count toward the idle bound. A parent with a busy retained child is protected
+too. Completion of protected background work reapplies the bound. Idle retained
+children can be released along with their parent. Worker continuation needs a
+live retained child, so choose a bound that fits your worker lifetime. Reattach
+an evicted conversation with `await agent.session(id=...)`; a previously released
+`Session` instance cannot run again.
+
 ### Steering an in-flight run
 
 `session.align(prompt, images=..., timeout_s=...)` injects a user message into a

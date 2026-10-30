@@ -263,6 +263,15 @@ stores persist the message/projection *snapshots* needed to reconstruct the two
 views; they do not persist the in-memory entry list as a replay journal. Loading
 a session therefore seeds a fresh log at that durable snapshot boundary.
 
+`Agent(max_idle_sessions=N)` optionally bounds the live idle-session cache.
+The existing session registry records recency on creation, reattachment, and run
+completion. After a run finishes, least recently used idle sessions are released
+through `release_session()`. Busy sessions and ownership trees containing active
+runs or unfinished background tasks are excluded. Task completion triggers another
+bound check. Eviction reserves the idle ownership tree before awaiting teardown,
+so a descendant cannot start a run while recursive release is in progress.
+`None` preserves the default cache lifetime. Durable messages are preserved.
+
 ---
 
 ### 3.6 Permission Evaluation
