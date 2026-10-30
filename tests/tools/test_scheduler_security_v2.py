@@ -160,6 +160,7 @@ async def test_checkpoint_restored_tool_allowlist_beats_stored_permission_replay
         current_turn_allowed_tools=["Read"],
         current_turn_permission_decisions={
             permission_decision_key("Bash", input): {
+                "schema_version": 3,
                 "decision": "allow",
                 "reason": None,
                 "updated_input": None,
@@ -201,7 +202,7 @@ async def test_permission_callback_updated_input_is_rejected() -> None:
     assert "updatedInput is unsupported" in (decision.reason or "")
 
 
-async def test_legacy_updated_input_decision_is_not_replayed() -> None:
+async def test_current_updated_input_decision_is_not_replayed() -> None:
     tool = _RecordingTool()
     callback_calls = 0
 
@@ -214,6 +215,7 @@ async def test_legacy_updated_input_decision_is_not_replayed() -> None:
     session = _session(
         current_turn_permission_decisions={
             permission_decision_key("Write", final_input): {
+                "schema_version": 3,
                 "decision": "allow",
                 "reason": None,
                 "updated_input": {"file_path": "other.txt"},
@@ -559,3 +561,14 @@ def test_legacy_parallel_safe_does_not_authorize_parallel_execution() -> None:
         is_immediate_error=False,
     )
     assert not _tool_parallel(call)
+
+
+def test_permission_writer_records_only_current_decision_fields() -> None:
+    from linch.permissions.engine import PermissionDecision
+    from linch.permissions.keys import permission_decision_to_dict
+
+    assert permission_decision_to_dict(PermissionDecision(decision="allow", reason="approved")) == {
+        "schema_version": 3,
+        "decision": "allow",
+        "reason": "approved",
+    }

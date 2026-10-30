@@ -89,7 +89,7 @@ uses `docker run --rm` when the Docker daemon is available. Passing
 `Agent(execution_backend=...)` replaces an existing `Bash` tool only, so a
 restricted registry that omits `Bash` does not gain shell access.
 
-The preferred `ExecutionBackend` exposes both `.shell` and `.fs`, so shell and
+`Agent` requires an `ExecutionBackend` exposing both `.shell` and `.fs`, so shell and
 filesystem operations share one coherent execution world.
 `LocalExecutionBackend` supplies that pair locally; `RemoteExecutionBackend`
 bundles host-supplied transports. Confinement metadata is declarative: a remote
@@ -97,15 +97,15 @@ backend is described as sandboxed only when the embedder supplies non-empty
 confinement metadata, and the SDK does not independently verify that boundary.
 The effective session `cwd` is passed to the shell transport; a remote backend
 must map that cwd and its filesystem paths to the same world if it claims
-coherence. The old shell-only `run(...)` value is a deprecated compatibility
-path: it has no filesystem transport unless `filesystem=` is supplied explicitly
-and cannot claim shell/filesystem coherence. Migrate by constructing
-`LocalExecutionBackend` or `RemoteExecutionBackend(shell=..., fs=...)`.
+coherence. Shell-only values are rejected. Pair `DockerBackend` (a shell
+transport) with a filesystem transport in the same execution world using
+`RemoteExecutionBackend(shell=..., fs=...)`, or use `LocalExecutionBackend`.
+An explicit `filesystem=` must be the world's own `.fs` object.
 
 Permissions and execution backends are separate layers. `ToolRule`, `PathRule`,
 and `BashRule` determine whether a tool call may run. If a Bash call is
 approved, the configured backend determines the runtime boundary. `DockerBackend`
-defaults remain compatibility-first: writable workspace mount, Docker default
+defaults are: writable workspace mount, Docker default
 network, no environment forwarding, and no read-only root filesystem. Opt-in
 controls such as `network="none"`, `workspace_mount="ro"`,
 `read_only_root=True`, `tmpfs=(...)`, `env={...}`, `forward_env=(...)`, and

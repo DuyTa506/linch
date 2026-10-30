@@ -9,6 +9,8 @@ from typing import Any
 
 import pytest
 
+from linch.storage._pg import _SCHEMA_LOCK_KEY
+
 _STORES = [
     ("linch.sessions.postgres", "PostgresSessionStore"),
     ("linch.filesystem.postgres", "PostgresFileBackend"),
@@ -46,6 +48,16 @@ class _Pool:
         await asyncio.sleep(0)
         if self.fail_schema and "pg_advisory" not in sql:
             raise RuntimeError("schema failed")
+
+    async def fetchval(self, sql: str, *args: Any) -> Any:
+        self.log.append(("fetchval", sql, args))
+        await asyncio.sleep(0)
+        return False
+
+    async def fetchrow(self, sql: str, *args: Any) -> Any:
+        self.log.append(("fetchrow", sql, args))
+        await asyncio.sleep(0)
+        return None
 
     async def close(self) -> None:
         self.closed += 1
@@ -95,23 +107,20 @@ async def test_lazy_initialization_is_locked_transactional_and_closes_supplied_p
     assert store._initialized is True
     assert len(adapter.imports) == 2  # constructor and first initializer only
     assert adapter.creations == ([] if supplied else [("test-dsn", {"min_size": 2, "max_size": 7})])
-    expected = [("enter", "acquire"), ("enter", "transaction")]
-    if adapter.is_run:
-        expected.append(
-            (
-                "execute",
-                "SELECT pg_advisory_xact_lock($1::bigint)",
-                (adapter.module._SCHEMA_LOCK_KEY,),
-            )
-        )
-    expected.extend(
-        [
-            ("execute", adapter.module._SCHEMA, ()),
-            ("exit", "transaction", None),
-            ("exit", "acquire", None),
-        ]
+    assert pool.log[:3] == [
+        ("enter", "acquire"),
+        ("enter", "transaction"),
+        ("execute", "SELECT pg_advisory_xact_lock($1::bigint)", (_SCHEMA_LOCK_KEY,)),
+    ]
+    locks = [row[2][0] for row in pool.log if row[0] == "execute" and "pg_advisory" in row[1]]
+    assert locks == [_SCHEMA_LOCK_KEY] + (
+        [adapter.module._SCHEMA_LOCK_KEY] if adapter.is_run else []
     )
-    assert pool.log == expected
+    assert pool.log.count(("execute", adapter.module._SCHEMA, ())) == 1
+    assert pool.log[-3][0] == "execute"
+    assert "INSERT INTO linch_schema_meta" in pool.log[-3][1]
+    assert pool.log[-3][2][1] == 3
+    assert pool.log[-2:] == [("exit", "transaction", None), ("exit", "acquire", None)]
     await store.close()
     await store.close()
     assert pool.closed == 1

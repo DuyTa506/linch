@@ -100,20 +100,7 @@ def _agent(
 ):
     from linch import Agent
     from linch.config import FeatureFlags
-    from linch.execution import RemoteExecutionBackend
     from linch.tools.registry import empty_tools
-
-    if execution_backend is not None and not hasattr(execution_backend, "shell"):
-        # DockerBackend is the legacy shell transport; tests that exercise its
-        # durable identity still use it as the shell half of a coherent world.
-        shell_config = getattr(execution_backend, "resume_policy_config", None)
-        execution_backend = RemoteExecutionBackend(
-            shell=execution_backend,
-            fs=_ContractFs(),
-            resume_policy_id=getattr(execution_backend, "resume_policy_id", "test.shell"),
-            resume_policy_version=getattr(execution_backend, "resume_policy_version", "1"),
-            resume_policy_config={"shell": shell_config},
-        )
 
     return Agent(
         model="test-model",
@@ -228,12 +215,26 @@ async def test_opaque_custom_policy_rejected_for_durable_run(kind: str) -> None:
         _ = [event async for event in session.run("go")]
 
 
+def _docker_world(**kwargs: Any) -> Any:
+    from linch.execution import RemoteExecutionBackend
+    from linch.tools.execution import DockerBackend
+
+    shell = DockerBackend(**kwargs)
+    return RemoteExecutionBackend(
+        shell=shell,
+        fs=_ContractFs(),
+        confinement=shell.confinement,
+        resume_policy_id="test.docker-world",
+        resume_policy_version="1",
+        resume_policy_config={"transport": "docker"},
+    )
+
+
 async def test_docker_backend_configuration_change_denies_resume() -> None:
     from linch.errors import ConfigError
     from linch.run_store import InMemoryRunStore
     from linch.sessions import InMemorySessionStore
     from linch.tools import workspace_tools
-    from linch.tools.execution import DockerBackend
 
     run_store = InMemoryRunStore()
     session_store = InMemorySessionStore()
@@ -241,7 +242,7 @@ async def test_docker_backend_configuration_change_denies_resume() -> None:
         run_store=run_store,
         session_store=session_store,
         tools=workspace_tools(),
-        execution_backend=DockerBackend(docker_path="/opt/docker-v1", network="none"),
+        execution_backend=_docker_world(docker_path="/opt/docker-v1", network="none"),
     )
     run_id = await _interrupt_after_first_event(await first.session(id="s1"))
 
@@ -249,7 +250,7 @@ async def test_docker_backend_configuration_change_denies_resume() -> None:
         run_store=run_store,
         session_store=session_store,
         tools=workspace_tools(),
-        execution_backend=DockerBackend(docker_path="/opt/docker-v2", network="none"),
+        execution_backend=_docker_world(docker_path="/opt/docker-v2", network="none"),
     )
     with pytest.raises(ConfigError, match="docker_path"):
         _ = [event async for event in (await changed.session(id="s1")).resume(run_id)]
@@ -261,7 +262,6 @@ async def test_docker_path_lookup_does_not_change_durable_contract(monkeypatch: 
     from linch.run_store import InMemoryRunStore
     from linch.sessions import InMemorySessionStore
     from linch.tools import workspace_tools
-    from linch.tools.execution import DockerBackend
 
     run_store = InMemoryRunStore()
     session_store = InMemorySessionStore()
@@ -270,7 +270,7 @@ async def test_docker_path_lookup_does_not_change_durable_contract(monkeypatch: 
         run_store=run_store,
         session_store=session_store,
         tools=workspace_tools(),
-        execution_backend=DockerBackend(docker_path=None, network="none"),
+        execution_backend=_docker_world(docker_path=None, network="none"),
     )
     run_id = await _interrupt_after_first_event(await first.session(id="s1"))
 
@@ -279,7 +279,7 @@ async def test_docker_path_lookup_does_not_change_durable_contract(monkeypatch: 
         run_store=run_store,
         session_store=session_store,
         tools=workspace_tools(),
-        execution_backend=DockerBackend(docker_path=None, network="none"),
+        execution_backend=_docker_world(docker_path=None, network="none"),
     )
     events = [event async for event in (await resumed.session(id="s1")).resume(run_id)]
 
@@ -294,7 +294,6 @@ async def test_docker_backend_contract_hashes_environment_values() -> None:
     from linch.run_store import InMemoryRunStore
     from linch.sessions import InMemorySessionStore
     from linch.tools import workspace_tools
-    from linch.tools.execution import DockerBackend
 
     run_store = InMemoryRunStore()
     session_store = InMemorySessionStore()
@@ -303,7 +302,7 @@ async def test_docker_backend_contract_hashes_environment_values() -> None:
         run_store=run_store,
         session_store=session_store,
         tools=workspace_tools(),
-        execution_backend=DockerBackend(
+        execution_backend=_docker_world(
             docker_path="/opt/docker",
             image="python@sha256:fixture",
             env={"API_KEY": "do-not-store-raw"},
@@ -321,7 +320,7 @@ async def test_docker_backend_contract_hashes_environment_values() -> None:
         run_store=run_store,
         session_store=session_store,
         tools=workspace_tools(),
-        execution_backend=DockerBackend(
+        execution_backend=_docker_world(
             docker_path="/opt/docker",
             image="python@sha256:fixture",
             env={"API_KEY": "changed"},
@@ -338,18 +337,19 @@ async def test_durable_docker_environment_requires_fingerprint_key() -> None:
     Degrading it to "this shell has no resume_policy" names a symptom and
     hides the fix, and would let the env drop out of the durable fingerprint.
     """
+    from linch.errors import ConfigError
     from linch.run_store import InMemoryRunStore
     from linch.sessions import InMemorySessionStore
     from linch.tools import workspace_tools
-    from linch.tools.execution import DockerBackend
 
-    with pytest.raises(ValueError, match="requires resume_fingerprint_key"):
-        _agent(
-            run_store=InMemoryRunStore(),
-            session_store=InMemorySessionStore(),
-            tools=workspace_tools(),
-            execution_backend=DockerBackend(env={"STAGE": "dev"}),
-        )
+    agent = _agent(
+        run_store=InMemoryRunStore(),
+        session_store=InMemorySessionStore(),
+        tools=workspace_tools(),
+        execution_backend=_docker_world(env={"STAGE": "dev"}),
+    )
+    with pytest.raises(ConfigError, match="requires resume_fingerprint_key"):
+        _ = [event async for event in (await agent.session()).run("go")]
 
 
 async def test_durable_docker_environment_with_fingerprint_key_contributes_identity() -> None:

@@ -300,17 +300,16 @@ def test_docker_backend_prompt_reports_sandbox_confinement(tmp_path: Any) -> Non
     from linch import Agent, workspace_tools
     from linch.tools.execution import DockerBackend
 
-    # DockerBackend is shell-only, so it reaches Agent via the deprecated
-    # compatibility path — still the shape existing users pass today.
-    with pytest.warns(DeprecationWarning, match="shell-only execution_backend"):
-        agent = Agent(
-            model="test",
-            provider=_Provider(),
-            cwd=str(tmp_path),
-            tools=workspace_tools(),
-            execution_backend=DockerBackend(image="alpine"),
-            result_offload=None,
-        )
+    shell = DockerBackend(image="alpine")
+    world = RemoteExecutionBackend(shell=shell, fs=_FakeFs(), confinement=shell.confinement)
+    agent = Agent(
+        model="test",
+        provider=_Provider(),
+        cwd=str(tmp_path),
+        tools=workspace_tools(),
+        execution_backend=world,
+        result_offload=None,
+    )
     combined = "\n".join(block.text for block in agent.system_blocks)
     assert "declares sandbox confinement" in combined
     assert "has not declared sandbox confinement" not in combined
@@ -524,38 +523,27 @@ async def test_owned_world_close_retries_and_deduplicates_hook_fs(tmp_path: Any)
     assert provider.close_calls == 1
 
 
-async def test_legacy_shell_does_not_transfer_shell_ownership(tmp_path: Any) -> None:
-    from linch import Agent
+@pytest.mark.parametrize("inherited", [False, True])
+def test_shell_only_execution_world_rejected_even_with_explicit_filesystem(
+    tmp_path: Any, inherited: bool
+) -> None:
+    from linch import Agent, Context
+    from linch.errors import ConfigError
 
-    class _CloseableShell(_FakeShell):
-        def __init__(self) -> None:
-            self.close_calls = 0
-
-        async def aclose(self) -> None:
-            self.close_calls += 1
-
-    class _CloseableFs(_FakeFs):
-        def __init__(self) -> None:
-            super().__init__()
-            self.close_calls = 0
-
-        async def aclose(self) -> None:
-            self.close_calls += 1
-
-    shell = _CloseableShell()
-    fs = _CloseableFs()
-    with pytest.warns(DeprecationWarning, match="shell-only execution_backend"):
-        agent = Agent(
+    shell = _FakeShell()
+    parent = Context()
+    if inherited:
+        parent.register("execution", shell)
+    with pytest.raises(ConfigError, match="shell.*fs"):
+        Agent(
             model="test",
             provider=_Provider(),
             cwd=str(tmp_path),
-            execution_backend=shell,
-            filesystem=fs,
+            context=parent if inherited else None,
+            execution_backend=None if inherited else shell,
+            filesystem=_FakeFs(),
             result_offload=None,
         )
-    await agent.close()
-    assert shell.close_calls == 0
-    assert fs.close_calls == 1
 
 
 async def test_agents_share_parent_context_without_transferring_world_ownership(

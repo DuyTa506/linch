@@ -209,7 +209,7 @@ Tests should fail at the most specific possible assertion. Avoid mega-tests that
 2. Implement `context_window(model) -> int`, `capabilities(model) -> ProviderCapabilities`, and `async def stream(req) -> AsyncIterator[dict]`.
 3. Map wire events to the normalized dict contract — see `providers/openai_chat.py` for the Chat Completions pattern, `openai_responses.py` + `providers/openai_responses.py` for the Responses API / stateful pattern, and `providers/gemini.py` for providers whose streamed tool-use format is part-based rather than delta-based.
 4. The normalized dict events the loop consumes: `message_start`, `text_delta`, `thinking_delta` (optional, carry `signature` for Anthropic round-trips), `tool_use_start`, `tool_use_input_delta`, `tool_use_end`, `message_end` (carries `stop_reason: StopReason` and `usage: Usage`). Never yield raw SDK objects.
-5. For providers that emit `reasoning_content` (DeepSeek, o-series via Chat Completions): yield `{"type": "thinking_delta", "text": chunk}` — `stream_turn` in `loop/streaming.py` assembles it into a `ThinkingBlock` and round-trips it on subsequent turns automatically.
+5. For providers that emit `reasoning_content` (DeepSeek, o-series via Chat Completions): yield `{"type": "thinking_delta", "text": chunk}` — `_stream_turn` in `loop/streaming.py` assembles it into a `ThinkingBlock` and round-trips it on subsequent turns automatically.
 6. Declare `capabilities()` accurately — `_build_turn_request` uses it to downgrade unsupported fields (clears `cache_prompt` when `prompt_cache=False`, clears `output_schema` when `structured_output=False`, etc.).
 7. Export from `src/linch/providers/__init__.py`.
 8. Add a test with a mocked HTTP client — do not require a real API key in CI.
@@ -249,7 +249,7 @@ Implement six async methods: `read`, `write`, `ls`, `edit`, `exists`, `delete`.
 
 - This project follows semantic versioning. Patch = bug fix. Minor = new primitive (backward-compatible). Major = breaking change to public API.
 - The public API surface is defined by `src/linch/__init__.py`. Anything not exported there is internal.
-- `dict`/`camelCase` kwargs on `Agent.__init__` are supported for backward compatibility. New parameters use snake_case keyword arguments only.
+- `Agent.__init__` uses snake_case keyword arguments; removed camelCase aliases are listed in the [3.0 migration guide](migration-3.0.md).
 - When a previously-silent `RunOptions` field becomes active (like `thinking`/`effort` did in 0.2), add a CHANGELOG note — it's a latent behavior change even though the signature doesn't change.
 
 ---

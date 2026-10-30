@@ -23,15 +23,6 @@ from ..events import WorkflowEvent
 if TYPE_CHECKING:
     from ..run_store import StoredRunEvent
 
-# Bump only when the call-options fingerprint formula changes (i.e. a change
-# that alters call_key for existing calls). A run's version is stamped once,
-# in its RunStore meta, at creation (see workflow/engine.py) and then reused
-# for that run's entire lifetime — including every resume — so an SDK upgrade
-# never invalidates a call_key computed under an earlier formula. Runs
-# persisted before this field existed have no version in their meta and
-# default to 1 (the original run_options-only formula).
-CURRENT_FINGERPRINT_VERSION = 2
-
 # The WorkflowEvent kinds that carry a journaled result. Keep in lockstep with
 # WORKFLOW_EVENT_KINDS in events.py — a new kind only replays if it is listed here.
 JOURNALED_KINDS = frozenset(
@@ -105,10 +96,9 @@ class WorkflowJournalRecord:
 class WorkflowJournal:
     """In-memory result cache keyed by ``(call_key, occurrence)``."""
 
-    def __init__(self, *, fingerprint_version: int = CURRENT_FINGERPRINT_VERSION) -> None:
+    def __init__(self) -> None:
         self._results: dict[tuple[str, int], WorkflowJournalRecord] = {}
         self._counters: dict[str, int] = {}
-        self.fingerprint_version = fingerprint_version
 
     def next_occurrence(self, key: str) -> int:
         """Return this key's next occurrence index (0-based, monotonic)."""
@@ -172,7 +162,6 @@ class WorkflowJournal:
         cls,
         events: list[StoredRunEvent],
         *,
-        fingerprint_version: int = 1,
         snapshot: list[Any] | None = None,
     ) -> WorkflowJournal:
         """Rebuild the journal from a run's persisted event log.
@@ -183,9 +172,6 @@ class WorkflowJournal:
         Args:
             events: The run's stored events, or just the tail after the
                 snapshot's watermark.
-            fingerprint_version: The formula this run's stored call_keys were
-                computed under (from the run's meta; defaults to 1, the
-                original formula, for runs persisted before versioning).
             snapshot: Rows from a prior :meth:`snapshot`, folded in first so a
                 later stored event still wins. Malformed rows are skipped —
                 the event log remains the source of truth.
@@ -193,7 +179,7 @@ class WorkflowJournal:
         Returns:
             A journal holding every record found, in event order.
         """
-        journal = cls(fingerprint_version=fingerprint_version)
+        journal = cls()
         for row in snapshot or ():
             if not isinstance(row, dict):
                 continue

@@ -1,14 +1,13 @@
-"""Versioned serialization / resume forward-compat (ROADMAP Phase 5.3).
+"""Versioned serialization / resume wire contracts.
 
-The `RunCheckpoint` wire format and the stored-event log are a stable, versioned
-contract. A checkpoint dict carries an explicit `schema_version`; a loader from an
-older binary must tolerate a *newer* checkpoint (unknown future keys, a higher
-version) without crashing. Stored events are required on read unless a future
-event explicitly carries a valid ``ignorable: true`` envelope.
+The `RunCheckpoint` wire format and the stored-event log are a strict, versioned
+contract. Pre-3.0 and unknown-generation state is rejected. Stored events are
+required on read unless a future event explicitly carries a valid
+``ignorable: true`` envelope.
 
-Verify: the version stamp is present; `checkpoint_from_dict` round-trips a
-future-versioned dict; `load_events` preserves explicitly ignorable events and
-fails closed for required or malformed rows.
+Verify: the version stamp is present; `checkpoint_from_dict` rejects an
+incompatible-versioned dict; `load_events` preserves explicitly ignorable
+events and fails closed for required or malformed rows.
 """
 
 from __future__ import annotations
@@ -72,34 +71,50 @@ def test_provider_snapshot_preserves_identity_and_messages() -> None:
     assert result.content == "activated"
 
 
-def test_checkpoint_from_dict_tolerates_future_version_and_unknown_keys() -> None:
+def test_checkpoint_from_dict_rejects_future_version_before_field_defaults() -> None:
+    from linch._wire import UnsupportedWireVersionError
+
     data = checkpoint_to_dict(_checkpoint())
     # Simulate a checkpoint written by a NEWER binary: bumped version + new field.
     data["schema_version"] = SCHEMA_VERSION + 99
     data["some_future_field"] = {"nested": True}
 
-    restored = checkpoint_from_dict(data)
-
-    assert restored.phase == "tool_batch_pending"
-    assert restored.turn_index == 2
-    assert restored.pending_tool_blocks[0].name == "Search"
-    assert restored.total_usage.output_tokens == 4
-    assert restored.truncation_attempts == 1
-    assert restored.truncation_prefix == "chunk one"
-    assert restored.pending_truncation_feedback == "continue"
+    with pytest.raises(UnsupportedWireVersionError, match="start a new run"):
+        checkpoint_from_dict(data)
 
 
-def test_checkpoint_from_dict_defaults_missing_truncation_attempts() -> None:
+@pytest.mark.parametrize(
+    "field",
+    [
+        "phase",
+        "prompt",
+        "turn_index",
+        "total_usage",
+        "assistant_message",
+        "pending_tool_blocks",
+        "completed_tool_results",
+        "force_final_pending",
+        "loop_guard_state",
+        "pending_skill_overlay",
+        "current_turn_allowed_tools",
+        "assistant_stop_reason",
+        "permission_decisions",
+        "background_workers",
+        "truncation_attempts",
+        "truncation_prefix",
+        "pending_truncation_feedback",
+        "tool_batch_event_after_seq",
+        "pending_alignment",
+        "extension_state",
+        "provider_attempt",
+        "model_input_snapshot_id",
+    ],
+)
+def test_checkpoint_requires_every_current_wire_field(field: str) -> None:
     data = checkpoint_to_dict(_checkpoint())
-    data.pop("truncation_attempts")
-    data.pop("truncation_prefix")
-    data.pop("pending_truncation_feedback")
-
-    restored = checkpoint_from_dict(data)
-
-    assert restored.truncation_attempts == 0
-    assert restored.truncation_prefix == ""
-    assert restored.pending_truncation_feedback is None
+    data.pop(field, None)
+    with pytest.raises(KeyError, match=field):
+        checkpoint_from_dict(data)
 
 
 def test_checkpoint_round_trips_pending_alignment_with_images() -> None:
@@ -116,7 +131,7 @@ def test_checkpoint_round_trips_pending_alignment_with_images() -> None:
     assert restored.pending_alignment == checkpoint.pending_alignment
 
 
-def test_checkpoint_round_trips_extension_state_and_legacy_defaults_empty() -> None:
+def test_checkpoint_round_trips_extension_state() -> None:
     checkpoint = _checkpoint()
     checkpoint.extension_state = {
         "example.extension": {
@@ -130,18 +145,14 @@ def test_checkpoint_round_trips_extension_state_and_legacy_defaults_empty() -> N
     restored = checkpoint_from_dict(data)
     assert restored.extension_state == checkpoint.extension_state
 
-    # A checkpoint persisted by older Linch releases has no extension namespace.
-    data.pop("extension_state")
-    assert checkpoint_from_dict(data).extension_state == {}
+    empty = checkpoint_to_dict(_checkpoint())
+    assert empty["extension_state"] == {}
+    assert empty["provider_attempt"] == 0
+    assert empty["model_input_snapshot_id"] is None
 
-    assert "extension_state" not in checkpoint_to_dict(_checkpoint())
 
-
-def test_checkpoint_from_dict_defaults_missing_pending_alignment() -> None:
+def test_checkpoint_normalizes_malformed_pending_alignment() -> None:
     data = checkpoint_to_dict(_checkpoint())
-    data.pop("pending_alignment")
-    assert checkpoint_from_dict(data).pending_alignment == []
-
     # Malformed entries are skipped or normalized, never crash the resume.
     data["pending_alignment"] = [
         "not-a-dict",
@@ -161,11 +172,17 @@ async def test_load_events_preserves_explicitly_ignorable_future_events(tmp_path
             "run-1",
             ToolCallStartEvent(tool_use_id="t1", tool_name="Search", input={}, summary="s"),
         )
-        future_raw = {"type": "telepathy_event", "ignorable": True, "payload": 42}
+        future_raw = {
+            "type": "telepathy_event",
+            "ignorable": True,
+            "schema_version": 97,
+            "payload": 42,
+        }
+        stored_future = {"schema_version": SCHEMA_VERSION, "event": future_raw}
         await store._exec.run(
             lambda c: c.execute(
                 "insert into run_events (run_id, seq, appended_at, event) values (?, ?, ?, ?)",
-                ("run-1", 2, "2026-01-01T00:00:00Z", json.dumps(future_raw)),
+                ("run-1", 2, "2026-01-01T00:00:00Z", json.dumps(stored_future)),
             )
         )
 
@@ -184,10 +201,29 @@ async def test_load_events_preserves_explicitly_ignorable_future_events(tmp_path
 @pytest.mark.parametrize(
     ("encoded", "error"),
     [
-        (json.dumps({"type": "telepathy_event", "payload": 42}), "unknown event type"),
-        (json.dumps({"type": "", "ignorable": True}), "non-empty string"),
-        (json.dumps({"ignorable": True}), "non-empty string"),
-        (json.dumps([]), "event must be an object"),
+        (
+            json.dumps(
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "event": {"type": "telepathy_event", "payload": 42},
+                }
+            ),
+            "unknown event type",
+        ),
+        (
+            json.dumps(
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "event": {"type": "", "ignorable": True},
+                }
+            ),
+            "non-empty string",
+        ),
+        (
+            json.dumps({"schema_version": SCHEMA_VERSION, "event": {"ignorable": True}}),
+            "non-empty string",
+        ),
+        (json.dumps([]), "state was written by Linch < 3.0"),
         ("{", "Expecting property name"),
     ],
 )

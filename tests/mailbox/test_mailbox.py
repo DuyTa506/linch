@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from linch._wire import UnsupportedWireVersionError
 from linch.coordination.mailbox import (
     ClaimableMailbox,
     Correlator,
@@ -298,7 +299,7 @@ async def test_sqlite_claim_survives_reopen_and_is_reclaimed_after_expiry(tmp_pa
         await second.aclose()
 
 
-async def test_sqlite_mailbox_adds_lease_schema_to_legacy_database(tmp_path: Any) -> None:
+async def test_sqlite_mailbox_rejects_pre_lease_database(tmp_path: Any) -> None:
     path = tmp_path / "legacy-mailbox.db"
     conn = sqlite3.connect(path)
     conn.execute(
@@ -327,7 +328,15 @@ async def test_sqlite_mailbox_adds_lease_schema_to_legacy_database(tmp_path: Any
 
     box = SqliteMailbox(path)
     try:
-        claims = await box.claim("b", owner="migration", lease_s=30, now=100)
-        assert [claim.message.id for claim in claims] == ["legacy"]
+        with pytest.raises(UnsupportedWireVersionError):
+            await box.claim("b", owner="owner", lease_s=30, now=100)
+        with sqlite3.connect(path) as conn:
+            assert conn.execute("select id from mailbox_messages").fetchone()[0] == "legacy"
+            assert (
+                conn.execute(
+                    "select name from sqlite_master where name='mailbox_claims'"
+                ).fetchone()
+                is None
+            )
     finally:
         await box.aclose()

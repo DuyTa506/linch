@@ -142,10 +142,9 @@ Supported scorer types map to the built-in scorers exported from `linch`:
 | `recovery_succeeded` | optional `tool` |
 | `run_completed` | none |
 
-`schema_valid` requires the optional `jsonschema` package. It fails closed
-(returns `False`) when that validator is unavailable, so an unchecked output
-cannot silently pass an eval. The development extra installs it; minimal runtime
-environments that use this scorer should install `jsonschema` explicitly.
+`schema_valid` uses the core `jsonschema` dependency. The scorer returns `False`
+for invalid output and also fails closed if the validator is unavailable in a
+broken installation, so unchecked output cannot silently pass an eval.
 
 Scripted turn files may be JSON or YAML and can either be a list or an object
 with a `turns` list. A text turn is:

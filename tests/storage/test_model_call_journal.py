@@ -438,6 +438,7 @@ def test_shared_receipt_prefix_matches_only_its_fixed_order(prefix: int) -> None
 )
 def test_primary_projection_codec_rejects_tampering(field: str, value: Any) -> None:
     """Required variants and digests are strict at public event ingress."""
+    from linch._wire import UnsupportedWireVersionError
     from linch.events import ModelCallEvent
     from linch.model_calls import _ModelCallError, _projection_record
 
@@ -458,7 +459,8 @@ def test_primary_projection_codec_rejects_tampering(field: str, value: Any) -> N
         control_message_sha256=None,
     )
     record[field] = value
-    with pytest.raises(_ModelCallError):
+    error = UnsupportedWireVersionError if field == "version" else _ModelCallError
+    with pytest.raises(error):
         ModelCallEvent("run", "projection", record)
 
 
@@ -603,7 +605,7 @@ async def test_paid_projection_and_consumption_reconcile_independently(
         )
         ledger.consume_auxiliary_receipts()
         checkpoint.extension_state["linch.model_calls.v1"] = {
-            "version": 1,
+            "version": 3,
             "ledger": ledger.snapshot(),
             "active_primary": None,
         }
@@ -956,7 +958,7 @@ async def test_contract_rejects_unsupported_accounting_semantics(tmp_path: Any) 
     provider = _Provider()
     resumed = await _agent(sessions, runs, provider).session(id="session")
     with pytest.raises(ConfigError, match="Cannot safely resume"):
-        _ = [event async for event in resumed.resume(run_id, RunOptions(allow_legacy_resume=True))]
+        _ = [event async for event in resumed.resume(run_id, RunOptions())]
     assert provider.calls == []
 
 
@@ -1086,7 +1088,7 @@ async def test_repeated_paid_projection_preserves_later_skill_reminder_order(
         total_usage=Usage(11, 2),
         extension_state={
             "linch.model_calls.v1": {
-                "version": 1,
+                "version": 3,
                 "ledger": first_snapshot,
                 "active_primary": None,
             },

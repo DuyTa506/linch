@@ -14,6 +14,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from functools import partial
 from typing import Any, cast
 
+from .._wire import UnsupportedWireVersionError
 from ..errors import ConfigError
 from ..events import (
     BackgroundWorkerEvent,
@@ -967,9 +968,16 @@ class RunRuntime:
                 self.checkpoint.extension_state.pop(key, None)
             self.checkpoint.extension_state.update(hook_state)
         buf = self.session._event_journal
-        if phase == "tool_batch_pending":
+        if phase == "tool_batch_pending" or (
+            phase == "assistant_appended"
+            and self.checkpoint.assistant_message is not None
+            and any(
+                isinstance(block, ToolUseBlock)
+                for block in self.checkpoint.assistant_message.content
+            )
+        ):
             self.checkpoint.tool_batch_event_after_seq = buf.last_seq if buf is not None else None
-        elif phase not in ("permission_pending", "tool_executing"):
+        elif phase not in ("permission_pending", "tool_executing", "tool_results_appended"):
             self.checkpoint.tool_batch_event_after_seq = None
         await store.save_checkpoint(self.run_id, self.checkpoint, status=status)
         if completed_snapshot_id is not None:
@@ -1021,6 +1029,8 @@ class RunRuntime:
             raise ConfigError("provider_pending checkpoint is missing a valid provider_attempt")
         try:
             snapshot = await self.model_input_store.load(snapshot_id)
+        except UnsupportedWireVersionError:
+            raise
         except Exception as exc:
             raise ConfigError(
                 f"failed to load exact model input snapshot {snapshot_id!r}: {exc}"
@@ -1037,6 +1047,8 @@ class RunRuntime:
             )
         try:
             return decode_model_input_snapshot(snapshot, signal=signal)
+        except UnsupportedWireVersionError:
+            raise
         except ModelInputSnapshotError as exc:
             raise ConfigError(
                 f"exact model input snapshot {snapshot_id!r} cannot be decoded: {exc}"

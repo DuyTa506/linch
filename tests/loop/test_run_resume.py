@@ -5,6 +5,20 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 
+async def _pin_run_contract(session: Any, run_id: str, opts: Any = None) -> None:
+    """Give a hand-built in-memory checkpoint its original execution contract."""
+    from linch import RunOptions
+    from linch.loop.contracts import _build_run_contract
+    from linch.run_store import run_meta_with_contract
+
+    await session.agent._ensure_provider_prepared()
+    record = session.agent.run_store._runs[run_id]
+    assert "run_contract" not in record.meta
+    record.meta = run_meta_with_contract(
+        _build_run_contract(session, record.checkpoint.prompt, opts or RunOptions()), record.meta
+    )
+
+
 class ScriptProvider:
     id = "script"
 
@@ -726,7 +740,6 @@ async def test_completed_tool_recovered_from_event_log_when_checkpoint_lacks_res
 
 
 async def test_resume_marks_checkpointed_running_background_workers_killed() -> None:
-    from linch import RunOptions
     from linch.run_store import RunCheckpoint
     from linch.types import Usage
 
@@ -758,7 +771,8 @@ async def test_resume_marks_checkpointed_running_background_workers_killed() -> 
     )
     session = await agent.session(id="s1")
 
-    events = await _collect(session.resume(run.id, RunOptions(allow_legacy_resume=True)))
+    await _pin_run_contract(session, run.id)
+    events = await _collect(session.resume(run.id))
 
     bg_events = [event for event in events if event.type == "background_worker"]
     user_events = [event for event in events if event.type == "user"]
@@ -1163,3 +1177,75 @@ async def test_resume_total_cost_reflects_whole_run_not_just_post_resume() -> No
     assert result.total_cost_usd is not None
     # Whole-run cost must match the whole-run usage — not just post-resume turns.
     assert result.total_cost_usd == expected
+
+
+async def test_contractless_resume_rejects_before_provider_or_tool_dispatch() -> None:
+    import pytest
+
+    from linch._wire import UnsupportedWireVersionError
+    from linch.run_store import RunCheckpoint
+    from linch.types import Usage
+
+    store = _memory_run_store()
+    counts: dict[str, int] = {}
+    session = await _agent(
+        model="gpt-5",
+        provider=ScriptProvider(fail_on_call=True),
+        tools=_registry(counts, "A"),
+        session_store=_memory_session_store(),
+        run_store=store,
+        cwd=".",
+    ).session(id="s1")
+    await store.create_run("s1", id="contractless")
+    await store.save_checkpoint(
+        "contractless",
+        RunCheckpoint(phase="turn_complete", prompt="go", turn_index=0, total_usage=Usage()),
+    )
+    with pytest.raises(UnsupportedWireVersionError, match="start a new run"):
+        await _collect(session.resume("contractless"))
+    assert counts == {}
+    assert await store.load_events("contractless") == []
+
+
+async def test_tool_recovery_with_null_cursor_fails_before_side_effects() -> None:
+    import pytest
+
+    from linch.errors import ConfigError
+
+    store = _memory_run_store()
+    sessions = _memory_session_store()
+    counts: dict[str, int] = {}
+    session = await _agent(
+        model="gpt-5",
+        provider=ScriptProvider(tool_names=["A"]),
+        tools=_registry(counts, "A"),
+        permissions={"mode": "skip-dangerous"},
+        session_store=sessions,
+        run_store=store,
+        cwd=".",
+    ).session(id="s1")
+    run_id, _ = await _run_until(session, "use tool", lambda event: event.type == "assistant")
+    checkpoint = store._runs[run_id].checkpoint
+    assert checkpoint is not None
+    checkpoint.tool_batch_event_after_seq = None
+    checkpoint.background_workers = {
+        "worker": {"worker_id": "worker", "display_name": "worker", "status": "running"}
+    }
+    resumed = await _agent(
+        model="gpt-5",
+        provider=ScriptProvider(fail_on_call=True),
+        tools=_registry(counts, "A"),
+        permissions={"mode": "skip-dangerous"},
+        session_store=sessions,
+        run_store=store,
+        cwd=".",
+    ).session(id="s1")
+    before = await store.load_events(run_id)
+    with pytest.raises(ConfigError, match="cursor"):
+        await _collect(resumed.resume(run_id))
+    assert counts == {}
+    assert await store.load_events(run_id) == before
+    record = await store.load_run(run_id)
+    assert record is not None and record.checkpoint is not None
+    assert record.checkpoint.tool_batch_event_after_seq is None
+    assert record.checkpoint.background_workers["worker"]["status"] == "running"

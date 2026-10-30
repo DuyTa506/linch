@@ -5,6 +5,7 @@ from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
+from linch._wire import UnsupportedWireVersionError
 from linch.run_store import (
     MODEL_INPUT_CODEC_VERSION,
     InMemoryRunStore,
@@ -120,11 +121,13 @@ def test_snapshot_codec_round_trips_every_request_field_and_rebinds_signal() -> 
 
 
 def test_snapshot_codec_rejects_corruption_and_incompatible_version() -> None:
+    from linch._wire import UnsupportedWireVersionError
+
     snapshot = create_model_input_snapshot("run-1", 1, _request())
 
     with pytest.raises(ModelInputSnapshotError, match="integrity"):
         decode_model_input_snapshot(replace(snapshot, request_json="{}"))
-    with pytest.raises(ModelInputSnapshotError, match="codec version"):
+    with pytest.raises(UnsupportedWireVersionError, match="start a new run"):
         decode_model_input_snapshot(replace(snapshot, codec_version=999))
 
 
@@ -160,7 +163,7 @@ def test_snapshot_codec_rejects_cycles_but_never_serializes_signal() -> None:
     create_model_input_snapshot("run-1", 1, request)
 
 
-def test_checkpoint_snapshot_fields_are_additive_and_round_trip() -> None:
+def test_checkpoint_snapshot_fields_are_always_written_and_round_trip() -> None:
     legacy = RunCheckpoint(
         phase="provider_pending",
         prompt="hello",
@@ -168,8 +171,8 @@ def test_checkpoint_snapshot_fields_are_additive_and_round_trip() -> None:
         total_usage=Usage(),
     )
     legacy_wire = checkpoint_to_dict(legacy)
-    assert "provider_attempt" not in legacy_wire
-    assert "model_input_snapshot_id" not in legacy_wire
+    assert legacy_wire["provider_attempt"] == 0
+    assert legacy_wire["model_input_snapshot_id"] is None
 
     exact = replace(
         legacy,
@@ -257,7 +260,7 @@ async def test_sqlite_load_fails_closed_for_corrupt_snapshot(tmp_path) -> None:
         await reopened.close()
 
 
-async def test_sqlite_schema_migrates_a_legacy_database_additively(tmp_path) -> None:
+async def test_sqlite_rejects_pre_snapshot_database(tmp_path) -> None:
     path = tmp_path / "legacy.db"
     conn = sqlite3.connect(path)
     conn.executescript(
@@ -288,11 +291,16 @@ async def test_sqlite_schema_migrates_a_legacy_database_additively(tmp_path) -> 
 
     store = SqliteRunStore(path)
     try:
-        legacy = await store.load_run("legacy-run")
-        snapshot = await store.save("legacy-run", 1, _request())
-        assert legacy is not None
-        assert legacy.checkpoint is None
-        assert await store.load(snapshot.id) == snapshot
+        with pytest.raises(UnsupportedWireVersionError):
+            await store.load_run("legacy-run")
+        with sqlite3.connect(path) as conn:
+            assert conn.execute("select id from runs").fetchone()[0] == "legacy-run"
+            assert (
+                conn.execute(
+                    "select name from sqlite_master where name='model_input_snapshots'"
+                ).fetchone()
+                is None
+            )
     finally:
         await store.close()
 
@@ -305,5 +313,5 @@ def test_snapshot_codec_preserves_golden_bytes_and_integrity_hash() -> None:
         "afcfb1aabbe427c33c50f4772e51c30c14c58a91e5d3d05439a34a752644b0a8"
     )
     assert snapshot.integrity_hash == (
-        "sha256:a99b94acb3dde086636081650393c70e4aae728e7bce3e9aa952bffd45855c95"
+        "sha256:779cf554f6f848fa02f28ae7425e0fc4ec3628c5c9bf9257f3af89d437000111"
     )

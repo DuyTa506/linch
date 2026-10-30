@@ -69,7 +69,9 @@ class PostgresFileBackend:
         self._init_lock = asyncio.Lock()
 
     async def _ensure(self) -> Any:
-        return await ensure_pool(self, _SCHEMA, _import_asyncpg)
+        return await ensure_pool(
+            self, _SCHEMA, _import_asyncpg, schema_key="filesystem", tables=("agentkit_files",)
+        )
 
     # ── FileBackend protocol ─────────────────────────────────────────────────
 
