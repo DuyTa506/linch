@@ -85,6 +85,14 @@ listener the path is byte-identical. `loop/response` and the participant
 coordinator from `generic-loop-seams-2026-10-30` wait until the reliability
 port needs them.
 
+Status (2026-10-31): WP3 showed the seam is needed (terminal-tool ACK runs
+before legacy hooks; `BeforeFinalAnswer` skips the forced-final route), but
+its first implementation (`scale/loop-split` 54d9951, 748 + 2,056 test lines)
+was not merged. It returns as a slim typed `turn-stopping` event (serial,
+veto) when WP7 or WP14 first needs it: a `continue` appends its feedback
+through `session.append` before the next turn, so no separate pending state
+is persisted; budget about 200 source lines.
+
 **D5 — Run-scoped listeners use a run-local dispatcher.** A child `Context`
 shares its parent's EventBus, so run code never registers unfiltered listeners
 on the agent bus. Leaking a listener across runs is a tenant-isolation defect.
