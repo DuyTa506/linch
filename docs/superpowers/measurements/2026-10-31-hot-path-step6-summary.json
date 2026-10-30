@@ -1,0 +1,47 @@
+{
+  "decision": "dropped",
+  "reason": "Lean scale profiles show generic JSON-safe traversal and deepcopy, not receipt or usage codecs, as the dominant CPU work.",
+  "msgspec": {
+    "installed_in_supplied_venv": false,
+    "version": null,
+    "prototype_run": false
+  },
+  "profiles": {
+    "memory_200x4": {
+      "profile_seconds": 10.080,
+      "json_safe_inner_self_seconds": 2.422821,
+      "deepcopy_self_seconds": 0.605813,
+      "checkpoint_to_dict_self_seconds": 0.045901,
+      "event_to_dict_self_seconds": 0.025282,
+      "receipt_to_dict_self_seconds": 0.004984,
+      "receipt_from_dict_self_seconds": 0.029913
+    },
+    "memory_1x50": {
+      "profile_seconds": 1.209,
+      "json_safe_inner_self_seconds": 0.134163,
+      "deepcopy_self_seconds": 0.145176,
+      "checkpoint_to_dict_self_seconds": 0.003059,
+      "event_to_dict_self_seconds": 0.001832,
+      "receipt_to_dict_self_seconds": 0.000403,
+      "receipt_from_dict_self_seconds": 0.002048
+    },
+    "postgres_200x4": {
+      "profile_seconds": 18.416,
+      "json_safe_inner_self_seconds": 2.181400,
+      "deepcopy_self_seconds": 0.550180,
+      "checkpoint_to_dict_self_seconds": 0.030003,
+      "event_to_dict_self_seconds": 0.029888,
+      "receipt_to_dict_self_seconds": 0.005770,
+      "receipt_from_dict_self_seconds": 0.028438
+    },
+    "postgres_1x50": {
+      "profile_seconds": 2.252,
+      "json_safe_inner_self_seconds": 0.119622,
+      "deepcopy_self_seconds": 0.138332,
+      "checkpoint_to_dict_self_seconds": 0.001953,
+      "event_to_dict_self_seconds": 0.001752,
+      "receipt_to_dict_self_seconds": 0.000341,
+      "receipt_from_dict_self_seconds": 0.001698
+    }
+  }
+}
