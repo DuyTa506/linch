@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -59,14 +60,14 @@ def test_run_report_summary_format_is_scannable():
 
 
 @pytest.mark.asyncio
-async def test_run_report_script_renders_from_sqlite_store(tmp_path):
+async def test_run_report_script_renders_from_postgres_store(pg_dsn):
+    from linch import PostgresRunStore, RunCheckpoint
     from linch.events import ResultEvent, SystemEvent
-    from linch.run_store import RunCheckpoint, SqliteRunStore
     from linch.types import Usage
 
-    db = tmp_path / "runs.db"
-    async with SqliteRunStore(db) as store:
-        run = await store.create_run("s1", id="r1")
+    run_id = uuid4().hex
+    async with PostgresRunStore(pg_dsn) as store:
+        run = await store.create_run("s1", id=run_id)
         checkpoint = RunCheckpoint(
             phase="completed",
             prompt="hello",
@@ -78,7 +79,7 @@ async def test_run_report_script_renders_from_sqlite_store(tmp_path):
             run.id,
             SystemEvent(
                 session_id="s1",
-                run_id="r1",
+                run_id=run_id,
                 model="fake",
                 tools=[],
                 permission_mode="skip-dangerous",
@@ -96,8 +97,29 @@ async def test_run_report_script_renders_from_sqlite_store(tmp_path):
             ),
         )
 
-    text = await _load_script().render_report(db, "r1", output="summary")
+    text = await _load_script().render_report(pg_dsn, run_id, output="summary")
 
-    assert "Linch run report: r1" in text
+    assert f"Linch run report: {run_id}" in text
     assert "status: completed" in text
     assert "- total_tokens: 3" in text
+
+
+def test_report_parser_uses_environment_dsn_and_explicit_override(monkeypatch):
+    monkeypatch.setenv("LINCH_POSTGRES_DSN", "postgresql://localhost/env")
+    parser = _load_script().build_parser()
+    assert parser.parse_args(["run"]).dsn == "postgresql://localhost/env"
+    assert parser.parse_args(["run", "--dsn", "postgresql://localhost/cli"]).dsn == (
+        "postgresql://localhost/cli"
+    )
+    with pytest.raises(SystemExit) as error:
+        parser.parse_args(["run", "--runs-db", "runs.db"])
+    assert error.value.code == 2
+
+
+@pytest.mark.asyncio
+async def test_report_cli_requires_dsn(monkeypatch, capsys):
+    monkeypatch.delenv("LINCH_POSTGRES_DSN", raising=False)
+    with pytest.raises(SystemExit) as error:
+        await _load_script()._main(["run"])
+    assert error.value.code == 2
+    assert "--dsn or set LINCH_POSTGRES_DSN" in capsys.readouterr().err

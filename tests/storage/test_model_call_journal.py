@@ -106,20 +106,22 @@ def _agent(session_store: Any, run_store: Any, provider: Any, **kw: Any) -> Any:
     )
 
 
-async def _stores(kind: str, tmp_path: Any) -> tuple[Any, Any]:
-    from linch.run_store import InMemoryRunStore, SqliteRunStore
-    from linch.sessions import InMemorySessionStore, SqliteSessionStore
+async def _stores(kind: str, pg_dsn: str) -> tuple[Any, Any]:
+    from linch.run_store import InMemoryRunStore
+    from linch.run_stores.postgres import PostgresRunStore
+    from linch.sessions import InMemorySessionStore
+    from linch.sessions.postgres import PostgresSessionStore
 
     if kind == "memory":
         return InMemorySessionStore(), InMemoryRunStore()
-    return SqliteSessionStore(tmp_path / "sessions.db"), SqliteRunStore(tmp_path / "runs.db")
+    return PostgresSessionStore(pg_dsn), PostgresRunStore(pg_dsn)
 
 
-async def _reopen(kind: str, tmp_path: Any, sessions: Any, runs: Any) -> tuple[Any, Any]:
-    if kind == "sqlite":
+async def _reopen(kind: str, pg_dsn: str, sessions: Any, runs: Any) -> tuple[Any, Any]:
+    if kind == "postgres":
         await sessions.close()
         await runs.close()
-        return await _stores(kind, tmp_path)
+        return await _stores(kind, pg_dsn)
     return sessions, runs
 
 
@@ -130,9 +132,10 @@ async def _close(*stores: Any) -> None:
             await closer()
 
 
-@pytest.mark.parametrize("kind", ["memory", "sqlite"])
+@pytest.mark.parametrize("kind", ["memory", "postgres"])
 async def test_primary_append_after_hook_recovers_without_reinference(
-    kind: str, tmp_path: Any
+    pg_dsn,
+    kind: str,
 ) -> None:
     """Losing the append checkpoint must not buy or mutate the accepted answer twice."""
     from linch.hooks import HookResult
@@ -151,7 +154,7 @@ async def test_primary_append_after_hook_recovers_without_reinference(
             ctx.assembly.message.content = [TextBlock(text="after hook")]
             return HookResult.mutate(assembly=ctx.assembly)
 
-    sessions, runs = await _stores(kind, tmp_path)
+    sessions, runs = await _stores(kind, pg_dsn)
     hook, provider = Mutate(), _Provider()
     fault = _FaultStore(runs, "checkpoint:assistant_appended")
     agent = _agent(sessions, fault, provider, hooks=[hook])
@@ -169,7 +172,7 @@ async def test_primary_append_after_hook_recovers_without_reinference(
     assert projections[0]["projection_kind"] == "primary_append"
     assert projections[0]["assistant_stop_reason"] == "end_turn"
     assert hook.calls == 1
-    sessions, runs = await _reopen(kind, tmp_path, sessions, runs)
+    sessions, runs = await _reopen(kind, pg_dsn, sessions, runs)
     try:
         resumed_provider, resumed_hook = _Provider(), Mutate()
         resumed = await _agent(sessions, runs, resumed_provider, hooks=[resumed_hook]).session(
@@ -184,12 +187,15 @@ async def test_primary_append_after_hook_recovers_without_reinference(
         await _close(sessions, runs)
 
 
-@pytest.mark.parametrize("kind", ["memory", "sqlite"])
-async def test_frozen_replay_rejects_unbound_assistant_suffix(kind: str, tmp_path: Any) -> None:
+@pytest.mark.parametrize("kind", ["memory", "postgres"])
+async def test_frozen_replay_rejects_unbound_assistant_suffix(
+    pg_dsn,
+    kind: str,
+) -> None:
     """A last-assistant heuristic must never accept somebody else's durable suffix."""
     from linch.types import Message, TextBlock
 
-    sessions, runs = await _stores(kind, tmp_path)
+    sessions, runs = await _stores(kind, pg_dsn)
     session = await _agent(sessions, _FaultStore(runs, "event:projection"), _Provider()).session(
         id="session"
     )
@@ -201,7 +207,7 @@ async def test_frozen_replay_rejects_unbound_assistant_suffix(kind: str, tmp_pat
     await sessions.append_messages(
         "session", [Message(role="assistant", content=[TextBlock(text="unrelated")])]
     )
-    sessions, runs = await _reopen(kind, tmp_path, sessions, runs)
+    sessions, runs = await _reopen(kind, pg_dsn, sessions, runs)
     try:
         provider = _Provider()
         resumed = await _agent(sessions, runs, provider).session(id="session")
@@ -213,12 +219,15 @@ async def test_frozen_replay_rejects_unbound_assistant_suffix(kind: str, tmp_pat
         await _close(sessions, runs)
 
 
-@pytest.mark.parametrize("kind", ["memory", "sqlite"])
-async def test_rejected_native_receipt_restores_terminal_error(kind: str, tmp_path: Any) -> None:
+@pytest.mark.parametrize("kind", ["memory", "postgres"])
+async def test_rejected_native_receipt_restores_terminal_error(
+    pg_dsn,
+    kind: str,
+) -> None:
     """A reported rejected batch is terminal_error_v0 before its terminal checkpoint."""
     from linch.types import Usage
 
-    sessions, runs = await _stores(kind, tmp_path)
+    sessions, runs = await _stores(kind, pg_dsn)
     session = await _agent(
         sessions, _FaultStore(runs, "event:usage"), _Provider(native=True)
     ).session(id="session")
@@ -227,7 +236,7 @@ async def test_rejected_native_receipt_restores_terminal_error(kind: str, tmp_pa
         async for event in session.run("go"):
             if event.type == "system":
                 run_id = event.run_id
-    sessions, runs = await _reopen(kind, tmp_path, sessions, runs)
+    sessions, runs = await _reopen(kind, pg_dsn, sessions, runs)
     try:
         provider = _Provider()
         resumed = await _agent(sessions, runs, provider).session(id="session")
@@ -244,15 +253,17 @@ async def test_rejected_native_receipt_restores_terminal_error(kind: str, tmp_pa
         await _close(sessions, runs)
 
 
-@pytest.mark.parametrize("kind", ["memory", "sqlite"])
+@pytest.mark.parametrize("kind", ["memory", "postgres"])
 @pytest.mark.parametrize("boundary", ["event:projection", "checkpoint:provider_pending"])
 async def test_paid_compaction_recovers_after_cache_loss(
-    kind: str, boundary: str, tmp_path: Any
+    pg_dsn,
+    kind: str,
+    boundary: str,
 ) -> None:
     """Both receipt-only and consumed projections rebuild their paid summary from history."""
     from linch.types import Message, TextBlock, Usage
 
-    sessions, runs = await _stores(kind, tmp_path)
+    sessions, runs = await _stores(kind, pg_dsn)
     provider = _Provider(compact=True)
     session = await _agent(sessions, _FaultStore(runs, boundary), provider).session(id="session")
     await session.append(
@@ -273,10 +284,9 @@ async def test_paid_compaction_recovers_after_cache_loss(
     if kind == "memory":
         sessions._snapshots.clear()
     else:
-        await sessions._exec.run(
-            lambda conn: conn.execute("delete from session_snapshots").connection.commit()
-        )
-    sessions, runs = await _reopen(kind, tmp_path, sessions, runs)
+        pool = await sessions._ensure()
+        await pool.execute("DELETE FROM session_snapshots")
+    sessions, runs = await _reopen(kind, pg_dsn, sessions, runs)
     try:
         provider = _Provider(compact=True)
         resumed = await _agent(sessions, runs, provider).session(id="session")
@@ -301,20 +311,23 @@ async def test_paid_compaction_recovers_after_cache_loss(
         await _close(sessions, runs)
 
 
-@pytest.mark.parametrize("kind", ["memory", "sqlite"])
+@pytest.mark.parametrize("kind", ["memory", "postgres"])
 @pytest.mark.parametrize(
     "boundary", ["event:intent", "event:dispatch_started", "event:projection", "assistant_append"]
 )
 @pytest.mark.parametrize("reuse_budget", [False, True])
 async def test_primary_retry_uses_new_delivery_and_receipt_charges(
-    kind: str, boundary: str, reuse_budget: bool, tmp_path: Any
+    pg_dsn,
+    kind: str,
+    boundary: str,
+    reuse_budget: bool,
 ) -> None:
     """A retry keeps its operation, never its physical id or aggregate-only charge."""
     from linch import RunBudget
     from linch.pricing import cost_usd
     from linch.types import Usage
 
-    sessions, runs = await _stores(kind, tmp_path)
+    sessions, runs = await _stores(kind, pg_dsn)
     budget = RunBudget(max_tokens=1000)
     run_fault = _FaultStore(runs, boundary)
     session_fault = _FaultStore(sessions, boundary)
@@ -333,7 +346,7 @@ async def test_primary_retry_uses_new_delivery_and_receipt_charges(
     assert len(provider.calls) == int(dispatched)
     if not reuse_budget:
         budget = RunBudget(max_tokens=1000)
-    sessions, runs = await _reopen(kind, tmp_path, sessions, runs)
+    sessions, runs = await _reopen(kind, pg_dsn, sessions, runs)
     try:
         provider = _Provider()
         resumed = await _agent(sessions, runs, provider, budget=budget).session(id="session")
@@ -358,12 +371,15 @@ async def test_primary_retry_uses_new_delivery_and_receipt_charges(
         await _close(sessions, runs)
 
 
-@pytest.mark.parametrize("kind", ["memory", "sqlite"])
-async def test_started_without_receipt_blocks_capped_resume(kind: str, tmp_path: Any) -> None:
+@pytest.mark.parametrize("kind", ["memory", "postgres"])
+async def test_started_without_receipt_blocks_capped_resume(
+    pg_dsn,
+    kind: str,
+) -> None:
     """Observed but undurable spending cannot become a free capped retry."""
     from linch import RunBudget
 
-    sessions, runs = await _stores(kind, tmp_path)
+    sessions, runs = await _stores(kind, pg_dsn)
     budget = RunBudget(max_tokens=1000)
     provider = _Provider()
     session = await _agent(
@@ -376,7 +392,7 @@ async def test_started_without_receipt_blocks_capped_resume(kind: str, tmp_path:
                 run_id = event.run_id
     assert len(provider.calls) == 1
     assert budget.spent_tokens == 13  # observed before the failed receipt append
-    sessions, runs = await _reopen(kind, tmp_path, sessions, runs)
+    sessions, runs = await _reopen(kind, pg_dsn, sessions, runs)
     try:
         provider = _Provider()
         resumed = await _agent(sessions, runs, provider, budget=RunBudget(max_tokens=1000)).session(
@@ -464,14 +480,15 @@ def test_primary_projection_codec_rejects_tampering(field: str, value: Any) -> N
         ModelCallEvent("run", "projection", record)
 
 
-@pytest.mark.parametrize("kind", ["memory", "sqlite"])
+@pytest.mark.parametrize("kind", ["memory", "postgres"])
 async def test_accepted_assistant_recovers_even_after_budget_exhaustion(
-    kind: str, tmp_path: Any
+    pg_dsn,
+    kind: str,
 ) -> None:
     """Admission is for another inference; an already paid assistant can finish."""
     from linch import RunBudget
 
-    sessions, runs = await _stores(kind, tmp_path)
+    sessions, runs = await _stores(kind, pg_dsn)
     budget = RunBudget(max_tokens=1)
     session = await _agent(
         sessions, _FaultStore(runs, "checkpoint:assistant_appended"), _Provider(), budget=budget
@@ -481,7 +498,7 @@ async def test_accepted_assistant_recovers_even_after_budget_exhaustion(
         async for event in session.run("go"):
             if event.type == "system":
                 run_id = event.run_id
-    sessions, runs = await _reopen(kind, tmp_path, sessions, runs)
+    sessions, runs = await _reopen(kind, pg_dsn, sessions, runs)
     try:
         provider = _Provider()
         resumed = await _agent(sessions, runs, provider, budget=RunBudget(max_tokens=1)).session(
@@ -495,7 +512,7 @@ async def test_accepted_assistant_recovers_even_after_budget_exhaustion(
         await _close(sessions, runs)
 
 
-@pytest.mark.parametrize("kind", ["memory", "sqlite"])
+@pytest.mark.parametrize("kind", ["memory", "postgres"])
 @pytest.mark.parametrize(
     "control,boundary",
     [
@@ -505,7 +522,10 @@ async def test_accepted_assistant_recovers_even_after_budget_exhaustion(
     ],
 )
 async def test_primary_recovers_post_hook_control_without_rerunning_hook(
-    kind: str, control: str, boundary: str, tmp_path: Any
+    pg_dsn,
+    kind: str,
+    control: str,
+    boundary: str,
 ) -> None:
     """Missing/existing control suffixes preserve the paid hook decision exactly once."""
     from linch.hooks import HookResult
@@ -528,7 +548,7 @@ async def test_primary_recovers_post_hook_control_without_rerunning_hook(
                 else HookResult.stop("paid stop")
             )
 
-    sessions, runs = await _stores(kind, tmp_path)
+    sessions, runs = await _stores(kind, pg_dsn)
     session = await _agent(
         sessions, _FaultStore(runs, boundary), _Provider(), hooks=[Control()]
     ).session(id="session")
@@ -537,7 +557,7 @@ async def test_primary_recovers_post_hook_control_without_rerunning_hook(
         async for event in session.run("go"):
             if event.type == "system":
                 run_id = event.run_id
-    sessions, runs = await _reopen(kind, tmp_path, sessions, runs)
+    sessions, runs = await _reopen(kind, pg_dsn, sessions, runs)
     try:
         hook, provider = Control(), _Provider()
         resumed = await _agent(sessions, runs, provider, hooks=[hook]).session(id="session")
@@ -561,18 +581,21 @@ async def test_primary_recovers_post_hook_control_without_rerunning_hook(
         await _close(sessions, runs)
 
 
-@pytest.mark.parametrize("kind", ["memory", "sqlite"])
+@pytest.mark.parametrize("kind", ["memory", "postgres"])
 @pytest.mark.parametrize("consumed", [False, True])
 @pytest.mark.parametrize("detailed", [False, True])
 async def test_paid_projection_and_consumption_reconcile_independently(
-    kind: str, consumed: bool, detailed: bool, tmp_path: Any
+    pg_dsn,
+    kind: str,
+    consumed: bool,
+    detailed: bool,
 ) -> None:
     """Either store may lead; consumption never substitutes for a projection identity."""
     from linch.compaction import DefaultCompaction, DetailedCompaction
     from linch.model_calls import _ModelCallLedger
     from linch.types import Message, TextBlock, Usage
 
-    sessions, runs = await _stores(kind, tmp_path)
+    sessions, runs = await _stores(kind, pg_dsn)
     strategy = DetailedCompaction(keep_recent_turns=2) if detailed else DefaultCompaction()
     fault = _FaultStore(runs, "event:projection" if consumed else "checkpoint:provider_pending")
     session = await _agent(sessions, fault, _Provider(compact=True), compaction=strategy).session(
@@ -611,7 +634,7 @@ async def test_paid_projection_and_consumption_reconcile_independently(
         }
         checkpoint.total_usage = ledger.total_usage
     await runs.save_checkpoint(run_id, checkpoint)
-    sessions, runs = await _reopen(kind, tmp_path, sessions, runs)
+    sessions, runs = await _reopen(kind, pg_dsn, sessions, runs)
     try:
         provider = _Provider(compact=True)
         resumed = await _agent(sessions, runs, provider, compaction=strategy).session(id="session")
@@ -638,15 +661,17 @@ async def test_paid_projection_and_consumption_reconcile_independently(
         await _close(sessions, runs)
 
 
-@pytest.mark.parametrize("kind", ["memory", "sqlite"])
+@pytest.mark.parametrize("kind", ["memory", "postgres"])
 @pytest.mark.parametrize(
     "field", ["snapshot_id", "request_fingerprint", "logical_call_id", "full_history_base_count"]
 )
 async def test_primary_binding_tampering_fails_before_dispatch(
-    kind: str, field: str, tmp_path: Any
+    pg_dsn,
+    kind: str,
+    field: str,
 ) -> None:
     """A different checkpoint binding cannot borrow a settled delivery's answer."""
-    sessions, runs = await _stores(kind, tmp_path)
+    sessions, runs = await _stores(kind, pg_dsn)
     session = await _agent(
         sessions, _FaultStore(runs, "checkpoint:assistant_appended"), _Provider()
     ).session(id="session")
@@ -660,7 +685,7 @@ async def test_primary_binding_tampering_fails_before_dispatch(
     binding = checkpoint.extension_state["linch.model_calls.v1"]["active_primary"]
     binding[field] = 0 if field == "full_history_base_count" else "changed"
     await runs.save_checkpoint(run_id, checkpoint)
-    sessions, runs = await _reopen(kind, tmp_path, sessions, runs)
+    sessions, runs = await _reopen(kind, pg_dsn, sessions, runs)
     try:
         provider = _Provider()
         resumed = await _agent(sessions, runs, provider).session(id="session")
@@ -671,9 +696,10 @@ async def test_primary_binding_tampering_fails_before_dispatch(
         await _close(sessions, runs)
 
 
-@pytest.mark.parametrize("kind", ["memory", "sqlite"])
+@pytest.mark.parametrize("kind", ["memory", "postgres"])
 async def test_custom_subclass_has_accounting_without_paid_transform_replay(
-    kind: str, tmp_path: Any
+    pg_dsn,
+    kind: str,
 ) -> None:
     """A built-in id inherited by an arbitrary transform never declares determinism."""
     from linch.compaction import DefaultCompaction
@@ -687,7 +713,7 @@ async def test_custom_subclass_has_accounting_without_paid_transform_replay(
                 *messages,
             ]
 
-    sessions, runs = await _stores(kind, tmp_path)
+    sessions, runs = await _stores(kind, pg_dsn)
     provider = _Provider(compact=True)
     session = await _agent(
         sessions, _FaultStore(runs, "checkpoint:provider_pending"), provider, compaction=Custom()
@@ -710,7 +736,7 @@ async def test_custom_subclass_has_accounting_without_paid_transform_replay(
         getattr(row.event, "record_kind", None) == "projection"
         for row in await runs.load_events(run_id)
     )
-    sessions, runs = await _reopen(kind, tmp_path, sessions, runs)
+    sessions, runs = await _reopen(kind, pg_dsn, sessions, runs)
     try:
         provider = _Provider(compact=True)
         resumed = await _agent(sessions, runs, provider, compaction=Custom()).session(id="session")
@@ -811,15 +837,17 @@ async def test_conflicting_paid_projection_for_one_receipt_fails_closed() -> Non
         await ledger.record_projection(_projection_record(**values))
 
 
-@pytest.mark.parametrize("kind", ["memory", "sqlite"])
+@pytest.mark.parametrize("kind", ["memory", "postgres"])
 @pytest.mark.parametrize("boundary", ["snapshot", "provider_snapshot"])
 async def test_snapshot_boundary_never_loses_a_paid_compaction(
-    kind: str, boundary: str, tmp_path: Any
+    pg_dsn,
+    kind: str,
+    boundary: str,
 ) -> None:
     """Provider-view cache failure and exact-input failure both replay only the main call."""
     from linch.types import Message, TextBlock, Usage
 
-    sessions, runs = await _stores(kind, tmp_path)
+    sessions, runs = await _stores(kind, pg_dsn)
     sf, rf = _FaultStore(sessions, boundary), _FaultStore(runs, boundary)
     provider = _Provider(compact=True)
     session = await _agent(sf, rf, provider).session(id="session")
@@ -838,7 +866,7 @@ async def test_snapshot_boundary_never_loses_a_paid_compaction(
             if event.type == "system":
                 run_id = event.run_id
     assert len(provider.calls) == 1
-    sessions, runs = await _reopen(kind, tmp_path, sessions, runs)
+    sessions, runs = await _reopen(kind, pg_dsn, sessions, runs)
     try:
         provider = _Provider(compact=True)
         resumed = await _agent(sessions, runs, provider).session(id="session")
@@ -849,15 +877,16 @@ async def test_snapshot_boundary_never_loses_a_paid_compaction(
         await _close(sessions, runs)
 
 
-@pytest.mark.parametrize("kind", ["memory", "sqlite"])
+@pytest.mark.parametrize("kind", ["memory", "postgres"])
 async def test_changed_paid_projection_view_fails_without_dispatch(
-    kind: str, tmp_path: Any
+    pg_dsn,
+    kind: str,
 ) -> None:
     """A provider-view cache with a different suffix is not a paid-result replay target."""
     from linch.sessions.store import ProviderViewSnapshot
     from linch.types import Message, TextBlock
 
-    sessions, runs = await _stores(kind, tmp_path)
+    sessions, runs = await _stores(kind, pg_dsn)
     session = await _agent(
         sessions, _FaultStore(runs, "checkpoint:provider_pending"), _Provider(compact=True)
     ).session(id="session")
@@ -884,7 +913,7 @@ async def test_changed_paid_projection_view_fails_without_dispatch(
             projection_id="wrong projection",
         ),
     )
-    sessions, runs = await _reopen(kind, tmp_path, sessions, runs)
+    sessions, runs = await _reopen(kind, pg_dsn, sessions, runs)
     try:
         provider = _Provider(compact=True)
         resumed = await _agent(sessions, runs, provider).session(id="session")
@@ -992,16 +1021,16 @@ async def test_recovered_accepted_assistant_defers_new_inbox_delivery(tmp_path: 
     assert len(resumed.full_history) == 2
 
 
-@pytest.mark.parametrize("kind", ["memory", "sqlite"])
+@pytest.mark.parametrize("kind", ["memory", "postgres"])
 @pytest.mark.parametrize("cache_present", [False, True])
 @pytest.mark.parametrize("consumed_before_projection", [False, True])
 @pytest.mark.parametrize("detailed", [False, True])
 async def test_repeated_paid_projection_preserves_later_skill_reminder_order(
+    pg_dsn,
     kind: str,
     cache_present: bool,
     consumed_before_projection: bool,
     detailed: bool,
-    tmp_path: Any,
 ) -> None:
     """A later skill reminder stays between its durable neighbors across two paid views."""
     from linch import RunBudget
@@ -1015,7 +1044,7 @@ async def test_repeated_paid_projection_preserves_later_skill_reminder_order(
     from linch.sessions.store import ProviderViewSnapshot
     from linch.types import InvokedSkillRecord, Message, TextBlock, Usage
 
-    sessions, runs = await _stores(kind, tmp_path)
+    sessions, runs = await _stores(kind, pg_dsn)
     strategy = DetailedCompaction(keep_recent_turns=3) if detailed else DefaultCompaction()
     budget = RunBudget(max_tokens=1000)
     agent = _agent(sessions, runs, _Provider(compact=True), compaction=strategy, budget=budget)
@@ -1110,7 +1139,7 @@ async def test_repeated_paid_projection_preserves_later_skill_reminder_order(
                 projection_id=(session.last_compaction_info or {}).get("projection_id"),
             ),
         )
-    sessions, runs = await _reopen(kind, tmp_path, sessions, runs)
+    sessions, runs = await _reopen(kind, pg_dsn, sessions, runs)
     try:
         provider = _Provider(compact=True)
         resumed_budget = RunBudget(max_tokens=1000)
@@ -1208,12 +1237,12 @@ async def test_compaction_source_recipe_is_bound_to_the_pending_delivery() -> No
     assert restored.total_usage.input_tokens == restored.total_usage.output_tokens == 0
 
 
-@pytest.mark.parametrize("kind", ["memory", "sqlite"])
+@pytest.mark.parametrize("kind", ["memory", "postgres"])
 @pytest.mark.parametrize("boundary", ["skill_records", "source_recipe"])
 async def test_compaction_reminder_durability_failure_prevents_dispatch(
+    pg_dsn,
     kind: str,
     boundary: str,
-    tmp_path: Any,
 ) -> None:
     """A recipe never outlives missing reminder bodies or authorizes an unmarked dispatch."""
     from linch.abort import AbortContext
@@ -1221,7 +1250,7 @@ async def test_compaction_reminder_durability_failure_prevents_dispatch(
     from linch.model_calls import _AccountedAuxiliaryCaller, _ModelCallError, _ModelCallLedger
     from linch.types import InvokedSkillRecord, Message, TextBlock
 
-    sessions, runs = await _stores(kind, tmp_path)
+    sessions, runs = await _stores(kind, pg_dsn)
 
     class SkillWriteFailure:
         def __getattr__(self, name: str) -> Any:

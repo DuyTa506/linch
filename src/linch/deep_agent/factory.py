@@ -9,11 +9,7 @@ from ..budget import RunBudget
 from ..config import FeatureFlags, SystemPromptConfig, SystemPromptSection
 from ..context import FileMemoryContextBuilder
 from ..errors import ConfigError
-from ..filesystem.backend import CompositeFileBackend, StateFileBackend
-from ..filesystem.sqlite import SqliteFileBackend
 from ..hooks import ContextInjectionHook
-from ..run_store import SqliteRunStore
-from ..sessions import SqliteSessionStore
 from ..tools.registry import workspace_tools
 from ..tools.tasks import TaskCreateTool, TaskGetTool, TaskListTool, TaskUpdateTool
 from .prompts import COORDINATOR_SYSTEM_PROMPT, DEEP_AGENT_SYSTEM_PROMPT
@@ -122,7 +118,7 @@ def create_deep_agent(
     heavy tools (Edit/Write/Bash/…) are removed from the parent so it delegates
     all real work to worker subagents. A coordinator-specific system prompt is
     injected and ``run_in_background`` becomes the default worker pattern.
-    A persistent ``/memories`` filesystem partition is set up for durable state.
+    The host supplies filesystem storage for durable memory under ``/memories``.
 
     The default ``balanced`` profile is durable, retains workers for continue,
     and bounds the open loop to 64 turns / 1,000,000 tokens across the complete
@@ -139,7 +135,10 @@ def create_deep_agent(
         model: Model identifier passed through to Agent.
         profile: Named/profile-object policy bundle. Built-ins are ``balanced``,
             ``coordinator``, and the explicit ``unbounded`` escape hatch.
-        durable: Optional override for profile durability.
+        durable: Optional override for profile durability. When true, requires
+            explicit session_store and run_store, plus filesystem when that
+            feature is enabled. Use Postgres adapters for durable state;
+            durable=False allows ephemeral defaults.
         coordinator: Optional override for pure-orchestrator mode
             (heavy tools removed, coordinator system prompt, background-worker
             default pattern).
@@ -147,15 +146,17 @@ def create_deep_agent(
         system_prompt: Extra system prompt text merged with the deep-agent defaults.
         tools: Existing tool registry to extend, or None for the default set.
         permissions: Permission config passed through to Agent.
-        session_store: Session store override; ignored when durable=False.
-        run_store: Run store override; ignored when durable=False.
+        session_store: Host-owned session store, preserved regardless of durability.
+        run_store: Host-owned run store, preserved regardless of durability.
         features: Feature flags; coordinator=True requires features.subagents=True.
         system_prompt_config: System prompt section config to merge with system_prompt.
         budget: RunBudget cap applied to this agent and its subagent tree.
         max_turns: Hard turn-count override; the profile supplies the default.
         verifiers: Verifiers checked before the final answer is accepted.
         max_verification_retries: Retry cap for failed verifiers.
-        **agent_kwargs: Forwarded verbatim to Agent.
+        **agent_kwargs: Forwarded verbatim to Agent, including the host-owned
+            filesystem backend. Durable mode requires an explicit non-None
+            filesystem when features.filesystem is enabled.
 
     Returns:
         A configured Agent with deep-agent tools, prompt, and (optionally)
@@ -186,6 +187,22 @@ def create_deep_agent(
 
     if coordinator and not features.subagents:
         raise ConfigError("create_deep_agent(coordinator=True) requires features.subagents=True")
+
+    if durable:
+        missing = []
+        if session_store is None:
+            missing.append("session_store")
+        if run_store is None:
+            missing.append("run_store")
+        if features.filesystem and agent_kwargs.get("filesystem") is None:
+            missing.append("filesystem")
+        if missing:
+            raise ConfigError(
+                "create_deep_agent(durable=True) requires explicit "
+                + ", ".join(missing)
+                + "; supply Postgres adapters for durable storage or set durable=False "
+                "for ephemeral use"
+            )
 
     root = Path(cwd or ".").resolve()
     worker_registry = _deep_agent_tools(tools)
@@ -220,20 +237,6 @@ def create_deep_agent(
     )
     agent_kwargs.setdefault("enable_task_stop", True)
     agent_kwargs.setdefault("read_before_write", True)
-
-    if durable:
-        store_root = root / ".linch"
-        if session_store is None:
-            session_store = SqliteSessionStore(store_root / "sessions.db")
-        if run_store is None:
-            run_store = SqliteRunStore(store_root / "runs.db")
-        # Persistent /memories partition: write to /memories/... survives runs.
-        # Everything else in the virtual FS stays ephemeral (StateFileBackend).
-        if "filesystem" not in agent_kwargs:
-            agent_kwargs["filesystem"] = CompositeFileBackend(
-                default=StateFileBackend(),
-                routes={"/memories": SqliteFileBackend(store_root / "memories.db")},
-            )
 
     agent = Agent(
         model=model,

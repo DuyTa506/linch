@@ -3,10 +3,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-from pathlib import Path
+import os
 from typing import Any, Literal
 
-from linch import RunReport, SqliteRunStore, load_run_report
+from linch import PostgresRunStore, RunReport, load_run_report
 
 OutputFormat = Literal["summary", "markdown", "json"]
 
@@ -108,14 +108,14 @@ def format_summary(report: RunReport) -> str:
     return "\n".join(lines)
 
 
-async def load_report(path: str | Path, run_id: str) -> RunReport:
-    async with SqliteRunStore(path) as store:
+async def load_report(dsn: str, run_id: str) -> RunReport:
+    async with PostgresRunStore(dsn) as store:
         report = await load_run_report(store, run_id)
     return report
 
 
-async def render_report(path: str | Path, run_id: str, *, output: OutputFormat) -> str:
-    report = await load_report(path, run_id)
+async def render_report(dsn: str, run_id: str, *, output: OutputFormat) -> str:
+    report = await load_report(dsn, run_id)
     if report.run_id == "":
         raise SystemExit(f"Run not found: {run_id}")
     if output == "markdown":
@@ -127,13 +127,13 @@ async def render_report(path: str | Path, run_id: str, *, output: OutputFormat) 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Render a Linch run report from a SQLite run store."
+        description="Render a Linch run report from a Postgres run store."
     )
     parser.add_argument("run_id", help="Run id to inspect.")
     parser.add_argument(
-        "--runs-db",
-        default=".linch/runs.db",
-        help="Path to the SqliteRunStore database. Defaults to .linch/runs.db.",
+        "--dsn",
+        default=os.environ.get("LINCH_POSTGRES_DSN"),
+        help="Postgres DSN. Defaults to LINCH_POSTGRES_DSN.",
     )
     parser.add_argument(
         "--format",
@@ -155,8 +155,11 @@ def _list_of_dicts(value: Any) -> list[dict[str, Any]]:
 
 
 async def _main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    text = await render_report(args.runs_db, args.run_id, output=args.format)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if not args.dsn or not args.dsn.strip():
+        parser.error("provide --dsn or set LINCH_POSTGRES_DSN")
+    text = await render_report(args.dsn, args.run_id, output=args.format)
     print(text)
     return 0
 

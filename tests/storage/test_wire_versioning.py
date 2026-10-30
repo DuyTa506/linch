@@ -26,7 +26,6 @@ from linch.permissions.keys import permission_decision_from_dict, permission_dec
 from linch.run_store import (
     InMemoryRunStore,
     RunCheckpoint,
-    SqliteRunStore,
     build_run_contract,
     checkpoint_from_dict,
     checkpoint_to_dict,
@@ -35,6 +34,7 @@ from linch.run_store import (
     run_contract_from_dict,
     run_contract_to_dict,
 )
+from linch.run_stores.postgres import PostgresRunStore
 from linch.sessions.store import ProviderViewSnapshot, snapshot_from_dict, snapshot_to_dict
 from linch.types import Message, ProviderRequest, TextBlock, Usage
 
@@ -195,17 +195,16 @@ def test_stored_event_envelope_requires_exact_wire_version(version: object) -> N
 
 
 @pytest.mark.asyncio
-async def test_stored_events_are_versioned_and_round_trip(tmp_path) -> None:
-    store = SqliteRunStore(tmp_path / "runs.db")
+async def test_stored_events_are_versioned_and_round_trip(
+    pg_dsn,
+) -> None:
+    store = PostgresRunStore(pg_dsn)
     try:
         await store.create_run("session", id="run")
         event = ToolCallStartEvent(tool_use_id="call", tool_name="Search", input={}, summary="s")
         await store.append_event("run", event)
-        raw = await store._exec.run(
-            lambda conn: conn.execute(
-                "select event from run_events where run_id = 'run'"
-            ).fetchone()[0]
-        )
+        pool = await store._ensure()
+        raw = await pool.fetchval("SELECT event FROM run_events WHERE run_id = 'run'")
         import json
 
         stored = json.loads(raw)
@@ -218,8 +217,10 @@ async def test_stored_events_are_versioned_and_round_trip(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_stored_ignorable_event_preserves_opaque_schema_fields(tmp_path) -> None:
-    store = SqliteRunStore(tmp_path / "runs.db")
+async def test_stored_ignorable_event_preserves_opaque_schema_fields(
+    pg_dsn,
+) -> None:
+    store = PostgresRunStore(pg_dsn)
     try:
         await store.create_run("session", id="run")
         raw = {
@@ -248,9 +249,11 @@ async def test_stored_ignorable_event_depth_budget_survives_in_memory_copy() -> 
 
 
 @pytest.mark.asyncio
-async def test_stored_ignorable_event_depth_budget_survives_sqlite_append(tmp_path) -> None:
+async def test_stored_ignorable_event_depth_budget_survives_postgres_append(
+    pg_dsn,
+) -> None:
     raw = _opaque_event_with_nested_lists()
-    store = SqliteRunStore(tmp_path / "runs.db")
+    store = PostgresRunStore(pg_dsn)
     try:
         await store.create_run("session", id="run")
         await store.append_event("run", event_from_dict(raw))

@@ -894,16 +894,16 @@ async def test_completed_run_resume_is_noop() -> None:
     assert provider.calls == 1
 
 
-async def test_sqlite_session_and_run_store_resume_after_restart(tmp_path) -> None:
-    from linch.run_store import SqliteRunStore
-    from linch.sessions import SqliteSessionStore
+async def test_postgres_session_and_run_store_resume_after_restart(
+    pg_dsn,
+) -> None:
+    from linch.run_stores.postgres import PostgresRunStore
+    from linch.sessions.postgres import PostgresSessionStore
 
-    session_path = tmp_path / "sessions.db"
-    run_path = tmp_path / "runs.db"
     counts: dict[str, int] = {}
 
-    session_store = SqliteSessionStore(session_path)
-    run_store = SqliteRunStore(run_path)
+    session_store = PostgresSessionStore(pg_dsn)
+    run_store = PostgresRunStore(pg_dsn)
     try:
         agent = _agent(
             model="gpt-5",
@@ -920,8 +920,8 @@ async def test_sqlite_session_and_run_store_resume_after_restart(tmp_path) -> No
         await session_store.close()
         await run_store.close()
 
-    session_store = SqliteSessionStore(session_path)
-    run_store = SqliteRunStore(run_path)
+    session_store = PostgresSessionStore(pg_dsn)
+    run_store = PostgresRunStore(pg_dsn)
     try:
         restarted = _agent(
             model="gpt-5",

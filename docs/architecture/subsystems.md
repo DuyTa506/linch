@@ -415,7 +415,7 @@ flowchart TD
 |---|---|---|---|
 | `StateFileBackend` | In-memory dict | Per-session when the filesystem feature is enabled | Zero-overhead ephemeral scratch |
 | `DiskFileBackend` | Real files under a root dir | Until deleted | Want human-inspectable files; root defaults to `.linch/offload` (gitignored) |
-| `SqliteFileBackend` | SQLite table | Persistent across sessions | Need cross-session recall (e.g. `/memories/`) |
+| `PostgresFileBackend` | Postgres table | Persistent across sessions | Need cross-session recall (e.g. `/memories/`) |
 | `CompositeFileBackend` | Routes by path prefix | Mixed | Ephemeral scratch + persistent `/memories/` subtree |
 
 **`FileBackend` protocol** — five async methods:
@@ -463,7 +463,7 @@ not the raw payload — matching the session's context budget.
   event for observers/RAG — large results stay within the context budget without being
   lost. A write failure silently returns the original result, so storage trouble never
   crashes a run.
-- **Memory and filesystem are app-owned protocols.** Core ships keyword/SQLite
+- **Memory and filesystem are app-owned protocols.** Core ships state/disk/Postgres filesystem
   backends but no vector DB or embedding dependency — anything heavier is an adapter
   the embedder supplies, keeping the core dependency-light and multi-tenant-safe.
 

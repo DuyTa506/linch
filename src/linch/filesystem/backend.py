@@ -203,7 +203,7 @@ class CompositeFileBackend:
 
         CompositeFileBackend(
             default=StateFileBackend(),
-            routes={"/memories/": SqliteFileBackend("memories.db")},
+            routes={"/memories/": PostgresFileBackend("postgresql://user:pw@host/db")},
         )
 
     Files written under ``/memories/`` land in the persistent backend and

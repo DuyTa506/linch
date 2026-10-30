@@ -59,7 +59,7 @@ linch is designed for application developers building agentic features such as:
 | Reliability | Per-tool timeout, opt-in retry, structured tool errors, recovery hints |
 | Context | `ContextBuilder`, RAG context injection, context budgets, compaction ladder (micro-compact, reactive recovery, circuit breaker) |
 | Memory | Run-scoped `/memories/MEMORY.md` index, file-per-fact tools, optional mem0 recipe |
-| Filesystem | Virtual filesystem, automatic large-result offloading, disk/state/sqlite backends |
+| Filesystem | Virtual filesystem, automatic large-result offloading, disk/state/Postgres backends |
 | Safety | Permission engine, tool/path/bash rules, dangerous-action skipping |
 | Budgets | `RunBudget` token/USD caps shared across the subagent tree, warning + exceeded events, graceful stop |
 | Workflows | Deterministic fleet loops: `wf.agent`/`parallel`/`pipeline`/`phase`, journaled resume, shared budgets |
@@ -185,7 +185,7 @@ A `Session` represents one conversation or workflow run. One agent can serve man
 
 ### Deep agent preset
 
-`create_deep_agent()` returns an `Agent` with long-horizon orchestration defaults: durable run/session SQLite storage, task planning tools, specialist subagents (researcher, planner, implementer), a persistent `/memories` virtual filesystem partition, and deepened system prompt with planning/verification doctrine.
+`create_deep_agent()` returns an `Agent` with long-horizon orchestration defaults: task planning tools, specialist subagents (researcher, planner, implementer), and a deepened system prompt with planning/verification doctrine. Durable profiles require explicit `PostgresSessionStore`, `PostgresRunStore`, and filesystem configuration; see [Deep agent](docs/usage/deep-agent.md). Use `durable=False` for an ephemeral demo.
 
 `coordinator=True` turns the parent into a pure orchestrator — it loses heavy tools (Edit/Write/Bash) and gains `SubagentContinueTool` and `TaskStopTool`. Workers receive full tool access. Background workers (`run_in_background=True` on Subagent) deliver results via `<task-notification>` at the top of the next turn. Fork/continue lets you re-engage any retained worker with its full prior context via `SubagentContinue`.
 

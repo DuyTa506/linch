@@ -10,7 +10,6 @@ from linch.run_store import (
     RUN_CONTRACT_META_KEY,
     InMemoryRunStore,
     RunContractMismatchError,
-    SqliteRunStore,
     build_run_contract,
     compare_run_contract,
     ensure_run_contract_compatible,
@@ -181,8 +180,8 @@ async def test_run_meta_contract_is_deep_copied_in_memory() -> None:
     assert restored.fingerprint == _contract().fingerprint
 
 
-async def test_sqlite_persistence_sanitizes_arbitrary_event_metadata(tmp_path: Path) -> None:
-    store = SqliteRunStore(tmp_path / "runs.db")
+async def test_memory_persistence_sanitizes_arbitrary_event_metadata(tmp_path: Path) -> None:
+    store = InMemoryRunStore()
     try:
         meta = run_meta_with_contract(_contract(), {"path": tmp_path, "labels": {"b", "a"}})
         await store.create_run("session-1", id="run-1", meta=meta)

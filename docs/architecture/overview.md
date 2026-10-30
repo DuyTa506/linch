@@ -33,8 +33,8 @@ graph TD
         end
 
         subgraph Storage["Storage"]
-            SS["SessionStore\nInMemory · SQLite"]
-            RS["RunStore\nInMemory · SQLite"]
+            SS["SessionStore\nInMemory · Postgres"]
+            RS["RunStore\nInMemory · Postgres"]
         end
 
         subgraph Knowledge["Knowledge"]
@@ -42,7 +42,7 @@ graph TD
         end
 
         subgraph Filesystem["Filesystem"]
-            FS["FileBackend\nState · Disk · SQLite · Composite"]
+            FS["FileBackend\nState · Disk · Postgres · Composite"]
             OFF["OffloadConfig\nthreshold · preview · prefix"]
         end
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from .core import ClaimableMailbox, InMemoryMailbox, Mailbox, MailboxClaim, MailboxMessage
 from .correlation import Correlator
-from .sqlite import SqliteMailbox
 
 __all__ = [
     "Correlator",
@@ -13,5 +12,4 @@ __all__ = [
     "Mailbox",
     "MailboxClaim",
     "MailboxMessage",
-    "SqliteMailbox",
 ]

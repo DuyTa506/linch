@@ -134,7 +134,7 @@ work.
 | Durable run contract | Canonical execution inputs are fingerprinted and compared on resume; current wire-3 state and a verified contract are required, and old runs must start anew | [migration-3.0.md](./migration-3.0.md) |
 | Portable session forks | Validated message-prefix forks preserve relevant metadata while rejecting unsafe tool-exchange boundaries; live work is not copied | [migration-2.0.md](./migration-2.0.md#session-forks) |
 | Provider-neutral compaction | Compaction and durable snapshots preserve pairing and fall back safely to full history when cache state is malformed | [architecture/compaction.md](./architecture/compaction.md) |
-| Concurrent storage allocation | Session/run allocation is transaction-safe under concurrent creators in SQLite and Postgres | [migration-2.0.md](./migration-2.0.md#compaction-and-storage-fixes) |
+| Concurrent storage allocation | Session/run allocation is transaction-safe under concurrent creators in Postgres | [migration-2.0.md](./migration-2.0.md#compaction-and-storage-fixes) |
 
 ### Deferred: central-loop structural split
 

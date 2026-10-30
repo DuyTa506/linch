@@ -113,8 +113,9 @@ double-release (abort + normal completion) cannot raise.
 ## `Mailbox` — peer-to-peer messages between agents
 
 The mailbox is the substrate for inter-agent messaging. `InMemoryMailbox` is the
-in-process default; implement the protocol for a durable or cross-process inbox (SQLite,
-Redis, a queue).
+only built-in implementation, with process-lifetime state; implement the protocol
+for a durable or cross-process inbox (Postgres, Redis, a queue). Mailboxes move to
+`linch.ext` in WP10.
 
 ```python
 from dataclasses import dataclass, field
@@ -148,11 +149,12 @@ handle you choose). `type` is a neutral category *you* interpret. Pair with the
 
 ---
 
-## `ScheduleStore` — durable time triggers
+## `ScheduleStore` — time triggers
 
 `SchedulerLoop` fires `Schedule`s (cron or interval) and reads/writes them through a
-`ScheduleStore`. `InMemoryScheduleStore` and durable `SqliteScheduleStore` ship;
-implement the protocol for another backend (Postgres, a cloud scheduler).
+`ScheduleStore`. Only `InMemoryScheduleStore` ships; its state lasts for the
+process lifetime. Implement the protocol for an external backend. Durable
+scheduling is planned in WP6 with PgQueuer.
 
 ```python
 from typing import Protocol
@@ -171,9 +173,9 @@ them — `Schedule.compute_next_run()` owns the timing math, so a custom store n
 re-implements cron parsing.
 
 For multi-process durability, also guard firing with a lock row so two processes
-sharing one store don't double-fire the same schedule. `SqliteScheduleStore` is the
-reference for the persistence shape; see [the scheduling section of the roadmap](../ROADMAP.md)
-for the loop contract.
+sharing one store don't double-fire the same schedule. Host adapters can implement
+the optional claim/lease protocols; see [Coordination](./coordination.md) for the
+loop contract.
 
 ---
 

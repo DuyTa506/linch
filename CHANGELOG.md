@@ -7,6 +7,15 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
 
 ## Unreleased
 
+- Remove all SQLite stores and their executor. Durable sessions, runs, and
+  virtual files use Postgres; InMemory stores remain for tests and development.
+  Built-in mailboxes and scheduling now last only for the process lifetime.
+- Require explicit session/run stores and an explicit enabled filesystem for
+  `create_deep_agent(durable=True)`; use `durable=False` for an ephemeral preset.
+- Read durable run reports from Postgres via `scripts/run_report.py --dsn` or
+  `LINCH_POSTGRES_DSN`; remove `--runs-db`. Runtime benchmarks use memory stores
+  and no longer apply former database latency thresholds.
+
 - Require Python 3.11+; remove the Python 3.10 scaffold TOML fallbacks.
 - Require shared wire version 3 for all persisted envelopes, including workflow
   metadata. Reject missing, old, or unknown versions; start new runs and use

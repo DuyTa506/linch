@@ -89,7 +89,12 @@ class MyTool(BaseTool):  # ← don't do this
 
 ### No blocking I/O in the core loop
 
-Everything in the `loop/` package, `scheduler.py`, `compaction.py`, and all providers must be async. For a blocking sync call (disk, CPU, a long-lived `sqlite3` connection) use `run_blocking` from `linch._blocking` — it offloads onto a **bounded daemon thread** (per-loop concurrency cap, reliable `call_soon_threadsafe` wakeup) so the event loop is never blocked and a hung call never blocks interpreter/test teardown. For a long-lived `sqlite3` connection use the `SqliteExecutor` helper (`linch.storage._executor.SqliteExecutor`): it serializes all access behind a lock and runs the work through `run_blocking`, so only one operation touches the connection at a time. Prefer these over `asyncio.to_thread` / `loop.run_in_executor(None, ...)`, which use the loop's default `ThreadPoolExecutor`: those threads may be non-daemon (causing interpreter/test teardown to hang on a stuck call) and have different per-loop lifecycle and queueing semantics compared to the bounded per-loop concurrency cap and daemon-thread teardown that `run_blocking` provides.
+Everything in the `loop/` package, `scheduler.py`, `compaction.py`, and all providers
+must be async. Use an asyncio-native client for database I/O (the Postgres
+backends use asyncpg). For blocking disk or non-database client calls, use
+`run_blocking` from `linch._blocking`: it offloads onto bounded daemon threads
+with a per-loop concurrency cap and reliable `call_soon_threadsafe` wakeup.
+Avoid the default executor for calls that could hang during interpreter teardown.
 
 ### Extension points go through hooks
 
@@ -174,7 +179,7 @@ async def stream(self, req):
 
 ### Use InMemorySessionStore
 
-Use `InMemorySessionStore` in all tests. `SqliteSessionStore` writes to disk and makes teardown harder.
+Use `InMemorySessionStore` for ordinary unit tests. Durable restart/conformance tests use Postgres through the isolated `pg_dsn` fixture and `AGENT_KIT_TEST_PG_DSN`.
 
 ### Lazy imports in files that co-exist with test_hardening.py
 
@@ -237,7 +242,7 @@ The `FileBackend` protocol (`filesystem/backend.py`) is duck-typed — no base c
 Implement six async methods: `read`, `write`, `ls`, `edit`, `exists`, `delete`.
 
 1. Create `src/linch/filesystem/my_backend.py`.
-2. Use `run_blocking` from `linch._blocking` (or an `asyncio`-native client) for any I/O — never block the event loop. For a SQLite backend, use `SqliteExecutor` from `linch.storage._executor` (lock-serialized, work offloaded via `run_blocking`). See `DiskFileBackend` (disk I/O via `run_blocking`) and `SqliteFileBackend` (`SqliteExecutor`) for reference patterns.
+2. Use `run_blocking` from `linch._blocking` (or an `asyncio`-native client) for any I/O — never block the event loop. See `DiskFileBackend` for disk I/O via `run_blocking` and `PostgresFileBackend` for native async database I/O.
 3. Call `normalize_path(path)` at the entry of every method to canonicalize paths.
 4. `read` must raise `FileNotFoundError` for missing paths; `edit` must raise `ValueError` when `old_string` is absent or not unique (and `replace_all=False`); `delete` is a no-op for missing paths.
 5. Export from `filesystem/__init__.py` and `src/linch/__init__.py`.
@@ -286,7 +291,7 @@ src/linch/          core library
   _blocking.py          run_blocking: bounded daemon-thread offload for sync I/O
   context/              ContextBuilder protocol + budget/result types
   memory/               *(removed in 3.0; use file memory through context/hooks)*
-  filesystem/           FileBackend protocol + Scoped/State/Disk/SQLite/Composite backends
+  filesystem/           FileBackend protocol + Scoped/State/Disk/Postgres/Composite backends
                         + ls/read_file/write_file/edit_file tools + OffloadConfig
   scheduler.py          resource-aware parallel tool execution
   compaction.py         context-window management
@@ -297,8 +302,8 @@ src/linch/          core library
   providers/            BaseProvider + OpenAI Chat/Responses/Anthropic/Gemini/llama.cpp/Retry
   tools/                tool protocol, ToolContext, ToolRegistry, built-ins
                         + SubagentContinueTool, TaskStopTool, function tools
-  sessions/             SessionStore + InMemory + SQLite
-  storage/              SqliteExecutor (lock-serialized sqlite, off-loop)
+  sessions/             SessionStore + InMemory + Postgres
+  storage/              Postgres pool/schema helpers
   mcp/                  MCP server adapters
   skills/               SKILL.md loader + skill context reminders
   subagents/            agents.yaml loader + child agent runner + WorkerHandle (workers.py)
@@ -307,7 +312,7 @@ src/linch/          core library
   evals/                offline harness — ScriptedProvider, run_eval, scorers
   reports.py            build_run_report / load_run_report read models
   pricing.py            USD cost table + cost_usd()
-  run_store.py          SqliteRunStore + RunCheckpoint; durable run checkpoint/resume
+  run_store.py          InMemoryRunStore + RunCheckpoint; Postgres in run_stores/
   deep_agent/           create_deep_agent factory; DEEP_AGENT_SYSTEM_PROMPT, COORDINATOR_SYSTEM_PROMPT; subagent roster
 
 tests/
@@ -315,7 +320,7 @@ tests/
   filesystem/           backends, tools, offload unit + end-to-end tests
   loop/                 agent loop, hardening, verification tests
   tools/                tool registry, scheduler, reliability, middleware tests
-  storage/              memory + SqliteRunStore tests
+  storage/              InMemory + Postgres conformance tests
   workflow/             workflow engine/context/journal tests
   observability/        observer/hook telemetry tests
   integration/          live-API tests (skipped without a key)
