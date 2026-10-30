@@ -1133,6 +1133,7 @@ _STOP_REASONS = (
     "stop_sequence",
     "refusal",
     "error",
+    "lease_lost",
     "interrupted",
 )
 
