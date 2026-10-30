@@ -99,12 +99,22 @@ instances. Asyncpg performs database I/O asynchronously.
 
 ## Failure semantics
 
-If a session-store or run-store write fails, the iterator ends with an
-`ErrorEvent` carrying the exception's class name and retryability, followed by
-a `ResultEvent(subtype="error")`. The loop attempts terminal persistence once;
-if that also fails, it logs the secondary failure with the run ID and keeps
-the terminal events available to the caller. Persistence is not retried by the
-loop, so the host must reconcile a run whose store stayed unavailable.
+After a run has been created, if a session-store or run-store write fails, the
+iterator ends with an `ErrorEvent` carrying the exception's class name and
+retryability, followed by a `ResultEvent(subtype="error")`. The loop attempts
+terminal persistence once; if that also fails, it logs the secondary failure
+with the run ID and keeps the terminal events available to the caller.
+Persistence is not retried by the loop, so the host must reconcile a run whose
+store stayed unavailable.
+
+If `create_run` fails, iteration raises that same store exception before the
+loop starts. No terminal events or `AgentStop` are emitted for a run that was
+never created.
+
+Optional provider-view snapshot caching and model-input snapshot deletion or
+pruning are best-effort: ordinary failures are logged and the run continues.
+Saving model-input snapshots remains required and a failure ends the run with
+the typed error pair above.
 
 `LeaseLostError` means another holder owns the run. The loop cancels background
 workers and stops writing immediately, including terminal persistence, buffered
