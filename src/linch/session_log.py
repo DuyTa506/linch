@@ -21,12 +21,14 @@ untracked in-place mutation.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Iterable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Literal
 
-from .types import Message
+from .durability import _strict_json
+from .types import Message, message_to_dict
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,12 +65,14 @@ LogEntry = MessageEntry | ProjectionEntry
 class SessionLog:
     """Append-only log projecting the provider view and full history."""
 
-    __slots__ = ("_entries", "_full", "_derived")
+    __slots__ = ("_entries", "_full", "_derived", "_history_hash", "_history_hashed_count")
 
     def __init__(self) -> None:
         self._entries: list[LogEntry] = []
         self._full: list[Message] = []
         self._derived: list[Message] = []
+        self._history_hash = None
+        self._history_hashed_count = 0
 
     def append(self, message: Message, *, visible: bool = True, historical: bool = True) -> None:
         """Append one message, choosing which projections it joins."""
@@ -130,6 +134,32 @@ class SessionLog:
     def history_count(self) -> int:
         """How many messages the full history holds (no snapshot taken)."""
         return len(self._full)
+
+    def _history_fingerprint(self) -> str:
+        """Hash canonical audit-history JSON, folding only its unprocessed tail.
+
+        Keep the array's closing bracket out of the cached prefix so append
+        needs no rehash. Serialization stays lazy: arbitrary metadata may be
+        appended even when no fingerprint consumer can encode it. A failed tail
+        leaves the previously valid prefix and cursor untouched.
+        """
+        prefix = (
+            self._history_hash.copy() if self._history_hash is not None else hashlib.sha256(b"[")
+        )
+        count = self._history_hashed_count
+        while count < len(self._full):
+            encoded = _strict_json(
+                message_to_dict(self._full[count]), label="model-call input"
+            ).encode("utf-8")
+            if count:
+                prefix.update(b",")
+            prefix.update(encoded)
+            count += 1
+        self._history_hash = prefix
+        self._history_hashed_count = count
+        complete = prefix.copy()
+        complete.update(b"]")
+        return complete.hexdigest()
 
     def last_visible(self) -> Message | None:
         """The newest provider-view message as a detached copy, or ``None``.
