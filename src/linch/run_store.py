@@ -5,7 +5,8 @@ import hashlib
 import json
 import math
 import sqlite3
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -139,6 +140,39 @@ class StoredRunEvent:
     seq: int
     appended_at: str
     event: Event
+
+
+@dataclass(frozen=True, slots=True)
+class RunLease:
+    """A fencing lease held by one worker for one run.
+
+    ``expires_at`` is a Unix timestamp.  Epochs are monotonically increasing
+    per run and are the fencing token: a holder whose epoch is no longer the
+    stored epoch cannot mutate the run.
+    """
+
+    run_id: str
+    owner: str
+    epoch: int
+    expires_at: float
+
+
+class RunLeaseConflictError(RuntimeError):
+    """Raised when a run has an unexpired lease owned by another worker."""
+
+
+class LeaseLostError(RuntimeError):
+    """Raised when a holder attempts a write after its fencing epoch changed."""
+
+
+class RunLeaseStore(Protocol):
+    """Optional capability implemented by stores that support run leases."""
+
+    async def claim(self, run_id: str, owner: str, ttl_s: float) -> RunLease: ...
+
+    async def renew(self, lease: RunLease) -> RunLease: ...
+
+    async def release(self, lease: RunLease) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -1206,11 +1240,30 @@ def _validate_model_input_snapshot(snapshot: ModelInputSnapshot) -> ModelInputSn
     return snapshot
 
 
+def _validate_lease_ttl(ttl_s: float) -> float:
+    if isinstance(ttl_s, bool) or not isinstance(ttl_s, (int, float)):
+        raise ValueError("lease ttl_s must be a finite positive number")
+    ttl = float(ttl_s)
+    if not math.isfinite(ttl) or ttl <= 0:
+        raise ValueError("lease ttl_s must be a finite positive number")
+    return ttl
+
+
+def _lease_lost(run_id: str, expected: int, actual: int | None = None) -> LeaseLostError:
+    detail = f" (stored epoch {actual})" if actual is not None else ""
+    return LeaseLostError(f"lease lost for run {run_id}: expected epoch {expected}{detail}")
+
+
 class InMemoryRunStore:
     def __init__(self) -> None:
         self._runs: dict[str, RunRecord] = {}
         self._events: dict[str, list[StoredRunEvent]] = {}
         self._model_input_snapshots: dict[str, ModelInputSnapshot] = {}
+        # Durable state and holder-local fencing state are kept separately.
+        self._lease_state: dict[str, tuple[str | None, float | None, int]] = {}
+        self._held_leases: dict[str, int] = {}
+        self._lease_ttls: dict[str, float] = {}
+        self._lease_owners: dict[str, str] = {}
 
     async def create_run(
         self,
@@ -1234,7 +1287,64 @@ class InMemoryRunStore:
         )
         self._runs[rid] = record
         self._events[rid] = []
+        self._lease_state.setdefault(rid, (None, None, 0))
         return _copy_record(record)
+
+    async def claim(self, run_id: str, owner: str, ttl_s: float) -> RunLease:
+        ttl = _validate_lease_ttl(ttl_s)
+        if run_id not in self._runs:
+            raise KeyError(f"run not found: {run_id}")
+        current_owner, expires_at, epoch = self._lease_state.get(run_id, (None, None, 0))
+        now = time.time()
+        live = current_owner is not None and expires_at is not None and expires_at > now
+        if live and current_owner != owner:
+            raise RunLeaseConflictError(f"run {run_id} is leased by {current_owner}")
+        next_epoch = epoch if live and current_owner == owner else epoch + 1
+        expires = now + ttl
+        self._lease_state[run_id] = (owner, expires, next_epoch)
+        self._held_leases[run_id] = next_epoch
+        self._lease_ttls[run_id] = ttl
+        self._lease_owners[run_id] = owner
+        return RunLease(run_id, owner, next_epoch, expires)
+
+    async def renew(self, lease: RunLease) -> RunLease:
+        held = self._held_leases.get(lease.run_id)
+        current_owner, expires_at, epoch = self._lease_state.get(lease.run_id, (None, None, 0))
+        if (
+            held != lease.epoch
+            or epoch != lease.epoch
+            or current_owner != lease.owner
+            or expires_at is None
+            or expires_at <= time.time()
+        ):
+            raise _lease_lost(lease.run_id, lease.epoch, epoch)
+        ttl = self._lease_ttls.get(lease.run_id)
+        if ttl is None:
+            raise _lease_lost(lease.run_id, lease.epoch, epoch)
+        renewed = time.time() + ttl
+        self._lease_state[lease.run_id] = (lease.owner, renewed, lease.epoch)
+        return RunLease(lease.run_id, lease.owner, lease.epoch, renewed)
+
+    async def release(self, lease: RunLease) -> None:
+        held = self._held_leases.get(lease.run_id)
+        current_owner, expires_at, epoch = self._lease_state.get(lease.run_id, (None, None, 0))
+        if (
+            held != lease.epoch
+            or epoch != lease.epoch
+            or current_owner != lease.owner
+            or expires_at is None
+        ):
+            raise _lease_lost(lease.run_id, lease.epoch, epoch)
+        self._lease_state[lease.run_id] = (None, None, lease.epoch + 1)
+
+    def _check_lease(self, run_id: str) -> None:
+        held = self._held_leases.get(run_id)
+        if held is None:
+            return
+        current = self._lease_state.get(run_id)
+        actual = current[2] if current is not None else None
+        if actual != held:
+            raise _lease_lost(run_id, held, actual)
 
     async def load_run(self, run_id: str) -> RunRecord | None:
         record = self._runs.get(run_id)
@@ -1247,6 +1357,7 @@ class InMemoryRunStore:
         *,
         status: str = "running",
     ) -> RunRecord:
+        self._check_lease(run_id)
         rec = self._runs[run_id]
         rec.checkpoint = _copy_checkpoint(checkpoint)
         rec.status = status  # type: ignore[assignment]
@@ -1254,6 +1365,7 @@ class InMemoryRunStore:
         return _copy_record(rec)
 
     async def append_event(self, run_id: str, event: Event) -> int:
+        self._check_lease(run_id)
         if run_id not in self._runs:
             raise KeyError(f"run not found: {run_id}")
         bucket = self._events.setdefault(run_id, [])
@@ -1279,6 +1391,7 @@ class InMemoryRunStore:
         provider_attempt: int,
         request: ProviderRequest,
     ) -> ModelInputSnapshot:
+        self._check_lease(run_id)
         if run_id not in self._runs:
             raise KeyError(f"run not found: {run_id}")
         snapshot = create_model_input_snapshot(run_id, provider_attempt, request)
@@ -1290,9 +1403,13 @@ class InMemoryRunStore:
         return _validate_model_input_snapshot(snapshot) if snapshot is not None else None
 
     async def delete(self, snapshot_id: str) -> None:
+        snapshot = self._model_input_snapshots.get(snapshot_id)
+        if snapshot is not None:
+            self._check_lease(snapshot.run_id)
         self._model_input_snapshots.pop(snapshot_id, None)
 
     async def prune(self, run_id: str, keep_ids: Sequence[str] = ()) -> int:
+        self._check_lease(run_id)
         keep = set(keep_ids)
         doomed = [
             snapshot_id
@@ -1304,6 +1421,7 @@ class InMemoryRunStore:
         return len(doomed)
 
     async def mark_completed(self, run_id: str, checkpoint: RunCheckpoint) -> RunRecord:
+        self._check_lease(run_id)
         checkpoint.phase = "completed"
         return await self.save_checkpoint(run_id, checkpoint, status="completed")
 
@@ -1313,6 +1431,7 @@ class InMemoryRunStore:
         checkpoint: RunCheckpoint | None = None,
         error: dict[str, object] | None = None,
     ) -> RunRecord:
+        self._check_lease(run_id)
         rec = self._runs[run_id]
         if checkpoint is not None:
             checkpoint.phase = "failed"
@@ -1359,6 +1478,24 @@ def _init_schema(conn: sqlite3.Connection) -> None:
           on model_input_snapshots (run_id);
         """
     )
+    # Forward-tolerant migration for databases created before lease support.
+    # SQLite has no portable ``ADD COLUMN IF NOT EXISTS``; inspect the table
+    # first and add only the missing columns.  Existing rows remain unleased.
+    columns = {row[1] for row in conn.execute("pragma table_info(runs)")}
+    if not {"lease_owner", "lease_expires_at", "lease_epoch"} <= columns:
+        conn.execute("begin immediate")
+        try:
+            columns = {row[1] for row in conn.execute("pragma table_info(runs)")}
+            if "lease_owner" not in columns:
+                conn.execute("alter table runs add column lease_owner text")
+            if "lease_expires_at" not in columns:
+                conn.execute("alter table runs add column lease_expires_at real")
+            if "lease_epoch" not in columns:
+                conn.execute("alter table runs add column lease_epoch integer not null default 0")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
 
 
 def _record(row: object) -> RunRecord:
@@ -1379,6 +1516,9 @@ class SqliteRunStore:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._exec = SqliteExecutor(self.path, init=_init_schema, wal=True)
+        self._held_leases: dict[str, int] = {}
+        self._lease_ttls: dict[str, float] = {}
+        self._lease_owners: dict[str, str] = {}
 
     async def create_run(
         self,
@@ -1388,6 +1528,37 @@ class SqliteRunStore:
         meta: dict[str, object] | None = None,
     ) -> RunRecord:
         return await self._exec.run(lambda c: _create_run(c, session_id, id, meta or {}))
+
+    async def claim(self, run_id: str, owner: str, ttl_s: float) -> RunLease:
+        ttl = _validate_lease_ttl(ttl_s)
+
+        def remember(lease: RunLease) -> None:
+            self._held_leases[run_id] = lease.epoch
+            self._lease_ttls[run_id] = ttl
+            self._lease_owners[run_id] = owner
+
+        lease = await self._exec.run(
+            lambda conn: _claim_sqlite(conn, run_id, owner, ttl, on_claim=remember)
+        )
+        return lease
+
+    async def renew(self, lease: RunLease) -> RunLease:
+        held = self._held_leases.get(lease.run_id)
+        ttl = self._lease_ttls.get(lease.run_id)
+        if (
+            held != lease.epoch
+            or ttl is None
+            or self._lease_owners.get(lease.run_id) != lease.owner
+        ):
+            raise _lease_lost(lease.run_id, lease.epoch)
+        renewed = await self._exec.run(lambda c: _renew_sqlite(c, lease, ttl))
+        return renewed
+
+    async def release(self, lease: RunLease) -> None:
+        held = self._held_leases.get(lease.run_id)
+        if held != lease.epoch or self._lease_owners.get(lease.run_id) != lease.owner:
+            raise _lease_lost(lease.run_id, lease.epoch)
+        await self._exec.run(lambda c: _release_sqlite(c, lease))
 
     async def load_run(self, run_id: str) -> RunRecord | None:
         return await self._exec.run(lambda c: _load_run(c, run_id))
@@ -1399,15 +1570,27 @@ class SqliteRunStore:
         *,
         status: str = "running",
     ) -> RunRecord:
-        return await self._exec.run(lambda c: _save_checkpoint(c, run_id, checkpoint, status))
+        return await self._exec.run(
+            lambda c: _save_checkpoint(
+                c,
+                run_id,
+                checkpoint,
+                status,
+                held_epoch=self._held_leases.get(run_id),
+            )
+        )
 
     async def append_event(self, run_id: str, event: Event) -> int:
-        return await self._exec.run(lambda c: _append_event(c, run_id, event))
+        return await self._exec.run(
+            lambda c: _append_event(c, run_id, event, held_epoch=self._held_leases.get(run_id))
+        )
 
     async def append_events(self, run_id: str, events: list[Event]) -> list[int]:
         if not events:
             return []
-        return await self._exec.run(lambda c: _append_events(c, run_id, events))
+        return await self._exec.run(
+            lambda c: _append_events(c, run_id, events, held_epoch=self._held_leases.get(run_id))
+        )
 
     async def load_events(self, run_id: str, *, after_seq: int = 0) -> list[StoredRunEvent]:
         return await self._exec.run(lambda c: _load_events(c, run_id, after_seq))
@@ -1418,18 +1601,31 @@ class SqliteRunStore:
         provider_attempt: int,
         request: ProviderRequest,
     ) -> ModelInputSnapshot:
-        snapshot = create_model_input_snapshot(run_id, provider_attempt, request)
-        return await self._exec.run(lambda c: _save_model_input_snapshot(c, snapshot))
+        return await self._exec.run(
+            lambda c: _save_model_input_request(
+                c,
+                run_id,
+                provider_attempt,
+                request,
+                held_epoch=self._held_leases.get(run_id),
+            )
+        )
 
     async def load(self, snapshot_id: str) -> ModelInputSnapshot | None:
         return await self._exec.run(lambda c: _load_model_input_snapshot(c, snapshot_id))
 
     async def delete(self, snapshot_id: str) -> None:
-        await self._exec.run(lambda c: _delete_model_input_snapshot(c, snapshot_id))
+        await self._exec.run(
+            lambda c: _delete_model_input_snapshot(c, snapshot_id, dict(self._held_leases))
+        )
 
     async def prune(self, run_id: str, keep_ids: Sequence[str] = ()) -> int:
         ids = tuple(str(snapshot_id) for snapshot_id in keep_ids)
-        return await self._exec.run(lambda c: _prune_model_input_snapshots(c, run_id, ids))
+        return await self._exec.run(
+            lambda c: _prune_model_input_snapshots(
+                c, run_id, ids, held_epoch=self._held_leases.get(run_id)
+            )
+        )
 
     async def mark_completed(self, run_id: str, checkpoint: RunCheckpoint) -> RunRecord:
         checkpoint.phase = "completed"
@@ -1441,7 +1637,15 @@ class SqliteRunStore:
         checkpoint: RunCheckpoint | None = None,
         error: dict[str, object] | None = None,
     ) -> RunRecord:
-        return await self._exec.run(lambda c: _mark_failed(c, run_id, checkpoint, error))
+        return await self._exec.run(
+            lambda c: _mark_failed(
+                c,
+                run_id,
+                checkpoint,
+                error,
+                held_epoch=self._held_leases.get(run_id),
+            )
+        )
 
     async def close(self) -> None:
         await self._exec.close()
@@ -1459,12 +1663,122 @@ class SqliteRunStore:
         await self.close()
 
 
+def _begin_immediate(conn: sqlite3.Connection) -> None:
+    """Serialize a lease check plus its mutation across SQLite connections."""
+    conn.execute("begin immediate")
+
+
+def _sql_epoch(conn: sqlite3.Connection, run_id: str) -> int:
+    row = conn.execute(
+        "select coalesce(lease_epoch, 0) from runs where id = ?", (run_id,)
+    ).fetchone()
+    if row is None:
+        raise KeyError(f"run not found: {run_id}")
+    return int(row[0] or 0)
+
+
+def _check_sql_lease(
+    conn: sqlite3.Connection,
+    run_id: str,
+    held_epoch: int | None,
+) -> None:
+    if held_epoch is None:
+        return
+    actual = _sql_epoch(conn, run_id)
+    if actual != held_epoch:
+        raise _lease_lost(run_id, held_epoch, actual)
+
+
+def _claim_sqlite(
+    conn: sqlite3.Connection,
+    run_id: str,
+    owner: str,
+    ttl_s: float,
+    on_claim: Callable[[RunLease], None] | None = None,
+) -> RunLease:
+    _begin_immediate(conn)
+    row = conn.execute(
+        "select lease_owner, lease_expires_at, coalesce(lease_epoch, 0) from runs where id = ?",
+        (run_id,),
+    ).fetchone()
+    if row is None:
+        raise KeyError(f"run not found: {run_id}")
+    current_owner = row[0]
+    expires_at = float(row[1]) if row[1] is not None else None
+    epoch = int(row[2] or 0)
+    now = time.time()
+    live = current_owner is not None and expires_at is not None and expires_at > now
+    if live and current_owner != owner:
+        raise RunLeaseConflictError(f"run {run_id} is leased by {current_owner}")
+    next_epoch = epoch if live and current_owner == owner else epoch + 1
+    new_expires = now + ttl_s
+    conn.execute(
+        "update runs set lease_owner = ?, lease_expires_at = ?, lease_epoch = ? where id = ?",
+        (owner, new_expires, next_epoch, run_id),
+    )
+    conn.commit()
+    lease = RunLease(run_id, owner, next_epoch, new_expires)
+    if on_claim is not None:
+        on_claim(lease)
+    return lease
+
+
+def _renew_sqlite(conn: sqlite3.Connection, lease: RunLease, ttl_s: float) -> RunLease:
+    _begin_immediate(conn)
+    row = conn.execute(
+        "select lease_owner, lease_expires_at, coalesce(lease_epoch, 0) from runs where id = ?",
+        (lease.run_id,),
+    ).fetchone()
+    if row is None:
+        raise _lease_lost(lease.run_id, lease.epoch)
+    current_owner = row[0]
+    expires_at = float(row[1]) if row[1] is not None else None
+    actual_epoch = int(row[2] or 0)
+    if (
+        actual_epoch != lease.epoch
+        or current_owner != lease.owner
+        or expires_at is None
+        or expires_at <= time.time()
+    ):
+        raise _lease_lost(lease.run_id, lease.epoch, actual_epoch)
+    renewed = time.time() + ttl_s
+    conn.execute(
+        "update runs set lease_expires_at = ? where id = ? and lease_epoch = ? and lease_owner = ?",
+        (renewed, lease.run_id, lease.epoch, lease.owner),
+    )
+    conn.commit()
+    return RunLease(lease.run_id, lease.owner, lease.epoch, renewed)
+
+
+def _release_sqlite(conn: sqlite3.Connection, lease: RunLease) -> None:
+    _begin_immediate(conn)
+    row = conn.execute(
+        "select lease_owner, lease_expires_at, coalesce(lease_epoch, 0) from runs where id = ?",
+        (lease.run_id,),
+    ).fetchone()
+    if row is None:
+        raise _lease_lost(lease.run_id, lease.epoch)
+    actual_epoch = int(row[2] or 0)
+    if actual_epoch != lease.epoch or row[0] != lease.owner:
+        raise _lease_lost(lease.run_id, lease.epoch, actual_epoch)
+    conn.execute(
+        "update runs set lease_owner = null, lease_expires_at = null, "
+        "lease_epoch = lease_epoch + 1 where id = ? and lease_epoch = ? and lease_owner = ?",
+        (lease.run_id, lease.epoch, lease.owner),
+    )
+    conn.commit()
+
+
 def _create_run(
     conn: sqlite3.Connection,
     session_id: str,
     id: str | None,
     meta: dict[str, object],
 ) -> RunRecord:
+    # Serialize the existence check with insertion across independent store
+    # instances.  Without the write transaction, two creators can both observe
+    # no row and race into the primary-key constraint.
+    _begin_immediate(conn)
     safe_meta = _safe_meta(meta)
     rid = id or str(uuid4())
     row = conn.execute(
@@ -1473,6 +1787,7 @@ def _create_run(
         (rid,),
     ).fetchone()
     if row:
+        conn.commit()
         return _record(row)
     ts = now_iso()
     conn.execute(
@@ -1503,7 +1818,11 @@ def _load_run(conn: sqlite3.Connection, run_id: str) -> RunRecord | None:
 def _save_model_input_snapshot(
     conn: sqlite3.Connection,
     snapshot: ModelInputSnapshot,
+    *,
+    held_epoch: int | None = None,
 ) -> ModelInputSnapshot:
+    _begin_immediate(conn)
+    _check_sql_lease(conn, snapshot.run_id, held_epoch)
     if conn.execute("select 1 from runs where id = ?", (snapshot.run_id,)).fetchone() is None:
         raise KeyError(f"run not found: {snapshot.run_id}")
     conn.execute(
@@ -1522,6 +1841,20 @@ def _save_model_input_snapshot(
     )
     conn.commit()
     return snapshot
+
+
+def _save_model_input_request(
+    conn: sqlite3.Connection,
+    run_id: str,
+    provider_attempt: int,
+    request: ProviderRequest,
+    *,
+    held_epoch: int | None = None,
+) -> ModelInputSnapshot:
+    # Keep canonical request encoding on the executor's worker thread.  This
+    # is intentionally inside the lambda passed to ``SqliteExecutor.run``.
+    snapshot = create_model_input_snapshot(run_id, provider_attempt, request)
+    return _save_model_input_snapshot(conn, snapshot, held_epoch=held_epoch)
 
 
 def _load_model_input_snapshot(
@@ -1547,7 +1880,17 @@ def _load_model_input_snapshot(
     return _validate_model_input_snapshot(snapshot)
 
 
-def _delete_model_input_snapshot(conn: sqlite3.Connection, snapshot_id: str) -> None:
+def _delete_model_input_snapshot(
+    conn: sqlite3.Connection,
+    snapshot_id: str,
+    held_epochs: Mapping[str, int] | None = None,
+) -> None:
+    _begin_immediate(conn)
+    row = conn.execute(
+        "select run_id from model_input_snapshots where id = ?", (snapshot_id,)
+    ).fetchone()
+    if row is not None and held_epochs is not None:
+        _check_sql_lease(conn, row[0], held_epochs.get(row[0]))
     conn.execute("delete from model_input_snapshots where id = ?", (snapshot_id,))
     conn.commit()
 
@@ -1556,7 +1899,11 @@ def _prune_model_input_snapshots(
     conn: sqlite3.Connection,
     run_id: str,
     keep_ids: tuple[str, ...],
+    *,
+    held_epoch: int | None = None,
 ) -> int:
+    _begin_immediate(conn)
+    _check_sql_lease(conn, run_id, held_epoch)
     if keep_ids:
         placeholders = ",".join("?" for _ in keep_ids)
         cursor = conn.execute(
@@ -1574,7 +1921,11 @@ def _save_checkpoint(
     run_id: str,
     checkpoint: RunCheckpoint,
     status: str,
+    *,
+    held_epoch: int | None = None,
 ) -> RunRecord:
+    _begin_immediate(conn)
+    _check_sql_lease(conn, run_id, held_epoch)
     row = conn.execute(
         "select id, session_id, status, created_at, updated_at, checkpoint, meta "
         "from runs where id = ?",
@@ -1600,40 +1951,36 @@ def _save_checkpoint(
     )
 
 
-def _append_event(conn: sqlite3.Connection, run_id: str, event: Event) -> int:
+def _append_event(
+    conn: sqlite3.Connection,
+    run_id: str,
+    event: Event,
+    *,
+    held_epoch: int | None = None,
+) -> int:
+    return _append_events(conn, run_id, [event], held_epoch=held_epoch)[0]
+
+
+def _append_events(
+    conn: sqlite3.Connection,
+    run_id: str,
+    events: list[Event],
+    *,
+    held_epoch: int | None = None,
+) -> list[int]:
+    _begin_immediate(conn)
+    _check_sql_lease(conn, run_id, held_epoch)
     row = conn.execute("select coalesce(max(seq), 0) from run_events where run_id = ?", (run_id,))
-    seq = int(row.fetchone()[0]) + 1
-    ts = now_iso()
-    conn.execute(
-        "insert into run_events (run_id, seq, appended_at, event) values (?, ?, ?, ?)",
-        (
-            run_id,
-            seq,
-            ts,
-            json.dumps(_json_safe(event_to_dict(event), strict=False), allow_nan=False),
-        ),
-    )
-    conn.commit()
-    return seq
-
-
-def _append_events(conn: sqlite3.Connection, run_id: str, events: list[Event]) -> list[int]:
-    # One MAX lookup + executemany + one commit, amortizing the per-event round
-    # trip. The executor's locked call rolls back on error, so it is all-or-nothing.
-    base = int(
-        conn.execute(
-            "select coalesce(max(seq), 0) from run_events where run_id = ?", (run_id,)
-        ).fetchone()[0]
-    )
+    base = int(row.fetchone()[0])
     ts = now_iso()
     rows = [
         (
             run_id,
-            base + i,
+            base + index,
             ts,
             json.dumps(_json_safe(event_to_dict(event), strict=False), allow_nan=False),
         )
-        for i, event in enumerate(events, start=1)
+        for index, event in enumerate(events, start=1)
     ]
     conn.executemany(
         "insert into run_events (run_id, seq, appended_at, event) values (?, ?, ?, ?)",
@@ -1667,7 +2014,11 @@ def _mark_failed(
     run_id: str,
     checkpoint: RunCheckpoint | None,
     error: dict[str, object] | None,
+    *,
+    held_epoch: int | None = None,
 ) -> RunRecord:
+    _begin_immediate(conn)
+    _check_sql_lease(conn, run_id, held_epoch)
     row = conn.execute(
         "select id, session_id, status, created_at, updated_at, checkpoint, meta "
         "from runs where id = ?",
