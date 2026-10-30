@@ -52,7 +52,7 @@ features it assembles; MCP is enabled only when servers are configured.
 `durable=True` requires explicit `session_store` and `run_store` adapters plus
 an explicit `filesystem` when that feature is enabled. There are no automatic
 persistent stores or implicit environment-based defaults. Missing configuration
-raises `ValueError`; explicit InMemory adapters are accepted for host-controlled
+raises `ConfigError`; explicit InMemory adapters are accepted for host-controlled
 tests but provide only process-lifetime state. Use `durable=False` for an
 ephemeral demo. When filesystem features are disabled, no filesystem is required.
 
