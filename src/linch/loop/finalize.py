@@ -43,6 +43,7 @@ class FinalizeCtx:
     signatures stay short. Built once per run by ``_run_loop_impl``."""
 
     session: Session
+    runtime: Any
     agent: Any
     run_id: str
     run_record: Any
@@ -231,10 +232,8 @@ async def emit_error_terminal(
     await ctx.end_active_turn()
     async for event in _error_result_tail(
         ctx.session,
-        ctx.agent,
+        runtime=ctx.runtime,
         run_id=ctx.run_id,
-        run_record=ctx.run_record,
-        checkpoint=ctx.checkpoint,
         total=total,
         duration_ms=dur,
         running_cost=running_cost,

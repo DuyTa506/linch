@@ -111,8 +111,11 @@ class _FailCompletedStore:
 
 
 class _FailCreateStore:
+    def __init__(self) -> None:
+        self.error = OSError("run creation failed")
+
     async def create_run(self, session_id: str, **kwargs: Any) -> Any:
-        raise OSError("run creation failed")
+        raise self.error
 
 
 class _FailCompletedAndFailedStore(_FailCompletedStore):
@@ -249,23 +252,23 @@ async def test_session_append_failure_without_run_store_is_terminalized() -> Non
     assert stop.calls == 1
 
 
-async def test_run_creation_failure_is_memory_only_terminal_tail() -> None:
+async def test_run_creation_failure_raises_before_loop() -> None:
     from linch.sessions import InMemorySessionStore
 
     stop = _StopCounter()
+    store = _FailCreateStore()
     agent = _agent(
         session_store=InMemorySessionStore(),
-        run_store=_FailCreateStore(),
+        run_store=store,
         hooks=[stop],
     )
     session = await agent.session(id="create-failure")
 
-    events = await _events(session)
+    with pytest.raises(OSError, match="run creation failed") as raised:
+        await _events(session)
 
-    assert [event.type for event in events] == ["error", "result"]
-    assert events[0].error["name"] == "OSError"
-    assert events[1].subtype == "error"
-    assert stop.calls == 1
+    assert raised.value is store.error
+    assert stop.calls == 0
 
 
 async def test_secondary_terminal_write_is_logged_with_run_and_original_context(
@@ -337,22 +340,6 @@ async def test_exact_model_input_snapshot_failure_keeps_original_exception_class
 
 
 @pytest.mark.parametrize("events_to_consume", [1, 2])
-async def test_create_failure_closing_after_terminal_event_still_dispatches_stop(
-    events_to_consume: int,
-) -> None:
-    stop = _StopCounter()
-    agent = _agent(session_store=_FailSessionStore(), run_store=_FailCreateStore(), hooks=[stop])
-    session = await agent.session(id="create-close")
-    iterator = session.run("hello")
-
-    events = [await anext(iterator) for _ in range(events_to_consume)]
-    assert events[0].type == "error"
-    await iterator.aclose()
-
-    assert stop.calls == 1
-
-
-@pytest.mark.parametrize("events_to_consume", [1, 2])
 async def test_startup_failure_closing_after_terminal_event_still_dispatches_stop(
     events_to_consume: int,
 ) -> None:
@@ -378,9 +365,10 @@ async def test_startup_failure_closing_after_terminal_event_still_dispatches_sto
     ("store_factory", "message"),
     [(_FailPruneStore, "snapshot prune failed"), (_FailDeleteStore, "snapshot delete failed")],
 )
-async def test_exact_model_input_cleanup_failure_terminalizes_run(
+async def test_exact_model_input_cleanup_failure_is_best_effort(
     store_factory: Any,
     message: str,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     from linch.durability import DurabilityOptions
     from linch.sessions import InMemorySessionStore
@@ -396,13 +384,15 @@ async def test_exact_model_input_cleanup_failure_terminalizes_run(
 
     events = await _events(session)
 
-    assert [event.type for event in events[-2:]] == ["error", "result"]
-    assert events[-2].error["name"] == "OSError"
-    assert events[-2].error["message"] == message
+    assert events[-1].type == "result"
+    assert events[-1].subtype == "success"
+    assert message in caplog.text
     assert stop.calls == 1
 
 
-async def test_provider_snapshot_write_failure_is_not_swallowed() -> None:
+async def test_provider_snapshot_write_failure_is_best_effort(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     from linch.loop.runtime import maybe_save_provider_snapshot
 
     session_store = _FailProviderSnapshotStore()
@@ -411,8 +401,9 @@ async def test_provider_snapshot_write_failure_is_not_swallowed() -> None:
     await session.append([])
     session.session_log.record_projection([], reason="test")
 
-    with pytest.raises(OSError, match="provider snapshot failed"):
-        await maybe_save_provider_snapshot(session)
+    await maybe_save_provider_snapshot(session)
+
+    assert "provider snapshot failed" in caplog.text
 
 
 async def test_alignment_append_failure_escapes_for_typed_run_terminal() -> None:
@@ -453,5 +444,66 @@ async def test_terminal_mark_failed_failure_is_not_retried() -> None:
 
     events = await _events(session)
 
-    assert events[-1].type == "result"
+    assert [event.type for event in events[-2:]] == ["error", "result"]
+    assert events[-2].error["name"] == "OSError"
+    assert events[-2].error["message"] == "failed status write"
     assert store.mark_failed_calls == 1
+
+
+async def test_abort_terminal_write_failure_marks_failed_once_before_error_pair() -> None:
+    from linch.run_store import InMemoryRunStore
+    from linch.sessions import InMemorySessionStore
+
+    class FailAbortStore(InMemoryRunStore):
+        failed_calls = 0
+
+        async def save_checkpoint(
+            self, run_id: str, checkpoint: Any, *, status: str = "running"
+        ) -> Any:
+            if status == "aborted":
+                raise OSError("abort status failed")
+            return await super().save_checkpoint(run_id, checkpoint, status=status)
+
+        async def mark_failed(self, run_id: str, checkpoint: Any = None, error: Any = None) -> Any:
+            self.failed_calls += 1
+            return await super().mark_failed(run_id, checkpoint, error=error)
+
+    store = FailAbortStore()
+    stop = _StopCounter()
+    agent = _agent(session_store=InMemorySessionStore(), run_store=store, hooks=[stop])
+    session = await agent.session(id="abort-failure")
+    iterator = session.run("hello")
+    system = await anext(iterator)
+    session.abort()
+    events = [event async for event in iterator]
+    run = await store.load_run(system.run_id)
+    assert run is not None and run.status == "failed"
+    assert store.failed_calls == 1
+    assert [event.type for event in events[-2:]] == ["error", "result"]
+    assert events[-2].error["name"] == "OSError"
+    assert stop.calls == 1
+
+
+@pytest.mark.parametrize("close_after", ["error", "result", None])
+async def test_blocked_prompt_stops_once_even_when_closed_at_terminal(
+    close_after: str | None,
+) -> None:
+    from linch import HookResult
+    from linch.run_store import InMemoryRunStore
+    from linch.sessions import InMemorySessionStore
+
+    class BlockHook(_StopCounter):
+        def on_user_prompt_submit(self, ctx: Any) -> Any:
+            return HookResult.block("blocked")
+
+    stop = BlockHook()
+    agent = _agent(session_store=InMemorySessionStore(), run_store=InMemoryRunStore(), hooks=[stop])
+    session = await agent.session()
+    iterator = session.run("hello")
+    try:
+        async for event in iterator:
+            if event.type == close_after:
+                break
+    finally:
+        await iterator.aclose()
+    assert stop.calls == 1

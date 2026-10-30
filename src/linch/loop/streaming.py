@@ -35,6 +35,7 @@ from ..model_calls import (
 from ..pricing import cost_usd
 from ..providers.limiter import provider_slot
 from ..providers.retry import RetryOptions, _delay_for_error
+from ..run_store import LeaseLostError
 from ..session import RunOptions, Session
 from ..types import (
     AssistantAssembly,
@@ -439,10 +440,12 @@ async def _accounted_primary_stream(
                 rejected_native=state.native_failure is not None,
             )
             return
+    except LeaseLostError:
+        raise
     except BaseException as exc:
         if not terminal_attempted:
             terminal_attempted = True
-            if isinstance(exc, _ModelCallError) and exc.code == "persistence_failed":
+            if ledger._persistence_failed:
                 pass
             elif not started:
                 await ledger.abandon(intent, reason="delivery_not_dispatched")

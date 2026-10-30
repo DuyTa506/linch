@@ -72,11 +72,18 @@ from .dispatch import (
     dispatch_user_prompt,
 )
 from .request import build_user_message
-from .terminals import _budget_exhausted_tail, _TerminalStatusWriteError
+from .terminals import _budget_exhausted_tail
 
 
 def _error_payload(exc: Exception) -> dict[str, object]:
     """Build the stable error envelope used by terminal ErrorEvents."""
+    # The journal has one known persistence wrapper; report its backend cause.
+    if (
+        isinstance(exc, _ModelCallError)
+        and exc.code == "persistence_failed"
+        and isinstance(exc.__cause__, Exception)
+    ):
+        exc = exc.__cause__
     retryable = getattr(exc, "retryable", False)
     payload: dict[str, object] = {
         "name": exc.__class__.__name__,
@@ -87,36 +94,6 @@ def _error_payload(exc: Exception) -> dict[str, object]:
     if isinstance(status, int):
         payload["status"] = status
     return payload
-
-
-def _terminal_original_exception(exc: Exception) -> Exception:
-    """Unwrap a terminal marker while retaining the store's original class."""
-    if isinstance(exc, _TerminalStatusWriteError):
-        return exc.original
-    if (
-        isinstance(exc, _ModelCallError)
-        and exc.code == "persistence_failed"
-        and isinstance(exc.__cause__, Exception)
-    ):
-        return _terminal_original_exception(exc.__cause__)
-    return exc
-
-
-def _lease_loss(exc: BaseException) -> LeaseLostError | None:
-    """Find fencing failures through model-call and compaction wrappers."""
-    pending = [exc]
-    seen: set[int] = set()
-    while pending:
-        current = pending.pop()
-        if id(current) in seen:
-            continue
-        seen.add(id(current))
-        if isinstance(current, LeaseLostError):
-            return current
-        pending.extend(
-            nested for nested in (current.__cause__, current.__context__) if nested is not None
-        )
-    return None
 
 
 def require_model_input_snapshot_store(agent: Any) -> Any:
@@ -171,6 +148,8 @@ def checkpoint_extension_state(
     for key, hook in checkpointable_hooks.items():
         try:
             state = hook.checkpoint_state(session, run_id)
+        except LeaseLostError:
+            raise
         except Exception as exc:
             raise RuntimeError(f"checkpointable hook {key!r} failed to save state") from exc
         if not isinstance(state, dict) or not all(isinstance(name, str) for name in state):
@@ -205,6 +184,8 @@ def restore_checkpointable_hooks(
             raise ConfigError(f"checkpoint state for hook {key!r} must be a dict with string keys")
         try:
             hook.restore_checkpoint_state(dict(state), session, run_id)
+        except LeaseLostError:
+            raise
         except Exception as exc:
             raise RuntimeError(f"checkpointable hook {key!r} failed to restore state") from exc
 
@@ -339,55 +320,38 @@ async def drain_alignment(
     entries = list(queue)
     queue.clear()
     for entry in entries:
-        persistence_failure = False
         try:
-            prompt, images, hook_events, block_reason = await dispatch_user_prompt_fn(
-                entry.prompt,
-                entry.images,
-                "align",
-            )
+            try:
+                prompt, images, hook_events, block_reason = await dispatch_user_prompt_fn(
+                    entry.prompt, entry.images, "align"
+                )
+            except LeaseLostError:
+                raise
+            except Exception as exc:
+                if not entry.future.done():
+                    entry.future.set_exception(exc)
+                error_event: Event = ErrorEvent(error=_error_payload(exc))
+                await _persist_event(session, run_id, error_event)
+                yield error_event
+                continue
             for hook_event in hook_events:
-                try:
-                    await _persist_event(session, run_id, hook_event)
-                except Exception as exc:
-                    persistence_failure = True
-                    if not entry.future.done():
-                        entry.future.set_exception(exc)
-                    raise
+                await _persist_event(session, run_id, hook_event)
                 yield hook_event
             if block_reason is not None:
                 if not entry.future.done():
                     entry.future.set_exception(ConfigError(block_reason))
                 continue
             user_message = build_user_message(prompt, images)
-            try:
-                await store_call(session, "session.append", session.append([user_message]))
-            except Exception as exc:
-                persistence_failure = True
-                if not entry.future.done():
-                    entry.future.set_exception(exc)
-                raise
+            await store_call(session, "session.append", session.append([user_message]))
             event: Event = UserEvent(message=user_message, subtype="alignment")
-            try:
-                await _persist_event(session, run_id, event)
-            except Exception as exc:
-                persistence_failure = True
-                if not entry.future.done():
-                    entry.future.set_exception(exc)
-                raise
+            await _persist_event(session, run_id, event)
             if not entry.future.done():
                 entry.future.set_result(None)
             yield event
-        except Exception as exc:
+        except BaseException as exc:
             if not entry.future.done():
                 entry.future.set_exception(exc)
-            error_event: Event = ErrorEvent(
-                error={"name": type(exc).__name__, "message": str(exc), "retryable": False}
-            )
-            if persistence_failure or _lease_loss(exc) is not None:
-                raise
-            await _persist_event(session, run_id, error_event)
-            yield error_event
+            raise
 
 
 async def drain_child_events(session: Session, run_id: str) -> AsyncIterator[Event]:
@@ -435,7 +399,12 @@ async def maybe_save_provider_snapshot(session: Session) -> None:
         covers_seq=getattr(session, "_last_seq", session.session_log.history_count),
         projection_id=(session.last_compaction_info or {}).get("projection_id"),
     )
-    await store_call(session, "session.save_provider_snapshot", saver(session.id, snapshot))
+    try:
+        await store_call(session, "session.save_provider_snapshot", saver(session.id, snapshot))
+    except LeaseLostError:
+        raise
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Failed to save provider snapshot: %s", exc)
 
 
 class TurnLifecycle:
@@ -580,102 +549,38 @@ class RunRuntime:
         self.dispatch_stop: Callable[..., Awaitable[Any]]
         self._checkpointable_hooks_fn: Callable[..., dict[str, Any]] | None = None
         self._checkpoint_extension_state_fn: Callable[..., dict[str, Any]] | None = None
-        self.terminal_exception: Exception | None = None
-        self._terminal_write_failure: Exception | None = None
-        # Once a terminal flush has failed, the pending buffer must not be
-        # retried by runner teardown.  A second write can duplicate a terminal
-        # event or mask the original store failure.
-        self._terminal_flush_failed = False
         self.lease_lost: LeaseLostError | None = None
 
-    def _record_lease_loss(self, exc: BaseException) -> bool:
-        loss = _lease_loss(exc)
-        if loss is not None:
-            self.lease_lost = loss
-            self.terminal_exception = loss
-        return self.lease_lost is not None
-
-    @property
-    def terminal_flush_failed(self) -> bool:
-        """Whether terminal event persistence failed and teardown must not retry."""
-        return self._terminal_flush_failed
-
-    def _log_secondary_write_failure(
-        self,
-        operation: str,
-        secondary: Exception,
-        original: Exception,
-    ) -> None:
-        self._record_lease_loss(secondary)
-        # Keep the original exception attached to the secondary failure.  This
-        # gives hosts a useful causal chain while retaining the original error
-        # as the run's typed ErrorEvent.
-        if secondary.__cause__ is None and secondary.__context__ is None:
-            secondary.__context__ = original
-        logging.getLogger(__name__).warning(
-            "run %s terminal %s failed after %s (%s): %s",
-            self.run_id,
-            operation,
-            original.__class__.__name__,
-            original,
-            secondary,
-            exc_info=(type(secondary), secondary, secondary.__traceback__),
-        )
-
-    async def _persist_terminal_event(self, event: Event, original: Exception) -> None:
-        """Best-effort terminal event write, preserving the original failure."""
+    async def _attempt(
+        self, operation: str, awaitable: Callable[[], Awaitable[Any]], original: Exception
+    ) -> Exception | None:
+        """Attempt terminal persistence once, keeping the causal failure visible."""
         if self.lease_lost is not None:
-            return
+            return self.lease_lost
         try:
-            await _persist_event(self.session, self.run_id, event)
+            await awaitable()
+        except LeaseLostError as exc:
+            self.lease_lost = exc
+            await cancel_background_workers(self.session)
+            return exc
         except Exception as secondary:
-            self._terminal_write_failure = secondary
-            self._log_secondary_write_failure("event append", secondary, original)
-
-    async def _flush_terminal_events(self, original: Exception) -> None:
-        """Flush terminal events once unless a prior terminal flush failed."""
-        if self.lease_lost is not None or self._terminal_flush_failed:
-            return
-        try:
-            await _flush_events(self.session)
-        except Exception as secondary:
-            self._terminal_flush_failed = True
-            self._terminal_write_failure = secondary
-            self._log_secondary_write_failure("event flush", secondary, original)
-
-    async def _mark_failed_best_effort(
-        self,
-        error: dict[str, object],
-        original: Exception,
-        *,
-        already_attempted: bool = False,
-    ) -> None:
-        store = self.agent.run_store
-        if (
-            self.lease_lost is not None
-            or already_attempted
-            or self.run_record is None
-            or store is None
-        ):
-            return
-        try:
-            await store_call(
-                self.session,
-                "run.mark_failed",
-                store.mark_failed(self.run_id, self.checkpoint, error=error),
+            if secondary.__cause__ is None and secondary.__context__ is None:
+                secondary.__context__ = original
+            logging.getLogger(__name__).warning(
+                "run %s terminal %s failed after %s (%s): %s",
+                self.run_id,
+                operation,
+                type(original).__name__,
+                original,
+                secondary,
+                exc_info=(type(secondary), secondary, secondary.__traceback__),
             )
-        except Exception as secondary:
-            self._log_secondary_write_failure("run.mark_failed", secondary, original)
-
-    async def _close_spans_best_effort(
-        self,
-        close_active_spans: Callable[..., Awaitable[None]],
-        original: Exception,
-    ) -> None:
-        try:
-            await close_active_spans(stop_reason="error")
-        except Exception as secondary:
-            self._log_secondary_write_failure("lifecycle cleanup", secondary, original)
+            return secondary
+        finally:
+            # A failed terminal batch is never retried by iterator teardown.
+            if operation == "event flush":
+                self.session._event_journal = None
+        return None
 
     @classmethod
     async def create(
@@ -957,10 +862,8 @@ class RunRuntime:
         self.terminal_result = self.build_run_result("error", "error", duration_ms=duration_ms)
         async for event in _budget_exhausted_tail(
             self.session,
-            self.agent,
+            runtime=self,
             run_id=self.run_id,
-            run_record=self.run_record,
-            checkpoint=self.checkpoint,
             budget=self.budget,
             total=self.total,
             duration_ms=duration_ms,
@@ -970,97 +873,85 @@ class RunRuntime:
             yield event
 
     async def emit_abort_terminal(
-        self,
-        *,
-        close_active_spans: Callable[..., Awaitable[None]],
+        self, *, close_active_spans: Callable[..., Awaitable[None]]
     ) -> AsyncIterator[Event]:
         """Persist and project the abort terminal while preserving event order."""
-        try:
-            await cancel_background_workers(self.session)
-            duration_ms = int((time.time() - self.started) * 1000)
-            self.terminal_result = self.build_run_result(
-                "aborted", "error", duration_ms=duration_ms
+        await cancel_background_workers(self.session)
+        duration_ms = int((time.time() - self.started) * 1000)
+        original = AbortError("run aborted")
+        self.terminal_result = self.build_run_result("aborted", "error", duration_ms=duration_ms)
+        self.sync_checkpoint_accounting()
+        await self._attempt(
+            "lifecycle cleanup", lambda: close_active_spans(stop_reason="error"), original
+        )
+        event = ResultEvent(
+            subtype="aborted",
+            stop_reason="error",
+            total_usage=self.total,
+            duration_ms=duration_ms,
+            total_cost_usd=self.running_cost,
+            usage_complete=self.ledger.usage_complete,
+        )
+        failure = await self._attempt(
+            "event append",
+            lambda event=event: _persist_event(self.session, self.run_id, event),
+            original,
+        )
+        failure = failure or await self._attempt(
+            "event flush", lambda: _flush_events(self.session), original
+        )
+        store = self.agent.run_store
+        if failure is None and self.run_record is not None and store is not None:
+            self.checkpoint.phase = "aborted"
+            self.checkpoint.total_usage = self.total
+            failure = await self._attempt(
+                "run.save_checkpoint",
+                lambda: store_call(
+                    self.session,
+                    "run.save_checkpoint",
+                    store.save_checkpoint(self.run_id, self.checkpoint, status="aborted"),
+                ),
+                original,
             )
-            self.sync_checkpoint_accounting()
-            await self._close_spans_best_effort(close_active_spans, AbortError("run aborted"))
-            event: Event = ResultEvent(
-                subtype="aborted",
-                stop_reason="error",
-                total_usage=self.total,
-                duration_ms=duration_ms,
-                total_cost_usd=self.running_cost,
-                usage_complete=self.ledger.usage_complete,
-            )
-            abort_error = AbortError("run aborted")
-            await self._persist_terminal_event(event, abort_error)
-            await self._flush_terminal_events(abort_error)
-            if self._terminal_write_failure is not None:
-                raise self._terminal_write_failure
-            store = self.agent.run_store
+        if failure is not None:
             if self.run_record is not None and store is not None:
-                self.checkpoint.phase = "aborted"
-                self.checkpoint.total_usage = self.total
-                try:
-                    await store_call(
+                await self._attempt(
+                    "run.mark_failed",
+                    lambda: store_call(
                         self.session,
-                        "run.save_checkpoint",
-                        store.save_checkpoint(self.run_id, self.checkpoint, status="aborted"),
-                    )
-                except Exception as secondary:
-                    self._log_secondary_write_failure("run.save_checkpoint", secondary, abort_error)
-                    raise
+                        "run.mark_failed",
+                        store.mark_failed(
+                            self.run_id, self.checkpoint, error=_error_payload(failure)
+                        ),
+                    ),
+                    failure,
+                )
+            async for item in self.emit_exception_terminal(failure):
+                yield item
+        else:
             yield event
-        except Exception as exc:
-            # An abort handler is still a run phase: if its terminal write
-            # fails, surface the store failure as the normal typed error tail.
-            async for event in self.emit_exception_terminal(
-                exc,
-                close_active_spans=close_active_spans,
-            ):
-                yield event
 
     async def emit_exception_terminal(
         self,
         exc: Exception,
         *,
-        close_active_spans: Callable[..., Awaitable[None]],
+        close_active_spans: Callable[..., Awaitable[None]] | None = None,
     ) -> AsyncIterator[Event]:
-        """Persist and project an exception terminal while preserving ordering."""
-        self._record_lease_loss(exc)
+        """Persist the typed error pair; callers own their single status attempt."""
         await cancel_background_workers(self.session)
-        status_already_attempted = isinstance(exc, _TerminalStatusWriteError)
-        original = self.lease_lost or _terminal_original_exception(exc)
-        self.terminal_exception = original
+        original = self.lease_lost or exc
         error = _error_payload(original)
         duration_ms = int((time.time() - self.started) * 1000)
-        try:
-            self.terminal_result = self.build_run_result(
-                "error", "error", duration_ms=duration_ms, error=error
+        self.terminal_result = self.build_run_result(
+            "error", "error", duration_ms=duration_ms, error=error
+        )
+        self.sync_checkpoint_accounting()
+        if close_active_spans is not None:
+            await self._attempt(
+                "lifecycle cleanup", lambda: close_active_spans(stop_reason="error"), original
             )
-        except Exception as secondary:
-            # Accounting should not hide a persistence failure.  A minimal
-            # terminal result is still enough for AgentStop cleanup below.
-            self._log_secondary_write_failure("result accounting", secondary, original)
-            self.terminal_result = _AgentResult(
-                run_id=self.run_id,
-                session_id=self.session.id,
-                subtype="error",
-                stop_reason="error",
-                total_usage=self.total,
-                duration_ms=duration_ms,
-                error=error,
-            )
-        try:
-            self.sync_checkpoint_accounting()
-        except Exception as secondary:
-            self._log_secondary_write_failure("checkpoint accounting", secondary, original)
-        await self._close_spans_best_effort(close_active_spans, original)
-
-        # Construct and attempt both terminal events before yielding either of
-        # them.  A failure in the first terminal append must not prevent the
-        # caller from seeing the complete typed error tail.
-        error_event: Event = ErrorEvent(error=error)
-        result_event: Event = ResultEvent(
+        error_event = ErrorEvent(error=error)
+        result_event = ResultEvent(
             subtype="error",
             stop_reason="error",
             total_usage=self.total,
@@ -1068,18 +959,14 @@ class RunRuntime:
             total_cost_usd=self.running_cost,
             usage_complete=self.ledger.usage_complete,
         )
-        await self._persist_terminal_event(error_event, original)
-        await self._persist_terminal_event(result_event, original)
-        self.checkpoint.total_usage = self.total
-        await self._flush_terminal_events(original)
-        await self._mark_failed_best_effort(
-            error,
-            original,
-            already_attempted=status_already_attempted,
-        )
+        for event in (error_event, result_event):
+            await self._attempt(
+                "event append",
+                lambda event=event: _persist_event(self.session, self.run_id, event),
+                original,
+            )
+        await self._attempt("event flush", lambda: _flush_events(self.session), original)
         if self.lease_lost is not None:
-            # A secondary terminal write can discover takeover.  Select the
-            # memory-only lease pair before exposing either terminal event.
             error = _error_payload(self.lease_lost)
             error["retryable"] = False
             error_event = ErrorEvent(error=error)
@@ -1095,8 +982,6 @@ class RunRuntime:
         *,
         snapshot_id: str | None = None,
         keep_ids: tuple[str, ...] = (),
-        original: Exception | None = None,
-        strict: bool = False,
     ) -> None:
         if self.lease_lost is not None or self.model_input_store is None:
             return
@@ -1105,41 +990,24 @@ class RunRuntime:
                 await store_call(
                     self.session, "run.delete", self.model_input_store.delete(snapshot_id)
                 )
+            except LeaseLostError:
+                raise
             except Exception as exc:
-                if self._record_lease_loss(exc):
-                    raise
-                if strict:
-                    raise
-                if original is not None:
-                    self._log_secondary_write_failure("run.delete", exc, original)
-                else:
-                    logging.getLogger(__name__).warning(
-                        "run %s failed to delete model-input snapshot %s: %s",
-                        self.run_id,
-                        snapshot_id,
-                        exc,
-                        exc_info=(type(exc), exc, exc.__traceback__),
-                    )
+                logging.getLogger(__name__).warning(
+                    "Failed to delete model-input snapshot %s: %s", snapshot_id, exc
+                )
         try:
             await store_call(
                 self.session,
                 "run.prune",
                 self.model_input_store.prune(self.run_id, keep_ids=keep_ids),
             )
+        except LeaseLostError:
+            raise
         except Exception as exc:
-            if self._record_lease_loss(exc):
-                raise
-            if strict:
-                raise
-            if original is not None:
-                self._log_secondary_write_failure("run.prune", exc, original)
-            else:
-                logging.getLogger(__name__).warning(
-                    "run %s failed to prune model-input snapshots: %s",
-                    self.run_id,
-                    exc,
-                    exc_info=(type(exc), exc, exc.__traceback__),
-                )
+            logging.getLogger(__name__).warning(
+                "Failed to prune model-input snapshots for run %s: %s", self.run_id, exc
+            )
 
     async def save_checkpoint(
         self,
@@ -1241,7 +1109,6 @@ class RunRuntime:
         if completed_snapshot_id is not None:
             await self.best_effort_snapshot_cleanup(
                 snapshot_id=completed_snapshot_id,
-                strict=True,
             )
 
     async def prepare_provider_call(
@@ -1271,7 +1138,7 @@ class RunRuntime:
             raise ConfigError("run_store returned an invalid model-input snapshot")
         self.checkpoint.provider_attempt = provider_attempt
         self.checkpoint.model_input_snapshot_id = snapshot.id
-        await self.best_effort_snapshot_cleanup(keep_ids=(snapshot.id,), strict=True)
+        await self.best_effort_snapshot_cleanup(keep_ids=(snapshot.id,))
         return request
 
     async def bind_active_primary(self, intent: ModelCallIntent) -> None:
@@ -1294,7 +1161,7 @@ class RunRuntime:
             snapshot = await store_call(
                 self.session, "run.load", self.model_input_store.load(snapshot_id)
             )
-        except UnsupportedWireVersionError:
+        except (LeaseLostError, UnsupportedWireVersionError):
             raise
         except Exception as exc:
             raise ConfigError(

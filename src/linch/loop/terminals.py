@@ -37,41 +37,6 @@ from ..types import (
 from .checkpoint import _flush_events, _persist_event
 from .request import final_text
 
-
-class _TerminalStatusWriteError(RuntimeError):
-    """Mark that a terminal status write was already attempted.
-
-    The runner may catch this failure and build a typed terminal tail.  Keeping
-    the marker on the exception, rather than in task/global state, makes the
-    one-attempt rule local to this terminal operation and preserves the
-    original store exception for the ErrorEvent.
-    """
-
-    status_already_attempted = True
-
-    def __init__(self, original: Exception) -> None:
-        self.original = original
-        super().__init__(str(original))
-
-
-async def _mark_failed_terminal(
-    session: Session,
-    store: Any,
-    run_id: str,
-    checkpoint: Any,
-    error: dict[str, object] | None = None,
-) -> None:
-    """Attempt one durable failed-status write and mark failures as terminal."""
-    try:
-        await store_call(
-            session,
-            "run.mark_failed",
-            store.mark_failed(run_id, checkpoint, error=error),
-        )
-    except Exception as exc:
-        raise _TerminalStatusWriteError(exc) from exc
-
-
 _FENCED_JSON_RE = re.compile(r"```(?:json)?\s*\n?(.*?)```", re.DOTALL | re.IGNORECASE)
 
 
@@ -133,11 +98,9 @@ def _last_assistant_text(session: Session) -> str | None:
 
 async def _budget_exhausted_tail(
     session: Session,
-    agent: Any,
     *,
+    runtime: Any,
     run_id: str,
-    run_record: Any,
-    checkpoint: Any,
     budget: Any,
     total: Usage,
     duration_ms: int,
@@ -173,11 +136,25 @@ async def _budget_exhausted_tail(
         usage_complete=usage_complete,
     )
     await _persist_event(session, run_id, event)
-    store = agent.run_store
-    if run_record is not None and store is not None:
+    store = runtime.agent.run_store
+    checkpoint = runtime.checkpoint
+    if runtime.run_record is not None and store is not None:
         checkpoint.total_usage = total
-        await _flush_events(session)
-        await _mark_failed_terminal(session, store, run_id, checkpoint, error=budget_error)
+        original = RuntimeError("terminal failed-status persistence")
+        failure = await runtime._attempt("event flush", lambda: _flush_events(session), original)
+        status_failure = await runtime._attempt(
+            "run.mark_failed",
+            lambda: store_call(
+                session,
+                "run.mark_failed",
+                store.mark_failed(run_id, checkpoint, error=budget_error),
+            ),
+            failure or original,
+        )
+        if failure is not None or status_failure is not None:
+            async for item in runtime.emit_exception_terminal(failure or status_failure):
+                yield item
+            return
     yield event
 
 
@@ -214,11 +191,9 @@ async def _stop_when_tail(
 
 async def _error_result_tail(
     session: Session,
-    agent: Any,
     *,
+    runtime: Any,
     run_id: str,
-    run_record: Any,
-    checkpoint: Any,
     total: Usage,
     duration_ms: int,
     running_cost: float | None,
@@ -238,11 +213,23 @@ async def _error_result_tail(
         usage_complete=usage_complete,
     )
     await _persist_event(session, run_id, event)
-    store = agent.run_store
-    if run_record is not None and store is not None:
+    store = runtime.agent.run_store
+    checkpoint = runtime.checkpoint
+    if runtime.run_record is not None and store is not None:
         checkpoint.total_usage = total
-        await _flush_events(session)
-        await _mark_failed_terminal(session, store, run_id, checkpoint)
+        original = RuntimeError("terminal failed-status persistence")
+        failure = await runtime._attempt("event flush", lambda: _flush_events(session), original)
+        status_failure = await runtime._attempt(
+            "run.mark_failed",
+            lambda: store_call(
+                session, "run.mark_failed", store.mark_failed(run_id, checkpoint, error=None)
+            ),
+            failure or original,
+        )
+        if failure is not None or status_failure is not None:
+            async for item in runtime.emit_exception_terminal(failure or status_failure):
+                yield item
+            return
     yield event
 
 
@@ -287,11 +274,9 @@ async def _success_result_tail(
 
 async def _max_turns_tail(
     session: Session,
-    agent: Any,
     *,
+    runtime: Any,
     run_id: str,
-    run_record: Any,
-    checkpoint: Any,
     max_turns: int,
     total: Usage,
     duration_ms: int,
@@ -323,11 +308,23 @@ async def _max_turns_tail(
         usage_complete=usage_complete,
     )
     await _persist_event(session, run_id, event)
-    store = agent.run_store
-    if run_record is not None and store is not None:
+    store = runtime.agent.run_store
+    checkpoint = runtime.checkpoint
+    if runtime.run_record is not None and store is not None:
         checkpoint.total_usage = total
-        await _flush_events(session)
-        await _mark_failed_terminal(session, store, run_id, checkpoint, error=turn_error)
+        original = RuntimeError("terminal failed-status persistence")
+        failure = await runtime._attempt("event flush", lambda: _flush_events(session), original)
+        status_failure = await runtime._attempt(
+            "run.mark_failed",
+            lambda: store_call(
+                session, "run.mark_failed", store.mark_failed(run_id, checkpoint, error=turn_error)
+            ),
+            failure or original,
+        )
+        if failure is not None or status_failure is not None:
+            async for item in runtime.emit_exception_terminal(failure or status_failure):
+                yield item
+            return
     yield event
 
 
