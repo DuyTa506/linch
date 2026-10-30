@@ -142,34 +142,6 @@ def context_metadata_contains(key: str, expected: Any = None) -> Callable[..., b
     return _score
 
 
-def memory_recalled(expected_ids: str | list[str] | tuple[str, ...]) -> Callable[..., bool | None]:
-    """Pass when SearchMemory returns all expected memory ids."""
-    from ..events import ToolCallEndEvent
-
-    required = {expected_ids} if isinstance(expected_ids, str) else set(expected_ids)
-
-    def _score(events: list | None = None, **_: Any) -> bool | None:
-        memory_calls = [
-            e
-            for e in (events or [])
-            if isinstance(e, ToolCallEndEvent) and e.tool_name == "SearchMemory"
-        ]
-        if not memory_calls:
-            return None
-
-        found: set[str] = set()
-        for event in memory_calls:
-            if event.tool_result is None:
-                continue
-            _add_strings(found, event.tool_result.metadata.get("result_ids"))
-            for citation in event.tool_result.citations:
-                found.add(citation.id)
-        return required.issubset(found)
-
-    _score.__name__ = "memory_recalled:" + ",".join(sorted(required))
-    return _score
-
-
 def recovery_succeeded(tool_name: str | None = None) -> Callable[..., bool | None]:
     """Pass when a failed tool call is followed by a successful tool call.
 
@@ -206,12 +178,3 @@ def run_completed() -> Callable[..., bool | None]:
 
     _score.__name__ = "run_completed"
     return _score
-
-
-def _add_strings(target: set[str], value: Any) -> None:
-    if isinstance(value, str):
-        target.add(value)
-    elif isinstance(value, list | tuple):
-        for item in value:
-            if isinstance(item, str):
-                target.add(item)

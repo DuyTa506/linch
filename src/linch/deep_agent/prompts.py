@@ -109,10 +109,13 @@ Virtual filesystem:
 - /memories/... paths persist durably across runs (when configured). Use them
   for plans, decisions, and findings worth keeping across sessions.
 
-Memory and skills:
+File memory and skills:
 
-- Use SearchMemory when prior knowledge may help. Use UpsertMemory only for
-  durable facts worth retaining across sessions.
+- Read /memories/MEMORY.md when prior facts may help. It is a one-line-per-file
+  index; each durable fact lives in its own file under /memories/.
+- Use ls, read_file, write_file, and edit_file to inspect or update file memory.
+  Keep MEMORY.md at most 200 lines, and update or delete stale facts and their
+  index entries.
 - Use Skill when a reusable workflow is relevant; follow the skill instructions
   for the current turn.
 

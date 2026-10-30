@@ -45,34 +45,6 @@ async def test_provider_template_streams_normalized_events():
 
 
 @pytest.mark.asyncio
-async def test_memory_store_template_searches_and_filters():
-    from linch.memory import MemoryItem
-
-    module = _load("memory_store_template")
-    store = module.TemplateMemoryStore()
-    await store.upsert(
-        [
-            MemoryItem(
-                id="m1",
-                content="PTO rolls over each January",
-                namespace="hr",
-                metadata={"kind": "policy"},
-            ),
-            MemoryItem(id="m2", content="Deploy notes", namespace="eng"),
-        ]
-    )
-
-    results = await store.search(
-        "pto january",
-        namespace="hr",
-        metadata_filter={"kind": "policy"},
-    )
-
-    assert [result.item.id for result in results] == ["m1"]
-    assert results[0].score == 1.0
-
-
-@pytest.mark.asyncio
 async def test_filesystem_backend_template_behaves_like_file_backend():
     module = _load("filesystem_backend_template")
     backend = module.TemplateFileBackend()

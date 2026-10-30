@@ -12,7 +12,6 @@ import pytest
 _STORES = [
     ("linch.sessions.postgres", "PostgresSessionStore"),
     ("linch.filesystem.postgres", "PostgresFileBackend"),
-    ("linch.memory.postgres", "PostgresMemoryStore"),
     ("linch.run_stores.postgres", "PostgresRunStore"),
 ]
 

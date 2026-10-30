@@ -129,34 +129,6 @@ async def test_pg_create_if_absent_has_one_concurrent_owner() -> None:
         await store.close()
 
 
-# ── MemoryStore ───────────────────────────────────────────────────────────────
-
-
-@needs_pg
-async def test_pg_memory_store_round_trip() -> None:
-
-    from linch.memory.postgres import PostgresMemoryStore
-    from linch.memory.types import MemoryItem
-
-    store = PostgresMemoryStore(DSN)
-    try:
-        items = [
-            MemoryItem(id=f"pg-{i}", content=f"agent memory {i}", namespace="pg-test")
-            for i in range(10)
-        ]
-        await store.upsert(items)
-
-        results = await store.search("agent memory", namespace="pg-test", limit=20)
-        assert len(results) == 10
-
-        # Upsert update
-        await store.upsert([MemoryItem(id="pg-0", content="updated content", namespace="pg-test")])
-        results2 = await store.search("updated", namespace="pg-test", limit=5)
-        assert any(r.item.id == "pg-0" for r in results2)
-    finally:
-        await store.close()
-
-
 # ── FileBackend ───────────────────────────────────────────────────────────────
 
 

@@ -43,21 +43,6 @@ async def test_session_store_concurrent_appends(tmp_path) -> None:
     await store.close()
 
 
-async def test_memory_store_concurrent_upserts(tmp_path) -> None:
-    """50 concurrent upserts to different IDs → all 50 items persisted."""
-    from linch.memory.sqlite import SqliteMemoryStore
-    from linch.memory.types import MemoryItem
-
-    async with SqliteMemoryStore(tmp_path / "mem.db") as store:
-        items = [
-            MemoryItem(id=f"item-{i}", content=f"content {i}", namespace="test") for i in range(50)
-        ]
-        await asyncio.gather(*[store.upsert([item]) for item in items])
-
-        results = await store.search("content", namespace="test", limit=100)
-        assert len(results) == 50
-
-
 async def test_filesystem_backend_concurrent_writes(tmp_path) -> None:
     """50 concurrent write() calls → all 50 paths exist."""
     from linch.filesystem.sqlite import SqliteFileBackend
@@ -158,20 +143,6 @@ async def test_session_store_async_close(tmp_path) -> None:
     await store.create()
     await store.close()
     await store.close()  # second close must not raise
-
-
-async def test_memory_store_sync_close(tmp_path) -> None:
-    """SqliteMemoryStore supports both sync and async context managers."""
-    from linch.memory.sqlite import SqliteMemoryStore
-    from linch.memory.types import MemoryItem
-
-    # sync with
-    with SqliteMemoryStore(tmp_path / "mem.db") as store:
-        await store.upsert([MemoryItem(id="x", content="hello", namespace="test")])
-
-    # async with
-    async with SqliteMemoryStore(tmp_path / "mem2.db") as store:
-        await store.upsert([MemoryItem(id="y", content="world", namespace="test")])
 
 
 async def test_filesystem_backend_sync_close(tmp_path) -> None:
