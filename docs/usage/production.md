@@ -75,7 +75,7 @@ section of [Agent & session](./agent.md).
 ## 4. Resume after a restart
 
 With a `run_store`, a run interrupted by a deploy or crash resumes from its last
-checkpoint after its 2.0 run contract is verified. Permission decisions and
+checkpoint after its version-3 run contract is verified. Permission decisions and
 durably recorded tool completions replay; a side effect that happened before
 its completion record became durable may execute again. Tool integrations must
 use `ctx.idempotency_key` to reconcile this at-least-once boundary.
@@ -85,11 +85,11 @@ async for event in session.resume(run_id):
     await publish(event)
 ```
 
-Runs created before Linch 2.0 have no persisted execution contract and are rejected by
-default. During a deliberate migration, pass
-`RunOptions(allow_legacy_resume=True)` and accept that the original authority inputs
-cannot be verified; otherwise start a new run. See the
-[2.0 migration guide](../migration-2.0.md#durable-runs-and-legacy-records).
+Resume requires current wire-3 state and a verified execution contract.
+Pre-3.0, missing-version, unknown-version, and contractless runs are rejected;
+start a new run. Built-in SQLite and Postgres stores reject incompatible
+existing schemas without upgrading them; use fresh databases. See the
+[3.0 migration guide](../migration-3.0.md).
 
 ## 5. Shut down without leaking work
 
@@ -133,8 +133,9 @@ For cron/webhook/interval/CI-driven recurring work, drive
 
 ## Optional dependencies are opt-in
 
-The core install pulls only the OpenAI SDK, PyYAML, and `typing_extensions`.
-Everything else is an extra and fails with an explicit
+The core install includes the OpenAI SDK, PyYAML, `typing_extensions`, and
+`jsonschema`. Configured structured-output schemas are always validated.
+Integration dependencies are extras and fail with an explicit
 `pip install 'linch[...]'` message when missing:
 
 | Extra | Enables |

@@ -94,24 +94,44 @@ def test_contract_mismatch_reports_stable_field_path() -> None:
         ensure_run_contract_compatible(stored, requested)
 
 
-def test_contract_corrupt_fingerprint_fails_closed() -> None:
+@pytest.mark.parametrize("fingerprint", [None, "", 7, "sha256:not-the-content"])
+def test_contract_invalid_fingerprint_fails_closed(fingerprint) -> None:
     wire = run_contract_to_dict(_contract())
-    wire["fingerprint"] = "sha256:not-the-content"
-    stored = run_contract_from_dict(wire)
-
-    comparison = compare_run_contract(stored, _contract())
-
-    assert comparison.compatible is False
-    assert comparison.differences[0].path == "$.fingerprint"
+    wire["fingerprint"] = fingerprint
+    with pytest.raises(ValueError, match="fingerprint"):
+        run_contract_from_dict(wire)
 
 
-def test_legacy_contract_requires_explicit_unsafe_override() -> None:
-    requested = _contract()
+def test_contract_missing_fingerprint_fails_closed() -> None:
+    wire = run_contract_to_dict(_contract())
+    del wire["fingerprint"]
+    with pytest.raises(ValueError, match="fingerprint"):
+        run_contract_from_dict(wire)
 
-    assert compare_run_contract(None, requested).compatible is False
-    allowed = compare_run_contract(None, requested, allow_legacy=True)
-    assert allowed.compatible is True
-    assert allowed.legacy is True
+
+def test_contract_writer_does_not_repair_corrupt_fingerprint() -> None:
+    from dataclasses import replace
+
+    with pytest.raises(ValueError, match="fingerprint"):
+        run_contract_to_dict(replace(_contract(), fingerprint="corrupt"))
+
+
+def test_missing_contract_rejects_with_start_fresh_version_error() -> None:
+    from linch._wire import UnsupportedWireVersionError
+
+    for action in (
+        lambda: run_contract_from_meta({}),
+        lambda: compare_run_contract(None, _contract()),
+    ):
+        with pytest.raises(UnsupportedWireVersionError, match="start a new run"):
+            action()
+
+
+def test_removed_legacy_resume_option_is_rejected() -> None:
+    from linch import RunOptions
+
+    with pytest.raises(TypeError, match="allow_legacy_resume"):
+        RunOptions(allow_legacy_resume=True)
 
 
 def test_contract_rejects_noncanonical_callable_configuration() -> None:
@@ -200,8 +220,8 @@ def test_contract_preserves_golden_bytes_and_fingerprint() -> None:
 
     contract = _contract()
     assert contract.fingerprint == (
-        "sha256:e1bdb68711b03c5078a41b6dcb4903efb73b0672b7a25f01c4b5a2dc097b76bc"
+        "sha256:3bfc7048fae97d9142d26766b98600703a75259c13cd17c4468fe5870e0e2e2f"
     )
     assert hashlib.sha256(canonical_json(run_contract_to_dict(contract)).encode()).hexdigest() == (
-        "0dcb825540ed156f718bd927eff81b3f9f9e1cabbf8a32a4fc4c7d210c711b2b"
+        "a53e0ae51aba48ad019aa7dead93e000aff803d2d880f7b7d1c0276a1d2c9632"
     )

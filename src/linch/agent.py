@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import os
 import platform
-import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,10 +10,11 @@ from typing import Any, cast
 
 from ._blocking import run_blocking
 from ._version import get_version
+from ._wire import UnsupportedWireVersionError
 from .config import FeatureFlags, SystemPromptConfig
 from .durability import DurabilityOptions
 from .errors import ConfigError
-from .execution import ExecutionBackend, ShellBackend
+from .execution import ExecutionBackend
 from .kernel import Context
 from .openai_responses import OpenAIOptions, OpenAIReasoning
 from .permissions import BashRule, CanUseTool, PathRule, PermissionEngine, PermissionRule, ToolRule
@@ -427,7 +427,7 @@ class Agent:
         enable_background_subagents: bool = False,
         enable_task_stop: bool = False,
         enable_background_tools: bool = False,
-        execution_backend: ExecutionBackend | ShellBackend | None = None,
+        execution_backend: ExecutionBackend | None = None,
         context: Context | None = None,
         tool_pipeline: ToolPipeline | None = None,
         ask_user: Any = None,
@@ -480,12 +480,9 @@ class Agent:
         execution_source = (
             execution_backend if execution_backend is not None else inherited_execution
         )
-        self.execution_backend: Any = None
+        self.execution_backend: ExecutionBackend | None = None
         if execution_source is not None:
-            from .execution.backend import (
-                UnavailableFileBackend,
-                normalize_execution_backend,
-            )
+            from .execution.backend import normalize_execution_backend
 
             # These messages name ``execution_backend=``/"the execution world",
             # but an inherited world was never passed here — say where it came
@@ -515,31 +512,13 @@ class Agent:
                     "local execution world with cwd=Agent.cwd so shell and fs share "
                     f"one workspace{origin}"
                 )
-            if getattr(self.execution_backend, "legacy_shell_only", False):
-                warnings.warn(
-                    "shell-only execution_backend values are deprecated; pass an "
-                    "ExecutionBackend exposing both .shell and .fs",
-                    DeprecationWarning,
-                    stacklevel=2,
-                )
-                if self.features.filesystem and isinstance(
-                    self.execution_backend.fs, UnavailableFileBackend
-                ):
-                    raise ConfigError(
-                        "filesystem=True with a legacy shell-only execution backend "
-                        "requires an explicit filesystem=; migrate to an ExecutionBackend "
-                        "with coherent shell and fs transports"
-                    )
         self._owns_execution_backend = bool(
-            execution_backend is not None
-            and self.execution_backend is not None
-            and not getattr(self.execution_backend, "legacy_shell_only", False)
+            execution_backend is not None and self.execution_backend is not None
         )
         self._borrows_execution_filesystem = bool(
             execution_backend is None
             and inherited_execution is not None
             and self.execution_backend is not None
-            and not getattr(self.execution_backend, "legacy_shell_only", False)
         )
         # Linch is an SDK, not an implicit coding harness.  A bare Agent gets
         # no shell/filesystem authority; applications opt in with their own
@@ -1758,6 +1737,8 @@ async def _restore_provider_view(
     fallback = list(full_history)
     try:
         snapshot = await snapshot_loader(sid)
+    except UnsupportedWireVersionError:
+        raise
     except Exception as exc:
         _logging.getLogger(__name__).warning(
             "provider snapshot load failed; rebuilding from full history: %s", exc

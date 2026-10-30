@@ -154,7 +154,21 @@ class PostgresSessionStore:
         self._init_lock = asyncio.Lock()
 
     async def _ensure(self) -> Any:
-        return await ensure_pool(self, _SCHEMA, _import_asyncpg)
+        return await ensure_pool(
+            self,
+            _SCHEMA,
+            _import_asyncpg,
+            schema_key="sessions",
+            tables=(
+                "sessions",
+                "messages",
+                "task_counters",
+                "tasks",
+                "task_edges",
+                "session_snapshots",
+                "session_inbox",
+            ),
+        )
 
     # ── SessionStore protocol ────────────────────────────────────────────────
 

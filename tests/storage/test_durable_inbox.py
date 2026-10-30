@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator
 
 import pytest
 
+from linch._wire import UnsupportedWireVersionError
 from linch.durability import DurabilityOptions, InboxDelivery, JsonValue
 from linch.errors import ConfigError
 from linch.sessions import InMemorySessionStore, SqliteSessionStore
@@ -167,7 +168,7 @@ async def test_sqlite_two_connections_enqueue_without_lost_fifo_rows(tmp_path) -
         await second.close()
 
 
-async def test_sqlite_additive_migration_from_pre_inbox_database(tmp_path) -> None:
+async def test_sqlite_rejects_pre_inbox_database(tmp_path) -> None:
     path = tmp_path / "legacy.db"
     conn = sqlite3.connect(path)
     conn.execute(
@@ -188,10 +189,14 @@ async def test_sqlite_additive_migration_from_pre_inbox_database(tmp_path) -> No
 
     store = SqliteSessionStore(path)
     try:
-        await store.enqueue_inbox("legacy", InboxDelivery("new", _message("new")))
-        rows = await store.commit_inbox("legacy", after_seq=0)
-        assert [row.seq for row in rows] == [1, 2]
-        assert [row.message.content[0].text for row in rows] == ["kept", "new"]  # type: ignore[union-attr]
+        with pytest.raises(UnsupportedWireVersionError):
+            await store.enqueue_inbox("legacy", InboxDelivery("new", _message("new")))
+        with sqlite3.connect(path) as conn:
+            assert conn.execute("select count(*) from messages").fetchone()[0] == 1
+            assert (
+                conn.execute("select name from sqlite_master where name='session_inbox'").fetchone()
+                is None
+            )
     finally:
         await store.close()
 

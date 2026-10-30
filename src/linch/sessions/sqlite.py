@@ -11,7 +11,7 @@ from linch.sessions.memory import now_iso
 from linch.sessions.tasks import CreateTaskInput, Task, TaskPatch
 from linch.types import Message, message_from_dict, message_to_dict
 
-from ..storage._executor import SqliteExecutor
+from ..storage._executor import SqliteExecutor, execute_schema
 from .store import (
     ProviderViewSnapshot,
     SessionRecord,
@@ -24,7 +24,8 @@ from .store import (
 
 
 def _init_schema(conn: sqlite3.Connection) -> None:
-    conn.executescript(
+    execute_schema(
+        conn,
         """
         create table if not exists sessions (
           id text primary key,
@@ -84,7 +85,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         );
         create index if not exists session_inbox_pending_idx
           on session_inbox (session_id, message_seq, inbox_seq);
-        """
+        """,
     )
 
 

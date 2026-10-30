@@ -85,11 +85,13 @@ async def _exercise_store(store) -> None:
         total_usage=Usage(input_tokens=3, output_tokens=4),
         permission_decisions={
             'WriteThing:{"value":"WriteThing"}': {
+                "schema_version": 3,
                 "decision": "allow",
                 "reason": None,
                 "updated_input": None,
             },
             'DeleteFile:{"path":"/x"}': {
+                "schema_version": 3,
                 "decision": "deny",
                 "reason": "user denied",
                 "updated_input": None,
@@ -175,7 +177,10 @@ async def test_run_stores_normalize_recursive_metadata(tmp_path) -> None:
             await store.close()
 
 
-async def test_run_stores_preserve_non_list_error_metadata(tmp_path) -> None:
+@pytest.mark.parametrize(
+    "history", ["legacy failure", ["legacy failure"], [{"message": "old"}, 7], {}]
+)
+async def test_run_stores_replace_malformed_error_history(tmp_path, history) -> None:
     stores = [InMemoryRunStore(), SqliteRunStore(tmp_path / "legacy-errors.db")]
     try:
         for index, store in enumerate(stores):
@@ -183,7 +188,7 @@ async def test_run_stores_preserve_non_list_error_metadata(tmp_path) -> None:
             await store.create_run(
                 "session-1",
                 id=run_id,
-                meta={"errors": "legacy failure", "kind": "test"},
+                meta={"errors": history, "kind": "test"},
             )
             recursive_error: dict[str, object] = {"message": "new failure"}
             recursive_error["self"] = recursive_error
@@ -192,7 +197,6 @@ async def test_run_stores_preserve_non_list_error_metadata(tmp_path) -> None:
             loaded = await store.load_run(run_id)
 
             assert failed.meta["errors"] == [
-                "legacy failure",
                 {"message": "new failure", "self": "<recursion>"},
             ]
             assert loaded is not None
@@ -261,3 +265,17 @@ async def test_sqlite_checkpoint_results_are_isolated_persisted_snapshots(tmp_pa
         assert failed_with_checkpoint.checkpoint.phase == "failed"
     finally:
         await store.close()
+
+
+async def test_run_stores_append_valid_current_error_history(tmp_path) -> None:
+    stores = [InMemoryRunStore(), SqliteRunStore(tmp_path / "current-errors.db")]
+    try:
+        for store in stores:
+            await store.create_run("session", id="run", meta={"errors": [{"message": "first"}]})
+            await store.mark_failed("run", error={"message": "second"})
+            record = await store.load_run("run")
+            assert record is not None
+            assert record.meta["errors"] == [{"message": "first"}, {"message": "second"}]
+    finally:
+        for store in stores:
+            await store.close()

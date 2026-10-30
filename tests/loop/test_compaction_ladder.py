@@ -575,3 +575,205 @@ async def test_ladder_disabled_is_byte_identical() -> None:
     assert len(compactions2) == 1
     assert events2[-1].type == "result"
     assert events2[-1].subtype == "error"
+
+
+@pytest.mark.parametrize("ladder_enabled", [False, True])
+@pytest.mark.parametrize("failure_stage", ["compaction", "context", "prepare", "start", "dispatch"])
+@pytest.mark.parametrize("fallback", [False, True])
+async def test_recovery_provider_error_boundary(
+    monkeypatch: Any, ladder_enabled: bool, failure_stage: str, fallback: bool
+) -> None:
+    """Default recovery retries ProviderError; ladder recovery propagates it.
+
+    This pins the recovery exception scope, including the second prepare/start
+    and dispatch. Moving recovery under a common sibling except changes it.
+    """
+    from types import SimpleNamespace
+
+    from linch.compaction import CompactionLadder
+    from linch.errors import ContextLengthError, ProviderError
+    from linch.loop import streaming
+
+    agent = _make_agent(
+        LadderProvider([]), max_retries=1, fallback_models=["fallback"] if fallback else None
+    )
+    session = await agent.session()
+    trace: list[str] = []
+    failed = False
+    dispatches = 0
+    prepares = 0
+    starts = 0
+
+    def fail(stage: str) -> None:
+        nonlocal failed
+        if stage == failure_stage and not failed:
+            failed = True
+            raise ProviderError("recovery transport", retryable=True)
+
+    async def stream(*args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+        nonlocal dispatches
+        dispatches += 1
+        trace.append("dispatch")
+        if dispatches == 1:
+            raise ContextLengthError("too big")
+        fail("dispatch")
+        yield "accepted"
+
+    async def compact(*args: Any, **kwargs: Any) -> None:
+        fail("compaction")
+
+    async def context(*args: Any) -> None:
+        fail("context")
+
+    async def prepare(req: Any, turn: int) -> Any:
+        nonlocal prepares
+        prepares += 1
+        if prepares == 2:
+            fail("prepare")
+        return req
+
+    async def start(turn: int, model: str) -> None:
+        nonlocal starts
+        starts += 1
+        if starts == 2:
+            fail("start")
+
+    async def end(*, stop_reason: str) -> None:
+        trace.append(stop_reason)
+
+    monkeypatch.setattr(streaming, "_accounted_primary_stream", stream)
+    monkeypatch.setattr(streaming, "run_forced_compaction", compact)
+    monkeypatch.setattr(streaming, "_build_context_result", context)
+    monkeypatch.setattr(
+        streaming, "_build_turn_request", lambda *a, **k: SimpleNamespace(model="test")
+    )
+    monkeypatch.setattr(streaming, "build_compaction_event", lambda session: "compacted")
+    monkeypatch.setattr(streaming, "_delay_for_error", lambda *a: 0)
+    driver = streaming._stream_turn_with_recovery
+    kwargs = {
+        "ladder": CompactionLadder(micro=False) if ladder_enabled else None,
+        "forced_used": [0],
+        "ledger": object(),
+        "logical_call_id": "primary",
+        "bind_active_primary": None,
+    }
+    output: list[Any] = []
+
+    async def run() -> None:
+        async for item in driver(
+            session,
+            agent,
+            SimpleNamespace(),
+            SimpleNamespace(model="test"),
+            turn_index=0,
+            signal=None,
+            prepare_provider_call=prepare,
+            start_provider_call=start,
+            end_provider_call=end,
+            **kwargs,
+        ):
+            output.append(item)
+
+    # Ladder's post-recovery dispatch enters the ordinary provider boundary;
+    # its prepare/start still occur outside that boundary.
+    propagates = ladder_enabled and failure_stage != "dispatch"
+    if propagates:
+        with pytest.raises(ProviderError, match="recovery transport"):
+            await run()
+        assert "error" not in trace
+        assert session.active_model is None
+    else:
+        await run()
+        assert output[-1] == "accepted"
+        assert trace.count("error") == 1
+        swaps = [item for item in output if getattr(item, "type", None) == "model_fallback"]
+        assert len(swaps) == int(fallback)
+        assert session.active_model == ("fallback" if fallback else None)
+
+
+@pytest.mark.parametrize("ladder_enabled", [False, True])
+async def test_forced_compaction_budget_scope_across_turns(ladder_enabled: bool) -> None:
+    """Default gets one recovery each turn; the ladder cap spans the whole run."""
+    from linch import DetailedCompaction
+    from linch.compaction import CompactionLadder
+
+    provider = LadderProvider(
+        [("tool", 100), ("raise_cle", 0), ("tool", 100), ("raise_cle", 0), ("text", 0)]
+    )
+    agent = _make_agent(
+        provider,
+        compaction=DetailedCompaction(keep_recent_turns=1),
+        compaction_ladder=CompactionLadder(micro=False, max_forced_compactions=1)
+        if ladder_enabled
+        else None,
+    )
+    session = await agent.session()
+    session.file_read_tracker.add("/seen.py")
+
+    events = [event async for event in session.run("go")]
+
+    assert events[-1].subtype == ("error" if ladder_enabled else "success")
+    assert provider.summarize_calls == (1 if ladder_enabled else 2)
+    assert ("/seen.py" in session.file_read_tracker) is (not ladder_enabled)
+
+
+@pytest.mark.parametrize("ladder_enabled", [False, True])
+async def test_exhausted_context_recovery_preserves_end_call_order(
+    monkeypatch: Any, ladder_enabled: bool
+) -> None:
+    """An exhausted default retry does not double-end the provider observer."""
+    from types import SimpleNamespace
+
+    from linch.compaction import CompactionLadder
+    from linch.errors import ContextLengthError
+    from linch.loop import streaming
+
+    agent = _make_agent(LadderProvider([]))
+    session = await agent.session()
+    ends: list[str] = []
+    failure = ContextLengthError("original provider context error")
+
+    async def stream(*args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+        raise failure
+        yield  # pragma: no cover
+
+    async def noop(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    async def prepare(req: Any, turn: int) -> Any:
+        return req
+
+    async def end(*, stop_reason: str) -> None:
+        ends.append(stop_reason)
+
+    req = SimpleNamespace(model="test")
+    monkeypatch.setattr(streaming, "_accounted_primary_stream", stream)
+    monkeypatch.setattr(streaming, "run_forced_compaction", noop)
+    monkeypatch.setattr(streaming, "_build_context_result", noop)
+    monkeypatch.setattr(streaming, "_build_turn_request", lambda *a, **k: req)
+    monkeypatch.setattr(streaming, "build_compaction_event", lambda session: "compacted")
+
+    with pytest.raises(ContextLengthError) as raised:
+        _ = [
+            item
+            async for item in streaming._stream_turn_with_recovery(
+                session,
+                agent,
+                SimpleNamespace(),
+                req,
+                turn_index=0,
+                signal=None,
+                ladder=CompactionLadder(micro=False, max_forced_compactions=1)
+                if ladder_enabled
+                else None,
+                forced_used=[0],
+                prepare_provider_call=prepare,
+                start_provider_call=noop,
+                end_provider_call=end,
+                ledger=object(),
+                logical_call_id="primary",
+                bind_active_primary=None,
+            )
+        ]
+    assert raised.value is failure
+    assert ends == (["context_length_error"] * (2 if ladder_enabled else 1))

@@ -12,7 +12,7 @@ from collections.abc import Sequence
 from typing import Any
 from uuid import uuid4
 
-from ..events import Event, event_from_dict, event_to_dict
+from ..events import Event, _stored_event_from_dict
 from ..run_store import (
     LeaseLostError,
     ModelInputSnapshot,
@@ -22,7 +22,7 @@ from ..run_store import (
     RunRecord,
     StoredRunEvent,
     _append_run_error,
-    _json_safe,
+    _json_safe_stored_event,
     _safe_meta,
     _validate_lease_ttl,
     _validate_model_input_snapshot,
@@ -47,10 +47,6 @@ CREATE TABLE IF NOT EXISTS runs (
     lease_epoch BIGINT NOT NULL DEFAULT 0,
     lease_expires_at DOUBLE PRECISION
 );
-
-ALTER TABLE runs ADD COLUMN IF NOT EXISTS lease_owner TEXT;
-ALTER TABLE runs ADD COLUMN IF NOT EXISTS lease_epoch BIGINT NOT NULL DEFAULT 0;
-ALTER TABLE runs ADD COLUMN IF NOT EXISTS lease_expires_at DOUBLE PRECISION;
 
 CREATE TABLE IF NOT EXISTS run_events (
     run_id TEXT NOT NULL,
@@ -130,6 +126,8 @@ class PostgresRunStore:
             self,
             _SCHEMA,
             _import_asyncpg,
+            schema_key="runs",
+            tables=("runs", "run_events", "model_input_snapshots"),
             advisory_lock_key=_SCHEMA_LOCK_KEY,
             allow_missing_pool_on_error=True,
         )
@@ -236,10 +234,7 @@ class PostgresRunStore:
         if not events:
             return []
         pool = await self._ensure()
-        encoded = [
-            json.dumps(_json_safe(event_to_dict(event), strict=False), allow_nan=False)
-            for event in events
-        ]
+        encoded = [json.dumps(_json_safe_stored_event(event), allow_nan=False) for event in events]
         async with pool.acquire() as conn:
             async with conn.transaction():
                 row = await self._locked_run(conn, run_id)
@@ -281,7 +276,7 @@ class PostgresRunStore:
                 StoredRunEvent(
                     seq=int(row["seq"]),
                     appended_at=str(row["appended_at"]),
-                    event=event_from_dict(json.loads(raw) if isinstance(raw, str) else raw),
+                    event=_stored_event_from_dict(json.loads(raw) if isinstance(raw, str) else raw),
                 )
             )
         return result

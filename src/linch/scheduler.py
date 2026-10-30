@@ -10,6 +10,7 @@ from typing import Any, Literal, cast
 from uuid import uuid4
 from xml.sax.saxutils import escape
 
+from ._wire import UnsupportedWireVersionError
 from .abort import AbortContext, throw_if_aborted
 from .errors import AbortError, ToolExecutionError, ToolTimeoutError
 from .events import (
@@ -1220,6 +1221,8 @@ def _evaluate_permissions(
 
             try:
                 decisions.append(_pd_from_dict(_stored_decisions[_key]))
+            except UnsupportedWireVersionError:
+                raise
             except (AttributeError, TypeError, ValueError):
                 ask_indices.append(i)
                 decisions.append(initial)

@@ -37,9 +37,9 @@ checklist for new extension points and runtime changes.
   Opaque custom providers fail closed instead of guessing identity.
 - Pipeline listeners run after permission and cannot rewrite authorization-
   sensitive input; use the pre-tool hook for a transform that is revalidated.
-- Keep compatibility shims at the boundary, document deprecations, and provide
-  an explicit migration path. A shell-only execution backend is legacy; new
-  integrations provide a coherent `.shell` and `.fs` world.
+- In the 3.0 transition, remove compatibility shims and pre-3.0 readers;
+  reject old state and start new runs. Execution backends must provide one
+  coherent `.shell` and `.fs` world; shell-only values are rejected.
 
 ## Async and security
 

@@ -9,7 +9,7 @@ flowchart LR
     subgraph A["Path A — Text Parse\noutput_schema on Agent or RunOptions"]
         direction TB
         A1["Provider emits JSON text\nvia response_format or text.format"]
-        A2["_parse_structured_output(final_text, schema)\noptional jsonschema validation"]
+        A2["_parse_structured_output(final_text, schema)\nrequired jsonschema validation"]
         A3["ResultEvent.structured_output = parsed\nResultEvent.structured_error = msg | None"]
         A1 --> A2 --> A3
     end
@@ -22,6 +22,8 @@ flowchart LR
         B1 --> B2 --> B3
     end
 ```
+
+`jsonschema` is a core dependency; configured schemas are always validated.
 
 Path B is more reliable for complex schemas and works across all providers without `response_format` support.
 

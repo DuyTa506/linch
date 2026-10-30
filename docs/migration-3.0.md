@@ -3,9 +3,14 @@
 This guide tracks the ongoing 3.0 transition, including the original
 `3.0.0a1` Release-A accounting slice and subsequent API cleanup. Python 3.11+
 is required. During 3.0 development, compatibility breaks do not require a
-warning window or compatibility shim; start fresh runs rather than depending
-on pre-3.0 durable state. Some legacy readers remain pending separate cleanup,
-so this policy does not imply that all old data is already rejected.
+warning window or compatibility shim.
+
+All persisted envelopes share wire generation **3**, including checkpoints,
+run contracts, model-call intents/receipts and journals, exact model-input
+snapshots, permission decisions, session/provider-view snapshots, events, and
+workflow run metadata. Missing, pre-3.0, or unknown versions are rejected;
+start new runs and use fresh databases. Built-in stores do not upgrade old
+schemas. `linch.RUN_SCHEMA_VERSION` reflects the shared private wire version.
 
 ## API and internal cleanup
 
@@ -16,6 +21,7 @@ remain the names in `linch.__all__`.
 - **Python / K16:** Python 3.10 support and the CLI scaffold's `tomllib` import/line-scan fallbacks are removed; use Python 3.11+ and valid TOML.
 - **A01:** `Session(provider_view=..., full_history=...)` is removed; pass `session_log=SessionLog.seed(historical=..., visible=...)`.
 - **A02:** `SessionLog.derive_messages()` is removed; read `provider_view`.
+- **A03:** Shell-only `Agent(execution_backend=...)` values are removed; supply one coherent `.shell`/`.fs` world with `LocalExecutionBackend` or `RemoteExecutionBackend`.
 - **A04:** `BashTool(backend=...)` is removed; use `BashTool(execution=...)` with a coherent execution backend.
 - **A05:** Agent constructor aliases `systemPrompt`, `maxRetries`, `maxOutputTokens`, `includePartialMessages`, `maxTurns`, `maxToolConcurrency`, `toolBatchingStrategy`, `toolTimeoutMs`, `cacheTtl`, `configDir`, `mcpServers`, and `loopGuard` are removed; use their snake_case spellings.
 - **A06:** The `Agent.openai` provider property is removed; use `agent.provider`; the separate `Agent(openai=...)` configuration argument remains supported.
@@ -28,10 +34,19 @@ remain the names in `linch.__all__`.
 - **D02:** Background-tool completion no longer appends directly to a duck session's notification list; custom session implementations must supply async `notify(...)`.
 - **D03:** The `parallel_safe` fallback is removed; read tools must declare `parallel` to opt into concurrent scheduling.
 - **D04:** The dormant runtime-control codec capability gate and store capability attributes are removed with deferred discovery support.
+- **P01:** Checkpoint field defaults on read are removed; every serialized current checkpoint field is required, including empty extension state and nullable fields.
+- **P02:** Default-version and missing-fingerprint run-contract readers are removed; current contracts require a verified fingerprint.
+- **P03:** `RunOptions.allow_legacy_resume` and contractless resume are removed; start a new run with a current execution contract.
+- **P04:** Cursorless assistant-boundary tool recovery is removed; tool recovery requires a valid `tool_batch_event_after_seq` cursor.
+- **P07:** Pre-3.0 permission readers and the null `updated_input` wire marker are removed; non-null persisted input rewrites and live approval rewrites remain rejected.
+- **P09:** Automatic SQLite/Postgres schema upgrades are removed; built-in database stores create complete version-3 schemas and reject old, missing, or unknown schema metadata on existing databases.
+- **P10:** Legacy scalar/malformed failure-history preservation is removed; failure writes append only to a valid current list of error objects, replacing malformed history.
+- **Workflow journals:** Old call-key algorithm readers and `fingerprint_version` branches are removed; durable workflow metadata requires `schema_version=3`, and incompatible runs must start anew.
 - **P08:** `ToolActivation`, `ToolSurfaceReaderGuard`, `tool_activations`, and their discovery codecs/projection plumbing are removed; unknown message-block types and unknown tool-result fields fail closed, while ordinary message-copy isolation remains intact.
-- **D05:** The unused runtime `PermissionDecision.updated_input` field is removed; persisted non-null input rewrites are still rejected and the null wire marker remains.
+- **D05:** The unused runtime `PermissionDecision.updated_input` field is removed; persisted non-null input rewrites remain rejected (the null marker was subsequently removed by P07).
 - **D06:** The unused private `add_usage` helper is removed; use `Usage.add`.
 - **D07:** The unused private `make_pool` factory is removed; Postgres stores own their pool configuration through the shared lifecycle helper.
+- **D08:** The unaccounted `stream_turn` entry point is removed; parser tests use `_stream_turn`, while loop deliveries use the required-ledger accounted path.
 - **D09:** The obsolete `glob.glob` TypeError retry is removed; supported Python versions accept `root_dir` and `recursive` directly.
 - **D12:** The `linch.memory` package and its `MemoryStore` contract are removed; use scoped file memory through `FileMemoryContextBuilder` and the existing `FileBackend` tools.
 - **D12:** `ConsolidationGate` is removed; application-owned file-memory policy can update or delete stale fact files through the backend.
@@ -53,6 +68,8 @@ remain the names in `linch.__all__`.
 - **D12:** `assert_memory_store_contract` is removed from `linch.testing`; use the file-backend contract helper.
 - **D12:** The `memory_recalled` eval scorer is removed; score host-owned semantic recall or inspect file-memory events in application evals.
 - **D12:** Legacy `RunReport.long_run` memory-search, recalled-id, and tier-count metrics are removed; report host-owned file-memory or semantic-recall signals instead.
+- **D10:** The missing-`jsonschema` validation bypass is removed; `jsonschema` is a core dependency and structured output is always validated against its configured schema.
+- **M01:** Duplicate compaction retry drivers are consolidated into `_stream_turn_with_recovery`, preserving one retry per turn without a ladder and the ladder's per-run forced-compaction limit, ordering, and accounting.
 - **M02:** Duplicate strict JSON traversals share a private traversal core with separate boundary adapters; serialized bytes, fingerprints, depth/error policies, and permissive metadata conversion are preserved.
 - **M03:** Compaction, context building, and offload share custom-estimator invocation; each retains its message/text counting and fallback policy.
 - **M04:** Loop-guard signatures use `permission_decision_key` instead of a duplicate canonicalizer; canonical JSON bytes and ASCII escaping are unchanged.
@@ -61,15 +78,10 @@ remain the names in `linch.__all__`.
 - **M07:** Mailbox and scheduling claims share a neutral validator; validation order and error messages are unchanged.
 - **Studio leftovers:** The `linch_ui/` ignore rule and stale Studio branch/DeepSeek documentation references are removed.
 
-## Deferred loop cleanup
-
-WP9b owns the shell-only `Agent(execution_backend=...)` compatibility path
-(A03), unaccounted stream entry (D08), missing-`jsonschema` fallback (D10), and
-compaction retry consolidation (M01). These remain in current code. Its scope
-also includes the stale loop docstring reference to removed
-`BashTool(backend=...)`. Other persisted-reader categories outside this sweep
-retain their current validation and recovery behavior; no blanket reader
-removal is claimed here.
+P05 accounting recovery safeguards remain: aggregate usage is not a substitute
+for valid delivery receipts. P06 event readers remain strict: unknown required
+events fail, and only valid unknown envelopes explicitly marked `ignorable: true`
+round-trip as `IgnorableEvent`.
 
 ## Accounting introduced in 3.0.0a1
 
@@ -149,8 +161,8 @@ summary without another provider call or duplicate charge.
 Linch fails closed when the source order, durable history boundary, receipt,
 skill body, listing wrapper, or contract does not match. A provider-view cache
 is verification material, not source authority. Old in-flight accounting state
-also fails closed, even when legacy resume is explicitly enabled; do not ask
-Linch to guess whether an interrupted delivery was billed.
+also fails closed; start a new run rather than asking Linch to guess whether an
+interrupted delivery was billed.
 
 ## Custom and standalone compaction
 

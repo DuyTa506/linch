@@ -10,7 +10,7 @@ the connection at a time.
 Usage::
 
     def _init_schema(conn: sqlite3.Connection) -> None:
-        conn.executescript("create table if not exists ...")
+        conn.execute("create table if not exists ...")
 
     exec_ = SqliteExecutor(path, init=_init_schema)
     result = await exec_.run(lambda conn: conn.execute("select ...").fetchall())
@@ -30,7 +30,16 @@ from pathlib import Path
 from threading import Lock
 from typing import TypeVar
 
+from .._wire import WIRE_VERSION, require_wire_version
+
 T = TypeVar("T")
+
+
+def execute_schema(conn: sqlite3.Connection, script: str) -> None:
+    """Execute static store DDL without executescript's implicit commit."""
+    for statement in script.split(";"):
+        if statement.strip():
+            conn.execute(statement)
 
 
 class SqliteExecutor:
@@ -77,7 +86,17 @@ class SqliteExecutor:
                 # NORMAL removes that fsync tax without weakening crash-resume.
                 conn.execute("pragma synchronous=NORMAL")
                 conn.commit()
+            # Hold the database write lock across version discovery, DDL and
+            # stamping, including when different stores share one current file.
+            conn.execute("begin immediate")
+            version = conn.execute("pragma user_version").fetchone()[0]
+            existing = conn.execute(
+                "select 1 from sqlite_master where name not glob 'sqlite_*' limit 1"
+            ).fetchone()
+            if version != 0 or existing is not None:
+                require_wire_version(version)
             self._init(conn)
+            conn.execute(f"pragma user_version={WIRE_VERSION}")
             conn.commit()
         except Exception:
             conn.close()

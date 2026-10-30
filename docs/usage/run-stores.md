@@ -88,16 +88,21 @@ Instances that never claimed a particular run retain their existing write
 behavior, including when another instance has a lease. All competing host
 workers must opt into claiming for ownership protection.
 
-SQLite adds missing lease columns when opening older databases. Existing rows
-remain unleased until claimed. Its write transactions also serialize event
-sequence allocation across store instances sharing the file. Model-input
-snapshot serialization and SQLite I/O run on the existing storage executor,
-outside the event-loop thread.
+Built-in SQLite and Postgres stores create complete version-3 schemas,
+including run lease columns, on fresh databases. Existing databases with old,
+missing, or unknown schema metadata are rejected without alteration; use fresh
+databases and start new runs. There is no automatic schema upgrade or legacy
+resume option. Persisted envelopes likewise require wire version 3; see the
+[3.0 migration guide](../migration-3.0.md).
+
+SQLite write transactions serialize event sequence allocation across store
+instances sharing the file. Model-input snapshot serialization and SQLite I/O
+run on the existing storage executor, outside the event-loop thread.
 
 Initialize one SQLite store before concurrently opening peers against a
 database that has not enabled WAL. The shared executor can fail with
-`database is locked` during simultaneous initial WAL switches, before lease
-migration starts; this existing executor limitation is separate from lease
+`database is locked` during simultaneous initial WAL switches, before schema
+initialization; this existing executor limitation is separate from lease
 transaction locking.
 
 ## Reconnect using the persisted event sequence

@@ -12,6 +12,8 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Any
 
+import pytest
+
 from linch.sessions import InMemorySessionStore, SqliteSessionStore
 from linch.sessions.store import (
     SNAPSHOT_SCHEMA_VERSION,
@@ -78,7 +80,7 @@ async def test_sqlite_snapshot_roundtrip_persists_across_reopen(tmp_path: Any) -
         await reopened.close()
 
 
-# ── wire-format tolerance (forward-compatible) ───────────────────────────────
+# ── wire-format contract ─────────────────────────────────────────────────────
 
 
 def test_snapshot_to_dict_stamps_schema_version() -> None:
@@ -88,19 +90,22 @@ def test_snapshot_to_dict_stamps_schema_version() -> None:
     assert raw["provider_view"] == [message_to_dict(_msg("a"))]
 
 
-def test_snapshot_from_dict_tolerates_future_version_and_unknown_keys() -> None:
+def test_snapshot_from_dict_rejects_future_version_before_defaults() -> None:
+    from linch._wire import UnsupportedWireVersionError
+
     raw = snapshot_to_dict(ProviderViewSnapshot(provider_view=[_msg("a")], covers_seq=2))
     raw["schema_version"] = SNAPSHOT_SCHEMA_VERSION + 99
     raw["some_future_field"] = {"nested": True}
-    restored = snapshot_from_dict(raw)
-    assert restored.covers_seq == 2
-    assert _texts(restored.provider_view) == ["a"]
+
+    with pytest.raises(UnsupportedWireVersionError, match="start a new run"):
+        snapshot_from_dict(raw)
 
 
 def test_snapshot_from_dict_defaults_missing_keys() -> None:
-    restored = snapshot_from_dict({})
-    assert restored.covers_seq == 0
-    assert restored.provider_view == []
+    from linch._wire import UnsupportedWireVersionError
+
+    with pytest.raises(UnsupportedWireVersionError, match="start a new run"):
+        snapshot_from_dict({})
 
 
 # ── load-path reconstruction (the acceptance criterion) ──────────────────────
@@ -237,6 +242,27 @@ async def test_reload_falls_back_when_snapshot_loader_raises() -> None:
     reloaded = await _agent(store, _Provider()).session(id="s1")
     # A raising loader must not abort the reload — rebuild from full history.
     assert _texts(reloaded.provider_view) == ["m1", "m2"]
+
+
+async def test_reload_propagates_incompatible_snapshot_version() -> None:
+    from linch._wire import UnsupportedWireVersionError
+
+    class _IncompatibleStore(InMemorySessionStore):
+        raise_incompatible = False
+
+        async def load_provider_snapshot(self, id: str) -> Any:
+            if not self.raise_incompatible:
+                return await super().load_provider_snapshot(id)
+            raise UnsupportedWireVersionError("state was written by Linch < 3.0; start a new run")
+
+    store = _IncompatibleStore()
+    agent = _agent(store, _Provider())
+    session = await agent.session(id="s1")
+    await session.append([_msg("m1")])
+    store.raise_incompatible = True
+
+    with pytest.raises(UnsupportedWireVersionError, match="start a new run"):
+        await _agent(store, _Provider()).session(id="s1")
 
 
 async def test_reload_falls_back_on_out_of_range_watermark() -> None:

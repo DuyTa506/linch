@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast, get_args
 from uuid import uuid4
 
 from ._json import walk_json
+from ._wire import WIRE_VERSION, require_wire_version
 from .abort import AbortContext
 from .errors import AbortError, ProviderError
 from .types import Message, ProviderRequest, StopReason, SystemBlock, Usage, message_to_dict
@@ -32,7 +33,7 @@ CallDisposition = Literal[
     "accepted", "rejected", "rejected_native", "cancelled", "failed", "not_dispatched"
 ]
 
-_VERSION = 1
+_VERSION = WIRE_VERSION
 _ACCEPTED_TEXT_MAX_BYTES = 1024 * 1024
 _USAGE_FIELDS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens")
 _RECORD_KINDS = frozenset({"intent", "dispatch_started", "receipt", "abandoned", "projection"})
@@ -108,10 +109,11 @@ def _usage_from_dict(raw: Any) -> Usage:
 
 
 def _versioned(raw: Mapping[str, Any], required: set[str]) -> None:
-    if not isinstance(raw, Mapping) or set(raw) != required | {"version"}:
+    if not isinstance(raw, Mapping):
+        require_wire_version(None)
+    require_wire_version(raw.get("version"))
+    if set(raw) != required | {"version"}:
         raise _invalid("model-call record has missing or unknown fields")
-    if type(raw["version"]) is not int or raw["version"] != _VERSION:
-        raise _invalid("unsupported model-call record version")
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,10 +282,9 @@ def _copy_model_call_record(
     run_id: Any, record_kind: Any, record: Any, budget_owner_id: Any, schema_version: Any
 ) -> dict[str, Any]:
     """Validate the public envelope, including its kind-specific private codec."""
+    require_wire_version(schema_version)
     _string(run_id, "run_id")
     _optional_string(budget_owner_id, "budget_owner_id")
-    if type(schema_version) is not int or schema_version != _VERSION:
-        raise _invalid("unsupported model-call envelope version")
     if not isinstance(record_kind, str) or record_kind not in _RECORD_KINDS:
         raise _invalid("unsupported model-call journal kind")
     owned = _copy_json_object(record)
@@ -751,7 +752,9 @@ class _ModelCallLedger:
                 "reason": reason,
                 "usage_status": status,
             }
-            _copy_model_call_record(self.run_id, "abandoned", record, self._budget_owner_id, 1)
+            _copy_model_call_record(
+                self.run_id, "abandoned", record, self._budget_owner_id, _VERSION
+            )
             if status == "unknown":
                 self._has_unknown_usage = True
                 if self._budget is not None:
@@ -992,12 +995,13 @@ class _LedgerRecovery:
             "consumed_auxiliary_receipt_ids",
         }
         optional = {"started_delivery_ids", "abandoned_delivery_ids", "persistence_failed"}
-        if not isinstance(state, Mapping) or not required <= state.keys():
+        if not isinstance(state, Mapping):
+            require_wire_version(None)
+        require_wire_version(state.get("version"))
+        if not required <= state.keys():
             raise _invalid("accounting snapshot is missing required fields")
         if set(state) - required - optional - {"version"}:
             raise _invalid("accounting snapshot has unknown fields")
-        if type(state.get("version")) is not int or state["version"] != _VERSION:
-            raise _invalid("unsupported accounting snapshot version")
         if state.get("persistence_failed", False) is not False:
             raise _ModelCallError("persistence_failed", "cannot resume failed journal durability")
         self._owner(_string(state["budget_owner_id"], "budget_owner_id"))
