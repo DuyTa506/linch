@@ -322,7 +322,7 @@ async def test_alignment_dispatch_lease_loss_never_appends_another_error(lease_s
 
 
 @pytest.mark.parametrize("wrapped", [False, True])
-async def test_run_creation_lease_loss_is_memory_only_and_cancels_background(wrapped: bool) -> None:
+async def test_run_creation_failure_propagates_unchanged_without_lifecycle(wrapped: bool) -> None:
     from linch import Agent
     from linch.run_store import LeaseLostError
     from linch.sessions import InMemorySessionStore
@@ -368,15 +368,11 @@ async def test_run_creation_lease_loss_is_memory_only_and_cancels_background(wra
     session.background_tasks.append(task)
     await started.wait()
     try:
-        events = [event async for event in session.run("hello")]
-        assert cancelled_and_awaited.is_set() and task.done()
-        assert [event.type for event in events] == ["error", "result"]
-        assert events[0].error["name"] == "LeaseLostError"
-        assert events[0].error["retryable"] is False
-        assert events[1].subtype == "error"
-        assert events[1].stop_reason == "lease_lost"
-        assert len(stop.results) == 1
-        assert stop.results[0].stop_reason == "lease_lost"
+        with pytest.raises(RuntimeError if wrapped else LeaseLostError) as raised:
+            _ = [event async for event in session.run("hello")]
+        assert str(raised.value) == ("admission wrapper" if wrapped else "admission lease lost")
+        assert not task.done()
+        assert stop.results == []
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
@@ -443,4 +439,121 @@ async def test_early_close_flush_lease_loss_cancels_background_and_reports_stop(
         await iterator.aclose()
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+        await agent.close()
+
+
+@pytest.mark.parametrize("origin", ["ledger", "compaction_skills"])
+async def test_fenced_persistence_origin_preserves_lease_exception(origin: str) -> None:
+    from types import SimpleNamespace
+
+    from linch import Context
+    from linch.compaction import _persist_compaction_skill_context
+    from linch.model_calls import ModelCallIntent, _ModelCallLedger
+    from linch.run_store import LeaseLostError
+
+    loss = LeaseLostError("origin fenced")
+
+    async def fail(*args: Any, **kwargs: Any) -> None:
+        raise loss
+
+    ledger = _ModelCallLedger(run_id="origin", persist=fail)
+    with pytest.raises(LeaseLostError) as raised:
+        if origin == "ledger":
+            await ledger.begin(
+                ModelCallIntent(
+                    "logical", "delivery", None, "primary", "origin", 0, "model", "a" * 64, None
+                )
+            )
+        else:
+            session = SimpleNamespace(
+                id="origin",
+                agent=SimpleNamespace(context=Context()),
+                invoked_skills=[SimpleNamespace(name="s", substituted_body="b", invoked_at=0)],
+                store=SimpleNamespace(set_invoked_skills=fail),
+            )
+            await _persist_compaction_skill_context(session, ledger)
+    assert raised.value is loss
+
+
+async def test_failed_tail_flush_lease_loss_skips_status_coroutine_creation() -> None:
+    import gc
+
+    from linch import Agent, HookResult
+    from linch.run_store import InMemoryRunStore, LeaseLostError
+    from linch.sessions import InMemorySessionStore
+
+    class Store(InMemoryRunStore):
+        failed_calls = 0
+
+        async def append_events(self, run_id: str, events: list[Any]) -> list[int]:
+            if any(event.type == "result" and event.subtype == "error" for event in events):
+                raise LeaseLostError("terminal batch fenced")
+            return await super().append_events(run_id, events)
+
+        async def mark_failed(self, run_id: str, checkpoint: Any = None, error: Any = None) -> Any:
+            self.failed_calls += 1
+            raise AssertionError("no status write after lease loss")
+
+    class StopHook:
+        resume_policy_id = "test.tail-lease-stop"
+        resume_policy_version = "1"
+
+        def on_before_final_answer(self, ctx: Any) -> Any:
+            return HookResult.stop("blocked")
+
+    store = Store()
+    agent = Agent(
+        model="lease-model",
+        provider=cast(Any, _TextProvider()),
+        session_store=InMemorySessionStore(),
+        run_store=store,
+        hooks=[StopHook()],
+        permissions={"mode": "skip-dangerous"},
+        cwd=".",
+    )
+    session = await agent.session()
+    try:
+        events = [event async for event in session.run("hello")]
+        assert store.failed_calls == 0
+        assert events[-2].error["name"] == "LeaseLostError"
+        assert events[-1].stop_reason == "lease_lost"
+        gc.collect()
+    finally:
+        await agent.close()
+
+
+async def test_blocked_prompt_terminal_lease_loss_reaches_single_agent_stop(
+    lease_stores: Any,
+) -> None:
+    from linch import Agent, HookResult
+    from linch.sessions import InMemorySessionStore
+
+    class BlockHook(_StopCounter):
+        def on_user_prompt_submit(self, ctx: Any) -> Any:
+            return HookResult.block("blocked")
+
+    first, second = lease_stores
+    state = _Takeover(first, second, "append_events")
+    stop = BlockHook()
+    agent = Agent(
+        model="lease-model",
+        provider=cast(Any, _TextProvider()),
+        session_store=InMemorySessionStore(),
+        run_store=state.wrap(first),
+        hooks=[stop],
+        permissions={"mode": "skip-dangerous"},
+        cwd=".",
+    )
+    session = await agent.session()
+    try:
+        events = [event async for event in session.run("hello")]
+        assert state.lost and state.after_loss == []
+        assert events[-2].error["name"] == "LeaseLostError"
+        assert events[-1].stop_reason == "lease_lost"
+        assert len(stop.results) == 1
+        assert stop.results[0].stop_reason == "lease_lost"
+        assert stop.results[0].error["name"] == "LeaseLostError"
+        assert await second.load_run(state.run_id) == state.winner_record
+        assert await second.load_events(state.run_id) == state.winner_events
+    finally:
         await agent.close()

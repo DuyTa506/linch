@@ -24,6 +24,7 @@ from ..model_calls import (
     _ModelCallLedger,
     _projection_record,
 )
+from ..run_store import LeaseLostError
 from ..types import AssistantAssembly, Message, ProviderRequest, Usage
 from .checkpoint import _message_digest, _primary_control_message
 from .request import _build_context_result, _build_turn_request, _context_selected_tool_names
@@ -330,6 +331,8 @@ async def run_provider_turn(ctx: ProviderTurnContext) -> AsyncIterator[Event]:
                         await ctx.maybe_save_provider_snapshot(session)
                     await ctx.persist_event(item)
                     yield item
+        except LeaseLostError:
+            raise
         except Exception as exc:
             async for usage_event in ctx.drain_auxiliary_usage():
                 yield usage_event
