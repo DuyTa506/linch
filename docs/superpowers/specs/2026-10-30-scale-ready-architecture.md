@@ -44,6 +44,20 @@ an untracked draft) runs against InMemory, Sqlite, and Postgres (Postgres tests 
 cleanly without `AGENT_KIT_TEST_PG_DSN`, the existing convention in `tests/storage/test_postgres.py`). NoSQL is not used; Redis appears
 only in examples.
 
+SQLite stays as the zero-dependency single-host backend (local, CLI, tests,
+one-process apps) and keeps passing the conformance suite, but it is not on the
+scale path: multi-worker deployments use Postgres, and no further scale work
+targets SQLite.
+
+The runtime's hot path is write-heavy (WP1: ~16.5 store calls per turn), and a
+checkpoint must be durable before the side effects it guards. Therefore **no
+write-back cache** for sessions, checkpoints, events, or permission decisions:
+writes stay write-through, and the lever is fewer, smaller, batched writes
+(WP8). Reads are already served from the owning process's memory while a run
+is leased (single writer ⇒ coherent); the store is read only on cold load,
+resume, and stream reconnect. Read caches belong at the tool layer (RAG/SQL
+results, embeddings) as host adapters, not in core.
+
 **D3 — Split the loop before adding behavior.** `_run_loop_impl` is split into
 phase modules with **no behavior change**, proven by event-trace equivalence on
 existing loop/characterization tests. `runner.py` keeps entry points and turn
@@ -135,6 +149,9 @@ WP8 hot path, driven by the WP1 baseline
   every checkpoint.
 - Profile (cProfile) the 200 × 4 and 1 × 50 cases first; every change reports
   its delta against the baseline.
+- Add Postgres cases to the `--scale` benchmark (skipped without a DSN) and
+  report store round-trips and bytes per turn on Postgres, since that is the
+  production backend.
 
 ## Rules for every worker
 
