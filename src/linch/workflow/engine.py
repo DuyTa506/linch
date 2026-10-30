@@ -143,7 +143,7 @@ async def _run_to_deadline(
         return await fn(wf)
     try:
         return await asyncio.wait_for(fn(wf), timeout=deadline_ms / 1000.0)
-    except asyncio.TimeoutError as exc:
+    except TimeoutError as exc:
         raise WorkflowTimeoutError(f"workflow exceeded its deadline of {deadline_ms:g}ms") from exc
 
 

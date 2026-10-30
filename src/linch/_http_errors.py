@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any
 
@@ -80,8 +80,8 @@ def retry_after_seconds(err: Exception) -> float | None:
     except (TypeError, ValueError, IndexError, OverflowError):
         return None
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return max(0.0, (dt - datetime.now(timezone.utc)).total_seconds())
+        dt = dt.replace(tzinfo=UTC)
+    return max(0.0, (dt - datetime.now(UTC)).total_seconds())
 
 
 def is_prompt_length_error(err: Exception) -> bool:

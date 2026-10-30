@@ -655,7 +655,7 @@ async def _execute_tool_attempts(
             return _execution_outcome(call.id, result, block_result=block_result)
         except AbortError:
             raise
-        except asyncio.TimeoutError:
+        except TimeoutError:
             # result_timeout_ms may be None if the tool raised asyncio.TimeoutError
             # internally (its own deadline) with no agent-wide timeout set.
             ms: int | str = int(result_timeout_ms) if result_timeout_ms is not None else "unknown"

@@ -324,7 +324,7 @@ class Session:
             return
         try:
             await asyncio.wait_for(future, timeout_s)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             # The run never reached a alignment boundary in time. Drop the still
             # -pending entry so it cannot inject into a later turn, and surface
             # the timeout instead of blocking the caller indefinitely. (If the
