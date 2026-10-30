@@ -115,6 +115,8 @@ class WorkerJob:
 class _Execution:
     agent: Agent | None = None
     session: Session | None = None
+    run_task: asyncio.Task[None] | None = None
+    cancel_requested: bool = False
 
 
 AgentFactory = Callable[[WorkerJob], Awaitable[Agent]]
@@ -216,9 +218,7 @@ class Worker:
                 # the last confirmed TTL, including a bound on a hung renewal.
                 pass
             else:
-                # Starting the budget before I/O conservatively accounts for
-                # round-trip latency rather than extending an unconfirmed lease.
-                deadline = started + self.lease_ttl_s
+                deadline = loop.time() + self.lease_ttl_s
             remaining = deadline - loop.time()
             if remaining <= 0:
                 run_task.cancel()
@@ -249,6 +249,33 @@ class Worker:
                 pass
 
     async def _handle(self, job: Job) -> None:
+        execution = _Execution()
+        lifecycle = asyncio.create_task(self._run_job(job, execution))
+        while True:
+            try:
+                # Queue callback cancellation must not interrupt lease release,
+                # terminal verification, or agent teardown and become an ACK.
+                await asyncio.shield(lifecycle)
+                return
+            except asyncio.CancelledError:
+                execution.cancel_requested = True
+                if execution.run_task is not None:
+                    execution.run_task.cancel()
+                if lifecycle.cancelled():
+                    lifecycle = asyncio.create_task(self._check_finished_job(job))
+
+    async def _check_finished_job(self, job: Job) -> None:
+        rid = json.loads(job.payload or b"{}")["run_id"]
+        async with PostgresRunStore("", pool=_BorrowedPool(self._pool)) as store:
+            await self._require_terminal(store, rid)
+
+    async def _require_terminal(self, store: PostgresRunStore, rid: str) -> None:
+        current = await store.load_run(rid)
+        if current is None or current.status not in _TERMINAL:
+            status = current.status if current is not None else "missing"
+            raise RuntimeError(f"run {rid} exited non-terminal ({status}); retry dispatch")
+
+    async def _run_job(self, job: Job, execution: _Execution) -> None:
         payload = json.loads(job.payload or b"{}")
         rid, sid = payload["run_id"], payload["session_id"]
         store = _JobRunStore(self._pool, rid, sid)
@@ -262,31 +289,32 @@ class Worker:
         if rid in self._active_runs:
             raise RunLeaseConflictError(f"run {rid} is active on this worker")
         self._active_runs.add(rid)
-        claim_started = asyncio.get_running_loop().time()
         try:
             lease = await store.claim(rid, self.worker_id, self.lease_ttl_s)
         except BaseException:
             self._active_runs.discard(rid)
             raise
-        execution = _Execution()
+        deadline = asyncio.get_running_loop().time() + self.lease_ttl_s
         run_task: asyncio.Task[None] | None = None
         heartbeat: asyncio.Task[None] | None = None
-        token = otel_context.attach(
-            TraceContextTextMapPropagator().extract(
-                {"traceparent": payload.get("traceparent") or ""}
-            )
-        )
+        token = None
         try:
             try:
+                token = otel_context.attach(
+                    TraceContextTextMapPropagator().extract(
+                        {"traceparent": payload.get("traceparent") or ""}
+                    )
+                )
                 record = await store.load_run(rid)
                 if record is None:
                     raise KeyError(f"run not found: {rid}")
-                if record.status not in _TERMINAL:
+                if record.status not in _TERMINAL and not execution.cancel_requested:
                     run_task = asyncio.create_task(self._invoke(execution, store, record, payload))
+                    execution.run_task = run_task
                     # Renew immediately so two short failed requests have a full
                     # TTL budget; subsequent attempts run on the ttl/3 cadence.
                     heartbeat = asyncio.create_task(
-                        self._heartbeat(store, lease, run_task, claim_started + self.lease_ttl_s)
+                        self._heartbeat(store, lease, run_task, deadline)
                     )
                     await run_task
             except (asyncio.CancelledError, LeaseLostError):
@@ -321,10 +349,7 @@ class Worker:
                 finally:
                     with suppress(LeaseLostError):
                         await store.release(lease)
-            current = await store.load_run(rid)
-            if current is None or current.status not in _TERMINAL:
-                status = current.status if current is not None else "missing"
-                raise RuntimeError(f"run {rid} exited non-terminal ({status}); retry dispatch")
+            await self._require_terminal(store, rid)
         finally:
             try:
                 if execution.agent is not None:
@@ -333,7 +358,8 @@ class Worker:
                     await store.close()
             finally:
                 self._active_runs.discard(rid)
-                otel_context.detach(token)
+                if token is not None:
+                    otel_context.detach(token)
 
     async def _fire(self, job: Job) -> None:
         from .schedules import _fire

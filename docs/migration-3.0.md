@@ -254,3 +254,7 @@ for worker topology and schedules.
 - **D11:** `linch.observability` is removed; use `opentelemetry` directly.
 - **D11:** The `[otel]` extra is removed; install `opentelemetry-sdk` and your exporter in the host application.
 - **D11:** `examples/observability/custom_observer.py` is removed; use the console/OTLP exporter example.
+
+## Pending run adoption
+
+- `RunStore.create_run(session_id, id=existing_id)` adopts only a same-session `pending` run, merges metadata and checks existing contract compatibility; other existing IDs raise `ValueError`. Queue submission remains idempotent through `enqueue_run`.

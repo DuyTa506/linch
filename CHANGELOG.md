@@ -7,6 +7,12 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
 
 ## Unreleased
 
+- Retry nonterminal worker exits after ownership loss or cancellation. Retry
+  transient lease renewal failures within the last confirmed TTL; cancel the
+  run task on lease loss/expiry without writing a terminal aborted status.
+  Protect teardown from queue callback cancellation. Move pending-run inserts
+  and contract-checked adoption into the run stores with shared conformance tests.
+
 - Add explicit `linch.worker` (`worker` extra): atomic pending-run dispatch and
   batching through PgQueuer, fleet queue limits, lease heartbeats, checkpoint
   recovery, W3C trace propagation, and deferred cron/interval schedule jobs.
