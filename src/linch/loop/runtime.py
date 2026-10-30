@@ -14,6 +14,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from functools import partial
 from typing import Any, cast
 
+from .._wire import UnsupportedWireVersionError
 from ..errors import ConfigError
 from ..events import (
     BackgroundWorkerEvent,
@@ -1021,6 +1022,8 @@ class RunRuntime:
             raise ConfigError("provider_pending checkpoint is missing a valid provider_attempt")
         try:
             snapshot = await self.model_input_store.load(snapshot_id)
+        except UnsupportedWireVersionError:
+            raise
         except Exception as exc:
             raise ConfigError(
                 f"failed to load exact model input snapshot {snapshot_id!r}: {exc}"
@@ -1037,6 +1040,8 @@ class RunRuntime:
             )
         try:
             return decode_model_input_snapshot(snapshot, signal=signal)
+        except UnsupportedWireVersionError:
+            raise
         except ModelInputSnapshotError as exc:
             raise ConfigError(
                 f"exact model input snapshot {snapshot_id!r} cannot be decoded: {exc}"

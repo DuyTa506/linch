@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Literal, TypeAlias, cast
 
 from ._json import walk_json
+from ._wire import WIRE_VERSION, require_wire_version
 from .tools.base import (
     CanonicalToolOutput,
     Citation,
@@ -126,7 +127,7 @@ class ModelCallEvent:
     record_kind: Literal["intent", "dispatch_started", "receipt", "abandoned", "projection"]
     record: dict[str, Any]
     budget_owner_id: str | None = None
-    schema_version: int = 1
+    schema_version: int = WIRE_VERSION
     type: Literal["model_call"] = "model_call"
 
     def __post_init__(self) -> None:
@@ -1095,6 +1096,31 @@ def event_to_dict(event: Event) -> dict[str, Any]:
             d["structured_error"] = event.structured_error
         return d
     raise ValueError(f"unknown event type: {getattr(event, 'type', '<missing>')}")
+
+
+def _stored_event_to_dict(event: Event) -> dict[str, Any]:
+    """Encode an event with the persisted run-event wire stamp."""
+
+    return {"schema_version": WIRE_VERSION, "event": event_to_dict(event)}
+
+
+def _stored_event_from_dict(raw: dict[str, Any]) -> Event:
+    """Decode a persisted event after checking its outer wire version.
+
+    ``schema_version`` belongs to the stored-event envelope, not to ordinary
+    transient event values. Keeping the event payload nested means an opaque
+    ``IgnorableEvent`` may contain its own ``schema_version`` field without
+    colliding with the outer durability stamp. Model-call events retain their
+    own inner version as well.
+    """
+
+    if not isinstance(raw, dict):
+        require_wire_version(None)
+    require_wire_version(raw.get("schema_version"))
+    payload = raw.get("event")
+    if not isinstance(payload, dict):
+        raise ValueError("stored event envelope must contain an event object")
+    return event_from_dict(payload)
 
 
 _USER_EVENT_SUBTYPES = ("prompt", "tool_result", "alignment", "notification")

@@ -120,11 +120,13 @@ def test_snapshot_codec_round_trips_every_request_field_and_rebinds_signal() -> 
 
 
 def test_snapshot_codec_rejects_corruption_and_incompatible_version() -> None:
+    from linch._wire import UnsupportedWireVersionError
+
     snapshot = create_model_input_snapshot("run-1", 1, _request())
 
     with pytest.raises(ModelInputSnapshotError, match="integrity"):
         decode_model_input_snapshot(replace(snapshot, request_json="{}"))
-    with pytest.raises(ModelInputSnapshotError, match="codec version"):
+    with pytest.raises(UnsupportedWireVersionError, match="start a new run"):
         decode_model_input_snapshot(replace(snapshot, codec_version=999))
 
 
@@ -305,5 +307,5 @@ def test_snapshot_codec_preserves_golden_bytes_and_integrity_hash() -> None:
         "afcfb1aabbe427c33c50f4772e51c30c14c58a91e5d3d05439a34a752644b0a8"
     )
     assert snapshot.integrity_hash == (
-        "sha256:a99b94acb3dde086636081650393c70e4aae728e7bce3e9aa952bffd45855c95"
+        "sha256:779cf554f6f848fa02f28ae7425e0fc4ec3628c5c9bf9257f3af89d437000111"
     )

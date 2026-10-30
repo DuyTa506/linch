@@ -85,11 +85,13 @@ async def _exercise_store(store) -> None:
         total_usage=Usage(input_tokens=3, output_tokens=4),
         permission_decisions={
             'WriteThing:{"value":"WriteThing"}': {
+                "schema_version": 3,
                 "decision": "allow",
                 "reason": None,
                 "updated_input": None,
             },
             'DeleteFile:{"path":"/x"}': {
+                "schema_version": 3,
                 "decision": "deny",
                 "reason": "user denied",
                 "updated_input": None,

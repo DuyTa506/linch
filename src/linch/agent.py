@@ -11,6 +11,7 @@ from typing import Any, cast
 
 from ._blocking import run_blocking
 from ._version import get_version
+from ._wire import UnsupportedWireVersionError
 from .config import FeatureFlags, SystemPromptConfig
 from .durability import DurabilityOptions
 from .errors import ConfigError
@@ -1758,6 +1759,8 @@ async def _restore_provider_view(
     fallback = list(full_history)
     try:
         snapshot = await snapshot_loader(sid)
+    except UnsupportedWireVersionError:
+        raise
     except Exception as exc:
         _logging.getLogger(__name__).warning(
             "provider snapshot load failed; rebuilding from full history: %s", exc

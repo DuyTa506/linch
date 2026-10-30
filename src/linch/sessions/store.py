@@ -3,13 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from linch._wire import WIRE_VERSION, require_wire_version
 from linch.durability import InboxDelivery
 from linch.sessions.tasks import CreateTaskInput, Task, TaskPatch
 from linch.types import Message, message_from_dict, message_to_dict
 
-# Snapshot wire version. Bumped only on a breaking shape change; readers are
-# best-effort and ignore unknown future keys (mirrors run_store.SCHEMA_VERSION).
-SNAPSHOT_SCHEMA_VERSION = 1
+# Retain the existing name for private store callers; the shared wire module
+# owns the single persisted-data version.
+SNAPSHOT_SCHEMA_VERSION = WIRE_VERSION
 
 
 @dataclass(slots=True)
@@ -53,7 +54,9 @@ def snapshot_to_dict(snapshot: ProviderViewSnapshot) -> dict[str, Any]:
 
 
 def snapshot_from_dict(raw: dict[str, Any]) -> ProviderViewSnapshot:
-    # Version-tolerant: unknown future keys are ignored, missing keys default.
+    if not isinstance(raw, dict):
+        require_wire_version(None)
+    require_wire_version(raw.get("schema_version"))
     projection_id = raw.get("projection_id")
     if projection_id is not None and (
         not isinstance(projection_id, str) or not projection_id.strip()

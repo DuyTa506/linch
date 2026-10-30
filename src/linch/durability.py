@@ -6,6 +6,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, TypeAlias
 
+from linch._wire import WIRE_VERSION
 from linch.errors import ConfigError
 from linch.types import Message, message_from_dict, message_to_dict
 
@@ -142,7 +143,7 @@ def encode_inbox_delivery(delivery: InboxDelivery) -> tuple[str, str, str]:
 def _delivery_envelope(message_json: str, source: str, metadata_json: str) -> bytes:
     return _strict_json(
         {
-            "schema_version": 1,
+            "schema_version": WIRE_VERSION,
             "message": json.loads(message_json),
             "source": source,
             "metadata": json.loads(metadata_json),
