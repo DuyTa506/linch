@@ -76,7 +76,6 @@ async def run_tool_batch(ctx: ToolBatchContext) -> AsyncIterator[Event]:
             ctx.checkpoint.completed_tool_results,
             tool_blocks,
             after_seq=ctx.checkpoint.tool_batch_event_after_seq,
-            assistant_message=ctx.checkpoint.assistant_message,
         )
         if ctx.resume_checkpoint is not None and ctx.turn_index == ctx.checkpoint.turn_index
         else {}

@@ -968,9 +968,16 @@ class RunRuntime:
                 self.checkpoint.extension_state.pop(key, None)
             self.checkpoint.extension_state.update(hook_state)
         buf = self.session._event_journal
-        if phase == "tool_batch_pending":
+        if phase == "tool_batch_pending" or (
+            phase == "assistant_appended"
+            and self.checkpoint.assistant_message is not None
+            and any(
+                isinstance(block, ToolUseBlock)
+                for block in self.checkpoint.assistant_message.content
+            )
+        ):
             self.checkpoint.tool_batch_event_after_seq = buf.last_seq if buf is not None else None
-        elif phase not in ("permission_pending", "tool_executing"):
+        elif phase not in ("permission_pending", "tool_executing", "tool_results_appended"):
             self.checkpoint.tool_batch_event_after_seq = None
         await store.save_checkpoint(self.run_id, self.checkpoint, status=status)
         if completed_snapshot_id is not None:

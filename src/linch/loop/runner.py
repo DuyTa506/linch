@@ -24,6 +24,7 @@ from ..run_store import (
     RunCheckpoint,
     RunContractMismatchError,
     RunRecord,
+    _require_tool_recovery_cursor,
     ensure_run_contract_compatible,
     run_contract_from_meta,
     run_meta_with_contract,
@@ -161,12 +162,20 @@ async def resume_loop(session: Session, run_id: str, opts: RunOptions) -> AsyncI
         ensure_run_contract_compatible(
             stored_contract,
             requested_contract,
-            allow_legacy=(
-                opts.allow_legacy_resume
-                and checkpoint.provider_attempt == 0
-                and checkpoint.model_input_snapshot_id is None
-            ),
         )
+        if checkpoint.phase in {
+            "tool_batch_pending",
+            "permission_pending",
+            "tool_executing",
+            "tool_results_appended",
+        } or (
+            checkpoint.phase == "assistant_appended"
+            and checkpoint.assistant_message is not None
+            and any(
+                isinstance(block, ToolUseBlock) for block in checkpoint.assistant_message.content
+            )
+        ):
+            _require_tool_recovery_cursor(checkpoint.tool_batch_event_after_seq)
     except UnsupportedWireVersionError:
         raise
     except (RunContractMismatchError, TypeError, ValueError) as exc:

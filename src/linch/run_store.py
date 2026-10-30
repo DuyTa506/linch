@@ -99,8 +99,7 @@ class RunCheckpoint:
     tool_batch_event_after_seq: int | None = None
     """Event-log watermark: the seq just before this turn's tool-batch start
     events. On resume, tool-result recovery scans only events after this cursor.
-    ``None`` (legacy checkpoints / non-tool phases) triggers the boundary
-    fallback in ``_recover_completed_tool_results``."""
+    Tool recovery requires a non-negative integer; non-tool phases may use ``None``."""
     pending_alignment: list[dict[str, Any]] = field(default_factory=list)
     """Undrained ``session.align()`` entries (``{"prompt", "images"}``) at the
     time of this save, restored on resume so steering intent survives a crash.
@@ -112,14 +111,12 @@ class RunCheckpoint:
 
     Keys are extension-owned namespaces (for example a checkpointable hook's
     ``checkpoint_key``).  Core preserves entries it does not understand, so
-    independently installed extensions can share one durable checkpoint.  A
-    checkpoint written before this field existed restores as an empty mapping.
+    independently installed extensions can share one durable checkpoint.
     """
     provider_attempt: int = 0
     """1-based provider dispatch attempt for an exact model-input snapshot.
 
-    Zero is the legacy/default value and is omitted from the checkpoint wire
-    shape so runs without exact-input durability keep their existing payload.
+    Zero means no provider attempt has been captured.
     """
     model_input_snapshot_id: str | None = None
     """Snapshot referenced by a ``provider_pending`` checkpoint, when enabled."""
@@ -227,14 +224,11 @@ class RunContractComparison:
     """Result of checking whether a durable run can be resumed safely."""
 
     compatible: bool
-    legacy: bool
-    stored_fingerprint: str | None
+    stored_fingerprint: str
     requested_fingerprint: str
     differences: tuple[RunContractDifference, ...] = ()
 
     def describe(self) -> str:
-        if self.legacy:
-            return "legacy run has no persisted run contract"
         if self.compatible:
             return "run contract matches"
         details = ", ".join(
@@ -870,9 +864,11 @@ def run_contract_to_dict(contract: RunContract) -> dict[str, Any]:
 
     require_wire_version(contract.schema_version)
     payload = _json_safe(contract.payload, strict=True)
+    if contract.fingerprint != _run_contract_fingerprint(contract.schema_version, payload):
+        raise ValueError("run contract fingerprint does not match payload")
     return {
         "schema_version": contract.schema_version,
-        "fingerprint": _run_contract_fingerprint(contract.schema_version, payload),
+        "fingerprint": contract.fingerprint,
         "payload": payload,
     }
 
@@ -891,11 +887,9 @@ def run_contract_from_dict(raw: Mapping[str, Any]) -> RunContract:
     assert isinstance(payload, dict)
     computed = _run_contract_fingerprint(version_raw, payload)
     declared = raw.get("fingerprint")
-    # Missing fingerprints are accepted for early/pre-release contract rows.
-    # A present but invalid value is retained so compatibility comparison can
-    # report corruption instead of silently blessing it.
-    fingerprint = declared if isinstance(declared, str) and declared else computed
-    return RunContract(schema_version=version_raw, payload=payload, fingerprint=fingerprint)
+    if not isinstance(declared, str) or not declared or declared != computed:
+        raise ValueError("run contract fingerprint does not match payload")
+    return RunContract(schema_version=version_raw, payload=payload, fingerprint=declared)
 
 
 def run_meta_with_contract(
@@ -910,11 +904,11 @@ def run_meta_with_contract(
     return safe
 
 
-def run_contract_from_meta(meta: Mapping[str, Any]) -> RunContract | None:
-    """Load a persisted contract; ``None`` means a genuinely legacy run."""
+def run_contract_from_meta(meta: Mapping[str, Any]) -> RunContract:
+    """Load a current persisted contract, rejecting contractless runs."""
 
     if RUN_CONTRACT_META_KEY not in meta:
-        return None
+        require_wire_version(None)
     raw = meta[RUN_CONTRACT_META_KEY]
     if not isinstance(raw, Mapping):
         require_wire_version(None)
@@ -956,23 +950,12 @@ def _contract_differences(
 def compare_run_contract(
     stored: RunContract | None,
     requested: RunContract,
-    *,
-    allow_legacy: bool = False,
 ) -> RunContractComparison:
-    """Compare persisted and requested inputs, failing closed for legacy runs.
-
-    Hosts migrating pre-contract records may opt in to ``allow_legacy``.  That
-    flag is intentionally explicit: without the original execution inputs,
-    compatibility cannot be proven.
-    """
+    """Compare current persisted and requested execution inputs."""
 
     if stored is None:
-        return RunContractComparison(
-            compatible=allow_legacy,
-            legacy=True,
-            stored_fingerprint=None,
-            requested_fingerprint=requested.fingerprint,
-        )
+        require_wire_version(None)
+    assert stored is not None
     stored_computed = _run_contract_fingerprint(stored.schema_version, stored.payload)
     requested_computed = _run_contract_fingerprint(requested.schema_version, requested.payload)
     differences: list[RunContractDifference] = []
@@ -990,7 +973,6 @@ def compare_run_contract(
     compatible = not differences and stored_computed == requested_computed
     return RunContractComparison(
         compatible=compatible,
-        legacy=False,
         stored_fingerprint=stored.fingerprint,
         requested_fingerprint=requested.fingerprint,
         differences=tuple(differences),
@@ -1000,12 +982,10 @@ def compare_run_contract(
 def ensure_run_contract_compatible(
     stored: RunContract | None,
     requested: RunContract,
-    *,
-    allow_legacy: bool = False,
 ) -> RunContractComparison:
     """Return comparison or raise :class:`RunContractMismatchError`."""
 
-    comparison = compare_run_contract(stored, requested, allow_legacy=allow_legacy)
+    comparison = compare_run_contract(stored, requested)
     if not comparison.compatible:
         raise RunContractMismatchError(comparison)
     return comparison
@@ -1040,15 +1020,9 @@ def checkpoint_to_dict(checkpoint: RunCheckpoint) -> dict[str, Any]:
         "tool_batch_event_after_seq": checkpoint.tool_batch_event_after_seq,
         "pending_alignment": checkpoint.pending_alignment,
     }
-    # Additive extensions must cost nothing when unused: preserving the legacy
-    # wire shape for an empty namespace keeps harness-off checkpoint payloads
-    # byte-identical.  Readers still default a missing key to ``{}``.
-    if checkpoint.extension_state:
-        data["extension_state"] = checkpoint.extension_state
-    if checkpoint.provider_attempt:
-        data["provider_attempt"] = checkpoint.provider_attempt
-    if checkpoint.model_input_snapshot_id is not None:
-        data["model_input_snapshot_id"] = checkpoint.model_input_snapshot_id
+    data["extension_state"] = checkpoint.extension_state
+    data["provider_attempt"] = checkpoint.provider_attempt
+    data["model_input_snapshot_id"] = checkpoint.model_input_snapshot_id
     safe = _json_safe(data, strict=False)
     assert isinstance(safe, dict)
     return safe
@@ -1079,32 +1053,35 @@ def _pending_alignment_from_raw(value: Any) -> list[dict[str, Any]]:
 
 
 def _extension_state_from_raw(value: Any) -> dict[str, Any]:
-    """Restore the extension namespace without making legacy reads brittle.
-
-    Checkpoints arrive from JSON-backed stores, but this parser is also public
-    and is used by host stores.  Treat a missing or malformed root as no
-    extension state; per-extension payload validation belongs to the extension
-    that owns the key when it restores its state.
-    """
+    """Preserve extension payloads; each extension validates its own namespace."""
     if not isinstance(value, dict):
         return {}
     return {key: item for key, item in value.items() if isinstance(key, str)}
+
+
+def _require_tool_recovery_cursor(value: int | None) -> int:
+    if type(value) is not int or value < 0:
+        raise ValueError("tool recovery requires a non-negative integer cursor")
+    return value
 
 
 def checkpoint_from_dict(raw: dict[str, Any]) -> RunCheckpoint:
     if not isinstance(raw, dict):
         require_wire_version(None)
     require_wire_version(raw.get("schema_version"))
-    assistant_raw = raw.get("assistant_message")
+    cursor = raw["tool_batch_event_after_seq"]
+    if cursor is not None:
+        _require_tool_recovery_cursor(cursor)
+    assistant_raw = raw["assistant_message"]
     pending_blocks: list[ToolUseBlock] = []
-    for item in raw.get("pending_tool_blocks", []):
+    for item in raw["pending_tool_blocks"]:
         if isinstance(item, dict):
             block = block_from_dict(item)
             if isinstance(block, ToolUseBlock):
                 pending_blocks.append(block)
 
     completed: dict[str, ToolResultBlock] = {}
-    completed_raw = raw.get("completed_tool_results", {})
+    completed_raw = raw["completed_tool_results"]
     if isinstance(completed_raw, dict):
         for key, item in completed_raw.items():
             if isinstance(item, dict):
@@ -1113,66 +1090,59 @@ def checkpoint_from_dict(raw: dict[str, Any]) -> RunCheckpoint:
                     completed[str(key)] = block
 
     return RunCheckpoint(
-        phase=raw.get("phase", "started"),
-        prompt=str(raw.get("prompt", "")),
-        turn_index=int(raw.get("turn_index", 0) or 0),
-        total_usage=usage_from_dict(dict(raw.get("total_usage", {}))),
+        phase=raw["phase"],
+        prompt=str(raw["prompt"]),
+        turn_index=int(raw["turn_index"] or 0),
+        total_usage=usage_from_dict(dict(raw["total_usage"])),
         assistant_message=(
             message_from_dict(dict(assistant_raw)) if isinstance(assistant_raw, dict) else None
         ),
         pending_tool_blocks=pending_blocks,
         completed_tool_results=completed,
-        force_final_pending=bool(raw.get("force_final_pending", False)),
-        loop_guard_state=_dict_or_none(raw.get("loop_guard_state")),
-        pending_skill_overlay=_dict_or_none(raw.get("pending_skill_overlay")),
+        force_final_pending=bool(raw["force_final_pending"]),
+        loop_guard_state=_dict_or_none(raw["loop_guard_state"]),
+        pending_skill_overlay=_dict_or_none(raw["pending_skill_overlay"]),
         current_turn_allowed_tools=(
-            [str(t) for t in raw.get("current_turn_allowed_tools", [])]
-            if isinstance(raw.get("current_turn_allowed_tools"), list)
+            [str(t) for t in raw["current_turn_allowed_tools"]]
+            if isinstance(raw["current_turn_allowed_tools"], list)
             else None
         ),
         assistant_stop_reason=(
-            str(raw.get("assistant_stop_reason"))
-            if isinstance(raw.get("assistant_stop_reason"), str)
+            str(raw["assistant_stop_reason"])
+            if isinstance(raw["assistant_stop_reason"], str)
             else None
         ),
         permission_decisions=(
-            {str(k): dict(v) for k, v in raw.get("permission_decisions", {}).items()}
-            if isinstance(raw.get("permission_decisions"), dict)
+            {str(k): dict(v) for k, v in raw["permission_decisions"].items()}
+            if isinstance(raw["permission_decisions"], dict)
             else {}
         ),
         background_workers=(
-            {str(k): dict(v) for k, v in raw.get("background_workers", {}).items()}
-            if isinstance(raw.get("background_workers"), dict)
+            {str(k): dict(v) for k, v in raw["background_workers"].items()}
+            if isinstance(raw["background_workers"], dict)
             else {}
         ),
-        truncation_attempts=max(0, int(raw.get("truncation_attempts", 0) or 0)),
+        truncation_attempts=max(0, int(raw["truncation_attempts"] or 0)),
         truncation_prefix=(
-            str(raw.get("truncation_prefix"))
-            if isinstance(raw.get("truncation_prefix"), str)
-            else ""
+            str(raw["truncation_prefix"]) if isinstance(raw["truncation_prefix"], str) else ""
         ),
         pending_truncation_feedback=(
-            str(raw.get("pending_truncation_feedback"))
-            if isinstance(raw.get("pending_truncation_feedback"), str)
+            str(raw["pending_truncation_feedback"])
+            if isinstance(raw["pending_truncation_feedback"], str)
             else None
         ),
-        tool_batch_event_after_seq=(
-            int(raw["tool_batch_event_after_seq"])
-            if isinstance(raw.get("tool_batch_event_after_seq"), int)
-            else None
-        ),
-        pending_alignment=_pending_alignment_from_raw(raw.get("pending_alignment")),
-        extension_state=_extension_state_from_raw(raw.get("extension_state")),
+        tool_batch_event_after_seq=cursor,
+        pending_alignment=_pending_alignment_from_raw(raw["pending_alignment"]),
+        extension_state=_extension_state_from_raw(raw["extension_state"]),
         provider_attempt=(
             max(0, raw["provider_attempt"])
-            if isinstance(raw.get("provider_attempt"), int)
-            and not isinstance(raw.get("provider_attempt"), bool)
+            if isinstance(raw["provider_attempt"], int)
+            and not isinstance(raw["provider_attempt"], bool)
             else 0
         ),
         model_input_snapshot_id=(
             raw["model_input_snapshot_id"]
-            if isinstance(raw.get("model_input_snapshot_id"), str)
-            and raw["model_input_snapshot_id"]
+            if isinstance(raw["model_input_snapshot_id"], str) and raw["model_input_snapshot_id"]
             else None
         ),
     )
@@ -1184,15 +1154,13 @@ def _safe_meta(meta: Any) -> dict[str, object]:
 
 
 def _append_run_error(meta: dict[str, object], error: dict[str, object]) -> None:
-    """Append an error without discarding malformed or legacy metadata."""
+    """Append to current error-object history, replacing malformed history."""
 
     existing = meta.get("errors")
-    if isinstance(existing, list):
-        errors = existing
-    else:
-        errors = [] if existing is None else [existing]
-        meta["errors"] = errors
-    errors.append(_json_safe(error, strict=False))
+    if not isinstance(existing, list) or not all(isinstance(item, dict) for item in existing):
+        existing = []
+        meta["errors"] = existing
+    existing.append(_json_safe(error, strict=False))
 
 
 def _copy_checkpoint(checkpoint: RunCheckpoint | None) -> RunCheckpoint | None:

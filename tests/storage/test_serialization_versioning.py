@@ -83,17 +83,38 @@ def test_checkpoint_from_dict_rejects_future_version_before_field_defaults() -> 
         checkpoint_from_dict(data)
 
 
-def test_checkpoint_from_dict_defaults_missing_truncation_attempts() -> None:
+@pytest.mark.parametrize(
+    "field",
+    [
+        "phase",
+        "prompt",
+        "turn_index",
+        "total_usage",
+        "assistant_message",
+        "pending_tool_blocks",
+        "completed_tool_results",
+        "force_final_pending",
+        "loop_guard_state",
+        "pending_skill_overlay",
+        "current_turn_allowed_tools",
+        "assistant_stop_reason",
+        "permission_decisions",
+        "background_workers",
+        "truncation_attempts",
+        "truncation_prefix",
+        "pending_truncation_feedback",
+        "tool_batch_event_after_seq",
+        "pending_alignment",
+        "extension_state",
+        "provider_attempt",
+        "model_input_snapshot_id",
+    ],
+)
+def test_checkpoint_requires_every_current_wire_field(field: str) -> None:
     data = checkpoint_to_dict(_checkpoint())
-    data.pop("truncation_attempts")
-    data.pop("truncation_prefix")
-    data.pop("pending_truncation_feedback")
-
-    restored = checkpoint_from_dict(data)
-
-    assert restored.truncation_attempts == 0
-    assert restored.truncation_prefix == ""
-    assert restored.pending_truncation_feedback is None
+    data.pop(field, None)
+    with pytest.raises(KeyError, match=field):
+        checkpoint_from_dict(data)
 
 
 def test_checkpoint_round_trips_pending_alignment_with_images() -> None:
@@ -110,7 +131,7 @@ def test_checkpoint_round_trips_pending_alignment_with_images() -> None:
     assert restored.pending_alignment == checkpoint.pending_alignment
 
 
-def test_checkpoint_round_trips_extension_state_and_legacy_defaults_empty() -> None:
+def test_checkpoint_round_trips_extension_state() -> None:
     checkpoint = _checkpoint()
     checkpoint.extension_state = {
         "example.extension": {
@@ -124,18 +145,14 @@ def test_checkpoint_round_trips_extension_state_and_legacy_defaults_empty() -> N
     restored = checkpoint_from_dict(data)
     assert restored.extension_state == checkpoint.extension_state
 
-    # A checkpoint persisted by older Linch releases has no extension namespace.
-    data.pop("extension_state")
-    assert checkpoint_from_dict(data).extension_state == {}
+    empty = checkpoint_to_dict(_checkpoint())
+    assert empty["extension_state"] == {}
+    assert empty["provider_attempt"] == 0
+    assert empty["model_input_snapshot_id"] is None
 
-    assert "extension_state" not in checkpoint_to_dict(_checkpoint())
 
-
-def test_checkpoint_from_dict_defaults_missing_pending_alignment() -> None:
+def test_checkpoint_normalizes_malformed_pending_alignment() -> None:
     data = checkpoint_to_dict(_checkpoint())
-    data.pop("pending_alignment")
-    assert checkpoint_from_dict(data).pending_alignment == []
-
     # Malformed entries are skipped or normalized, never crash the resume.
     data["pending_alignment"] = [
         "not-a-dict",

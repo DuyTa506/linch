@@ -162,7 +162,7 @@ def test_snapshot_codec_rejects_cycles_but_never_serializes_signal() -> None:
     create_model_input_snapshot("run-1", 1, request)
 
 
-def test_checkpoint_snapshot_fields_are_additive_and_round_trip() -> None:
+def test_checkpoint_snapshot_fields_are_always_written_and_round_trip() -> None:
     legacy = RunCheckpoint(
         phase="provider_pending",
         prompt="hello",
@@ -170,8 +170,8 @@ def test_checkpoint_snapshot_fields_are_additive_and_round_trip() -> None:
         total_usage=Usage(),
     )
     legacy_wire = checkpoint_to_dict(legacy)
-    assert "provider_attempt" not in legacy_wire
-    assert "model_input_snapshot_id" not in legacy_wire
+    assert legacy_wire["provider_attempt"] == 0
+    assert legacy_wire["model_input_snapshot_id"] is None
 
     exact = replace(
         legacy,

@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
+from test_run_resume import _pin_run_contract
 
 
 class _TextProvider:
@@ -102,7 +103,6 @@ async def test_checkpointable_hook_snapshots_session_scoped_json_state() -> None
 
 
 async def test_checkpointable_hook_restores_matching_state_and_preserves_other_extensions() -> None:
-    from linch import RunOptions
     from linch.run_store import InMemoryRunStore, RunCheckpoint
     from linch.sessions import InMemorySessionStore
     from linch.types import Usage
@@ -133,7 +133,8 @@ async def test_checkpointable_hook_restores_matching_state_and_preserves_other_e
     )
     session = await agent.session(id="session-restore")
 
-    events = await _collect(session.resume(run.id, RunOptions(allow_legacy_resume=True)))
+    await _pin_run_contract(session, run.id)
+    events = await _collect(session.resume(run.id))
 
     assert events[-1].type == "result"
     assert hook.restored == [
@@ -146,7 +147,6 @@ async def test_checkpointable_hook_restores_matching_state_and_preserves_other_e
 
 
 async def test_empty_hook_snapshot_clears_stale_active_namespace_only() -> None:
-    from linch import RunOptions
     from linch.run_store import InMemoryRunStore, RunCheckpoint
     from linch.sessions import InMemorySessionStore
     from linch.types import Usage
@@ -177,7 +177,8 @@ async def test_empty_hook_snapshot_clears_stale_active_namespace_only() -> None:
     )
     session = await agent.session(id="session-clear")
 
-    events = await _collect(session.resume(run.id, RunOptions(allow_legacy_resume=True)))
+    await _pin_run_contract(session, run.id)
+    events = await _collect(session.resume(run.id))
 
     assert events[-1].type == "result"
     loaded = await run_store.load_run(run.id)

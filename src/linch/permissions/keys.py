@@ -23,9 +23,6 @@ def permission_decision_to_dict(decision: Any) -> dict[str, Any]:
         "schema_version": WIRE_VERSION,
         "decision": decision.decision,
         "reason": decision.reason,
-        # Retain the field for wire compatibility, but Linch 2 never persists
-        # post-approval mutation.
-        "updated_input": None,
     }
 
 

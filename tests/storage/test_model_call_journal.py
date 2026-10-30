@@ -958,7 +958,7 @@ async def test_contract_rejects_unsupported_accounting_semantics(tmp_path: Any) 
     provider = _Provider()
     resumed = await _agent(sessions, runs, provider).session(id="session")
     with pytest.raises(ConfigError, match="Cannot safely resume"):
-        _ = [event async for event in resumed.resume(run_id, RunOptions(allow_legacy_resume=True))]
+        _ = [event async for event in resumed.resume(run_id, RunOptions())]
     assert provider.calls == []
 
 

@@ -11,6 +11,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
+from test_run_resume import _pin_run_contract
 
 
 async def _run_compaction_case(
@@ -582,12 +583,14 @@ async def test_legacy_nonzero_checkpoint_without_receipts_is_rejected_before_dis
     )
     session = await agent.session(id="legacy-accounting")
 
+    await _pin_run_contract(session, run.id, RunOptions(budget=budget))
+
     with pytest.raises(ConfigError, match="receipt provenance"):
         _ = [
             event
             async for event in session.resume(
                 run.id,
-                RunOptions(allow_legacy_resume=True, budget=budget),
+                RunOptions(budget=budget),
             )
         ]
 
@@ -691,8 +694,10 @@ async def test_resume_rejects_an_unproven_legacy_offset_alongside_new_receipts()
     )
     session = await agent.session(id="legacy-offset")
 
+    await _pin_run_contract(session, run.id)
+
     with pytest.raises(ConfigError, match="receipt provenance"):
-        _ = [event async for event in session.resume(run.id, RunOptions(allow_legacy_resume=True))]
+        _ = [event async for event in session.resume(run.id, RunOptions())]
 
     assert provider.calls == 0
 
@@ -808,11 +813,12 @@ async def test_resume_merges_journal_after_receipt_backed_checkpoint_without_dou
         permissions={"mode": "skip-dangerous"},
     )
     session = await agent.session(id=f"journal-ahead-{reuse_budget}")
+    await _pin_run_contract(session, run.id, RunOptions(budget=resumed_budget))
     events = [
         event
         async for event in session.resume(
             run.id,
-            RunOptions(allow_legacy_resume=True, budget=resumed_budget),
+            RunOptions(budget=resumed_budget),
         )
     ]
 
