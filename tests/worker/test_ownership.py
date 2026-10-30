@@ -199,3 +199,147 @@ async def test_normal_nonterminal_exit_is_retried(pool, monkeypatch):
             lambda: pool.fetchval("SELECT status='completed' FROM runs WHERE id=$1", rid)
         )
     assert calls == 2
+
+
+async def test_successful_slow_claim_starts_a_fresh_ttl_budget(pool, monkeypatch):
+    from linch import PostgresRunStore
+    from linch.worker import Worker, enqueue_run
+
+    real_claim = PostgresRunStore.claim
+
+    async def claim(store, rid, owner, ttl):
+        await asyncio.sleep(ttl * 1.1)  # Waiting for a pool slot happens before the DB lease.
+        return await real_claim(store, rid, owner, ttl)
+
+    async def factory(job):
+        return make_agent(job)
+
+    monkeypatch.setattr(PostgresRunStore, "claim", claim)
+    rid = await enqueue_run(pool, "slow-claim", "hello")
+    async with running(
+        Worker(pool, factory, lease_ttl_s=0.3, poll_interval_s=0.02, retry_delay_s=0.05)
+    ):
+        await wait_for(
+            lambda: pool.fetchval("SELECT status='completed' FROM runs WHERE id=$1", rid), timeout=3
+        )
+
+
+async def test_successful_renewal_refreshes_budget_at_reply(pool, monkeypatch):
+    from linch import PostgresRunStore
+    from linch.worker import Worker, enqueue_run
+
+    async def factory(job):
+        return make_agent(job)
+
+    real_renew = PostgresRunStore.renew
+
+    async def renew(store, lease):
+        await asyncio.sleep(0.25)
+        return await real_renew(store, lease)
+
+    monkeypatch.setattr(PostgresRunStore, "renew", renew)
+    rid = await enqueue_run(pool, "slow-renew", "hello")
+    store = PostgresRunStore("", pool=pool)
+    lease = await store.claim(rid, "owner", 0.6)
+
+    async def blocked():
+        await asyncio.Event().wait()
+
+    run_task = asyncio.create_task(blocked())
+    worker = Worker(pool, factory, lease_ttl_s=0.6)
+    heartbeat = asyncio.create_task(worker._heartbeat(store, lease, run_task))
+    try:
+        await asyncio.sleep(0.95)
+        assert not run_task.done()
+    finally:
+        heartbeat.cancel()
+        run_task.cancel()
+        await asyncio.gather(heartbeat, run_task, return_exceptions=True)
+        await store.release(lease)
+
+
+async def _picked_job(pool):
+    from datetime import timedelta
+    from uuid import uuid4
+
+    from pgqueuer import Queries
+    from pgqueuer.ports.repository import EntrypointExecutionParameter
+    from pgqueuer.types import QueueEntrypoint, QueueManagerId
+
+    jobs = await Queries.from_asyncpg_pool(pool).dequeue(
+        1,
+        {QueueEntrypoint("linch.run:default"): EntrypointExecutionParameter(0)},
+        QueueManagerId(uuid4()),
+        None,
+        timedelta(seconds=30),
+    )
+    return jobs[0]
+
+
+async def test_cancellation_during_cleanup_preserves_nonterminal_dispatch(pool, monkeypatch):
+    from datetime import timedelta
+
+    from pgqueuer import Queries
+
+    from linch import Agent
+    from linch.worker import Worker, enqueue_run
+
+    entered = asyncio.Event()
+    finish = asyncio.Event()
+    real_close = Agent.close
+
+    async def close(agent):
+        entered.set()
+        await finish.wait()
+        await real_close(agent)
+
+    async def factory(job):
+        return make_agent(job)
+
+    worker = Worker(pool, factory)
+
+    async def nonterminal(execution, store, record, payload):
+        from linch import Agent, empty_tools
+        from linch.evals import ScriptedProvider
+        from linch.sessions import InMemorySessionStore
+
+        execution.agent = Agent(
+            model="m",
+            provider=ScriptedProvider([]),
+            session_store=InMemorySessionStore(),
+            run_store=store,
+            tools=empty_tools(),
+        )
+
+    monkeypatch.setattr(worker, "_invoke", nonterminal)
+    monkeypatch.setattr(Agent, "close", close)
+    rid = await enqueue_run(pool, "cleanup-cancel", "hello")
+    job = await _picked_job(pool)
+    task = asyncio.create_task(worker._handle(job))
+    await asyncio.wait_for(entered.wait(), 3)
+    task.cancel()
+    finish.set()
+    with pytest.raises(RuntimeError, match="non-terminal"):
+        await task
+    assert await pool.fetchval("SELECT status FROM runs WHERE id=$1", rid) == "pending"
+    assert await pool.fetchval("SELECT lease_owner FROM runs WHERE id=$1", rid) is None
+    await Queries.from_asyncpg_pool(pool).retry_job(job, timedelta(0), None)
+    assert await pool.fetchval("SELECT attempts FROM pgqueuer") == 1
+
+
+async def test_trace_extraction_failure_does_not_leak_claimed_lease(pool):
+    import json
+
+    from linch.worker import Worker, enqueue_run
+
+    async def factory(job):
+        return make_agent(job)
+
+    rid = await enqueue_run(pool, "bad-carrier", "hello")
+    job = await _picked_job(pool)
+    payload = json.loads(job.payload)
+    payload["traceparent"] = 42
+    job = job.model_copy(update={"payload": json.dumps(payload).encode()})
+    worker = Worker(pool, factory)
+    await worker._handle(job)
+    assert await pool.fetchval("SELECT lease_owner FROM runs WHERE id=$1", rid) is None

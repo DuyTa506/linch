@@ -199,11 +199,14 @@ These limits cap runs; use host limiters for provider request/token quotas.
 The queue only dispatches. A job separately claims the D1 run lease using the
 worker ID. Renewal starts immediately, then repeats every **lease TTL / 3**.
 Transient renewal failures retry within the last confirmed TTL; a hung renewal
-is bounded by that same deadline. `LeaseLostError` or expiry without a successful
-renewal cancels the run task without aborting its signal or writing a terminal
+is bounded by that same deadline. Successful claim/renew replies start a fresh
+TTL budget, so waiting for a pool slot does not consume a newly acquired lease.
+`LeaseLostError` or expiry without a successful renewal cancels the run task without aborting its signal or writing a terminal
 status. Session work is quiesced before lease release. Completed, failed and
 aborted runs are acknowledged without invocation; every nonterminal exit,
 including cancellation and ownership loss, is retried from its checkpoint.
+Queue-callback cancellation stops the run task while shielding cleanup and the
+terminal-state check, preventing PgQueuer from acknowledging unfinished work.
 An agent failure is a durable result, not a queue retry. Infrastructure errors
 such as an unreachable store or a competing live lease use
 `DatabaseRetryEntrypointExecutor` backoff; exhausted jobs are held for host
