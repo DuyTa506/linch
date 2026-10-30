@@ -83,15 +83,15 @@ def test_scale_metrics_separates_payload_bytes_and_sql_round_trips():
 def test_scale_metrics_counts_reset_calls_in_supporting_round_trips():
     benchmark = _load_script()
     metrics = benchmark.ScaleStoreMetrics()
-    metrics.sql_round_trips["run", 0] = 6
+    metrics.sql_round_trips["run", 0] = 4
     metrics.transaction_commands["run", 0] = 2
-    metrics.pool_reset_commands["run", 0] = 3
+    metrics.pool_reset_commands["run", 0] = 1
 
     summary = metrics.round_trip_summary(turns=1)["by_store"]["run"]
-    assert summary["round_trips"] == 9
-    assert summary["application_statements"] == 4
+    assert summary["round_trips"] == 4
+    assert summary["application_statements"] == 1
     assert summary["transaction_commands"] == 2
-    assert summary["pool_reset_commands"] == 3
+    assert summary["pool_reset_commands"] == 1
 
 
 @pytest.mark.asyncio

@@ -785,12 +785,13 @@ class ScaleStoreMetrics:
                 if name == store
             )
             by_store[store] = {
-                # Resets are tracked separately because the supporting public
-                # method counter does not include Connection.reset()'s query.
-                # Keep the aggregate additive: application + transaction +
-                # reset == round_trips.
-                "round_trips": statement_calls + pool_reset_commands,
-                "application_statements": statement_calls - transaction_commands,
+                # The supporting command counter includes one call for reset;
+                # its underlying reset query is counted independently by the
+                # protocol proxy, so this does not double-count that metric.
+                "round_trips": statement_calls,
+                "application_statements": statement_calls
+                - transaction_commands
+                - pool_reset_commands,
                 "transaction_commands": transaction_commands,
                 "pool_reset_commands": pool_reset_commands,
                 "pool_acquires": acquires,
@@ -809,21 +810,13 @@ class ScaleStoreMetrics:
                 "setup; transaction and pool-reset categories are broken out",
             }
         by_turn = []
-        for turn in sorted(
-            {turn for _store, turn in self.sql_round_trips}
-            | {turn for _store, turn in self.pool_reset_commands}
-        ):
+        for turn in sorted({turn for _store, turn in self.sql_round_trips}):
             statement_calls = sum(
                 count
                 for (_store, row_turn), count in self.sql_round_trips.items()
                 if row_turn == turn
             )
-            reset_calls = sum(
-                count
-                for (_store, row_turn), count in self.pool_reset_commands.items()
-                if row_turn == turn
-            )
-            by_turn.append({"turn": turn, "round_trips": statement_calls + reset_calls})
+            by_turn.append({"turn": turn, "round_trips": statement_calls})
         return {"by_store": by_store, "by_turn": by_turn}
 
 
@@ -918,6 +911,7 @@ def _instrument_connection_class(metrics: ScaleStoreMetrics, store: str) -> Any:
             try:
                 turn = metrics.turn.get()
                 metrics.pool_reset_commands[store, turn] += 1
+                metrics.sql_round_trips[store, turn] += 1
                 return await super().reset(*args, **kwargs)
             finally:
                 reset_depth.reset(token)
