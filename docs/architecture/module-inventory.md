@@ -21,7 +21,7 @@
 | `compaction.py` | Context-window management; calls `agent.provider` directly; `CompactionLadder` + `micro_compact` recovery rungs |
 | `budget.py` | `RunBudget` — token/USD spending caps shared across the agent tree; charged per turn in `loop/runner.py` |
 | `workflow/` | Deterministic workflow engine: `WorkflowContext` (`context.py`), content-addressed journal (`journal.py`), `run_workflow` driver (`engine.py`) |
-| `coordination/` | Optional capabilities that advance the loop from a clock or a peer: `scheduling/` (cron/interval primitive + `CreateSchedule`/`List`/`Cancel` tools, `SchedulerLoop`), `mailbox/` (peer message bus + `Correlator`), `send_message.py`. Opt-in via `Agent(schedule_store=...)` / `Agent(mailbox=...)` |
+| `coordination/` | Optional in-process peer messaging: `mailbox/` (peer message bus + `Correlator`) and `send_message.py`; durable scheduling and queue dispatch are in `linch.worker` |
 | `permissions/` | `PermissionEngine`: final canonical-input rule evaluation, event emission, loop suspension, durable same-turn permission decision keys |
 | `pricing.py` | `ModelPricing`, `_DEFAULT_PRICING`, `cost_usd()` for per-turn and cumulative cost events |
 | `evals/` | Scripted provider, eval case/result dataclasses, built-in scorers, `run_eval()` |
