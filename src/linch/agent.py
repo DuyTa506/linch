@@ -1294,6 +1294,11 @@ class Agent:
                 registry=registry,
                 get_session=get_session,
                 next_default_display_name=self._next_default_display_name,
+                tool_registry=lambda: (
+                    self._subagent_tool_registry
+                    if self._subagent_tool_registry is not None
+                    else self.tools
+                ),
                 retain_subagents=self.retain_subagents,
                 enable_background_subagents=self.enable_background_subagents,
             )
