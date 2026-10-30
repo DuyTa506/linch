@@ -20,8 +20,48 @@ def test_scale_suite_is_explicit_and_separate_from_default_cases(tmp_path):
         ("memory", 200, 4),
         ("memory", 1000, 4),
         ("memory", 1, 50),
+        ("postgres", 200, 4),
+        ("postgres", 1000, 4),
+        ("postgres", 1, 50),
     }
     assert not set(cases).intersection(benchmark.build_cases(tmp_path))
+
+
+def test_postgres_scale_cases_skip_without_dsn(monkeypatch):
+    benchmark = _load_script()
+    monkeypatch.delenv("AGENT_KIT_TEST_PG_DSN", raising=False)
+    case = benchmark.ScaleCase("scale_postgres_1x50", "postgres", 1, 50)
+    assert benchmark.scale_case_skip_reason(case) == "AGENT_KIT_TEST_PG_DSN not set"
+
+
+def test_scale_metrics_separates_payload_bytes_and_sql_round_trips():
+    benchmark = _load_script()
+    metrics = benchmark.ScaleStoreMetrics()
+    metrics.payloads[0, "provider_pending"].append(17)
+    metrics.event_payloads[0].extend((5, 7))
+    metrics.session_payloads[0].append(11)
+    metrics.sql_round_trips["run", 0] = 9
+    metrics.transaction_commands["run", 0] = 3
+    metrics.pool_acquires["run", 0] = 3
+    metrics.pool_releases["run", 0] = 3
+
+    writes, checkpoint = metrics.summaries(turns=1)
+    assert writes["total"] == 0
+    assert checkpoint["total"] == 17
+    assert checkpoint["event_bytes"]["per_provider_turn"] == 12
+    assert checkpoint["session_append_bytes"]["per_provider_turn"] == 11
+    assert metrics.round_trip_summary(turns=1)["by_store"]["run"] == {
+        "round_trips": 9,
+        "application_statements": 6,
+        "transaction_commands": 3,
+        "pool_reset_commands": 0,
+        "pool_acquires": 3,
+        "pool_releases": 3,
+        "per_provider_turn": 9.0,
+        "definition": "round_trips counts every instrumented asyncpg command method "
+        "and Connection.reset call after schema setup; transaction and pool-reset "
+        "commands are broken out explicitly",
+    }
 
 
 @pytest.mark.asyncio
