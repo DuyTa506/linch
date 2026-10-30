@@ -120,7 +120,7 @@ registry.unregister(name)                 # remove by name
 registry.select(names={...}, tags={...})  # runtime subset (per-request)
 registry.copy()                           # shallow clone
 registry.schemas()                        # provider-ready schema list
-workspace_tools(exclude, extra)           # configurable software-workspace preset
+workspace_tools(exclude=..., extra=...)   # configurable software-workspace preset
 empty_tools(*extra)                       # no built-ins + optional extras
 ```
 

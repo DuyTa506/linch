@@ -7,7 +7,7 @@ This example loads ../.env automatically when present. It does not print any
 secret values.
 
 Demonstrates:
-  1. ToolRegistry.add/remove/replace.
+  1. ToolRegistry.register/unregister/replace.
   2. ToolRegistry.select by tool name and tag.
   3. Provider schema export through registry.schemas().
   4. Runtime tools that are read-scoped and parallel-safe.

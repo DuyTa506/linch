@@ -227,7 +227,7 @@ Tests should fail at the most specific possible assertion. Avoid mega-tests that
 6. Use class-based duck-typed tools when you need custom `validate()`, `resources(input) -> list[ResourceAccess]`, or non-trivial `summarize()` behavior.
 7. `validate()` should raise `ValueError` with a clear message. It runs before permission checks.
 8. `summarize()` should return a single line — it appears in logs and compaction summaries.
-9. For process execution, prefer injecting a backend into `BashTool` or `Agent(execution_backend=...)` instead of adding subprocess calls to unrelated tools. `Agent(execution_backend=...)` must not add `Bash` to registries that intentionally exclude it.
+9. For process execution, prefer injecting a coherent backend through `BashTool(execution=...)` or `Agent(execution_backend=...)` instead of adding subprocess calls to unrelated tools. `Agent(execution_backend=...)` must not add `Bash` to registries that intentionally exclude it.
 
 ---
 

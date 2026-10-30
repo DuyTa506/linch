@@ -91,7 +91,7 @@ retryable and a later `close()` resumes the unfinished teardown.
 
 ## What builds on the kernel
 
-- **Reversible registration** — `ToolRegistry.add/register/replace` return a
+- **Reversible registration** — `ToolRegistry.register/replace` return a
   `Disposable` (see [Tool Protocol](./tool-protocol.md)).
 - **Open tool pipeline** — `ToolPipeline` (`tools/pipeline.py`) exposes
   `tools/pre-execute → tools/execute → tools/post-execute`. `tools/execute` is a
