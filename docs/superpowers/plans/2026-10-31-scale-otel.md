@@ -24,11 +24,13 @@
 
 ## Tasks
 
-- [ ] Record no-SDK scale baseline, move API to core / SDK to dev, refresh lock, verify dependency metadata and commit.
-- [ ] Write failing private telemetry tests; implement Context resolution, constants, safe iterator/context helpers and metrics; verify and commit.
-- [ ] Write failing source span-tree, error, resume, nested-run, isolation and capture tests; instrument run/step/provider/tool/compaction/store sources; verify and commit.
-- [ ] Delete observer package, adapter, exports and obsolete tests/example; migrate lifecycle assertions to hooks/SDK; verify removals and commit.
-- [ ] Update OTel usage/example, migration and changelog; remeasure no-SDK scale benchmark; verify and commit.
-- [ ] Review complete diff; resolve material findings with regression tests; run pytest, ruff and pyright, report counts and LOC/public/API/benchmark deltas; leave clean.
+- [x] Record no-SDK scale baseline, move API to core / SDK to dev, refresh lock, verify dependency metadata and commit.
+- [x] Write failing private telemetry tests; implement Context resolution, constants, safe iterator/context helpers and metrics; verify and commit.
+- [x] Write failing source span-tree, error, resume, nested-run, isolation and capture tests; instrument run/step/provider/tool/compaction/store sources; verify and commit.
+- [x] Delete observer package, adapter, exports and obsolete tests/example; migrate lifecycle assertions to hooks/SDK; verify removals and commit.
+- [x] Update OTel usage/example, migration and changelog; remeasure no-SDK scale benchmark; verify and commit.
+- [x] Review complete diff; resolve material findings with regression tests; run pytest, ruff and pyright, report counts and LOC/public/API/benchmark deltas; leave clean.
 
 Pre-flight: telemetry helpers precede source calls; source calls precede observer deletion. Documentation uses the same Context keys as tests. WP17 stores remain untouched.
+
+Verification: full Postgres suite 2165 passed / 18 skipped; ruff lint/format passed; pyright 0 errors (3 pre-existing environment warnings). Six scale cases correct. Fresh review findings fixed with RED→GREEN coverage; no decisions departed from D11. Report: `docs/architecture/otel-noop-benchmark.md`.

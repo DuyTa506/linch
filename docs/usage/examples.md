@@ -61,8 +61,7 @@ Runnable example code lives in the `examples/` directory, organized by subsystem
 
 | File | What it shows |
 |------|---------------|
-| `observability/observability_agent.py` | LoggingObserver + optional OpenTelemetryObserver |
-| `observability/custom_observer.py` | BaseObserver subclass: latency tracking, error counts per tool |
+| `observability/observability_agent.py` | Direct OpenTelemetry setup with per-agent `Context` injection and console exporters |
 
 ---
 

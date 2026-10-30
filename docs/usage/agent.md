@@ -11,7 +11,7 @@ spending is capped (budgets).
 - Model and provider selection live in [providers.md](./providers.md).
 - Tools, timeouts, retry, the Bash backend, dependencies, and permissions live
   in [tools.md](./tools.md).
-- Cross-cutting extension (observers, middleware, RAG, verifiers) is unified
+- Cross-cutting extension (middleware, RAG, verifiers) is unified
   under [hooks.md](./hooks.md).
 
 ---
@@ -482,6 +482,6 @@ The tool side has its own separate cap, `Agent(max_tool_concurrency=...)` — se
 ## Related pages
 
 - [Providers](./providers.md) — model selection and capabilities.
-- [Hooks](./hooks.md) — observers, middleware, RAG, verifiers, stop predicates.
+- [Hooks](./hooks.md) — middleware, RAG, verifiers, stop predicates, and OTel setup.
 - [Workflows](./workflows.md) / [Deep agent](./deep-agent.md) — durable runs and
   the subagent tree that budgets cover.

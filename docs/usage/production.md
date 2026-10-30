@@ -93,8 +93,9 @@ existing schemas without upgrading them; use fresh databases. See the
 
 ## 5. Shut down without leaking work
 
-On shutdown, `await agent.close()` cancels background workers/tools and flushes
-observers (e.g. OpenTelemetry exporters). To stop a single in-flight run, call
+On shutdown, `await agent.close()` cancels background workers/tools and closes
+hooks. Hosts own OpenTelemetry providers: flush and shut them down after their
+agents have closed. To stop a single in-flight run, call
 `session.abort()` — a cooperative tool sees `ctx.signal` and the run ends with an
 `aborted` result.
 

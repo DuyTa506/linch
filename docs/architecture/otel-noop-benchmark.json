@@ -1,0 +1,303 @@
+{
+  "command": "/home/duy/Downloads/duy_dev/agent_kit/.venv/bin/python scripts/benchmark_runtime.py --scale",
+  "baseline_commit": "175ea48",
+  "implementation_commit": "36aec4a",
+  "sdk_configured": false,
+  "repetitions": 1,
+  "cases": [
+    {
+      "name": "scale_memory_200x4",
+      "before": {
+        "correct": true,
+        "completed": 200,
+        "failed": 0,
+        "elapsed_s": 5.309663874999387,
+        "run_latency_ms": {
+          "p50": 4590.9712169996055,
+          "p99": 4748.511499001324,
+          "samples": 200,
+          "scope": "session creation plus run; successful runs only"
+        },
+        "event_loop_lag_ms": {
+          "interval": 10.0,
+          "max": 844.1026559994498,
+          "p99": 844.1026559994498,
+          "samples": 9
+        },
+        "peak_rss_delta_bytes_per_session": 140083.2,
+        "checkpoint_bytes_per_turn": 18125.745,
+        "store_writes_per_turn": 16.5
+      },
+      "after": {
+        "correct": true,
+        "completed": 200,
+        "failed": 0,
+        "elapsed_s": 5.838961146000656,
+        "run_latency_ms": {
+          "p50": 5092.485376000695,
+          "p99": 5281.572686002619,
+          "samples": 200,
+          "scope": "session creation plus run; successful runs only"
+        },
+        "event_loop_lag_ms": {
+          "interval": 10.0,
+          "max": 899.1934210025647,
+          "p99": 899.1934210025647,
+          "samples": 9
+        },
+        "peak_rss_delta_bytes_per_session": 142622.72,
+        "checkpoint_bytes_per_turn": 18125.7,
+        "store_writes_per_turn": 16.5
+      },
+      "delta_percent": {
+        "p50": 10.923922963055531,
+        "p99": 11.225858610922689
+      }
+    },
+    {
+      "name": "scale_memory_1000x4",
+      "before": {
+        "correct": true,
+        "completed": 1000,
+        "failed": 0,
+        "elapsed_s": 28.74862084399865,
+        "run_latency_ms": {
+          "p50": 25355.34305600231,
+          "p99": 25912.535879000643,
+          "samples": 1000,
+          "scope": "session creation plus run; successful runs only"
+        },
+        "event_loop_lag_ms": {
+          "interval": 10.0,
+          "max": 4308.346602003439,
+          "p99": 4308.346602003439,
+          "samples": 10
+        },
+        "peak_rss_delta_bytes_per_session": 121032.704,
+        "checkpoint_bytes_per_turn": 18136.75,
+        "store_writes_per_turn": 16.5
+      },
+      "after": {
+        "correct": true,
+        "completed": 1000,
+        "failed": 0,
+        "elapsed_s": 28.216227236000123,
+        "run_latency_ms": {
+          "p50": 24823.198994003178,
+          "p99": 25691.635964998568,
+          "samples": 1000,
+          "scope": "session creation plus run; successful runs only"
+        },
+        "event_loop_lag_ms": {
+          "interval": 10.0,
+          "max": 4330.184945003566,
+          "p99": 4330.184945003566,
+          "samples": 10
+        },
+        "peak_rss_delta_bytes_per_session": 125362.176,
+        "checkpoint_bytes_per_turn": 18136.75,
+        "store_writes_per_turn": 16.5
+      },
+      "delta_percent": {
+        "p50": -2.0987452657366457,
+        "p99": -0.8524828099942594
+      }
+    },
+    {
+      "name": "scale_memory_1x50",
+      "before": {
+        "correct": true,
+        "completed": 1,
+        "failed": 0,
+        "elapsed_s": 1.1348021630001313,
+        "run_latency_ms": {
+          "p50": 1134.7210980020463,
+          "p99": 1134.7210980020463,
+          "samples": 1,
+          "scope": "session creation plus run; successful runs only"
+        },
+        "event_loop_lag_ms": {
+          "interval": 10.0,
+          "max": 16.682317000231706,
+          "p99": 16.682317000231706,
+          "samples": 82
+        },
+        "peak_rss_delta_bytes_per_session": 4366336.0,
+        "checkpoint_bytes_per_turn": 122852.76,
+        "store_writes_per_turn": 16.04
+      },
+      "after": {
+        "correct": true,
+        "completed": 1,
+        "failed": 0,
+        "elapsed_s": 1.1170844309999666,
+        "run_latency_ms": {
+          "p50": 1117.0328449989029,
+          "p99": 1117.0328449989029,
+          "samples": 1,
+          "scope": "session creation plus run; successful runs only"
+        },
+        "event_loop_lag_ms": {
+          "interval": 10.0,
+          "max": 10.341901001083897,
+          "p99": 10.341901001083897,
+          "samples": 83
+        },
+        "peak_rss_delta_bytes_per_session": 4276224.0,
+        "checkpoint_bytes_per_turn": 122852.76,
+        "store_writes_per_turn": 16.04
+      },
+      "delta_percent": {
+        "p50": -1.5588194345102058,
+        "p99": -1.5588194345102058
+      }
+    },
+    {
+      "name": "scale_sqlite_200x4",
+      "before": {
+        "correct": true,
+        "completed": 200,
+        "failed": 0,
+        "elapsed_s": 8.502399625998805,
+        "run_latency_ms": {
+          "p50": 6023.21562099678,
+          "p99": 8497.914187999413,
+          "samples": 200,
+          "scope": "session creation plus run; successful runs only"
+        },
+        "event_loop_lag_ms": {
+          "interval": 10.0,
+          "max": 27.491911001561675,
+          "p99": 8.170752003934467,
+          "samples": 678
+        },
+        "peak_rss_delta_bytes_per_session": 109424.64,
+        "checkpoint_bytes_per_turn": 18114.755,
+        "store_writes_per_turn": 16.5
+      },
+      "after": {
+        "correct": true,
+        "completed": 200,
+        "failed": 0,
+        "elapsed_s": 8.266432321001048,
+        "run_latency_ms": {
+          "p50": 5867.89734100239,
+          "p99": 8259.751566998602,
+          "samples": 200,
+          "scope": "session creation plus run; successful runs only"
+        },
+        "event_loop_lag_ms": {
+          "interval": 10.0,
+          "max": 21.00291400347487,
+          "p99": 7.439480003085919,
+          "samples": 665
+        },
+        "peak_rss_delta_bytes_per_session": 111063.04,
+        "checkpoint_bytes_per_turn": 18114.7475,
+        "store_writes_per_turn": 16.5
+      },
+      "delta_percent": {
+        "p50": -2.57866046589722,
+        "p99": -2.802600917495013
+      }
+    },
+    {
+      "name": "scale_sqlite_1000x4",
+      "before": {
+        "correct": true,
+        "completed": 1000,
+        "failed": 0,
+        "elapsed_s": 42.5136534680023,
+        "run_latency_ms": {
+          "p50": 22854.217758998857,
+          "p99": 42472.50022699882,
+          "samples": 1000,
+          "scope": "session creation plus run; successful runs only"
+        },
+        "event_loop_lag_ms": {
+          "interval": 10.0,
+          "max": 44.42139900129405,
+          "p99": 10.765677998278989,
+          "samples": 3393
+        },
+        "peak_rss_delta_bytes_per_session": 33320.96,
+        "checkpoint_bytes_per_turn": 18114.8065,
+        "store_writes_per_turn": 16.5
+      },
+      "after": {
+        "correct": true,
+        "completed": 1000,
+        "failed": 0,
+        "elapsed_s": 43.24057583499962,
+        "run_latency_ms": {
+          "p50": 23163.026022997656,
+          "p99": 43205.274074000044,
+          "samples": 1000,
+          "scope": "session creation plus run; successful runs only"
+        },
+        "event_loop_lag_ms": {
+          "interval": 10.0,
+          "max": 43.102448998979526,
+          "p99": 9.544422002363717,
+          "samples": 3430
+        },
+        "peak_rss_delta_bytes_per_session": 33472.512,
+        "checkpoint_bytes_per_turn": 18114.8825,
+        "store_writes_per_turn": 16.5
+      },
+      "delta_percent": {
+        "p50": 1.3512090733326598,
+        "p99": 1.7252901126254327
+      }
+    },
+    {
+      "name": "scale_sqlite_1x50",
+      "before": {
+        "correct": true,
+        "completed": 1,
+        "failed": 0,
+        "elapsed_s": 1.8878025659978448,
+        "run_latency_ms": {
+          "p50": 1887.6066360026016,
+          "p99": 1887.6066360026016,
+          "samples": 1,
+          "scope": "session creation plus run; successful runs only"
+        },
+        "event_loop_lag_ms": {
+          "interval": 10.0,
+          "max": 20.225309999659657,
+          "p99": 8.806044999801088,
+          "samples": 161
+        },
+        "peak_rss_delta_bytes_per_session": 6631424.0,
+        "checkpoint_bytes_per_turn": 122852.76,
+        "store_writes_per_turn": 16.04
+      },
+      "after": {
+        "correct": true,
+        "completed": 1,
+        "failed": 0,
+        "elapsed_s": 1.9156176860014966,
+        "run_latency_ms": {
+          "p50": 1915.5531679971318,
+          "p99": 1915.5531679971318,
+          "samples": 1,
+          "scope": "session creation plus run; successful runs only"
+        },
+        "event_loop_lag_ms": {
+          "interval": 10.0,
+          "max": 16.29325400062953,
+          "p99": 9.995486001571408,
+          "samples": 161
+        },
+        "peak_rss_delta_bytes_per_session": 6295552.0,
+        "checkpoint_bytes_per_turn": 122852.76,
+        "store_writes_per_turn": 16.04
+      },
+      "delta_percent": {
+        "p50": 1.4805273228808202,
+        "p99": 1.4805273228808202
+      }
+    }
+  ]
+}
