@@ -1160,9 +1160,10 @@ async def run_scale_case(
     metrics = ScaleStoreMetrics()
     postgres_cleanup: Callable[[], Awaitable[None]] | None = None
     if case.backend == "postgres":
-        postgres_schema = postgres_schema or _new_scale_schema()
-        if _SCALE_SCHEMA.fullmatch(postgres_schema) is None:
-            raise ValueError(f"invalid benchmark schema: {postgres_schema!r}")
+        schema = postgres_schema or _new_scale_schema()
+        if _SCALE_SCHEMA.fullmatch(schema) is None:
+            raise ValueError(f"invalid benchmark schema: {schema!r}")
+        postgres_schema = schema
     session_pool: Any | None = None
     run_pool: Any | None = None
 
@@ -1185,9 +1186,9 @@ async def run_scale_case(
         from linch.sessions.postgres import PostgresSessionStore
 
         try:
-            _write_scale_schema_marker(progress_path, case, postgres_schema)
+            _write_scale_schema_marker(progress_path, case, schema)
             dsn, postgres_cleanup, postgres_schema = await _fresh_postgres_dsn(
-                os.environ["AGENT_KIT_TEST_PG_DSN"], schema=postgres_schema
+                os.environ["AGENT_KIT_TEST_PG_DSN"], schema=schema
             )
             session_pool = await asyncpg.create_pool(
                 dsn,
