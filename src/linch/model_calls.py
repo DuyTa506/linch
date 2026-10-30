@@ -1197,7 +1197,8 @@ def _primary_active_binding(
     intent: ModelCallIntent,
     *,
     snapshot_id: str | None,
-    full_history: Sequence[Message],
+    full_history_count: int,
+    full_history_fingerprint: str,
 ) -> dict[str, Any]:
     """Return the compact durable identity required before a primary dispatch.
 
@@ -1215,8 +1216,8 @@ def _primary_active_binding(
         "turn_index": intent.turn_index,
         "snapshot_id": snapshot_id,
         "request_fingerprint": intent.request_fingerprint,
-        "full_history_base_count": len(full_history),
-        "full_history_base_fingerprint": _context_fingerprint(full_history),
+        "full_history_base_count": full_history_count,
+        "full_history_base_fingerprint": full_history_fingerprint,
     }
 
 

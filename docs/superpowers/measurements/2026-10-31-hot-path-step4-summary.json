@@ -1,0 +1,214 @@
+{
+  "baseline_revision": "cee531b72ea88ac4d98eab2013ee384ba92de9f4",
+  "cases": {
+    "scale_memory_1x50": {
+      "checkpoint_bytes_per_turn": {
+        "after": 8451.1,
+        "before": 8451.1,
+        "delta_pct": 0.0
+      },
+      "event_bytes_per_turn": {
+        "after": 4763.8,
+        "before": 4763.8,
+        "delta_pct": 0.0
+      },
+      "lag_max_ms": {
+        "after": 10.850808997929562,
+        "before": 10.491016997548286,
+        "delta_pct": 3.4295245205050966
+      },
+      "lag_p99_ms": {
+        "after": 10.850808997929562,
+        "before": 10.491016997548286,
+        "delta_pct": 3.4295245205050966
+      },
+      "ms_per_turn": {
+        "after": 12.071197759942152,
+        "before": 13.007567080057925,
+        "delta_pct": -7.19865071117975
+      },
+      "protocol_exchanges_per_turn": {
+        "after": null,
+        "before": null,
+        "delta_pct": null
+      },
+      "runs_per_second": {
+        "after": 1.6568364132322728,
+        "before": 1.5375665469880426,
+        "delta_pct": 7.757053929006803
+      },
+      "session_bytes_per_turn": {
+        "after": 268.08,
+        "before": 268.08,
+        "delta_pct": 0.0
+      },
+      "sql_round_trips_per_turn": {
+        "after": null,
+        "before": null,
+        "delta_pct": null
+      },
+      "store_calls_per_turn": {
+        "after": 16.04,
+        "before": 16.04,
+        "delta_pct": 0.0
+      }
+    },
+    "scale_memory_200x4": {
+      "checkpoint_bytes_per_turn": {
+        "after": 8181.0,
+        "before": 8181.0,
+        "delta_pct": 0.0
+      },
+      "event_bytes_per_turn": {
+        "after": 4849.8225,
+        "before": 4849.805,
+        "delta_pct": 0.0003608392502363959
+      },
+      "lag_max_ms": {
+        "after": 768.3368199941469,
+        "before": 774.1595679981401,
+        "delta_pct": -0.7521379628556335
+      },
+      "lag_p99_ms": {
+        "after": 768.3368199941469,
+        "before": 774.1595679981401,
+        "delta_pct": -0.7521379628556335
+      },
+      "ms_per_turn": {
+        "after": 5.54335006000656,
+        "before": 5.695142360000318,
+        "delta_pct": -2.6652942173995053
+      },
+      "protocol_exchanges_per_turn": {
+        "after": null,
+        "before": null,
+        "delta_pct": null
+      },
+      "runs_per_second": {
+        "after": 45.099082196462284,
+        "before": 43.89705896657973,
+        "delta_pct": 2.7382773656834183
+      },
+      "session_bytes_per_turn": {
+        "after": 299.0,
+        "before": 299.0,
+        "delta_pct": 0.0
+      },
+      "sql_round_trips_per_turn": {
+        "after": null,
+        "before": null,
+        "delta_pct": null
+      },
+      "store_calls_per_turn": {
+        "after": 16.5,
+        "before": 16.5,
+        "delta_pct": 0.0
+      }
+    },
+    "scale_postgres_1x50": {
+      "checkpoint_bytes_per_turn": {
+        "after": 8451.1,
+        "before": 8451.1,
+        "delta_pct": 0.0
+      },
+      "event_bytes_per_turn": {
+        "after": 4763.82,
+        "before": 4763.82,
+        "delta_pct": 0.0
+      },
+      "lag_max_ms": {
+        "after": 10.582928996882401,
+        "before": 10.517827999137808,
+        "delta_pct": 0.6189585696774123
+      },
+      "lag_p99_ms": {
+        "after": 3.713090998644475,
+        "before": 7.474205995094962,
+        "delta_pct": -50.32126487975799
+      },
+      "ms_per_turn": {
+        "after": 27.90769569997792,
+        "before": 27.470933919976233,
+        "delta_pct": 1.5899051021490231
+      },
+      "protocol_exchanges_per_turn": {
+        "after": 92.46,
+        "before": 92.46,
+        "delta_pct": 0.0
+      },
+      "runs_per_second": {
+        "after": 0.7166482039581585,
+        "before": 0.7280422303173486,
+        "delta_pct": -1.5650227259788887
+      },
+      "session_bytes_per_turn": {
+        "after": 268.08,
+        "before": 268.08,
+        "delta_pct": 0.0
+      },
+      "sql_round_trips_per_turn": {
+        "after": 92.22,
+        "before": 92.22,
+        "delta_pct": 0.0
+      },
+      "store_calls_per_turn": {
+        "after": 16.04,
+        "before": 16.04,
+        "delta_pct": 0.0
+      }
+    },
+    "scale_postgres_200x4": {
+      "checkpoint_bytes_per_turn": {
+        "after": 8181.0,
+        "before": 8181.0,
+        "delta_pct": 0.0
+      },
+      "event_bytes_per_turn": {
+        "after": 4848.0375,
+        "before": 4848.03,
+        "delta_pct": 0.0001547020129953498
+      },
+      "lag_max_ms": {
+        "after": 26.187211995420512,
+        "before": 25.828069003182463,
+        "delta_pct": 1.3905142974250062
+      },
+      "lag_p99_ms": {
+        "after": 3.7551650020759553,
+        "before": 4.273682992788963,
+        "delta_pct": -12.132813584627344
+      },
+      "ms_per_turn": {
+        "after": 11.54771182499644,
+        "before": 11.792991298752895,
+        "delta_pct": -2.0798749659248266
+      },
+      "protocol_exchanges_per_turn": {
+        "after": 94.875,
+        "before": 94.8825,
+        "delta_pct": -0.00790451347718829
+      },
+      "runs_per_second": {
+        "after": 21.64931059838576,
+        "before": 21.199032006954624,
+        "delta_pct": 2.124052604304839
+      },
+      "session_bytes_per_turn": {
+        "after": 299.0,
+        "before": 299.0,
+        "delta_pct": 0.0
+      },
+      "sql_round_trips_per_turn": {
+        "after": 94.75,
+        "before": 94.75,
+        "delta_pct": 0.0
+      },
+      "store_calls_per_turn": {
+        "after": 16.5,
+        "before": 16.5,
+        "delta_pct": 0.0
+      }
+    }
+  },
+  "samples": 3
+}

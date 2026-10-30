@@ -1223,7 +1223,8 @@ class RunRuntime:
         self.active_primary = _primary_active_binding(
             intent,
             snapshot_id=self.checkpoint.model_input_snapshot_id,
-            full_history=self.session.full_history,
+            full_history_count=self.session.session_log.history_count,
+            full_history_fingerprint=self.session.session_log._history_fingerprint(),
         )
         await self.save_checkpoint("provider_pending", turn_index=intent.turn_index)
 

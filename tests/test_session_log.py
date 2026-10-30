@@ -316,3 +316,162 @@ def test_last_visible_is_detached_and_empty_safe() -> None:
     assert first is not None
     first.content[0].text = "mutated"  # type: ignore[union-attr]
     assert log.last_visible() == _msg("only")  # authoritative state untouched
+
+
+def test_history_fingerprint_matches_reference_through_projection_changes() -> None:
+    from linch.model_calls import _context_fingerprint
+    from linch.types import ToolUseBlock
+
+    log = SessionLog()
+    assert log._history_fingerprint() == _context_fingerprint([])
+    for index in range(4):
+        message = _msg(f"Tiếng Việt {index}")
+        message.content.append(
+            ToolUseBlock(
+                id=f"call-{index}",
+                name="search",
+                input={"z": [None, True, 1.25], "a": {"nested": "é"}},
+            )
+        )
+        log.append(message, visible=index % 2 == 0)
+        assert log._history_fingerprint() == _context_fingerprint(log.full_history)
+        before = log._history_fingerprint()
+        log.append(_msg("reminder"), historical=False)
+        log.record_projection([_msg("summary")])
+        assert log._history_fingerprint() == before
+
+
+def test_history_fingerprint_seed_and_detached_mutations() -> None:
+    from linch.model_calls import _context_fingerprint
+
+    historical = [_msg("a"), _msg("b")]
+    visible = [_msg("summary")]
+    log = SessionLog.seed(historical=historical, visible=visible)
+    expected = _context_fingerprint(historical)
+
+    # Mutations before the first demand must not affect lazy serialization.
+    _text(historical[0]).text = "changed input"
+    assert historical[1].provider_metadata is not None
+    historical[1].provider_metadata["nested"]["source"] = "changed input"
+    for snapshot in (log.full_history, log.provider_view):
+        _text(snapshot[0]).text = "changed snapshot"
+        assert snapshot[0].provider_metadata is not None
+        snapshot[0].provider_metadata["nested"]["source"] = "changed snapshot"
+    entry = log.entries[0]
+    assert isinstance(entry, MessageEntry)
+    _text(entry.message).text = "changed entry"
+
+    assert log._history_fingerprint() == expected
+    inspected = log.full_history[0]
+    _text(inspected).text = "changed after fingerprint"
+    assert inspected.provider_metadata is not None
+    inspected.provider_metadata["nested"]["source"] = "changed after fingerprint"
+    assert log._history_fingerprint() == expected
+    rebuilt = SessionLog.seed(historical=log.full_history, visible=log.provider_view)
+    assert rebuilt._history_fingerprint() == expected
+    log.append(_msg("tail"))
+    rebuilt.append(_msg("tail"))
+    assert rebuilt._history_fingerprint() == log._history_fingerprint()
+    assert log._history_fingerprint() == _context_fingerprint(log.full_history)
+
+
+def test_history_fingerprint_only_serializes_the_demanded_tail(monkeypatch) -> None:
+    import linch.types as types
+
+    calls = []
+    original = types.message_to_dict
+
+    def counted(message):
+        calls.append(message)
+        return original(message)
+
+    monkeypatch.setattr(types, "message_to_dict", counted)
+    # SessionLog may import the serializer eagerly; cover either import style.
+    import linch.session_log as session_log
+
+    monkeypatch.setattr(session_log, "message_to_dict", counted, raising=False)
+    hashes = []
+    original_sha256 = session_log.hashlib.sha256
+
+    def counted_sha256(*args, **kwargs):
+        hashes.append(args)
+        return original_sha256(*args, **kwargs)
+
+    monkeypatch.setattr(session_log.hashlib, "sha256", counted_sha256)
+    log = SessionLog.seed(historical=[_msg("a"), _msg("b")])
+    log.append(_msg("c"))
+    log.record_projection([_msg("summary")])
+    assert calls == []
+    assert hashes == []
+    first = log._history_fingerprint()
+    assert len(calls) == 3
+    assert log._history_fingerprint() == first
+    assert len(calls) == 3
+    log.append(_msg("injection"), historical=False)
+    assert log._history_fingerprint() == first
+    assert len(calls) == 3
+    log.append(_msg("tail"))
+    assert log._history_fingerprint() != first
+    assert len(calls) == 4
+
+
+@pytest.mark.parametrize("invalid", [object(), float("nan"), {1: "bad"}, ("tuple",)])
+def test_history_fingerprint_defers_invalid_metadata_and_preserves_prefix(invalid) -> None:
+    from linch.errors import ConfigError
+    from linch.model_calls import _context_fingerprint
+
+    log = SessionLog()
+    log.append(_msg("valid prefix"))
+    expected = _context_fingerprint(log.full_history)
+    assert log._history_fingerprint() == expected
+    prefix = log._history_hash.copy().hexdigest()
+    log.append(_msg("valid tail"))
+    invalid_message = _msg("invalid tail")
+    invalid_message.provider_metadata = {"invalid": invalid}
+    log.append(invalid_message)
+
+    visible_only = SessionLog()
+    visible_only.append(invalid_message, historical=False)
+    visible_only.record_projection([invalid_message])
+    assert visible_only._history_fingerprint() == _context_fingerprint([])
+
+    for _ in range(2):
+        with pytest.raises(ConfigError, match="model-call input"):
+            log._history_fingerprint()
+        assert log._history_hash.copy().hexdigest() == prefix
+        assert log._history_hashed_count == 1
+
+
+def test_history_fingerprint_defers_cyclic_metadata() -> None:
+    from linch.errors import ConfigError
+
+    cycle = []
+    cycle.append(cycle)
+    message = _msg("cycle")
+    message.provider_metadata = {"cycle": cycle}
+    log = SessionLog()
+    log.append(message)
+    with pytest.raises(ConfigError, match="reference cycles"):
+        log._history_fingerprint()
+    assert log._history_hash is None
+    assert log._history_hashed_count == 0
+
+
+async def test_history_fingerprint_matches_reloaded_session() -> None:
+    from linch import Agent
+    from linch.model_calls import _context_fingerprint
+    from linch.sessions import InMemorySessionStore
+
+    store = InMemorySessionStore()
+    original_agent = Agent(model="offline-model", session_store=store)
+    original = await original_agent.session(id="history-digest")
+    await original.append([_msg("a"), _msg("b")])
+    expected = original.session_log._history_fingerprint()
+
+    restarted_agent = Agent(model="offline-model", session_store=store)
+    reloaded = await restarted_agent.session(id="history-digest")
+    assert reloaded.session_log._history_fingerprint() == expected
+    await reloaded.append([_msg("tail")])
+    assert reloaded.session_log._history_fingerprint() == _context_fingerprint(
+        reloaded.full_history
+    )
