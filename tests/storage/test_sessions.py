@@ -1,3 +1,7 @@
+import asyncio
+
+import pytest
+
 from linch.sessions import InMemorySessionStore
 from linch.sessions.postgres import PostgresSessionStore
 from linch.sessions.tasks import CreateTaskInput
@@ -20,6 +24,33 @@ async def test_memory_store_round_trip() -> None:
     assert rows[0].seq == 1
     assert isinstance(rows[0].message.content[0], TextBlock)
     assert rows[0].message.content[0].text == "hi"
+
+
+@pytest.mark.parametrize("kind", ["memory", "postgres"])
+async def test_multiple_sessions_concurrent_writes(kind: str, pg_dsn: str) -> None:
+    """Ten sessions sharing one store retain their own five messages."""
+    store = InMemorySessionStore() if kind == "memory" else PostgresSessionStore(pg_dsn)
+    try:
+        records = await asyncio.gather(*(store.create() for _ in range(10)))
+        assert len({record.id for record in records}) == 10
+
+        async def write_session(session_id: str) -> None:
+            message = Message(role="user", content=[TextBlock(text=session_id)])
+            for _ in range(5):
+                await store.append_messages(session_id, [message])
+
+        await asyncio.gather(*(write_session(record.id) for record in records))
+
+        for record in records:
+            rows = await store.load_messages(record.id)
+            assert len(rows) == 5, f"session {record.id} expected 5 messages, got {len(rows)}"
+            assert [row.seq for row in rows] == [1, 2, 3, 4, 5]
+            for row in rows:
+                block = row.message.content[0]
+                assert isinstance(block, TextBlock)
+                assert block.text == record.id
+    finally:
+        await store.close()
 
 
 async def test_memory_store_deeply_isolates_ordinary_message_graph_at_every_boundary() -> None:
