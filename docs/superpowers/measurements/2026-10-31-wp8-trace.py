@@ -29,7 +29,10 @@ class Provider:
         self.calls += 1
         yield {"type": "message_start", "model": request.model}
         if self.tool_turn and self.calls == 1:
-            for name, tool_id in (("trace_read_a", "fixed-call-a"), ("trace_read_b", "fixed-call-b")):
+            for name, tool_id in (
+                ("trace_read_a", "fixed-call-a"),
+                ("trace_read_b", "fixed-call-b"),
+            ):
                 yield {"type": "tool_use_start", "id": tool_id, "name": name}
                 yield {"type": "tool_use_input_delta", "id": tool_id, "json_delta": '{"value":"x"}'}
                 yield {"type": "tool_use_end", "id": tool_id}
@@ -53,8 +56,10 @@ class Tool:
         self.name = name
         self.scope = scope
         self.parallel = scope == "read"
+
     description = "trace tool"
     input_schema = {"type": "object", "properties": {"value": {"type": "string"}}}
+
     def validate(self, raw):
         return raw
 
@@ -71,7 +76,14 @@ def normalize(value):
     if isinstance(value, dict):
         out = {}
         for key, item in value.items():
-            if key in {"session_id", "run_id", "created_at", "updated_at", "timestamp", "emitted_at"}:
+            if key in {
+                "session_id",
+                "run_id",
+                "created_at",
+                "updated_at",
+                "timestamp",
+                "emitted_at",
+            }:
                 out[key] = "<normalized>"
             elif key == "id" and not (
                 isinstance(item, str) and item.startswith(("fixed-call-", "call-"))
