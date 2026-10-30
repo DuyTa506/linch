@@ -53,8 +53,8 @@
 
 **Files:** `docs/usage/coordination.md`, `docs/migration-3.0.md`.
 
-- [ ] Document in-memory mailbox/scheduling only; durable scheduling comes in WP6/PgQueuer and mailbox moves to `linch.ext` in WP10.
-- [ ] Commit coordination documentation.
+- [x] Document in-memory mailbox/scheduling only; durable scheduling comes in WP6/PgQueuer and mailbox moves to `linch.ext` in WP10.
+- [x] Commit coordination documentation.
 
 ### Task 4: Migrate examples, scripts and current guides
 
