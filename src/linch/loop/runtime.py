@@ -11,6 +11,7 @@ import json
 import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import replace
 from functools import partial
 from typing import Any, cast
 
@@ -38,10 +39,12 @@ from ..hooks import (
 from ..hooks.contexts import _AgentResult
 from ..model_calls import (
     ModelCallIntent,
+    _ModelCallError,
     _ModelCallLedger,
     _primary_active_binding,
 )
 from ..run_store import (
+    LeaseLostError,
     ModelInputSnapshotError,
     RunCheckpoint,
     RunRecord,
@@ -90,7 +93,30 @@ def _terminal_original_exception(exc: Exception) -> Exception:
     """Unwrap a terminal marker while retaining the store's original class."""
     if isinstance(exc, _TerminalStatusWriteError):
         return exc.original
+    if (
+        isinstance(exc, _ModelCallError)
+        and exc.code == "persistence_failed"
+        and isinstance(exc.__cause__, Exception)
+    ):
+        return _terminal_original_exception(exc.__cause__)
     return exc
+
+
+def _lease_loss(exc: BaseException) -> LeaseLostError | None:
+    """Find fencing failures through model-call and compaction wrappers."""
+    pending = [exc]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, LeaseLostError):
+            return current
+        pending.extend(
+            nested for nested in (current.__cause__, current.__context__) if nested is not None
+        )
+    return None
 
 
 def require_model_input_snapshot_store(agent: Any) -> Any:
@@ -358,7 +384,7 @@ async def drain_alignment(
             error_event: Event = ErrorEvent(
                 error={"name": type(exc).__name__, "message": str(exc), "retryable": False}
             )
-            if persistence_failure:
+            if persistence_failure or _lease_loss(exc) is not None:
                 raise
             await _persist_event(session, run_id, error_event)
             yield error_event
@@ -560,6 +586,14 @@ class RunRuntime:
         # retried by runner teardown.  A second write can duplicate a terminal
         # event or mask the original store failure.
         self._terminal_flush_failed = False
+        self.lease_lost: LeaseLostError | None = None
+
+    def _record_lease_loss(self, exc: BaseException) -> bool:
+        loss = _lease_loss(exc)
+        if loss is not None:
+            self.lease_lost = loss
+            self.terminal_exception = loss
+        return self.lease_lost is not None
 
     @property
     def terminal_flush_failed(self) -> bool:
@@ -572,6 +606,7 @@ class RunRuntime:
         secondary: Exception,
         original: Exception,
     ) -> None:
+        self._record_lease_loss(secondary)
         # Keep the original exception attached to the secondary failure.  This
         # gives hosts a useful causal chain while retaining the original error
         # as the run's typed ErrorEvent.
@@ -589,6 +624,8 @@ class RunRuntime:
 
     async def _persist_terminal_event(self, event: Event, original: Exception) -> None:
         """Best-effort terminal event write, preserving the original failure."""
+        if self.lease_lost is not None:
+            return
         try:
             await _persist_event(self.session, self.run_id, event)
         except Exception as secondary:
@@ -597,7 +634,7 @@ class RunRuntime:
 
     async def _flush_terminal_events(self, original: Exception) -> None:
         """Flush terminal events once unless a prior terminal flush failed."""
-        if self._terminal_flush_failed:
+        if self.lease_lost is not None or self._terminal_flush_failed:
             return
         try:
             await _flush_events(self.session)
@@ -614,7 +651,12 @@ class RunRuntime:
         already_attempted: bool = False,
     ) -> None:
         store = self.agent.run_store
-        if already_attempted or self.run_record is None or store is None:
+        if (
+            self.lease_lost is not None
+            or already_attempted
+            or self.run_record is None
+            or store is None
+        ):
             return
         try:
             await store_call(
@@ -984,9 +1026,10 @@ class RunRuntime:
         close_active_spans: Callable[..., Awaitable[None]],
     ) -> AsyncIterator[Event]:
         """Persist and project an exception terminal while preserving ordering."""
+        self._record_lease_loss(exc)
         await cancel_background_workers(self.session)
         status_already_attempted = isinstance(exc, _TerminalStatusWriteError)
-        original = _terminal_original_exception(exc)
+        original = self.lease_lost or _terminal_original_exception(exc)
         self.terminal_exception = original
         error = _error_payload(original)
         duration_ms = int((time.time() - self.started) * 1000)
@@ -1034,6 +1077,16 @@ class RunRuntime:
             original,
             already_attempted=status_already_attempted,
         )
+        if self.lease_lost is not None:
+            # A secondary terminal write can discover takeover.  Select the
+            # memory-only lease pair before exposing either terminal event.
+            error = _error_payload(self.lease_lost)
+            error["retryable"] = False
+            error_event = ErrorEvent(error=error)
+            result_event.stop_reason = "lease_lost"
+            self.terminal_result = replace(
+                self.terminal_result, stop_reason="lease_lost", error=error
+            )
         yield error_event
         yield result_event
 
@@ -1045,7 +1098,7 @@ class RunRuntime:
         original: Exception | None = None,
         strict: bool = False,
     ) -> None:
-        if self.model_input_store is None:
+        if self.lease_lost is not None or self.model_input_store is None:
             return
         if snapshot_id is not None:
             try:
@@ -1053,6 +1106,8 @@ class RunRuntime:
                     self.session, "run.delete", self.model_input_store.delete(snapshot_id)
                 )
             except Exception as exc:
+                if self._record_lease_loss(exc):
+                    raise
                 if strict:
                     raise
                 if original is not None:
@@ -1072,6 +1127,8 @@ class RunRuntime:
                 self.model_input_store.prune(self.run_id, keep_ids=keep_ids),
             )
         except Exception as exc:
+            if self._record_lease_loss(exc):
+                raise
             if strict:
                 raise
             if original is not None:

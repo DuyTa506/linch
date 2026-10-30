@@ -37,6 +37,7 @@ from ..session import RunOptions, Session
 from ..types import (
     AssistantAssembly,
     Message,
+    StopReason,
     ToolResultBlock,
     ToolUseBlock,
     Usage,
@@ -73,6 +74,8 @@ from .request import (
 from .resume import ResumeContext, ResumeState, recover_resume
 from .runtime import (
     RunRuntime,
+    _lease_loss,
+    cancel_background_workers,
 )
 from .runtime import (
     TurnLifecycle as _TurnLifecycle,
@@ -122,10 +125,15 @@ async def _create_run_failure_tail(session: Session, exc: Exception) -> AsyncIte
     """Surface a create-run write failure without inventing durable state."""
     run_id = str(uuid4())
     session.active_run_id = run_id
+    lease_loss = _lease_loss(exc)
+    stop_reason: StopReason = "lease_lost" if lease_loss is not None else "error"
+    if lease_loss is not None:
+        exc = lease_loss
+        await cancel_background_workers(session)
     error: dict[str, object] = {
         "name": exc.__class__.__name__,
         "message": str(exc),
-        "retryable": getattr(exc, "retryable", False),
+        "retryable": False if lease_loss is not None else getattr(exc, "retryable", False),
     }
     status = getattr(exc, "status", None)
     if isinstance(status, int):
@@ -134,7 +142,7 @@ async def _create_run_failure_tail(session: Session, exc: Exception) -> AsyncIte
         run_id=run_id,
         session_id=session.id,
         subtype="error",
-        stop_reason="error",
+        stop_reason=stop_reason,
         total_usage=Usage(),
         duration_ms=0,
         error=error,
@@ -144,7 +152,7 @@ async def _create_run_failure_tail(session: Session, exc: Exception) -> AsyncIte
     error_event: Event = ErrorEvent(error=error)
     result_event: Event = ResultEvent(
         subtype="error",
-        stop_reason="error",
+        stop_reason=stop_reason,
         total_usage=Usage(),
         duration_ms=0,
         usage_complete=True,
@@ -366,7 +374,6 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         )
         _pull_runtime_state()
 
-    _best_effort_snapshot_cleanup = _runtime.best_effort_snapshot_cleanup
     _prepare_provider_call = _runtime.prepare_provider_call
     _load_pending_provider_request = _runtime.load_pending_provider_request
     checkpoint = _runtime.checkpoint
@@ -405,19 +412,16 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
     async def _finish_run() -> None:
         """Run cleanup and dispatch AgentStop exactly once."""
         nonlocal agent_stop_dispatched
-        if (
-            _exact_model_input
-            and checkpoint.model_input_snapshot_id is not None
-            and checkpoint.phase != "provider_pending"
-        ):
-            await _best_effort_snapshot_cleanup(
-                snapshot_id=checkpoint.model_input_snapshot_id,
-                original=_runtime.terminal_exception,
-            )
-            checkpoint.model_input_snapshot_id = None
+        # Snapshot cleanup belongs to the checkpoint transition, before a
+        # terminal result is exposed.  Failed/closed runs leave snapshots for
+        # host reconciliation rather than introducing late teardown writes.
         # A failed terminal flush already made its one best-effort attempt.
         # Teardown must not retry the same write and obscure its root cause.
-        if not _runtime.terminal_flush_failed:
+        if (
+            _runtime.lease_lost is None
+            and _runtime.terminal_exception is None
+            and not _runtime.terminal_flush_failed
+        ):
             try:
                 await _flush_events(session)
             except Exception:
