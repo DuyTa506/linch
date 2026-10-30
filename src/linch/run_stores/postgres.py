@@ -48,10 +48,6 @@ CREATE TABLE IF NOT EXISTS runs (
     lease_expires_at DOUBLE PRECISION
 );
 
-ALTER TABLE runs ADD COLUMN IF NOT EXISTS lease_owner TEXT;
-ALTER TABLE runs ADD COLUMN IF NOT EXISTS lease_epoch BIGINT NOT NULL DEFAULT 0;
-ALTER TABLE runs ADD COLUMN IF NOT EXISTS lease_expires_at DOUBLE PRECISION;
-
 CREATE TABLE IF NOT EXISTS run_events (
     run_id TEXT NOT NULL,
     seq BIGINT NOT NULL,
@@ -130,6 +126,8 @@ class PostgresRunStore:
             self,
             _SCHEMA,
             _import_asyncpg,
+            schema_key="runs",
+            tables=("runs", "run_events", "model_input_snapshots"),
             advisory_lock_key=_SCHEMA_LOCK_KEY,
             allow_missing_pool_on_error=True,
         )

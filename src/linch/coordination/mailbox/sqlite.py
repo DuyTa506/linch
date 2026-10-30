@@ -40,8 +40,6 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         ON mailbox_messages(recipient, seq)
         """
     )
-    # Kept separate from the legacy message table so opening a 2.0 database is
-    # an additive table/index migration and never rewrites message history.
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS mailbox_claims (
