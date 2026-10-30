@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from ..coordination.mailbox import Mailbox, MailboxMessage
-from ..coordination.scheduling import ClaimingScheduleStore, Schedule, ScheduleStore
 from ..filesystem import FileBackend
 from ..tools.base import ResourceAccess, ToolContext, ToolResult
 from ..tools.isolation import IsolationBackend
@@ -151,83 +150,6 @@ async def assert_mailbox_contract(
         )
     finally:
         await _maybe_close(box)
-
-
-async def assert_schedule_store_contract(
-    factory: Callable[[], ScheduleStore | Awaitable[ScheduleStore]],
-) -> None:
-    """Assert the core behavioral contract for a ``ScheduleStore`` implementation.
-
-    Stores that also implement ``claim_due`` are checked for the atomic claim
-    invariant used by ``SchedulerLoop``.
-    """
-
-    store = await _call_factory(factory)
-    try:
-        assert await store.list() == [], "fresh store must list no schedules"
-
-        schedule = Schedule(id="contract-interval", payload="alpha", interval_s=60)
-        schedule.next_run = 1000.0
-        await store.add(schedule)
-
-        loaded = await store.get(schedule.id)
-        assert loaded is not None, "added schedule must be retrievable"
-        assert loaded.id == schedule.id
-        assert loaded.payload == "alpha"
-        assert [item.id for item in await store.list()] == [schedule.id]
-
-        updated = Schedule(
-            id=schedule.id,
-            payload="beta",
-            interval_s=30,
-            next_run=2000.0,
-            enabled=False,
-            metadata={"kind": "contract"},
-        )
-        await store.update(updated)
-        loaded = await store.get(schedule.id)
-        assert loaded is not None, "updated schedule must remain retrievable"
-        assert loaded.payload == "beta"
-        assert loaded.interval_s == 30
-        assert loaded.next_run == 2000.0
-        assert loaded.enabled is False
-        assert loaded.metadata == {"kind": "contract"}
-
-        assert await store.remove(schedule.id) is True
-        assert await store.remove(schedule.id) is False
-        assert await store.get(schedule.id) is None
-        assert await store.list() == []
-
-        if isinstance(store, ClaimingScheduleStore):
-            due = Schedule(id="contract-due", payload="due", interval_s=60, next_run=1000.0)
-            future = Schedule(
-                id="contract-future",
-                payload="future",
-                interval_s=60,
-                next_run=5000.0,
-            )
-            disabled = Schedule(
-                id="contract-disabled",
-                payload="disabled",
-                interval_s=60,
-                next_run=1000.0,
-                enabled=False,
-            )
-            await store.add(due)
-            await store.add(future)
-            await store.add(disabled)
-
-            first, second = await asyncio.gather(store.claim_due(1000.0), store.claim_due(1000.0))
-            claimed_ids = [schedule.id for schedule in first + second]
-            assert claimed_ids == [due.id], "claim_due must atomically claim each due schedule once"
-
-            loaded_due = await store.get(due.id)
-            assert loaded_due is not None
-            assert loaded_due.next_run == 1060.0, "claim_due must advance next_run before returning"
-            assert await store.get(future.id) is not None
-            assert await store.get(disabled.id) is not None
-    finally:
-        await _maybe_close(store)
 
 
 async def assert_tool_contract(

@@ -29,7 +29,6 @@ from linch import (
     assert_file_backend_contract,
     assert_isolation_backend_contract,
     assert_mailbox_contract,
-    assert_schedule_store_contract,
     assert_tool_contract,
 )
 
@@ -46,10 +45,6 @@ async def test_my_mailbox_contract(tmp_path):
     await assert_mailbox_contract(lambda: MyMailbox(tmp_path / "mailbox.db"))
 
 @pytest.mark.asyncio
-async def test_my_schedule_store_contract(tmp_path):
-    await assert_schedule_store_contract(lambda: MyScheduleStore(tmp_path / "schedules.db"))
-
-@pytest.mark.asyncio
 async def test_my_tool_contract():
     await assert_tool_contract(
         MyTool(),
@@ -61,8 +56,7 @@ async def test_my_tool_contract():
 The helpers expect a factory that returns a fresh, empty adapter. They exercise
 the same behavioral guarantees Linch's built-in adapters rely on: file backend
 CRUD/list/edit semantics, distinct writable isolation workspaces, destructive
-mailbox drains, no dropped concurrent sends, schedule add/update/remove/list,
-atomic `claim_due` when the store implements it, and custom tool
+mailbox drains, no dropped concurrent sends, and custom tool
 metadata/validation/execution/resource shape.
 
 Copyable starter files live in
@@ -149,33 +143,11 @@ handle you choose). `type` is a neutral category *you* interpret. Pair with the
 
 ---
 
-## `ScheduleStore` — time triggers
+## Scheduling and queue workers
 
-`SchedulerLoop` fires `Schedule`s (cron or interval) and reads/writes them through a
-`ScheduleStore`. Only `InMemoryScheduleStore` ships; its state lasts for the
-process lifetime. Implement the protocol for an external backend. Durable
-scheduling is planned in WP6 with PgQueuer.
-
-```python
-from typing import Protocol
-
-class ScheduleStore(Protocol):
-    async def add(self, schedule: Schedule) -> None: ...
-    async def update(self, schedule: Schedule) -> None: ...
-    async def remove(self, schedule_id: str) -> bool: ...      # True if it existed
-    async def get(self, schedule_id: str) -> Schedule | None: ...
-    async def list(self) -> list[Schedule]: ...
-```
-
-A `Schedule` carries exactly one of `cron` / `interval_s`, a `payload`, an `enabled`
-flag, and a computed `next_run` (epoch seconds). Your store only persists and returns
-them — `Schedule.compute_next_run()` owns the timing math, so a custom store never
-re-implements cron parsing.
-
-For multi-process durability, also guard firing with a lock row so two processes
-sharing one store don't double-fire the same schedule. Host adapters can implement
-the optional claim/lease protocols; see [Coordination](./coordination.md) for the
-loop contract.
+Durable schedules and run dispatch are provided by the optional `linch.worker`
+package. Hosts register its schedule tools and configure PgQueuer; see
+[Scale out](./production.md#scale-out).
 
 ---
 

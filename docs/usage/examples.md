@@ -109,7 +109,6 @@ clock or a peer. Both are built via a factory so they run offline under a
 
 | File | What it shows |
 |------|---------------|
-| `coordination/scheduling_agent.py` | An agent that schedules its own recurring work: `Agent(schedule_store=...)` auto-registers `CreateSchedule`, a `SchedulerLoop` fires the due payload into `pending_notifications`, and the next turn drains it as a `<scheduled-task>` |
 | `coordination/team_mailbox.py` | A two-agent team over a shared `InMemoryMailbox`: one peer addresses another with `send_message` and it drains into the recipient's next turn, plus a `Correlator` request/response handshake (plan approval) |
 
 ---
