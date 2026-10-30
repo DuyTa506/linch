@@ -411,7 +411,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
 
     async def _finish_run() -> None:
         """Run cleanup and dispatch AgentStop exactly once."""
-        nonlocal agent_stop_dispatched
+        nonlocal agent_stop_dispatched, _final_result
         # Snapshot cleanup belongs to the checkpoint transition, before a
         # terminal result is exposed.  Failed/closed runs leave snapshots for
         # host reconciliation rather than introducing late teardown writes.
@@ -424,8 +424,16 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         ):
             try:
                 await _flush_events(session)
-            except Exception:
-                pass
+            except Exception as exc:
+                if _lease_loss(exc) is not None:
+                    # A closed iterator cannot deliver terminal events, but
+                    # fencing still requires the shared cancellation/result
+                    # path before AgentStop.  It performs no further writes.
+                    async for _ in _runtime.emit_exception_terminal(
+                        exc, close_active_spans=_close_active_spans
+                    ):
+                        pass
+                    _final_result = _runtime.terminal_result
         session._event_journal = None
         if signal is not session._abort_controller:
             signal.close()

@@ -381,3 +381,66 @@ async def test_run_creation_lease_loss_is_memory_only_and_cancels_background(wra
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         await agent.close()
+
+
+async def test_early_close_flush_lease_loss_cancels_background_and_reports_stop(
+    lease_stores: Any,
+) -> None:
+    from linch import Agent
+    from linch.sessions import InMemorySessionStore
+
+    first, second = lease_stores
+    state = _Takeover(first, second, "manual-takeover")
+    stop = _StopCounter()
+    agent = Agent(
+        model="lease-model",
+        provider=cast(Any, _TextProvider()),
+        session_store=state.wrap(InMemorySessionStore(), session=True),
+        run_store=state.wrap(first),
+        hooks=[stop],
+        cwd=".",
+        permissions={"mode": "skip-dangerous"},
+    )
+    session = await agent.session()
+    started = asyncio.Event()
+    cancelled_and_awaited = asyncio.Event()
+
+    async def background() -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0)
+            cancelled_and_awaited.set()
+
+    task = asyncio.create_task(background())
+    session.background_tasks.append(task)
+    await started.wait()
+    iterator = session.run("hello")
+    try:
+        event = await anext(iterator)
+        assert event.type == "system"
+        # The first event is buffered.  Only iterator teardown now attempts
+        # the stale holder's actual fenced write.
+        await state.take_over()
+        await iterator.aclose()
+        await iterator.aclose()
+
+        assert state.lost
+        assert state.first_loss == "run.append_events"
+        assert state.after_loss == []
+        assert cancelled_and_awaited.is_set() and task.done()
+        assert len(stop.results) == 1
+        assert stop.results[0].subtype == "error"
+        assert stop.results[0].stop_reason == "lease_lost"
+        assert stop.results[0].error["name"] == "LeaseLostError"
+        assert stop.results[0].error["retryable"] is False
+        assert session._event_journal is None
+        assert await second.load_run(state.run_id) == state.winner_record
+        assert await second.load_events(state.run_id) == state.winner_events
+        assert await second.load(state.winner_snapshot.id) == state.winner_snapshot
+    finally:
+        await iterator.aclose()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await agent.close()
