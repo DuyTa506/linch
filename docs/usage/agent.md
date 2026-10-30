@@ -329,8 +329,8 @@ existing direct-provider behavior; it is not a durable run receipt by itself.
 ### Compaction ladder
 
 `CompactionLadder` adds cheap, LLM-free recovery rungs before and around
-summarization. It is opt-in — with the default (`compaction_ladder=None`)
-behavior is byte-identical to the legacy single-retry path.
+summarization. It is opt-in — the default (`compaction_ladder=None`) keeps one
+compaction retry per turn. Both policies use the same recovery driver.
 
 ```python
 from linch import Agent, CompactionLadder

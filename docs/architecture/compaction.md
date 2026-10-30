@@ -14,10 +14,11 @@
 
 **Invariant:** `full_history` is never modified. Only `provider_view` (a projection of the single append-only log) shrinks, and it shrinks by a *logged* projection, not an untracked in-place mutation. This covers session-owned model input; per-request `ContextInjectionHook`/RAG context is ephemeral and exists only in `ProviderRequest`. Compaction uses the configured `agent.provider` — never a hardcoded OpenAI call.
 
-The compaction path is provider-agnostic in Linch 2.0: summaries use the same
+The compaction path is provider-agnostic: summaries use the same
 normalized provider stream contract as a normal turn, retain message/tool
-pairing, and do not assume a coding workspace. Malformed or missing durable
-snapshot state is treated as a cache miss and rebuilt from `full_history`.
+pairing, and do not assume a coding workspace. Missing or malformed current
+wire-3 snapshot caches can be rebuilt from `full_history`; incompatible snapshot
+versions are rejected rather than treated as cache misses.
 
 The direct `summarize_with_provider(...)` helper remains available for
 standalone callers with its existing provider-stream behavior. The normal run
@@ -105,11 +106,12 @@ byte-identical.
   `tool_use_id` stays paired. Runs proactively inside `maybe_compact` (skips
   summarization when elision frees enough) and reactively, once per turn, when
   the provider raises `ContextLengthError`.
-- **Rung 2 — forced compaction with a circuit breaker**: the reactive path
-  (`_stream_turn_with_ladder` in `loop/streaming.py`) retries with forced compactions up
-  to `max_forced_compactions` per run, then lets the error surface. The legacy
-  path (no ladder) keeps its original single-retry-per-turn semantics in
-  `_stream_turn_with_compaction_retry`.
+- **Rung 2 — forced compaction with a circuit breaker**: the shared
+  `_stream_turn_with_recovery` driver in `loop/streaming.py` retries with forced
+  compactions up to `max_forced_compactions` per run, then lets the error surface.
+  Without a ladder, that same driver retains one compaction retry per turn.
+  Consolidation preserves each policy's retry/fallback boundaries, observer
+  ordering, and accounting.
 
 ### Durable compacted views (opt-in, store-detected)
 
@@ -131,12 +133,12 @@ messages written *after* `covers_seq`, reproducing the live view exactly.
 Both methods are optional and detected at runtime with `getattr`. The built-in
 in-memory, SQLite, and Postgres stores implement them; a custom store that omits
 them keeps reconstructing the view from full history (byte-identical to before).
-The snapshot payload is schema-versioned and read best-effort, so an older store
-file stays forward-tolerant. Because the snapshot is only a cache, the load path
-validates it and silently falls back to rebuilding from `full_history` whenever
-it cannot be trusted — a loader error, a malformed payload, or a `covers_seq`
-that is negative, ahead of the newest stored message, or inconsistent with a
-non-monotonic message log. Message-sequence gaps are legal and preserved;
+The snapshot envelope requires exact wire version 3. Missing, older, or unknown
+versions fail with the start-new-run error; incompatible stores require fresh
+databases. After the version gate, the load path validates the current snapshot
+cache and falls back to rebuilding from `full_history` on an ordinary loader
+error, malformed payload, or a `covers_seq` that is negative, ahead of the newest
+stored message, or inconsistent with a non-monotonic message log. Message-sequence gaps are legal and preserved;
 out-of-order sequences simply disable snapshot caching for that session.
 Compaction never mutates or removes the append-only session log's historical
 projection — the snapshot is a cache of a derived view, never a source of truth.

@@ -46,15 +46,15 @@ from .types import (
 # one actual version constant shared by every persisted envelope.
 SCHEMA_VERSION = WIRE_VERSION
 
-# A run contract is versioned independently from the checkpoint wire format.
-# Checkpoints describe *where* execution stopped; this contract describes the
-# execution inputs that must stay stable when that checkpoint is resumed.
+# Run contracts share the common wire generation with checkpoints. Checkpoints
+# describe where execution stopped; contracts bind the execution inputs that
+# must stay stable when that checkpoint is resumed.
 RUN_CONTRACT_SCHEMA_VERSION = WIRE_VERSION
 RUN_CONTRACT_META_KEY = "run_contract"
 
-# Model input snapshots have their own codec version because their compatibility
-# requirement is stricter than the best-effort checkpoint/event readers.  A
-# pending provider request must either decode exactly or fail closed.
+# Model input snapshots share the common wire generation. Their exact-input
+# integrity checks additionally require a pending provider request to decode
+# exactly or fail closed.
 MODEL_INPUT_CODEC_VERSION = WIRE_VERSION
 
 # "suspended" is a workflow parked at a wf.interrupt; distinct from

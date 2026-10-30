@@ -53,8 +53,9 @@ the embedder supplies the domain implementation. For example,
 - Duck-typed protocols do not gain required methods in a minor release. New
   protocol capabilities are detected with `getattr` or `hasattr` and have a
   compatibility fallback.
-- Persisted wire formats remain forward-tolerant. Breaking shapes require an
-  explicit schema-version migration.
+- Core reads only current wire-3 persisted formats; pre-3.0, missing, and
+  unknown versions are rejected. Start new runs and use fresh databases;
+  built-in stores do not upgrade old schemas.
 - Python 3.11 is the minimum supported runtime. Use its standard-library
   primitives directly; do not add compatibility fallbacks for older Python.
 - The core dependency graph stays small. Heavy integrations belong in extras,
@@ -130,7 +131,7 @@ work.
 | Canonical permission boundary | Pre-tool transforms are revalidated before rules/callback approval; `updatedInput` is rejected instead of executing post-approval mutation | [migration-2.0.md](./migration-2.0.md#tool-permissions-and-hooks) |
 | Strict provider stream | Normalized event vocabulary and required fields are enforced at the adapter boundary | [architecture/provider-contract.md](./architecture/provider-contract.md) |
 | Tool progress | Best-effort `ToolContext.report_progress()` and `ToolProgressEvent` provide transient UI/telemetry updates without entering provider history or the durable run event log | [usage/events.md](./usage/events.md) |
-| Durable run contract | Canonical execution inputs are fingerprinted and compared on resume; legacy runs require an explicit unsafe migration policy | [migration-2.0.md](./migration-2.0.md#durable-runs-and-legacy-records) |
+| Durable run contract | Canonical execution inputs are fingerprinted and compared on resume; current wire-3 state and a verified contract are required, and old runs must start anew | [migration-3.0.md](./migration-3.0.md) |
 | Portable session forks | Validated message-prefix forks preserve relevant metadata while rejecting unsafe tool-exchange boundaries; live work is not copied | [migration-2.0.md](./migration-2.0.md#session-forks) |
 | Provider-neutral compaction | Compaction and durable snapshots preserve pairing and fall back safely to full history when cache state is malformed | [architecture/compaction.md](./architecture/compaction.md) |
 | Concurrent storage allocation | Session/run allocation is transaction-safe under concurrent creators in SQLite and Postgres | [migration-2.0.md](./migration-2.0.md#compaction-and-storage-fixes) |

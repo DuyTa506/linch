@@ -361,10 +361,11 @@ agent = Agent(..., cwd=".", execution_backend=LocalExecutionBackend(cwd="."))
 ```
 
 Construct the local world with `cwd=Agent.cwd` so shell and filesystem share one
-workspace (a mismatch raises `ConfigError`). A shell-only `execution_backend`
-remains a deprecated compatibility path — it has no filesystem transport, and
-pairing it with `FeatureFlags(filesystem=True)` requires an explicit
-`filesystem=`; migrate to a real `ExecutionBackend`.
+workspace (a mismatch raises `ConfigError`). `execution_backend` must expose
+both `.shell` and `.fs`; shell-only values are rejected. Pair a shell transport
+such as `DockerBackend` with a filesystem transport for the same execution
+world through `RemoteExecutionBackend(shell=..., fs=...)`. An explicit
+`filesystem=` must be the backend's own `.fs` object.
 
 **`execution_backend=` transfers ownership.** The agent closes that world during
 `Agent.close()`, so do *not* hand the same object to two agents — the first

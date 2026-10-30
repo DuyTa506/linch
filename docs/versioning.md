@@ -2,16 +2,9 @@
 
 Linch 3.0 is under development. During this transition, incompatible changes
 may remove APIs, aliases, shims, and legacy persisted-data readers without a
-warning or deprecation window. Compatibility with 2.x is not a requirement. The target policy rejects
-pre-3.0 runs instead of interpreting them through compatibility readers; start
-fresh runs for 3.0. See
-[Migrating to Linch 3.0](migration-3.0.md) for implemented changes and deferred
-cleanup.
-
-This is the 3.0 compatibility policy, not a claim that every old reader has
-already been removed. Some checkpoint defaults, database upgrades, and explicit
-legacy resume paths remain in the implementation until their planned cleanup.
-Accounting and execution-contract checks still reject unsafe recovery state.
+warning or deprecation window. Compatibility with 2.x is not a requirement.
+Pre-3.0 runs are rejected; start fresh runs and use fresh databases for 3.0.
+See [Migrating to Linch 3.0](migration-3.0.md) for the removals.
 
 ## Public API
 
@@ -68,15 +61,21 @@ commit and inspect artifacts for private workspace data before handoff.
 
 ## Persisted formats
 
-Persisted schemas are versioned separately from the package version.
-`linch.RUN_SCHEMA_VERSION` stamps serialized checkpoints; model-call journals
-and other persisted records have their own contracts. A package MAJOR does
-not itself rewrite stored data or make an unsafe recovery valid.
+Persisted schemas are versioned separately from the package version, but all
+persisted envelopes share the private `WIRE_VERSION = 3` generation.
+`linch.RUN_SCHEMA_VERSION` reflects that generation. Checkpoints, run contracts,
+model-call intents/receipts and journals, exact model-input snapshots, permission
+decisions, session/provider-view snapshots, events, and workflow run metadata
+require the exact current version. Missing, pre-3.0, and unknown versions are
+rejected; start a new run. Built-in SQLite and Postgres stores create complete
+version-3 schemas and reject incompatible existing databases without upgrading
+them; use fresh databases.
 
-Current checkpoint readers decode fields individually, retain supported
-extension state, and still default some omitted fields. This does not promise
-that arbitrary older or newer runs can resume: run contracts, accounting
-receipts, and recovery boundaries must satisfy their validation rules.
+Checkpoint wire fields are required, including nullable and extension-state
+fields. A valid current version does not waive contract fingerprints,
+accounting receipts, exact-input integrity checks, or recovery-cursor validation.
+Malformed current-version provider-view caches may be rebuilt from full history;
+an incompatible snapshot version fails rather than falling back.
 
 Stored events are required on read. Unknown required event types and unknown
 required discriminators, including `WorkflowEvent.kind`, raise errors rather
