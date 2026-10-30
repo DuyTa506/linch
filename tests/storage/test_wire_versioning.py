@@ -24,6 +24,7 @@ from linch.model_calls import (
 from linch.permissions.engine import PermissionDecision
 from linch.permissions.keys import permission_decision_from_dict, permission_decision_to_dict
 from linch.run_store import (
+    InMemoryRunStore,
     RunCheckpoint,
     SqliteRunStore,
     build_run_contract,
@@ -89,6 +90,13 @@ def _request() -> ProviderRequest:
         tools=[],
         messages=[Message(role="user", content=[TextBlock(text="hello")])],
     )
+
+
+def _opaque_event_with_nested_lists(depth: int = 99) -> dict[str, object]:
+    value: object = "leaf"
+    for _ in range(depth):
+        value = [value]
+    return {"type": "future_event", "ignorable": True, "payload": value}
 
 
 def _set_version(raw: dict[str, object], version: object) -> None:
@@ -222,6 +230,33 @@ async def test_stored_ignorable_event_preserves_opaque_schema_fields(tmp_path) -
         }
         await store.append_event("run", event_from_dict(raw))
         loaded = await store.load_events("run")
+        assert event_to_dict(loaded[0].event) == raw
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_stored_ignorable_event_depth_budget_survives_in_memory_copy() -> None:
+    raw = _opaque_event_with_nested_lists()
+    store = InMemoryRunStore()
+    await store.create_run("session", id="run")
+    await store.append_event("run", event_from_dict(raw))
+
+    loaded = await store.load_events("run")
+
+    assert event_to_dict(loaded[0].event) == raw
+
+
+@pytest.mark.asyncio
+async def test_stored_ignorable_event_depth_budget_survives_sqlite_append(tmp_path) -> None:
+    raw = _opaque_event_with_nested_lists()
+    store = SqliteRunStore(tmp_path / "runs.db")
+    try:
+        await store.create_run("session", id="run")
+        await store.append_event("run", event_from_dict(raw))
+
+        loaded = await store.load_events("run")
+
         assert event_to_dict(loaded[0].event) == raw
     finally:
         await store.close()

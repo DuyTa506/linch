@@ -1213,10 +1213,23 @@ def _copy_record(record: RunRecord) -> RunRecord:
     )
 
 
+def _json_safe_stored_event(event: Event) -> dict[str, Any]:
+    """Normalize the payload before adding the outer envelope.
+
+    The event payload's depth budget is shared with the P06 ignorable-event
+    validator. Applying ``_json_safe`` to the wrapper would spend one level on
+    the durability envelope and truncate a payload that was valid before the
+    envelope was introduced.
+    """
+
+    envelope = _stored_event_to_dict(event)
+    payload = _json_safe(envelope["event"], strict=False)
+    assert isinstance(payload, dict)
+    return {"schema_version": envelope["schema_version"], "event": payload}
+
+
 def _copy_event(event: Event) -> Event:
-    raw = _json_safe(_stored_event_to_dict(event), strict=False)
-    assert isinstance(raw, dict)
-    return _stored_event_from_dict(raw)
+    return _stored_event_from_dict(_json_safe_stored_event(event))
 
 
 def _validate_model_input_snapshot(snapshot: ModelInputSnapshot) -> ModelInputSnapshot:
@@ -1982,7 +1995,7 @@ def _append_events(
             run_id,
             base + index,
             ts,
-            json.dumps(_json_safe(_stored_event_to_dict(event), strict=False), allow_nan=False),
+            json.dumps(_json_safe_stored_event(event), allow_nan=False),
         )
         for index, event in enumerate(events, start=1)
     ]

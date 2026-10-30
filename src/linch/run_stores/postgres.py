@@ -12,7 +12,7 @@ from collections.abc import Sequence
 from typing import Any
 from uuid import uuid4
 
-from ..events import Event, _stored_event_from_dict, _stored_event_to_dict
+from ..events import Event, _stored_event_from_dict
 from ..run_store import (
     LeaseLostError,
     ModelInputSnapshot,
@@ -22,7 +22,7 @@ from ..run_store import (
     RunRecord,
     StoredRunEvent,
     _append_run_error,
-    _json_safe,
+    _json_safe_stored_event,
     _safe_meta,
     _validate_lease_ttl,
     _validate_model_input_snapshot,
@@ -236,10 +236,7 @@ class PostgresRunStore:
         if not events:
             return []
         pool = await self._ensure()
-        encoded = [
-            json.dumps(_json_safe(_stored_event_to_dict(event), strict=False), allow_nan=False)
-            for event in events
-        ]
+        encoded = [json.dumps(_json_safe_stored_event(event), allow_nan=False) for event in events]
         async with pool.acquire() as conn:
             async with conn.transaction():
                 row = await self._locked_run(conn, run_id)
