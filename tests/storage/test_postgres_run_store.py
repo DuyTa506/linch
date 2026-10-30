@@ -67,6 +67,7 @@ async def test_postgres_concurrent_snapshot_delete_and_prune() -> None:
         await asyncio.wait_for(
             asyncio.gather(store.delete(snapshots[0].id), peer.prune(run_id)), timeout=5
         )
-        assert all(await store.load(snapshot.id) is None for snapshot in snapshots)
+        remaining = [await store.load(snapshot.id) for snapshot in snapshots]
+        assert all(snapshot is None for snapshot in remaining)
     finally:
         await asyncio.gather(store.close(), peer.close())
