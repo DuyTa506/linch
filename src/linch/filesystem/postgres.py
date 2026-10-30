@@ -1,7 +1,6 @@
 """PostgreSQL-backed :class:`~linch.filesystem.backend.FileBackend`.
 
-Use instead of :class:`~linch.filesystem.backend.SqliteFileBackend` when
-you need cross-session or cross-process persistence (e.g. shared offload
+Use for cross-session or cross-process persistence (e.g. shared offload
 storage on multi-worker deployments).
 
 Install::
