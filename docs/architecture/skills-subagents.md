@@ -21,6 +21,19 @@ The bare SDK agent also leaves `subagents`, `mcp`, and `filesystem` disabled.
 Enable each trusted project resource explicitly, or use the opt-in
 `create_deep_agent()` preset, which enables the capabilities it assembles.
 
+`SubagentTool` stays exec-scoped and supplies an input-aware concurrency
+predicate. Only a named type with an explicit tool list whose every tool resolves
+to `scope="read"` may overlap another tool call. An explicit empty list is safe;
+`None` or `"*"` inherits tool access and serializes. General-purpose, unknown,
+unresolvable, write-capable, and background subagents serialize too. Lookup or
+scope errors fail closed. The predicate resolves the current worker catalog,
+including coordinator catalogs installed after the tool is registered. An active
+parent exposing this tool through a session-specific registry also serializes:
+the predicate cannot identify the invoking session from input alone. Child
+completion may arrive out of order; result events and provider tool results
+retain the original provider call order. `SubagentContinueTool` and `TaskStopTool`
+keep their existing concurrency declarations.
+
 **MCP** — `connect_mcp_servers(configs)` wraps each MCP tool as a duck-typed Linch tool. Names are normalized via `mcp/naming.py`. The connection closes on `agent.close()`. Gated by `FeatureFlags(mcp=True)`.
 
 ### Deep agent preset (`deep_agent/`)
@@ -63,7 +76,7 @@ sequenceDiagram
     end
 ```
 
-- `SubagentTool` always passes `retain=True` so the child session stays live in `agent._sessions` after the run ends.
+- `SubagentTool` always passes `retain=True` so the child session stays live in `agent._sessions` after the run ends. Explicit release or opt-in `max_idle_sessions` eviction can release an idle child; continuation requires that the child remain live.
 - `session.workers: dict[str, WorkerHandle]` indexes every spawned worker by `worker_id`.
 - **`run_in_background=True`** on `SubagentTool`: spawns `asyncio.create_task(_bg_run())` and returns an acknowledgement immediately. On completion, the task calls `Session.notify()` with a stable delivery ID before recording its `BackgroundWorkerEvent`. The default notification is in-memory; durable inbox mode persists an already-enqueued completion across restart.
 - The loop drains the selected next-turn channel at the top of each new turn, yielding each notification as a `UserEvent` before `ContextInjectionHook.build_context()` runs, so the model sees task-completion content before the next provider call.
