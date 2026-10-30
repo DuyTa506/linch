@@ -1,4 +1,4 @@
-"""asyncpg import guard and connection-pool factory.
+"""asyncpg import guard.
 
 Used by all Postgres-backed store implementations.  Follows the repo's
 established optional-dependency pattern: import guard at call-time, clear
@@ -25,14 +25,3 @@ def _import_asyncpg() -> Any:
             "Postgres storage requires the optional 'asyncpg' dependency. "
             "Install with: pip install 'linch[postgres]'"
         ) from exc
-
-
-async def make_pool(
-    dsn: str,
-    *,
-    min_size: int = 1,
-    max_size: int = 10,
-) -> Any:
-    """Create and return an ``asyncpg.Pool`` for *dsn*."""
-    asyncpg = _import_asyncpg()
-    return await asyncpg.create_pool(dsn, min_size=min_size, max_size=max_size)

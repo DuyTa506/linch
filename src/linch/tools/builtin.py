@@ -801,10 +801,7 @@ class GlobTool:
                 )
             files = [line.strip() for line in raw_out.split("\n") if line.strip()]
         else:
-            try:
-                entries = glob.glob(pattern, root_dir=root, recursive=True)
-            except TypeError:
-                entries = glob.glob(pattern, root_dir=root)
+            entries = glob.glob(pattern, root_dir=root, recursive=True)
             if include_dotfiles:
                 files = sorted(entries)
             else:

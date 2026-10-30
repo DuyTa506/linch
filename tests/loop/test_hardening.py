@@ -46,7 +46,7 @@ class ReadSleepTool:
     description = "Read sleep tool."
     input_schema = {"type": "object", "properties": {}}
     scope = "read"
-    parallel_safe = True
+    parallel = True
 
     def __init__(self, name: str, *, resource_mode: str | None = None) -> None:
         self.name = name
@@ -312,7 +312,7 @@ async def test_malformed_stored_permission_decision_reprompts() -> None:
 
 
 @pytest.mark.asyncio
-async def test_parallel_safe_legacy_read_tools_still_run_in_parallel() -> None:
+async def test_read_tools_with_parallel_flag_run_in_parallel() -> None:
     registry = ToolRegistry()
     registry.register(ReadSleepTool("A"))
     registry.register(ReadSleepTool("B"))

@@ -40,8 +40,6 @@ class _InboxRow:
 
 
 class InMemorySessionStore:
-    runtime_control_block_codec_version = 1
-
     def __init__(self) -> None:
         self._sessions: dict[str, SessionRecord] = {}
         self._messages: dict[str, list[StoredMessage]] = {}
