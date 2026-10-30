@@ -189,6 +189,28 @@ Order: WP3 → WP9b → WP10 → WP11 → WP12 → WP13/WP14 (parallel). WP5/WP6
 alongside where files do not overlap. Plugins and profiles are tested with
 `linch.evals` business scenarios before a profile version is promoted.
 
+### Ideas borrowed from DeepSeek Harness (ideas, not code)
+
+Read at `deepseek-ai/deepseek-harness@ce7073d` (TypeScript, Cordis-based,
+single-user product: no multi-worker lease or Postgres story, so the scale
+work above stays ours). Docs paths are relative to that repo.
+
+| Idea | Where (dsh) | Use in Linch |
+|---|---|---|
+| Everything, including the loop, tool registry and session log, is a plugin; a plugin declares `inject` (required services) and activates only when they exist | `docs/architecture.md` "Cordis", `docs/cordis-primer.md` | WP10 `Plugin` with `requires`/`provides`; built-ins become plugins |
+| Activation audit: a mount fails on missing services or on a plugin leaking a service outside its scope | `packages/preset/agent-preset-registry/README.md` | WP10: reject a plugin that registers outside its scope (tenant isolation check) |
+| Profiles = ordered layers of config rows with stable ids; later layers replace a row by id or insert rows; `--dump-config` prints the composed tree | `docs/architecture.md` "Profiles and bundles" | WP11: profile = base bundle + domain layer + tenant patch; `profile.resolve()` shows the final tree |
+| Preset registry with revisions: an edit retires the old revision, running agents keep theirs until released; failed definitions stay visible but unbindable | `agent-preset-registry/README.md` | WP11; Linch goes further and pins profile id+revision in the RunContract |
+| Scoped registry layers: global layer + per-scope overlay; allow/deny tool restrictions intersect along the scope chain, a scope's own tools stay exempt | `docs/subsystems/scope.md`, `docs/subsystems/tools.md` §ToolRestriction | WP11/WP13 tool permissions per profile, role, and subagent |
+| Dispatch mode is part of each event's contract (`emit`/`waterfall`/`parallel`/`serial`/`bail`, `@mode` tag); a generated catalog lists producers/consumers and CI checks it is fresh | `docs/cordis-primer.md`, `docs/event-producer-consumer.md` | WP12 typed lifecycle + generated event catalog; also stops doc drift found by the WP9 audit |
+| Turn/step lifecycle: `turn/start` → `agent/pre-step` (accept/rewrite/reject) → `step/start` → request → `llm/stream` → `tools/*` → `step/end` → `agent/turn-stopping` (serial, may stop) | `docs/architecture.md` "Turn flow" | WP3/WP12 naming; `turn-stopping` is our `pre-finalize` |
+| Session projections are pure fold units (`init`, `apply(state, event)`); an uninterested unit returns the same reference (zero work); state is cached as `(session, key, version, seq, value)` and rebuilt by checkpoint + tail replay | `docs/subsystems/session-projection.md` | WP8: maintain `provider_view`/`full_history` incrementally instead of deep-copying the whole log per read; smaller checkpoints |
+| Storage formats are versioned generations; each `vN → vN+1` migration is its own module; core reads only the current format | `docs/architecture.md` "Session log" | WP9b: core reads only 3.0 data; any future upgrade is a separate migration step, never a legacy branch in core |
+| Permission presets: named bundles of sandbox mode + approval policy | `docs/subsystems/permission-presets.md` | WP13: presets per role |
+
+Not adopted: vendoring Cordis, TypeScript declaration merging, HMR, plugin
+market, desktop/web UI, Remote/Typert gateway, JSONL file sessions.
+
 ## Rules for every worker
 
 - Own git worktree and branch from `integration/3.0`; never commit to
