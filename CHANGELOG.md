@@ -4,6 +4,24 @@ Notable changes to `linch`. Versioning follows the contract in
 [docs/versioning.md](docs/versioning.md): the public API is exactly `linch.__all__`,
 and persisted wire formats are versioned separately via `linch.RUN_SCHEMA_VERSION`.
 
+## Unreleased
+
+- Require Python 3.11+; remove the Python 3.10 scaffold TOML fallbacks.
+- Remove legacy public API aliases, unused configuration/middleware types,
+  and camelCase properties/arguments. Use the configurable `workspace_tools`
+  preset and `ToolRegistry.register/unregister`.
+- Remove dormant discovery types/codecs/capability plumbing and obsolete
+  runtime helpers; reject removed discovery controls during message decoding.
+- Consolidate strict JSON traversal, custom token estimation, Postgres pool
+  lifecycle, permission signatures, client close, and claim validation while
+  preserving serialization bytes, fingerprints, and caller-specific policies.
+- Remove stale Studio ignore/documentation references.
+- Replace the old versioning exceptions with the unrestricted 3.0 transition
+  policy and normal SemVer for releases after 3.0 stable.
+
+See [Migrating to Linch 3.0](docs/migration-3.0.md) for each removal,
+replacement, and deferred loop cleanup.
+
 ## 3.0.0a1 — 2026-10-30
 
 This is the first incremental 3.0 prerelease. It adds model-call accounting
