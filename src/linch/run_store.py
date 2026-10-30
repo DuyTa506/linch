@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 from uuid import UUID, uuid4
 
+from ._json import walk_json
 from .events import (
     IGNORABLE_MAX_DEPTH,
     Event,
@@ -462,43 +463,35 @@ def _strict_model_json(
 ) -> Any:
     """Normalize a JSON value without lossy persistence fallbacks."""
 
+    return walk_json(
+        value,
+        check_node=_check_model_json_node,
+        check_key=_check_model_json_key,
+        path=path,
+        seen=set(seen),
+        depth=depth,
+    )
+
+
+def _check_model_json_node(value: Any, path: str, seen: set[int], depth: int) -> int | None:
     if value is None or isinstance(value, str | bool | int):
-        return value
+        return None
     if isinstance(value, float):
         if not math.isfinite(value):
             raise TypeError(f"{path} contains a non-finite float")
-        return value
+        return None
     if depth >= _JSON_SAFE_MAX_DEPTH:
         raise TypeError(f"{path} exceeds maximum nesting depth {_JSON_SAFE_MAX_DEPTH}")
-    if isinstance(value, Mapping):
-        if id(value) in seen:
-            raise TypeError(f"{path} contains a recursive value")
-        nested_seen = seen | {id(value)}
-        out: dict[str, Any] = {}
-        for key, item in value.items():
-            if not isinstance(key, str):
-                raise TypeError(f"{path} mapping key must be str, got {type(key).__name__}")
-            out[key] = _strict_model_json(
-                item,
-                path=f"{path}.{key}",
-                seen=nested_seen,
-                depth=depth + 1,
-            )
-        return out
-    if isinstance(value, list):
-        if id(value) in seen:
-            raise TypeError(f"{path} contains a recursive value")
-        nested_seen = seen | {id(value)}
-        return [
-            _strict_model_json(
-                item,
-                path=f"{path}[{index}]",
-                seen=nested_seen,
-                depth=depth + 1,
-            )
-            for index, item in enumerate(value)
-        ]
-    raise TypeError(f"{path} contains non-JSON value of type {type(value).__name__}")
+    if not isinstance(value, Mapping | list):
+        raise TypeError(f"{path} contains non-JSON value of type {type(value).__name__}")
+    if id(value) in seen:
+        raise TypeError(f"{path} contains a recursive value")
+    return depth + 1
+
+
+def _check_model_json_key(key: Any, path: str) -> None:
+    if not isinstance(key, str):
+        raise TypeError(f"{path} mapping key must be str, got {type(key).__name__}")
 
 
 def _output_schema_to_snapshot(schema: OutputSchema | None) -> dict[str, Any] | None:
