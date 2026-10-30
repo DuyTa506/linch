@@ -99,9 +99,9 @@ One `Agent`, many `Session`s is the canonical web-app shape — see
 | [Workflows](./workflows.md) | Deterministic fleet loops (`run_workflow`), journaling, resume |
 | [Outer loop runner](./loop-runner.md) | `LoopSpec` + `LoopRunner.run_once()` for cron, CI, webhooks, and manual recurring work |
 | [Deep agent](./deep-agent.md) | `create_deep_agent`, background workers, fork/continue, coordinator mode |
-| [Coordination](./coordination.md) | Advance the loop from a clock or a peer: scheduling (cron/interval) and multi-agent teams (mailbox + correlator) |
+| [Coordination](./coordination.md) | Multi-agent teams with mailbox messaging and correlator handshakes |
 | [Skills](./skills.md) | Slash-command prompt workflows, the built-in `verify` skill |
-| [Extending](./extending.md) | Implement your own seam: `IsolationBackend`, `Mailbox`, `ScheduleStore`, prompt assembly, and context builders |
+| [Extending](./extending.md) | Implement your own seam: `IsolationBackend`, `Mailbox`, prompt assembly, and context builders |
 | [Examples](./examples.md) | Index of runnable examples under `examples/` |
 
 ---

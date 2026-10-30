@@ -6,75 +6,19 @@
 > definition the **whole linch SDK is the harness**. This page is *not* "the
 > harness"; it is one optional capability *within* it.
 
-`linch.coordination` is about **advancing the loop from a source other than a
-direct user turn**: from a *clock* (scheduling) or from a *peer* (mailbox /
-multi-agent teams). Core stays single-conversation and user-driven; this is the
-opt-in layer for scheduled and multi-agent work.
+`linch.coordination` retains the in-process mailbox capability for peer
+messages. Core stays single-conversation and user-driven.
 
-These are deliberately **thin primitives, not implementations**. The SDK ships
-the mechanism; *you* supply the policy (what a fired schedule does, what a peer
-message means). Everything here is **opt-in and zero-overhead when unused** —
-with the defaults (`schedule_store=None`, `mailbox=None`) nothing is registered
-and the loop is byte-identical.
+The mailbox is an opt-in primitive; the host supplies the policy for interpreting
+peer messages. Durable recurring work uses `linch.worker` and PgQueuer; see
+[Scale out](./production.md#scale-out).
 
-> All public names are re-exported from the top-level package, so
-> `from linch import Schedule, Mailbox` is unchanged. The `linch.coordination.*`
-> path is internal organization, not a separate import surface.
+> Mailbox names are re-exported from the top-level package. The
+> `linch.coordination.*` path is internal organization, not a separate import
+> surface.
 
 For the *implement-your-own* side of these seams (durable stores, a git-worktree
 isolation backend, a Redis mailbox), see [Extending](./extending.md).
-
----
-
-## Scheduling — produce work on a schedule
-
-`linch.coordination.scheduling` is a dependency-free cron/interval primitive plus the
-tools that let an agent enqueue its *own* future work. Pass a store and three
-tools register automatically:
-
-```python
-from linch import Agent, InMemoryScheduleStore, SchedulerLoop
-
-agent = Agent(model="gpt-5", schedule_store=InMemoryScheduleStore())
-# Auto-registers: CreateSchedule, ListSchedules, CancelSchedule
-```
-
-The round trip has two halves — the agent schedules, **the embedder fires**:
-
-1. The agent calls `CreateSchedule(payload=..., cron="0 9 * * *")` (a 5-field UTC
-   cron expression) or `CreateSchedule(payload=..., interval_s=3600)`.
-2. You drive a `SchedulerLoop` over the same store. `loop.start()` ticks once a
-   second; each due schedule fires its `payload` into the session's next-turn
-   notification channel — the same channel background workers use.
-3. The next `session.run()` drains the payload as a `<scheduled-task>`
-   `UserEvent` at the top of the turn, so the agent acts on it as if a user asked.
-
-```python
-loop = SchedulerLoop(store, session)
-loop.start()                 # background asyncio task for the process lifetime
-# ... or tick by hand in tests / bounded runs:
-fired = await loop.tick()    # returns the schedules that fired this tick
-```
-
-`Schedule` takes exactly one of `cron` / `interval_s`; the cron expression is
-validated at creation, so an invalid expression is rejected before it can fire.
-The built-in `InMemoryScheduleStore` lives only for the current process. It
-supports atomic due claims within that process; it does not survive restart or
-coordinate separate processes. A `ScheduleEvent` is emitted on each fire.
-Durable scheduling is planned in WP6 with PgQueuer.
-
-For host-supplied adapters, `DurabilityOptions(durable_inbox=True)` uses the optional
-`LeasedScheduleStore` occurrence outbox: materialization and `next_run`
-advancement are atomic, delivery uses the stable occurrence ID, and an
-unacknowledged occurrence is reclaimed after its lease. Removing a schedule
-prevents future occurrences but does not discard one already materialized.
-
-**When to reach for it:** the agent itself should set up recurring work
-("check CI every 30 min", "summarize the inbox at 9am"). If your *application*
-already owns a scheduler (cron, k8s `CronJob`, Celery beat), drive `session.run`
-from that instead — you don't need this.
-
-Runnable: [`examples/coordination/scheduling_agent.py`](../../examples/coordination/scheduling_agent.py).
 
 ---
 

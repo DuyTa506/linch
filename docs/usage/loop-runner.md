@@ -155,30 +155,8 @@ or the TTL expires. Use the same root as `LoopSpec.root` when you override it.
 
 ## Scheduling integration
 
-`SchedulerLoop` can trigger the host call, but it does not own execution. Keep the
-scheduler responsible for due times and the runner responsible for the agent tick.
-
-```python
-from linch import InMemoryScheduleStore, LoopTrigger, SchedulerLoop
-
-store = InMemoryScheduleStore()
-scheduler = SchedulerLoop(store, session)
-
-for schedule in await scheduler.tick():
-    await runner.run_once(
-        spec,
-        LoopTrigger(
-            source="schedule",
-            id=schedule.id,
-            payload=schedule.payload,
-            metadata={"name": schedule.name},
-        ),
-    )
-```
-
-This keeps trigger ownership in the host application. A future daemon or webhook
-adapter can wrap the same `run_once()` primitive without changing loop artifacts or
-run reports.
+Durable schedules are dispatched by `linch.worker` on PgQueuer. For the queue
+topology and schedule tools, see [Scale out](./production.md#scale-out).
 
 ---
 

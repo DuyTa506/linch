@@ -202,7 +202,6 @@ details.
 - `SqliteSessionStore` is removed; use `PostgresSessionStore(dsn)` for durable history or `InMemorySessionStore` for process-lifetime tests/dev.
 - `SqliteFileBackend` is removed; use `PostgresFileBackend(dsn)` for durable virtual files or `StateFileBackend` for ephemeral state.
 - `SqliteMailbox` is removed; use `InMemoryMailbox` for process-lifetime messaging or a host-owned `Mailbox` adapter for external infrastructure.
-- `SqliteScheduleStore` is removed; use `InMemoryScheduleStore` for process-lifetime scheduling; durable scheduling is planned in WP6 with PgQueuer.
 - `create_deep_agent(durable=True)` requires explicit `session_store`, `run_store`, and an explicit `filesystem` when enabled; supply Postgres adapters for restart durability or use `durable=False` for an ephemeral preset. Explicit InMemory overrides remain accepted.
 - `scripts/run_report.py --runs-db` is removed; pass `--dsn` or set `LINCH_POSTGRES_DSN`. `load_report` and `render_report` now take a Postgres DSN string.
 
@@ -214,12 +213,23 @@ attempting a legacy database upgrade.
 
 ## Coordination scope
 
-Built-in scheduling and mailboxes now provide only `InMemoryScheduleStore` and
-`InMemoryMailbox`: schedules and messages last for the process lifetime. They
-provide no built-in restart survival or cross-process delivery. Durable
-scheduling is planned in WP6 with PgQueuer; mailbox functionality moves to
-`linch.ext` in WP10. Hosts can still adapt the `Mailbox`, `ClaimableMailbox`,
-`ScheduleStore`, and `LeasedScheduleStore` protocols to external infrastructure.
+- `Schedule` is removed; define schedules through `linch.worker`.
+- `ScheduleOccurrence` is removed; worker schedule fires use queue payloads.
+- `ScheduleStore` is removed; use the worker Postgres schedule-definition table.
+- `ClaimingScheduleStore` is removed; PgQueuer claims deferred jobs.
+- `LeasedScheduleStore` is removed; worker queue delivery handles retries.
+- `InMemoryScheduleStore` is removed; use an explicit worker/Postgres adapter.
+- `SchedulerLoop` is removed; PgQueuer dispatches runs and deferred schedule jobs.
+- `schedule_tools` is removed; register schedule tools from `linch.worker`.
+- `cron_matches` is removed; worker cron definitions use `croniter`.
+- `next_cron_time` is removed; worker cron definitions use `croniter`.
+- `validate_cron` is removed; worker cron definitions use `croniter` validation.
+- `assert_schedule_store_contract` is removed with the scheduling protocol.
+- `Agent(schedule_store=...)` is removed; hosts register worker tools explicitly.
+
+`InMemoryMailbox` remains available for process-lifetime messaging; durable
+mailbox adapters remain host-owned. See [Scale out](usage/production.md#scale-out)
+for worker topology and schedules.
 
 ## Direct OpenTelemetry (WP15 / D11)
 

@@ -417,7 +417,6 @@ class Agent:
         filesystem: Any = None,
         result_offload: Any = _DEFAULT_OFFLOAD,
         mailbox: Any = None,
-        schedule_store: Any = None,
         hooks: Any = None,
         read_before_write: Any = False,
         tool_cache: Any = None,
@@ -611,7 +610,6 @@ class Agent:
         )
         self._configure_filesystem(filesystem, result_offload)
         self._configure_mailbox(mailbox)
-        self._configure_schedule_store(schedule_store)
         self.context.register("tool_pipeline", self.tool_pipeline)
         if self.execution_backend is not None:
             self.context.register("execution", self.execution_backend)
@@ -763,26 +761,6 @@ class Agent:
             )
         except ConfigError:
             pass  # already registered (e.g. caller added it manually)
-        self._refresh_system_blocks()
-
-    def _configure_schedule_store(self, schedule_store: Any) -> None:
-        """Register the schedule create/list/cancel tools when a store is provided.
-
-        Opt-in: with ``schedule_store=None`` no tool is added and the loop stays
-        byte-identical. The embedder drives a ``SchedulerLoop`` over the same
-        store to fire due schedules into a session.
-        """
-        self.schedule_store: Any = schedule_store
-        if schedule_store is None:
-            return
-
-        from .coordination.scheduling import schedule_tools
-
-        for schedule_tool in schedule_tools(schedule_store):
-            try:
-                self.tools.register(cast("Tool", schedule_tool))
-            except ConfigError:
-                pass  # already registered (e.g. caller added it manually)
         self._refresh_system_blocks()
 
     def _filesystem_active(self) -> bool:

@@ -99,17 +99,10 @@ async def test_mailbox_contract_accepts_in_memory_mailbox() -> None:
     await assert_mailbox_contract(InMemoryMailbox)
 
 
-async def test_schedule_store_contract_accepts_in_memory_store() -> None:
-    from linch import InMemoryScheduleStore, assert_schedule_store_contract
-
-    await assert_schedule_store_contract(InMemoryScheduleStore)
-
-
 def test_contract_helpers_are_public_top_level_api() -> None:
     import linch
 
     assert "assert_file_backend_contract" in linch.__all__
     assert "assert_isolation_backend_contract" in linch.__all__
     assert "assert_mailbox_contract" in linch.__all__
-    assert "assert_schedule_store_contract" in linch.__all__
     assert "assert_tool_contract" in linch.__all__
