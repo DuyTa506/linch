@@ -215,7 +215,8 @@ Wave 1 (parallel, disjoint files):
 | 4 | `scale/durable-runs` | D1, D2, D9 | `run_store.py` (or a new `run_stores/` package), Postgres store, conformance tests; move `SqliteRunStore.save` serialization off the event loop |
 
 Merged into `integration/3.0`: WP1, WP2, WP4, WP3 (loop split only; see D4
-status), WP9a. Order from here, one merge at a time:
+status), WP9a, WP9b, WP16, WP17, WP15, WP6, WP5. Remaining Wave 2: WP8, then WP7.
+Order (one merge at a time):
 
 | WP | Branch | Decisions | Scope |
 |---|---|---|---|
