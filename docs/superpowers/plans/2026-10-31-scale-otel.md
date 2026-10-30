@@ -34,3 +34,14 @@
 Pre-flight: telemetry helpers precede source calls; source calls precede observer deletion. Documentation uses the same Context keys as tests. WP17 stores remain untouched.
 
 Verification: full Postgres suite 2165 passed / 18 skipped; ruff lint/format passed; pyright 0 errors (3 pre-existing environment warnings). Six scale cases correct. Fresh review findings fixed with RED→GREEN coverage; no decisions departed from D11. Report: `docs/architecture/otel-noop-benchmark.md`.
+
+## Owner review: no-SDK streaming overhead
+
+- [x] Reproduce the 5dad741 regression with interleaved 3-warmup/40-sample cases.
+- [x] Pin invalid-span/raw-iterator pass-through, metrics-only operation, and valid sampled-out propagation with RED→GREEN tests.
+- [x] Delete redundant chat wrappers; use completed primary/auxiliary state and existing source loops; preserve standalone compaction and close/cancellation.
+- [x] Capture three interleaved baseline/current medians and three in-memory SDK medians on committed e99d25c. No-SDK deltas: +0.209% streaming, +1.795% tools, both ≤3%.
+- [x] Replace the single-run report/table with all final medians and raw samples.
+- [x] Verify full Postgres suite: 2172 passed / 18 skipped; Ruff lint/format pass; Pyright 0 errors (3 unchanged environment warnings). No protected paths or public names changed.
+
+The final profile has no use_span calls and no telemetry async-generator advances when unconfigured. The shared conditional activation helper replaced the duplicate run activation loop; no extra primary-stream layer remains. Review found a custom standalone compaction regression during the restructure; tracing/metrics-only regression cases now pass. No unresolved material findings or spec deviations.

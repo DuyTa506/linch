@@ -13,6 +13,8 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
   Inject providers through Agent Context for tenant isolation. Emit run, step,
   chat, tool and compaction spans plus token, operation and store histograms;
   message/tool content requires the standard OTel capture environment switch.
+  No-op spans pass streamed iterators through unchanged; metrics-only hosts and
+  valid sampled-out trace contexts retain instrumentation.
 
 - Require Python 3.11+; remove the Python 3.10 scaffold TOML fallbacks.
 - Require shared wire version 3 for all persisted envelopes, including workflow

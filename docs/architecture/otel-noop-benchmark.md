@@ -1,173 +1,157 @@
-# WP15: direct OpenTelemetry and no-op measurements
+# WP15: direct OpenTelemetry fast path and interleaved measurements
 
-D11 is implemented on `scale/otel`. Baseline: `175ea48`; measured implementation:
-`36aec4a`. No SDK was configured in either benchmark process. The SDK is a
-`dev` dependency; core depends only on `opentelemetry-api`. The lock was refreshed
-with uv using cached metadata, without upgrading unrelated packages.
+The owner review of `5dad741` found that the original single-run scale table
+missed per-stream-item overhead. This report replaces that table with repeated,
+interleaved measurements of the two review cases against `175ea48`.
+The measured fix is `e99d25c8aa3d096b8d334074a5b00194b34659a9` on `scale/otel`.
 
-## Runtime contract
+## What changed
 
-| Span | Boundary / parent |
-| --- | --- |
-| `invoke_agent` | Each run/resumption; caller's current span (including extracted W3C context) |
-| `step` | Each turn; run span |
-| `chat {model}` | Each physical primary/auxiliary provider delivery; step or compaction span |
-| `execute_tool {name}` | Each tool execution; current turn; subagent runs inherit this span |
-| `compaction` | Each actual compaction attempt; current turn/caller |
+- `trace_run` and `in_span` are regular iterator factories. Invalid span contexts
+  return the exact inner iterator, with no telemetry async-generator layer.
+- `trace_chat` and `chat_stream` are deleted. Primary chat lifecycle and metrics
+  use the existing `_accounted_primary_stream` loop and its completed parser
+  state, including known usage after a parsing failure and actual response model.
+  Chat completion precedes durable receipt settlement.
+- Only `span.get_span_context().is_valid` permits activation. A valid sampled-out
+  span still propagates; `is_recording()` gates content capture only.
+- A metrics-only host still records operation duration and token usage at call
+  completion. The default/no-op meter skips store timers and proxy records; the
+  deferred global provider is checked again at call boundaries so late host setup
+  can activate it. This uses the API package's deferred-provider type, without
+  importing the SDK into core.
+- Auxiliary deliveries use their existing normalized-response state. Generated
+  definitions and custom/built-in standalone compaction retain instrumentation;
+  the standalone facade also passes its raw iterator through when unconfigured.
+  One shared activation helper owns context restoration and close/cancellation.
 
-The histograms are `gen_ai.client.token.usage` (`{token}`, input/output split by
-`gen_ai.token.type`), `gen_ai.client.operation.duration` (`s`, one per chat), and
-`linch.store.duration` (`s`, attribute `op`). Store calls produce no spans.
-Store timers cover loop append/checkpoint/event/batch/status/load/snapshot calls,
-durable inbox commit/enqueue, and compaction skill-context persistence. All
-`gen_ai.*`/`linch.*` telemetry keys are constants in `_telemetry.py`. Usage includes
-input/output and cache read/creation buckets; spans carry operation, provider,
-request/response model, finish reasons, conversation/tool identifiers, run ID,
-turn index, resume marker and compaction strategy where applicable.
+No public API or dependency changes were needed. Core remains API-only; hosts
+own SDK providers and exporters, resolved through the agent Context. All
+`gen_ai.*`/`linch.*` keys remain in the private telemetry module. Content remains
+absent unless `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true`.
 
-`error.type` and error status describe failures without exception messages or
-exception events. Known paid usage survives parser failure. Prompt, assistant,
-and tool arguments/results are captured only when
-`OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true`. Async iterator context
-is restored before every consumer yield; close/cancellation finishes telemetry
-before the session becomes idle. Providers/instruments are resolved through the
-agent Context with an agent-local cache. Hosts own SDK shutdown. Host-job W3C
-propagation is documented and tested; subagent task propagation is automatic.
+## Method
 
-## No-SDK benchmark
-
-Run before changes and after final runtime fixes:
+All variants use `/home/duy/Downloads/duy_dev/agent_kit/.venv/bin/python` with
+**3 warmups and 40 measured samples per case, per process**. Both baseline and
+current no-SDK processes have the SDK installed but no configured SDK providers.
+Each process runs both cases with the unchanged command:
 
 ```bash
-/home/duy/Downloads/duy_dev/agent_kit/.venv/bin/python scripts/benchmark_runtime.py --scale
+/home/duy/Downloads/duy_dev/agent_kit/.venv/bin/python scripts/benchmark_runtime.py \
+  --warmups 3 --samples 40 \
+  --case no_tool_stream_200_deltas --case parallel_8_read_tools --json
 ```
 
-All six cases completed correctly with no timeout. These are single observations
-on the same machine, not a statistical estimate; scheduling/allocation/I/O noise
-is visible. In particular, the 200-session memory case increased while the
-1,000-session memory case decreased. There is no claim of a speed improvement.
-SQLite cases remain in this worktree's pre-WP17 benchmark only; no SQLite code
-was added or modified. [Machine-readable results](./otel-noop-benchmark.json)
-include all measured deltas and correctness counts.
+Baseline source was extracted with `git archive 175ea48` into `/tmp`; no branch
+was switched and no other worktree was edited. The six no-SDK processes ran in
+order **B1, C1, C2, B2, B3, C3**, followed by three SDK processes. Code was held
+fixed during this batch; before/after source fingerprints were identical:
+`b4708b07b36830c82ecf5531252a2b2ae957dfba9169eaad7245adff35d8817e`.
 
-Latency in milliseconds:
+The enabled variant injects a shared `TracerProvider`, `SimpleSpanProcessor`,
+`InMemorySpanExporter`, `MeterProvider`, and `InMemoryMetricReader` through the
+Agent Context. It uses no global provider setters and leaves content capture
+off. This measures traces **and** metrics; there is no enabled-SDK performance
+target. Each SDK process exported 688 spans across its warmup/measured runs and
+observed all three histograms. All nine processes passed correctness checks.
 
-| Case | Before p50 | After p50 | Delta | Before p99 | After p99 | Delta |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| memory_200x4 | 4590.97 | 5092.49 | +10.92% | 4748.51 | 5281.57 | +11.23% |
-| memory_1000x4 | 25355.34 | 24823.20 | -2.10% | 25912.54 | 25691.64 | -0.85% |
-| memory_1x50 | 1134.72 | 1117.03 | -1.56% | 1134.72 | 1117.03 | -1.56% |
-| sqlite_200x4 | 6023.22 | 5867.90 | -2.58% | 8497.91 | 8259.75 | -2.80% |
-| sqlite_1000x4 | 22854.22 | 23163.03 | +1.35% | 42472.50 | 43205.27 | +1.73% |
-| sqlite_1x50 | 1887.61 | 1915.55 | +1.48% | 1887.61 | 1915.55 | +1.48% |
+These are three run medians of 40 samples each, in milliseconds. Every median
+from the final committed-source batch is reported, in chronological order within
+each variant:
 
-Other scale measurements, before → after:
+| Case | Variant | Run 1 | Run 2 | Run 3 |
+| --- | --- | ---: | ---: | ---: |
+| `no_tool_stream_200_deltas` | 175ea48 baseline | 1.816768 | 1.860934 | 1.870779 |
+| `no_tool_stream_200_deltas` | e99d25c no SDK | 1.864819 | 1.877485 | 1.843074 |
+| `no_tool_stream_200_deltas` | e99d25c SDK | 3.050605 | 2.981250 | 3.025261 |
+| `parallel_8_read_tools` | 175ea48 baseline | 9.922058 | 9.946050 | 9.928294 |
+| `parallel_8_read_tools` | e99d25c no SDK | 10.111243 | 10.106555 | 10.055813 |
+| `parallel_8_read_tools` | e99d25c SDK | 11.081938 | 11.023267 | 11.141828 |
 
-| Case | Max loop lag (ms) | Peak RSS increase/session (KiB) | Checkpoint bytes/turn | Store writes/turn |
-| --- | ---: | ---: | ---: | ---: |
-| memory_200x4 | 844.10 → 899.19 | 136.80 → 139.28 | 18125.745 → 18125.700 | 16.50 → 16.50 |
-| memory_1000x4 | 4308.35 → 4330.18 | 118.20 → 122.42 | 18136.750 → 18136.750 | 16.50 → 16.50 |
-| memory_1x50 | 16.68 → 10.34 | 4264.00 → 4176.00 | 122852.760 → 122852.760 | 16.04 → 16.04 |
-| sqlite_200x4 | 27.49 → 21.00 | 106.86 → 108.46 | 18114.755 → 18114.748 | 16.50 → 16.50 |
-| sqlite_1000x4 | 44.42 → 43.10 | 32.54 → 32.69 | 18114.806 → 18114.882 | 16.50 → 16.50 |
-| sqlite_1x50 | 20.23 → 16.29 | 6476.00 → 6148.00 | 122852.760 → 122852.760 | 16.04 → 16.04 |
+The comparison statistic is the median of those three run medians:
 
-## Surface, scope and verification
+| Case | Baseline (ms) | No SDK (ms) | No SDK vs baseline | SDK (ms) | SDK vs no SDK |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `no_tool_stream_200_deltas` | 1.860934 | 1.864819 | +0.209% | 3.025261 | +62.228% |
+| `parallel_8_read_tools` | 9.928294 | 10.106555 | +1.795% | 11.081938 | +9.651% |
 
-Public names added: none. Public names removed (16): `BaseObserver`,
-`LoggingObserver`, `ObserverDispatcher`, `OpenTelemetryObserver`,
-`ProviderCallInfo`, `ProviderCallResult`, `RunInfo`, `RunObserver`, `RunResultInfo`,
-`RunTelemetryHook`, `Span`, `SpanCollector`, `ToolInfo`, `ToolResultInfo`,
-`TurnInfo`, `normalize_observers`. Each removal and the removed package/extra/
-example/parameter has a line in [the migration guide](../migration-3.0.md).
-Native lifecycle hooks remain available; their stop result is now private.
+Both no-SDK cases meet the owner's **≤3%** target. Each corresponding B/C pair
+also meets it; these are the paired changes in process order:
 
-Line delta against baseline: `src/linch` +733 / −1118 = **−385**;
-`tests` +922 / −930 = **−8**. Changes cover dependency metadata/lock, the private
-telemetry module, loop/provider/tool/compaction source calls, observer deletion,
-SDK tests, examples, usage/migration/changelog and this measurement report.
-`session.py` gained one private run-state field; `subagents/generator.py` changed
-to cover its direct provider call. Shared `agent.py`/`__init__.py` changes are
-limited to observability. WP17-owned paths are unchanged. No spec deviations.
+| Case | Pair 1 | Pair 2 | Pair 3 |
+| --- | ---: | ---: | ---: |
+| `no_tool_stream_200_deltas` | +2.645% | +0.889% | -1.481% |
+| `parallel_8_read_tools` | +1.907% | +1.614% | +1.284% |
 
-Final gates using the prescribed venv and supplied Postgres DSN:
+Small differences remain subject to normal scheduling/timer noise. No speedup is
+claimed. The enabled numbers apply to the stated in-memory SDK setup, rather
+than predicting a particular OTLP exporter/backend's cost.
 
-- `python -m pytest -q`: **2165 passed, 18 skipped**, 31.10 s. Postgres tests
-  used a disposable schema. Unix-socket access required sandbox escalation.
+[The measurement artifact](./otel-noop-benchmark.json) contains all 40-sample
+payloads, run order, medians, correctness results, profile counts, and the exact
+SDK harness source. To reproduce the enabled case, extract that harness:
+
+```python
+import json
+from pathlib import Path
+
+report = json.loads(Path("docs/architecture/otel-noop-benchmark.json").read_text())
+Path("/tmp/linch-otel-benchmark.py").write_text(report["sdk_driver_source"])
+```
+
+```bash
+/home/duy/Downloads/duy_dev/agent_kit/.venv/bin/python /tmp/linch-otel-benchmark.py \
+  --root "$PWD" --warmups 3 --samples 40
+```
+
+## Non-timing evidence and verification
+
+A no-SDK 200-delta run forbids `trace.use_span` in a regression test. Separate
+identity assertions require raw iterator pass-through for invalid spans and
+no-op runs. Metrics-only recording, valid sampled-out propagation, cancellation,
+caller restoration, span trees, tenant isolation and content capture remain
+covered. Custom standalone compaction is checked with and without tracing.
+
+A cProfile run of the streaming case (3 warmups, 40 samples) has **0**
+`trace.use_span` calls and **0** telemetry async-generator advances. It calls the
+regular `in_span` factory 86 times: once per run and once per provider call,
+independent of the 200 deltas in each call.
+
+Gates on the committed implementation, using the supplied Postgres DSN:
+
+- `python -m pytest -q`: **2172 passed, 18 skipped**, 30.98 s. Postgres test
+  writes used a disposable schema; the supplied Unix socket needed sandbox access.
 - `ruff check .`: passed.
-- `ruff format --check .`: passed, **412 files** formatted.
-- `pyright`: **0 errors**, 3 existing environment warnings about resolving
-  `jsonschema` source in `tools/base.py` and `tools/registry.py`.
-- Focused telemetry/compaction coverage: **67 passed**, including **24 OTel
-  tests**, with injected SDK exporters/readers and no global provider mutation.
+- `ruff format --check .`: passed, **413 files**.
+- `pyright`: **0 errors**, 3 pre-existing `jsonschema` source-resolution warnings
+  in `tools/base.py` and `tools/registry.py`.
+- Focused telemetry/compaction tests: **74 passed**, including **31 OTel tests**.
 
-Review findings about close errors, delayed public close, successful-call error
-labels, scoped-provider cache inheritance, known usage after parse failure, and
-unclosed auxiliary iterators were fixed with regression coverage. No deferred
-material findings. The branch is retained for architecture-owner integration;
-no push or protected-branch changes were made.
+One exploratory run with an added 20-second timeout timed out in the unrelated
+`tests/tools/test_builtin_search.py::test_grep_malformed_regex_rg_reports_error`;
+it passed immediately in isolation and in the final required full gate.
 
-## Changed files (62)
+## Surface and scope
 
-- `CHANGELOG.md`
-- `README.md`
-- `docs/architecture/otel-noop-benchmark.json`
-- `docs/architecture/otel-noop-benchmark.md`
-- `docs/migration-3.0.md`
-- `docs/superpowers/plans/2026-10-31-scale-otel.md`
-- `docs/usage/README.md`
-- `docs/usage/agent.md`
-- `docs/usage/events.md`
-- `docs/usage/examples.md`
-- `docs/usage/hooks.md`
-- `docs/usage/production.md`
-- `examples/observability/custom_observer.py`
-- `examples/observability/observability_agent.py`
-- `pyproject.toml`
-- `src/linch/__init__.py`
-- `src/linch/_telemetry.py`
-- `src/linch/agent.py`
-- `src/linch/compaction.py`
-- `src/linch/hooks/__init__.py`
-- `src/linch/hooks/adapters.py`
-- `src/linch/hooks/contexts.py`
-- `src/linch/loop/checkpoint.py`
-- `src/linch/loop/finalize.py`
-- `src/linch/loop/provider_turn.py`
-- `src/linch/loop/resume.py`
-- `src/linch/loop/runner.py`
-- `src/linch/loop/runtime.py`
-- `src/linch/loop/startup.py`
-- `src/linch/loop/streaming.py`
-- `src/linch/loop/terminals.py`
-- `src/linch/loop/tool_batch.py`
-- `src/linch/model_calls.py`
-- `src/linch/observability/__init__.py`
-- `src/linch/observability/dispatcher.py`
-- `src/linch/observability/otel.py`
-- `src/linch/observability/protocol.py`
-- `src/linch/observability/reference.py`
-- `src/linch/scheduler.py`
-- `src/linch/session.py`
-- `src/linch/subagents/generator.py`
-- `tests/loop/test_compaction_provider_agnostic.py`
-- `tests/loop/test_compaction_response_chaining.py`
-- `tests/loop/test_hardening.py`
-- `tests/loop/test_phase_state_recovery.py`
-- `tests/loop/test_run_resume.py`
-- `tests/observability/conftest.py`
-- `tests/observability/test_observability.py`
-- `tests/observability/test_otel_propagation.py`
-- `tests/observability/test_otel_runtime.py`
-- `tests/observability/test_telemetry.py`
-- `tests/test_compaction_accounting.py`
-- `tests/test_hooks.py`
-- `tests/test_public_api.py`
-- `tests/tools/test_maximal_batching.py`
-- `tests/tools/test_middleware.py`
-- `tests/tools/test_pipeline.py`
-- `tests/tools/test_scheduler_security_v2.py`
-- `tests/tools/test_scheduler_tool_output_v2.py`
-- `tests/tools/test_scheduler_v2.py`
-- `tests/tools/test_tool_reliability.py`
-- `uv.lock`
+Spans remain `invoke_agent`, `step`, `chat {model}`, `execute_tool {name}`, and
+`compaction`. Histograms remain `gen_ai.client.token.usage` (`{token}`),
+`gen_ai.client.operation.duration` (`s`), and `linch.store.duration` (`s`, `op`).
+Store calls do not create spans. Host-job W3C propagation and subagent ancestry
+are unchanged. SDK-backed usage/actual-model reads occur at call completion,
+rather than on each primary-stream item.
+
+This review revision changes four runtime files, two test files, and the
+benchmark report/artifact, changelog and implementation plan. Shared `agent.py`
+and `__init__.py`, dependency metadata, and all WP17-owned paths are unchanged.
+Source line delta versus `5dad741`: **+288 / −216 = +72**; tests:
+**+258 / −0 = +258**. Cumulative WP15 delta versus `175ea48`: source
+**+807 / −1120 = −313**; tests **+1180 / −930 = +250**.
+
+Public names added/removed in this revision: **0 / 0**. The original 16 removals
+remain: `BaseObserver`, `LoggingObserver`, `ObserverDispatcher`,
+`OpenTelemetryObserver`, `ProviderCallInfo`, `ProviderCallResult`, `RunInfo`,
+`RunObserver`, `RunResultInfo`, `RunTelemetryHook`, `Span`, `SpanCollector`,
+`ToolInfo`, `ToolResultInfo`, `TurnInfo`, `normalize_observers`. See
+[the migration guide](../migration-3.0.md). No spec deviations; no push or
+protected-branch changes.
