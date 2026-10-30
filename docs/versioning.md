@@ -67,7 +67,7 @@ persisted envelopes share the private `WIRE_VERSION = 3` generation.
 model-call intents/receipts and journals, exact model-input snapshots, permission
 decisions, session/provider-view snapshots, events, and workflow run metadata
 require the exact current version. Missing, pre-3.0, and unknown versions are
-rejected; start a new run. Built-in SQLite and Postgres stores create complete
+rejected; start a new run. Built-in Postgres stores create complete
 version-3 schemas and reject incompatible existing databases without upgrading
 them; use fresh databases.
 

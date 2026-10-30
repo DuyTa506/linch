@@ -131,7 +131,7 @@ compaction seam; on load, the agent restores the snapshot and appends only the
 messages written *after* `covers_seq`, reproducing the live view exactly.
 
 Both methods are optional and detected at runtime with `getattr`. The built-in
-in-memory, SQLite, and Postgres stores implement them; a custom store that omits
+in-memory and Postgres stores implement them; a custom store that omits
 them keeps reconstructing the view from full history (byte-identical to before).
 The snapshot envelope requires exact wire version 3. Missing, older, or unknown
 versions fail with the start-new-run error; incompatible stores require fresh

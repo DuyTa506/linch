@@ -16,7 +16,7 @@
 | `context/` | `ContextBuilder` protocol, `ContextBuildResult`, `ContextBudget`, `apply_context_budget`; consumed by `ContextInjectionHook` in `hooks/adapters.py` |
 | `loop_guard/` | `LoopGuard`, `LoopGuardState`, `LoopGuardDecision`, `evaluate_loop_guard`, `normalize_loop_guard` |
 | `memory/` | *(removed in 3.0)* — file memory is `FileMemoryContextBuilder` in the context/hook path; semantic recall is host-owned (see the mem0 example) |
-| `filesystem/` | Explicit `FeatureFlags(filesystem=True)` capability: `FileBackend` protocol, `ScopedFileBackend`, `StateFileBackend`, `DiskFileBackend`, `SqliteFileBackend`, `CompositeFileBackend`, `OffloadConfig`, ls/read_file/write_file/edit_file tools |
+| `filesystem/` | Explicit `FeatureFlags(filesystem=True)` capability: `FileBackend` protocol, `ScopedFileBackend`, `StateFileBackend`, `DiskFileBackend`, `PostgresFileBackend`, `CompositeFileBackend`, `OffloadConfig`, ls/read_file/write_file/edit_file tools |
 | `scheduler.py` | Canonical tool-call security pipeline (validate → offered-tool boundary → `PreToolUse` → revalidate → final permission), resource-aware bounded execution, stream-only tool progress, and enabled-filesystem offload at the result chokepoint |
 | `compaction.py` | Context-window management; calls `agent.provider` directly; `CompactionLadder` + `micro_compact` recovery rungs |
 | `budget.py` | `RunBudget` — token/USD spending caps shared across the agent tree; charged per turn in `loop/runner.py` |
@@ -27,11 +27,11 @@
 | `evals/` | Scripted provider, eval case/result dataclasses, built-in scorers, `run_eval()` |
 | `providers/` | `BaseProvider`, `ProviderCapabilities`; implementations: `OpenAIChatCompletionsProvider` (generic OpenAI-compatible endpoint), `DeepSeekProvider` (native thinking, JSON-object output, `reasoning_content` round-trip), `OpenAIResponsesProvider` (stateful, native reasoning effort/summary), `AnthropicProvider` (adaptive/extended thinking with signature, prompt caching), `GeminiProvider`, `LlamaCppProvider`, `VLLMProvider`, `SGLangProvider`; `limiter.py` — `Limiter` protocol and the `provider_slot` gate core holds around every live provider call |
 | `tools/` | Tool protocol, `ToolContext`, `ToolRegistry` (registration returns a `Disposable`), `ToolResult`, `Citation`, built-in tools, execution backends; `pipeline.py` — the open `tools/pre-execute → execute → post-execute` seam (`ToolPipeline`); `wrappers/` — `tools/execute` around-wrappers (metrics, timeout) |
-| `sessions/` | `SessionStore` protocol, `InMemorySessionStore`, `SqliteSessionStore`, Postgres store, provider-view snapshots, and portable safe-prefix session forking |
+| `sessions/` | `SessionStore` protocol, `InMemorySessionStore`, `PostgresSessionStore`, provider-view snapshots, and portable safe-prefix session forking |
 | `mcp/` | MCP server connection → Linch tool adapters |
 | `skills/` | `SKILL.md`-based slash-commands with argument substitution |
 | `subagents/` | Specialized agent roles from `.linch/agents.yaml`; `workers.py` — `WorkerHandle` dataclass for per-worker state tracking; wiring for `SubagentContinueTool` |
-| `run_store.py` | `InMemoryRunStore`/`SqliteRunStore`, `RunCheckpoint`, and `RunContract` — durable checkpoints plus a canonical fingerprint of resume-safe execution inputs. Background completion events are status-only audit records; no durable result-delivery queue exists. |
+| `run_store.py` | `InMemoryRunStore` plus `PostgresRunStore` in `run_stores/postgres.py`, `RunCheckpoint`, and `RunContract` — durable checkpoints plus a canonical fingerprint of resume-safe execution inputs. Background completion events are status-only audit records; no durable result-delivery queue exists. |
 | `deep_agent/` | Explicit `create_deep_agent` profiles/factory (`factory.py`); deep prompt layers (`prompts.py`); specialist roster — researcher, planner, implementer, verification (`subagents.py`) |
 | `tools/subagent_continue.py` | `SubagentContinueTool` — continues a retained child session by worker id or display name |
 | `tools/subagent_stop.py` | `TaskStopTool` — cancels a background worker; handle remains in `session.workers` and is still continuable |

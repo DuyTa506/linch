@@ -140,7 +140,7 @@ so the messages survive a reload. `session.session_log.append(...)` updates
 only the in-memory log and is not a durable session mutation. Record
 compaction with `session.session_log.record_projection(...)`. Per-request context-builder output
 is ephemeral and is never part of the log. Pick ephemeral for stateless workers,
-SQLite to survive restarts.
+Postgres to survive restarts.
 
 Because each read of `provider_view`/`full_history` builds a detached deep copy,
 reach for the cheap accessors when you only need a count or the newest turn —
@@ -153,14 +153,14 @@ boundary is the session snapshot, not a persisted projection-entry journal. On
 load, Linch seeds a fresh log from the stored historical and visible snapshots.
 
 ```python
-from linch.sessions import InMemorySessionStore, SqliteSessionStore
-from pathlib import Path
+import os
+from linch import InMemorySessionStore, PostgresSessionStore
 
 # Ephemeral (tests, single-request workers)
 store = InMemorySessionStore()
 
 # Persistent (keep history across restarts)
-store = SqliteSessionStore(Path("~/.myapp/sessions.db").expanduser())
+store = PostgresSessionStore(os.environ["LINCH_POSTGRES_DSN"])
 
 agent = Agent(model="gpt-5", session_store=store)
 ```
@@ -168,7 +168,7 @@ agent = Agent(model="gpt-5", session_store=store)
 `SessionStore` is a protocol, so a host app can implement its own backend
 (Redis, Postgres, …) by satisfying the same interface. For durable *run*
 checkpoints (resume across process restarts, durable HITL approvals) also pass a
-`run_store=SqliteRunStore(...)` — see [workflows.md](./workflows.md) and
+`run_store=PostgresRunStore(dsn)` — see [workflows.md](./workflows.md) and
 [deep-agent.md](./deep-agent.md).
 
 ### Incremental durability
@@ -176,12 +176,15 @@ checkpoints (resume across process restarts, durable HITL approvals) also pass a
 `DurabilityOptions` enables durability without changing the default 2.x path:
 
 ```python
-from linch import Agent, DurabilityOptions, SqliteRunStore, SqliteSessionStore
+import os
+from linch import Agent, DurabilityOptions, PostgresRunStore, PostgresSessionStore
+
+dsn = os.environ["LINCH_POSTGRES_DSN"]
 
 agent = Agent(
     model="gpt-5",
-    session_store=SqliteSessionStore("sessions.db"),
-    run_store=SqliteRunStore("runs.db"),
+    session_store=PostgresSessionStore(dsn),
+    run_store=PostgresRunStore(dsn),
     durability=DurabilityOptions.strict_v1(),
 )
 

@@ -8,6 +8,10 @@ with the full detail — this is the wiring checklist, not a re-explanation.
 Linch is a **library**, not a daemon. Your service owns the process, the request
 lifecycle, and the schedule; Linch owns one agent run at a time.
 
+For a local database, follow the [Docker Postgres setup](./quickstart.md#5-keep-state-when-the-process-restarts).
+The host reads `LINCH_POSTGRES_DSN` and passes it to each store; the SDK does not
+read this variable automatically.
+
 ## 1. Build the agent once, reuse it
 
 An `Agent` holds configuration and its own registries — construct it at startup
@@ -16,13 +20,15 @@ so independent `Agent` instances run concurrently in one process (multi-tenant
 safe).
 
 ```python
-from linch import Agent, SqliteRunStore
-from linch.sessions import SqliteSessionStore
+import os
+from linch import Agent, PostgresRunStore, PostgresSessionStore
+
+dsn = os.environ["LINCH_POSTGRES_DSN"]
 
 agent = Agent(
     model="claude-opus-4-8",
-    session_store=SqliteSessionStore("var/sessions.db"),  # conversation state
-    run_store=SqliteRunStore("var/runs.db"),              # checkpoints for resume
+    session_store=PostgresSessionStore(dsn),  # conversation state
+    run_store=PostgresRunStore(dsn),              # checkpoints for resume
     cwd="var/workspace",
 )
 ```
@@ -87,7 +93,7 @@ async for event in session.resume(run_id):
 
 Resume requires current wire-3 state and a verified execution contract.
 Pre-3.0, missing-version, unknown-version, and contractless runs are rejected;
-start a new run. Built-in SQLite and Postgres stores reject incompatible
+start a new run. Built-in Postgres stores reject incompatible
 existing schemas without upgrading them; use fresh databases. See the
 [3.0 migration guide](../migration-3.0.md).
 

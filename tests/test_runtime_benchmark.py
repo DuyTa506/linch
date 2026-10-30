@@ -86,9 +86,9 @@ async def test_no_tool_case_runs_offline_and_validates_events(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_trivial_sqlite_case_runs_offline(tmp_path):
+async def test_trivial_memory_case_runs_offline(tmp_path):
     benchmark = _load_script()
-    case = benchmark.build_cases(tmp_path)["sqlite_trivial_operation"]
+    case = benchmark.build_cases(tmp_path)["memory_trivial_operation"]
 
     try:
         result = await benchmark.run_case(case, warmups=1, samples=2, threshold_ms=None)
@@ -110,7 +110,7 @@ async def test_run_store_50_event_writes_validates_persisted_order(tmp_path):
     finally:
         await case.close()
 
-    assert benchmark.DEFAULT_THRESHOLDS_MS[case.name] == 250.0
+    assert case.name not in benchmark.DEFAULT_THRESHOLDS_MS
     assert result.correct is True
     assert result.event_counts == [50]
     assert len(result.samples_ms) == 1
@@ -122,9 +122,9 @@ def test_new_cases_registered(tmp_path):
 
     assert "scheduler_maximal_16_read_tools" in cases
     assert "session_churn_25" in cases
-    # Existing SQLite gates are retained.
-    assert benchmark.DEFAULT_THRESHOLDS_MS["durable_sqlite_8_read_tools"] == 25.0
-    assert benchmark.DEFAULT_THRESHOLDS_MS["durable_sqlite_32_read_tools"] == 70.0
+    assert "checkpoint_memory_8_read_tools" in cases
+    assert "checkpoint_memory_32_read_tools" in cases
+    assert benchmark.DEFAULT_THRESHOLDS_MS == {}
 
 
 def test_parser_accepts_threshold_override():
