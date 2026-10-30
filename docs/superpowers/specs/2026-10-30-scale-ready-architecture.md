@@ -15,9 +15,16 @@ is the source of truth for sessions, runs, events and leases. Tools are RAG,
 SQL, and a few read/write tools with per-tenant dependencies via
 `RunOptions(deps=...)`.
 
-Linch stays a library. No daemon, server, queue, or Redis dependency enters
-core. Linch ships *mechanisms* (lease, fencing, conformance, seams, bounds);
-the topology (queue, worker pool, HTTP) is the host's, shown in a recipe.
+Linch stays embeddable, but (owner decision 2026-10-31) it may ship an
+optional runtime module: `linch.worker` — claim/renew/release loop over a
+leasing RunStore, graceful drain, resume of orphaned runs — so every host does
+not rebuild it. The HTTP API and queue choice stay with the host (example
+only). Dependencies may be added when they pay for themselves (CLAUDE.md).
+
+Compatibility: 3.0 breaks freely (CLAUDE.md "3.0 compatibility policy").
+Pre-3.0 runs and checkpoints are rejected rather than read through legacy
+paths; immutable message types are allowed if they remove the SessionLog
+deep-copy cost.
 
 Out of scope for 3.0: tool discovery (deferred, measured need first),
 cross-process rate limiting in core (host `Limiter` adapter), partial-text

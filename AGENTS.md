@@ -24,7 +24,7 @@ Use targeted tests while iterating, for example `pytest tests/tools/test_functio
 
 ## Coding Style & Naming Conventions
 
-Target Python 3.10+. Ruff enforces imports and lint rules (`E`, `F`, `I`, `UP`, `B`) with a 100-character line length. Use 4-space indentation, type annotations for public surfaces, and `slots=True` on new dataclasses following existing primitives. Keep runtime/provider paths async; avoid blocking I/O in `loop/`, `scheduler.py`, `compaction.py`, and provider modules. Tools are duck-typed protocols; do not introduce base-class inheritance where protocols are expected. The supported public surface is exactly `linch.__all__` (`tests/test_public_api.py` guards it); submodule paths and underscore names are private.
+Target Python 3.11+. Linch 3.0 breaks compatibility freely (see CLAUDE.md, "3.0 compatibility policy"): remove deprecated paths and legacy readers instead of keeping them, and do not add shims. Ruff enforces imports and lint rules (`E`, `F`, `I`, `UP`, `B`) with a 100-character line length. Use 4-space indentation, type annotations for public surfaces, and `slots=True` on new dataclasses following existing primitives. Keep runtime/provider paths async; avoid blocking I/O in `loop/`, `scheduler.py`, `compaction.py`, and provider modules. Tools are duck-typed protocols; do not introduce base-class inheritance where protocols are expected. The supported public surface is exactly `linch.__all__` (`tests/test_public_api.py` guards it); submodule paths and underscore names are private.
 
 ## Testing Guidelines
 
