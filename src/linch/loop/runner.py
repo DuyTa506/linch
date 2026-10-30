@@ -44,7 +44,6 @@ from ..types import (
 from .checkpoint import (
     _alignment_entries_from_checkpoint,
     _flush_events,
-    _loop_guard_state_from_dict,
     _message_digest,
     _persist_event,
     _primary_control_message,
@@ -230,7 +229,6 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         checkpoint_extension_state=_checkpoint_extension_state,
         effective_final_tool_name=_effective_final_tool_name,
         loop_guard_state_factory=LoopGuardState,
-        loop_guard_state_from_dict=_loop_guard_state_from_dict,
         skill_overlay_from_dict=_skill_overlay_from_dict,
         alignment_entries_from_checkpoint=_alignment_entries_from_checkpoint,
     )
@@ -898,6 +896,13 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 resume_checkpoint=resume_checkpoint,
                 guard=_guard,
                 guard_state=_guard_state,
+                guard_evaluation_ids=_runtime.guard_evaluation_ids,
+                guard_evaluation_facts=_runtime.guard_evaluation_facts,
+                record_guard_evaluation=lambda: setattr(
+                    _runtime,
+                    "guard_evaluation_count",
+                    _runtime.guard_evaluation_count + 1,
+                ),
                 save_checkpoint=_save_checkpoint,
                 flush_events=lambda: _flush_events(session),
                 persist_event=lambda event: _persist_event(session, run_id, event),

@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .._telemetry import store_call
+from ..errors import ConfigError
 from ..events import (
     Event,
     LoopGuardEvent,
@@ -21,9 +22,11 @@ from ..events import (
     ToolCallStartEvent,
     ToolProgressEvent,
     UserEvent,
+    _LoopGuardEvaluationEvent,
 )
 from ..hooks import HookEvent, ToolUseStartContext, ToolUseStopContext
 from ..loop_guard import evaluate_loop_guard
+from ..permissions.keys import permission_decision_key
 from ..scheduler import execute_tool_calls
 from ..types import (
     AssistantAssembly,
@@ -36,6 +39,8 @@ from ..types import (
 from .checkpoint import (
     _interrupted_tool_result_block,
     _last_message_has_tool_results,
+    _loop_guard_batch_id,
+    _loop_guard_is_active,
     _recover_completed_tool_results,
     _tool_result_block_from_end,
 )
@@ -55,6 +60,9 @@ class ToolBatchContext:
     resume_checkpoint: Any
     guard: Any
     guard_state: Any
+    guard_evaluation_ids: set[str] | None
+    guard_evaluation_facts: dict[str, _LoopGuardEvaluationEvent] | None
+    record_guard_evaluation: Callable[[], None]
     save_checkpoint: Callable[..., Awaitable[None]]
     flush_events: Callable[[], Awaitable[None]]
     persist_event: Callable[[Event], Awaitable[None]]
@@ -183,6 +191,7 @@ async def run_tool_batch(ctx: ToolBatchContext) -> AsyncIterator[Event]:
     )
     if not already_appended:
         await store_call(session, "session.append", session.append([result_message]))
+
     await ctx.save_checkpoint(
         "tool_results_appended",
         turn_index=ctx.turn_index,
@@ -195,23 +204,58 @@ async def run_tool_batch(ctx: ToolBatchContext) -> AsyncIterator[Event]:
     await ctx.persist_event(event)
     yield event
 
-    if ctx.guard is not None and ctx.guard_state is not None:
-        decision = evaluate_loop_guard(ctx.guard, ctx.guard_state, tool_blocks, result_blocks)
-        if decision.action != "continue":
-            event = LoopGuardEvent(
-                reason=decision.reason,
-                detail=decision.detail,
-                action=decision.action,
-            )
-            await ctx.persist_event(event)
-            yield event
-            if decision.action == "force_final":
-                reminder_event = await _inject_force_final_reminder(ctx)
-                yield reminder_event
-            else:
-                async for error_event in ctx.emit_error_terminal():
-                    yield error_event
-                ctx.terminal = True
+    guard_decision = None
+    if _loop_guard_is_active(ctx.guard) and ctx.guard_state is not None:
+        if ctx.guard_evaluation_ids is None or ctx.guard_evaluation_facts is None:
+            raise ConfigError("active loop-guard runtime lacks fact containers")
+        before_counts: dict[str, int] = {}
+        if getattr(ctx.guard, "max_identical_tool_calls", 0) > 0:
+            for block in tool_blocks:
+                signature = permission_decision_key(block.name, block.input)
+                before_counts.setdefault(signature, ctx.guard_state.call_counts.get(signature, 0))
+        before_failures = ctx.guard_state.consecutive_failures
+        guard_decision = evaluate_loop_guard(ctx.guard, ctx.guard_state, tool_blocks, result_blocks)
+        count_deltas = {
+            signature: ctx.guard_state.call_counts.get(signature, 0) - count
+            for signature, count in before_counts.items()
+            if ctx.guard_state.call_counts.get(signature, 0) > count
+        }
+        batch_id = _loop_guard_batch_id(ctx.turn_index, tool_blocks)
+        guard_fact = _LoopGuardEvaluationEvent(
+            batch_id=batch_id,
+            turn_index=ctx.turn_index,
+            count_deltas=count_deltas,
+            count_before={signature: before_counts[signature] for signature in count_deltas},
+            failures_before=before_failures,
+            consecutive_failures=ctx.guard_state.consecutive_failures,
+            action=guard_decision.action,
+            reason=guard_decision.reason,
+            detail=guard_decision.detail,
+        )
+        prior_fact = ctx.guard_evaluation_facts.get(batch_id)
+        if prior_fact is not None and prior_fact != guard_fact:
+            raise ConfigError("loop-guard journal fact differs from live evaluation")
+        if batch_id not in ctx.guard_evaluation_ids:
+            await ctx.persist_event(guard_fact)
+            ctx.guard_evaluation_ids.add(batch_id)
+            ctx.guard_evaluation_facts[batch_id] = guard_fact
+        ctx.record_guard_evaluation()
+
+    if guard_decision is not None and guard_decision.action != "continue":
+        event = LoopGuardEvent(
+            reason=guard_decision.reason,
+            detail=guard_decision.detail,
+            action=guard_decision.action,
+        )
+        await ctx.persist_event(event)
+        yield event
+        if guard_decision.action == "force_final":
+            reminder_event = await _inject_force_final_reminder(ctx)
+            yield reminder_event
+        else:
+            async for error_event in ctx.emit_error_terminal():
+                yield error_event
+            ctx.terminal = True
 
 
 async def _append_recovery_hint(

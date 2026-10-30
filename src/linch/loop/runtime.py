@@ -56,8 +56,14 @@ from .checkpoint import (
     RunEventBuffer,
     _alignment_queue_to_dicts,
     _background_workers_to_dict,
+    _consumed_auxiliary_receipt_ids_from_events,
     _flush_events,
-    _loop_guard_state_to_dict,
+    _loop_guard_batch_id_for_checkpoint,
+    _loop_guard_evaluations_from_events,
+    _loop_guard_is_active,
+    _loop_guard_runtime_from_extension,
+    _loop_guard_runtime_to_extension,
+    _loop_guard_state_from_events,
     _model_call_runtime_from_extension,
     _model_call_runtime_to_extension,
     _persist_event,
@@ -531,6 +537,11 @@ class RunRuntime:
         self.effective_final_tool: str | None = None
         self.guard: Any = None
         self.guard_state: Any = None
+        self.guard_evaluation_ids: set[str] | None = None
+        self.guard_evaluation_facts: dict[str, Any] | None = None
+        self.guard_evaluation_count = 0
+        self.guard_committed_count = 0
+        self.guard_evaluation_seq = 0
         self.truncation_recovery: Any = None
         self.truncation_attempts = 0
         self.truncation_prefix = ""
@@ -595,7 +606,6 @@ class RunRuntime:
         checkpoint_extension_state: Callable[..., dict[str, Any]],
         effective_final_tool_name: Callable[..., str | None],
         loop_guard_state_factory: Callable[[], Any],
-        loop_guard_state_from_dict: Callable[[Any], Any],
         skill_overlay_from_dict: Callable[[Any], Any],
         alignment_entries_from_checkpoint: Callable[[Any], list[Any]],
         model_call_runtime_from_extension: Callable[..., Any] = _model_call_runtime_from_extension,
@@ -686,7 +696,12 @@ class RunRuntime:
         session.active_budget = runtime.budget
         runtime.effective_final_tool = effective_final_tool_name(agent, opts)
         runtime.guard = getattr(agent, "loop_guard", None)
-        runtime.guard_state = loop_guard_state_factory() if runtime.guard is not None else None
+        if _loop_guard_is_active(runtime.guard):
+            runtime.guard_state = loop_guard_state_factory()
+            runtime.guard_evaluation_ids = set()
+            runtime.guard_evaluation_facts = {}
+        else:
+            runtime.guard_state = None
         runtime.truncation_recovery = getattr(agent, "truncation_recovery", None)
         runtime.checkpoint = resume_checkpoint or RunCheckpoint(
             phase="started",
@@ -695,10 +710,27 @@ class RunRuntime:
             total_usage=runtime.total,
         )
         if resume_checkpoint is not None:
-            if runtime.guard is not None:
-                runtime.guard_state = loop_guard_state_from_dict(resume_checkpoint.loop_guard_state)
-                if runtime.guard_state is None:
-                    runtime.guard_state = loop_guard_state_factory()
+            if _loop_guard_is_active(runtime.guard):
+                if resume_checkpoint.loop_guard_state is not None:
+                    raise ConfigError("runtime checkpoint contains an unsupported guard snapshot")
+                (
+                    runtime.guard_committed_count,
+                    runtime.guard_evaluation_seq,
+                ) = _loop_guard_runtime_from_extension(resume_checkpoint.extension_state)
+                runtime.guard_evaluation_count = runtime.guard_committed_count
+                runtime.guard_evaluation_facts = _loop_guard_evaluations_from_events(
+                    runtime.stored_events,
+                    after_seq=runtime.guard_evaluation_seq,
+                )
+                runtime.guard_evaluation_ids = set(runtime.guard_evaluation_facts)
+                runtime.guard_state = _loop_guard_state_from_events(
+                    runtime.guard,
+                    runtime.stored_events,
+                    evaluation_count=runtime.guard_evaluation_count,
+                    evaluation_seq=runtime.guard_evaluation_seq,
+                    current_batch_id=_loop_guard_batch_id_for_checkpoint(resume_checkpoint),
+                    current_turn_index=resume_checkpoint.turn_index,
+                )
             runtime.force_final_pending = resume_checkpoint.force_final_pending
             session.pending_skill_overlay = skill_overlay_from_dict(
                 resume_checkpoint.pending_skill_overlay
@@ -723,7 +755,7 @@ class RunRuntime:
 
         runtime._checkpointable_hooks_fn = checkpointable_hooks
         runtime._checkpoint_extension_state_fn = checkpoint_extension_state
-        ledger_state, runtime.active_primary = model_call_runtime_from_extension(
+        runtime.active_primary, journal_count = model_call_runtime_from_extension(
             runtime.checkpoint.extension_state
         )
         model_call_events = [
@@ -731,29 +763,57 @@ class RunRuntime:
             for row in runtime.stored_events
             if isinstance(getattr(row, "event", None), ModelCallEvent)
         ]
+        consumed_auxiliary_receipt_ids = _consumed_auxiliary_receipt_ids_from_events(
+            runtime.stored_events
+        )
         runtime.ledger = _ModelCallLedger(
             run_id,
             budget=runtime.budget,
             persist=runtime.persist_model_call if agent.run_store is not None else None,
         )
         session._model_call_ledger = runtime.ledger
-        if resume_checkpoint is not None and resume_checkpoint.total_usage != Usage():
-            if ledger_state is None:
-                raise ConfigError(
-                    "Cannot resume checkpoint with nonzero aggregate usage without "
-                    "receipt provenance"
+        if model_call_events or journal_count or consumed_auxiliary_receipt_ids:
+            try:
+                await runtime.ledger.restore(
+                    None,
+                    model_call_events,
+                    consumed_auxiliary_receipt_ids=consumed_auxiliary_receipt_ids,
                 )
-            checkpoint_ledger = _ModelCallLedger(run_id)
-            await checkpoint_ledger.restore(ledger_state, [])
-            if resume_checkpoint.total_usage != checkpoint_ledger.total_usage:
-                raise ConfigError(
-                    "Cannot resume checkpoint with nonzero aggregate usage without "
-                    "receipt provenance"
-                )
-        if ledger_state is not None or model_call_events:
-            await runtime.ledger.restore(ledger_state, model_call_events)
+            except _ModelCallError as exc:
+                if consumed_auxiliary_receipt_ids:
+                    raise ConfigError("invalid durable compaction usage projection") from exc
+                raise
+            if resume_checkpoint is not None:
+                expected = resume_checkpoint.total_usage
+                actual = runtime.ledger.total_usage
+                if any(
+                    getattr(actual, field) < getattr(expected, field)
+                    for field in (
+                        "input_tokens",
+                        "output_tokens",
+                        "cache_read_tokens",
+                        "cache_creation_tokens",
+                    )
+                ):
+                    raise ConfigError(
+                        "Cannot resume checkpoint with nonzero aggregate usage without "
+                        "receipt provenance"
+                    )
             runtime.total = runtime.ledger.total_usage
             runtime.running_cost = runtime.ledger.total_cost_usd
+        elif resume_checkpoint is not None and resume_checkpoint.total_usage != Usage():
+            raise ConfigError(
+                "Cannot resume checkpoint with nonzero aggregate usage without receipt provenance"
+            )
+        if journal_count is not None and len(model_call_events) < journal_count:
+            raise ConfigError("model-call journal is missing records referenced by checkpoint")
+        if runtime.active_primary is not None and resume_checkpoint is not None:
+            delivery_id = runtime.active_primary["delivery_attempt_id"]
+            if (
+                resume_checkpoint.phase == "assistant_appended"
+                and runtime.ledger.intent_for(delivery_id) is None
+            ):
+                raise ConfigError("active primary journal is missing its intent")
         return runtime
 
     async def persist_model_call(self, event: ModelCallEvent) -> None:
@@ -770,8 +830,9 @@ class RunRuntime:
             raise ConfigError("RunCheckpoint.extension_state must be a dict")
         _model_call_runtime_to_extension(
             self.checkpoint.extension_state,
-            ledger_snapshot=self.ledger.snapshot(),
+            ledger_snapshot=None,
             active_primary=self.active_primary,
+            journal_count=self.ledger._journal_count(),
         )
         self.checkpoint.total_usage = self.total
 
@@ -1055,7 +1116,7 @@ class RunRuntime:
                 dict(completed_tool_results) if isinstance(completed_tool_results, dict) else {}
             )
         self.checkpoint.force_final_pending = self.force_final_pending
-        self.checkpoint.loop_guard_state = _loop_guard_state_to_dict(self.guard_state)
+        self.checkpoint.loop_guard_state = None
         self.checkpoint.pending_skill_overlay = _skill_overlay_to_dict(
             self.session.pending_skill_overlay
         )
@@ -1088,6 +1149,20 @@ class RunRuntime:
                 self.checkpoint.extension_state.pop(key, None)
             self.checkpoint.extension_state.update(hook_state)
         buf = self.session._event_journal
+        guard_prefix_committed = False
+        if _loop_guard_is_active(self.guard):
+            if (
+                phase == "turn_complete"
+                and self.guard_evaluation_count > self.guard_committed_count
+            ):
+                self.guard_evaluation_seq = buf.last_seq if buf is not None else 0
+                self.guard_committed_count = self.guard_evaluation_count
+                guard_prefix_committed = True
+            _loop_guard_runtime_to_extension(
+                self.checkpoint.extension_state,
+                evaluation_count=self.guard_committed_count,
+                evaluation_seq=self.guard_evaluation_seq,
+            )
         if phase == "tool_batch_pending" or (
             phase == "assistant_appended"
             and self.checkpoint.assistant_message is not None
@@ -1104,6 +1179,11 @@ class RunRuntime:
             "run.save_checkpoint",
             store.save_checkpoint(self.run_id, self.checkpoint, status=status),
         )
+        if guard_prefix_committed:
+            assert self.guard_evaluation_ids is not None
+            assert self.guard_evaluation_facts is not None
+            self.guard_evaluation_ids.clear()
+            self.guard_evaluation_facts.clear()
         if completed_snapshot_id is not None:
             await self.best_effort_snapshot_cleanup(
                 snapshot_id=completed_snapshot_id,

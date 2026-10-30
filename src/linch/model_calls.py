@@ -623,6 +623,10 @@ class _ModelCallLedger:
     def usage_complete(self) -> bool:
         return not self._has_unknown_usage
 
+    def _journal_count(self) -> int:
+        """Number of model-call journal records durably observed by this ledger."""
+        return len(self._journal)
+
     def _healthy(self) -> None:
         if self._persistence_failed:
             raise _ModelCallError("persistence_failed", "model-call journal durability failed")
@@ -853,6 +857,8 @@ class _ModelCallLedger:
         self,
         state: Mapping[str, Any] | None,
         journal: Sequence[ModelCallEvent],
+        *,
+        consumed_auxiliary_receipt_ids: Sequence[str] = (),
     ) -> None:
         async with self._lock:
             self._healthy()
@@ -862,6 +868,15 @@ class _ModelCallLedger:
             recovery.prepare_source_replay(journal)
             for event in journal:
                 recovery.apply(event)
+            consumed_ids = list(consumed_auxiliary_receipt_ids)
+            if len(set(consumed_ids)) != len(consumed_ids):
+                raise _invalid("duplicate consumed auxiliary receipt IDs")
+            for delivery_id in consumed_ids:
+                _string(delivery_id, "delivery_attempt_id")
+                receipt = recovery.receipts.get(delivery_id)
+                if receipt is None or receipt.kind != "compaction":
+                    raise _invalid("consumed auxiliary ID must reference a compaction receipt")
+            recovery.consumed.update(consumed_ids)
             unknown = {
                 receipt.delivery_attempt_id
                 for receipt in recovery.receipts.values()
