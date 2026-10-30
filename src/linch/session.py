@@ -288,6 +288,8 @@ class Session:
                 await _aclose_generator(inner)
             finally:
                 self._finish_run()
+                if self.agent.max_idle_sessions is not None:
+                    await self.agent._session_became_idle(self)
 
     def _finish_run(self) -> None:
         """Release the single-run admission token and publish true idleness."""

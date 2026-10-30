@@ -381,6 +381,7 @@ class AgentOptions:
     tools: ToolRegistry | None = None
     permissions: dict[str, object] | None = None
     session_store: SessionStore | None = None
+    max_idle_sessions: int | None = None
     run_store: RunStore | None = None
     durability: DurabilityOptions | None = None
     cwd: str | None = None
@@ -437,6 +438,7 @@ class Agent:
         tools: ToolRegistry | None = None,
         permissions: Any | dict[str, object] | None = None,
         session_store: SessionStore | None = None,
+        max_idle_sessions: int | None = None,
         run_store: RunStore | None = None,
         durability: DurabilityOptions | None = None,
         cwd: str | None = None,
@@ -526,6 +528,10 @@ class Agent:
             raise ConfigError("Agent requires a model")
         if max_retries < 0:
             raise ConfigError("max_retries must be non-negative")
+        if max_idle_sessions is not None and (
+            type(max_idle_sessions) is not int or max_idle_sessions < 0
+        ):
+            raise ConfigError("max_idle_sessions must be a non-negative integer or None")
         if truncation_recovery is not None and not isinstance(
             truncation_recovery, TruncationRecovery
         ):
@@ -644,6 +650,11 @@ class Agent:
             project_root=cwd_resolved,
         )
         self._store: SessionStore | None = session_store
+        self.max_idle_sessions = max_idle_sessions
+        self._idle_prune_task: asyncio.Task[None] | None = None
+        self._idle_watch_tasks: set[asyncio.Task[Any]] | None = (
+            set() if max_idle_sessions is not None else None
+        )
         self.run_store: RunStore | None = run_store
         self.durability: DurabilityOptions = durability or DurabilityOptions()
         self.system_prompt = system_prompt
@@ -1416,6 +1427,8 @@ class Agent:
             if id is not None:
                 existing = self._sessions.get(id)
                 if existing is not None and not existing._closed:
+                    if self.max_idle_sessions is not None:
+                        self._touch_session(existing)
                     return existing
 
             store = self._get_store()
@@ -1486,6 +1499,79 @@ class Agent:
                 raise ConfigError("agent is closing")
             self._sessions[record.id] = session
             return session
+
+    def _touch_session(self, session: Session) -> None:
+        """Keep the opted-in cache in least-to-most-recently-used order."""
+        if self._sessions.get(session.id) is session:
+            self._sessions.pop(session.id)
+            self._sessions[session.id] = session
+
+    async def _session_became_idle(self, session: Session) -> None:
+        self._touch_session(session)
+        await self._prune_idle_sessions()
+
+    def _idle_session_tree(
+        self, session: Session, seen: set[str] | None = None
+    ) -> list[Session] | None:
+        """Return the releasable ownership tree, protecting all live work."""
+        if session._active or session._lifecycle_state != _OPEN:
+            return None
+        seen = set() if seen is None else seen
+        if session.id in seen:
+            return []
+        seen.add(session.id)
+        busy = False
+        tasks = list(session.background_tasks) + [
+            getattr(handle, "task", None) for handle in session.workers.values()
+        ]
+        for task in tasks:
+            if isinstance(task, asyncio.Task) and not task.done():
+                busy = True
+                if self._idle_watch_tasks is not None and task not in self._idle_watch_tasks:
+                    self._idle_watch_tasks.add(task)
+                    task.add_done_callback(self._idle_work_done)
+        tree = [session]
+        for handle in session.workers.values():
+            child_id = getattr(handle, "child_session_id", None)
+            child = self._sessions.get(child_id) if isinstance(child_id, str) else None
+            if child is not None:
+                subtree = self._idle_session_tree(child, seen)
+                if subtree is None:
+                    busy = True
+                else:
+                    tree.extend(subtree)
+        return None if busy else tree
+
+    def _idle_work_done(self, task: asyncio.Task[Any]) -> None:
+        if self._idle_watch_tasks is not None:
+            self._idle_watch_tasks.discard(task)
+        if self._lifecycle_state != _OPEN:
+            return
+        if self._idle_prune_task is None or self._idle_prune_task.done():
+            self._idle_prune_task = asyncio.create_task(self._prune_idle_sessions())
+            self._idle_prune_task.add_done_callback(_consume_task_exception)
+
+    async def _prune_idle_sessions(self) -> None:
+        bound = self.max_idle_sessions
+        if bound is None or self._lifecycle_state != _OPEN:
+            return
+        if self._session_lock is None:
+            self._session_lock = asyncio.Lock()
+        async with self._session_lock:
+            while self._lifecycle_state == _OPEN:
+                candidates = [
+                    (session, tree)
+                    for session in self._sessions.values()
+                    if (tree := self._idle_session_tree(session)) is not None
+                ]
+                if len(candidates) <= bound:
+                    return
+                session, tree = candidates[0]
+                # Reserve the entire tree before the first await: release_session
+                # closes descendants recursively, so they must reject new runs too.
+                for owned in tree:
+                    owned._lifecycle_state = _QUIESCING
+                await self.release_session(session)
 
     def _require_open(self) -> None:
         if self._lifecycle_state != _OPEN:
@@ -1653,6 +1739,9 @@ class Agent:
 
     async def _close_impl(self) -> None:
         import inspect as _inspect
+
+        if self._idle_prune_task is not None:
+            await asyncio.gather(self._idle_prune_task, return_exceptions=True)
 
         # Drain and release every live session — cancel owned worker/background
         # tasks and await their finalizers — before closing shared resources, so
