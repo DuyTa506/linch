@@ -17,8 +17,8 @@ from typing import Any
 from uuid import uuid4
 
 from ...storage._executor import SqliteExecutor
+from .._claim_validation import _validate_claim_args
 from .schedule import Schedule, ScheduleOccurrence, occurrence_id
-from .store import _validate_occurrence_claim_args
 
 
 def _init_schema(conn: sqlite3.Connection) -> None:
@@ -127,7 +127,7 @@ class SqliteScheduleStore:
         lease_s: float,
         limit: int | None = None,
     ) -> list[ScheduleOccurrence]:
-        _validate_occurrence_claim_args(owner=owner, lease_s=lease_s, now=now, limit=limit)
+        _validate_claim_args(owner=owner, lease_s=lease_s, now=now, limit=limit)
         return await self._exec.run(
             lambda conn: _claim_due_occurrences(
                 conn,

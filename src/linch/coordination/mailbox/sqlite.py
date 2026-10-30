@@ -15,7 +15,8 @@ from typing import Any
 from uuid import uuid4
 
 from ...storage._executor import SqliteExecutor
-from .core import MailboxClaim, MailboxMessage, _validate_claim_args
+from .._claim_validation import _validate_claim_args
+from .core import MailboxClaim, MailboxMessage
 
 
 def _init_schema(conn: sqlite3.Connection) -> None:

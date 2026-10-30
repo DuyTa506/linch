@@ -10,12 +10,13 @@ choreography, never core policy.
 from __future__ import annotations
 
 import asyncio
-import math
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 from uuid import uuid4
+
+from .._claim_validation import _validate_claim_args
 
 
 def _new_id() -> str:
@@ -194,16 +195,3 @@ class InMemoryMailbox:
                         entry.lease_token = None
                         entry.lease_owner = None
                         entry.lease_expires_at = None
-
-
-def _validate_claim_args(*, owner: str, lease_s: float, now: float, limit: int | None) -> None:
-    if not isinstance(owner, str) or not owner:
-        raise ValueError("owner must be non-empty")
-    if isinstance(lease_s, bool) or not isinstance(lease_s, (int, float)):
-        raise ValueError("lease_s must be a positive finite number")
-    if not math.isfinite(lease_s) or lease_s <= 0:
-        raise ValueError("lease_s must be a positive finite number")
-    if isinstance(now, bool) or not isinstance(now, (int, float)) or not math.isfinite(now):
-        raise ValueError("now must be finite")
-    if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 0):
-        raise ValueError("limit must be a non-negative integer or None")

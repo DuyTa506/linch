@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
 from typing import Any
 
-from linch._client_lifecycle import loop_changed, running_loop
+from linch._client_lifecycle import aclose_client, loop_changed, running_loop
 from linch._prompt_cache import openai_cached_tokens
 from linch.errors import AbortError, ProviderError
 from linch.openai_responses import map_openai_error
@@ -109,12 +108,7 @@ class OpenAIChatCompletionsProvider(BaseProvider):
         self._client_loop = None
         if client is None:
             return
-        closer = getattr(client, "aclose", None) or getattr(client, "close", None)
-        if closer is None:
-            return
-        result = closer()
-        if inspect.isawaitable(result):
-            await result
+        await aclose_client(client)
 
     def _build_payload(self, req: ProviderRequest) -> dict[str, Any]:
         return _build_openai_compatible_payload(
