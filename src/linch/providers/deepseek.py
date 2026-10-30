@@ -111,7 +111,7 @@ def _effective_thinking(req: ProviderRequest, opts: DeepSeekProviderOptions) -> 
 def _effective_effort(
     req: ProviderRequest, opts: DeepSeekProviderOptions
 ) -> Literal["high", "max"] | None:
-    """Normalize Studio/SDK effort levels to the two DeepSeek-native values."""
+    """Normalize SDK effort levels to the two DeepSeek-native values."""
 
     configured = req.effort if req.effort is not None else opts.effort
     if configured is None or _effective_thinking(req, opts) == "disabled":
