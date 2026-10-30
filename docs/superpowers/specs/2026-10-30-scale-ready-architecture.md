@@ -167,6 +167,28 @@ WP8 hot path, driven by the WP1 baseline
   report store round-trips and bytes per turn on Postgres, since that is the
   production backend.
 
+## Wave 3 — harness kernel surface (owner target, 2026-10-31)
+
+Target picture: one Harness Kernel (shared context/service registry, typed
+events/lifecycle, dependency resolution, plugin mount/unmount, run state and
+trace boundary) with plugin groups around it — Model Adapter, RAG Connector,
+Tool & Skill Pack, Session & Memory, Policy & Security, Scheduler/Sub-agent,
+Observability — and **Domain Profiles** selecting a plugin set per domain so
+one runtime serves many domains. Gaps against today's code:
+
+| Target | Linch today | Gap → WP |
+|---|---|---|
+| Plugin mount/unmount + dependency resolution | `Context`, `Disposable`, scattered per-kind registration APIs; no plugin unit (0 hits for a plugin/use API); `Agent.__init__` takes 70 parameters | WP10: `Plugin` protocol (name, version, provides, requires, `setup(ctx) -> Disposable`), `agent.use(plugin, config)`; a plugin activates when its required services exist and is disposed when one disappears; built-in tools/hooks/providers/memory/skills become plugins; most constructor parameters move into plugins/profile |
+| Domain Profile | `DeepAgentProfile` only (authority/retention presets) | WP11: versioned declarative profile (role/prompt, knowledge scope, plugin set + config, tool permissions, workflow/subagents, output schema, limits) selected per run (`RunOptions(profile=...)`); profile id + version recorded in the RunContract so resume pins the version (controlled rollout/rollback) |
+| Typed events / lifecycle | typed run events, string-named EventBus, separate HookDispatcher | WP12: one typed lifecycle (run start/end, turn request/response, tool pre/execute/post, pre-finalize) on the kernel bus, keeping typed security ordering; built on WP3 seams |
+| Run state / trace boundary | run_id, OTel observer; no `trace_id` anywhere | WP12: a trace id per run propagated into events, store rows, `ToolContext`, logs and OTel spans |
+| Policy & Security (RBAC, approvals) | rule-based permissions + durable approvals; no per-run principal/role | WP13: per-run principal (tenant, user, roles) in `RunOptions`, permission rules over roles, approval routing as a plugin |
+| RAG Connector with grounding | memory/RAG hooks, citation events in reports | WP14: RAG connector protocol returning sourced chunks with ids; grounding check as a pre-finalize plugin (answer must cite retrieved sources) |
+
+Order: WP3 → WP9b → WP10 → WP11 → WP12 → WP13/WP14 (parallel). WP5/WP6/WP8 run
+alongside where files do not overlap. Plugins and profiles are tested with
+`linch.evals` business scenarios before a profile version is promoted.
+
 ## Rules for every worker
 
 - Own git worktree and branch from `integration/3.0`; never commit to
