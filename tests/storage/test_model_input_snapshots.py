@@ -5,6 +5,7 @@ from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
+from linch._wire import UnsupportedWireVersionError
 from linch.run_store import (
     MODEL_INPUT_CODEC_VERSION,
     InMemoryRunStore,
@@ -259,7 +260,7 @@ async def test_sqlite_load_fails_closed_for_corrupt_snapshot(tmp_path) -> None:
         await reopened.close()
 
 
-async def test_sqlite_schema_migrates_a_legacy_database_additively(tmp_path) -> None:
+async def test_sqlite_rejects_pre_snapshot_database(tmp_path) -> None:
     path = tmp_path / "legacy.db"
     conn = sqlite3.connect(path)
     conn.executescript(
@@ -290,11 +291,16 @@ async def test_sqlite_schema_migrates_a_legacy_database_additively(tmp_path) -> 
 
     store = SqliteRunStore(path)
     try:
-        legacy = await store.load_run("legacy-run")
-        snapshot = await store.save("legacy-run", 1, _request())
-        assert legacy is not None
-        assert legacy.checkpoint is None
-        assert await store.load(snapshot.id) == snapshot
+        with pytest.raises(UnsupportedWireVersionError):
+            await store.load_run("legacy-run")
+        with sqlite3.connect(path) as conn:
+            assert conn.execute("select id from runs").fetchone()[0] == "legacy-run"
+            assert (
+                conn.execute(
+                    "select name from sqlite_master where name='model_input_snapshots'"
+                ).fetchone()
+                is None
+            )
     finally:
         await store.close()
 

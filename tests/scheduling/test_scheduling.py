@@ -21,6 +21,8 @@ from typing import Any, cast
 
 import pytest
 
+from linch._wire import UnsupportedWireVersionError
+
 # ── cron utility ─────────────────────────────────────────────────────────────
 
 
@@ -518,7 +520,7 @@ async def test_sqlite_occurrence_claims_are_shared_and_persist_across_restart(
         await right.aclose()
 
 
-async def test_sqlite_schedule_adds_occurrence_outbox_to_legacy_database(tmp_path: Any) -> None:
+async def test_sqlite_schedule_rejects_pre_outbox_database(tmp_path: Any) -> None:
     from linch.coordination.scheduling import SqliteScheduleStore
 
     path = tmp_path / "legacy-schedules.db"
@@ -549,12 +551,16 @@ async def test_sqlite_schedule_adds_occurrence_outbox_to_legacy_database(tmp_pat
     conn.close()
 
     async with SqliteScheduleStore(path) as store:
-        occurrences = await store.claim_due_occurrences(1000.0, owner="migration", lease_s=30)
-        assert [(item.schedule_id, item.payload) for item in occurrences] == [
-            ("legacy", "old payload")
-        ]
-        loaded = await store.get("legacy")
-        assert loaded is not None and loaded.next_run == 1060.0
+        with pytest.raises(UnsupportedWireVersionError):
+            await store.claim_due_occurrences(1000.0, owner="owner", lease_s=30)
+        with sqlite3.connect(path) as conn:
+            assert conn.execute("select next_run from schedules").fetchone()[0] == 1000.0
+            assert (
+                conn.execute(
+                    "select name from sqlite_master where name='schedule_occurrences'"
+                ).fetchone()
+                is None
+            )
 
 
 # ── tools ────────────────────────────────────────────────────────────────────

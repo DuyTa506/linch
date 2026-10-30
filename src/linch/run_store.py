@@ -26,7 +26,7 @@ from .events import (
     usage_to_dict,
 )
 from .sessions.memory import now_iso
-from .storage._executor import SqliteExecutor
+from .storage._executor import SqliteExecutor, execute_schema
 from .types import (
     Message,
     OutputSchema,
@@ -1427,7 +1427,8 @@ class InMemoryRunStore:
 
 
 def _init_schema(conn: sqlite3.Connection) -> None:
-    conn.executescript(
+    execute_schema(
+        conn,
         """
         create table if not exists runs (
           id text primary key,
@@ -1436,7 +1437,10 @@ def _init_schema(conn: sqlite3.Connection) -> None:
           created_at text not null,
           updated_at text not null,
           checkpoint text,
-          meta text not null
+          meta text not null,
+          lease_owner text,
+          lease_expires_at real,
+          lease_epoch integer not null default 0
         );
         create table if not exists run_events (
           run_id text not null,
@@ -1456,26 +1460,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         );
         create index if not exists model_input_snapshots_run_id_idx
           on model_input_snapshots (run_id);
-        """
+        """,
     )
-    # Forward-tolerant migration for databases created before lease support.
-    # SQLite has no portable ``ADD COLUMN IF NOT EXISTS``; inspect the table
-    # first and add only the missing columns.  Existing rows remain unleased.
-    columns = {row[1] for row in conn.execute("pragma table_info(runs)")}
-    if not {"lease_owner", "lease_expires_at", "lease_epoch"} <= columns:
-        conn.execute("begin immediate")
-        try:
-            columns = {row[1] for row in conn.execute("pragma table_info(runs)")}
-            if "lease_owner" not in columns:
-                conn.execute("alter table runs add column lease_owner text")
-            if "lease_expires_at" not in columns:
-                conn.execute("alter table runs add column lease_expires_at real")
-            if "lease_epoch" not in columns:
-                conn.execute("alter table runs add column lease_epoch integer not null default 0")
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
 
 
 def _record(row: object) -> RunRecord:

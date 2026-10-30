@@ -14,6 +14,11 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, cast
 
+from .._wire import WIRE_VERSION, require_wire_version
+
+# All store types share metadata DDL, so lock before inspecting or creating it.
+_SCHEMA_LOCK_KEY = 0x4C494E4348534348
+
 
 def _import_asyncpg() -> Any:
     """Return the ``asyncpg`` module or raise with an install hint."""
@@ -33,6 +38,8 @@ async def ensure_pool(
     schema: str,
     import_asyncpg: Callable[[], Any],
     *,
+    schema_key: str,
+    tables: tuple[str, ...],
     advisory_lock_key: int | None = None,
     allow_missing_pool_on_error: bool = False,
 ) -> Any:
@@ -54,11 +61,36 @@ async def ensure_pool(
         try:
             async with store._pool.acquire() as conn:
                 async with conn.transaction():
+                    await conn.execute("SELECT pg_advisory_xact_lock($1::bigint)", _SCHEMA_LOCK_KEY)
                     if advisory_lock_key is not None:
                         await conn.execute(
                             "SELECT pg_advisory_xact_lock($1::bigint)", advisory_lock_key
                         )
+                    meta_exists = await conn.fetchval(
+                        "SELECT to_regclass('linch_schema_meta') IS NOT NULL"
+                    )
+                    metadata = None
+                    if meta_exists:
+                        metadata = await conn.fetchrow(
+                            "SELECT version FROM linch_schema_meta WHERE store = $1", schema_key
+                        )
+                    if metadata is None:
+                        for table in tables:
+                            if await conn.fetchval("SELECT to_regclass($1) IS NOT NULL", table):
+                                require_wire_version(None)
+                    else:
+                        require_wire_version(metadata["version"])
+                    await conn.execute(
+                        "CREATE TABLE IF NOT EXISTS linch_schema_meta "
+                        "(store TEXT PRIMARY KEY, version INTEGER NOT NULL)"
+                    )
                     await conn.execute(schema)
+                    await conn.execute(
+                        "INSERT INTO linch_schema_meta (store, version) VALUES ($1, $2) "
+                        "ON CONFLICT (store) DO NOTHING",
+                        schema_key,
+                        WIRE_VERSION,
+                    )
         except Exception:
             pool, store._pool = store._pool, None
             if pool is not None or not allow_missing_pool_on_error:

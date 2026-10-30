@@ -1,4 +1,4 @@
-"""Lease fencing, migration, and SQLite serialization tests for run stores."""
+"""Lease fencing and SQLite serialization tests for run stores."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from linch._wire import UnsupportedWireVersionError
 from linch.run_store import InMemoryRunStore, RunCheckpoint, SqliteRunStore
 from linch.types import ProviderRequest, Usage
 
@@ -341,7 +342,7 @@ async def test_sqlite_claim_cancellation_keeps_committed_lease_fencing(
         await second.close()
 
 
-async def test_sqlite_migrates_legacy_schema_without_lease_columns(tmp_path: Path) -> None:
+async def test_sqlite_rejects_legacy_schema_without_lease_columns(tmp_path: Path) -> None:
     path = tmp_path / "legacy.db"
     with sqlite3.connect(path) as conn:
         conn.executescript(
@@ -368,15 +369,16 @@ async def test_sqlite_migrates_legacy_schema_without_lease_columns(tmp_path: Pat
         )
     store = SqliteRunStore(path)
     try:
-        loaded = await store.load_run("legacy-run")
-        assert loaded is not None
-        lease = await store.claim("legacy-run", "owner", 1.0)
-        assert lease.epoch >= 1
+        with pytest.raises(UnsupportedWireVersionError):
+            await store.load_run("legacy-run")
+        with sqlite3.connect(path) as conn:
+            assert "lease_owner" not in {row[1] for row in conn.execute("pragma table_info(runs)")}
+            assert conn.execute("select id from runs").fetchone()[0] == "legacy-run"
     finally:
         await store.close()
 
 
-async def test_sqlite_concurrent_old_schema_migration_is_forward_tolerant(tmp_path: Path) -> None:
+async def test_sqlite_concurrent_old_schema_open_is_rejected(tmp_path: Path) -> None:
     path = tmp_path / "legacy-concurrent.db"
     with sqlite3.connect(path) as conn:
         conn.executescript(
@@ -403,17 +405,18 @@ async def test_sqlite_concurrent_old_schema_migration_is_forward_tolerant(tmp_pa
             """
         )
         # SqliteExecutor switches file-backed stores to WAL on first connect.
-        # Preconfigure the legacy file so this test isolates concurrent lease
-        # migration from that shared executor's cold journal-mode switch.
+        # Isolate version checks from the executor's cold WAL switch.
         conn.execute("PRAGMA journal_mode=WAL")
         conn.commit()
     first = SqliteRunStore(path)
     second = SqliteRunStore(path)
     try:
         records = await asyncio.gather(
-            first.load_run("legacy-concurrent"), second.load_run("legacy-concurrent")
+            first.load_run("legacy-concurrent"),
+            second.load_run("legacy-concurrent"),
+            return_exceptions=True,
         )
-        assert all(record is not None for record in records)
+        assert all(isinstance(record, UnsupportedWireVersionError) for record in records)
     finally:
         await first.close()
         await second.close()
