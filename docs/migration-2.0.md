@@ -32,9 +32,9 @@ from linch import create_deep_agent
 agent = create_deep_agent(model="gpt-5")
 ```
 
-`default_tools()` and `defaultTools` remain compatibility names for the
-workspace preset, but they are not the defaults of `Agent`. New integrations
-should prefer `workspace_tools()` when the intent is clear at the call site.
+`workspace_tools()` is the explicit workspace preset, but it is not the default
+of `Agent`. New integrations should pass it when workspace authority is
+intentional and visible at the call site.
 `FeatureFlags(skills=True, subagents=True, filesystem=True, mcp=True)` can be
 provided explicitly when those project resources are trusted. MCP still needs
 configured servers; enabling the flag alone does not invent a server.

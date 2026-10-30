@@ -17,12 +17,12 @@ def _make_agent(*, config_dir: str | None = None):
     from linch import Agent
     from linch.config import FeatureFlags
     from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import default_tools
+    from linch.tools.registry import workspace_tools
 
     return Agent(
         model="model-x",
         provider=_FakeProvider(),
-        tools=default_tools(),
+        tools=workspace_tools(),
         permissions={"mode": "skip-dangerous"},
         session_store=InMemorySessionStore(),
         config_dir=config_dir,

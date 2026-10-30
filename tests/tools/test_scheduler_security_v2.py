@@ -55,7 +55,7 @@ def _agent(
     enable_background_tools: bool = False,
 ) -> SimpleNamespace:
     registry = ToolRegistry()
-    registry.add(tool)
+    registry.register(tool)
     return SimpleNamespace(
         cwd="/project",
         tools=registry,
@@ -355,8 +355,8 @@ async def test_parallel_later_tool_progress_is_not_hidden_by_slow_first() -> Non
     first = ParallelTool("First", False)
     second = ParallelTool("Second", True)
     registry = ToolRegistry()
-    registry.add(first)
-    registry.add(second)
+    registry.register(first)
+    registry.register(second)
     agent = _agent(first, PermissionEngine(mode="skip-dangerous"))
     agent.tools = registry
     iterator = execute_tool_calls(
@@ -433,8 +433,8 @@ async def test_closing_parallel_event_stream_cancels_all_started_tools() -> None
     first = BlockingTool("First")
     second = BlockingTool("Second")
     registry = ToolRegistry()
-    registry.add(first)
-    registry.add(second)
+    registry.register(first)
+    registry.register(second)
     agent = _agent(first, PermissionEngine(mode="skip-dangerous"))
     agent.tools = registry
     iterator = execute_tool_calls(

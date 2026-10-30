@@ -30,10 +30,9 @@ from .base import (
 from .builtin import BashTool, EditTool, GlobTool, GrepTool, ReadTool, WriteTool
 from .file_tracker import FileReadTracker
 from .function import FunctionTool, tool
-from .registry import ToolRegistry, coding_tools, default_tools, workspace_tools
+from .registry import ToolRegistry, workspace_tools
 from .tasks import TaskCreateTool, TaskGetTool, TaskListTool, TaskUpdateTool
 
-defaultTools = default_tools
 __all__ = [
     "BashTool",
     "AskUserHandler",
@@ -68,10 +67,7 @@ __all__ = [
     "ToolResult",
     "ToolScope",
     "WriteTool",
-    "defaultTools",
-    "coding_tools",
     "default_render_output",
-    "default_tools",
     "tool",
     "normalize_json_value",
     "normalize_tool_output",

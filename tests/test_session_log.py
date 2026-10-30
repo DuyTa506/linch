@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
-from inspect import signature
-from typing import Any, Literal, cast
+from typing import Literal
 
 import pytest
 
-from linch.session import Session
 from linch.session_log import (
     MessageEntry,
     ProjectionEntry,
@@ -227,20 +225,6 @@ def test_provider_view_nested_mutation_does_not_reach_log() -> None:
     assert authoritative.provider_metadata == {"nested": {"source": "owned"}}
 
 
-def test_derive_messages_alias_is_detached_from_log_and_later_reads() -> None:
-    """The compatibility alias has the same mutation-isolation contract."""
-    log = SessionLog()
-    log.append(_msg("owned"))
-
-    inspected = log.derive_messages()[0]
-    _text(inspected).text = "tampered"
-    assert inspected.provider_metadata is not None
-    inspected.provider_metadata["nested"]["source"] = "tampered"
-
-    assert _text(log.derive_messages()[0]).text == "owned"
-    assert _text(log.provider_view[0]).text == "owned"
-
-
 def test_full_history_is_an_immutable_snapshot() -> None:
     log = SessionLog()
     hist = log.full_history
@@ -327,31 +311,6 @@ def test_equal_projection_is_not_logged() -> None:
 
     assert log.record_projection([original], reason="no-op") is False
     assert [entry.kind for entry in log.entries] == ["message"]
-
-
-def test_session_constructor_legacy_views_seed_canonical_log() -> None:
-    parameters = signature(Session).parameters
-    assert "provider_view" in parameters
-    assert "full_history" in parameters
-
-    provider = [_msg("summary")]
-    history = [_msg("original")]
-    constructor = cast(Any, Session)
-    with pytest.warns(DeprecationWarning, match="session_log=SessionLog.seed"):
-        session = constructor(
-            id="legacy",
-            created_at="now",
-            meta={},
-            agent=object(),
-            store=object(),
-            provider_view=provider,
-            full_history=history,
-        )
-
-    _text(provider[0]).text = "tampered-provider"
-    _text(history[0]).text = "tampered-history"
-    assert session.provider_view == (_msg("summary"),)
-    assert session.full_history == (_msg("original"),)
 
 
 def test_seed_equal_views_no_projection() -> None:

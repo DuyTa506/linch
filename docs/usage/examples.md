@@ -11,7 +11,7 @@ Runnable example code lives in the `examples/` directory, organized by subsystem
 | File | What it shows |
 |------|---------------|
 | `core/minimal_agent.py` | Smallest possible agent |
-| `core/coding_agent.py` | Full SWE agent — tools_from_defaults, BashRule/PathRule safety fence, LoopGuard, multi-turn |
+| `core/coding_agent.py` | Full SWE agent — workspace_tools, BashRule/PathRule safety fence, LoopGuard, multi-turn |
 | `core/policy_aware_execution.py` | Docker-backed Bash execution with permission rules and opt-in runtime restrictions |
 | `core/reading_agent.py` | Read-only codebase Q&A — exclude Write/Edit/Bash, PathRule, custom reviewer persona |
 | `core/chat_agent.py` | Pure conversation agent — no tools, custom domain, structured JSON output via ContextBuilder injection |

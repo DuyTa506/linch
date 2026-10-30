@@ -17,7 +17,7 @@ from linch.errors import ToolExecutionError
 from linch.permissions import BashRule, PathRule
 from linch.sessions import InMemorySessionStore
 from linch.tools.execution import DockerBackend
-from linch.tools.registry import tools_from_defaults
+from linch.tools.registry import workspace_tools
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -36,7 +36,7 @@ def _make_agent() -> Agent:
 
     return Agent(
         model="gpt-5",
-        tools=tools_from_defaults(),
+        tools=workspace_tools(),
         session_store=InMemorySessionStore(),
         cwd=str(ROOT),
         execution_backend=backend,

@@ -53,8 +53,7 @@ synchronous renderer must declare stable `renderer_id` and `renderer_version`.
 `ToolContext` carries: `cwd`, `session_id`, `run_id`, `session_store`, `signal`
 (abort), `file_read_tracker`, `deps`, `filesystem`, `idempotency_key`, and a
 best-effort progress sink. Tools report transient progress with
-`ctx.report_progress(message, data=None)` (or the compatibility spelling
-`ctx.reportProgress(...)`). Progress becomes a `ToolProgressEvent` for the
+`ctx.report_progress(message, data=None)`. Progress becomes a `ToolProgressEvent` for the
 live consumer only; it is not provider history, a tool result, or a durable run
 event.
 
@@ -115,19 +114,17 @@ controls such as `network="none"`, `workspace_mount="ro"`,
 ### ToolRegistry
 
 ```python
-registry.add(tool)                        # add; raises if name exists → Disposable
 registry.register(tool)                   # add; raises if name exists → Disposable
 registry.replace(tool)                    # swap same-named tool → Disposable
-registry.remove(name)                     # remove by name
+registry.unregister(name)                 # remove by name
 registry.select(names={...}, tags={...})  # runtime subset (per-request)
 registry.copy()                           # shallow clone
 registry.schemas()                        # provider-ready schema list
-workspace_tools()                         # explicit software-workspace preset
+workspace_tools(exclude, extra)           # configurable software-workspace preset
 empty_tools(*extra)                       # no built-ins + optional extras
-tools_from_defaults(exclude, extra)       # workspace preset ± named tools
 ```
 
-`add`/`register`/`replace` are **reversible effects**: each returns a
+`register`/`replace` are **reversible effects**: each returns a
 `linch.Disposable`. `register` rejects a duplicate name; use `replace` for an
 intentional hot swap. Disposing a registration removes exactly that registration
 (identity-checked, single-use, and idempotent). Disposing a replacement restores
@@ -155,9 +152,8 @@ The pipeline runs after canonical validation and permission evaluation. Pipeline
 listeners must not mutate authorization-sensitive `input`, `tool`, or decisions;
 put rewrites in `PreToolUse`, which is revalidated and re-authorized.
 
-`Agent` does not install `workspace_tools()` implicitly in Linch 2.0. The
-`default_tools()` / `defaultTools` names remain compatibility aliases for that
-preset; use `workspace_tools()` when the authority is intentional and visible.
+`Agent` does not install `workspace_tools()` implicitly. Pass the explicit
+preset when the authority is intentional and visible.
 Project-local filesystem, skills, subagents, and MCP resources are likewise
 trust-gated by `FeatureFlags` and are not ambient bare-agent defaults.
 

@@ -121,13 +121,6 @@ class SessionLog:
         """A detached, immutable-sequence snapshot of the current provider view."""
         return tuple(deepcopy(self._derived))
 
-    def derive_messages(self) -> Sequence[Message]:
-        """Compatibility alias for :attr:`provider_view`.
-
-        Unlike the former mutable-list API, this never exposes live storage.
-        """
-        return self.provider_view
-
     @property
     def visible_count(self) -> int:
         """How many messages the provider view holds.

@@ -31,7 +31,7 @@ async def test_tool_progress_is_not_persisted() -> None:
             return ToolResult(content="done")
 
     tools = ToolRegistry()
-    tools.add(ProgressTool())
+    tools.register(ProgressTool())
     run_store = InMemoryRunStore()
     agent = Agent(
         model="test-model",

@@ -22,7 +22,7 @@ protocol plumbing.
 
 ```python
 from linch import Agent, ToolContext, tool
-from linch.tools.registry import empty_tools, tools_from_defaults
+from linch.tools.registry import empty_tools, workspace_tools
 
 @tool(description="Search the internal knowledge base.", tags=("rag",))
 async def search_kb(query: str, ctx: ToolContext) -> str:
@@ -33,7 +33,7 @@ async def search_kb(query: str, ctx: ToolContext) -> str:
 agent = Agent(..., tools=empty_tools(search_kb), deps=my_app_state)
 
 # SWE tools minus Bash, plus custom
-registry = tools_from_defaults(exclude={"Bash"}, extra=[search_kb])
+registry = workspace_tools(exclude={"Bash"}, extra=[search_kb])
 agent = Agent(..., tools=registry, deps=my_app_state)
 ```
 
@@ -47,7 +47,7 @@ later on this page.
 
 `empty_tools(...)` builds a registry with *only* the tools you pass — the right
 choice for a pure domain agent that should never touch the filesystem or shell.
-`tools_from_defaults(exclude=..., extra=...)` starts from the standard SWE set
+`workspace_tools(exclude=..., extra=...)` starts from the standard SWE set
 (`Read`, `Write`, `Edit`, `Bash`, `Glob`, `Grep`) and adds or removes from there.
 
 ### FunctionTool
@@ -117,8 +117,8 @@ class MyTool:
 agent = Agent(..., tools=empty_tools(MyTool()))
 
 # SWE tools minus Bash, plus custom
-from linch.tools.registry import tools_from_defaults
-registry = tools_from_defaults(exclude={"Bash"}, extra=[MyTool()])
+from linch.tools.registry import workspace_tools
+registry = workspace_tools(exclude={"Bash"}, extra=[MyTool()])
 agent = Agent(..., tools=registry)
 ```
 
@@ -161,7 +161,7 @@ the same vector store, for example.
 
 ### Batching strategy
 
-`Agent(tool_batching_strategy=...)` (alias `toolBatchingStrategy`, default
+`Agent(tool_batching_strategy=...)` (default
 `"greedy"`) controls how parallel-safe calls in one turn are grouped into
 batches:
 

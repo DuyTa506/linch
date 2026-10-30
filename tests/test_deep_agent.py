@@ -98,7 +98,7 @@ def test_deep_agent_preserves_original_agent_defaults(tmp_path: Path) -> None:
     assert agent.run_store is None
 
 
-def test_deep_agent_default_tools_include_tasks(tmp_path: Path) -> None:
+def test_deep_agent_workspace_tools_include_tasks(tmp_path: Path) -> None:
     from linch import create_deep_agent
 
     agent = create_deep_agent(

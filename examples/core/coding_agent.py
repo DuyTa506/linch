@@ -6,7 +6,7 @@ Run:
     OPENAI_API_KEY=sk-... python3 examples/core/coding_agent.py
 
 Demonstrates:
-  - tools_from_defaults() for the full SWE tool set (Read, Write, Edit,
+  - workspace_tools() for the full SWE tool set (Read, Write, Edit,
     Bash, Glob, Grep)
   - BashRule to block destructive shell commands
   - PathRule to deny writes outside the project root
@@ -32,7 +32,7 @@ def _make_agent():
     from linch.providers import OpenAIChatCompletionsProvider
     from linch.providers.openai_chat import OpenAIChatProviderOptions
     from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import tools_from_defaults
+    from linch.tools.registry import workspace_tools
 
     api_key = (
         os.environ.get("DEEPSEEK_API_KEY")
@@ -52,7 +52,7 @@ def _make_agent():
     return Agent(
         model=model,
         provider=provider,
-        tools=tools_from_defaults(),
+        tools=workspace_tools(),
         session_store=InMemorySessionStore(),
         permissions={
             "mode": "acceptEdits",  # auto-approve file reads/writes; ask for Bash

@@ -139,7 +139,7 @@ async def test_tool_hooks_rewrite_input_block_and_result() -> None:
 
     tool = RecordingTool()
     registry = ToolRegistry()
-    registry.add(tool)
+    registry.register(tool)
 
     class Hooks:
         def on_pre_tool_use(self, ctx):
@@ -171,7 +171,7 @@ async def test_tool_hook_can_block_execution() -> None:
 
     tool = RecordingTool()
     registry = ToolRegistry()
-    registry.add(tool)
+    registry.register(tool)
 
     class Hooks:
         def on_pre_tool_use(self, ctx):
@@ -298,7 +298,7 @@ async def test_tool_middleware_raising_before_call_fails_closed() -> None:
 
     tool = RecordingTool()
     registry = ToolRegistry()
-    registry.add(tool)
+    registry.register(tool)
 
     class VetoMiddleware:
         def before_tool_call(self, call, ctx):
@@ -326,7 +326,7 @@ async def test_tool_middleware_raising_after_result_fails_closed() -> None:
 
     tool = RecordingTool()
     registry = ToolRegistry()
-    registry.add(tool)
+    registry.register(tool)
 
     class BoomMiddleware:
         def after_tool_result(self, call, result, ctx):
@@ -472,7 +472,7 @@ async def test_stop_when_runs_through_before_provider_hook() -> None:
     from linch import ToolRegistry
 
     registry = ToolRegistry()
-    registry.add(tool)
+    registry.register(tool)
     agent = _agent(provider, tools=registry)
     session = await agent.session()
 
@@ -533,7 +533,7 @@ async def test_pre_tool_hook_allow_cannot_bypass_config_deny() -> None:
 
     tool = RecordingTool()
     registry = ToolRegistry()
-    registry.add(tool)
+    registry.register(tool)
 
     hook_ran: list[str] = []
 
@@ -572,8 +572,8 @@ async def test_post_tool_use_failure_hook_fires_only_on_error() -> None:
     failing = FailingTool()
     ok = RecordingTool()
     registry = ToolRegistry()
-    registry.add(failing)
-    registry.add(ok)
+    registry.register(failing)
+    registry.register(ok)
 
     failures: list[tuple[str, bool]] = []
     post_calls: list[str] = []
@@ -741,7 +741,7 @@ async def test_post_tool_use_hook_exception_does_not_crash_tool_loop() -> None:
 
     tool = RecordingTool()
     registry = ToolRegistry()
-    registry.add(tool)
+    registry.register(tool)
 
     class Boom:
         name = "boom"
@@ -812,7 +812,7 @@ async def test_compaction_dispatches_pre_and_post_compact_hooks() -> None:
 
         @property
         def provider_view(self) -> Sequence[Message]:
-            return self.session_log.derive_messages()
+            return self.session_log.provider_view
 
     session = FakeSession()
     await run_forced_compaction(session, FakeAgent(), AbortContext())

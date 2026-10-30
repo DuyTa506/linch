@@ -40,18 +40,6 @@ def test_idle_session_bound_rejects_invalid_values(bound: Any) -> None:
         _agent(max_idle_sessions=bound)
 
 
-def test_agent_options_preserves_existing_positional_store_arguments() -> None:
-    from linch import AgentOptions, InMemoryRunStore, InMemorySessionStore, OpenAIOptions
-
-    session_store = InMemorySessionStore()
-    run_store = InMemoryRunStore()
-    options = AgentOptions("m", None, OpenAIOptions(), None, None, None, session_store, run_store)
-
-    assert options.session_store is session_store
-    assert options.run_store is run_store
-    assert options.max_idle_sessions is None
-
-
 async def test_idle_sessions_evict_in_last_use_order() -> None:
     agent = _agent(max_idle_sessions=2)
     a = await agent.session(id="a")

@@ -156,7 +156,7 @@ async def multi_tenant_example(api_key: str) -> None:
 
 
 def show_tool_aware_protocol() -> None:
-    from linch.tools.registry import tools_from_defaults as _tfd
+    from linch.tools.registry import workspace_tools as _tfd
 
     # Use a base config without 'tools' so we can supply it per agent
     _base = {k: v for k, v in BASE.items() if k != "tools"}
