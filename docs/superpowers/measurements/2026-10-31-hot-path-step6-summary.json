@@ -1,47 +1,155 @@
 {
   "decision": "dropped",
-  "reason": "Lean scale profiles show generic JSON-safe traversal and deepcopy, not receipt or usage codecs, as the dominant CPU work.",
+  "reason": "The faithful receipt DTO prototype did not produce a greater-than-10-percent full-scale CPU win.",
+  "prototype_scope": "receipt encoding/record construction only; existing handwritten receipt_from_dict decode and validation retained",
   "msgspec": {
-    "installed_in_supplied_venv": false,
-    "version": null,
-    "prototype_run": false
+    "version": "0.22.0",
+    "isolated_target": "/tmp/wp8-msgspec-target",
+    "installed_in_supplied_venv": false
   },
-  "profiles": {
+  "semantic_equivalence": {
+    "receipt_dicts": true,
+    "decoded_values": true,
+    "malformed_error_classes_and_messages": true,
+    "normalized_traces": true,
+    "trace_event_counts": {
+      "text_only": 6,
+      "multi_tool": 21
+    }
+  },
+  "cpu_scope": "process_time around complete run_scale_case including setup and teardown; three interleaved lean pairs",
+  "cases": {
     "memory_200x4": {
-      "profile_seconds": 10.080,
-      "json_safe_inner_self_seconds": 2.422821,
-      "deepcopy_self_seconds": 0.605813,
-      "checkpoint_to_dict_self_seconds": 0.045901,
-      "event_to_dict_self_seconds": 0.025282,
-      "receipt_to_dict_self_seconds": 0.004984,
-      "receipt_from_dict_self_seconds": 0.029913
+      "cpu_seconds": {
+        "baseline": 3.712223499,
+        "prototype": 3.776415592,
+        "delta_pct": 1.729208735
+      },
+      "full_run_wall_seconds": {
+        "baseline": 3.712589126,
+        "prototype": 3.778144697,
+        "delta_pct": 1.765764236
+      },
+      "runs_per_second": {
+        "baseline": 54.184029738,
+        "prototype": 53.236467153,
+        "delta_pct": -1.748785739
+      },
+      "ms_per_turn": {
+        "baseline": 4.613905632,
+        "prototype": 4.696029120,
+        "delta_pct": 1.779912596
+      },
+      "store_calls_per_turn": {
+        "baseline": 16.5,
+        "prototype": 16.5,
+        "delta_pct": 0.0
+      },
+      "payload_bytes": "disabled by lean mode"
     },
     "memory_1x50": {
-      "profile_seconds": 1.209,
-      "json_safe_inner_self_seconds": 0.134163,
-      "deepcopy_self_seconds": 0.145176,
-      "checkpoint_to_dict_self_seconds": 0.003059,
-      "event_to_dict_self_seconds": 0.001832,
-      "receipt_to_dict_self_seconds": 0.000403,
-      "receipt_from_dict_self_seconds": 0.002048
+      "cpu_seconds": {
+        "baseline": 0.362783601,
+        "prototype": 0.368484195,
+        "delta_pct": 1.571348315
+      },
+      "full_run_wall_seconds": {
+        "baseline": 0.574036114,
+        "prototype": 0.579280046,
+        "delta_pct": 0.913519528
+      },
+      "runs_per_second": {
+        "baseline": 1.800471643,
+        "prototype": 1.791633260,
+        "delta_pct": -0.490892643
+      },
+      "ms_per_turn": {
+        "baseline": 11.108200500,
+        "prototype": 11.162998840,
+        "delta_pct": 0.493314286
+      },
+      "store_calls_per_turn": {
+        "baseline": 16.04,
+        "prototype": 16.04,
+        "delta_pct": 0.0
+      },
+      "payload_bytes": "disabled by lean mode"
     },
     "postgres_200x4": {
-      "profile_seconds": 18.416,
-      "json_safe_inner_self_seconds": 2.181400,
-      "deepcopy_self_seconds": 0.550180,
-      "checkpoint_to_dict_self_seconds": 0.030003,
-      "event_to_dict_self_seconds": 0.029888,
-      "receipt_to_dict_self_seconds": 0.005770,
-      "receipt_from_dict_self_seconds": 0.028438
+      "cpu_seconds": {
+        "baseline": 8.039198672,
+        "prototype": 8.053798144,
+        "delta_pct": 0.181603573
+      },
+      "full_run_wall_seconds": {
+        "baseline": 8.116056467,
+        "prototype": 8.124370162,
+        "delta_pct": 0.102435155
+      },
+      "runs_per_second": {
+        "baseline": 24.960686765,
+        "prototype": 24.908019668,
+        "delta_pct": -0.211000194
+      },
+      "ms_per_turn": {
+        "baseline": 10.015750061,
+        "prototype": 10.036927999,
+        "delta_pct": 0.211446346
+      },
+      "store_calls_per_turn": {
+        "baseline": 15.0,
+        "prototype": 15.0,
+        "delta_pct": 0.0
+      },
+      "sql_round_trips_per_turn": {
+        "baseline": 88.75,
+        "prototype": 88.75,
+        "delta_pct": 0.0
+      },
+      "protocol_exchanges_per_turn": {
+        "baseline": 88.87375,
+        "prototype": 88.8825,
+        "delta_pct": 0.009845427
+      },
+      "payload_bytes": "disabled by lean mode"
     },
     "postgres_1x50": {
-      "profile_seconds": 2.252,
-      "json_safe_inner_self_seconds": 0.119622,
-      "deepcopy_self_seconds": 0.138332,
-      "checkpoint_to_dict_self_seconds": 0.001953,
-      "event_to_dict_self_seconds": 0.001752,
-      "receipt_to_dict_self_seconds": 0.000341,
-      "receipt_from_dict_self_seconds": 0.001698
+      "cpu_seconds": {
+        "baseline": 0.674353666,
+        "prototype": 0.665604180,
+        "delta_pct": -1.297462510
+      },
+      "full_run_wall_seconds": {
+        "baseline": 1.336572352,
+        "prototype": 1.319411335,
+        "delta_pct": -1.283957204
+      },
+      "runs_per_second": {
+        "baseline": 0.806277275,
+        "prototype": 0.812100968,
+        "delta_pct": 0.722294133
+      },
+      "ms_per_turn": {
+        "baseline": 24.805362400,
+        "prototype": 24.627479560,
+        "delta_pct": -0.717114457
+      },
+      "store_calls_per_turn": {
+        "baseline": 15.0,
+        "prototype": 15.0,
+        "delta_pct": 0.0
+      },
+      "sql_round_trips_per_turn": {
+        "baseline": 88.06,
+        "prototype": 88.06,
+        "delta_pct": 0.0
+      },
+      "protocol_exchanges_per_turn": {
+        "baseline": 88.3,
+        "prototype": 88.3,
+        "delta_pct": 0.0
+      },
+      "payload_bytes": "disabled by lean mode"
     }
   }
 }
