@@ -6,6 +6,7 @@ import asyncio
 import importlib.util
 import os
 import sys
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -29,6 +30,62 @@ def _postgres_available() -> bool:
 needs_postgres = pytest.mark.skipif(
     not _postgres_available(), reason="AGENT_KIT_TEST_PG_DSN or asyncpg unavailable"
 )
+
+
+class _RollbackTransaction:
+    """Proxy a real asyncpg transaction and force rollback at context exit."""
+
+    def __init__(self, real: Any, failure_type: type[BaseException]) -> None:
+        self._real = real
+        self._failure_type = failure_type
+
+    async def __aenter__(self) -> Any:
+        return await self._real.__aenter__()
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+        failure = (
+            asyncio.CancelledError()
+            if self._failure_type is asyncio.CancelledError
+            else RuntimeError("forced claim transaction failure")
+        )
+        await self._real.__aexit__(self._failure_type, failure, tb)
+        raise failure
+
+
+class _RollbackConnection:
+    def __init__(self, real: Any, failure_type: type[BaseException]) -> None:
+        self._real = real
+        self._failure_type = failure_type
+
+    def transaction(self, *args: Any, **kwargs: Any) -> _RollbackTransaction:
+        return _RollbackTransaction(self._real.transaction(*args, **kwargs), self._failure_type)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+
+class _RollbackAcquire:
+    def __init__(self, real: Any, failure_type: type[BaseException]) -> None:
+        self._real = real
+        self._failure_type = failure_type
+
+    async def __aenter__(self) -> _RollbackConnection:
+        return _RollbackConnection(await self._real.__aenter__(), self._failure_type)
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+        return await self._real.__aexit__(exc_type, exc, tb)
+
+
+class _RollbackPool:
+    def __init__(self, real: Any, failure_type: type[BaseException]) -> None:
+        self._real = real
+        self._failure_type = failure_type
+
+    def acquire(self, *args: Any, **kwargs: Any) -> _RollbackAcquire:
+        return _RollbackAcquire(self._real.acquire(*args, **kwargs), self._failure_type)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
 
 
 @needs_postgres
@@ -71,3 +128,75 @@ async def test_postgres_concurrent_snapshot_delete_and_prune() -> None:
         assert all(snapshot is None for snapshot in remaining)
     finally:
         await asyncio.gather(store.close(), peer.close())
+
+
+@pytest.mark.parametrize(
+    "failure_type",
+    [RuntimeError, asyncio.CancelledError],
+    ids=["commit-error", "cancelled"],
+)
+@needs_postgres
+async def test_postgres_claim_rollback_does_not_publish_local_lease(
+    failure_type: type[BaseException],
+) -> None:
+    """A claim rolled back after UPDATE cannot poison the holder's local state."""
+    from linch.run_store import LeaseLostError, RunCheckpoint, RunLease
+    from linch.run_stores.postgres import PostgresRunStore
+    from linch.types import Usage
+
+    dsn = os.environ["AGENT_KIT_TEST_PG_DSN"]
+    first = PostgresRunStore(dsn)
+    peer = PostgresRunStore(dsn)
+    run_id = f"pg-claim-rollback-{uuid4()}"
+    real_pool: Any = None
+    try:
+        await first.create_run("session-claim-rollback", id=run_id)
+        await first._ensure()
+        real_pool = first._pool
+        assert real_pool is not None
+        first._pool = _RollbackPool(real_pool, failure_type)
+        with pytest.raises(failure_type):
+            await first.claim(run_id, "owner-a", 30.0)
+        first._pool = real_pool
+
+        assert first._held_leases == {}
+        assert first._lease_ttls == {}
+
+        # A newly created run starts at epoch zero; the failed claimant's
+        # candidate would have been epoch one, and the independent peer must
+        # obtain that same epoch after rollback.
+        failed_candidate_epoch = 1
+        peer_lease = await peer.claim(run_id, "owner-b", 30.0)
+        assert peer_lease.epoch == failed_candidate_epoch
+
+        candidate = RunLease(
+            run_id=run_id,
+            owner="owner-a",
+            epoch=failed_candidate_epoch,
+            expires_at=peer_lease.expires_at,
+        )
+        for token in (candidate, peer_lease):
+            with pytest.raises(LeaseLostError):
+                await first.renew(token)
+            with pytest.raises(LeaseLostError):
+                await first.release(token)
+            assert first._held_leases == {}
+            assert first._lease_ttls == {}
+
+        renewed = await peer.renew(peer_lease)
+        checkpoint = RunCheckpoint(
+            phase="started",
+            prompt="live owner",
+            turn_index=1,
+            total_usage=Usage(),
+        )
+        saved = await peer.save_checkpoint(run_id, checkpoint)
+        assert saved.checkpoint is not None
+        assert saved.checkpoint.prompt == "live owner"
+        await peer.release(renewed)
+        assert peer._held_leases == {}
+        assert peer._lease_ttls == {}
+    finally:
+        if real_pool is not None:
+            first._pool = real_pool
+        await asyncio.gather(first.close(), peer.close())

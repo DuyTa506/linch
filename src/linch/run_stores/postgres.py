@@ -386,9 +386,11 @@ class PostgresRunStore:
                         raise KeyError(f"run not found: {run_id}")
                     raise RunLeaseConflictError(f"run {run_id} is leased by another owner")
                 lease = _lease_from_row(row, run_id, owner)
-                self._held_leases[run_id] = lease.epoch
-                self._lease_ttls[run_id] = float(ttl_s)
-                return lease
+        # Publish ownership after all awaited context exits, so transaction
+        # failure or cancellation cannot record an uncommitted epoch.
+        self._held_leases[run_id] = lease.epoch
+        self._lease_ttls[run_id] = float(ttl_s)
+        return lease
 
     async def renew(self, lease: RunLease) -> RunLease:
         held = self._held_leases.get(lease.run_id)
