@@ -4,9 +4,10 @@ import hashlib
 import json
 from collections.abc import AsyncGenerator, Sequence
 from dataclasses import dataclass, replace
-from typing import Any, Protocol, cast, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 from uuid import uuid4
 
+from ._token_estimation import custom_token_estimate
 from .abort import AbortContext
 from .errors import ConfigError, ProviderError
 from .events import CompactionEvent
@@ -195,15 +196,7 @@ class CompactionStrategy(Protocol):
     id: str
 
     async def compact(self, ctx: CompactionContext, provider: Any) -> list[Message]:
-        """Compact *ctx.messages* using *provider* (a :class:`~linch.providers.BaseProvider`).
-
-        .. note::
-            The parameter was historically named ``openai`` in the 0.1.x
-            series.  :class:`DefaultCompaction` and ``_run_compaction_impl``
-            pass ``agent.provider`` now, but for backward compatibility
-            ``agent.openai`` (an alias for ``agent.provider``) still works if
-            you reference it by keyword.
-        """
+        """Compact *ctx.messages* using *provider* (a :class:`~linch.providers.BaseProvider`)."""
         ...
 
 
@@ -1047,12 +1040,9 @@ def _estimate_tokens(
 ) -> int:
     resolved_model = model or agent.model
     estimator = getattr(agent, "token_estimator", None)
-    if callable(estimator):
-        try:
-            value = estimator(messages, resolved_model)
-            return max(0, int(cast(Any, value)))
-        except Exception:
-            pass
+    estimate = custom_token_estimate(estimator, messages, resolved_model)
+    if estimate is not None:
+        return estimate
 
     # Provider-neutral fallback heuristic for compaction decisions and
     # telemetry.  Serialising the normalized message shape counts tool results,

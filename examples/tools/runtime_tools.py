@@ -7,7 +7,7 @@ This example loads ../.env automatically when present. It does not print any
 secret values.
 
 Demonstrates:
-  1. ToolRegistry.add/remove/replace.
+  1. ToolRegistry.register/unregister/replace.
   2. ToolRegistry.select by tool name and tag.
   3. Provider schema export through registry.schemas().
   4. Runtime tools that are read-scoped and parallel-safe.
@@ -82,16 +82,16 @@ class RuntimeLookupTool:
 def registry_demo() -> ToolRegistry:
     registry = ToolRegistry()
 
-    registry.add(RuntimeLookupTool("LookupProduct", {"plan": "Pro", "sla": "99.9%"}))
-    registry.add(RuntimeLookupTool("LookupPolicy", {"refund": "30 days"}))
+    registry.register(RuntimeLookupTool("LookupProduct", {"plan": "Pro", "sla": "99.9%"}))
+    registry.register(RuntimeLookupTool("LookupPolicy", {"refund": "30 days"}))
     print("After add:", [tool.name for tool in registry.list()])
 
     registry.replace(RuntimeLookupTool("LookupPolicy", {"refund": "45 days"}))
     print("After replace LookupPolicy:", registry.get("LookupPolicy") is not None)
 
-    removed = registry.remove("LookupProduct")
+    removed = registry.unregister("LookupProduct")
     print("Removed:", removed.name if removed else None)
-    registry.add(RuntimeLookupTool("LookupProduct", {"plan": "Enterprise"}))
+    registry.register(RuntimeLookupTool("LookupProduct", {"plan": "Enterprise"}))
 
     selected = registry.select(names={"LookupPolicy"}, tags={"lookup"})
     print("Selected:", [tool.name for tool in selected.list()])

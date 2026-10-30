@@ -191,3 +191,17 @@ async def test_sqlite_persistence_sanitizes_arbitrary_event_metadata(tmp_path: P
         assert event.metadata["nan"] == "nan"
     finally:
         await store.close()
+
+
+def test_contract_preserves_golden_bytes_and_fingerprint() -> None:
+    import hashlib
+
+    from linch.run_store import canonical_json
+
+    contract = _contract()
+    assert contract.fingerprint == (
+        "sha256:e1bdb68711b03c5078a41b6dcb4903efb73b0672b7a25f01c4b5a2dc097b76bc"
+    )
+    assert hashlib.sha256(canonical_json(run_contract_to_dict(contract)).encode()).hexdigest() == (
+        "0dcb825540ed156f718bd927eff81b3f9f9e1cabbf8a32a4fc4c7d210c711b2b"
+    )

@@ -9,6 +9,8 @@ from typing import Any, Literal, Protocol, TypeAlias, cast
 
 from jsonschema import Draft202012Validator
 
+from .._json import walk_json
+
 JsonValue: TypeAlias = None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
 RenderOutput: TypeAlias = Callable[[JsonValue], str]
 
@@ -75,26 +77,6 @@ class ToolContext:
     reaching back through the Agent or global state. ``None`` on the legacy
     default path. Kept last for positional-constructor compatibility."""
 
-    @property
-    def sessionId(self) -> str:
-        return self.session_id
-
-    @property
-    def runId(self) -> str:
-        return self.run_id
-
-    @property
-    def sessionStore(self) -> Any:
-        return self.session_store
-
-    @property
-    def fileReadTracker(self) -> Any:
-        return self.file_read_tracker
-
-    @property
-    def idempotencyKey(self) -> str:
-        return self.idempotency_key
-
     def report_progress(self, message: str, data: dict[str, Any] | None = None) -> None:
         """Report transient execution progress to event-stream observers.
 
@@ -113,10 +95,6 @@ class ToolContext:
             sink(message, data)
         except Exception:
             return
-
-    @property
-    def reportProgress(self) -> Callable[[str, dict[str, Any] | None], None]:
-        return self.report_progress
 
 
 @dataclass(slots=True)
@@ -186,43 +164,29 @@ def normalize_json_value(value: Any) -> JsonValue:
     default Python encoder otherwise accepts as non-standard tokens.
     """
 
-    active: set[int] = set()
+    return cast(
+        JsonValue,
+        walk_json(value, check_node=_check_tool_json_node, check_key=_check_tool_json_key),
+    )
 
-    def visit(item: Any, path: str) -> JsonValue:
-        if item is None or isinstance(item, str | bool):
-            return cast(JsonValue, item)
-        if isinstance(item, int):
-            return item
-        if isinstance(item, float):
-            if not math.isfinite(item):
-                raise ValueError(f"{path} contains a non-finite float")
-            return item
-        if isinstance(item, list):
-            identity = id(item)
-            if identity in active:
-                raise ValueError(f"{path} contains a cycle")
-            active.add(identity)
-            try:
-                return [visit(child, f"{path}[{index}]") for index, child in enumerate(item)]
-            finally:
-                active.remove(identity)
-        if isinstance(item, dict):
-            identity = id(item)
-            if identity in active:
-                raise ValueError(f"{path} contains a cycle")
-            active.add(identity)
-            try:
-                normalized: dict[str, JsonValue] = {}
-                for key, child in item.items():
-                    if not isinstance(key, str):
-                        raise ValueError(f"{path} contains a non-string object key")
-                    normalized[key] = visit(child, f"{path}.{key}")
-                return normalized
-            finally:
-                active.remove(identity)
-        raise ValueError(f"{path} contains non-JSON value {type(item).__name__}")
 
-    return visit(value, "$")
+def _check_tool_json_node(value: Any, path: str, active: set[int], depth: int) -> int | None:
+    if value is None or isinstance(value, str | bool | int):
+        return None
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"{path} contains a non-finite float")
+        return None
+    if not isinstance(value, list | dict):
+        raise ValueError(f"{path} contains non-JSON value {type(value).__name__}")
+    if id(value) in active:
+        raise ValueError(f"{path} contains a cycle")
+    return depth + 1
+
+
+def _check_tool_json_key(key: Any, path: str) -> None:
+    if not isinstance(key, str):
+        raise ValueError(f"{path} contains a non-string object key")
 
 
 def normalize_tool_output(output: CanonicalToolOutput | JsonValue) -> CanonicalToolOutput:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import keyword
 import re
+import tomllib
 from pathlib import Path
 
 from . import _templates
@@ -134,43 +135,13 @@ def _depends_on_linch(pyproject: Path) -> bool:
     """
     text = pyproject.read_text(encoding="utf-8")
     try:
-        import tomllib
-    except ImportError:  # Python 3.10 — tomllib is 3.11+
-        return _depends_on_linch_line_scan(text)
-    try:
         data = tomllib.loads(text)
-    except Exception:
-        return _depends_on_linch_line_scan(text)
+    except tomllib.TOMLDecodeError:
+        return False
     dependencies = data.get("project", {}).get("dependencies")
     if not isinstance(dependencies, list):
         return False
     return any(_requirement_name(dep) == "linch" for dep in dependencies if isinstance(dep, str))
-
-
-def _depends_on_linch_line_scan(text: str) -> bool:
-    in_project = False
-    in_dependencies = False
-    for raw_line in text.splitlines():
-        stripped = raw_line.strip()
-        if not in_dependencies and stripped.startswith("["):
-            in_project = stripped == "[project]"
-            continue
-        if not in_project:
-            continue
-        if not in_dependencies:
-            match = re.match(r"dependencies\s*=\s*\[", stripped)
-            if not match:
-                continue
-            in_dependencies = True
-            stripped = stripped[match.end() :]
-        closed = "]" in stripped
-        body = stripped.split("]", 1)[0] if closed else stripped
-        for value in re.findall(r"""["']([^"']+)["']""", body):
-            if _requirement_name(value) == "linch":
-                return True
-        if closed:
-            in_dependencies = False
-    return False
 
 
 _REQUIREMENT_NAME_RE = re.compile(r"^\s*([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)")
@@ -213,26 +184,8 @@ def _find_package_dir(root: Path) -> Path:
 def _project_name_from_pyproject(path: Path) -> str | None:
     text = path.read_text(encoding="utf-8")
     try:
-        import tomllib
-    except ImportError:  # Python 3.10 — tomllib is 3.11+
-        return _project_name_line_scan(text)
-    try:
         data = tomllib.loads(text)
-    except Exception:
-        return _project_name_line_scan(text)
+    except tomllib.TOMLDecodeError:
+        return None
     name = data.get("project", {}).get("name")
     return name if isinstance(name, str) else None
-
-
-def _project_name_line_scan(text: str) -> str | None:
-    in_project = False
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("["):
-            in_project = stripped == "[project]"
-            continue
-        if in_project:
-            match = re.match(r'\s*name\s*=\s*["\']([^"\']+)["\']', line)
-            if match:
-                return match.group(1)
-    return None

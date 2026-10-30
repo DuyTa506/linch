@@ -100,8 +100,8 @@ async def maybe_live_agent() -> None:
 
     store = await seed_store()
     registry = ToolRegistry()
-    registry.add(MemorySearchTool(namespace="linch"))
-    registry.add(MemoryUpsertTool(namespace="linch"))
+    registry.register(MemorySearchTool(namespace="linch"))
+    registry.register(MemoryUpsertTool(namespace="linch"))
     agent = Agent(
         model=MODEL,
         openai_api_key=os.environ.get("OPENAI_API_KEY"),

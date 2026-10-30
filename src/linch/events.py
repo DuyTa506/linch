@@ -6,6 +6,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Literal, TypeAlias, cast
 
+from ._json import walk_json
 from .tools.base import (
     CanonicalToolOutput,
     Citation,
@@ -476,39 +477,41 @@ def _validate_ignorable_json_value(
     durable codec preserves verbatim.
     """
 
+    walk_json(
+        value,
+        check_node=_check_ignorable_json_node,
+        check_key=_check_ignorable_json_key,
+        path=path,
+        seen=seen,
+        depth=depth,
+        copy_containers=False,
+    )
+
+
+def _check_ignorable_json_node(value: Any, path: str, active: set[int], depth: int) -> int | None:
     if value is None or isinstance(value, str | bool | int):
-        return
+        return None
     if isinstance(value, float):
         if not math.isfinite(value):
             raise ValueError(f"ignorable event {path} must not contain NaN or Infinity")
-        return
+        return None
     if not isinstance(value, list | dict):
         raise ValueError(
             f"ignorable event {path} must be strictly JSON-serializable; got {type(value).__name__}"
         )
-
-    active = seen if seen is not None else set()
-    identity = id(value)
-    if identity in active:
+    if id(value) in active:
         raise ValueError(f"ignorable event {path} must not contain reference cycles")
     if depth >= IGNORABLE_MAX_DEPTH:
         raise ValueError(
             f"ignorable event {path} exceeds maximum nesting depth {IGNORABLE_MAX_DEPTH}"
         )
-    active.add(identity)
-    try:
-        if isinstance(value, list):
-            for index, item in enumerate(value):
-                _validate_ignorable_json_value(
-                    item, path=f"{path}[{index}]", seen=active, depth=depth + 1
-                )
-        else:
-            for key, item in value.items():
-                if not isinstance(key, str):
-                    raise ValueError(f"ignorable event {path} must contain only string object keys")
-                _validate_ignorable_json_value(item, path=f"{path}.{key}", seen=active)
-    finally:
-        active.remove(identity)
+    # Preserve the envelope validator's existing object-child depth policy.
+    return depth + 1 if isinstance(value, list) else 0
+
+
+def _check_ignorable_json_key(key: Any, path: str) -> None:
+    if not isinstance(key, str):
+        raise ValueError(f"ignorable event {path} must contain only string object keys")
 
 
 def _copy_ignorable_event_envelope(

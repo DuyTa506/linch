@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
@@ -21,7 +21,7 @@ from .store import (
 
 
 def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _copy_message(message: Message) -> Message:
@@ -40,8 +40,6 @@ class _InboxRow:
 
 
 class InMemorySessionStore:
-    runtime_control_block_codec_version = 1
-
     def __init__(self) -> None:
         self._sessions: dict[str, SessionRecord] = {}
         self._messages: dict[str, list[StoredMessage]] = {}

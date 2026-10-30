@@ -114,7 +114,7 @@ async def test_before_tool_call_rewrites_effective_input() -> None:
 
     tool = RecordingTool()
     registry = ToolRegistry()
-    registry.add(tool)
+    registry.register(tool)
 
     events = await collect_events(registry, RewriteInputMiddleware())
 
@@ -132,7 +132,7 @@ async def test_before_tool_call_can_block_with_bracketed_events() -> None:
 
     tool = RecordingTool()
     registry = ToolRegistry()
-    registry.add(tool)
+    registry.register(tool)
 
     events = await collect_events(registry, BlockMiddleware())
 
@@ -150,7 +150,7 @@ async def test_after_tool_result_rewrites_event_result() -> None:
     from linch import ToolCallEndEvent, ToolRegistry
 
     registry = ToolRegistry()
-    registry.add(RecordingTool(content="contains secret"))
+    registry.register(RecordingTool(content="contains secret"))
 
     events = await collect_events(registry, RedactResultMiddleware())
 
@@ -165,7 +165,7 @@ async def test_multiple_middleware_run_in_order() -> None:
     from linch import ToolCallEndEvent, ToolCallStartEvent, ToolRegistry
 
     registry = ToolRegistry()
-    registry.add(RecordingTool(content="base"))
+    registry.register(RecordingTool(content="base"))
 
     events = await collect_events(registry, [AppendMiddleware("-a"), AppendMiddleware("-b")])
 
@@ -181,7 +181,7 @@ async def test_no_middleware_preserves_existing_behavior() -> None:
 
     tool = RecordingTool()
     registry = ToolRegistry()
-    registry.add(tool)
+    registry.register(tool)
 
     events = await collect_events(registry)
 

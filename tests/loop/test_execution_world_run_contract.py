@@ -126,7 +126,8 @@ async def test_opaque_filesystem_override_is_rejected_for_durable_world(tmp_path
 
 async def test_replaced_bash_backend_cannot_escape_configured_world(tmp_path: Any) -> None:
     from linch.errors import ConfigError
-    from linch.execution import LocalExecutionBackend
+    from linch.execution import LocalExecutionBackend, RemoteExecutionBackend
+    from linch.filesystem.disk import DiskFileBackend
     from linch.run_store import InMemoryRunStore
     from linch.sessions import InMemorySessionStore
     from linch.tools.builtin import BashTool
@@ -137,7 +138,11 @@ async def test_replaced_bash_backend_cannot_escape_configured_world(tmp_path: An
         InMemorySessionStore(),
         LocalExecutionBackend(cwd=tmp_path / "world"),
     )
-    agent.tools.register(BashTool(backend=DockerBackend(network="none")))
+    replacement_world = RemoteExecutionBackend(
+        shell=DockerBackend(network="none"),
+        fs=DiskFileBackend(tmp_path / "replacement"),
+    )
+    agent.tools.register(BashTool(execution=replacement_world))
 
     with pytest.raises(ConfigError, match=r"effective BashTool backend.*coherent"):
         _ = [event async for event in (await agent.session()).run("go")]

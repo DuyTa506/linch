@@ -353,25 +353,12 @@ async def _run_background_tool(
     from .types import Message, TextBlock
 
     notification_message = Message(role="user", content=[TextBlock(text=notification)])
-    notify = getattr(session, "notify", None)
-    if callable(notify):
-        await cast(
-            Awaitable[Any],
-            notify(
-                notification_message,
-                delivery_id=f"background-tool:{bg_id}",
-                source="background-tool",
-                metadata={"task_id": bg_id, "tool_name": tool_name, "status": status_str},
-            ),
-        )
-    else:
-        # Compatibility for lightweight Session duck types used by legacy
-        # embedders/tests. Real Session instances always route through notify(),
-        # which enforces the durable-inbox contract when enabled.
-        notifications = getattr(session, "pending_notifications", None)
-        if notifications is None:
-            return
-        notifications.append(notification_message)
+    await session.notify(
+        notification_message,
+        delivery_id=f"background-tool:{bg_id}",
+        source="background-tool",
+        metadata={"task_id": bg_id, "tool_name": tool_name, "status": status_str},
+    )
     completion_event = BackgroundWorkerEvent(
         worker_id=bg_id,
         status=status_str,
@@ -655,7 +642,7 @@ async def _execute_tool_attempts(
             return _execution_outcome(call.id, result, block_result=block_result)
         except AbortError:
             raise
-        except asyncio.TimeoutError:
+        except TimeoutError:
             # result_timeout_ms may be None if the tool raised asyncio.TimeoutError
             # internally (its own deadline) with no agent-wide timeout set.
             ms: int | str = int(result_timeout_ms) if result_timeout_ms is not None else "unknown"
@@ -719,9 +706,7 @@ def _tool_parallel(call: ResolvedCall, input: dict[str, Any] | None = None) -> b
             return False
     if _tool_scope(call) != "read":
         return False
-    if parallel is not None:
-        return bool(parallel)
-    return bool(getattr(call.tool, "parallel_safe", False))
+    return bool(parallel)
 
 
 def _resource_accesses(

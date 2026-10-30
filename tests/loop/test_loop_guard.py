@@ -476,3 +476,15 @@ async def test_max_turns_emits_loop_guard_event():
     assert len(max_turn_guard) == 1, "expected one max_turns LoopGuardEvent"
     results = [e for e in events if isinstance(e, ResultEvent)]
     assert results[-1].subtype == "error"
+
+
+def test_loop_guard_and_permission_keys_preserve_exact_ascii_escaped_bytes() -> None:
+    from linch.loop_guard.guard import LoopGuard, LoopGuardState, evaluate_loop_guard
+    from linch.permissions.keys import permission_decision_key
+
+    proposed = {"z": [True, None, {"é": "☃"}], "a": 1.25}
+    expected = 'Search:{"a":1.25,"z":[true,null,{"\\u00e9":"\\u2603"}]}'
+    assert permission_decision_key("Search", proposed).encode() == expected.encode()
+    state = LoopGuardState()
+    evaluate_loop_guard(LoopGuard(), state, [_make_tool_block("Search", proposed)], [])
+    assert state.call_counts == {expected: 1}

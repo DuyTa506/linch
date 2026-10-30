@@ -1095,3 +1095,19 @@ async def test_restore_preserves_proven_source_order_against_later_checkpoint(
     assert restored.total_usage.input_tokens == (111 if phase == "settled" else 0)
     await restored.restore(restored.snapshot(), journal)
     assert budget.spent_tokens == (133 if phase == "settled" else 0)
+
+
+def test_journal_preserves_golden_bytes() -> None:
+    import hashlib
+    import json
+
+    from linch.model_calls import _copy_json_object, intent_to_dict, receipt_to_dict
+
+    intent, receipt = _records()
+    owned = _copy_json_object(
+        {"intent": intent_to_dict(intent), "receipt": receipt_to_dict(receipt)}
+    )
+    encoded = json.dumps(owned, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    assert hashlib.sha256(encoded.encode()).hexdigest() == (
+        "538a016ee0833092cc9a1f80af5d2484d4626e0084f04411ce65f762dc7e5c38"
+    )

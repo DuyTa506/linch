@@ -193,21 +193,6 @@ def _docker_rm_args(calls: list[list[str]]) -> list[str]:
 
 
 @pytest.mark.asyncio(loop_scope="module")
-async def test_bash_tool_uses_injected_backend(tmp_path) -> None:
-    from linch.tools.builtin import BashTool
-
-    fake = _FakeBackend()
-    tool = BashTool(backend=fake)
-    ctx = _make_ctx(tmp_path)
-    validated = tool.validate({"command": "echo injected"})
-    result = await tool.execute(validated, ctx)
-    assert fake.calls == ["echo injected"]
-    assert "fake-out" in result.content
-    assert result.summary == "Exited 0"
-    assert result.is_error is False
-
-
-@pytest.mark.asyncio(loop_scope="module")
 async def test_bash_tool_timeout_raises_tool_execution_error(tmp_path) -> None:
     from linch.errors import ToolExecutionError
     from linch.tools.builtin import BashTool

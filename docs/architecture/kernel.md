@@ -26,7 +26,7 @@ later close can finish cleanup. The undo may be a coroutine. Every registration
 in the system returns one:
 
 ```python
-disposer = registry.add(tool)       # returns a Disposable
+disposer = registry.register(tool)  # returns a Disposable
 ...
 await disposer.dispose()            # removes exactly that tool
 await disposer.dispose()            # single-use: a no-op
@@ -91,7 +91,7 @@ retryable and a later `close()` resumes the unfinished teardown.
 
 ## What builds on the kernel
 
-- **Reversible registration** — `ToolRegistry.add/register/replace` return a
+- **Reversible registration** — `ToolRegistry.register/replace` return a
   `Disposable` (see [Tool Protocol](./tool-protocol.md)).
 - **Open tool pipeline** — `ToolPipeline` (`tools/pipeline.py`) exposes
   `tools/pre-execute → tools/execute → tools/post-execute`. `tools/execute` is a

@@ -9,7 +9,8 @@ pad for notes, plans, and intermediate state.
 Register them via::
 
     from linch.filesystem import filesystem_tools
-    registry = tools_from_defaults(extra=list(filesystem_tools()))
+    from linch.tools.registry import workspace_tools
+    registry = workspace_tools(extra=list(filesystem_tools()))
 
 Or pass ``Agent(filesystem=StateFileBackend())`` which wires everything
 automatically.

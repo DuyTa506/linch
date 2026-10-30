@@ -280,3 +280,40 @@ async def test_stream_propagates_wait_for_timeout_instead_of_swallowing_it() -> 
 
     with pytest.raises(asyncio.TimeoutError):
         await asyncio.wait_for(consume(), timeout=0.05)
+
+
+@pytest.mark.parametrize("method", ["aclose", "close"])
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("fails", [False, True])
+async def test_chat_client_close_resets_fields_before_close_and_preserves_errors(
+    method: str, asynchronous: bool, fails: bool
+) -> None:
+    from types import SimpleNamespace
+
+    from linch.providers.openai_chat import OpenAIChatCompletionsProvider
+
+    provider = OpenAIChatCompletionsProvider()
+    calls = []
+
+    def close() -> None:
+        assert provider._client is None
+        assert provider._client_loop is None
+        calls.append(method)
+        if fails:
+            raise RuntimeError("close failed")
+
+    async def aclose() -> None:
+        close()
+
+    client = SimpleNamespace(**{method: aclose if asynchronous else close})
+    if method == "aclose":
+        client.close = lambda: pytest.fail("aclose must take precedence")
+    provider._client = client
+    provider._client_loop = object()
+    if fails:
+        with pytest.raises(RuntimeError, match="close failed"):
+            await provider.aclose()
+    else:
+        await provider.aclose()
+    await provider.aclose()
+    assert calls == [method]

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from linch import defaultTools
+from linch import workspace_tools
 from linch.sessions import InMemorySessionStore, SqliteSessionStore
 from linch.sessions.tasks import CreateTaskInput, TaskPatch
 
 
-def test_default_tools_schema_names_match_typescript_contract() -> None:
-    registry = defaultTools()
+def test_workspace_tools_schema_names_match_typescript_contract() -> None:
+    registry = workspace_tools()
     tools = {tool.name: tool for tool in registry.list()}
 
     assert "file_path" in tools["Read"].input_schema["properties"]

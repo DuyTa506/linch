@@ -143,13 +143,13 @@ async def test_live_loop_runner_run_once_with_project_env(tmp_path) -> None:
                 ),
                 timeout=TIMEOUT_S,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pytest.xfail(f"live provider did not complete within {TIMEOUT_S}s")
     finally:
         await agent.close()
         try:
             await asyncio.wait_for(provider.aclose(), timeout=5)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
     assert result is not None

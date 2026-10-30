@@ -26,7 +26,7 @@ import asyncio
 import time
 from typing import Any
 
-from ..storage._pg import _import_asyncpg
+from ..storage._pg import _import_asyncpg, close_pool, ensure_pool
 from .backend import _slice_lines, normalize_path
 
 _SCHEMA = """
@@ -69,28 +69,7 @@ class PostgresFileBackend:
         self._init_lock = asyncio.Lock()
 
     async def _ensure(self) -> Any:
-        if self._initialized:
-            return self._pool
-        async with self._init_lock:
-            if self._initialized:
-                return self._pool
-            asyncpg = _import_asyncpg()
-            if self._pool is None:
-                self._pool = await asyncpg.create_pool(
-                    self._dsn,
-                    min_size=self._min_size,
-                    max_size=self._max_size,
-                )
-            try:
-                async with self._pool.acquire() as conn:
-                    async with conn.transaction():
-                        await conn.execute(_SCHEMA)
-            except Exception:
-                pool, self._pool = self._pool, None
-                await pool.close()
-                raise
-            self._initialized = True
-        return self._pool
+        return await ensure_pool(self, _SCHEMA, _import_asyncpg)
 
     # ── FileBackend protocol ─────────────────────────────────────────────────
 
@@ -176,6 +155,4 @@ class PostgresFileBackend:
     # ── lifecycle ────────────────────────────────────────────────────────────
 
     async def close(self) -> None:
-        if self._pool is not None:
-            await self._pool.close()
-            self._pool = None
+        await close_pool(self)

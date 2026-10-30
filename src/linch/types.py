@@ -30,32 +30,12 @@ class ToolUseBlock:
     type: Literal["tool_use"] = "tool_use"
 
 
-@dataclass(frozen=True, slots=True)
-class ToolActivation:
-    """Immutable durable record of a policy-approved deferred tool activation."""
-
-    schema_version: int
-    name: str
-    activation_id: str
-    activation_version: str | None
-    tool_contract_fingerprint: str
-    scope_id: str
-    scope_fingerprint: str
-    catalog_policy_id: str
-    catalog_policy_version: str
-    activation_policy_id: str
-    activation_policy_version: str
-    source_loader_id: str
-    source_tool_use_id: str
-
-
 @dataclass(slots=True)
 class ToolResultBlock:
     tool_use_id: str
     content: str | list[TextBlock | ImageBlock]
     is_error: bool = False
     type: Literal["tool_result"] = "tool_result"
-    tool_activations: tuple[ToolActivation, ...] = ()
 
 
 @dataclass(slots=True)
@@ -77,23 +57,8 @@ class ImageBlock:
     type: Literal["image"] = "image"
 
 
-@dataclass(frozen=True, slots=True)
-class ToolSurfaceReaderGuard:
-    """Private unknown-to-old-reader sentinel for durable tool controls."""
-
-    required_reader_version: int
-    feature_version: int
-    type: Literal["tool_surface_guard"] = "tool_surface_guard"
-
-
 ContentBlock: TypeAlias = (
-    TextBlock
-    | ToolUseBlock
-    | ToolResultBlock
-    | ThinkingBlock
-    | RedactedThinkingBlock
-    | ImageBlock
-    | ToolSurfaceReaderGuard
+    TextBlock | ToolUseBlock | ToolResultBlock | ThinkingBlock | RedactedThinkingBlock | ImageBlock
 )
 
 
@@ -155,15 +120,6 @@ class InvokedSkillRecord:
 class SkillOverlay:
     allowed_tools: list[str] | None = None
     model_override: str | None = None
-
-
-def add_usage(a: Usage, b: Usage) -> Usage:
-    return Usage(
-        input_tokens=a.input_tokens + b.input_tokens,
-        output_tokens=a.output_tokens + b.output_tokens,
-        cache_read_tokens=a.cache_read_tokens + b.cache_read_tokens,
-        cache_creation_tokens=a.cache_creation_tokens + b.cache_creation_tokens,
-    )
 
 
 @dataclass(slots=True)
@@ -247,10 +203,6 @@ def block_to_dict(block: ContentBlock) -> dict[str, Any]:
         }
         if block.is_error:
             out["is_error"] = True
-        from .tool_surface import _tool_activations_to_wire
-
-        if activations := _tool_activations_to_wire(block.tool_activations):
-            out["tool_activations"] = activations
         return out
     if isinstance(block, ThinkingBlock):
         out = {"type": "thinking", "thinking": block.thinking}
@@ -261,10 +213,6 @@ def block_to_dict(block: ContentBlock) -> dict[str, Any]:
         return {"type": "redacted_thinking", "data": block.data}
     if isinstance(block, ImageBlock):
         return {"type": "image", "source": block.source}
-    from .tool_surface import ToolSurfaceReaderGuard, _tool_surface_guard_to_dict
-
-    if isinstance(block, ToolSurfaceReaderGuard):
-        return _tool_surface_guard_to_dict(block)
     raise TypeError(f"unknown block {block!r}")
 
 
@@ -277,6 +225,9 @@ def block_from_dict(raw: dict[str, Any]) -> ContentBlock:
             id=str(raw["id"]), name=str(raw["name"]), input=dict(raw.get("input", {}))
         )
     if typ == "tool_result":
+        unknown_fields = raw.keys() - {"type", "tool_use_id", "content", "is_error"}
+        if unknown_fields:
+            raise ValueError(f"unknown tool_result fields: {sorted(unknown_fields)!r}")
         raw_content = raw.get("content", "")
         content: str | list[TextBlock | ImageBlock]
         if isinstance(raw_content, list):
@@ -290,16 +241,10 @@ def block_from_dict(raw: dict[str, Any]) -> ContentBlock:
             content = nested
         else:
             content = str(raw_content)
-        tool_activations: tuple[ToolActivation, ...] = ()
-        if "tool_activations" in raw:
-            from .tool_surface import _tool_activations_from_wire
-
-            tool_activations = _tool_activations_from_wire(raw["tool_activations"])
         return ToolResultBlock(
             tool_use_id=str(raw["tool_use_id"]),
             content=content,
             is_error=bool(raw.get("is_error", False)),
-            tool_activations=tool_activations,
         )
     if typ == "thinking":
         return ThinkingBlock(
@@ -310,10 +255,6 @@ def block_from_dict(raw: dict[str, Any]) -> ContentBlock:
         return RedactedThinkingBlock(data=str(raw.get("data", "")))
     if typ == "image":
         return ImageBlock(source=dict(raw.get("source", {})))
-    if typ == "tool_surface_guard":
-        from .tool_surface import _tool_surface_guard_from_dict
-
-        return _tool_surface_guard_from_dict(raw)
     raise ValueError(f"unknown content block type: {typ!r}")
 
 
