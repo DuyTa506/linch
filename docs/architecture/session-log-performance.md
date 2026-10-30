@@ -125,7 +125,6 @@ for turns in (50, 200):
         "provider_view",
         "full_history",
         "entries",
-        "derive_messages",
         "last_visible",
     ):
         median_ms, minimum_ms = timed(log, getter, reps)
@@ -149,7 +148,6 @@ PY
 | `provider_view` | 3,248 µs/read | 14,785 µs/read |
 | `full_history` | 3,245 µs/read | 14,528 µs/read |
 | `entries` | 4,626 µs/read | 19,932 µs/read |
-| `derive_messages` | 3,270 µs/read | 14,386 µs/read |
 | `last_visible()` | 14 µs/read | 14 µs/read |
 
 The current implementation was retained, so the D6 runtime delta is 0. The
@@ -193,7 +191,7 @@ objects.
 * `src/linch/session.py` exposes the `Session` wrappers and
   `last_provider_message()`.
 * `src/linch/session_log.py` implements `entries`, `full_history`,
-  `provider_view`, `derive_messages`, and `last_visible()`.
+  `provider_view`, and `last_visible()`.
 * `src/linch/loop/request.py` scans `provider_view` for skill reminders and
   copies it into `ProviderRequest.messages`.
 * `src/linch/loop/runner.py` copies `provider_view` for durable provider

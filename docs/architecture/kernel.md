@@ -26,7 +26,7 @@ later close can finish cleanup. The undo may be a coroutine. Every registration
 in the system returns one:
 
 ```python
-disposer = registry.add(tool)       # returns a Disposable
+disposer = registry.register(tool)  # returns a Disposable
 ...
 await disposer.dispose()            # removes exactly that tool
 await disposer.dispose()            # single-use: a no-op

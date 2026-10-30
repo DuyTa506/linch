@@ -97,9 +97,9 @@ def test_retrieve_only_agent_has_generic_parallel_hint():
 
 
 def test_default_swe_toolset_protocol_parity():
-    from linch.tools.registry import tools_from_defaults
+    from linch.tools.registry import workspace_tools
 
-    agent = _make_agent(tools=tools_from_defaults())
+    agent = _make_agent(tools=workspace_tools())
     combined = "\n".join(_block_texts(agent))
     assert "Read a file before you Edit it" in combined
     assert "Bash runs in the user" in combined

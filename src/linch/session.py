@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import warnings
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
@@ -557,48 +556,6 @@ async def _aclose_generator(gen: Any) -> None:
     if aclose is None:
         return
     await aclose()
-
-
-# ``provider_view=`` and ``full_history=`` were public Session constructor
-# keywords before SessionLog became canonical. Keep a keyword-only compatibility
-# seam without restoring either value as mutable Session state. The generated
-# dataclass initializer remains the implementation for the standard path.
-_SESSION_INIT = Session.__init__
-_LEGACY_VIEW_MISSING = object()
-
-
-def _session_init_compat(
-    self: Session,
-    *args: Any,
-    provider_view: Sequence[Message] | object = _LEGACY_VIEW_MISSING,
-    full_history: Sequence[Message] | object = _LEGACY_VIEW_MISSING,
-    **kwargs: Any,
-) -> None:
-    legacy_supplied = (
-        provider_view is not _LEGACY_VIEW_MISSING or full_history is not _LEGACY_VIEW_MISSING
-    )
-    if legacy_supplied:
-        if len(args) >= 6 or "session_log" in kwargs:
-            raise TypeError(
-                "Session() cannot combine legacy provider_view/full_history with session_log"
-            )
-        warnings.warn(
-            "Session(provider_view=..., full_history=...) is deprecated; "
-            "pass session_log=SessionLog.seed(historical=..., visible=...) instead",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        historical = (
-            () if full_history is _LEGACY_VIEW_MISSING else cast(Sequence[Message], full_history)
-        )
-        visible = (
-            () if provider_view is _LEGACY_VIEW_MISSING else cast(Sequence[Message], provider_view)
-        )
-        kwargs["session_log"] = SessionLog.seed(historical=historical, visible=visible)
-    _SESSION_INIT(self, *args, **kwargs)
-
-
-Session.__init__ = _session_init_compat  # type: ignore[method-assign]
 
 
 def _consume_task_exception(task: asyncio.Task[None]) -> None:

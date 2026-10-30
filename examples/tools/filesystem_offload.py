@@ -44,7 +44,7 @@ from linch.filesystem import (
 from linch.filesystem.offload import maybe_offload
 from linch.sessions import InMemorySessionStore
 from linch.tools.base import ToolContext, ToolResult
-from linch.tools.registry import tools_from_defaults
+from linch.tools.registry import workspace_tools
 
 # ── A tool that returns a large result (e.g. a verbose web/RAG search) ────────
 
@@ -142,7 +142,7 @@ async def demo_live() -> None:
                 "to inspect the parts you need, then answer concisely."
             ),
         ),
-        tools=tools_from_defaults(extra=[BigSearchTool()]),
+        tools=workspace_tools(extra=[BigSearchTool()]),
         # Offload anything over ~200 tokens to real files under .linch/offload.
         filesystem=DiskFileBackend(root=".linch/offload"),
         result_offload=OffloadConfig(threshold_tokens=200, preview_lines=5),

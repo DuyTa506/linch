@@ -212,8 +212,8 @@ async def run_calls_with_permissions(
 async def test_read_tools_run_in_parallel() -> None:
     recorder = Recorder()
     registry = ToolRegistry()
-    registry.add(TimedTool("ReadA", recorder, scope="read", parallel=True))
-    registry.add(TimedTool("ReadB", recorder, scope="read", parallel=True))
+    registry.register(TimedTool("ReadA", recorder, scope="read", parallel=True))
+    registry.register(TimedTool("ReadB", recorder, scope="read", parallel=True))
 
     await run_calls(
         registry,
@@ -231,8 +231,8 @@ async def test_read_tools_run_in_parallel() -> None:
 async def test_write_tools_serialize_even_when_marked_parallel() -> None:
     recorder = Recorder()
     registry = ToolRegistry()
-    registry.add(TimedTool("WriteA", recorder, scope="write", parallel=True))
-    registry.add(TimedTool("WriteB", recorder, scope="write", parallel=True))
+    registry.register(TimedTool("WriteA", recorder, scope="write", parallel=True))
+    registry.register(TimedTool("WriteB", recorder, scope="write", parallel=True))
 
     await run_calls(
         registry,
@@ -249,8 +249,8 @@ async def test_write_tools_serialize_even_when_marked_parallel() -> None:
 async def test_read_write_same_resource_do_not_overlap() -> None:
     recorder = Recorder()
     registry = ToolRegistry()
-    registry.add(TimedTool("ReadA", recorder, scope="read", parallel=True))
-    registry.add(TimedTool("WriteA", recorder, scope="write", parallel=True))
+    registry.register(TimedTool("ReadA", recorder, scope="read", parallel=True))
+    registry.register(TimedTool("WriteA", recorder, scope="write", parallel=True))
 
     await run_calls(
         registry,
@@ -268,7 +268,7 @@ async def test_max_tool_concurrency_is_enforced() -> None:
     recorder = Recorder()
     registry = ToolRegistry()
     for name in ("ReadA", "ReadB", "ReadC"):
-        registry.add(TimedTool(name, recorder, scope="read", parallel=True))
+        registry.register(TimedTool(name, recorder, scope="read", parallel=True))
 
     await run_calls(
         registry,
@@ -294,8 +294,8 @@ def test_agent_accepts_max_tool_concurrency_option() -> None:
 async def test_results_keep_original_tool_call_order() -> None:
     recorder = Recorder()
     registry = ToolRegistry()
-    registry.add(TimedTool("Slow", recorder, delay=0.03, output="slow"))
-    registry.add(TimedTool("Fast", recorder, delay=0.005, output="fast"))
+    registry.register(TimedTool("Slow", recorder, delay=0.03, output="slow"))
+    registry.register(TimedTool("Fast", recorder, delay=0.005, output="fast"))
 
     events = await run_calls(
         registry,
@@ -313,7 +313,7 @@ async def test_results_keep_original_tool_call_order() -> None:
 @pytest.mark.asyncio
 async def test_tool_call_end_preserves_rich_tool_result() -> None:
     registry = ToolRegistry()
-    registry.add(RichTool())
+    registry.register(RichTool())
 
     events = await run_calls(registry, [ToolUseBlock(id="rich", name="Rich", input={})])
 
@@ -331,9 +331,9 @@ async def test_tool_call_end_preserves_rich_tool_result() -> None:
 @pytest.mark.asyncio
 async def test_immediate_validation_and_permission_errors_have_tool_result() -> None:
     registry = ToolRegistry()
-    registry.add(InvalidTool())
+    registry.register(InvalidTool())
     recorder = Recorder()
-    registry.add(TimedTool("Denied", recorder, scope="write", parallel=False))
+    registry.register(TimedTool("Denied", recorder, scope="write", parallel=False))
 
     validation_events = await run_calls(
         registry,
@@ -396,8 +396,8 @@ async def test_fast_first_tool_end_emits_before_slow_second_completes() -> None:
             return ToolResult(content=self.name)
 
     registry = ToolRegistry()
-    registry.add(_Gated("Fast", wait=False))
-    registry.add(_Gated("Slow", wait=True))
+    registry.register(_Gated("Fast", wait=False))
+    registry.register(_Gated("Slow", wait=True))
 
     iterator = execute_tool_calls(
         [

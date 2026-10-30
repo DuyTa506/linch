@@ -195,15 +195,7 @@ class CompactionStrategy(Protocol):
     id: str
 
     async def compact(self, ctx: CompactionContext, provider: Any) -> list[Message]:
-        """Compact *ctx.messages* using *provider* (a :class:`~linch.providers.BaseProvider`).
-
-        .. note::
-            The parameter was historically named ``openai`` in the 0.1.x
-            series.  :class:`DefaultCompaction` and ``_run_compaction_impl``
-            pass ``agent.provider`` now, but for backward compatibility
-            ``agent.openai`` (an alias for ``agent.provider``) still works if
-            you reference it by keyword.
-        """
+        """Compact *ctx.messages* using *provider* (a :class:`~linch.providers.BaseProvider`)."""
         ...
 
 

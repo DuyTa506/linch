@@ -95,7 +95,7 @@ async def test_abort_during_foreground_tool_emits_aborted_result() -> None:
             return ToolResult(content="never")
 
     tools = ToolRegistry()
-    tools.add(HangUntilAbort())
+    tools.register(HangUntilAbort())
     provider = ScriptedProvider(
         [ToolUseTurn(tool_name="hang", tool_input={}), TextTurn(text="unreached")]
     )

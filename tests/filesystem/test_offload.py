@@ -8,7 +8,7 @@ from linch.filesystem import OffloadConfig, StateFileBackend
 from linch.filesystem.offload import maybe_offload
 from linch.sessions import InMemorySessionStore
 from linch.tools.base import ToolContext, ToolResult
-from linch.tools.registry import tools_from_defaults
+from linch.tools.registry import workspace_tools
 from linch.types import Usage
 
 BIG = "\n".join(f"result line {i} with some filler text" for i in range(200))
@@ -119,7 +119,7 @@ async def test_offload_end_to_end() -> None:
         session_store=InMemorySessionStore(),
         permissions={"mode": "skip-dangerous"},
         cwd=".",
-        tools=tools_from_defaults(extra=[BigTool()]),
+        tools=workspace_tools(extra=[BigTool()]),
         features=FeatureFlags(filesystem=True),
         result_offload=OffloadConfig(threshold_tokens=10, preview_lines=5),
     )
@@ -158,7 +158,7 @@ async def test_no_offload_when_disabled() -> None:
         session_store=InMemorySessionStore(),
         permissions={"mode": "skip-dangerous"},
         cwd=".",
-        tools=tools_from_defaults(extra=[BigTool()]),
+        tools=workspace_tools(extra=[BigTool()]),
         result_offload=None,  # explicitly disable
     )
     session = await agent.session()

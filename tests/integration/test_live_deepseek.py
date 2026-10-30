@@ -149,7 +149,7 @@ async def test_deepseek_background_worker_notification():
     from linch.config import FeatureFlags, SystemPromptConfig
     from linch.sessions import InMemorySessionStore
     from linch.tools.base import ToolContext
-    from linch.tools.registry import default_tools
+    from linch.tools.registry import workspace_tools
 
     agent = Agent(
         model=MODEL,
@@ -158,7 +158,7 @@ async def test_deepseek_background_worker_notification():
             replace_defaults=True,
             append="You are a concise assistant.",
         ),
-        tools=default_tools(),
+        tools=workspace_tools(),
         features=FeatureFlags(skills=False, subagents=True, mcp=False),
         session_store=InMemorySessionStore(),
         permissions={"mode": "skip-dangerous"},
@@ -219,7 +219,7 @@ async def test_deepseek_fork_continue_worker():
     from linch import Agent
     from linch.config import FeatureFlags, SystemPromptConfig
     from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import default_tools
+    from linch.tools.registry import workspace_tools
 
     agent = Agent(
         model=MODEL,
@@ -235,7 +235,7 @@ async def test_deepseek_fork_continue_worker():
                 "Always echo the worker's reply verbatim."
             ),
         ),
-        tools=default_tools(),
+        tools=workspace_tools(),
         features=FeatureFlags(skills=False, subagents=True, mcp=False),
         session_store=InMemorySessionStore(),
         permissions={"mode": "skip-dangerous"},

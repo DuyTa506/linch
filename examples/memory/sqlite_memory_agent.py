@@ -138,7 +138,7 @@ async def maybe_live_agent() -> None:
 
     store = SqliteMemoryStore(DB_PATH)
     registry = ToolRegistry()
-    registry.add(MemorySearchTool(namespace=NS))
+    registry.register(MemorySearchTool(namespace=NS))
 
     agent = Agent(
         model="gpt-5-nano-2025-08-07",

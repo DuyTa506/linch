@@ -106,7 +106,7 @@ async def main() -> None:
     from linch import Agent
     from linch.config import FeatureFlags
     from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import tools_from_defaults
+    from linch.tools.registry import workspace_tools
 
     metrics = MetricsObserver()
     logger = LoggingObserver()
@@ -114,7 +114,7 @@ async def main() -> None:
     agent = Agent(
         model="gpt-5-nano-2025-08-07",
         openai_api_key=api_key,
-        tools=tools_from_defaults(),
+        tools=workspace_tools(),
         permissions={"mode": "skip-dangerous"},
         session_store=InMemorySessionStore(),
         features=FeatureFlags(skills=False, subagents=False, mcp=False),

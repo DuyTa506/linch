@@ -75,26 +75,6 @@ class ToolContext:
     reaching back through the Agent or global state. ``None`` on the legacy
     default path. Kept last for positional-constructor compatibility."""
 
-    @property
-    def sessionId(self) -> str:
-        return self.session_id
-
-    @property
-    def runId(self) -> str:
-        return self.run_id
-
-    @property
-    def sessionStore(self) -> Any:
-        return self.session_store
-
-    @property
-    def fileReadTracker(self) -> Any:
-        return self.file_read_tracker
-
-    @property
-    def idempotencyKey(self) -> str:
-        return self.idempotency_key
-
     def report_progress(self, message: str, data: dict[str, Any] | None = None) -> None:
         """Report transient execution progress to event-stream observers.
 
@@ -113,10 +93,6 @@ class ToolContext:
             sink(message, data)
         except Exception:
             return
-
-    @property
-    def reportProgress(self) -> Callable[[str, dict[str, Any] | None], None]:
-        return self.report_progress
 
 
 @dataclass(slots=True)

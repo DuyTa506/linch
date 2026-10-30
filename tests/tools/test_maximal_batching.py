@@ -189,7 +189,7 @@ def _agent(registry: ToolRegistry, strategy: str) -> SimpleNamespace:
 
 async def _start_order(strategy: str) -> tuple[list[str], list[str]]:
     registry = ToolRegistry()
-    registry.add(_Conflicting("Conf"))
+    registry.register(_Conflicting("Conf"))
     blocks = [
         ToolUseBlock(id="t0", name="Conf", input={"res": "A"}),
         ToolUseBlock(id="t1", name="Conf", input={"res": "A"}),
@@ -234,8 +234,8 @@ def test_agent_defaults_to_greedy() -> None:
     assert agent.tool_batching_strategy == "greedy"
 
 
-def test_agent_accepts_camelcase_alias() -> None:
-    agent = Agent(model="dummy", provider=DummyProvider(), toolBatchingStrategy="maximal")
+def test_agent_accepts_snake_case_strategy() -> None:
+    agent = Agent(model="dummy", provider=DummyProvider(), tool_batching_strategy="maximal")
     assert agent.tool_batching_strategy == "maximal"
 
 
