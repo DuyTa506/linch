@@ -1250,6 +1250,26 @@ class InMemoryRunStore:
         rid = id or str(uuid4())
         existing = self._runs.get(rid)
         if existing is not None:
+            if existing.status != "pending":
+                raise ValueError(f"run {rid} already exists")
+            self._check_lease(rid)
+            if existing.session_id != session_id:
+                raise ValueError(f"run {rid} belongs to session {existing.session_id}")
+            incoming_meta = _safe_meta(meta)
+            stored_contract = existing.meta.get(RUN_CONTRACT_META_KEY)
+            requested_contract = incoming_meta.get(RUN_CONTRACT_META_KEY)
+            if stored_contract is not None and requested_contract is not None:
+                ensure_run_contract_compatible(
+                    run_contract_from_meta(existing.meta),
+                    run_contract_from_meta(incoming_meta),
+                )
+            merged_meta = _safe_meta(existing.meta)
+            merged_meta.update(incoming_meta)
+            if stored_contract is not None:
+                merged_meta[RUN_CONTRACT_META_KEY] = stored_contract
+            existing.meta = merged_meta
+            existing.status = "running"
+            existing.updated_at = now_iso()
             return _copy_record(existing)
         ts = now_iso()
         record = RunRecord(

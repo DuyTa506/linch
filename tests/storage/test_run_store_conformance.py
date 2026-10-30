@@ -8,6 +8,7 @@ repository's normal test environment does not install ``asyncpg``.  Set
 from __future__ import annotations
 
 import copy
+import time
 from dataclasses import dataclass
 from uuid import uuid4
 
@@ -161,7 +162,9 @@ async def test_run_store_concurrent_claim_has_one_winner(store_case: _StoreCase)
     assert len(conflicts) == 1
 
 
-async def test_run_store_concurrent_create_same_id_is_idempotent(store_case: _StoreCase) -> None:
+async def test_run_store_concurrent_create_same_id_rejects_existing_id(
+    store_case: _StoreCase,
+) -> None:
     import asyncio
 
     run_id = f"conformance-create-{uuid4()}"
@@ -170,6 +173,110 @@ async def test_run_store_concurrent_create_same_id_is_idempotent(store_case: _St
         store_case.peer.create_run("session-1", id=run_id, meta={"owner": "second"}),
         return_exceptions=True,
     )
-    errors = [result for result in results if isinstance(result, Exception)]
-    assert errors == [], errors
-    assert [result.id for result in results] == [run_id, run_id]
+    errors = [result for result in results if isinstance(result, ValueError)]
+    successes = [result for result in results if not isinstance(result, Exception)]
+    assert len(errors) == 1
+    assert len(successes) == 1
+    assert successes[0].id == run_id
+
+
+async def _seed_pending(
+    store_case: _StoreCase,
+    run_id: str,
+    session_id: str,
+    meta: dict[str, object],
+) -> None:
+    store = store_case.store
+    if isinstance(store, InMemoryRunStore):
+        await store.create_run(session_id, id=run_id, meta=meta)
+        store._runs[run_id].status = "pending"  # type: ignore[assignment]
+        return
+    assert isinstance(store, PostgresRunStore)
+    pool = await store._ensure()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            created = await store.create_pending_run(conn, session_id, id=run_id, meta=meta)
+            assert created is not None
+
+
+async def test_pending_adoption_merges_metadata_and_retains_contract(
+    store_case: _StoreCase,
+) -> None:
+    from linch.run_store import build_run_contract, run_meta_with_contract
+
+    run_id = f"conformance-pending-contract-{uuid4()}"
+    contract = build_run_contract(primary_model="provider/model")
+    await _seed_pending(
+        store_case,
+        run_id,
+        "session-1",
+        run_meta_with_contract(contract, {"created": "before"}),
+    )
+    adopted = await store_case.store.create_run(
+        "session-1",
+        id=run_id,
+        meta=run_meta_with_contract(contract, {"created": "after", "worker": "one"}),
+    )
+    assert adopted.status == "running"
+    assert adopted.meta["created"] == "after"
+    assert adopted.meta["worker"] == "one"
+    assert adopted.meta["run_contract"] == run_meta_with_contract(contract)["run_contract"]
+
+
+async def test_pending_adoption_rejects_different_session(store_case: _StoreCase) -> None:
+    run_id = f"conformance-pending-owner-{uuid4()}"
+    await _seed_pending(store_case, run_id, "session-1", {})
+    with pytest.raises(ValueError, match="belongs to session session-1"):
+        await store_case.store.create_run("session-2", id=run_id)
+
+
+async def test_pending_adoption_rejects_incompatible_contract_without_mutation(
+    store_case: _StoreCase,
+) -> None:
+    from linch.run_store import (
+        RunContractMismatchError,
+        build_run_contract,
+        run_meta_with_contract,
+    )
+
+    run_id = f"conformance-pending-mismatch-{uuid4()}"
+    stored_contract = build_run_contract(primary_model="provider/stored")
+    requested_contract = build_run_contract(primary_model="provider/requested")
+    stored_meta = run_meta_with_contract(stored_contract, {"source": "queue"})
+    await _seed_pending(store_case, run_id, "session-1", stored_meta)
+    with pytest.raises(RunContractMismatchError):
+        await store_case.store.create_run(
+            "session-1",
+            id=run_id,
+            meta=run_meta_with_contract(requested_contract, {"worker": "one"}),
+        )
+    loaded = await store_case.store.load_run(run_id)
+    assert loaded is not None
+    assert loaded.status == "pending"
+    assert loaded.meta == stored_meta
+
+
+async def test_pending_adoption_is_fenced_after_peer_claims_newer_epoch(
+    store_case: _StoreCase,
+) -> None:
+    from linch.run_store import LeaseLostError
+
+    run_id = f"conformance-pending-fence-{uuid4()}"
+    await _seed_pending(store_case, run_id, "session-1", {})
+    store = store_case.store
+    peer = store_case.peer
+    await store.claim(run_id, "owner-a", 30.0)  # type: ignore[attr-defined]
+    if isinstance(store, InMemoryRunStore):
+        owner, _, epoch = store._lease_state[run_id]
+        assert owner == "owner-a"
+        store._lease_state[run_id] = (owner, time.time() - 1, epoch)
+    else:
+        assert isinstance(store, PostgresRunStore)
+        pool = await store._ensure()
+        await pool.execute("UPDATE runs SET lease_expires_at = 0 WHERE id = $1", run_id)
+    await peer.claim(run_id, "owner-b", 30.0)  # type: ignore[attr-defined]
+    with pytest.raises(LeaseLostError):
+        await store.create_run("session-1", id=run_id, meta={"worker": "stale"})
+    loaded = await store.load_run(run_id)
+    assert loaded is not None
+    assert loaded.status == "pending"

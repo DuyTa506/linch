@@ -100,12 +100,42 @@ async def test_postgres_init_and_create_run_race() -> None:
             *(
                 store.create_run("session-race", id=run_id, meta={"winner": index})
                 for index, store in enumerate(stores)
-            )
+            ),
+            return_exceptions=True,
         )
-        assert {row.id for row in rows} == {run_id}
-        assert {row.session_id for row in rows} == {"session-race"}
+        assert sum(not isinstance(row, ValueError) for row in rows) == 1
+        assert sum(isinstance(row, ValueError) for row in rows) == len(rows) - 1
     finally:
         await asyncio.gather(*(store.close() for store in stores))
+
+
+@needs_postgres
+async def test_postgres_create_pending_run_is_transactional_and_session_scoped() -> None:
+    from linch.run_stores.postgres import PostgresRunStore
+
+    dsn = os.environ["AGENT_KIT_TEST_PG_DSN"]
+    store = PostgresRunStore(dsn)
+    run_id = f"pg-pending-{uuid4()}"
+    try:
+        pool = await store._ensure()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                created = await store.create_pending_run(
+                    conn,
+                    "session-pending",
+                    id=run_id,
+                    meta={"traceparent": "00-abc-def-01"},
+                )
+                assert created is not None
+                assert created.status == "pending"
+                assert await store.create_pending_run(conn, "session-pending", id=run_id) is None
+                with pytest.raises(ValueError, match="belongs to session session-pending"):
+                    await store.create_pending_run(conn, "other-session", id=run_id)
+        loaded = await store.load_run(run_id)
+        assert loaded is not None
+        assert loaded.status == "pending"
+    finally:
+        await store.close()
 
 
 @needs_postgres
