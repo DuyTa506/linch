@@ -17,6 +17,7 @@ from time import monotonic
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast, get_args
 from uuid import uuid4
 
+from ._json import walk_json
 from .abort import AbortContext
 from .errors import AbortError, ProviderError
 from .types import Message, ProviderRequest, StopReason, SystemBlock, Usage, message_to_dict
@@ -256,30 +257,23 @@ def receipt_to_dict(receipt: ModelCallReceipt) -> dict[str, Any]:
 
 
 def _copy_json_object(raw: Any) -> dict[str, Any]:
-    def validate(value: Any, active: set[int], depth: int) -> None:
-        if value is None or type(value) in (str, bool, int):
-            return
-        if type(value) is float and math.isfinite(value):
-            return
-        if not isinstance(value, list | dict) or depth > 64 or id(value) in active:
-            raise _invalid("journal record must be bounded, finite JSON without cycles")
-        active.add(id(value))
-        try:
-            if isinstance(value, dict):
-                if any(not isinstance(key, str) for key in value):
-                    raise _invalid("journal object keys must be strings")
-                children = value.values()
-            else:
-                children = value
-            for child in children:
-                validate(child, active, depth + 1)
-        finally:
-            active.remove(id(value))
-
     if not isinstance(raw, dict):
         raise _invalid("journal record must be an object")
-    validate(raw, set(), 0)
+    walk_json(raw, check_node=_check_journal_json_node, copy_containers=False)
     return deepcopy(raw)
+
+
+def _check_journal_json_node(value: Any, path: str, active: set[int], depth: int) -> int | None:
+    if value is None or type(value) in (str, bool, int):
+        return None
+    if type(value) is float and math.isfinite(value):
+        return None
+    if not isinstance(value, list | dict) or depth > 64 or id(value) in active:
+        raise _invalid("journal record must be bounded, finite JSON without cycles")
+    # Check every key before visiting children, preserving journal error order.
+    if isinstance(value, dict) and any(not isinstance(key, str) for key in value):
+        raise _invalid("journal object keys must be strings")
+    return depth + 1
 
 
 def _copy_model_call_record(
