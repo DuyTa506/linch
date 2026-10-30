@@ -31,6 +31,22 @@ def _set_event() -> asyncio.Event:
     return event
 
 
+class _BackgroundTasks(list[Any]):
+    """Keep the scheduler's append API while retaining only outstanding tasks."""
+
+    def append(self, task: Any) -> None:
+        super().append(task)
+        if isinstance(task, asyncio.Task):
+            task.add_done_callback(self._discard_done)
+
+    def _discard_done(self, task: asyncio.Task[Any]) -> None:
+        try:
+            self.remove(task)
+        except ValueError:
+            # Teardown or an explicit owner may already have cleared the list.
+            pass
+
+
 @dataclass(slots=True)
 class RunOptions:
     signal: Any = None
@@ -166,9 +182,9 @@ class Session:
     """SubagentEvents accumulated by in-flight child sessions; available to host UIs."""
     pending_notifications: list[Message] = field(default_factory=list)
     """In-process background-worker <task-notification> messages, drained next turn."""
-    background_tasks: list[Any] = field(default_factory=list)
+    background_tasks: list[Any] = field(default_factory=_BackgroundTasks)
     """Detached asyncio.Tasks for backgrounded tool calls (run_in_background hint).
-    Cancelled on abort so they never write into a dead session."""
+    Removed on completion and cancelled/drained on abort or close."""
     mailbox_address: str | None = None
     """This session's inbox address on ``agent.mailbox``; drained into provider_view
     each turn when set. Workers default to their display_name; the root is set by
