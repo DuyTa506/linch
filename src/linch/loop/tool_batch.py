@@ -62,7 +62,7 @@ class ToolBatchContext:
     guard_state: Any
     guard_evaluation_ids: set[str] | None
     guard_evaluation_facts: dict[str, _LoopGuardEvaluationEvent] | None
-    record_guard_evaluation: Callable[[], None]
+    record_guard_evaluation: Callable[[], None] | None
     save_checkpoint: Callable[..., Awaitable[None]]
     flush_events: Callable[[], Awaitable[None]]
     persist_event: Callable[[Event], Awaitable[None]]
@@ -206,40 +206,46 @@ async def run_tool_batch(ctx: ToolBatchContext) -> AsyncIterator[Event]:
 
     guard_decision = None
     if _loop_guard_is_active(ctx.guard) and ctx.guard_state is not None:
-        if ctx.guard_evaluation_ids is None or ctx.guard_evaluation_facts is None:
-            raise ConfigError("active loop-guard runtime lacks fact containers")
+        durable_guard_facts = (
+            ctx.guard_evaluation_ids is not None and ctx.guard_evaluation_facts is not None
+        )
         before_counts: dict[str, int] = {}
-        if getattr(ctx.guard, "max_identical_tool_calls", 0) > 0:
+        if durable_guard_facts and getattr(ctx.guard, "max_identical_tool_calls", 0) > 0:
             for block in tool_blocks:
                 signature = permission_decision_key(block.name, block.input)
                 before_counts.setdefault(signature, ctx.guard_state.call_counts.get(signature, 0))
         before_failures = ctx.guard_state.consecutive_failures
         guard_decision = evaluate_loop_guard(ctx.guard, ctx.guard_state, tool_blocks, result_blocks)
-        count_deltas = {
-            signature: ctx.guard_state.call_counts.get(signature, 0) - count
-            for signature, count in before_counts.items()
-            if ctx.guard_state.call_counts.get(signature, 0) > count
-        }
-        batch_id = _loop_guard_batch_id(ctx.turn_index, tool_blocks)
-        guard_fact = _LoopGuardEvaluationEvent(
-            batch_id=batch_id,
-            turn_index=ctx.turn_index,
-            count_deltas=count_deltas,
-            count_before={signature: before_counts[signature] for signature in count_deltas},
-            failures_before=before_failures,
-            consecutive_failures=ctx.guard_state.consecutive_failures,
-            action=guard_decision.action,
-            reason=guard_decision.reason,
-            detail=guard_decision.detail,
-        )
-        prior_fact = ctx.guard_evaluation_facts.get(batch_id)
-        if prior_fact is not None and prior_fact != guard_fact:
-            raise ConfigError("loop-guard journal fact differs from live evaluation")
-        if batch_id not in ctx.guard_evaluation_ids:
-            await ctx.persist_event(guard_fact)
-            ctx.guard_evaluation_ids.add(batch_id)
-            ctx.guard_evaluation_facts[batch_id] = guard_fact
-        ctx.record_guard_evaluation()
+        if durable_guard_facts:
+            assert ctx.guard_evaluation_ids is not None
+            assert ctx.guard_evaluation_facts is not None
+            count_deltas = {
+                signature: ctx.guard_state.call_counts.get(signature, 0) - count
+                for signature, count in before_counts.items()
+                if ctx.guard_state.call_counts.get(signature, 0) > count
+            }
+            batch_id = _loop_guard_batch_id(ctx.turn_index, tool_blocks)
+            guard_fact = _LoopGuardEvaluationEvent(
+                batch_id=batch_id,
+                turn_index=ctx.turn_index,
+                count_deltas=count_deltas,
+                count_before={signature: before_counts[signature] for signature in count_deltas},
+                failures_before=before_failures,
+                consecutive_failures=ctx.guard_state.consecutive_failures,
+                action=guard_decision.action,
+                reason=guard_decision.reason,
+                detail=guard_decision.detail,
+            )
+            prior_fact = ctx.guard_evaluation_facts.get(batch_id)
+            if prior_fact is not None and prior_fact != guard_fact:
+                raise ConfigError("loop-guard journal fact differs from live evaluation")
+            if batch_id not in ctx.guard_evaluation_ids:
+                await ctx.persist_event(guard_fact)
+                ctx.guard_evaluation_ids.add(batch_id)
+                ctx.guard_evaluation_facts[batch_id] = guard_fact
+            if ctx.record_guard_evaluation is None:
+                raise ConfigError("durable loop-guard runtime lacks evaluation recorder")
+            ctx.record_guard_evaluation()
 
     if guard_decision is not None and guard_decision.action != "continue":
         event = LoopGuardEvent(
