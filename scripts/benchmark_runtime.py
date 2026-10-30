@@ -6,6 +6,7 @@ import json
 import math
 import os
 import platform
+import re
 import shlex
 import statistics
 import subprocess
@@ -438,7 +439,30 @@ def scale_case_skip_reason(case: ScaleCase) -> str | None:
     return None
 
 
-async def _fresh_postgres_dsn(raw_dsn: str) -> tuple[str, Callable[[], Awaitable[None]]]:
+_SCALE_SCHEMA = re.compile(r"linch_scale_[0-9a-f]{32}\Z")
+
+
+async def _drop_postgres_schema(raw_dsn: str, schema: str) -> None:
+    """Drop exactly one validated scale schema using the unscoped DSN."""
+    import asyncpg
+
+    parts = urlsplit(raw_dsn)
+    base_query = [
+        (key, value)
+        for key, value in parse_qsl(parts.query, keep_blank_values=True)
+        if key != "search_path"
+    ]
+    base_dsn = urlunsplit(parts._replace(query=urlencode(base_query)))
+    connection = await asyncpg.connect(base_dsn)
+    try:
+        await connection.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+    finally:
+        await connection.close()
+
+
+async def _fresh_postgres_dsn(
+    raw_dsn: str,
+) -> tuple[str, Callable[[], Awaitable[None]], str]:
     """Create an isolated schema for one scale child and return its DSN."""
     import asyncpg
 
@@ -460,11 +484,7 @@ async def _fresh_postgres_dsn(raw_dsn: str) -> tuple[str, Callable[[], Awaitable
         # annotating it if best-effort cleanup also fails.
         if created:
             try:
-                cleanup_connection = await asyncpg.connect(base_dsn)
-                try:
-                    await cleanup_connection.execute(f'DROP SCHEMA "{schema}" CASCADE')
-                finally:
-                    await cleanup_connection.close()
+                await _drop_postgres_schema(base_dsn, schema)
             except BaseException as cleanup_exc:
                 exc.add_note(f"failed to clean up benchmark schema {schema}: {cleanup_exc!r}")
         raise
@@ -472,13 +492,9 @@ async def _fresh_postgres_dsn(raw_dsn: str) -> tuple[str, Callable[[], Awaitable
     scoped_dsn = urlunsplit(parts._replace(query=urlencode(query)))
 
     async def cleanup() -> None:
-        connection = await asyncpg.connect(base_dsn)
-        try:
-            await connection.execute(f'DROP SCHEMA "{schema}" CASCADE')
-        finally:
-            await connection.close()
+        await _drop_postgres_schema(base_dsn, schema)
 
-    return scoped_dsn, cleanup
+    return scoped_dsn, cleanup, schema
 
 
 async def _close_postgres_benchmark_resources(
@@ -507,6 +523,44 @@ async def _close_postgres_benchmark_resources(
             if first_error is None:
                 first_error = exc
     return first_error
+
+
+def _write_scale_schema_marker(progress_path: Path | None, case: ScaleCase, schema: str) -> None:
+    """Publish the validated schema ID before any child resource can block."""
+    if progress_path is None:
+        return
+    marker = {
+        "name": case.name,
+        "backend": case.backend,
+        "sessions": case.sessions,
+        "turns": case.turns,
+        "postgres_schema": schema,
+        "pid": os.getpid(),
+        "completed": 0,
+        "failed": 0,
+        "errors": [],
+        "observed_provider_turns": 0,
+        "observed_tool_calls": 0,
+        "timed_out": False,
+    }
+    temporary = progress_path.with_suffix(".schema.tmp")
+    temporary.write_text(json.dumps(marker, allow_nan=False))
+    temporary.replace(progress_path)
+
+
+async def _cleanup_scale_schema_from_progress(progress_path: Path) -> None:
+    """Best-effort parent cleanup for a child killed before its finally block."""
+    try:
+        payload = json.loads(progress_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return
+    schema = payload.get("postgres_schema")
+    if not isinstance(schema, str) or _SCALE_SCHEMA.fullmatch(schema) is None:
+        return
+    raw_dsn = os.environ.get("AGENT_KIT_TEST_PG_DSN")
+    if not raw_dsn:
+        return
+    await _drop_postgres_schema(raw_dsn, schema)
 
 
 class ScaleProvider:
@@ -729,10 +783,12 @@ class ScaleStoreMetrics:
                 if name == store
             )
             by_store[store] = {
-                "round_trips": statement_calls,
-                "application_statements": statement_calls
-                - transaction_commands
-                - pool_reset_commands,
+                # Resets are tracked separately because the supporting public
+                # method counter does not include Connection.reset()'s query.
+                # Keep the aggregate additive: application + transaction +
+                # reset == round_trips.
+                "round_trips": statement_calls + pool_reset_commands,
+                "application_statements": statement_calls - transaction_commands,
                 "transaction_commands": transaction_commands,
                 "pool_reset_commands": pool_reset_commands,
                 "pool_acquires": acquires,
@@ -751,13 +807,21 @@ class ScaleStoreMetrics:
                 "setup; transaction and pool-reset categories are broken out",
             }
         by_turn = []
-        for turn in sorted({turn for _store, turn in self.sql_round_trips}):
+        for turn in sorted(
+            {turn for _store, turn in self.sql_round_trips}
+            | {turn for _store, turn in self.pool_reset_commands}
+        ):
             statement_calls = sum(
                 count
                 for (_store, row_turn), count in self.sql_round_trips.items()
                 if row_turn == turn
             )
-            by_turn.append({"turn": turn, "round_trips": statement_calls})
+            reset_calls = sum(
+                count
+                for (_store, row_turn), count in self.pool_reset_commands.items()
+                if row_turn == turn
+            )
+            by_turn.append({"turn": turn, "round_trips": statement_calls + reset_calls})
         return {"by_store": by_store, "by_turn": by_turn}
 
 
@@ -1100,6 +1164,7 @@ async def run_scale_case(
     workdir.mkdir(parents=True, exist_ok=True)
     metrics = ScaleStoreMetrics()
     postgres_cleanup: Callable[[], Awaitable[None]] | None = None
+    postgres_schema: str | None = None
     session_pool: Any | None = None
     run_pool: Any | None = None
 
@@ -1122,7 +1187,10 @@ async def run_scale_case(
         from linch.sessions.postgres import PostgresSessionStore
 
         try:
-            dsn, postgres_cleanup = await _fresh_postgres_dsn(os.environ["AGENT_KIT_TEST_PG_DSN"])
+            dsn, postgres_cleanup, postgres_schema = await _fresh_postgres_dsn(
+                os.environ["AGENT_KIT_TEST_PG_DSN"]
+            )
+            _write_scale_schema_marker(progress_path, case, postgres_schema)
             session_pool = await asyncpg.create_pool(
                 dsn,
                 min_size=1,
@@ -1186,6 +1254,7 @@ async def run_scale_case(
         "observed_provider_turns": 0,
         "observed_tool_calls": 0,
         "timed_out": False,
+        "postgres_schema": postgres_schema,
     }
     latencies: list[float] = []
     started = time.perf_counter()
@@ -1332,6 +1401,8 @@ async def run_scale_subprocess(case: ScaleCase, *, timeout_s: float = 600) -> di
         ]
         started = time.perf_counter()
         timed_out = False
+        child_cleanup_needed = False
+        child_cleanup_error: BaseException | None = None
         # File-backed output and timer-driven, nonblocking poll avoid depending
         # on asyncio child-transport / cross-thread wakeups during termination.
         stdout_path, stderr_path = Path(raw) / "stdout", Path(raw) / "stderr"
@@ -1343,29 +1414,38 @@ async def run_scale_subprocess(case: ScaleCase, *, timeout_s: float = 600) -> di
                     remaining = deadline - time.perf_counter()
                     if remaining <= 0:
                         timed_out = True
+                        child_cleanup_needed = True
                         break
                     await asyncio.sleep(min(0.01, remaining))
+            except asyncio.CancelledError:
+                child_cleanup_needed = True
+                raise
             finally:
                 if process.poll() is None:
                     process.kill()
+                    child_cleanup_needed = True
                     # Bounded reap also runs when the parent task is cancelled.
                     process.wait(timeout=5)
+                if child_cleanup_needed:
+                    try:
+                        await asyncio.shield(_cleanup_scale_schema_from_progress(progress))
+                    except BaseException as exc:
+                        child_cleanup_error = exc
         stdout, stderr = stdout_path.read_bytes(), stderr_path.read_bytes()
         if not timed_out and process.returncode == 0:
             result = json.loads(stdout)
         else:
-            result = (
-                json.loads(progress.read_text())
-                if progress.exists()
-                else {
-                    **asdict(case),
-                    "completed": 0,
-                    "failed": 0,
-                    "errors": [],
-                    "observed_provider_turns": 0,
-                    "observed_tool_calls": 0,
-                }
-            )
+            result = {
+                **asdict(case),
+                "completed": 0,
+                "failed": 0,
+                "errors": [],
+                "observed_provider_turns": 0,
+                "observed_tool_calls": 0,
+                "timed_out": False,
+            }
+            if progress.exists():
+                result.update(json.loads(progress.read_text()))
             message = (
                 f"timeout after {timeout_s}s"
                 if timed_out
@@ -1373,6 +1453,12 @@ async def run_scale_subprocess(case: ScaleCase, *, timeout_s: float = 600) -> di
             )
             result.update(correct=False, timed_out=timed_out)
             result["errors"].append(message)
+        if child_cleanup_error is not None:
+            result["correct"] = False
+            result["errors"].append(
+                f"parent schema cleanup failed: {type(child_cleanup_error).__name__}: "
+                f"{child_cleanup_error}"
+            )
         result.update(
             child_command=command,
             child_wall_s=time.perf_counter() - started,

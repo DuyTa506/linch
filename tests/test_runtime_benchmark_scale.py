@@ -80,6 +80,20 @@ def test_scale_metrics_separates_payload_bytes_and_sql_round_trips():
     }
 
 
+def test_scale_metrics_counts_reset_calls_in_supporting_round_trips():
+    benchmark = _load_script()
+    metrics = benchmark.ScaleStoreMetrics()
+    metrics.sql_round_trips["run", 0] = 6
+    metrics.transaction_commands["run", 0] = 2
+    metrics.pool_reset_commands["run", 0] = 3
+
+    summary = metrics.round_trip_summary(turns=1)["by_store"]["run"]
+    assert summary["round_trips"] == 9
+    assert summary["application_statements"] == 4
+    assert summary["transaction_commands"] == 2
+    assert summary["pool_reset_commands"] == 3
+
+
 @pytest.mark.asyncio
 async def test_postgres_protocol_instrumentation_distinguishes_cold_cache_and_boundaries(pg_dsn):
     benchmark = _load_script()
@@ -301,6 +315,39 @@ async def test_scale_subprocess_hard_deadline_reports_observed_work():
     assert result["correct"] is False
     assert result["completed"] == 0
     assert "timeout" in result["errors"][0].lower()
+
+
+@pytest.mark.asyncio
+async def test_postgres_timeout_drops_child_schema(pg_dsn):
+    benchmark = _load_script()
+    import asyncpg
+
+    async def scale_schemas(connection):
+        return {
+            row["nspname"]
+            for row in await connection.fetch(
+                "SELECT nspname FROM pg_namespace WHERE nspname LIKE 'linch_scale_%'"
+            )
+        }
+
+    connection = await asyncpg.connect(pg_dsn)
+    try:
+        before = await scale_schemas(connection)
+    finally:
+        await connection.close()
+
+    result = await benchmark.run_scale_subprocess(
+        benchmark.ScaleCase("timeout_postgres", "postgres", sessions=1, turns=50),
+        timeout_s=0.5,
+    )
+    assert result["timed_out"] is True
+
+    connection = await asyncpg.connect(pg_dsn)
+    try:
+        after = await scale_schemas(connection)
+    finally:
+        await connection.close()
+    assert after == before
 
 
 @pytest.mark.asyncio
