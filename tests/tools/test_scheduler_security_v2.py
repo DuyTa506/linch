@@ -80,6 +80,11 @@ def _session(**overrides: Any) -> SimpleNamespace:
         "pending_notifications": [],
         "pending_child_events": [],
     }
+
+    async def notify(message: Any, **kwargs: Any) -> None:
+        values["pending_notifications"].append(message)
+
+    values["notify"] = notify
     values.update(overrides)
     return SimpleNamespace(**values)
 
@@ -539,3 +544,18 @@ async def test_background_audit_failure_logs_origin_and_worker(caplog: Any) -> N
     assert "origin_run_id=run-origin" in record.message
     assert "worker_id=bgtool_" in record.message
     assert record.exc_info is not None
+
+
+def test_legacy_parallel_safe_does_not_authorize_parallel_execution() -> None:
+    from linch.scheduler import _tool_parallel
+
+    tool = SimpleNamespace(scope="read", parallel_safe=True)
+    call = ResolvedCall(
+        id="legacy-call",
+        block=ToolUseBlock(id="legacy-call", name="LegacyRead", input={}),
+        input={},
+        tool=tool,
+        summary="legacy read",
+        is_immediate_error=False,
+    )
+    assert not _tool_parallel(call)

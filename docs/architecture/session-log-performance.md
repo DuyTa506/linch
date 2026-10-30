@@ -229,7 +229,7 @@ Tests that exercise projection readers are in
 `tests/storage/test_provider_snapshot.py`,
 `tests/storage/test_serialization_versioning.py`,
 `tests/storage/test_session_fork.py`, `tests/storage/test_tiered_memory.py`,
-`tests/storage/test_tool_surface_codec.py`, `tests/test_compaction_accounting.py`,
+`tests/test_compaction_accounting.py`,
 `tests/test_hooks.py`, `tests/test_session_log.py`, and
 `tests/tools/test_subagent_tool.py`, `tests/test_idle_sessions.py`, and
 `tests/tools/test_subagent_parallel.py`. The session-log tests deliberately mutate

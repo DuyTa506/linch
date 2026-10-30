@@ -137,8 +137,6 @@ class PostgresSessionStore:
         max_size: Maximum pool connections.
     """
 
-    runtime_control_block_codec_version = 1
-
     def __init__(
         self,
         dsn: str,

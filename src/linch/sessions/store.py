@@ -44,20 +44,15 @@ class ProviderViewSnapshot:
 
 
 def snapshot_to_dict(snapshot: ProviderViewSnapshot) -> dict[str, Any]:
-    from linch.tool_surface import _project_messages_for_provider
-
-    provider_view = _project_messages_for_provider(snapshot.provider_view)
     return {
         **({"projection_id": snapshot.projection_id} if snapshot.projection_id is not None else {}),
         "schema_version": SNAPSHOT_SCHEMA_VERSION,
         "covers_seq": snapshot.covers_seq,
-        "provider_view": [message_to_dict(message) for message in provider_view],
+        "provider_view": [message_to_dict(message) for message in snapshot.provider_view],
     }
 
 
 def snapshot_from_dict(raw: dict[str, Any]) -> ProviderViewSnapshot:
-    from linch.tool_surface import _project_messages_for_provider
-
     # Version-tolerant: unknown future keys are ignored, missing keys default.
     projection_id = raw.get("projection_id")
     if projection_id is not None and (
@@ -66,9 +61,7 @@ def snapshot_from_dict(raw: dict[str, Any]) -> ProviderViewSnapshot:
         raise ValueError("invalid provider snapshot projection identity")
     return ProviderViewSnapshot(
         projection_id=projection_id,
-        provider_view=_project_messages_for_provider(
-            message_from_dict(message) for message in raw.get("provider_view", [])
-        ),
+        provider_view=[message_from_dict(message) for message in raw.get("provider_view", [])],
         covers_seq=int(raw.get("covers_seq", 0)),
     )
 

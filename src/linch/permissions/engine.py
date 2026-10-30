@@ -24,10 +24,6 @@ _ToolDecision = Literal["allow", "deny", "ask"]
 class PermissionDecision:
     decision: _ToolDecision
     reason: str | None = None
-    # Kept only so v1 checkpoints decode. Linch 2 never executes or replays a
-    # decision carrying updated input; mutation belongs in PreToolUse, before
-    # the final permission evaluation.
-    updated_input: dict[str, Any] | None = None
     # Set by a PreToolUse hook that short-circuits execution (e.g. a cache hit):
     # when present, the scheduler returns this result instead of running the
     # tool. Typed Any to avoid coupling permissions to the tools layer.
