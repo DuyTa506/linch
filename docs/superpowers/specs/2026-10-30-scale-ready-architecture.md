@@ -7,6 +7,13 @@ wrong stops and reports evidence instead of working around it.
 Baseline: `integration/3.0` @ `da9bcd7`. Review that motivated this:
 https://claude.ai/artifact/CJHkJQrTK7BbHWqDMGNp6T (section 8).
 
+## Direction
+
+Linch is a headless **agent kernel**: excellent core loop, scales out, easy
+to customize through seams and protocols. No UI — Linch Studio was dropped
+(owner, 2026-10-31). Work that does not serve kernel quality, scale, or
+customization is out of scope.
+
 ## Target deployment
 
 A virtual-assistant product embeds Linch in a host service: N stateless API
