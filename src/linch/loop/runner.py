@@ -71,10 +71,7 @@ from .request import (
     final_text,
 )
 from .resume import ResumeContext, ResumeState, recover_resume
-from .runtime import (
-    RunRuntime,
-    _error_payload,
-)
+from .runtime import RunRuntime
 from .runtime import (
     TurnLifecycle as _TurnLifecycle,
 )
@@ -958,21 +955,6 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         ):
             yield event
     except Exception as exc:
-        _runtime.sync_checkpoint_accounting()
-        if run_record is not None and agent.run_store is not None:
-            await _runtime._attempt(
-                "run.mark_failed",
-                lambda exc=exc: store_call(
-                    session,
-                    "run.mark_failed",
-                    agent.run_store.mark_failed(
-                        run_id,
-                        checkpoint,
-                        error=_error_payload(exc),
-                    ),
-                ),
-                exc,
-            )
         async for event in _runtime.emit_exception_terminal(
             exc, close_active_spans=_close_active_spans
         ):

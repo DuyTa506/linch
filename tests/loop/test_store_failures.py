@@ -252,6 +252,62 @@ async def test_session_append_failure_without_run_store_is_terminalized() -> Non
     assert stop.calls == 1
 
 
+@pytest.mark.parametrize("failure", ["checkpoint", "session", "provider"])
+async def test_error_pair_is_durable_when_failed_status_becomes_visible(failure: str) -> None:
+    from linch.run_store import InMemoryRunStore
+    from linch.sessions import InMemorySessionStore
+
+    class RecordingStore(InMemoryRunStore):
+        visible_terminal_pairs: list[list[str]]
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.visible_terminal_pairs = []
+
+        async def save_checkpoint(
+            self, run_id: str, checkpoint: Any, *, status: str = "running"
+        ) -> Any:
+            if failure == "checkpoint":
+                raise OSError("checkpoint unavailable")
+            return await super().save_checkpoint(run_id, checkpoint, status=status)
+
+        async def mark_failed(self, run_id: str, checkpoint: Any = None, error: Any = None) -> Any:
+            record = await super().mark_failed(run_id, checkpoint, error=error)
+            visible = await self.load_run(run_id)
+            assert visible is not None and visible.status == "failed"
+            events = await self.load_events(run_id)
+            self.visible_terminal_pairs.append([row.event.type for row in events[-2:]])
+            return record
+
+    class FailProvider(_TextProvider):
+        async def stream(self, request: Any) -> AsyncIterator[dict[str, object]]:
+            raise OSError("provider unavailable")
+            yield  # pragma: no cover
+
+    store = RecordingStore()
+    stop = _StopCounter()
+    agent = _agent(
+        session_store=_FailSessionStore() if failure == "session" else InMemorySessionStore(),
+        run_store=store,
+        hooks=[stop],
+    )
+    if failure == "provider":
+        agent.provider = cast(Any, FailProvider())
+    session = await agent.session(id=f"ordered-{failure}")
+    iterator = session.run("hello")
+    try:
+        async for event in iterator:
+            if event.type == "error":
+                assert store.visible_terminal_pairs == [["error", "result"]]
+                break
+        else:
+            pytest.fail("the injected failure must emit an error event")
+    finally:
+        await iterator.aclose()
+        await agent.close()
+    assert stop.calls == 1
+
+
 async def test_run_creation_failure_raises_before_loop() -> None:
     from linch.sessions import InMemorySessionStore
 
@@ -423,7 +479,7 @@ async def test_alignment_append_failure_escapes_for_typed_run_terminal() -> None
             pass
 
 
-async def test_terminal_mark_failed_failure_is_not_retried() -> None:
+async def test_terminal_mark_failed_failure_has_one_bounded_error_status_attempt() -> None:
     from linch import HookResult
     from linch.sessions import InMemorySessionStore
 
@@ -447,15 +503,20 @@ async def test_terminal_mark_failed_failure_is_not_retried() -> None:
     assert [event.type for event in events[-2:]] == ["error", "result"]
     assert events[-2].error["name"] == "OSError"
     assert events[-2].error["message"] == "failed status write"
-    assert store.mark_failed_calls == 1
+    assert store.mark_failed_calls == 2
 
 
-async def test_abort_terminal_write_failure_marks_failed_once_before_error_pair() -> None:
+async def test_abort_terminal_write_failure_persists_error_pair_before_failed_status() -> None:
     from linch.run_store import InMemoryRunStore
     from linch.sessions import InMemorySessionStore
 
     class FailAbortStore(InMemoryRunStore):
         failed_calls = 0
+        visible_terminal_pairs: list[list[str]]
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.visible_terminal_pairs = []
 
         async def save_checkpoint(
             self, run_id: str, checkpoint: Any, *, status: str = "running"
@@ -466,7 +527,12 @@ async def test_abort_terminal_write_failure_marks_failed_once_before_error_pair(
 
         async def mark_failed(self, run_id: str, checkpoint: Any = None, error: Any = None) -> Any:
             self.failed_calls += 1
-            return await super().mark_failed(run_id, checkpoint, error=error)
+            record = await super().mark_failed(run_id, checkpoint, error=error)
+            visible = await self.load_run(run_id)
+            assert visible is not None and visible.status == "failed"
+            events = await self.load_events(run_id)
+            self.visible_terminal_pairs.append([row.event.type for row in events[-2:]])
+            return record
 
     store = FailAbortStore()
     stop = _StopCounter()
@@ -479,6 +545,7 @@ async def test_abort_terminal_write_failure_marks_failed_once_before_error_pair(
     run = await store.load_run(system.run_id)
     assert run is not None and run.status == "failed"
     assert store.failed_calls == 1
+    assert store.visible_terminal_pairs == [["error", "result"]]
     assert [event.type for event in events[-2:]] == ["error", "result"]
     assert events[-2].error["name"] == "OSError"
     assert stop.calls == 1
