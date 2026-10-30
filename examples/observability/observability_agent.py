@@ -1,102 +1,80 @@
-"""Observability demo — shows LoggingObserver and optionally OpenTelemetryObserver.
+"""Direct OpenTelemetry setup for a Linch agent.
 
-Loads ../.env automatically when present.  Never prints secret values.
+The Linch core only needs ``opentelemetry-api``. This example adds the SDK at
+the host boundary, injects providers through the agent ``Context`` (without
+changing process-global providers), and prints spans/metrics locally.
 
-Run without OTel::
-
-    python examples/observability_agent.py
-
-Run with OTel console spans (requires pip install 'linch[otel]')::
-
-    pip install 'linch[otel]'
-    python examples/observability_agent.py
+For production, replace the console exporters with an OTLP exporter pointed at
+your collector. Langfuse, Grafana Tempo, and Datadog can all receive the same
+OTLP data; the agent wiring stays unchanged.
 """
 
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
-from pathlib import Path
-
-# ── Load .env from the project root (never overrides real env vars) ────────────
-
-ROOT = Path(__file__).resolve().parents[1]
-MODEL = os.environ.get("MODEL", "gpt-4o")
 
 
-def load_project_env() -> None:
-    env_file = ROOT / ".env"
-    if not env_file.exists():
+async def main() -> None:
+    try:
+        from opentelemetry.sdk.metrics import MeterProvider
+        from opentelemetry.sdk.metrics.export import (
+            ConsoleMetricExporter,
+            PeriodicExportingMetricReader,
+        )
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import ConsoleSpanExporter, SimpleSpanProcessor
+    except ModuleNotFoundError:
+        print("Install opentelemetry-sdk to run this example (the Linch core uses the API only).")
         return
-    with env_file.open() as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, _, val = line.partition("=")
-            key = key.strip()
-            val = val.strip().strip("\"'")
-            os.environ.setdefault(key, val)
 
+    from linch import Agent, Context
+    from linch.config import FeatureFlags
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import empty_tools
 
-load_project_env()
-
-# ── Logging setup ──────────────────────────────────────────────────────────────
-
-logging.basicConfig(level=logging.DEBUG, format="%(name)s  %(levelname)s  %(message)s")
-log = logging.getLogger("observability_demo")
-
-# ── Build observer list ────────────────────────────────────────────────────────
-
-from linch.hooks import RunTelemetryHook  # noqa: E402
-from linch.observability import LoggingObserver  # noqa: E402
-
-observers = [LoggingObserver(level=logging.INFO)]
-
-# Attempt to attach OpenTelemetry with a console exporter.
-try:
-    from opentelemetry.sdk.trace import TracerProvider  # type: ignore[import]
-    from opentelemetry.sdk.trace.export import (  # type: ignore[import]
-        ConsoleSpanExporter,
-        SimpleSpanProcessor,
+    tracer_provider = TracerProvider()
+    tracer_provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
+    meter_provider = MeterProvider(
+        metric_readers=[
+            PeriodicExportingMetricReader(ConsoleMetricExporter(), export_interval_millis=5_000)
+        ]
     )
 
-    from linch.observability import OpenTelemetryObserver
+    # Do not call trace.set_tracer_provider()/metrics.set_meter_provider() here.
+    # A host can inject a different provider into each Agent Context.
+    host_context = Context()
+    host_context.register("tracer_provider", tracer_provider)
+    host_context.register("meter_provider", meter_provider)
 
-    tp = TracerProvider()
-    tp.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
-    otel_obs = OpenTelemetryObserver(tp.get_tracer("observability_demo"))
-    observers.append(otel_obs)
-    log.info("OpenTelemetry console exporter attached — spans will print below")
-except ModuleNotFoundError:
-    log.info("opentelemetry not installed — run `pip install 'linch[otel]'` for OTel spans")
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        print("Set OPENAI_API_KEY to run the live example.")
+        tracer_provider.shutdown()
+        meter_provider.shutdown()
+        return
 
-# ── Create agent ───────────────────────────────────────────────────────────────
-
-api_key = os.environ.get("OPENAI_API_KEY")
-if not api_key:
-    log.warning("OPENAI_API_KEY not set — skipping live run")
-else:
-
-    async def main() -> None:
-        from linch import Agent
-        from linch.config import FeatureFlags
-        from linch.sessions import InMemorySessionStore
-        from linch.tools.registry import empty_tools
-
-        agent = Agent(
-            model=MODEL,
-            openai_api_key=api_key,
-            tools=empty_tools(),
-            permissions={"mode": "skip-dangerous"},
-            session_store=InMemorySessionStore(),
-            features=FeatureFlags(skills=False, subagents=False, mcp=False),
-            loop_guard=None,
-            hooks=[RunTelemetryHook(observers)],
-        )
+    agent = Agent(
+        model=os.environ.get("MODEL", "gpt-4o"),
+        openai_api_key=api_key,
+        tools=empty_tools(),
+        permissions={"mode": "skip-dangerous"},
+        session_store=InMemorySessionStore(),
+        features=FeatureFlags(skills=False, subagents=False, mcp=False),
+        loop_guard=None,
+        context=host_context,
+    )
+    try:
         session = await agent.session()
-        async for _event in session.run("Reply with exactly: pong"):
-            pass  # span hooks fire automatically; LoggingObserver handles logging
+        async for event in session.run("Reply with exactly: pong"):
+            if event.type == "result":
+                print(event.final_text)
+    finally:
+        await agent.close()
+        # The host owns SDK providers and shuts them down after its agents.
+        tracer_provider.shutdown()
+        meter_provider.shutdown()
 
+
+if __name__ == "__main__":
     asyncio.run(main())
