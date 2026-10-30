@@ -447,10 +447,27 @@ async def _fresh_postgres_dsn(raw_dsn: str) -> tuple[str, Callable[[], Awaitable
     base_dsn = urlunsplit(parts._replace(query=urlencode(base_query)))
     schema = f"linch_scale_{uuid4().hex}"
     connection = await asyncpg.connect(base_dsn)
+    created = False
     try:
-        await connection.execute(f'CREATE SCHEMA "{schema}"')
-    finally:
-        await connection.close()
+        try:
+            await connection.execute(f'CREATE SCHEMA "{schema}"')
+            created = True
+        finally:
+            await connection.close()
+    except BaseException as exc:
+        # A failed close after CREATE, or a cancellation during setup, must not
+        # leave a benchmark schema behind.  Preserve the original failure while
+        # annotating it if best-effort cleanup also fails.
+        if created:
+            try:
+                cleanup_connection = await asyncpg.connect(base_dsn)
+                try:
+                    await cleanup_connection.execute(f'DROP SCHEMA "{schema}" CASCADE')
+                finally:
+                    await cleanup_connection.close()
+            except BaseException as cleanup_exc:
+                exc.add_note(f"failed to clean up benchmark schema {schema}: {cleanup_exc!r}")
+        raise
     query = [*base_query, ("search_path", schema)]
     scoped_dsn = urlunsplit(parts._replace(query=urlencode(query)))
 
@@ -462,6 +479,34 @@ async def _fresh_postgres_dsn(raw_dsn: str) -> tuple[str, Callable[[], Awaitable
             await connection.close()
 
     return scoped_dsn, cleanup
+
+
+async def _close_postgres_benchmark_resources(
+    session_pool: Any | None,
+    run_pool: Any | None,
+    postgres_cleanup: Callable[[], Awaitable[None]] | None,
+) -> BaseException | None:
+    """Close benchmark pools and schema, retaining the first cleanup failure."""
+    first_error: BaseException | None = None
+    for pool in (run_pool, session_pool):
+        if pool is None:
+            continue
+        try:
+            await pool.close()
+        except BaseException as exc:
+            if first_error is None:
+                first_error = exc
+            try:
+                pool.terminate()
+            except BaseException:
+                pass
+    if postgres_cleanup is not None:
+        try:
+            await postgres_cleanup()
+        except BaseException as exc:
+            if first_error is None:
+                first_error = exc
+    return first_error
 
 
 class ScaleProvider:
@@ -532,6 +577,7 @@ class ScaleTool:
 class ScaleStoreMetrics:
     def __init__(self) -> None:
         self.turn = ContextVar("scale_turn", default=-1)
+        self.capture_payload_bytes = os.environ.get("LINCH_SCALE_PROFILE_LEAN") != "1"
         self.writes: Counter[tuple[str, str, int]] = Counter()
         self.payloads: dict[tuple[int, str], list[int]] = defaultdict(list)
         self.event_payloads: dict[int, list[int]] = defaultdict(list)
@@ -541,6 +587,9 @@ class ScaleStoreMetrics:
         self.pool_reset_commands: Counter[tuple[str, int]] = Counter()
         self.pool_acquires: Counter[tuple[str, int]] = Counter()
         self.pool_releases: Counter[tuple[str, int]] = Counter()
+        self.protocol_exchanges: Counter[tuple[str, int, str]] = Counter()
+        self.protocol_transaction_commands: Counter[tuple[str, int]] = Counter()
+        self.protocol_failures: Counter[tuple[str, int, str]] = Counter()
 
     def reset_round_trip_metrics(self) -> None:
         self.sql_round_trips.clear()
@@ -548,6 +597,22 @@ class ScaleStoreMetrics:
         self.pool_reset_commands.clear()
         self.pool_acquires.clear()
         self.pool_releases.clear()
+        self.protocol_exchanges.clear()
+        self.protocol_transaction_commands.clear()
+        self.protocol_failures.clear()
+
+    def record_protocol_exchange(
+        self,
+        store: str,
+        method: str,
+        query: object = None,
+    ) -> None:
+        turn = self.turn.get()
+        self.protocol_exchanges[store, turn, method] += 1
+        if method == "query" and str(query or "").lstrip().upper().startswith(
+            ("BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT")
+        ):
+            self.protocol_transaction_commands[store, turn] += 1
 
     def summaries(self, *, turns: int) -> tuple[dict[str, Any], dict[str, Any]]:
         stores: dict[str, Counter[str]] = defaultdict(Counter)
@@ -622,7 +687,10 @@ class ScaleStoreMetrics:
         )
 
     def round_trip_summary(self, *, turns: int) -> dict[str, Any]:
-        stores = sorted({store for store, _turn in self.sql_round_trips})
+        stores = sorted(
+            {store for store, _turn in self.sql_round_trips}
+            | {store for store, _turn, _method in self.protocol_exchanges}
+        )
         by_store: dict[str, dict[str, Any]] = {}
         for store in stores:
             statement_calls = sum(
@@ -640,6 +708,26 @@ class ScaleStoreMetrics:
             releases = sum(
                 count for (name, _turn), count in self.pool_releases.items() if name == store
             )
+            protocol_by_method = {
+                method: sum(
+                    count
+                    for (name, _turn, row_method), count in self.protocol_exchanges.items()
+                    if name == store and row_method == method
+                )
+                for name, _turn, method in self.protocol_exchanges
+                if name == store
+            }
+            protocol_exchanges = sum(protocol_by_method.values())
+            protocol_transaction_commands = sum(
+                count
+                for (name, _turn), count in self.protocol_transaction_commands.items()
+                if name == store
+            )
+            protocol_failures = sum(
+                count
+                for (name, _turn, _method), count in self.protocol_failures.items()
+                if name == store
+            )
             by_store[store] = {
                 "round_trips": statement_calls,
                 "application_statements": statement_calls
@@ -649,10 +737,18 @@ class ScaleStoreMetrics:
                 "pool_reset_commands": pool_reset_commands,
                 "pool_acquires": acquires,
                 "pool_releases": releases,
+                "protocol_exchanges": protocol_exchanges,
+                "protocol_exchanges_per_provider_turn": (
+                    protocol_exchanges / turns if turns else None
+                ),
+                "protocol_by_method": protocol_by_method,
+                "protocol_transaction_commands": protocol_transaction_commands,
+                "protocol_failures": protocol_failures,
                 "per_provider_turn": statement_calls / turns if turns else None,
-                "definition": "round_trips counts every instrumented asyncpg command method "
-                "and Connection.reset call after schema setup; transaction and pool-reset "
-                "commands are broken out explicitly",
+                "definition": "round_trips counts supporting connection command/reset calls; "
+                "protocol_exchanges counts attempted asyncpg protocol cycles (query, prepare, "
+                "bind_execute, bind_execute_many, execute, and close_statement) after schema "
+                "setup; transaction and pool-reset categories are broken out",
             }
         by_turn = []
         for turn in sorted({turn for _store, turn in self.sql_round_trips}):
@@ -663,6 +759,57 @@ class ScaleStoreMetrics:
             )
             by_turn.append({"turn": turn, "round_trips": statement_calls})
         return {"by_store": by_store, "by_turn": by_turn}
+
+
+def _instrument_connection_protocol(
+    connection: Any, metrics: ScaleStoreMetrics, store: str
+) -> None:
+    protocol = connection._protocol
+    if getattr(protocol, "_wp8_instrumented", False):
+        return
+
+    class ProtocolProxy:
+        __slots__ = ("inner", "_wp8_instrumented")
+
+        def __init__(self, inner: Any) -> None:
+            self.inner = inner
+            self._wp8_instrumented = True
+
+        async def _call(self, method: str, *args: Any, **kwargs: Any) -> Any:
+            query = (
+                args[1]
+                if method == "prepare" and len(args) > 1
+                else (args[0] if method == "query" and args else None)
+            )
+            metrics.record_protocol_exchange(store, method, query)
+            try:
+                return await getattr(self.inner, method)(*args, **kwargs)
+            except BaseException:
+                metrics.protocol_failures[store, metrics.turn.get(), method] += 1
+                raise
+
+        async def prepare(self, *args: Any, **kwargs: Any) -> Any:
+            return await self._call("prepare", *args, **kwargs)
+
+        async def bind_execute(self, *args: Any, **kwargs: Any) -> Any:
+            return await self._call("bind_execute", *args, **kwargs)
+
+        async def bind_execute_many(self, *args: Any, **kwargs: Any) -> Any:
+            return await self._call("bind_execute_many", *args, **kwargs)
+
+        async def execute(self, *args: Any, **kwargs: Any) -> Any:
+            return await self._call("execute", *args, **kwargs)
+
+        async def query(self, *args: Any, **kwargs: Any) -> Any:
+            return await self._call("query", *args, **kwargs)
+
+        async def close_statement(self, *args: Any, **kwargs: Any) -> Any:
+            return await self._call("close_statement", *args, **kwargs)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self.inner, name)
+
+    connection._protocol = ProtocolProxy(protocol)
 
 
 def _instrument_connection_class(metrics: ScaleStoreMetrics, store: str) -> Any:
@@ -704,7 +851,6 @@ def _instrument_connection_class(metrics: ScaleStoreMetrics, store: str) -> Any:
             token = reset_depth.set(True)
             try:
                 turn = metrics.turn.get()
-                metrics.sql_round_trips[store, turn] += 1
                 metrics.pool_reset_commands[store, turn] += 1
                 return await super().reset(*args, **kwargs)
             finally:
@@ -714,11 +860,22 @@ def _instrument_connection_class(metrics: ScaleStoreMetrics, store: str) -> Any:
 
 
 class _CountingAcquire:
-    def __init__(self, inner: Any, metrics: ScaleStoreMetrics, store: str) -> None:
-        self.inner, self.metrics, self.store = inner, metrics, store
+    def __init__(
+        self,
+        inner: Any,
+        metrics: ScaleStoreMetrics,
+        store: str,
+        instrument: Callable[[Any, ScaleStoreMetrics, str], None],
+    ) -> None:
+        self.inner, self.metrics, self.store, self.instrument = inner, metrics, store, instrument
 
     async def __aenter__(self) -> Any:
         connection = await self.inner.__aenter__()
+        # asyncpg exposes a PoolConnectionProxy from ``Pool.acquire()``.  The
+        # protocol is owned by its private underlying Connection, so install
+        # the benchmark-only proxy there while returning the normal public
+        # connection proxy to callers.
+        self.instrument(getattr(connection, "_con", connection), self.metrics, self.store)
         turn = self.metrics.turn.get()
         self.metrics.pool_acquires[self.store, turn] += 1
         self.connection = connection
@@ -731,11 +888,19 @@ class _CountingAcquire:
 
 
 class _CountingPool:
-    def __init__(self, inner: Any, metrics: ScaleStoreMetrics, store: str) -> None:
-        self.inner, self.metrics, self.store = inner, metrics, store
+    def __init__(
+        self,
+        inner: Any,
+        metrics: ScaleStoreMetrics,
+        store: str,
+        instrument: Callable[[Any, ScaleStoreMetrics, str], None],
+    ) -> None:
+        self.inner, self.metrics, self.store, self.instrument = inner, metrics, store, instrument
 
     def acquire(self, *args: Any, **kwargs: Any) -> _CountingAcquire:
-        return _CountingAcquire(self.inner.acquire(*args, **kwargs), self.metrics, self.store)
+        return _CountingAcquire(
+            self.inner.acquire(*args, **kwargs), self.metrics, self.store, self.instrument
+        )
 
     async def close(self) -> None:
         await self.inner.close()
@@ -800,13 +965,25 @@ class MeasuredStore:
                         self.metrics.turn.set(turn)
             result = await method(*args, **kwargs)
             self.metrics.writes[self.name, name, turn] += 1
-            if self.name == "session" and name == "append_messages":
+            if (
+                self.metrics.capture_payload_bytes
+                and self.name == "session"
+                and name == "append_messages"
+            ):
                 messages = args[1] if len(args) > 1 else kwargs.get("messages", [])
                 self.metrics.session_payloads[turn].extend(
                     len(json.dumps(message_to_dict(message), allow_nan=False).encode("utf-8"))
                     for message in messages
                 )
-            if self.name == "run" and name in {"append_event", "append_events"}:
+            if (
+                self.metrics.capture_payload_bytes
+                and self.name == "run"
+                and name
+                in {
+                    "append_event",
+                    "append_events",
+                }
+            ):
                 events = args[1] if len(args) > 1 else kwargs.get("events", [])
                 if name == "append_event":
                     events = [events]
@@ -814,7 +991,11 @@ class MeasuredStore:
                     len(json.dumps(_json_safe_stored_event(event), allow_nan=False).encode("utf-8"))
                     for event in events
                 )
-            if self.name == "run" and name in {"save_checkpoint", "mark_completed", "mark_failed"}:
+            if (
+                self.metrics.capture_payload_bytes
+                and self.name == "run"
+                and name in {"save_checkpoint", "mark_completed", "mark_failed"}
+            ):
                 persisted = result.checkpoint
                 if persisted is None:
                     return result
@@ -919,6 +1100,18 @@ async def run_scale_case(
     workdir.mkdir(parents=True, exist_ok=True)
     metrics = ScaleStoreMetrics()
     postgres_cleanup: Callable[[], Awaitable[None]] | None = None
+    session_pool: Any | None = None
+    run_pool: Any | None = None
+
+    async def cleanup_postgres() -> None:
+        nonlocal postgres_cleanup
+        cleanup_error = await _close_postgres_benchmark_resources(
+            session_pool, run_pool, postgres_cleanup
+        )
+        postgres_cleanup = None
+        if cleanup_error is not None:
+            raise cleanup_error
+
     if case.backend == "memory":
         session_store: Any = InMemorySessionStore()
         run_store: Any = InMemoryRunStore()
@@ -928,43 +1121,61 @@ async def run_scale_case(
         from linch.run_stores.postgres import PostgresRunStore
         from linch.sessions.postgres import PostgresSessionStore
 
-        dsn, postgres_cleanup = await _fresh_postgres_dsn(os.environ["AGENT_KIT_TEST_PG_DSN"])
-        session_pool = await asyncpg.create_pool(
-            dsn,
-            min_size=1,
-            max_size=10,
-            connection_class=_instrument_connection_class(metrics, "session"),
-        )
-        run_pool = await asyncpg.create_pool(
-            dsn,
-            min_size=1,
-            max_size=10,
-            connection_class=_instrument_connection_class(metrics, "run"),
-        )
-        session_store = PostgresSessionStore(dsn, pool=session_pool)
-        run_store = PostgresRunStore(dsn, pool=run_pool)
-        # Initialize schema before timing, then instrument only workload calls.
-        await session_store._ensure()
-        await run_store._ensure()
-        metrics.reset_round_trip_metrics()
-        session_store._pool = _CountingPool(session_pool, metrics, "session")
-        run_store._pool = _CountingPool(run_pool, metrics, "run")
+        try:
+            dsn, postgres_cleanup = await _fresh_postgres_dsn(os.environ["AGENT_KIT_TEST_PG_DSN"])
+            session_pool = await asyncpg.create_pool(
+                dsn,
+                min_size=1,
+                max_size=10,
+                connection_class=_instrument_connection_class(metrics, "session"),
+            )
+            run_pool = await asyncpg.create_pool(
+                dsn,
+                min_size=1,
+                max_size=10,
+                connection_class=_instrument_connection_class(metrics, "run"),
+            )
+            session_store = PostgresSessionStore(dsn, pool=session_pool)
+            run_store = PostgresRunStore(dsn, pool=run_pool)
+            # Initialize schema before timing, then instrument only workload calls.
+            await session_store._ensure()
+            await run_store._ensure()
+            metrics.reset_round_trip_metrics()
+            session_store._pool = _CountingPool(
+                session_pool, metrics, "session", _instrument_connection_protocol
+            )
+            run_store._pool = _CountingPool(
+                run_pool, metrics, "run", _instrument_connection_protocol
+            )
+        except BaseException as exc:
+            try:
+                await cleanup_postgres()
+            except BaseException as cleanup_exc:
+                exc.add_note(f"failed to clean up benchmark Postgres resources: {cleanup_exc!r}")
+            raise
     active: dict[str, int] = {}
     overlaps: set[str] = set()
     tools = ToolRegistry()
     for name in ("rag_search", "sql_query", "save_note"):
         tools.register(ScaleTool(name, active, overlaps))
-    agent = Agent(
-        model="gpt-5",
-        provider=ScaleProvider(turns=case.turns),
-        tools=tools,
-        session_store=MeasuredStore(session_store, "session", metrics),
-        run_store=MeasuredStore(run_store, "run", metrics),
-        permissions={"mode": "skip-dangerous"},
-        max_tool_concurrency=2,
-        max_turns=case.turns + 1,
-        result_offload=None,
-    )
+    try:
+        agent = Agent(
+            model="gpt-5",
+            provider=ScaleProvider(turns=case.turns),
+            tools=tools,
+            session_store=MeasuredStore(session_store, "session", metrics),
+            run_store=MeasuredStore(run_store, "run", metrics),
+            permissions={"mode": "skip-dangerous"},
+            max_tool_concurrency=2,
+            max_turns=case.turns + 1,
+            result_offload=None,
+        )
+    except BaseException as exc:
+        try:
+            await cleanup_postgres()
+        except BaseException as cleanup_exc:
+            exc.add_note(f"failed to clean up benchmark Postgres resources: {cleanup_exc!r}")
+        raise
     result: dict[str, Any] = {
         **asdict(case),
         "pid": os.getpid(),
@@ -1042,9 +1253,9 @@ async def run_scale_case(
         progress()
 
     sampler = LagSampler()
-    await sampler.start()
-    progress(force=True)
     try:
+        await sampler.start()
+        progress(force=True)
         started = time.perf_counter()
         # All session/run admission tasks are queued before any starts running.
         await asyncio.gather(*(run_one() for _ in range(case.sessions)))
@@ -1085,10 +1296,26 @@ async def run_scale_case(
         progress(force=True)
         return result
     finally:
-        await sampler.stop()
-        await agent.close()
-        if postgres_cleanup is not None:
-            await postgres_cleanup()
+        close_error: BaseException | None = None
+        try:
+            await sampler.stop()
+        except BaseException as exc:
+            close_error = exc
+        try:
+            await agent.close()
+        except BaseException as exc:
+            close_error = exc
+        try:
+            await cleanup_postgres()
+        except BaseException as cleanup_exc:
+            if close_error is None:
+                close_error = cleanup_exc
+            else:
+                close_error.add_note(
+                    f"failed to clean up benchmark Postgres resources: {cleanup_exc!r}"
+                )
+        if close_error is not None:
+            raise close_error
 
 
 async def run_scale_subprocess(case: ScaleCase, *, timeout_s: float = 600) -> dict[str, Any]:
