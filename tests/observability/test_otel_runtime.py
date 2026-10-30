@@ -514,3 +514,46 @@ async def test_failed_primary_parse_keeps_known_usage_and_actual_model(otel):
         for p in metric_points(reader, "gen_ai.client.token.usage")
     } == {("input", 7), ("output", 4)}
     await agent.close()
+
+
+@pytest.mark.parametrize("tracing", [False, True])
+async def test_custom_standalone_compaction_records_physical_call(otel, tracing):
+    from linch import Message, TextBlock, TextTurn, Usage
+    from linch.abort import AbortContext
+    from linch.compaction import run_forced_compaction
+    from linch.types import ProviderRequest
+
+    class DirectStreamCompaction:
+        id = "direct-stream"
+
+        async def compact(self, ctx, provider):
+            request = ProviderRequest(model=ctx.model, messages=ctx.messages, tools=[], system=[])
+            text = ""
+            async for event in provider.stream(request):
+                if event["type"] == "text_delta":
+                    text += event["text"]
+            return [Message("user", [TextBlock(text)])]
+
+    context, exporter, reader = otel
+    if not tracing:
+        context.register("tracer", trace.NoOpTracer())
+    agent = agent_for(
+        context, [TextTurn("summary", usage=Usage(7, 4))], compaction=DirectStreamCompaction()
+    )
+    session = await agent.session()
+    await session.append([Message("user", [TextBlock("long history")])])
+    try:
+        await run_forced_compaction(session, agent, AbortContext())
+        if tracing:
+            (compact,) = operation_spans(exporter, "compaction")
+            (chat,) = operation_spans(exporter, "chat")
+            assert chat.parent.span_id == compact.context.span_id
+        else:
+            assert not exporter.get_finished_spans()
+        assert metric_points(reader, "gen_ai.client.operation.duration")[0].count == 1
+        assert {
+            (p.attributes["gen_ai.token.type"], p.sum)
+            for p in metric_points(reader, "gen_ai.client.token.usage")
+        } == {("input", 7), ("output", 4)}
+    finally:
+        await agent.close()
