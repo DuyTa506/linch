@@ -300,6 +300,7 @@ if TYPE_CHECKING:
     )
     from .run_store import (
         InMemoryRunStore,
+        LeaseLostError,
         ModelInputSnapshot,
         ModelInputSnapshotError,
         ModelInputSnapshotStore,
@@ -309,6 +310,9 @@ if TYPE_CHECKING:
         RunContractDifference,
         RunContractMismatchError,
         RunEventBatchStore,
+        RunLease,
+        RunLeaseConflictError,
+        RunLeaseStore,
         RunRecord,
         RunStore,
         SqliteRunStore,
@@ -323,6 +327,7 @@ if TYPE_CHECKING:
         run_contract_to_dict,
         run_meta_with_contract,
     )
+    from .run_stores.postgres import PostgresRunStore
     from .scheduler import ToolBatchingStrategy
     from .session import RunOptions, Session
     from .session_log import SessionLog
@@ -688,6 +693,7 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
     ".reports": ("RunReport", "build_run_report", "load_run_report"),
     ".run_store": (
         "InMemoryRunStore",
+        "LeaseLostError",
         "ModelInputSnapshot",
         "ModelInputSnapshotError",
         "ModelInputSnapshotStore",
@@ -697,6 +703,9 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
         "RunContractDifference",
         "RunContractMismatchError",
         "RunEventBatchStore",
+        "RunLease",
+        "RunLeaseConflictError",
+        "RunLeaseStore",
         "RunRecord",
         "RunStore",
         "SqliteRunStore",
@@ -711,6 +720,7 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
         "run_contract_to_dict",
         "run_meta_with_contract",
     ),
+    ".run_stores.postgres": ("PostgresRunStore",),
     ".scheduler": ("ToolBatchingStrategy",),
     ".session": ("RunOptions", "Session"),
     ".session_log": ("SessionLog",),
@@ -1056,6 +1066,11 @@ __all__ = [
     "RunContractComparison",
     "RunContractDifference",
     "RunContractMismatchError",
+    "RunLease",
+    "RunLeaseStore",
+    "RunLeaseConflictError",
+    "LeaseLostError",
+    "PostgresRunStore",
     "RunRecord",
     "RunStore",
     "SessionInboxStore",

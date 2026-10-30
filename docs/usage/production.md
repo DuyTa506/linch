@@ -32,6 +32,8 @@ agent = Agent(
   `InMemoryRunStore`) are for tests. Postgres-backed stores ship under the
   `[postgres]` extra.
 - See [Agent & session](./agent.md).
+- For Postgres run persistence, optional worker leases, and stream reconnect by
+  sequence, see [Run stores](./run-stores.md).
 
 ## 2. Stream events to your host
 
@@ -141,7 +143,7 @@ Everything else is an extra and fails with an explicit
 | `linch[gemini]` | Gemini provider |
 | `linch[mcp]` | MCP tool servers (requires `mcp>=2.0.0`; 1.x is not supported) |
 | `linch[otel]` | OpenTelemetry observer |
-| `linch[postgres]` | Postgres session/memory stores |
+| `linch[postgres]` | Postgres session/memory/run stores |
 
 ---
 

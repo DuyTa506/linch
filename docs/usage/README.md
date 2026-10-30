@@ -84,6 +84,7 @@ One `Agent`, many `Session`s is the canonical web-app shape — see
 | [Quickstart](./quickstart.md) | New-developer path: install, offline smoke test, live provider, first tool, persistence |
 | [Scaffolding CLI](./cli.md) | `linch new` / `linch add tool` — generate a runnable, offline-testable project you own |
 | [Production wiring](./production.md) | Minimal checklist to embed Linch in a service: persistence, streaming, HITL, resume, shutdown, blast radius |
+| [Run stores](./run-stores.md) | Durable checkpoints, Postgres, optional leases and fencing, reconnect by event sequence |
 | [Agent & session](./agent.md) | Session stores, feature flags, system prompt, compaction, run budgets, truncation recovery |
 | [Providers](./providers.md) | Choosing a provider, model catalog, capabilities, thinking events |
 | [Events](./events.md) | Event stream, cost fields, run reports, long-run eval scorers |

@@ -55,6 +55,33 @@ PROMOTED_EVAL_NAMES = frozenset(
 PROMOTED_PERMISSION_NAMES = frozenset({"BashRule", "PathRule", "ToolRule"})
 
 
+def test_durable_run_store_names_are_public_and_lazy() -> None:
+    expected = {
+        "RunLease",
+        "RunLeaseStore",
+        "RunLeaseConflictError",
+        "LeaseLostError",
+        "PostgresRunStore",
+    }
+    assert expected <= set(linch.__all__)
+    root = Path(__file__).resolve().parents[1]
+    script = f"""
+import sys
+sys.path.insert(0, {str(root / "src")!r})
+import linch
+assert 'asyncpg' not in sys.modules
+assert 'linch.run_stores.postgres' not in sys.modules
+from linch import PostgresRunStore, RunLease, RunLeaseStore
+from linch import RunLeaseConflictError, LeaseLostError
+assert 'asyncpg' not in sys.modules
+assert 'linch.run_stores.postgres' in sys.modules
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script], cwd=root, capture_output=True, text=True, check=False
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
 def test_studio_prerequisite_names_are_promoted() -> None:
     evals = importlib.import_module("linch.evals")
     permissions = importlib.import_module("linch.permissions")
