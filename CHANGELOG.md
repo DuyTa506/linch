@@ -7,6 +7,8 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
 
 ## Unreleased
 
+- Raise public `RunNotResumableError` with `run_id` and `status` when resuming
+  terminal runs or runs without checkpoints, replacing the silent no-op.
 - Remove all SQLite stores and their executor. Durable sessions, runs, and
   virtual files use Postgres; InMemory stores remain for tests and development.
   Built-in mailboxes and scheduling now last only for the process lifetime.

@@ -4,6 +4,8 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any
 
+import pytest
+
 
 async def _pin_run_contract(session: Any, run_id: str, opts: Any = None) -> None:
     """Give a hand-built in-memory checkpoint its original execution contract."""
@@ -862,7 +864,24 @@ async def test_run_loop_aclose_at_worker_yield_finishes_invoke_agent_span() -> N
 # ── End Phase 2 tests ────────────────────────────────────────────────────────
 
 
-async def test_completed_run_resume_is_noop() -> None:
+@pytest.mark.parametrize(
+    ("status", "has_checkpoint"),
+    [
+        ("completed", True),
+        ("failed", True),
+        ("aborted", True),
+        ("running", False),
+        ("waiting_permission", False),
+        ("suspended", False),
+    ],
+)
+async def test_nonresumable_run_raises_without_side_effects(
+    status: str, has_checkpoint: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from linch import RunNotResumableError
+    from linch.run_store import RunCheckpoint
+    from linch.types import Usage
+
     session_store = _memory_session_store()
     run_store = _memory_run_store()
     provider = ScriptProvider()
@@ -874,21 +893,67 @@ async def test_completed_run_resume_is_noop() -> None:
         cwd=".",
     )
     session = await agent.session(id="s1")
-    events = await _collect(session.run("hello"))
-    run_id = next(event.run_id for event in events if event.type == "system")
+    run = await run_store.create_run("s1", id=f"rejected-{status}")
+    if has_checkpoint:
+        await run_store.save_checkpoint(
+            run.id,
+            RunCheckpoint(phase="turn_complete", prompt="hello", turn_index=0, total_usage=Usage()),
+            status=status,
+        )
+    else:
+        run_store._runs[run.id].status = status
+    before = await run_store.load_run(run.id)
 
-    restarted = _agent(
+    async def reject_write(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("rejected resume must not write to the run store")
+
+    resume_events: list[Any] = []
+    with monkeypatch.context() as patch:
+        for method in (
+            "create_run",
+            "save_checkpoint",
+            "append_event",
+            "append_events",
+            "mark_completed",
+            "mark_failed",
+            "save",
+            "delete",
+            "prune",
+        ):
+            patch.setattr(run_store, method, reject_write)
+        with pytest.raises(RunNotResumableError) as raised:
+            async for event in session.resume(run.id):
+                resume_events.append(event)
+
+    assert raised.value.run_id == run.id
+    assert raised.value.status == status
+    assert run.id in str(raised.value)
+    assert status in str(raised.value)
+    assert resume_events == []
+    assert provider.calls == 0
+    assert await run_store.load_run(run.id) == before
+    assert await run_store.load_events(run.id) == []
+    assert await session_store.load_messages("s1") == []
+
+    events = await _collect(session.run("new run"))
+    assert events[-1].type == "result"
+    assert events[-1].subtype == "success"
+    assert provider.calls == 1
+
+
+async def test_unknown_run_resume_still_raises_key_error() -> None:
+    provider = ScriptProvider(fail_on_call=True)
+    session = await _agent(
         model="gpt-5",
         provider=provider,
-        session_store=session_store,
-        run_store=run_store,
+        session_store=_memory_session_store(),
+        run_store=_memory_run_store(),
         cwd=".",
-    )
-    resumed = await restarted.session(id="s1")
-    resume_events = await _collect(resumed.resume(run_id))
+    ).session(id="s1")
 
-    assert resume_events == []
-    assert provider.calls == 1
+    with pytest.raises(KeyError, match="run not found: missing"):
+        await _collect(session.resume("missing"))
+    assert provider.calls == 0
 
 
 async def test_postgres_session_and_run_store_resume_after_restart(
