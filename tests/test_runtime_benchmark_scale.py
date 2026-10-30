@@ -34,6 +34,16 @@ def test_postgres_scale_cases_skip_without_dsn(monkeypatch):
     assert benchmark.scale_case_skip_reason(case) == "AGENT_KIT_TEST_PG_DSN not set"
 
 
+def test_lean_profile_disables_repeated_payload_encoding(monkeypatch):
+    monkeypatch.setenv("LINCH_SCALE_PROFILE_LEAN", "1")
+    lean = _load_script()
+    assert lean.ScaleStoreMetrics().capture_payload_bytes is False
+
+    monkeypatch.delenv("LINCH_SCALE_PROFILE_LEAN")
+    instrumented = _load_script()
+    assert instrumented.ScaleStoreMetrics().capture_payload_bytes is True
+
+
 def test_scale_metrics_separates_payload_bytes_and_sql_round_trips():
     benchmark = _load_script()
     metrics = benchmark.ScaleStoreMetrics()
@@ -57,11 +67,78 @@ def test_scale_metrics_separates_payload_bytes_and_sql_round_trips():
         "pool_reset_commands": 0,
         "pool_acquires": 3,
         "pool_releases": 3,
+        "protocol_exchanges": 0,
+        "protocol_exchanges_per_provider_turn": 0.0,
+        "protocol_by_method": {},
+        "protocol_transaction_commands": 0,
+        "protocol_failures": 0,
         "per_provider_turn": 9.0,
-        "definition": "round_trips counts every instrumented asyncpg command method "
-        "and Connection.reset call after schema setup; transaction and pool-reset "
-        "commands are broken out explicitly",
+        "definition": "round_trips counts supporting connection command/reset calls; "
+        "protocol_exchanges counts attempted asyncpg protocol cycles (query, prepare, "
+        "bind_execute, bind_execute_many, execute, and close_statement) after schema "
+        "setup; transaction and pool-reset categories are broken out",
     }
+
+
+@pytest.mark.asyncio
+async def test_postgres_protocol_instrumentation_distinguishes_cold_cache_and_boundaries(pg_dsn):
+    benchmark = _load_script()
+    import asyncpg
+
+    metrics = benchmark.ScaleStoreMetrics()
+    pool = await asyncpg.create_pool(
+        pg_dsn,
+        min_size=1,
+        max_size=1,
+        connection_class=benchmark._instrument_connection_class(metrics, "run"),
+    )
+    wrapped = benchmark._CountingPool(
+        pool, metrics, "run", benchmark._instrument_connection_protocol
+    )
+    try:
+        metrics.reset_round_trip_metrics()
+        async with wrapped.acquire() as connection:
+            await connection.fetchval("SELECT $1::integer", 1)
+            cold_prepare = sum(
+                count
+                for (store, _turn, method), count in metrics.protocol_exchanges.items()
+                if store == "run" and method == "prepare"
+            )
+            cold_bind = sum(
+                count
+                for (store, _turn, method), count in metrics.protocol_exchanges.items()
+                if store == "run" and method == "bind_execute"
+            )
+            await connection.fetchval("SELECT $1::integer", 2)
+            warm_prepare = sum(
+                count
+                for (store, _turn, method), count in metrics.protocol_exchanges.items()
+                if store == "run" and method == "prepare"
+            )
+            warm_bind = sum(
+                count
+                for (store, _turn, method), count in metrics.protocol_exchanges.items()
+                if store == "run" and method == "bind_execute"
+            )
+            assert cold_prepare >= 1
+            assert cold_bind >= 1
+            assert warm_prepare == cold_prepare
+            assert warm_bind >= cold_bind + 1
+            async with connection.transaction():
+                await connection.fetchval("SELECT $1::integer", 3)
+            await connection.executemany("SELECT $1::integer", [(4,), (5,)])
+        assert sum(metrics.protocol_transaction_commands.values()) >= 2
+        assert sum(metrics.pool_reset_commands.values()) == 1
+        assert (
+            sum(
+                count
+                for (store, _turn, method), count in metrics.protocol_exchanges.items()
+                if store == "run" and method == "bind_execute_many"
+            )
+            >= 1
+        )
+    finally:
+        await pool.close()
 
 
 @pytest.mark.asyncio
