@@ -12,6 +12,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+from .._telemetry import store_call
 from ..events import (
     Event,
     LoopGuardEvent,
@@ -181,7 +182,7 @@ async def run_tool_batch(ctx: ToolBatchContext) -> AsyncIterator[Event]:
         and _last_message_has_tool_results(session, tool_blocks)
     )
     if not already_appended:
-        await session.append([result_message])
+        await store_call(session, "session.append", session.append([result_message]))
     await ctx.save_checkpoint(
         "tool_results_appended",
         turn_index=ctx.turn_index,
@@ -232,7 +233,7 @@ async def _append_recovery_hint(
         f"- {hint}" for hint in recovery_hints.values()
     )
     hint_message = Message(role="user", content=[TextBlock(text=hint_text)])
-    await ctx.session.append([hint_message])
+    await store_call(ctx.session, "session.append", ctx.session.append([hint_message]))
     hint_event: Event = UserEvent(message=hint_message, subtype="notification")
     await ctx.persist_event(hint_event)
     return hint_event
@@ -247,7 +248,7 @@ async def _inject_force_final_reminder(ctx: ToolBatchContext) -> Event:
         "Please provide your final answer now without making further tool calls."
     )
     reminder_message = Message(role="user", content=[TextBlock(text=reminder_text)])
-    await ctx.session.append([reminder_message])
+    await store_call(ctx.session, "session.append", ctx.session.append([reminder_message]))
     ctx.force_final_pending = True
     await ctx.save_checkpoint("turn_complete", turn_index=ctx.turn_index)
     event: Event = UserEvent(message=reminder_message, subtype="notification")

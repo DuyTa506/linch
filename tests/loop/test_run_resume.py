@@ -784,30 +784,26 @@ async def test_resume_marks_checkpointed_running_background_workers_killed() -> 
     assert loaded.checkpoint.background_workers["worker-1"]["status"] == "killed"
 
 
-async def test_run_loop_aclose_at_worker_yield_runs_observer_finally() -> None:
-    """Closing _run_loop_impl at the early crashed-worker yield must still run the
-    finally block (observer on_run_end). Regression for the yield-outside-try bug:
-    if the yield sits before `try:`, GeneratorExit skips finally and spans leak.
+async def test_run_loop_aclose_at_worker_yield_finishes_invoke_agent_span() -> None:
+    """Closing at the early crashed-worker yield must finish the run span.
+
+    Regression for the yield-outside-try bug: if the yield sits before ``try``,
+    ``GeneratorExit`` skips the run-span cleanup and the span leaks.
     """
-    from linch import RunOptions
-    from linch.hooks import RunTelemetryHook
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    from linch import Context, RunOptions
     from linch.loop import _run_loop_impl
-    from linch.observability.protocol import BaseObserver
     from linch.run_store import RunCheckpoint
     from linch.types import Usage
 
-    class _RunSpanObserver(BaseObserver):
-        def __init__(self) -> None:
-            self.started = False
-            self.ended = False
-
-        def on_run_start(self, info: Any) -> None:
-            self.started = True
-
-        def on_run_end(self, info: Any) -> None:
-            self.ended = True
-
-    observer = _RunSpanObserver()
+    exporter = InMemorySpanExporter()
+    tracer_provider = TracerProvider()
+    tracer_provider.add_span_processor(SimpleSpanProcessor(exporter))
+    context = Context()
+    context.register("tracer_provider", tracer_provider)
     session_store = _memory_session_store()
     run_store = _memory_run_store()
     run = await run_store.create_run("s1", id="run-bg-close")
@@ -833,7 +829,7 @@ async def test_run_loop_aclose_at_worker_yield_runs_observer_finally() -> None:
         session_store=session_store,
         run_store=run_store,
         cwd=".",
-        hooks=[RunTelemetryHook([observer])],
+        context=context,
     )
     session = await agent.session(id="s1")
     run_record = await run_store.load_run(run.id)
@@ -858,8 +854,9 @@ async def test_run_loop_aclose_at_worker_yield_runs_observer_finally() -> None:
     await agen.aclose()
 
     assert saw_worker
-    assert observer.started, "on_run_start should have fired"
-    assert observer.ended, "on_run_end must fire from finally even when closed at the early yield"
+    spans = exporter.get_finished_spans()
+    assert [span.name for span in spans].count("invoke_agent") == 1
+    tracer_provider.shutdown()
 
 
 # ── End Phase 2 tests ────────────────────────────────────────────────────────

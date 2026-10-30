@@ -6,9 +6,11 @@ from __future__ import annotations
 
 import time
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from typing import Any
 from uuid import uuid4
 
+from .._telemetry import store_call, trace_run
 from .._wire import UnsupportedWireVersionError
 from ..errors import AbortError, ConfigError
 from ..events import Event, ResultEvent, UserEvent
@@ -71,7 +73,7 @@ from .runtime import (
     RunRuntime,
 )
 from .runtime import (
-    SpanLifecycle as _SpanLifecycle,
+    TurnLifecycle as _TurnLifecycle,
 )
 from .runtime import (
     checkpoint_extension_state as _checkpoint_extension_state,
@@ -120,23 +122,30 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
     await session.agent._ensure_provider_prepared()
     store = session.agent.run_store
     run_record = (
-        await store.create_run(
-            session.id,
-            meta=run_meta_with_contract(_build_run_contract(session, prompt, opts)),
+        await store_call(
+            session,
+            "run.create_run",
+            store.create_run(
+                session.id,
+                meta=run_meta_with_contract(_build_run_contract(session, prompt, opts)),
+            ),
         )
         if store is not None
         else None
     )
     run_id = run_record.id if run_record is not None else str(uuid4())
-    async for event in _run_loop_impl(
-        session,
-        prompt,
-        opts,
-        run_id=run_id,
-        run_record=run_record,
-        resume_checkpoint=None,
-    ):
-        yield event
+    async with aclosing(
+        _run_loop_impl(
+            session,
+            prompt,
+            opts,
+            run_id=run_id,
+            run_record=run_record,
+            resume_checkpoint=None,
+        )
+    ) as iterator:
+        async for event in iterator:
+            yield event
 
 
 async def resume_loop(session: Session, run_id: str, opts: RunOptions) -> AsyncIterator[Event]:
@@ -146,7 +155,7 @@ async def resume_loop(session: Session, run_id: str, opts: RunOptions) -> AsyncI
     store = session.agent.run_store
     if store is None:
         raise RuntimeError("Agent has no run_store configured")
-    run_record = await store.load_run(run_id)
+    run_record = await store_call(session, "run.load_run", store.load_run(run_id))
     if run_record is None:
         raise KeyError(f"run not found: {run_id}")
     if run_record.session_id != session.id:
@@ -180,17 +189,21 @@ async def resume_loop(session: Session, run_id: str, opts: RunOptions) -> AsyncI
         raise
     except (RunContractMismatchError, TypeError, ValueError) as exc:
         raise ConfigError(f"Cannot safely resume run {run_id}: {exc}") from None
-    async for event in _run_loop_impl(
-        session,
-        checkpoint.prompt,
-        opts,
-        run_id=run_record.id,
-        run_record=run_record,
-        resume_checkpoint=checkpoint,
-    ):
-        yield event
+    async with aclosing(
+        _run_loop_impl(
+            session,
+            checkpoint.prompt,
+            opts,
+            run_id=run_record.id,
+            run_record=run_record,
+            resume_checkpoint=checkpoint,
+        )
+    ) as iterator:
+        async for event in iterator:
+            yield event
 
 
+@trace_run
 async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
     session: Session,
     prompt: str,
@@ -200,8 +213,8 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
     run_record: RunRecord | None,
     resume_checkpoint: RunCheckpoint | None,
 ) -> AsyncIterator[Event]:
+    from ..hooks.contexts import _AgentResult
     from ..loop_guard import LoopGuardState
-    from ..observability import RunResultInfo as _RunResultInfo
 
     _runtime = await RunRuntime.create(
         session,
@@ -328,7 +341,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         else session._abort_controller
     )
     _runtime.signal = signal
-    _final_result: _RunResultInfo | None = None
+    _final_result: _AgentResult | None = None
     # Closed-loop schema-repair state (per-run; not checkpointed — a resumed
     # run starts with fresh retry counters).
     _max_schema_retries = int(getattr(agent, "structured_output_retries", 0) or 0)
@@ -339,21 +352,21 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
     # retries at _MAX_FINAL_ANSWER_REENTRIES, then accepts the answer as-is.
     _final_answer_reentries = [0]
 
-    # Observer/hook span bookkeeping (turn + provider-call spans) lives in a
+    # Native lifecycle bookkeeping (turn + provider-call spans) lives in a
     # small helper so the turn loop no longer threads its mutable span state
     # through nonlocal closures. Local aliases keep the call sites unchanged.
-    _spans = _SpanLifecycle(session, run_id, _dispatch_lifecycle)
+    _spans = _TurnLifecycle(session, run_id, _dispatch_lifecycle)
     _start_turn = _spans.start_turn
     _end_active_turn = _spans.end_active_turn
     _start_provider_call = _spans.start_provider_call
     _end_active_provider_call = _spans.end_active_provider_call
-    _close_active_observer_spans = _spans.close_active_observer_spans
+    _close_active_spans = _spans.close_active_spans
 
     _build_run_result = _runtime.build_run_result
 
     # Terminal-answer finalization lives in loop/finalize.py; FinalizeCtx bundles
     # this run's dependencies so the call sites below stay short. The thin
-    # wrappers copy the resolved RunResultInfo back into _final_result, which the
+    # wrappers copy the resolved _AgentResult back into _final_result, which the
     # turn loop reads to choose between returning and continuing.
     _fctx = FinalizeCtx(
         session=session,
@@ -538,7 +551,9 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 if run_record is not None and store is not None:
                     checkpoint.total_usage = total
                     await _flush_events(session)
-                    await store.mark_completed(run_id, checkpoint)
+                    await store_call(
+                        session, "run.mark_completed", store.mark_completed(run_id, checkpoint)
+                    )
                 yield event
                 return
             if turn_index != _align_defer_turn:
@@ -574,6 +589,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             _auxiliary_caller = _AccountedAuxiliaryCaller(
                 agent.provider,
                 ledger,
+                session=session,
                 limiter=getattr(agent, "limiter", None),
                 parent_logical_call_id=_primary_logical_call_id,
                 turn_index=turn_index,
@@ -749,7 +765,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 persist_event=lambda event: _persist_event(session, run_id, event),
                 flush_events=lambda: _flush_events(session),
                 maybe_save_provider_snapshot=_maybe_save_provider_snapshot,
-                close_active_observer_spans=_close_active_observer_spans,
+                close_active_spans=_close_active_spans,
                 sync_ledger_totals=_sync_ledger_totals,
                 active_primary=active_primary,
                 budget=_budget,
@@ -808,7 +824,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                         raise ConfigError(
                             "primary control message differs from its acceptance projection"
                         )
-                    await session.append([control])
+                    await store_call(session, "session.append", session.append([control]))
                     event = UserEvent(message=control)
                     await _persist_event(session, run_id, event)
                     yield event
@@ -933,14 +949,14 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             yield event
     except AbortError:
         async for event in _runtime.emit_abort_terminal(
-            close_active_observer_spans=_close_active_observer_spans,
+            close_active_spans=_close_active_spans,
         ):
             yield event
         _final_result = _runtime.terminal_result
     except Exception as exc:
         async for event in _runtime.emit_exception_terminal(
             exc,
-            close_active_observer_spans=_close_active_observer_spans,
+            close_active_spans=_close_active_spans,
         ):
             yield event
         _final_result = _runtime.terminal_result
@@ -964,7 +980,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         # controller has no watcher and close() is a no-op.
         if signal is not session._abort_controller:
             signal.close()
-        await _close_active_observer_spans(stop_reason="error")
+        await _close_active_spans(stop_reason="error")
         _run_result = (
             _final_result
             or _runtime.terminal_result

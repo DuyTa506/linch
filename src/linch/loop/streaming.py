@@ -6,11 +6,13 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from dataclasses import dataclass
 from time import monotonic
 from typing import Any, cast, get_args
 from uuid import uuid4
 
+from .._telemetry import ChatCall, in_span
 from ..compaction import (
     apply_micro_compaction,
     build_compaction_event,
@@ -71,6 +73,8 @@ class _PrimaryStreamState:
     actual_model: str = ""
     usage: Usage | None = None
     native_failure: str | None = None
+    stop_reason: str | None = None
+    message: Message | None = None
 
 
 @dataclass(slots=True)
@@ -209,7 +213,7 @@ async def _stream_turn_with_recovery(
     Default recovery includes its second prepare/dispatch inside the retryable
     ProviderError boundary. Ladder recovery occurs outside that boundary; only
     its next dispatch re-enters it. Preserve that distinction as well as each
-    policy's compaction budget and observer end-call ordering.
+    policy's compaction budget and lifecycle end-call ordering.
     """
     micro_tried_this_turn = False
     same_model_retries = [0]
@@ -403,29 +407,38 @@ async def _accounted_primary_stream(
             # The marker is durable before the physical iterator can advance.
             _throw_if_aborted(req.signal)
             ledger.assert_may_start()
-            async for item in _stream_turn(session, req, state=state, stage_partials=True):
-                if isinstance(item, _ParsedPrimaryAssembly):
-                    receipt = _primary_receipt(
-                        intent,
-                        state,
-                        started_at=started_at,
-                        reported=True,
+            parsed: _ParsedPrimaryAssembly | None = None
+            with ChatCall(session, req, state) as chat:
+                async with aclosing(
+                    in_span(
+                        _stream_turn(session, req, state=state, stage_partials=True),
+                        chat.span,
+                        end_on_exit=False,
                     )
-                    terminal_attempted = True
-                    await ledger.settle(receipt)
-                    yield _AccountedPrimaryAssembly(
-                        assembly=item.assembly,
-                        receipt=receipt,
-                        rejected_native=state.native_failure is not None,
-                    )
-                    return
-                if isinstance(item, _PrimaryPartial):
-                    yield _PrimaryPartial(
-                        event=item.event,
-                        delivery_attempt_id=intent.delivery_attempt_id,
-                    )
-                else:
-                    raise RuntimeError("accounted primary parser yielded an unexpected item")
+                ) as stream:
+                    async for item in stream:
+                        if isinstance(item, _ParsedPrimaryAssembly):
+                            parsed = item
+                            break
+                        if isinstance(item, _PrimaryPartial):
+                            yield _PrimaryPartial(
+                                event=item.event,
+                                delivery_attempt_id=intent.delivery_attempt_id,
+                            )
+                        else:
+                            raise RuntimeError(
+                                "accounted primary parser yielded an unexpected item"
+                            )
+            assert parsed is not None
+            receipt = _primary_receipt(intent, state, started_at=started_at, reported=True)
+            terminal_attempted = True
+            await ledger.settle(receipt)
+            yield _AccountedPrimaryAssembly(
+                assembly=parsed.assembly,
+                receipt=receipt,
+                rejected_native=state.native_failure is not None,
+            )
+            return
     except BaseException as exc:
         if not terminal_attempted:
             terminal_attempted = True
@@ -622,6 +635,8 @@ async def _stream_turn(
             flush_text()
             flush_thinking()
             stop_reason = cast(StopReason, raw_stop)
+            if state is not None:
+                state.stop_reason = stop_reason
             usage = owned_usage
             raw_metadata = event.get("provider_metadata")
             if raw_metadata is not None and not isinstance(raw_metadata, dict):
@@ -649,6 +664,8 @@ async def _stream_turn(
 
     message = Message(role="assistant", content=content, provider_metadata=metadata)
     assembly = AssistantAssembly(message=message, stop_reason=stop_reason, usage=usage)
+    if state is not None:
+        state.message = message
     if state is None:
         yield assembly
     else:

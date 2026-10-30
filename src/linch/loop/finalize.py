@@ -8,7 +8,7 @@ generator stays focused on the turn loop itself.
 
 The loop drives each via a thin wrapper that supplies the per-turn ``total`` /
 ``running_cost`` and a :class:`TerminalOutcome`. ``outcome.result`` is set (to
-the terminal :class:`RunResultInfo`) only when the run should end; it stays
+the terminal :class:`_AgentResult`) only when the run should end; it stays
 ``None`` when the answer was bounced back for another turn, so the loop reads
 the flag to choose between ``return`` and ``continue``."""
 
@@ -21,7 +21,7 @@ from typing import Any
 
 from ..errors import ProviderError
 from ..events import Event, ResultEvent
-from ..observability import RunResultInfo
+from ..hooks.contexts import _AgentResult
 from ..session import Session
 from ..types import AssistantAssembly, Message, TextBlock, ToolUseBlock, Usage
 from .checkpoint import _persist_event
@@ -64,12 +64,12 @@ class FinalizeCtx:
 
 @dataclass(slots=True)
 class TerminalOutcome:
-    """Carries the terminal :class:`RunResultInfo` back to the loop.
+    """Carries the terminal :class:`_AgentResult` back to the loop.
 
     ``result`` is ``None`` while the run should continue (the finalizer bounced
     the answer back for another turn) and set when the run should end."""
 
-    result: RunResultInfo | None = None
+    result: _AgentResult | None = None
 
 
 @dataclass(slots=True)
@@ -83,7 +83,7 @@ class RunFinalization:
 
     ctx: FinalizeCtx
     runtime: Any
-    result: RunResultInfo | None = None
+    result: _AgentResult | None = None
 
     async def emit_error(
         self,
@@ -186,12 +186,12 @@ def build_run_result(
     total: Usage,
     duration_ms: int,
     error: dict[str, Any] | None = None,
-) -> RunResultInfo:
-    """Build a terminal :class:`RunResultInfo` from current run state.
+) -> _AgentResult:
+    """Build a terminal :class:`_AgentResult` from current run state.
 
     Centralises the ``run_id``/``session_id``/``total_usage`` boilerplate
     repeated at every loop exit (success, error, abort, max-turns, finally)."""
-    return RunResultInfo(
+    return _AgentResult(
         run_id=run_id,
         session_id=session_id,
         subtype=subtype,

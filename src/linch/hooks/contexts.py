@@ -5,7 +5,7 @@ from typing import Any, Literal
 
 from ..context import ContextBuildResult
 from ..tools import CanonicalToolOutput, ToolResult
-from ..types import AssistantAssembly, ProviderRequest, StopReason, ToolUseBlock
+from ..types import AssistantAssembly, ProviderRequest, StopReason, ToolUseBlock, Usage
 
 
 @dataclass(slots=True)
@@ -167,3 +167,16 @@ class SubagentStopContext(HookContext):
 @dataclass(slots=True)
 class EventEmitContext(HookContext):
     event: Any = None
+
+
+@dataclass(frozen=True, slots=True)
+class _AgentResult:
+    """Private native lifecycle result supplied to AgentStop hooks."""
+
+    run_id: str
+    session_id: str
+    subtype: str
+    stop_reason: str
+    total_usage: Usage
+    duration_ms: int
+    error: dict[str, Any] | None = None

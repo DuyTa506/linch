@@ -220,3 +220,26 @@ provide no built-in restart survival or cross-process delivery. Durable
 scheduling is planned in WP6 with PgQueuer; mailbox functionality moves to
 `linch.ext` in WP10. Hosts can still adapt the `Mailbox`, `ClaimableMailbox`,
 `ScheduleStore`, and `LeasedScheduleStore` protocols to external infrastructure.
+
+## Direct OpenTelemetry (WP15 / D11)
+
+- **D11:** `RunObserver` is removed; configure an OpenTelemetry API tracer/meter through Agent Context.
+- **D11:** `BaseObserver` is removed; use native hooks for application behavior and OTel for telemetry.
+- **D11:** `ObserverDispatcher` is removed; OTel SDK span processors/exporters provide telemetry fan-out.
+- **D11:** `LoggingObserver` is removed; configure an OTel ConsoleSpanExporter.
+- **D11:** `SpanCollector` is removed; use the SDK InMemorySpanExporter in tests.
+- **D11:** `OpenTelemetryObserver` is removed; Linch emits OTel spans directly; hosts configure SDK providers.
+- **D11:** `RunTelemetryHook` is removed; remove the hook; OTel source instrumentation is always present.
+- **D11:** `RunInfo` is removed; use invoke_agent span attributes or native AgentStartContext.
+- **D11:** `RunResultInfo` is removed; use invoke_agent span attributes or native AgentStopContext.result.
+- **D11:** `TurnInfo` is removed; use step spans or native turn hook contexts.
+- **D11:** `ProviderCallInfo` is removed; use chat span attributes or native provider hook contexts.
+- **D11:** `ProviderCallResult` is removed; use chat usage/finish attributes or native provider hook contexts.
+- **D11:** `ToolInfo` is removed; use execute_tool span attributes or native tool hook contexts.
+- **D11:** `ToolResultInfo` is removed; use execute_tool span attributes or native tool hook contexts.
+- **D11:** `Span` is removed; use the SDK ReadableSpan type.
+- **D11:** `normalize_observers` is removed; configure SDK processors/exporters directly.
+- **D11:** `observers=` is removed; pass OTel services through `Agent(context=...)`.
+- **D11:** `linch.observability` is removed; use `opentelemetry` directly.
+- **D11:** The `[otel]` extra is removed; install `opentelemetry-sdk` and your exporter in the host application.
+- **D11:** `examples/observability/custom_observer.py` is removed; use the console/OTLP exporter example.

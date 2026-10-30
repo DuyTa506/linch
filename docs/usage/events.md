@@ -176,6 +176,35 @@ unknown-use fence or replay an already charged delivery. This is not a
 distributed-tree guarantee and does not promise exactly-once billing at an
 external provider or a reservation against concurrent admissions.
 
+## OpenTelemetry traces and metrics
+
+The event stream remains the application-facing way to render progress and
+results. Operational traces and metrics are emitted at the I/O source through
+`opentelemetry-api`; without an SDK provider they are no-ops. Inject a host's
+tracer and meter providers through the agent `Context` (or inject direct
+tracer/meter objects) so different agents can use different exporters:
+
+```python
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.trace import TracerProvider
+from linch import Agent, Context
+
+host_context = Context()
+host_context.register("tracer_provider", TracerProvider())
+host_context.register("meter_provider", MeterProvider())
+agent = Agent(model="gpt-5", provider=my_provider, context=host_context)
+```
+
+The source instrumentation creates `invoke_agent`, `step`, `chat`,
+`execute_tool`, and compaction spans. GenAI attributes include operation,
+provider, model, finish reasons, token/cache usage, conversation id, tool name
+and call id; Linch adds run and turn identifiers. It records
+`gen_ai.client.token.usage`, `gen_ai.client.operation.duration`, and
+`linch.store.duration` (tagged with `op`) metrics. Content fields are omitted
+unless `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true` is set. Use
+an OTLP exporter for Langfuse, Tempo, Datadog, or another collector; no Linch
+observer or telemetry hook is required.
+
 ---
 
 ## Backpressure
@@ -316,6 +345,41 @@ distinct from a hard fail — so a scorer that never saw the relevant signal doe
 not silently count as a pass. Pair this with a `ScriptedProvider` to grade
 behavior without spending a live model call. For suite files, target
 comparisons, and CI exit codes, see [Evals and benchmarks](./evals.md).
+
+---
+
+## Trace context across host jobs
+
+`invoke_agent` uses the caller's current span as its parent. Foreground and
+background subagents inherit that context through their tool tasks. A run's
+trace identifier is the OTel trace ID; `linch.run_id` remains its durable run ID.
+When a host dispatches work to another process, carry W3C `traceparent` in the
+job payload using OTel propagation:
+
+```python
+from opentelemetry import context, propagate
+
+# Producer, inside the host request span:
+carrier = {}
+propagate.inject(carrier)
+job = {"run_id": run_id, "trace_context": carrier}
+
+# Consumer, after loading the session for this job:
+token = context.attach(propagate.extract(job["trace_context"]))
+try:
+    async for event in session.resume(job["run_id"]):
+        ...
+finally:
+    context.detach(token)
+```
+
+Install `opentelemetry-sdk` and `opentelemetry-exporter-otlp` in the host for
+OTLP export. Configure SDK trace processors and metric readers with OTLP
+exporters, then register their providers in `Context` as shown in
+[the hooks guide](./hooks.md#opentelemetry). Send to an OTel Collector that
+routes traces/metrics to Langfuse, Tempo, or Datadog according to the backend's
+supported signals. The SDK/exporter owns endpoint and authentication settings;
+Linch does not require a vendor adapter.
 
 ---
 

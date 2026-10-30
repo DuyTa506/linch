@@ -160,12 +160,15 @@ def make_agent(
     max_tool_concurrency: int = 8,
     permission_engine: PermissionEngine | None = None,
 ) -> SimpleNamespace:
+    from linch import Context
+
     return SimpleNamespace(
         cwd=".",
         tools=registry,
         permission_engine=permission_engine or PermissionEngine(mode="skip-dangerous"),
         max_tool_concurrency=max_tool_concurrency,
         tool_concurrency=max_tool_concurrency,
+        context=Context(),
     )
 
 
