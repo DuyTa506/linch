@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -21,6 +22,12 @@ from .store import (
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _copy_message(message: Message) -> Message:
+    """Copy the full message wire graph while retaining the shared strict codec."""
+
+    return message_from_dict(deepcopy(message_to_dict(message)))
 
 
 @dataclass(slots=True)
@@ -84,7 +91,7 @@ class InMemorySessionStore:
             StoredMessage(
                 seq=row.seq,
                 appended_at=row.appended_at,
-                message=message_from_dict(message_to_dict(row.message)),
+                message=_copy_message(row.message),
             )
             for row in self._messages.get(id, [])
         ]
@@ -99,14 +106,14 @@ class InMemorySessionStore:
             row = StoredMessage(
                 seq=len(bucket) + 1,
                 appended_at=ts,
-                message=message_from_dict(message_to_dict(message)),
+                message=_copy_message(message),
             )
             bucket.append(row)
             stored.append(
                 StoredMessage(
                     seq=row.seq,
                     appended_at=row.appended_at,
-                    message=message_from_dict(message_to_dict(row.message)),
+                    message=_copy_message(row.message),
                 )
             )
         rec = self._sessions[id]

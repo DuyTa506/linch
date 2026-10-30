@@ -1,7 +1,14 @@
 from linch.sessions import InMemorySessionStore, SqliteSessionStore
 from linch.sessions.tasks import CreateTaskInput
 from linch.tool_surface import ToolSurfaceReaderGuard
-from linch.types import Message, TextBlock, ToolActivation, ToolResultBlock
+from linch.types import (
+    ImageBlock,
+    Message,
+    TextBlock,
+    ToolActivation,
+    ToolResultBlock,
+    ToolUseBlock,
+)
 
 
 def _delete_task_counter(conn, session_id: str) -> None:
@@ -56,6 +63,57 @@ async def test_memory_store_round_trip() -> None:
     assert rows[0].seq == 1
     assert isinstance(rows[0].message.content[0], TextBlock)
     assert rows[0].message.content[0].text == "hi"
+
+
+async def test_memory_store_deeply_isolates_ordinary_message_graph_at_every_boundary() -> None:
+    store = InMemorySessionStore()
+    rec = await store.create()
+    message = Message(
+        role="assistant",
+        content=[
+            ToolUseBlock(
+                id="call-1",
+                name="ordinary_tool",
+                input={"nested": {"image": {"data": "before"}}},
+            ),
+            ToolResultBlock(
+                tool_use_id="call-1",
+                content=[ImageBlock(source={"media_type": "image/png", "data": "before"})],
+            ),
+        ],
+        provider_metadata={"nested": {"value": "before"}},
+    )
+
+    returned = await store.append_messages(rec.id, [message])
+
+    assert message.provider_metadata is not None
+    message.provider_metadata["nested"]["value"] = "caller mutation"
+    caller_tool = message.content[0]
+    assert isinstance(caller_tool, ToolUseBlock)
+    caller_tool.input["nested"]["image"]["data"] = "caller mutation"
+
+    returned_message = returned[0].message
+    assert returned_message.provider_metadata is not None
+    returned_message.provider_metadata["nested"]["value"] = "returned mutation"
+    returned_tool = returned_message.content[0]
+    assert isinstance(returned_tool, ToolUseBlock)
+    returned_tool.input["nested"]["image"]["data"] = "returned mutation"
+
+    loaded = (await store.load_messages(rec.id))[0].message
+    assert loaded.provider_metadata == {"nested": {"value": "before"}}
+    loaded_tool = loaded.content[0]
+    assert isinstance(loaded_tool, ToolUseBlock)
+    assert loaded_tool.input == {"nested": {"image": {"data": "before"}}}
+
+    assert loaded.provider_metadata is not None
+    loaded.provider_metadata["nested"]["value"] = "loaded mutation"
+    loaded_tool.input["nested"]["image"]["data"] = "loaded mutation"
+
+    reloaded = (await store.load_messages(rec.id))[0].message
+    assert reloaded.provider_metadata == {"nested": {"value": "before"}}
+    reloaded_tool = reloaded.content[0]
+    assert isinstance(reloaded_tool, ToolUseBlock)
+    assert reloaded_tool.input == {"nested": {"image": {"data": "before"}}}
 
 
 async def test_memory_store_control_messages_are_copy_isolated() -> None:
