@@ -220,7 +220,8 @@ attempting a legacy database upgrade.
 - `LeasedScheduleStore` is removed; worker queue delivery handles retries.
 - `InMemoryScheduleStore` is removed; use an explicit worker/Postgres adapter.
 - `SchedulerLoop` is removed; PgQueuer dispatches runs and deferred schedule jobs.
-- `schedule_tools` is removed; register schedule tools from `linch.worker`.
+- `schedule_tools` is removed; use `linch.worker.register_schedule_tools` (returns a `Disposable`).
+- `render_schedule_message` is removed; a schedule fire dispatches a separate run.
 - `cron_matches` is removed; worker cron definitions use `croniter`.
 - `next_cron_time` is removed; worker cron definitions use `croniter`.
 - `validate_cron` is removed; worker cron definitions use `croniter` validation.

@@ -5,8 +5,9 @@ service: persistence, streaming, human-in-the-loop, resume after a restart,
 graceful shutdown, and blast-radius controls. Each section links to the page
 with the full detail — this is the wiring checklist, not a re-explanation.
 
-Linch is a **library**, not a daemon. Your service owns the process, the request
-lifecycle, and the schedule; Linch owns one agent run at a time.
+Linch is a **library**. Your service owns the process and HTTP lifecycle;
+Linch owns agent execution. The optional `linch.worker` runtime dispatches
+runs and recurring work across a worker fleet.
 
 For a local database, follow the [Docker Postgres setup](./quickstart.md#5-keep-state-when-the-process-restarts).
 The host reads `LINCH_POSTGRES_DSN` and passes it to each store; the SDK does not
@@ -138,6 +139,143 @@ For cron/webhook/interval/CI-driven recurring work, drive
 [Outer loop runner](./loop-runner.md) and
 [`examples/recipes/runner_recipes.py`](../../examples/recipes/runner_recipes.py).
 
+## Scale out
+
+Install `linch[worker]` and import `linch.worker` explicitly. Core `import linch`
+never imports PgQueuer; worker names are absent from `linch.__all__`.
+
+The topology is **API processes → one Postgres → N worker processes**. API
+processes call `enqueue_run`; they do not run the model loop. Postgres holds
+sessions, pending runs, checkpoints, sequenced events, schedule definitions and
+PgQueuer jobs. All stores and PgQueuer share the host's asyncpg pool within each
+process; each process creates its own pool. Reserve at least one pool connection
+per worker for LISTEN and enough additional connections for queries and runs.
+
+```python
+from linch import Agent, empty_tools
+from linch.sessions.postgres import PostgresSessionStore
+from linch.worker import Worker, WorkerJob, enqueue_run, install
+
+await install(pool)  # once at process startup; serializes concurrent installers
+run_id = await enqueue_run(pool, session_id, prompt, queue="provider-a",
+                           meta={"tenant_id": tenant_id})
+
+async def agent_factory(job: WorkerJob) -> Agent:
+    provider = await provider_for_tenant(job.run.meta["tenant_id"])
+    return Agent(
+        model="your-model", provider=provider, tools=empty_tools(),
+        session_store=PostgresSessionStore("", pool=job.pool),
+        run_store=job.run_store,
+    )
+
+worker = Worker(pool, agent_factory, queues={"provider-a": 8, "premium": 4},
+                lease_ttl_s=30, stall_timeout_s=60, poll_interval_s=1)
+await worker.run()
+```
+
+The factory is async and returns a **fresh agent per job**. The host chooses the
+tenant, provider, tools, policy and dependencies; reuse exactly `job.run_store`
+so every write carries the claimed fencing epoch. Use `job.pool` for job-scoped
+stores: it borrows the shared pool, so the worker can close the agent and stores
+after the run without closing the host's pool. The host closes its real pool
+after workers have drained. Serialize different runs targeting the same session
+at the API boundary; the run lease does not serialize distinct runs in one session.
+
+`enqueue_run` creates a `pending` run and its job in one transaction with
+`dedupe_key="run:<run_id>"`. A caller-supplied run ID makes repeated submissions
+permanent no-ops, including after the queue job is acknowledged. Reusing an ID
+with a different session is rejected; the first submission's prompt and metadata
+win. `enqueue_runs(pool, [RunRequest(...)])` batches queue inserts in one
+transaction. The job JSON includes run/session IDs, prompt, optional queue and
+the caller's W3C `traceparent`. The worker restores it before execution, so the
+kernel's `invoke_agent` span joins the caller's trace.
+
+Each named run queue is a PgQueuer entrypoint with a database-enforced
+`concurrency_limit` across the **whole fleet**. Configure the same limits on
+all workers. `0` means unlimited; the default is one `default` run queue with
+unlimited concurrency. Queues must be registered on a worker to execute.
+These limits cap runs; use host limiters for provider request/token quotas.
+
+The queue only dispatches. A job separately claims the D1 run lease using the
+worker ID, and renews it every **lease TTL / 3**. A failed renewal aborts the run's
+signal; stale writes raise `LeaseLostError`. Agent cleanup completes before lease
+release. Completed, failed and aborted runs are acknowledged without invocation.
+An agent failure is a durable result, not a queue retry. Infrastructure errors
+such as an unreachable store or a competing live lease use
+`DatabaseRetryEntrypointExecutor` backoff; exhausted jobs are held for host
+inspection rather than discarded.
+
+On process death, queue and lease heartbeats both stop. PgQueuer re-picks the
+stale `picked` job after `stall_timeout_s`, plus up to the polling interval. The
+new worker claims the expired lease and resumes the checkpoint, verifying the
+stored execution contract. Choose a stall timeout at least as long as the lease
+TTL, with margin for scheduling/DB delays. Durable tool receipts replay; external
+tool effects still need `ctx.idempotency_key` reconciliation. The Postgres test
+kills worker A at `provider_pending`, recovers on B with a queue limit of one,
+and checks that A's retained epoch cannot append events or change status.
+PgQueuer acknowledges task cancellation, so a hard process kill is required to
+exercise actual orphan recovery. `worker.stop()` stops picking and drains active
+jobs; let `run()` return before closing the host pool.
+
+### Recurring work on the queue
+
+`create_schedule(pool, session_id, payload, cron="0 9 * * *")` or
+`interval_s=3600` creates a schedule definition and its first deferred job
+atomically. Cron uses croniter, five fields, UTC. Each fire transaction creates
+one deterministic run ID, advances the definition and inserts the next deferred
+job with `execute_after` and a dedupe key containing the fire time. Replaying a
+fire is a no-op. Missed occurrences catch up in fire-time order after downtime.
+`list_schedules(pool, session_id=...)` returns definitions;
+`cancel_schedule(pool, id, session_id=...)` disables future fires while preserving
+runs already materialized. API processes need no scheduler polling loop.
+
+Hosts mount the model tools explicitly:
+
+```python
+from linch.worker import register_schedule_tools
+
+undo = register_schedule_tools(agent.tools, pool, session_id=session_id)
+# CreateSchedule / ListSchedules / CancelSchedule are bound to this target.
+await undo()  # identity-safe, idempotent Disposable
+```
+
+### Stream from any process by sequence
+
+Stream readers need only a `PostgresRunStore`, not the worker's memory. Read
+`await store.load_events(run_id, after_seq=last_seq)`, deliver in ascending order,
+and advance `last_seq` only after successful delivery. Persist that cursor in the
+client (for example SSE `Last-Event-ID`) and use it on reconnect. A sequence is
+local to a run. Poll `run_events` by `(run_id, seq)` when no wakeup channel is
+available or NOTIFY contention is material; notifications are hints, never the
+source of truth. An empty poll does not mean completion; observe the persisted
+result event. The runnable [fleet example](../../examples/worker/minimal.py)
+includes enqueue, worker and polling-reader modes without a live model key.
+
+### Enqueue / NOTIFY measurement
+
+Measured 2026-10-31 with Python 3.11.14, PgQueuer 1.6.0 and local Postgres 16.2
+via Unix socket. Each result is the median of three 3,072-run samples with a
+warm 33-connection pool, one separate active LISTEN receiver, short prompts
+and no consumers. Time includes run-row
+writes, queue inserts, transaction commit and PgQueuer's NOTIFY trigger; it does
+not isolate the NOTIFY lock from database/network/client work. Batches contain
+32 runs and use one transaction and one queue insert per batch.
+
+| Concurrent enqueuers | Single runs/s | Batch runs/s (32) |
+|---:|---:|---:|
+| 1 | 1,103.0 | 8,199.2 |
+| 8 | 2,471.7 | 17,700.4 |
+| 32 | 2,375.0 | 18,788.8 |
+
+Reproduce with `PYTHONPATH=src python examples/worker/benchmark_enqueue.py`
+and `AGENT_KIT_TEST_PG_DSN` (or `LINCH_POSTGRES_DSN`). The script creates and
+removes an isolated schema. Single-submit throughput stopped improving beyond
+eight enqueuers on this host. Postgres NOTIFY serializes commit work through a
+global lock; batch enqueue amortizes commits and notifications. Prefer batches
+for bursts, bound enqueuer concurrency, and remeasure with your workload and
+consumers. For stream readers, polling `run_events` by sequence avoids adding
+per-event NOTIFY traffic to that shared commit path.
+
 ## Optional dependencies are opt-in
 
 The core install includes the OpenAI SDK, PyYAML, `typing_extensions`, and
@@ -150,7 +288,7 @@ Integration dependencies are extras and fail with an explicit
 | `linch[anthropic]` | Anthropic provider |
 | `linch[gemini]` | Gemini provider |
 | `linch[mcp]` | MCP tool servers (requires `mcp>=2.0.0`; 1.x is not supported) |
-| `linch[otel]` | OpenTelemetry observer |
+| `linch[worker]` | PgQueuer dispatch, asyncpg, and croniter schedules |
 | `linch[postgres]` | Postgres session/run stores and filesystem backends |
 
 ---
