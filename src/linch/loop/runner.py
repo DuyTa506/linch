@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from .._telemetry import store_call, trace_run
 from .._wire import UnsupportedWireVersionError
-from ..errors import AbortError, ConfigError
+from ..errors import AbortError, ConfigError, RunNotResumableError
 from ..events import ErrorEvent, Event, ResultEvent, UserEvent
 from ..hooks import (
     AgentStopContext,
@@ -230,10 +230,10 @@ async def resume_loop(session: Session, run_id: str, opts: RunOptions) -> AsyncI
     if run_record.session_id != session.id:
         raise ValueError(f"run {run_id} belongs to session {run_record.session_id}")
     if run_record.status in {"completed", "failed", "aborted"}:
-        return
+        raise RunNotResumableError(run_id, run_record.status)
     checkpoint = run_record.checkpoint
     if checkpoint is None:
-        return
+        raise RunNotResumableError(run_id, run_record.status)
     requested_contract = _build_run_contract(session, checkpoint.prompt, opts)
     try:
         stored_contract = run_contract_from_meta(run_record.meta)
