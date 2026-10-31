@@ -30,13 +30,22 @@ TERMINAL = "('completed','failed','aborted')"
 
 
 async def pool_for(a: argparse.Namespace, *, direct: bool = False, name: str = "audit") -> Any:
-    return await asyncpg.create_pool(
-        a.dsn if direct else a.proxy_dsn,
+    dsn = a.dsn if direct else a.proxy_dsn
+    if getattr(a, "pgbouncer", False) and not direct:
+        parsed = urlsplit(dsn)
+        dsn = parsed._replace(netloc=f"{name}@{parsed.hostname}:{parsed.port}").geturl()
+    settings = {} if getattr(a, "pgbouncer", False) and not direct else {"application_name": name}
+    if direct or not getattr(a, "pgbouncer", False):
+        settings["search_path"] = a.schema
+    options: dict[str, Any] = dict(
         min_size=2,
         max_size=a.pool_size,
         command_timeout=10,
-        server_settings={"search_path": a.schema, "application_name": name},
+        server_settings=settings,
     )
+    if getattr(a, "pgbouncer", False) and not direct:
+        options["statement_cache_size"] = 0
+    return await asyncpg.create_pool(dsn, **options)
 
 
 class TimedProvider(BaseProvider):
@@ -191,9 +200,9 @@ async def child(a: argparse.Namespace) -> None:
             ]
             pending: set[asyncio.Task[Any]] = set()
 
-            async def submit() -> None:
+            async def submit(arrival: float) -> None:
                 try:
-                    await enqueue_run(pool, uuid4().hex, "hello", meta={"arrival": time.time()})
+                    await enqueue_run(pool, uuid4().hex, "hello", meta={"arrival": arrival})
                 except Exception as exc:
                     metrics["errors"][type(exc).__name__] += 1
 
@@ -201,7 +210,7 @@ async def child(a: argparse.Namespace) -> None:
             next_at = a.start - offset
             while next_at < a.end - offset and not stop.is_set():
                 await asyncio.sleep(max(0, next_at - time.monotonic()))
-                task = asyncio.create_task(submit())
+                task = asyncio.create_task(submit(next_at + offset))
                 pending.add(task)
                 task.add_done_callback(pending.discard)
                 next_at += random.expovariate(a.rate)
@@ -263,6 +272,26 @@ def free_port() -> int:
         return sock.getsockname()[1]
 
 
+def pgbouncer_config(port: int, logfile: str, pidfile: str, authfile: str) -> str:
+    return f"""[databases]
+postgres = host=127.0.0.1 port=55432 dbname=postgres
+
+[pgbouncer]
+listen_addr = 127.0.0.1
+listen_port = {port}
+unix_socket_dir =
+pool_mode = transaction
+auth_type = trust
+auth_file = {authfile}
+stats_users = api
+ignore_startup_parameters = search_path
+max_client_conn = 512
+default_pool_size = 64
+logfile = {logfile}
+pidfile = {pidfile}
+"""
+
+
 async def stop_process(proc: Any, timeout: float) -> None:
     if proc.returncode is not None:
         return
@@ -280,6 +309,21 @@ async def pg_stats(pool: Any) -> Any:
         (SELECT wal_bytes::float FROM pg_stat_wal) wal
         FROM pg_stat_database WHERE datname=current_database()""")
     return dict(row), time.monotonic()
+
+
+def recovered(chaos: dict[str, Any]) -> bool:
+    return chaos.get("recovery") is not None and chaos["recovery"]["seconds"] <= 7
+
+
+async def recovery_after(pool: Any, chaos: dict[str, Any]) -> dict[str, Any] | None:
+    query = """WITH moved AS (SELECT DISTINCT ON(n.run_id) n.run_id,n.epoch,n.at
+        FROM load_claims n WHERE extract(epoch FROM n.at)::float>$2 AND EXISTS(
+        SELECT 1 FROM load_claims o WHERE o.run_id=n.run_id AND o.owner=$1
+        AND o.epoch<n.epoch AND extract(epoch FROM o.at)<$2) ORDER BY n.run_id,n.at)
+        SELECT run_id,epoch,at::text,extract(epoch FROM at)::float-$2 seconds,
+        count(*) OVER() runs FROM moved ORDER BY at DESC LIMIT 1"""
+    row = await pool.fetchrow(query, chaos["lease_owner"], chaos["injected_at"])
+    return dict(row) if row else None
 
 
 async def summarize(pool: Any, a: argparse.Namespace) -> dict[str, Any]:
@@ -336,8 +380,7 @@ async def run_point(a: argparse.Namespace) -> dict[str, Any]:
     from linch.worker import install
 
     a = argparse.Namespace(**vars(a))
-    a.schema = "load_" + uuid4().hex
-    a.logs = tempfile.mkdtemp(prefix="linch-load-")
+    a.schema, a.logs = "load_" + uuid4().hex, tempfile.mkdtemp(prefix="linch-load-")
     processes: dict[str, Any] = {}
     handles = []
     admin = await asyncpg.connect(a.dsn, command_timeout=10)
@@ -354,6 +397,36 @@ async def run_point(a: argparse.Namespace) -> dict[str, Any]:
         a.proxy_dsn = a.dsn
         if not a.direct:
             api, port = free_port(), free_port()
+            upstream_port = 55432
+            if a.pgbouncer:
+                a.pg_roles = []
+                for role in [*(f"w-{i}" for i in range(a.workers)), "api"]:
+                    await admin.execute(f'CREATE ROLE "{role}" LOGIN SUPERUSER')
+                    await admin.execute(
+                        f'ALTER ROLE "{role}" SET search_path TO "{a.schema}",public'
+                    )
+                    a.pg_roles.append(role)
+                upstream_port = free_port()
+                authfile = Path(a.logs) / "pgbouncer.users"
+                authfile.write_text("".join(f'"{role}" ""\n' for role in a.pg_roles))
+                config = Path(a.logs) / "pgbouncer.ini"
+                config.write_text(
+                    pgbouncer_config(
+                        upstream_port,
+                        str(Path(a.logs) / "pgbouncer.log"),
+                        str(Path(a.logs) / "pgbouncer.pid"),
+                        str(authfile),
+                    )
+                )
+                await spawn("pgbouncer", ["/usr/sbin/pgbouncer", str(config)])
+                for _ in range(50):
+                    try:
+                        _reader, writer = await asyncio.open_connection("127.0.0.1", upstream_port)
+                        writer.close()
+                        await writer.wait_closed()
+                        break
+                    except OSError:
+                        await asyncio.sleep(0.1)
             await spawn("proxy", ["toxiproxy-server", "-host", "127.0.0.1", "-port", str(api)])
             for _ in range(50):
                 try:
@@ -361,7 +434,11 @@ async def run_point(a: argparse.Namespace) -> dict[str, Any]:
                     break
                 except OSError:
                     await asyncio.sleep(0.1)
-            proxy = dict(name="pg", listen=f"127.0.0.1:{port}", upstream="127.0.0.1:55432")
+            proxy = dict(
+                name="pg",
+                listen=f"127.0.0.1:{port}",
+                upstream=f"127.0.0.1:{upstream_port}",
+            )
             await http(api, "/proxies", proxy)
             for direction in ("upstream", "downstream"):
                 toxic: dict[str, Any] = dict(name=direction, type="latency", stream=direction)
@@ -373,7 +450,8 @@ async def run_point(a: argparse.Namespace) -> dict[str, Any]:
             a.proxy_dsn = parsed._replace(netloc=address).geturl()
         pool = await pool_for(a, direct=True)
         await install(pool)
-        await pool.execute(AUDIT_DDL)
+        ddl = AUDIT_DDL.replace("current_setting('application_name')", "current_user")
+        await pool.execute(ddl if a.pgbouncer else AUDIT_DDL)
         a.start = time.time() + 2
         a.steady = a.start + a.warmup
         a.end = a.steady + a.duration
@@ -400,7 +478,7 @@ async def run_point(a: argparse.Namespace) -> dict[str, Any]:
                 tracked = [
                     (name, psutil.Process(p.pid))
                     for name, p in processes.items()
-                    if p.returncode is None and name != "api"
+                    if p.returncode is None
                 ]
                 if root:
                     tracked += [("postgres", p) for p in [root, *root.children(recursive=True)]]
@@ -443,7 +521,7 @@ async def run_point(a: argparse.Namespace) -> dict[str, Any]:
                 if enqueued and not remaining:
                     break
             await asyncio.sleep(0.25)
-        children = [p for name, p in processes.items() if name != "proxy"]
+        children = [p for name, p in processes.items() if name not in {"proxy", "pgbouncer"}]
         await asyncio.gather(*(stop_process(p, a.drain_timeout) for p in children))
         result = await summarize(pool, a)
         if done_chaos:
@@ -452,17 +530,16 @@ async def run_point(a: argparse.Namespace) -> dict[str, Any]:
                 chaos["lease_owner"],
                 chaos["injected_at"],
             )
-            query = """SELECT epoch,at::text FROM load_claims WHERE run_id=$1
-                AND epoch>$2 ORDER BY at LIMIT 1"""
-            recovery = await pool.fetchrow(query, chaos["id"], chaos["lease_epoch"])
-            chaos["recovery"] = dict(recovery) if recovery else None
-        result.update({key: getattr(a, key) for key in ("workers", "rate", "rtt", "logs")})
+            chaos["recovery"] = await recovery_after(pool, chaos)
+        keys = "workers rate rtt logs pool_size readers concurrency poll_interval pgbouncer".split()
+        result.update({key: getattr(a, key) for key in keys})
         checks = result["invariant_errors"]
-        ignored = ("proxy", chaos.get("lease_owner") if a.chaos == "kill" else None)
+        ignored = ("proxy", "pgbouncer", chaos.get("lease_owner") if a.chaos == "kill" else None)
         codes = [p.returncode for n, p in processes.items() if n not in ignored]
         checks["processes"] = sum(code != 0 for code in codes)
         checks["chaos"] = int(a.chaos != "none" and not done_chaos)
-        checks["recovery"] = int(a.chaos == "kill" and not chaos.get("recovery"))
+        checks["recovery"] = int(a.chaos == "kill" and not recovered(chaos))
+        checks["failed_runs"] = result["failed"]
         checks["drain_claims"] = chaos.get("claims_after_signal", 0) if a.chaos == "drain" else 0
         result["chaos"] = chaos
         result["cpu_pct"] = {k: v / a.duration * 100 for k, v in cpu.items()}
@@ -500,6 +577,8 @@ async def run_point(a: argparse.Namespace) -> dict[str, Any]:
             pool.terminate()
         try:
             await admin.execute(f'DROP SCHEMA IF EXISTS "{a.schema}" CASCADE')
+            for role in getattr(a, "pg_roles", []):
+                await admin.execute(f'DROP ROLE IF EXISTS "{role}"')
         finally:
             await asyncio.wait_for(admin.close(), 10)
 
@@ -523,8 +602,8 @@ async def experiments(a: argparse.Namespace) -> dict[str, Any]:
     elif a.command == "capacity":
         for m in (1, 2, 4, 8):
             rate, stable, base = a.rate, None, None
-            for _ in range(6):
-                result = await point(workers=m, rate=rate, rtt=1, readers=a.readers if base else 0)
+            for _ in range(9):
+                result = await point(workers=m, rate=rate, rtt=1)
                 latency = result["latency_ms"]["p99"]
                 base = base or latency
                 bad = (
@@ -540,9 +619,7 @@ async def experiments(a: argparse.Namespace) -> dict[str, Any]:
                 brackets[str(m)] = {"last_stable": stable, "first_bad": None}
     elif a.command == "network":
         for rtt in (0, 1, 2):
-            await point(workers=4, rtt=rtt, readers=0)
-            if rtt == 1 and a.readers:
-                await point(workers=4, rtt=rtt)
+            await point(workers=4, rtt=rtt)
     else:
         for mode in ("kill", "blip", "drain"):
             await point(workers=4, rtt=1, chaos=mode)
@@ -577,6 +654,7 @@ def main() -> None:
     p.add_argument("--dsn", default="postgresql://postgres@127.0.0.1:55432/postgres")
     p.add_argument("--chaos", choices=("none", "kill", "blip", "drain"), default="none")
     p.add_argument("--direct", action="store_true")
+    p.add_argument("--pgbouncer", action="store_true")
     p.add_argument("--quick", action="store_true")
     p.add_argument("--output")
     a = p.parse_args()
@@ -586,6 +664,8 @@ def main() -> None:
         raise SystemExit("rate, duration, workers must be positive; pool-size >=2")
     if a.direct and a.chaos == "blip":
         raise SystemExit("blip requires Toxiproxy")
+    if a.direct and a.pgbouncer:
+        raise SystemExit("pgbouncer requires Toxiproxy")
     report = asyncio.run(experiments(a))
     text = json.dumps(report, indent=2)
     if a.output:

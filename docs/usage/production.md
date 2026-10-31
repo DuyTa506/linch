@@ -222,6 +222,16 @@ all workers. `0` means unlimited; the default is one `default` run queue with
 unlimited concurrency. Queues must be registered on a worker to execute.
 These limits cap runs; use host limiters for provider request/token quotas.
 
+**Capacity.** On a shared 12-CPU host, four-turn simulated runs measured about 20
+runs/s with one worker, 25 total with four (~6 each), and 39 with eight (~5 each).
+More processes did not scale linearly; size connection pools and database write
+capacity first. At 24 offered runs/s, raising one pool from 16 to 32 helped until
+CPU approached 100%. PgBouncer transaction mode completed all jobs, but p99 wait
+before work started rose from 40 ms to 4.3 s. Use direct/session pooling for workers;
+preserving queue notifications with transaction pooling requires a separate connection.
+PgBouncer 1.16 also needs `statement_cache_size=0`. See the
+[capacity measurements](../superpowers/measurements/2026-10-31-scale-gate.md).
+
 The queue only dispatches. A job separately claims the D1 run lease using the
 worker ID. Renewal starts immediately, then repeats every **lease TTL / 3**.
 Transient renewal failures retry within the last confirmed TTL; a hung renewal
