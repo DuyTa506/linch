@@ -144,6 +144,7 @@ async def prepare_provider_turn(ctx: ProviderPreparationContext) -> AsyncIterato
             "permission_pending",
             "tool_batch_pending",
             "tool_executing",
+            "tool_results_appended",
         }
         and ctx.checkpoint.assistant_message is not None
     )

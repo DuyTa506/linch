@@ -18,7 +18,6 @@ from ..events import (
     ToolCallEndEvent,
     ToolCallStartEvent,
     UsageEvent,
-    _LoopGuardEvaluationEvent,
 )
 from ..model_calls import _context_fingerprint, _model_call_fingerprint
 from ..run_store import RunCheckpoint, _require_tool_recovery_cursor
@@ -366,10 +365,6 @@ async def _queue_crashed_worker_notifications(
     return events
 
 
-_LOOP_GUARD_RUNTIME_NAMESPACE = "linch.loop_guard.v1"
-_LOOP_GUARD_RUNTIME_FORMAT = "delta-v1"
-
-
 def _loop_guard_is_active(guard: Any) -> bool:
     return guard is not None and (
         getattr(guard, "max_identical_tool_calls", 0) > 0
@@ -377,217 +372,42 @@ def _loop_guard_is_active(guard: Any) -> bool:
     )
 
 
-def _loop_guard_runtime_from_extension(extension_state: dict[str, Any]) -> tuple[int, int]:
-    """Decode the compact committed-prefix watermark for guard deltas."""
-    raw = extension_state.get(_LOOP_GUARD_RUNTIME_NAMESPACE)
-    if raw is None:
-        return 0, 0
-    if not isinstance(raw, dict):
-        raise ConfigError("invalid loop-guard checkpoint runtime envelope")
-    if set(raw) != {"version", "format", "evaluation_count", "evaluation_seq"}:
-        raise ConfigError("invalid loop-guard checkpoint runtime envelope")
-    require_wire_version(raw.get("version"))
-    if raw["format"] != _LOOP_GUARD_RUNTIME_FORMAT:
-        raise ConfigError("invalid loop-guard checkpoint runtime envelope")
-    count = raw["evaluation_count"]
-    seq = raw["evaluation_seq"]
-    if type(count) is not int or count < 0 or type(seq) is not int or seq < 0:
-        raise ConfigError("invalid loop-guard checkpoint runtime envelope")
-    return count, seq
-
-
-def _loop_guard_runtime_to_extension(
-    extension_state: dict[str, Any], *, evaluation_count: int, evaluation_seq: int
-) -> None:
-    """Write the scalar committed-prefix watermark, never the guard map."""
-    if not isinstance(extension_state, dict):
-        raise ConfigError("RunCheckpoint.extension_state must be a dict")
-    if type(evaluation_count) is not int or evaluation_count < 0:
-        raise ConfigError("invalid loop-guard evaluation count")
-    if type(evaluation_seq) is not int or evaluation_seq < 0:
-        raise ConfigError("invalid loop-guard evaluation sequence")
-    extension_state[_LOOP_GUARD_RUNTIME_NAMESPACE] = {
-        "version": WIRE_VERSION,
-        "format": _LOOP_GUARD_RUNTIME_FORMAT,
-        "evaluation_count": evaluation_count,
-        "evaluation_seq": evaluation_seq,
+def _loop_guard_state_to_dict(state: Any) -> dict[str, object] | None:
+    if state is None:
+        return None
+    return {
+        "call_counts": dict(getattr(state, "call_counts", {})),
+        "consecutive_failures": int(getattr(state, "consecutive_failures", 0) or 0),
     }
 
 
-def _loop_guard_batch_id(turn_index: int, tool_blocks: list[ToolUseBlock]) -> str:
-    """Return a stable identity for one accepted assistant tool batch."""
-    if type(turn_index) is not int or turn_index < 0:
-        raise ConfigError("loop-guard batch turn index is invalid")
-    return _model_call_fingerprint(
-        {
-            "turn_index": turn_index,
-            "tool_blocks": [
-                {"id": block.id, "name": block.name, "input": block.input} for block in tool_blocks
-            ],
-        }
-    )
-
-
-def _loop_guard_batch_id_for_checkpoint(checkpoint: RunCheckpoint) -> str | None:
-    """Return the current in-flight batch identity, if recovery owns one."""
-    if checkpoint.phase not in {
-        "assistant_appended",
-        "permission_pending",
-        "tool_batch_pending",
-        "tool_executing",
-        "tool_results_appended",
-    }:
+def _loop_guard_state_from_dict(raw: dict[str, object] | None) -> Any:
+    if raw is None:
         return None
-    if checkpoint.phase == "assistant_appended":
-        blocks = []
-        if checkpoint.assistant_message:
-            blocks = [
-                block
-                for block in checkpoint.assistant_message.content
-                if isinstance(block, ToolUseBlock)
-            ]
-    else:
-        blocks = list(checkpoint.pending_tool_blocks)
-    return _loop_guard_batch_id(checkpoint.turn_index, blocks) if blocks else None
-
-
-def _loop_guard_delta_rows(rows: list[Any]) -> list[tuple[int, _LoopGuardEvaluationEvent]]:
-    """Validate and return private guard facts in durable sequence order."""
-    out: list[tuple[int, _LoopGuardEvaluationEvent]] = []
-    seen: dict[str, _LoopGuardEvaluationEvent] = {}
-    previous_seq = 0
-    for row in rows:
-        seq = getattr(row, "seq", None)
-        if type(seq) is not int or seq < 1:
-            raise ConfigError("loop-guard journal requires valid event sequence numbers")
-        if seq < previous_seq:
-            raise ConfigError("loop-guard journal sequence numbers are not ordered")
-        previous_seq = seq
-        event = getattr(row, "event", None)
-        if not isinstance(event, _LoopGuardEvaluationEvent):
-            continue
-        prior = seen.get(event.batch_id)
-        if prior is not None and prior != event:
-            raise ConfigError("conflicting loop-guard delta for one batch")
-        if out and event.turn_index < out[-1][1].turn_index:
-            raise ConfigError("loop-guard delta turn indexes are not ordered")
-        seen[event.batch_id] = event
-        out.append((seq, event))
-    return out
-
-
-def _loop_guard_evaluations_from_events(
-    rows: list[Any],
-    *,
-    after_seq: int = 0,
-) -> dict[str, _LoopGuardEvaluationEvent]:
-    if type(after_seq) is not int or after_seq < 0:
-        raise ConfigError("invalid loop-guard evaluation sequence")
-    return {event.batch_id: event for seq, event in _loop_guard_delta_rows(rows) if seq > after_seq}
-
-
-def _validate_loop_guard_delta_decision(
-    guard: Any,
-    state: Any,
-    event: _LoopGuardEvaluationEvent,
-    changed_counts: dict[str, int],
-) -> None:
-    """Reject a malformed fact instead of silently changing guard behavior."""
     from ..loop_guard import LoopGuardState
 
-    if not isinstance(state, LoopGuardState):
-        raise ConfigError("invalid loop-guard replay state")
-    if event.action == "continue":
-        if guard.max_identical_tool_calls > 0 and any(
-            state.call_counts.get(signature, 0) >= guard.max_identical_tool_calls
-            for signature in changed_counts
-        ):
-            raise ConfigError("loop-guard delta continues after repeated call threshold")
-        if (
-            guard.max_consecutive_failures > 0
-            and state.consecutive_failures >= guard.max_consecutive_failures
-        ):
-            raise ConfigError("loop-guard delta continues after failure threshold")
-        return
-    if event.reason not in {"repeated_tool_call", "repeated_failures"} or not event.detail:
-        raise ConfigError("loop-guard delta has an invalid decision")
-    repeated_call = guard.max_identical_tool_calls > 0 and any(
-        state.call_counts.get(signature, 0) >= guard.max_identical_tool_calls
-        for signature in changed_counts
+    call_counts_raw = raw.get("call_counts")
+    failures = raw.get("consecutive_failures")
+    if (
+        set(raw) != {"call_counts", "consecutive_failures"}
+        or not isinstance(call_counts_raw, dict)
+        or type(failures) is not int
+        or failures < 0
+        or any(
+            type(key) is not str
+            or len(key) != 16
+            or key != key.lower()
+            or any(char not in "0123456789abcdef" for char in key)
+            or type(value) is not int
+            or value < 0
+            for key, value in call_counts_raw.items()
+        )
+    ):
+        raise ConfigError("invalid loop-guard checkpoint state")
+    return LoopGuardState(
+        call_counts=dict(call_counts_raw),
+        consecutive_failures=failures,
     )
-    repeated_failure = (
-        guard.max_consecutive_failures > 0
-        and state.consecutive_failures >= guard.max_consecutive_failures
-    )
-    if event.reason == "repeated_tool_call" and not repeated_call:
-        raise ConfigError("loop-guard delta lacks a repeated-call threshold crossing")
-    if event.reason == "repeated_failures" and (not repeated_failure or repeated_call):
-        raise ConfigError("loop-guard delta lacks the expected failure threshold crossing")
-
-
-def _loop_guard_state_from_events(
-    guard: Any,
-    rows: list[Any],
-    *,
-    evaluation_count: int,
-    evaluation_seq: int,
-    current_batch_id: str | None,
-    current_turn_index: int | None = None,
-) -> Any:
-    """Rebuild guard state from the checkpoint-committed sparse delta prefix.
-
-    Tool scheduler events are intentionally not an input here: they can be
-    missing across a valid crash cut, and their recovery cursor is unrelated to
-    the point at which the guard was evaluated.  Facts after the committed
-    watermark are allowed only for the one in-flight batch and are replayed by
-    the normal tool phase.
-    """
-    from ..loop_guard import LoopGuardState
-
-    if type(evaluation_count) is not int or evaluation_count < 0:
-        raise ConfigError("invalid loop-guard evaluation count")
-    if type(evaluation_seq) is not int or evaluation_seq < 0:
-        raise ConfigError("invalid loop-guard evaluation sequence")
-    delta_rows = _loop_guard_delta_rows(rows)
-    committed: list[tuple[int, _LoopGuardEvaluationEvent]] = []
-    ahead_ids: set[str] = set()
-    unique_committed: set[str] = set()
-    for seq, event in delta_rows:
-        if seq <= evaluation_seq:
-            if event.batch_id not in unique_committed:
-                unique_committed.add(event.batch_id)
-                committed.append((seq, event))
-        else:
-            ahead_ids.add(event.batch_id)
-    if len(unique_committed) != evaluation_count:
-        raise ConfigError("loop-guard journal is missing committed evaluation facts")
-    if current_batch_id is None:
-        if ahead_ids:
-            raise ConfigError("loop-guard journal is ahead of a non-tool checkpoint")
-    else:
-        if any(batch_id != current_batch_id for batch_id in ahead_ids):
-            raise ConfigError("loop-guard journal is ahead of a different tool batch")
-        if current_turn_index is not None and any(
-            event.turn_index != current_turn_index
-            for seq, event in delta_rows
-            if seq > evaluation_seq and event.batch_id == current_batch_id
-        ):
-            raise ConfigError("loop-guard journal fact does not match the checkpoint turn")
-    if current_batch_id in unique_committed:
-        raise ConfigError("in-flight tool batch is already committed in loop-guard checkpoint")
-
-    state = LoopGuardState()
-    for _, event in committed:
-        changed_counts = dict(event.count_deltas)
-        if state.consecutive_failures != event.failures_before:
-            raise ConfigError("loop-guard delta failure streak does not match its prefix")
-        for signature, delta in changed_counts.items():
-            if state.call_counts.get(signature, 0) != event.count_before[signature]:
-                raise ConfigError("loop-guard delta count does not match its prefix")
-            state.call_counts[signature] = state.call_counts.get(signature, 0) + delta
-        state.consecutive_failures = event.consecutive_failures
-        _validate_loop_guard_delta_decision(guard, state, event, changed_counts)
-    return state
 
 
 def _consumed_auxiliary_receipt_ids_from_events(rows: list[Any]) -> tuple[str, ...]:

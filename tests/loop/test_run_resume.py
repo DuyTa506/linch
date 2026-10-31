@@ -66,6 +66,37 @@ class ScriptProvider:
         yield {"type": "message_end", "stop_reason": "tool_use", "usage": Usage()}
 
 
+class ThreeBatchProvider:
+    """Emit the same tool call for three batches, then answer without tools."""
+
+    id = "three-batch"
+
+    def __init__(self, *, start_calls: int = 0) -> None:
+        self.calls = start_calls
+
+    def context_window(self, model: str) -> int:
+        return 100_000
+
+    async def stream(self, req) -> AsyncIterator[dict[str, object]]:
+        from linch.types import Usage
+
+        self.calls += 1
+        yield {"type": "message_start", "model": req.model}
+        if not req.tools:
+            yield {"type": "text_delta", "text": "done"}
+            yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
+            return
+        tool_id = f"call-{self.calls}"
+        yield {"type": "tool_use_start", "id": tool_id, "name": "A"}
+        yield {
+            "type": "tool_use_input_delta",
+            "id": tool_id,
+            "json_delta": json.dumps({"value": "same"}),
+        }
+        yield {"type": "tool_use_end", "id": tool_id}
+        yield {"type": "message_end", "stop_reason": "tool_use", "usage": Usage()}
+
+
 class _Crash(BaseException):
     pass
 
@@ -762,8 +793,8 @@ async def test_guard_recovery_does_not_require_missing_assistant_observation() -
     assert events[-1].type == "result"
 
 
-async def test_guard_recovery_does_not_count_journal_ahead_batch_twice() -> None:
-    """A fact ahead of an in-flight checkpoint is re-evaluated exactly once."""
+async def test_guard_recovery_does_not_count_inflight_batch_twice() -> None:
+    """A checkpointed in-flight batch is re-evaluated exactly once."""
     from linch import LoopGuard
 
     session_store = _memory_session_store()
@@ -815,33 +846,7 @@ async def test_guard_recovery_does_not_count_journal_ahead_batch_twice() -> None
     assert events[-1].type == "result"
 
 
-async def test_guard_delta_is_durable_but_never_yielded() -> None:
-    session_store = _memory_session_store()
-    run_store = _memory_run_store()
-    counts: dict[str, int] = {}
-    agent = _agent(
-        model="gpt-5",
-        provider=ScriptProvider(tool_names=["A"]),
-        tools=_registry(counts, "A"),
-        permissions={"mode": "skip-dangerous"},
-        session_store=session_store,
-        run_store=run_store,
-        cwd=".",
-    )
-    session = await agent.session(id="s1")
-    events = await _collect(session.run("use tool"))
-    run_id = next(event.run_id for event in events if event.type == "system")
-
-    assert not any(event.type == "loop_guard_delta" for event in events)
-    rows = await run_store.load_events(run_id)
-    assert sum(row.event.type == "loop_guard_delta" for row in rows) == 1
-    run = await run_store.load_run(run_id)
-    assert run is not None and run.checkpoint is not None
-    watermark = run.checkpoint.extension_state["linch.loop_guard.v1"]
-    assert watermark["evaluation_count"] == 1
-
-
-async def test_disabled_guard_does_not_write_guard_deltas() -> None:
+async def test_disabled_guard_has_no_checkpoint_state() -> None:
     from linch import LoopGuard
 
     session_store = _memory_session_store()
@@ -861,14 +866,13 @@ async def test_disabled_guard_does_not_write_guard_deltas() -> None:
     events = await _collect(session.run("use tool"))
     run_id = next(event.run_id for event in events if event.type == "system")
 
-    rows = await run_store.load_events(run_id)
-    assert not any(row.event.type == "loop_guard_delta" for row in rows)
     run = await run_store.load_run(run_id)
     assert run is not None and run.checkpoint is not None
+    assert run.checkpoint.loop_guard_state is None
     assert "linch.loop_guard.v1" not in run.checkpoint.extension_state
 
 
-async def test_guard_trip_is_not_reemitted_after_durable_force_final_cut() -> None:
+async def test_guard_trip_is_not_reemitted_after_interleaved_host_notification() -> None:
     from linch import LoopGuard
 
     session_store = _memory_session_store()
@@ -904,6 +908,10 @@ async def test_guard_trip_is_not_reemitted_after_durable_force_final_cut() -> No
     resumed = await restarted.session(id="s1")
     with pytest.raises(_Crash):
         await _collect(resumed.resume(run_id))
+    from linch.types import Message, TextBlock
+
+    await resumed.append([Message(role="user", content=[TextBlock(text="host note")])])
+    await restarted.close()
 
     run_store.reset(None)
     restarted_again = _agent(
@@ -922,6 +930,216 @@ async def test_guard_trip_is_not_reemitted_after_durable_force_final_cut() -> No
     assert not any(event.type == "loop_guard" for event in events)
     rows = await run_store.load_events(run_id)
     assert sum(row.event.type == "loop_guard" for row in rows) == 1
+    reminders = [
+        message
+        for message in resumed_again.full_history
+        if any(
+            "You appear to be stuck in a loop" in getattr(block, "text", "")
+            for block in message.content
+        )
+    ]
+    assert len(reminders) == 1
+
+
+def _failing_registry(counts: dict[str, int]):
+    from linch.tools import ToolRegistry, ToolResult
+
+    class FailingTool(CountingTool):
+        async def execute(self, input: dict[str, Any], ctx: Any):
+            self.counts[self.name] = self.counts.get(self.name, 0) + 1
+            return ToolResult(content=f"{self.name}:{self.counts[self.name]}", is_error=True)
+
+    registry = ToolRegistry()
+    registry.register(FailingTool("A", counts))
+    return registry
+
+
+def _guard_run_summary(events: list[Any], history: list[Any], checkpoint: Any) -> tuple[Any, ...]:
+    from linch.events import LoopGuardEvent
+
+    decisions = [event for event in events if isinstance(event, LoopGuardEvent)]
+    assert len(decisions) == 1
+    tool_batches = sum(
+        1
+        for message in history
+        if any(getattr(block, "type", None) == "tool_result" for block in message.content)
+    )
+    assert checkpoint is not None
+    state = checkpoint.loop_guard_state
+    assert isinstance(state, dict)
+    counts = state.get("call_counts")
+    assert isinstance(counts, dict)
+    assert all(isinstance(key, str) and len(key) == 16 for key in counts)
+    return (
+        tool_batches,
+        decisions[0].action,
+        decisions[0].reason,
+        decisions[0].detail,
+        dict(counts),
+        state["consecutive_failures"],
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("force_final", [False, True])
+@pytest.mark.parametrize(
+    "phase",
+    [
+        "assistant_appended",
+        "tool_batch_pending",
+        "tool_executing",
+        "tool_results_appended",
+        "turn_complete",
+    ],
+)
+async def test_repeated_guard_resume_preserves_decision_at_each_tool_phase(
+    phase, force_final
+) -> None:
+    from linch import LoopGuard
+
+    def build_agent(provider, session_store, run_store, counts):
+        return _agent(
+            model="gpt-5",
+            provider=provider,
+            tools=_failing_registry(counts),
+            loop_guard=LoopGuard(
+                max_identical_tool_calls=3,
+                max_consecutive_failures=5,
+                force_final_answer=force_final,
+            ),
+            permissions={"mode": "skip-dangerous"},
+            session_store=session_store,
+            run_store=run_store,
+            cwd=".",
+        )
+
+    baseline_session_store = _memory_session_store()
+    baseline_run_store = _memory_run_store()
+    baseline_counts: dict[str, int] = {}
+    baseline_agent = build_agent(
+        ThreeBatchProvider(), baseline_session_store, baseline_run_store, baseline_counts
+    )
+    baseline_session = await baseline_agent.session(id="baseline")
+    baseline_events = await _collect(baseline_session.run("repeat"))
+    baseline_record = await baseline_run_store.load_run(
+        next(event.run_id for event in baseline_events if event.type == "system")
+    )
+    assert baseline_record is not None
+    expected = _guard_run_summary(
+        baseline_events,
+        list(baseline_session.full_history),
+        baseline_record.checkpoint,
+    )
+    await baseline_agent.close()
+
+    session_store = _memory_session_store()
+    run_store = _CheckpointCrashStore(_memory_run_store())
+    counts: dict[str, int] = {}
+    run_store.reset(f"checkpoint:{phase}")
+    agent = build_agent(ThreeBatchProvider(), session_store, run_store, counts)
+    session = await agent.session(id="s1")
+    run_id = ""
+    with pytest.raises(_Crash):
+        async for event in session.run("repeat"):
+            if event.type == "system":
+                run_id = event.run_id
+    assert run_id
+    await agent.close()
+
+    run_store.reset(None)
+    restarted = build_agent(ThreeBatchProvider(start_calls=1), session_store, run_store, counts)
+    resumed = await restarted.session(id="s1")
+    resumed_events = await _collect(resumed.resume(run_id))
+    resumed_record = await run_store.load_run(run_id)
+    assert resumed_record is not None
+    actual = _guard_run_summary(
+        resumed_events,
+        list(resumed.full_history),
+        resumed_record.checkpoint,
+    )
+    await restarted.close()
+
+    assert actual == expected
+    assert actual[0] == 3
+    assert actual[5] == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("force_final", [False, True])
+async def test_guard_trip_after_results_checkpoint_replays_guard_action(force_final) -> None:
+    """A crash after batch three's checkpoint must not lose its guard action."""
+    from linch import LoopGuard
+
+    def build_agent(provider, session_store, run_store, counts):
+        return _agent(
+            model="gpt-5",
+            provider=provider,
+            tools=_failing_registry(counts),
+            loop_guard=LoopGuard(
+                max_identical_tool_calls=3,
+                max_consecutive_failures=5,
+                force_final_answer=force_final,
+            ),
+            permissions={"mode": "skip-dangerous"},
+            session_store=session_store,
+            run_store=run_store,
+            cwd=".",
+        )
+
+    baseline_session_store = _memory_session_store()
+    baseline_run_store = _memory_run_store()
+    baseline_counts: dict[str, int] = {}
+    baseline_agent = build_agent(
+        ThreeBatchProvider(), baseline_session_store, baseline_run_store, baseline_counts
+    )
+    baseline_session = await baseline_agent.session(id="baseline-after-checkpoint")
+    baseline_events = await _collect(baseline_session.run("repeat"))
+    baseline_record = await baseline_run_store.load_run(
+        next(event.run_id for event in baseline_events if event.type == "system")
+    )
+    assert baseline_record is not None
+    expected = _guard_run_summary(
+        baseline_events,
+        list(baseline_session.full_history),
+        baseline_record.checkpoint,
+    )
+    await baseline_agent.close()
+
+    session_store = _memory_session_store()
+    run_store = _memory_run_store()
+    counts: dict[str, int] = {}
+    agent = build_agent(ThreeBatchProvider(), session_store, run_store, counts)
+    session = await agent.session(id="s1-after-checkpoint")
+    run_id = ""
+    tool_results_seen = 0
+    with pytest.raises(_Crash):
+        async for event in session.run("repeat"):
+            if event.type == "system":
+                run_id = event.run_id
+            if event.type == "user" and event.subtype == "tool_result":
+                tool_results_seen += 1
+                if tool_results_seen == 3:
+                    raise _Crash("after durable tool_results_appended checkpoint")
+    assert run_id
+    assert tool_results_seen == 3
+    crashed_record = await run_store.load_run(run_id)
+    assert crashed_record is not None and crashed_record.checkpoint is not None
+    assert crashed_record.checkpoint.phase == "tool_results_appended"
+    await agent.close()
+
+    restarted = build_agent(ThreeBatchProvider(start_calls=3), session_store, run_store, counts)
+    resumed = await restarted.session(id="s1-after-checkpoint")
+    resumed_events = await _collect(resumed.resume(run_id))
+    resumed_record = await run_store.load_run(run_id)
+    assert resumed_record is not None
+    actual = _guard_run_summary(
+        resumed_events,
+        list(resumed.full_history),
+        resumed_record.checkpoint,
+    )
+    await restarted.close()
+
+    assert actual == expected
 
 
 async def test_crash_between_permission_checkpoint_and_start_event_reruns_tool() -> None:

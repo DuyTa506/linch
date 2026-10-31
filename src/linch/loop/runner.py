@@ -452,17 +452,13 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             _final_result = _runtime.terminal_result
 
         start_turn = checkpoint.turn_index
-        if resume_checkpoint is not None and checkpoint.phase in {
-            "tool_results_appended",
-            "turn_complete",
-        }:
+        if resume_checkpoint is not None and checkpoint.phase == "turn_complete":
             start_turn = checkpoint.turn_index + 1
 
         _resume_state = ResumeState(
             start_turn=(
                 checkpoint.turn_index + 1
-                if resume_checkpoint is not None
-                and checkpoint.phase in {"tool_results_appended", "turn_complete"}
+                if resume_checkpoint is not None and checkpoint.phase == "turn_complete"
                 else checkpoint.turn_index
             )
         )
@@ -641,6 +637,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 hook_dispatcher.active
                 and not frozen_pending_resume
                 and not (_recovered_primary_projection is not None and turn_index == start_turn)
+                and not (resumed_assistant and checkpoint.phase == "tool_results_appended")
             ):
                 (
                     req,
@@ -896,20 +893,6 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 resume_checkpoint=resume_checkpoint,
                 guard=_guard,
                 guard_state=_guard_state,
-                guard_evaluation_ids=_runtime.guard_evaluation_ids,
-                guard_evaluation_facts=_runtime.guard_evaluation_facts,
-                record_guard_evaluation=(
-                    (
-                        lambda: setattr(
-                            _runtime,
-                            "guard_evaluation_count",
-                            _runtime.guard_evaluation_count + 1,
-                        )
-                    )
-                    if _runtime.guard_evaluation_ids is not None
-                    and _runtime.guard_evaluation_facts is not None
-                    else None
-                ),
                 save_checkpoint=_save_checkpoint,
                 flush_events=lambda: _flush_events(session),
                 persist_event=lambda event: _persist_event(session, run_id, event),

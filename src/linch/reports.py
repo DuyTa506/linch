@@ -16,7 +16,6 @@ from .events import (
     ToolCallEndEvent,
     ToolCallStartEvent,
     UsageEvent,
-    _LoopGuardEvaluationEvent,
     event_to_dict,
     tool_result_to_dict,
     usage_to_dict,
@@ -232,14 +231,7 @@ def build_run_report(
     final: dict[str, Any] | None = None
     timeline: list[dict[str, Any]] = []
 
-    visible_events = [
-        item
-        for item in events
-        if not isinstance(
-            item.event if isinstance(item, StoredRunEvent) else item,
-            _LoopGuardEvaluationEvent,
-        )
-    ]
+    visible_events = list(events)
 
     for index, item in enumerate(visible_events, start=1):
         seq, appended_at, event = _event_parts(item, index)

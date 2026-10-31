@@ -58,12 +58,9 @@ from .checkpoint import (
     _background_workers_to_dict,
     _consumed_auxiliary_receipt_ids_from_events,
     _flush_events,
-    _loop_guard_batch_id_for_checkpoint,
-    _loop_guard_evaluations_from_events,
     _loop_guard_is_active,
-    _loop_guard_runtime_from_extension,
-    _loop_guard_runtime_to_extension,
-    _loop_guard_state_from_events,
+    _loop_guard_state_from_dict,
+    _loop_guard_state_to_dict,
     _model_call_runtime_from_extension,
     _model_call_runtime_to_extension,
     _persist_event,
@@ -537,11 +534,6 @@ class RunRuntime:
         self.effective_final_tool: str | None = None
         self.guard: Any = None
         self.guard_state: Any = None
-        self.guard_evaluation_ids: set[str] | None = None
-        self.guard_evaluation_facts: dict[str, Any] | None = None
-        self.guard_evaluation_count = 0
-        self.guard_committed_count = 0
-        self.guard_evaluation_seq = 0
         self.truncation_recovery: Any = None
         self.truncation_attempts = 0
         self.truncation_prefix = ""
@@ -696,13 +688,9 @@ class RunRuntime:
         session.active_budget = runtime.budget
         runtime.effective_final_tool = effective_final_tool_name(agent, opts)
         runtime.guard = getattr(agent, "loop_guard", None)
-        if _loop_guard_is_active(runtime.guard):
-            runtime.guard_state = loop_guard_state_factory()
-            if agent.run_store is not None and run_record is not None:
-                runtime.guard_evaluation_ids = set()
-                runtime.guard_evaluation_facts = {}
-        else:
-            runtime.guard_state = None
+        runtime.guard_state = (
+            loop_guard_state_factory() if _loop_guard_is_active(runtime.guard) else None
+        )
         runtime.truncation_recovery = getattr(agent, "truncation_recovery", None)
         runtime.checkpoint = resume_checkpoint or RunCheckpoint(
             phase="started",
@@ -711,28 +699,10 @@ class RunRuntime:
             total_usage=runtime.total,
         )
         if resume_checkpoint is not None:
-            if _loop_guard_is_active(runtime.guard) and runtime.guard_evaluation_ids is not None:
-                assert runtime.guard_evaluation_facts is not None
-                if resume_checkpoint.loop_guard_state is not None:
-                    raise ConfigError("runtime checkpoint contains an unsupported guard snapshot")
-                (
-                    runtime.guard_committed_count,
-                    runtime.guard_evaluation_seq,
-                ) = _loop_guard_runtime_from_extension(resume_checkpoint.extension_state)
-                runtime.guard_evaluation_count = runtime.guard_committed_count
-                runtime.guard_evaluation_facts = _loop_guard_evaluations_from_events(
-                    runtime.stored_events,
-                    after_seq=runtime.guard_evaluation_seq,
-                )
-                runtime.guard_evaluation_ids = set(runtime.guard_evaluation_facts)
-                runtime.guard_state = _loop_guard_state_from_events(
-                    runtime.guard,
-                    runtime.stored_events,
-                    evaluation_count=runtime.guard_evaluation_count,
-                    evaluation_seq=runtime.guard_evaluation_seq,
-                    current_batch_id=_loop_guard_batch_id_for_checkpoint(resume_checkpoint),
-                    current_turn_index=resume_checkpoint.turn_index,
-                )
+            if _loop_guard_is_active(runtime.guard):
+                restored = _loop_guard_state_from_dict(resume_checkpoint.loop_guard_state)
+                if restored is not None:
+                    runtime.guard_state = restored
             runtime.force_final_pending = resume_checkpoint.force_final_pending
             session.pending_skill_overlay = skill_overlay_from_dict(
                 resume_checkpoint.pending_skill_overlay
@@ -752,6 +722,7 @@ class RunRuntime:
                 "permission_pending",
                 "tool_batch_pending",
                 "tool_executing",
+                "tool_results_appended",
             }:
                 runtime.align_defer_turn = resume_checkpoint.turn_index
 
@@ -1125,7 +1096,7 @@ class RunRuntime:
                 dict(completed_tool_results) if isinstance(completed_tool_results, dict) else {}
             )
         self.checkpoint.force_final_pending = self.force_final_pending
-        self.checkpoint.loop_guard_state = None
+        self.checkpoint.loop_guard_state = _loop_guard_state_to_dict(self.guard_state)
         self.checkpoint.pending_skill_overlay = _skill_overlay_to_dict(
             self.session.pending_skill_overlay
         )
@@ -1157,17 +1128,6 @@ class RunRuntime:
             for key in self.checkpointable_hooks:
                 self.checkpoint.extension_state.pop(key, None)
             self.checkpoint.extension_state.update(hook_state)
-        guard_prefix_committed = (
-            _loop_guard_is_active(self.guard)
-            and phase == "turn_complete"
-            and self.guard_evaluation_count > self.guard_committed_count
-        )
-        if _loop_guard_is_active(self.guard):
-            _loop_guard_runtime_to_extension(
-                self.checkpoint.extension_state,
-                evaluation_count=self.guard_committed_count,
-                evaluation_seq=self.guard_evaluation_seq,
-            )
         if phase == "tool_batch_pending" or (
             phase == "assistant_appended"
             and self.checkpoint.assistant_message is not None
@@ -1179,35 +1139,19 @@ class RunRuntime:
             self.checkpoint.tool_batch_event_after_seq = buf.last_seq if buf is not None else None
         elif phase not in ("permission_pending", "tool_executing", "tool_results_appended"):
             self.checkpoint.tool_batch_event_after_seq = None
-        # Only the candidate can see newly allocated cursors before commit.
-        # Keep the live marker and guard facts available if the batch rolls back.
         candidate = (
             replace(self.checkpoint, extension_state=dict(self.checkpoint.extension_state))
             if atomic_checkpoint
             else self.checkpoint
         )
-        committed_seq = self.guard_evaluation_seq
-
-        def prepare_checkpoint(last_seq: int) -> None:
-            nonlocal committed_seq
-            if guard_prefix_committed:
-                committed_seq = last_seq
-                _loop_guard_runtime_to_extension(
-                    candidate.extension_state,
-                    evaluation_count=self.guard_evaluation_count,
-                    evaluation_seq=last_seq,
-                )
 
         batched = False
         if atomic_checkpoint:
             assert buf is not None
-            batched = await buf.flush_with_checkpoint(
-                candidate, status=status, prepare_checkpoint=prepare_checkpoint
-            )
+            batched = await buf.flush_with_checkpoint(candidate, status=status)
         if not batched:
             if atomic_checkpoint:
                 await _flush_events(self.session)
-            prepare_checkpoint(buf.last_seq if buf is not None else 0)
             await store_call(
                 self.session,
                 "run.save_checkpoint",
@@ -1215,13 +1159,6 @@ class RunRuntime:
             )
         if atomic_checkpoint:
             self.checkpoint.extension_state = candidate.extension_state
-        if guard_prefix_committed:
-            self.guard_committed_count = self.guard_evaluation_count
-            self.guard_evaluation_seq = committed_seq
-            assert self.guard_evaluation_ids is not None
-            assert self.guard_evaluation_facts is not None
-            self.guard_evaluation_ids.clear()
-            self.guard_evaluation_facts.clear()
         if completed_snapshot_id is not None:
             await self.best_effort_snapshot_cleanup(
                 snapshot_id=completed_snapshot_id,

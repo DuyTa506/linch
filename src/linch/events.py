@@ -287,67 +287,6 @@ class LoopGuardEvent:
     type: Literal["loop_guard"] = "loop_guard"
 
 
-@dataclass(frozen=True, slots=True)
-class _LoopGuardEvaluationEvent:
-    """Private durable delta for rebuilding guard state after a restart.
-
-    This is a required recovery fact, not an emitted/observable event.  The
-    sparse count delta is bounded by one tool batch; the complete call-count
-    map never enters a checkpoint or this journal record.
-    """
-
-    batch_id: str
-    turn_index: int
-    count_deltas: dict[str, int]
-    count_before: dict[str, int]
-    failures_before: int
-    consecutive_failures: int
-    action: Literal["continue", "stop", "force_final"]
-    reason: str = ""
-    detail: str = ""
-    type: Literal["loop_guard_delta"] = "loop_guard_delta"
-
-    def __post_init__(self) -> None:
-        if self.type != "loop_guard_delta":
-            raise ValueError("loop-guard delta event has an invalid type")
-        if not isinstance(self.batch_id, str) or not self.batch_id.strip():
-            raise ValueError("loop-guard delta batch_id must be a nonblank string")
-        if type(self.turn_index) is not int or self.turn_index < 0:
-            raise ValueError("loop-guard delta turn index must be nonnegative")
-        if self.action not in {"continue", "stop", "force_final"}:
-            raise ValueError("loop-guard delta action is invalid")
-        if not isinstance(self.reason, str) or not isinstance(self.detail, str):
-            raise ValueError("loop-guard delta decision text must be strings")
-        if self.action == "continue" and (self.reason or self.detail):
-            raise ValueError("continuing loop-guard delta must not carry a decision detail")
-        if type(self.consecutive_failures) is not int or self.consecutive_failures < 0:
-            raise ValueError("loop-guard delta failure streak must be nonnegative")
-        if type(self.failures_before) is not int or self.failures_before < 0:
-            raise ValueError("loop-guard delta prior failure streak must be nonnegative")
-        if not isinstance(self.count_deltas, dict):
-            raise ValueError("loop-guard delta count_deltas must be an object")
-        if not isinstance(self.count_before, dict):
-            raise ValueError("loop-guard delta count_before must be an object")
-        copied: dict[str, int] = {}
-        for key, value in self.count_deltas.items():
-            if not isinstance(key, str) or not key:
-                raise ValueError("loop-guard delta signatures must be nonblank strings")
-            if type(value) is not int or value <= 0:
-                raise ValueError("loop-guard delta counts must be positive integers")
-            copied[key] = value
-        prior_counts: dict[str, int] = {}
-        for key, value in self.count_before.items():
-            if not isinstance(key, str) or not key:
-                raise ValueError("loop-guard delta prior signatures must be nonblank strings")
-            if type(value) is not int or value < 0:
-                raise ValueError("loop-guard delta prior counts must be nonnegative integers")
-            prior_counts[key] = value
-        if set(prior_counts) != set(copied):
-            raise ValueError("loop-guard delta prior counts must match changed signatures")
-        object.__setattr__(self, "count_deltas", copied)
-        object.__setattr__(self, "count_before", prior_counts)
-
-
 @dataclass(slots=True)
 class VerificationEvent:
     """Emitted when a closed-loop gate acts on a would-be-final answer.
@@ -485,7 +424,6 @@ _KNOWN_EVENT_TYPES = frozenset(
         "error",
         "hook",
         "loop_guard",
-        "loop_guard_delta",
         "model_fallback",
         "model_call",
         "partial_assistant",
@@ -641,7 +579,6 @@ Event: TypeAlias = (
     | SubagentEvent
     | BackgroundWorkerEvent
     | LoopGuardEvent
-    | _LoopGuardEvaluationEvent
     | VerificationEvent
     | HookEventRecord
     | ScheduleEvent
@@ -1121,19 +1058,6 @@ def event_to_dict(event: Event) -> dict[str, Any]:
             "detail": event.detail,
             "action": event.action,
         }
-    if isinstance(event, _LoopGuardEvaluationEvent):
-        return {
-            "type": event.type,
-            "batch_id": event.batch_id,
-            "turn_index": event.turn_index,
-            "count_deltas": dict(event.count_deltas),
-            "count_before": dict(event.count_before),
-            "failures_before": event.failures_before,
-            "consecutive_failures": event.consecutive_failures,
-            "action": event.action,
-            "reason": event.reason,
-            "detail": event.detail,
-        }
     if isinstance(event, VerificationEvent):
         return {
             "type": event.type,
@@ -1440,38 +1364,6 @@ def event_from_dict(raw: dict[str, Any]) -> Event:
             reason=str(raw.get("reason", "")),
             detail=str(raw.get("detail", "")),
             action=str(raw.get("action", "stop")),
-        )
-    if typ == "loop_guard_delta":
-        expected = {
-            "type",
-            "batch_id",
-            "turn_index",
-            "count_deltas",
-            "count_before",
-            "failures_before",
-            "consecutive_failures",
-            "action",
-            "reason",
-            "detail",
-        }
-        if set(raw) != expected:
-            raise ValueError("loop-guard delta event has unexpected fields")
-        count_deltas = raw.get("count_deltas")
-        if not isinstance(count_deltas, dict):
-            raise ValueError("loop-guard delta event count_deltas must be an object")
-        action = raw.get("action")
-        if action not in {"continue", "stop", "force_final"}:
-            raise ValueError("loop-guard delta event action is invalid")
-        return _LoopGuardEvaluationEvent(
-            batch_id=cast(Any, raw.get("batch_id")),
-            turn_index=cast(Any, raw.get("turn_index")),
-            count_deltas=count_deltas,
-            count_before=cast(Any, raw.get("count_before")),
-            failures_before=cast(Any, raw.get("failures_before")),
-            consecutive_failures=cast(Any, raw.get("consecutive_failures")),
-            action=cast(Any, action),
-            reason=cast(Any, raw.get("reason")),
-            detail=cast(Any, raw.get("detail")),
         )
     if typ == "verification":
         return VerificationEvent(
