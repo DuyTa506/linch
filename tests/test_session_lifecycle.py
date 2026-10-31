@@ -400,6 +400,36 @@ async def test_close_cancelled_mid_teardown_still_releases_provider() -> None:
     assert order.count("provider_closed") == 1
 
 
+async def test_cancelled_agent_close_drains_default_plugin_before_returning() -> None:
+    class SlowProvider(_Provider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def aclose(self) -> None:
+            self.entered.set()
+            await self.release.wait()
+
+    provider = SlowProvider()
+    agent = _agent(provider=provider)
+    session = await agent.session(id="never-started-close")
+    session.run("never consumed")
+    closing = asyncio.create_task(agent.close())
+    await asyncio.wait_for(provider.entered.wait(), 1)
+    closing.cancel()
+    provider.release.set()
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await closing
+        assert agent._closed
+        assert agent.context._scope.disposed
+        assert agent.context.get("request_catalog") is None
+        assert not agent.context.events.has_listeners("tools/resolve")
+    finally:
+        await agent.close()
+
+
 async def test_run_after_close_raises() -> None:
     from linch.errors import ConfigError
 

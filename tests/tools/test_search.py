@@ -65,6 +65,35 @@ async def test_below_threshold_request_is_byte_identical(count):
     await agent.close()
 
 
+async def test_agent_copies_registry_and_late_registration_is_agent_local():
+    from linch import FunctionTool
+
+    registry = _tools(1)
+    agent = _agent(registry)
+    caller_late = FunctionTool(
+        lambda value: value,
+        name="caller_late",
+        description="Registered only on the caller registry after construction.",
+        scope="read",
+    )
+    registry.register(caller_late)
+    assert agent.tools.get("caller_late") is None
+
+    agent_late = FunctionTool(
+        lambda value: value,
+        name="agent_late",
+        description="Registered directly on this agent after construction.",
+        scope="read",
+    )
+    agent.tools.register(agent_late)
+    assert agent.tools.get("agent_late") is agent_late
+    assert registry.get("agent_late") is None
+
+    session = await agent.session()
+    assert set(_names(_request(session))) == {"lookup_0", "agent_late"}
+    await agent.close()
+
+
 async def test_default_defers_native_and_mcp_tools_except_truthy_always_load():
     tools = _tools(30)
     pinned = _tools(1).get("lookup_0")
