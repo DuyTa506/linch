@@ -60,6 +60,12 @@ class ToolCacheConfig:
         max_value_bytes: Results whose content exceeds this are not cached. Large
             results are what the offload subsystem already handles; caching them
             would keep full payloads resident and re-offload on every served hit.
+
+    Args:
+        allow: Optional allowlist of cacheable tool names.
+        deny: Tool names excluded from caching.
+        max_entries: Maximum cached entries per run.
+        max_value_bytes: Maximum result size eligible for caching.
     """
 
     allow: set[str] | None = None
@@ -99,11 +105,24 @@ class ToolCacheHook:
     It is **off by default**: caching only suits tools whose data is stable
     enough within a run (search/grep over a fixed corpus), so the host names
     which tools are cacheable rather than the SDK guessing.
+
+    Args:
+        config: Optional cache policy configuration.
     """
 
     name = "tool_cache"
 
     def __init__(self, config: ToolCacheConfig | None = None) -> None:
+        """Create a per-run tool-result cache.
+
+        Args:
+            config: Optional cache policy configuration.
+
+        Raises:
+            ValueError: If either cache bound is negative or zero where a
+                positive bound is required.
+        """
+
         cfg = config or ToolCacheConfig()
         if cfg.max_entries < 1:
             raise ValueError("ToolCacheConfig.max_entries must be >= 1")
@@ -113,6 +132,15 @@ class ToolCacheHook:
         self._runs: OrderedDict[str, _RunCache] = OrderedDict()
 
     async def on_pre_tool_use(self, ctx: PreToolUseContext) -> HookResult | None:
+        """Resolve cache hits or record cacheable misses before execution.
+
+        Args:
+            ctx: Pre-tool lifecycle context.
+
+        Returns:
+            A resolving result for a cache hit; otherwise ``None``.
+        """
+
         scope = getattr(ctx.tool, "scope", None)
         if scope in ("write", "exec"):
             # Clear now to drop prior-turn reads before the write runs, and mark
@@ -151,6 +179,15 @@ class ToolCacheHook:
         return None
 
     async def on_post_tool_use(self, ctx: PostToolUseContext) -> HookResult | None:
+        """Store successful cacheable results or invalidate writes.
+
+        Args:
+            ctx: Post-tool lifecycle context.
+
+        Returns:
+            Always ``None`` because cache updates are internal.
+        """
+
         bucket = self._runs.get(ctx.run_id)
         if bucket is None:
             return None
@@ -187,6 +224,15 @@ class ToolCacheHook:
         return None
 
     async def on_agent_stop(self, ctx: AgentStopContext) -> HookResult | None:
+        """Drop all cache state for a completed run.
+
+        Args:
+            ctx: Agent-stop context containing the run identifier.
+
+        Returns:
+            Always ``None``.
+        """
+
         # A run ended (success OR error/abort/budget — on_agent_stop fires in the
         # loop's finally on every terminal path) — drop its cache so an error
         # termination doesn't orphan the bucket. True per-run lifetime.
