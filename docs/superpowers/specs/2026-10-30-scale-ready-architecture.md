@@ -215,7 +215,7 @@ Wave 1 (parallel, disjoint files):
 | 4 | `scale/durable-runs` | D1, D2, D9 | `run_store.py` (or a new `run_stores/` package), Postgres store, conformance tests; move `SqliteRunStore.save` serialization off the event loop |
 
 Merged into `integration/3.0`: WP1, WP2, WP4, WP3 (loop split only; see D4
-status), WP9a, WP9b, WP16, WP17, WP15, WP6, WP5, WP8 (f23d726; a follow-up making failure terminals write their pending events in the same statement is in review). Remaining Wave 2: WP7; WP18 (load test) runs now as a baseline and again as the scale-ready gate after WP7. Then Wave 3: WP10 (plugins), WP19 (tool search plugin), WP11-WP14.
+status), WP9a, WP9b, WP16, WP17, WP15, WP6, WP5, WP8 (f23d726, plus 33cb316: every terminal commits its pending events in the same statement as its status). Remaining Wave 2: WP7; WP18 (load test) runs now as a baseline and again as the scale-ready gate after WP7. Then Wave 3: WP10 (plugins), WP19 (tool search plugin), WP11-WP14.
 Order (one merge at a time):
 
 | WP | Branch | Decisions | Scope |
