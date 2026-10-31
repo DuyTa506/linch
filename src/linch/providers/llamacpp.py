@@ -17,6 +17,36 @@ from linch.types import ModelId, ProviderRequest
 
 @dataclass(slots=True)
 class LlamaCppProviderOptions:
+    """Configure the llama.cpp OpenAI-compatible adapter.
+
+    Args:
+        api_key: Optional credential accepted by the server.
+        base_url: llama.cpp server endpoint.
+        default_headers: Headers added to client requests.
+        context_window: Fallback context capacity before a props probe succeeds.
+        auto_context_window: Whether ``prepare`` probes the server for capacity.
+        context_window_timeout: Timeout for the optional props probe in seconds.
+        json_mode: Whether to request JSON-object responses.
+        include_stream_options: Whether to request usage in the final stream chunk.
+        parallel_tool_calls: Optional support declaration for parallel calls.
+        chat_template_kwargs: Provider-specific chat-template settings.
+        reasoning_format: llama.cpp reasoning format hint.
+        reasoning_control: Whether reasoning control is sent to the server.
+        generation_prompt: Optional generation prompt override.
+        parse_tool_calls: Whether the server should parse tool calls.
+        extra_body: Additional request fields merged into the payload.
+
+    Attributes:
+        auto_context_window: Controls whether ``prepare`` performs optional
+            off-loop ``/props`` discovery.
+        context_window_timeout: Timeout used by that discovery request.
+        reasoning_format: Server-specific reasoning wire format, when configured.
+        reasoning_control: Optional server reasoning-control switch.
+        generation_prompt: Optional server generation-prompt override.
+        parse_tool_calls: Optional server-side tool-call parsing switch.
+        extra_body: Provider-specific fields merged into every request.
+    """
+
     api_key: str | None = None
     base_url: str | None = None
     default_headers: dict[str, str] | None = None
@@ -37,11 +67,20 @@ class LlamaCppProviderOptions:
 
 
 class LlamaCppProvider(OpenAIChatCompletionsProvider):
-    """llama.cpp server provider using its OpenAI-compatible chat endpoint."""
+    """llama.cpp server provider using its OpenAI-compatible chat endpoint.
+
+    Args:
+        options: Optional llama.cpp endpoint, probing, and request settings.
+    """
 
     id = "llamacpp"
 
     def __init__(self, options: LlamaCppProviderOptions | None = None) -> None:
+        """Create a llama.cpp provider with optional server settings.
+
+        Args:
+            options: llama.cpp endpoint, probing, and request options.
+        """
         opts = options or LlamaCppProviderOptions()
         self._llamacpp_options = opts
         self._context_window_cache: int | None = None
@@ -56,6 +95,14 @@ class LlamaCppProvider(OpenAIChatCompletionsProvider):
         )
 
     def context_window(self, model: ModelId) -> int:
+        """Return the cached or configured llama.cpp context capacity.
+
+        Args:
+            model: Model identifier; llama.cpp uses the server-wide capacity.
+
+        Returns:
+            The discovered capacity or configured fallback without network I/O.
+        """
         # Immediate, non-blocking lookup: the detected value (populated by
         # prepare()) or the configured default. Never performs network I/O — the
         # /props probe runs off the event loop in prepare() instead.

@@ -13,6 +13,28 @@ from linch.types import ProviderRequest
 
 @dataclass(slots=True)
 class SGLangProviderOptions:
+    """Configure the SGLang OpenAI-compatible endpoint.
+
+    Args:
+        api_key: Optional endpoint credential.
+        base_url: SGLang server endpoint.
+        default_headers: Headers added to requests.
+        context_window: Server context capacity in tokens.
+        json_mode: Whether to request JSON-object output.
+        parallel_tool_calls: Optional parallel-call support declaration.
+        include_stream_options: Whether to request usage in the final chunk.
+        sampling_params: SGLang sampling parameters merged into the request.
+        enable_cache_report: Whether the server reports cached prompt tokens.
+        extra_body: Additional request fields merged into the payload.
+
+    Attributes:
+        json_mode: Requests JSON-object transport; Linch performs any schema
+            validation after the normalized response arrives.
+        sampling_params: Native SGLang sampling fields placed in ``extra_body``.
+        enable_cache_report: Optional server switch for cached-token reporting.
+        extra_body: Provider-specific fields merged after the native SGLang fields.
+    """
+
     api_key: str | None = None
     base_url: str | None = None
     default_headers: dict[str, str] | None = None
@@ -28,11 +50,20 @@ class SGLangProviderOptions:
 
 
 class SGLangProvider(OpenAIChatCompletionsProvider):
-    """SGLang provider using its OpenAI-compatible chat completions endpoint."""
+    """SGLang provider using its OpenAI-compatible chat completions endpoint.
+
+    Args:
+        options: Optional SGLang endpoint and request settings.
+    """
 
     id = "sglang"
 
     def __init__(self, options: SGLangProviderOptions | None = None) -> None:
+        """Create an SGLang provider with optional server settings.
+
+        Args:
+            options: SGLang endpoint and request options.
+        """
         opts = options or SGLangProviderOptions()
         self._sglang_options = opts
         super().__init__(
