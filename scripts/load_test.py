@@ -1751,8 +1751,11 @@ async def _run_points(
             result = {"error": f"{type(exc).__name__}: {exc}", "point": _describe_point(point)}
         results.append(result)
         print(_summary_line(result, index, len(points)), file=sys.stderr, flush=True)
-        required_streams = 100 if experiment == "streams" else 0
-        strict_chaos = experiment == "chaos" and point.chaos == "kill"
+        fan_in = getattr(point, "stream_fan_in", 0)
+        required_streams = (
+            int(getattr(point, "max_stream_readers", 100)) if fan_in is True else int(fan_in or 0)
+        )
+        strict_chaos = point.chaos == "kill"
         accepted = (
             _acceptance(
                 result,

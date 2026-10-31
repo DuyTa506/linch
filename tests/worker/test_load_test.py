@@ -269,3 +269,85 @@ async def test_fan_in_reader_peak_counts_only_active_followers(monkeypatch):
     assert result["peak_readers"] == 4
     assert result["subscriptions"] == 4
     assert result["active_readers"] == 0
+
+
+def _acceptance_report(*, peak_readers: int = 100, chaos: dict[str, Any] | None = None):
+    return {
+        "workers": 2,
+        "concurrency": 8,
+        "target_rate": 1.0,
+        "rtt_ms": 1,
+        "enqueued": 1,
+        "completed": 1,
+        "failed": 0,
+        "aborted": 0,
+        "non_terminal": 0,
+        "terminal_exactly_once": True,
+        "duplicate_terminal": 0,
+        "duplicate_save_notes": 0,
+        "queue_remaining": 0,
+        "event_sequence_contiguous": True,
+        "event_audit": {},
+        "stream": {
+            "in_order": True,
+            "terminal": True,
+            "events": 1,
+            "peak_concurrent_readers": peak_readers,
+        },
+        "chaos": chaos or {},
+        "terminal_latency_ms": {"p99": 1.0},
+        "runs_per_s": 1.0,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("experiment", ["quick", "point", "network", "streams"])
+async def test_run_points_requires_fan_in_peak_for_every_experiment(monkeypatch, experiment):
+    """A configured fan-in point cannot pass acceptance on idle subscribers."""
+
+    harness = _load_harness_module()
+
+    async def fake_run_point(_point, _dsn, *, quick=False):
+        return _acceptance_report(peak_readers=0)
+
+    monkeypatch.setattr(harness, "run_point", fake_run_point)
+    point = SimpleNamespace(stream_fan_in=True, max_stream_readers=100, chaos=None)
+    report, accepted = await harness._run_points(
+        [point], SimpleNamespace(), SimpleNamespace(output=None), experiment=experiment
+    )
+    assert report["points"]
+    assert accepted is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("experiment", ["quick", "point", "network", "streams"])
+async def test_run_points_requires_kill_recovery_for_every_experiment(monkeypatch, experiment):
+    """A kill point cannot pass acceptance without fencing/recovery evidence."""
+
+    harness = _load_harness_module()
+
+    async def fake_run_point(_point, _dsn, *, quick=False):
+        return _acceptance_report(chaos={"active_lease": {"epoch": 1}})
+
+    monkeypatch.setattr(harness, "run_point", fake_run_point)
+    point = SimpleNamespace(stream_fan_in=False, max_stream_readers=0, chaos="kill")
+    report, accepted = await harness._run_points(
+        [point], SimpleNamespace(), SimpleNamespace(output=None), experiment=experiment
+    )
+    assert report["points"]
+    assert accepted is False
+
+
+@pytest.mark.asyncio
+async def test_run_points_accepts_healthy_quick_completion(monkeypatch):
+    harness = _load_harness_module()
+
+    async def fake_run_point(_point, _dsn, *, quick=False):
+        return _acceptance_report()
+
+    monkeypatch.setattr(harness, "run_point", fake_run_point)
+    point = SimpleNamespace(stream_fan_in=False, max_stream_readers=0, chaos=None)
+    _, accepted = await harness._run_points(
+        [point], SimpleNamespace(), SimpleNamespace(output=None), experiment="quick", quick=True
+    )
+    assert accepted is True
