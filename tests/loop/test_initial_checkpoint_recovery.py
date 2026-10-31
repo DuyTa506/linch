@@ -167,6 +167,22 @@ class EventAccountedTransform(AccountedTransform):
             await self.paid_action(ctx, delivery)
 
 
+class BlockedErrorAccountedTransform(AccountedTransform):
+    def __init__(self):
+        super().__init__()
+        self.stop_results = []
+
+    def on_agent_stop(self, ctx):
+        self.stop_results.append(ctx.result)
+
+    def on_user_prompt_submit(self, ctx):
+        return HookResult.block("blocked before provider")
+
+    async def on_event_emit(self, ctx):
+        if ctx.event.type == "error":
+            await self.paid_action(ctx, "blocked-error")
+
+
 class LoggedContext:
     """Idempotent logged startup context; no external effects or SDK state edits."""
 
@@ -219,9 +235,11 @@ def normalized(rows):
         "context-equal",
         "accounted-transform",
         "event-accounted-transform",
+        "blocked-error-accounted-transform",
     ],
 )
 async def test_startup_store_boundary_takeover_trace(kind, variant, pg_dsn):
+    blocked = variant == "blocked-error-accounted-transform"
     transforming = variant in {
         "transform-identical-tail",
         "accounted-transform",
@@ -245,6 +263,8 @@ async def test_startup_store_boundary_takeover_trace(kind, variant, pg_dsn):
                 hooks = [AccountedTransform()]
             elif variant == "event-accounted-transform":
                 hooks = [EventAccountedTransform()]
+            elif blocked:
+                hooks = [BlockedErrorAccountedTransform()]
             if variant.startswith("context-"):
                 hooks = [LoggedContext(same_as_prompt=variant == "context-equal")]
             agent = Agent(
@@ -324,17 +344,39 @@ async def test_startup_store_boundary_takeover_trace(kind, variant, pg_dsn):
                 finally:
                     await second.close()
             record = await raw.load_run(rid)
-            assert record.status == "completed", (target, timing, gate.calls)
+            assert record.status == ("failed" if blocked else "completed"), (
+                target,
+                timing,
+                gate.calls,
+            )
             if transforming and replayed_started:
                 assert record.checkpoint.extension_state["test.transform"] == {"starts": 1}
             rows = await raw.load_events(rid)
             assert [row.seq for row in rows] == list(range(1, len(rows) + 1))
             types = [row.event.type for row in rows]
             assert types[0] == "system"
-            assert types.count("system") == types.count("user") == types.count("result") == 1
+            assert types.count("system") == types.count("result") == 1
+            assert types.count("user") == (0 if blocked else 1)
+            assert types.count("error") == (1 if blocked else 0)
             assert types[-1] == "result"
-            assert provider.calls == 1
-            if "accounted-transform" in variant:
+            assert provider.calls == (0 if blocked else 1)
+            if blocked:
+                assert rows[-1].event.subtype == rows[-1].event.stop_reason == "error"
+                assert record.checkpoint.total_usage.input_tokens == 111
+                assert record.checkpoint.total_usage.output_tokens == 22
+                paid = [row.event for row in rows if row.event.type == "model_call"]
+                assert [event.record_kind for event in paid] == [
+                    "intent",
+                    "dispatch_started",
+                    "receipt",
+                ]
+                assert paid[-1].record["cost_usd"] == 0.125
+                hook = next(
+                    h for h in session.agent.hooks if isinstance(h, BlockedErrorAccountedTransform)
+                )
+                assert len(hook.stop_results) == 1
+                assert hook.stop_results[0].total_usage == record.checkpoint.total_usage
+            elif "accounted-transform" in variant:
                 paid = [
                     row.event
                     for row in rows
@@ -362,7 +404,9 @@ async def test_startup_store_boundary_takeover_trace(kind, variant, pg_dsn):
                     )
                     assert hook_positions[0] < first_receipt < hook_positions[1]
             history = [m for m in session.full_history if m.role == "user"]
-            assert len(history) == (2 if transforming or variant.startswith("context-") else 1)
+            assert len(history) == (
+                0 if blocked else (2 if transforming or variant.startswith("context-") else 1)
+            )
             if variant.startswith("context-"):
                 assert history[0].content[-1].text == (
                     "hello" if variant == "context-equal" else "logged context"
@@ -384,14 +428,18 @@ async def test_startup_store_boundary_takeover_trace(kind, variant, pg_dsn):
             await messages.close()
 
     calls, baseline, history, view = await exercise()
-    assert any(phase == "provider_pending" for _, _, phase in calls)
+    assert blocked or any(phase == "provider_pending" for _, _, phase in calls)
     targets = list(enumerate(calls))
     timings = ("before", "committed", "returned")
     if "accounted-transform" in variant:
         # In-flight billable dispatch changes accounting completeness by
         # contract. Test completed durable callback facts, without filtering
         # ModelCallEvent or weakening the full trace/history oracle.
-        delivery = "event-first" if variant == "event-accounted-transform" else "startup-delivery"
+        delivery = (
+            "blocked-error"
+            if blocked
+            else ("event-first" if variant == "event-accounted-transform" else "startup-delivery")
+        )
         targets = [((delivery, "receipt"), "completed startup receipt")]
         timings = ("committed", "returned")
     for target, boundary in targets:
@@ -400,6 +448,12 @@ async def test_startup_store_boundary_takeover_trace(kind, variant, pg_dsn):
             assert trace == baseline, (boundary, timing, trace, baseline)
             assert recovered_history == history, (boundary, timing)
             assert recovered_view == view, (boundary, timing)
+            if blocked:
+                for result in (baseline[-1], trace[-1]):
+                    assert result["total_usage"]["input_tokens"] == 111
+                    assert result["total_usage"]["output_tokens"] == 22
+                    assert result["total_cost_usd"] == 0.125
+                    assert result.get("usage_complete", True)
 
 
 @pytest.mark.parametrize("after_event", ["system", "hook"])
@@ -617,5 +671,32 @@ async def test_preparation_barrier_requires_actual_startup_handler(handler, expe
         events = [event async for event in session.run("hello")]
         assert events[-1].subtype == "success"
         assert store.barriers == expected_barriers
+    finally:
+        await agent.close()
+
+
+async def test_no_store_blocked_error_callback_refreshes_result_and_stop_usage():
+    hook = BlockedErrorAccountedTransform()
+    provider = ScriptProvider()
+    agent = Agent(
+        model="m",
+        provider=provider,
+        run_store=None,
+        session_store=InMemorySessionStore(),
+        tools=empty_tools(),
+        hooks=[hook],
+    )
+    try:
+        session = await agent.session()
+        events = [event async for event in session.run("blocked")]
+        assert [event.type for event in events].count("error") == 1
+        result = events[-1]
+        assert result.type == "result" and result.subtype == "error"
+        assert result.total_usage.input_tokens == 111
+        assert result.total_usage.output_tokens == 22
+        assert result.total_cost_usd == 0.125 and result.usage_complete
+        assert len(hook.stop_results) == 1
+        assert hook.stop_results[0].total_usage == result.total_usage
+        assert provider.calls == 0
     finally:
         await agent.close()
