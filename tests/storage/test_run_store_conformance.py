@@ -111,7 +111,11 @@ async def test_run_store_round_trip_status_and_reconnect(store_case: _StoreCase)
 
     failed_id = f"conformance-failed-{uuid4()}"
     await store.create_run("session-1", id=failed_id)
-    failed = await store.mark_failed(failed_id, _checkpoint("failed"), {"message": "boom"})
+    failed, seqs = await store.mark_failed(
+        failed_id, _checkpoint("failed"), {"message": "boom"}, events=[_event("terminal")]
+    )
+    assert seqs == [1]
+    assert [row.event for row in await store.load_events(failed_id)] == [_event("terminal")]
     assert failed.status == "failed"
     failed_loaded = await store.load_run(failed_id)
     assert failed_loaded is not None
@@ -280,3 +284,22 @@ async def test_pending_adoption_is_fenced_after_peer_claims_newer_epoch(
     loaded = await store.load_run(run_id)
     assert loaded is not None
     assert loaded.status == "pending"
+
+
+async def test_failed_terminal_encoding_failure_changes_neither_status_nor_log(store_case):
+    store = store_case.store
+    run_id = f"failed-encoding-{uuid4()}"
+    await store.create_run("session", id=run_id, meta={"errors": [{"message": "before"}]})
+    await store.save_checkpoint(run_id, _checkpoint("before"))
+    await store.append_event(run_id, _event("before"))
+    before = await store.load_run(run_id)
+    before_events = await store.load_events(run_id)
+    with pytest.raises(ValueError):
+        await store.mark_failed(
+            run_id,
+            _checkpoint("after"),
+            {"message": "after"},
+            events=[_event("valid prefix"), object()],
+        )
+    assert await store.load_run(run_id) == before
+    assert await store.load_events(run_id) == before_events

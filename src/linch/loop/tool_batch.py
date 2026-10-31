@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from .._telemetry import store_call
-from ..errors import ConfigError
 from ..events import (
     Event,
     LoopGuardEvent,
@@ -75,7 +74,6 @@ async def run_tool_batch(ctx: ToolBatchContext) -> AsyncIterator[Event]:
         ctx.resume_checkpoint is not None and ctx.turn_index == ctx.checkpoint.turn_index
     )
     replaying_results_checkpoint = resuming_turn and ctx.checkpoint.phase == "tool_results_appended"
-    replay_event_after_seq = ctx.checkpoint.tool_batch_event_after_seq
     tool_blocks = [
         block for block in ctx.assembly.message.content if isinstance(block, ToolUseBlock)
     ]
@@ -214,15 +212,8 @@ async def run_tool_batch(ctx: ToolBatchContext) -> AsyncIterator[Event]:
             detail=guard_decision.detail,
             action=guard_decision.action,
         )
-        guard_event_seen = await _replayed_guard_event_seen(
-            ctx,
-            event,
-            replaying_results_checkpoint=replaying_results_checkpoint,
-            after_seq=replay_event_after_seq,
-        )
-        if not guard_event_seen:
-            await ctx.persist_event(event)
-            yield event
+        await ctx.persist_event(event)
+        yield event
         if guard_decision.action == "force_final":
             reminder_event = await _inject_force_final_reminder(ctx)
             yield reminder_event
@@ -270,9 +261,9 @@ async def _inject_force_final_reminder(ctx: ToolBatchContext) -> Event:
     if not already_appended:
         await store_call(ctx.session, "session.append", ctx.session.append([reminder_message]))
     ctx.force_final_pending = True
-    await ctx.save_checkpoint("turn_complete", turn_index=ctx.turn_index)
     event: Event = UserEvent(message=reminder_message, subtype="notification")
     await ctx.persist_event(event)
+    await ctx.save_checkpoint("turn_complete", turn_index=ctx.turn_index)
     return event
 
 
@@ -298,23 +289,3 @@ def _replayed_force_final_reminder_present(ctx: ToolBatchContext, reminder: Mess
         if message.role == "user" and result_ids == tool_ids:
             return False
     return False
-
-
-async def _replayed_guard_event_seen(
-    ctx: ToolBatchContext,
-    expected: LoopGuardEvent,
-    *,
-    replaying_results_checkpoint: bool,
-    after_seq: int | None,
-) -> bool:
-    if not replaying_results_checkpoint:
-        return False
-    cursor = max(0, after_seq or 0)
-    prior = [
-        row.event
-        for row in ctx.stored_events
-        if getattr(row, "seq", 0) > cursor and isinstance(row.event, LoopGuardEvent)
-    ]
-    if any(event != expected for event in prior):
-        raise ConfigError("resumed loop-guard decision differs from durable event")
-    return bool(prior)

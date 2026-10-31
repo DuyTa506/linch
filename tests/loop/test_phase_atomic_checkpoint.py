@@ -28,9 +28,15 @@ class _AtomicBufferStore:
         self.saved.extend(events)
         return None, [8, 9]
 
+    async def mark_failed(self, run_id, checkpoint=None, error=None, *, events=()):
+        return await self.save_checkpoint_with_events(run_id, checkpoint, events, status="failed")
 
+
+@pytest.mark.parametrize("status", ["running", "failed"])
 @pytest.mark.parametrize("failure", [OSError, asyncio.CancelledError])
-async def test_atomic_buffer_failure_retains_pending_prefix_and_concurrent_tail(failure) -> None:
+async def test_atomic_buffer_failure_retains_pending_prefix_and_concurrent_tail(
+    failure, status
+) -> None:
     store = _AtomicBufferStore(failure)
     buffer = RunEventBuffer(store, "run", initial_seq=4)
     store.buffer = buffer
@@ -38,7 +44,9 @@ async def test_atomic_buffer_failure_retains_pending_prefix_and_concurrent_tail(
     for event in events:
         await buffer.append(event)
     with pytest.raises(failure):
-        await buffer.flush_with_checkpoint(RunCheckpoint("turn_complete", "hi", 0, Usage()))
+        await buffer.flush_with_checkpoint(
+            RunCheckpoint("turn_complete", "hi", 0, Usage()), status=status
+        )
     assert buffer.last_seq == 4
     assert buffer._pending == [*events, store.tail]
     assert store.saved == []
@@ -150,3 +158,20 @@ async def test_required_atomic_method_is_called_directly() -> None:
     await buffer.flush_with_checkpoint(RunCheckpoint("turn_complete", "hi", 0, Usage()))
     assert buffer.last_seq == 9
     assert inner.saved == events
+
+
+async def test_failed_atomic_write_cannot_be_split_by_finally_flush() -> None:
+    class Store(_AtomicBufferStore):
+        async def append_events(self, run_id, events):
+            self.saved.extend(events)
+            return [1]
+
+    store = Store(asyncio.CancelledError)
+    buffer = RunEventBuffer(store, "run")
+    store.buffer = buffer
+    await buffer.append(PartialAssistantEvent(delta={"text": "pending"}))
+    with pytest.raises(asyncio.CancelledError):
+        await buffer.flush_with_checkpoint(RunCheckpoint("turn_complete", "hi", 0, Usage()))
+    await buffer.flush()
+    assert store.saved == []
+    assert len(buffer._pending) == 2

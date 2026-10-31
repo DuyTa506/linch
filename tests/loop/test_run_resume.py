@@ -894,7 +894,7 @@ async def test_disabled_guard_has_no_checkpoint_state() -> None:
     assert "linch.loop_guard.v1" not in run.checkpoint.extension_state
 
 
-async def test_guard_trip_is_not_reemitted_after_interleaved_host_notification() -> None:
+async def test_pending_guard_trip_replays_once_after_interleaved_host_notification() -> None:
     from linch import LoopGuard
 
     session_store = _memory_session_store()
@@ -930,6 +930,8 @@ async def test_guard_trip_is_not_reemitted_after_interleaved_host_notification()
     resumed = await restarted.session(id="s1")
     with pytest.raises(_Crash):
         await _collect(resumed.resume(run_id))
+    rows_before_resume = await run_store.load_events(run_id)
+    assert not any(row.event.type == "loop_guard" for row in rows_before_resume)
     from linch.types import Message, TextBlock
 
     await resumed.append([Message(role="user", content=[TextBlock(text="host note")])])
@@ -949,7 +951,7 @@ async def test_guard_trip_is_not_reemitted_after_interleaved_host_notification()
     resumed_again = await restarted_again.session(id="s1")
     events = await _collect(resumed_again.resume(run_id))
 
-    assert not any(event.type == "loop_guard" for event in events)
+    assert sum(event.type == "loop_guard" for event in events) == 1
     rows = await run_store.load_events(run_id)
     assert sum(row.event.type == "loop_guard" for row in rows) == 1
     reminders = [

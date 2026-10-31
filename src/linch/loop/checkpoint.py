@@ -175,7 +175,7 @@ class RunEventBuffer:
     the session for one run), never process-global.
     """
 
-    __slots__ = ("store", "run_id", "_pending", "_last_seq", "session")
+    __slots__ = ("store", "run_id", "_pending", "_last_seq", "session", "_atomic_write_failed")
 
     def __init__(
         self, store: Any, run_id: str, *, initial_seq: int = 0, session: Any = None
@@ -185,6 +185,7 @@ class RunEventBuffer:
         self.run_id = run_id
         self._pending: list[Event] = []
         self._last_seq = max(0, initial_seq)
+        self._atomic_write_failed = False
 
     @property
     def last_seq(self) -> int:
@@ -200,30 +201,32 @@ class RunEventBuffer:
         checkpoint: RunCheckpoint,
         *,
         status: str = "running",
+        error: dict[str, object] | None = None,
     ) -> None:
         """Commit a pending prefix with its checkpoint."""
-        if not self._pending:
+        if not self._pending and status == "running":
             return
         pending, self._pending = self._pending, []
         try:
-            _, seqs = await store_call(
-                self.session,
-                "run.save_checkpoint_with_events",
-                self.store.save_checkpoint_with_events(
-                    self.run_id,
-                    checkpoint,
-                    pending,
-                    status=status,
-                ),
+            operation = "mark_failed" if status == "failed" else "save_checkpoint_with_events"
+            write = (
+                self.store.mark_failed(self.run_id, checkpoint, error=error, events=pending)
+                if status == "failed"
+                else self.store.save_checkpoint_with_events(
+                    self.run_id, checkpoint, pending, status=status
+                )
             )
+            _, seqs = await store_call(self.session, f"run.{operation}", write)
         except BaseException:
             self._pending = pending + self._pending
+            self._atomic_write_failed = True
             raise
+        self._atomic_write_failed = False
         if seqs:
             self._last_seq = max(self._last_seq, *seqs)
 
     async def flush(self) -> int:
-        if self.store is None or not self._pending:
+        if self.store is None or not self._pending or self._atomic_write_failed:
             return self._last_seq
         pending = self._pending
         self._pending = []
