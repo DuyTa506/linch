@@ -27,7 +27,9 @@ class MailboxPlugin:
 
         Args:
             ctx: Plugin activation context containing the owning agent.
-            config: Mailbox implementation used for delivery and sending.
+            config: Mailbox implementation used for delivery and sending. It
+                must be provided; durable inbox mode additionally requires the
+                ``ClaimableMailbox`` methods ``claim``, ``ack``, and ``release``.
 
         Returns:
             A disposer for plugin-specific cleanup; context effects own the

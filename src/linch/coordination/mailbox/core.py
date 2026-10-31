@@ -32,6 +32,20 @@ class MailboxMessage:
     category the embedder interprets. ``request_id``/``in_reply_to`` are the
     correlation hooks (see :class:`Correlator`): a request carries a
     ``request_id``; its response echoes that value in ``in_reply_to``.
+
+    Args:
+        sender: Opaque address of the message producer.
+        recipient: Opaque address of the destination inbox.
+        content: Message body delivered to the peer.
+        type: Neutral message category interpreted by the embedder.
+        request_id: Optional identifier for a request awaiting a response.
+        in_reply_to: Optional request identifier being answered.
+        id: Stable message identifier; generated when omitted.
+
+    Attributes:
+        request_id: Correlates a request with a later response without imposing
+            semantics on the mailbox transport.
+        in_reply_to: Echoes the request identifier on a response message.
     """
 
     sender: str
@@ -52,9 +66,35 @@ class Mailbox(Protocol):
     never drop messages.
     """
 
-    async def send(self, message: MailboxMessage) -> None: ...
+    async def send(self, message: MailboxMessage) -> None:
+        """Enqueue a message before returning.
 
-    async def drain(self, recipient: str) -> list[MailboxMessage]: ...
+        Implementations must not report success before the message is safely
+        accepted by their delivery store. In-memory implementations provide
+        process-local delivery only; durable adapters must commit their write.
+        There is no deduplication guarantee beyond the message identity supplied
+        by the caller.
+
+        Args:
+            message: Message to append to the recipient's FIFO inbox.
+        """
+        ...
+
+    async def drain(self, recipient: str) -> list[MailboxMessage]:
+        """Atomically remove and return a recipient's pending messages.
+
+        A destructive drain is a separate delivery mode from lease-based
+        ``claim``. Callers must not mix the two modes for one recipient; this
+        protocol does not require a drain to preserve active claims. Durable
+        adapters must commit the removals before returning.
+
+        Args:
+            recipient: Inbox address to drain.
+
+        Returns:
+            Messages in FIFO order; each is delivered to at most one drain.
+        """
+        ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +104,17 @@ class MailboxClaim:
     Claims are capabilities: only the exact ``message.id``/``token`` pair may
     acknowledge or release the row.  Once ``expires_at`` has passed another
     consumer may reclaim the message and the old capability becomes stale.
+
+    Attributes:
+        token: Capability checked together with ``message.id`` by ack/release.
+        owner: Informational consumer identity carried with the lease.
+        expires_at: Absolute timestamp in seconds after which the row is reclaimable.
+
+    Args:
+        message: Message held by this claim.
+        token: Capability token required for acknowledgement or release.
+        owner: Consumer identity that acquired the claim.
+        expires_at: Absolute expiry time after which reclamation is allowed.
     """
 
     message: MailboxMessage
@@ -74,7 +125,13 @@ class MailboxClaim:
 
 @runtime_checkable
 class ClaimableMailbox(Mailbox, Protocol):
-    """Optional leased-delivery extension for durable next-turn consumers."""
+    """Define leased delivery for durable next-turn consumers.
+
+    ``claim`` is strict FIFO: a live lease on the oldest row blocks later rows
+    until it expires. ``ack`` and ``release`` use the exact message/token pair;
+    stale or already-completed claims are harmless no-ops. Durable adapters
+    must commit each state transition before returning.
+    """
 
     async def claim(
         self,
@@ -84,11 +141,46 @@ class ClaimableMailbox(Mailbox, Protocol):
         lease_s: float,
         now: float | None = None,
         limit: int | None = None,
-    ) -> list[MailboxClaim]: ...
+    ) -> list[MailboxClaim]:
+        """Claim available messages for one recipient.
 
-    async def ack(self, claims: Sequence[MailboxClaim]) -> None: ...
+        The returned prefix is claimed atomically under the mailbox's ordering
+        rules; a live lease on the oldest row prevents skipping ahead. Durable
+        adapters commit the lease assignments before returning.
 
-    async def release(self, claims: Sequence[MailboxClaim]) -> None: ...
+        Args:
+            recipient: Inbox address to claim from.
+            owner: Consumer identity recorded on each lease.
+            lease_s: Lease duration in seconds.
+            now: Optional clock value used for deterministic expiry checks.
+            limit: Optional maximum number of claims; zero returns no claims.
+
+        Returns:
+            FIFO claims up to ``limit``, stopping before the first live lease.
+        """
+        ...
+
+    async def ack(self, claims: Sequence[MailboxClaim]) -> None:
+        """Acknowledge and remove claimed messages after delivery is durable.
+
+        Stale or already-removed claims are ignored; durable adapters commit
+        the removals before returning.
+
+        Args:
+            claims: Exact claim capabilities being acknowledged.
+        """
+        ...
+
+    async def release(self, claims: Sequence[MailboxClaim]) -> None:
+        """Release claimed messages for retry or later reclamation.
+
+        Stale claims are ignored; durable adapters commit lease removal before
+        returning.
+
+        Args:
+            claims: Exact claim capabilities being released.
+        """
+        ...
 
 
 @dataclass(slots=True)
@@ -111,10 +203,28 @@ class InMemoryMailbox:
         self._lock = asyncio.Lock()
 
     async def send(self, message: MailboxMessage) -> None:
+        """Append a message to the process-local FIFO inbox.
+
+        Args:
+            message: Message to append for its recipient.
+        """
         async with self._lock:
             self._inboxes.setdefault(message.recipient, []).append(_MailboxEntry(message=message))
 
     async def drain(self, recipient: str) -> list[MailboxMessage]:
+        """Destructively drain one process-local inbox in FIFO order.
+
+        This implementation removes the whole bucket, including entries with
+        active claim metadata; use either drain or lease delivery for a given
+        recipient, never both. The process-local mutation needs no external
+        durability commit.
+
+        Args:
+            recipient: Inbox address to remove.
+
+        Returns:
+            All messages currently present for the recipient.
+        """
         async with self._lock:
             inbox = self._inboxes.get(recipient)
             if not inbox:
@@ -134,6 +244,18 @@ class InMemoryMailbox:
         now: float | None = None,
         limit: int | None = None,
     ) -> list[MailboxClaim]:
+        """Claim process-local messages using strict FIFO leases.
+
+        Args:
+            recipient: Inbox address to claim from.
+            owner: Consumer identity recorded on each lease.
+            lease_s: Lease duration in seconds.
+            now: Optional clock value used for deterministic expiry checks.
+            limit: Optional maximum number of claims.
+
+        Returns:
+            Claims up to ``limit``; a live oldest lease blocks later rows.
+        """
         claimed_at = time.time() if now is None else now
         _validate_claim_args(owner=owner, lease_s=lease_s, now=claimed_at, limit=limit)
         if limit == 0:
@@ -169,6 +291,13 @@ class InMemoryMailbox:
             return claims
 
     async def ack(self, claims: Sequence[MailboxClaim]) -> None:
+        """Remove matching process-local claims after delivery succeeds.
+
+        Args:
+            claims: Exact message/token capabilities to acknowledge.
+
+        Stale capabilities are ignored.
+        """
         if not claims:
             return
         capabilities = {(claim.message.id, claim.token) for claim in claims}
@@ -185,6 +314,13 @@ class InMemoryMailbox:
                     del self._inboxes[recipient]
 
     async def release(self, claims: Sequence[MailboxClaim]) -> None:
+        """Clear matching process-local leases so messages can be retried.
+
+        Args:
+            claims: Exact message/token capabilities to release.
+
+        Stale capabilities are ignored.
+        """
         if not claims:
             return
         capabilities = {(claim.message.id, claim.token) for claim in claims}
