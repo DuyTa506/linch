@@ -25,7 +25,7 @@ def test_fractional_rtt_is_rejected_before_starting_processes():
     assert "argument --rtt" in result.stderr
 
 
-def test_pgbouncer_config_uses_transaction_pool_and_schema_connect_query():
+def test_pgbouncer_config_uses_transaction_pool_and_role_auth():
     import importlib.util
 
     script = Path(__file__).resolve().parents[2] / "scripts/load_test.py"
@@ -33,12 +33,10 @@ def test_pgbouncer_config_uses_transaction_pool_and_schema_connect_query():
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    config = module.pgbouncer_config(
-        "load_test", 56432, "/tmp/pg.log", "/tmp/pg.pid", "/tmp/users", "load_user"
-    )
+    config = module.pgbouncer_config(56432, "/tmp/pg.log", "/tmp/pg.pid", "/tmp/users")
     assert "pool_mode = transaction" in config
-    assert "postgres = host=127.0.0.1 port=55432 dbname=postgres user=load_user" in config
-    assert "connect_query='SET search_path TO \"load_test\",public'" in config
+    assert "postgres = host=127.0.0.1 port=55432 dbname=postgres" in config
+    assert "connect_query" not in config
     assert "statement_cache" not in config
 
 
@@ -67,7 +65,8 @@ def test_pgbouncer_pool_disables_statement_cache(monkeypatch):
     )
     asyncio.run(module.pool_for(args, name="w-0"))
     assert captured["kwargs"]["statement_cache_size"] == 0
-    assert captured["kwargs"]["server_settings"] == {"application_name": "w-0"}
+    assert captured["kwargs"]["server_settings"] == {}
+    assert captured["dsn"].startswith("postgresql://w-0@")
 
 
 @pytest.mark.skipif(not os.getenv("AGENT_KIT_TEST_PG_DSN"), reason="Postgres DSN required")
