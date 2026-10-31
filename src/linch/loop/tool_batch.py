@@ -10,10 +10,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from ..permissions import Principal
+from typing import Any
 
 from .._telemetry import store_call
 from ..events import (
@@ -69,7 +66,6 @@ class ToolBatchContext:
     observe_results: Callable[[list[ToolUseBlock], dict[str, ToolResultBlock]], None] | None = None
     force_final_pending: bool = False
     terminal: bool = False
-    principal: Principal | None = None
 
 
 async def run_tool_batch(ctx: ToolBatchContext) -> AsyncIterator[Event]:
@@ -132,7 +128,6 @@ async def run_tool_batch(ctx: ToolBatchContext) -> AsyncIterator[Event]:
         ctx.agent,
         session,
         ctx.signal,
-        principal=ctx.principal,
         turn_index=ctx.turn_index,
         on_permissions_resolved=checkpoint_tool_executing,
     ):

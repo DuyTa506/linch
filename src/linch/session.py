@@ -111,6 +111,9 @@ class Session:
     """Set only when the run iterator and all of its finalizers are finished."""
     _telemetry_run: Any = field(default=None, repr=False)
     active_run_id: str | None = None
+    _active_principal: Principal | None = field(default=None, repr=False)
+    _run_principals: dict[str, Principal] = field(default_factory=dict, repr=False)
+    _principal_background_before: set[Any] = field(default_factory=set, repr=False)
     _active_gen: Any = None
     """The async generator driving the in-flight ``run``/``resume`` iterator.
     Captured so a forced ``aclose`` can finalize an abandoned run generator
@@ -293,6 +296,29 @@ class Session:
 
     def _finish_run(self) -> None:
         """Release the single-run admission token and publish true idleness."""
+        run_id = self.active_run_id
+        principal = self._active_principal
+        if run_id is not None and principal is not None:
+            pending = {
+                task
+                for task in self.background_tasks
+                if isinstance(task, asyncio.Task)
+                and not task.done()
+                and task not in self._principal_background_before
+            }
+            if pending:
+                run_principals = self._run_principals
+
+                def retire(_task: asyncio.Task[Any]) -> None:
+                    if all(task.done() for task in pending):
+                        run_principals.pop(run_id, None)
+
+                for task in pending:
+                    task.add_done_callback(retire)
+            else:
+                self._run_principals.pop(run_id, None)
+        self._active_principal = None
+        self._principal_background_before.clear()
         self._active_gen = None
         self._active_inner = None
         self._active_started = False

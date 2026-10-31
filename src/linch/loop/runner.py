@@ -24,7 +24,6 @@ from ..model_calls import (
     ModelCallIntent,
     _AccountedAuxiliaryCaller,
 )
-from ..permissions import Principal
 from ..run_store import (
     LeaseLostError,
     RunCheckpoint,
@@ -133,7 +132,6 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
         _require_model_input_snapshot_store(session.agent)
     await session.agent._ensure_provider_prepared()
     run_id = opts.run_id or str(uuid4())
-    principal = opts.principal
     session.active_run_id = run_id
     session.run_deps = opts.deps if opts.deps is not None else getattr(session.agent, "deps", None)
     run_record = (
@@ -183,7 +181,6 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
             run_id=run_id,
             run_record=run_record,
             resume_checkpoint=None,
-            principal=principal,
         )
     ) as iterator:
         async for event in iterator:
@@ -243,7 +240,6 @@ async def resume_loop(session: Session, run_id: str, opts: RunOptions) -> AsyncI
             run_id=run_record.id,
             run_record=run_record,
             resume_checkpoint=checkpoint,
-            principal=opts.principal,
         )
     ) as iterator:
         async for event in iterator:
@@ -259,7 +255,6 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
     run_id: str,
     run_record: RunRecord | None,
     resume_checkpoint: RunCheckpoint | None,
-    principal: Principal | None = None,
 ) -> AsyncIterator[Event]:
     from ..loop_guard import LoopGuardState
 
@@ -917,7 +912,6 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             _tool_ctx = ToolBatchContext(
                 session=session,
                 agent=agent,
-                principal=principal,
                 signal=signal,
                 run_id=run_id,
                 turn_index=turn_index,
