@@ -19,8 +19,9 @@ Unlike a [workflow](./workflows.md), a deep agent is LLM-driven: the model itsel
 import os
 from linch import (
     CompositeFileBackend, PostgresFileBackend, PostgresRunStore,
-    PostgresSessionStore, StateFileBackend, create_deep_agent,
+    PostgresSessionStore, StateFileBackend,
 )
+from linch.ext.deep_agent import create_deep_agent
 from linch.providers import OpenAIChatCompletionsProvider
 
 dsn = os.environ["LINCH_POSTGRES_DSN"]

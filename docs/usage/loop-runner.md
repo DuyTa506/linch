@@ -28,7 +28,8 @@ stores.
 ## Manual tick
 
 ```python
-from linch import Agent, LoopRunner, LoopSpec, LoopTrigger
+from linch import Agent
+from linch.ext.loop_runner import LoopRunner, LoopSpec, LoopTrigger
 
 agent = Agent(model="gpt-5", permissions={"mode": "skip-dangerous"})
 
@@ -86,7 +87,7 @@ The runner does not infer domain completion from marker files. Use caller
 predicates over `LoopTickResult` and its `RunReport`.
 
 ```python
-from linch import LoopTickResult
+from linch.ext.loop_runner import LoopTickResult
 
 
 def verify(result: LoopTickResult) -> bool:
@@ -137,7 +138,7 @@ For cron, CI workers, webhook handlers, or multiple app processes, add a durable
 lease store:
 
 ```python
-from linch import FileLoopLeaseStore
+from linch.ext.loop_runner import FileLoopLeaseStore
 
 runner = LoopRunner(
     agent,
