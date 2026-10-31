@@ -85,9 +85,12 @@ safe.
   independent and idempotently removable, and an iterator's `aclose()` is
   awaited when present. No producer means the loop does not allocate or dispatch
   an inbox coroutine.
-- `scope(label) -> Context` — a **child** sharing the bus but with an isolated
+- `scope(label, isolate_events=False) -> Context` — a **child** sharing the bus but with an isolated
   service overlay and its own child `EffectScope`, so per-agent (or per-subagent)
-  teardown disposes only that branch.
+  teardown disposes only that branch. With `isolate_events=True`, listener
+  registrations are snapshotted onto an independent bus; filtered parent service
+  changes still reach the child. `EventBus.fork()` and `ToolPipeline.fork()` own
+  the listener-copy mechanics and preserve registration ordering and ownership.
 
 `Agent` creates one owned child `Context` for its lifetime. When `context=` is
 supplied it is the parent/host scope, which remains alive when the Agent closes;
@@ -117,6 +120,38 @@ nested scopes. Services are not published to the agent until setup and the
 audit complete, so failed setup is fully rolled back. Plugin mounts and inbox
 registrations are per-agent; sharing a parent `Context` does not share a
 mount's child services.
+
+### Domain profiles
+
+`Profile` (`profiles.py`) composes immutable declarative fields and plugin rows
+by stable id. `RunOptions(profile=...)` selects the composed definition. Before
+the loop starts, the session enters a run scope: a shallow configuration copy of
+the same Agent shares its provider, stores, and host dependencies, while tools,
+permission configuration, hook registrations, tool pipeline listener lists,
+turn-stopping registrations, and context event listener lists are local to the
+run. `agent.use` mounts selected plugins in that scope. Existing hooks and host
+service objects retain their normal shared ownership. No listener is registered
+unfiltered on the parent agent bus.
+
+The effective tool registry intersects the profile allow/deny names and any
+session tool override. A deny-only permission layer reinforces the restriction;
+host permission rules still decide authorization. Role instructions append to
+the existing system prompt, schemas use `OutputSchema`, and budget limits create
+a fresh `RunBudget`. Cleanup restores the session's original Agent and overrides
+and disposes the scope, including on early iterator close or setup failure.
+Detached work releases the scope when its last task finishes; retained child
+sessions retain their services until released. Session close notifications and
+task callbacks trigger disposal without requiring Agent shutdown. The parent
+Context retains retry ownership if disposal fails. Inherited service changes
+are relayed by the kernel's isolated scope so run-local plugin dependencies
+still activate and deactivate normally.
+
+Direct callers pass the same profile on resume; workers resolve it from their
+supplied `profiles` definitions on queue launch and takeover. `loop/contracts.py` records its id, version, and
+SHA-256 content hash in `RunContract.payload.run_options.profile`. The existing
+whole-contract compatibility check rejects omission or a changed definition,
+including plugin execution order. `profile=None` adds no contract fields or
+request changes. See [domain profiles](../usage/profiles.md) for the API.
 
 ---
 

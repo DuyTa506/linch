@@ -74,6 +74,22 @@ class EventBus:
         """Whether any listener is currently registered for *name*."""
         return bool(self._listeners.get(name))
 
+    def fork(self, *, exclude: tuple[str, ...] = ()) -> EventBus:
+        """Snapshot listeners into an independently mutable bus.
+
+        Args:
+            exclude: Event names whose registrations must stay on this bus.
+
+        Returns:
+            A bus preserving listener order with independent registration ownership.
+        """
+        bus = EventBus()
+        for name, listeners in self._listeners.items():
+            if name not in exclude:
+                for listener in listeners:
+                    bus.on(name, listener)
+        return bus
+
     def emit(self, name: str, *args: Any) -> None:
         """Broadcast to every listener, isolating failures. Non-vetoing.
 

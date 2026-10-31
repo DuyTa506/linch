@@ -16,6 +16,7 @@ The tables below group the 2.x removals and replacements by area.
 |---|---|
 | Python 3.10; scaffold TOML fallback readers | Python 3.11+ and valid TOML |
 | `AgentOptions` | Configure `Agent(...)`; `from linch import Agent` |
+| Domain configuration selected only at Agent construction | `Profile` layers selected with `RunOptions(profile=...)`; pass the pinned id/version/definition again on resume or takeover; see [profiles](usage/profiles.md) |
 | `Agent.openai` provider property | `agent.provider`; the separate `Agent(openai=...)` configuration argument remains |
 | `Agent(execution_backend=...)` with only shell support | A coherent `.shell`/`.fs` backend; `from linch import LocalExecutionBackend, RemoteExecutionBackend` |
 | `BashTool(backend=...)` | `BashTool(execution=...)`; `from linch.tools.builtin import BashTool` |

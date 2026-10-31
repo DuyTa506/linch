@@ -6,7 +6,7 @@ import asyncio
 import json
 import math
 import random
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from contextlib import aclosing, suppress
 from dataclasses import dataclass
 from datetime import timedelta
@@ -23,9 +23,18 @@ from pgqueuer.errors import FailingListenerError
 from pgqueuer.ports.driver import NotifyCallback
 
 from ..agent import Agent
+from ..errors import ConfigError
 from ..events import ErrorEvent, ModelCallEvent, ResultEvent
+from ..loop.contracts import _principal_from_value
 from ..model_calls import _ModelCallLedger
-from ..run_store import LeaseLostError, RunLease, RunLeaseConflictError, RunRecord
+from ..profiles import Profile
+from ..run_store import (
+    LeaseLostError,
+    RunLease,
+    RunLeaseConflictError,
+    RunRecord,
+    run_contract_from_meta,
+)
 from ..run_stores.postgres import PostgresRunStore
 from ..session import RunOptions, Session
 from ..sessions.postgres import PostgresSessionStore
@@ -126,6 +135,9 @@ class Worker:
     Configure identical per-queue limits on every fleet member. Zero means
     unlimited. ``stop()`` stops picking and drains current jobs; cancellation
     is cooperative shutdown, while process death leaves jobs for stall recovery.
+
+    Args:
+        profiles: Released definitions available for queued runs and takeover.
     """
 
     def __init__(
@@ -139,6 +151,7 @@ class Worker:
         stall_timeout_s: float = 60,
         poll_interval_s: float = 1,
         retry_delay_s: float = 1,
+        profiles: Iterable[Profile] = (),
     ) -> None:
         self._pool = pool if isinstance(pool, _BorrowedPool) else _BorrowedPool(pool)
         if self._pool.get_max_size() < 2:
@@ -155,12 +168,45 @@ class Worker:
         self._stop = asyncio.Event()
         self._manager: QueueManager | None = None
         self._limits = dict(queues) if queues is not None else {"default": 0}
+        self._profiles = {(profile.id, profile.version): profile for profile in profiles}
         if not self._limits:
             raise ValueError("at least one queue is required")
         for queue, limit in self._limits.items():
             _entrypoint(queue)
             if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
                 raise ValueError("concurrency_limit must be a non-negative integer")
+
+    def _resolve_profile(self, raw: Any) -> Profile | None:
+        if raw is None:
+            return None
+        if not isinstance(raw, Mapping):
+            raise ConfigError("queued run has an invalid profile reference") from None
+        profile_id, version = raw.get("id"), raw.get("version")
+        if not isinstance(profile_id, str) or not isinstance(version, str):
+            raise ConfigError("queued run has an invalid profile reference")
+        profile = self._profiles.get((profile_id, version))
+        if profile is None:
+            raise ConfigError(
+                f"worker has no profile {profile_id!r}@{version!r}; "
+                "supply the pinned Profile definition"
+            )
+        if profile._contract()["content_hash"] != raw.get("content_hash"):
+            raise ConfigError(
+                f"profile {profile_id!r}@{version!r} content hash mismatch; "
+                "supply the original definition"
+            )
+        return profile
+
+    def _run_options(self, record: RunRecord) -> RunOptions:
+        options: Any = record.meta
+        if "run_contract" in record.meta:
+            options = run_contract_from_meta(record.meta).payload.get("run_options")
+            if not isinstance(options, Mapping):
+                raise ConfigError("stored run contract has invalid run options")
+        profile = self._resolve_profile(options.get("profile"))
+        raw_principal = options.get("principal")
+        principal = _principal_from_value(raw_principal) if raw_principal is not None else None
+        return RunOptions(run_id=record.id, profile=profile, principal=principal)
 
     def _make_manager(self, connection: Any) -> QueueManager:
         manager = _WorkerQueueManager(
@@ -285,6 +331,7 @@ class Worker:
         record: RunRecord,
         payload: dict[str, Any],
     ) -> None:
+        options = self._run_options(record)
         execution.agent = await self.agent_factory(
             WorkerJob(record, store, self._pool, self._session_store, payload.get("queue"))
         )
@@ -293,7 +340,6 @@ class Worker:
         if execution.agent.session_store is not self._session_store:
             raise ValueError("agent factory must use WorkerJob.session_store")
         execution.session = await execution.agent.session(id=record.session_id)
-        options = RunOptions(run_id=record.id)
         iterator = (
             execution.session.resume(record.id, options)
             if record.checkpoint is not None
