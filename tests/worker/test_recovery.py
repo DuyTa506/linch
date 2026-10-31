@@ -15,7 +15,6 @@ import asyncio, sys
 import asyncpg
 from linch import Agent, empty_tools
 from linch.evals import ScriptedProvider, TextTurn
-from linch.sessions.postgres import PostgresSessionStore
 from linch.worker import Worker
 
 class Blocked(ScriptedProvider):
@@ -30,7 +29,7 @@ async def main():
     async def factory(job):
         return Agent(model='m', provider=Blocked([TextTurn('never')]),
                      tools=empty_tools(), permissions={'mode':'skip-dangerous'},
-                     session_store=PostgresSessionStore('', pool=job.pool),
+                     session_store=job.session_store,
                      run_store=job.run_store)
     await Worker(pool, factory, worker_id='worker-a', lease_ttl_s=.6,
                  stall_timeout_s=1.2, poll_interval_s=.05).run()

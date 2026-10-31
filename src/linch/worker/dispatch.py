@@ -12,19 +12,7 @@ from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapProp
 from pgqueuer import Queries
 
 from ..run_stores.postgres import PostgresRunStore
-
-
-class _BorrowedPool:
-    """Stores may close their handle without closing the host's shared pool."""
-
-    def __init__(self, pool: Any) -> None:
-        self._pool = pool
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._pool, name)
-
-    async def close(self) -> None:
-        pass
+from ..storage._pg import _BorrowedPool
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,7 +42,8 @@ async def install(pool: Any) -> None:
     Run once at host startup. Existing PgQueuer schemas must already be current;
     migrations are host-owned. Safe for concurrent process startup.
     """
-    async with PostgresRunStore("", pool=_BorrowedPool(pool)):
+    pool = pool if isinstance(pool, _BorrowedPool) else _BorrowedPool(pool)
+    async with PostgresRunStore("", pool=pool):
         pass
     async with pool.acquire() as conn:
         async with conn.transaction():
