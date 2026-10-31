@@ -56,13 +56,15 @@ worker-owned running runs are resumable even before startup returns. The optiona
 default supports direct store callers; it does not make manually created runs
 without a checkpoint resumable. Custom stores must accept the new keyword.
 
-Startup buffers its system, skills, hook, and prompt events until the atomic
-`user_appended` checkpoint (or a terminal write). Its initial checkpoint captures
-hook state before `AgentStart`, so replaying interrupted startup restores that
-baseline. A private history baseline distinguishes a prior identical user tail
-from this run's
-already committed prompt. Startup hooks must be repeatable across takeover;
-arbitrary external hook side effects do not have an exactly-once guarantee.
+Startup events commit with the checkpoint that owns their progress. Ordinary
+runs use `user_appended`; startup-affecting hooks also have a preparation boundary
+that freezes the prompt, remaining hook events, and post-hook history baseline
+before the SDK appends its prompt. This distinguishes hook context from the
+prompt even when their messages are identical. Hook-free runs need no extra
+checkpoint. The initial checkpoint captures hook state before `AgentStart`;
+startup accounting writes preserve that snapshot until preparation completes.
+Startup hooks must be repeatable across takeover; arbitrary external hook side
+effects do not have an exactly-once guarantee.
 
 Every `RunStore` implements
 `save_checkpoint_with_events(run_id, checkpoint, events, *, status="running")`.

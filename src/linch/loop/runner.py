@@ -142,6 +142,16 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
                             _checkpointable_hooks(list(session.agent.hooks or [])), session, run_id
                         ),
                         "linch.startup": {
+                            "preparation_required": any(
+                                callable(getattr(hook, name, None))
+                                for hook in session.agent.hooks or ()
+                                for name in (
+                                    "on_hook",
+                                    "on_agent_start",
+                                    "on_user_prompt_submit",
+                                    "on_event_emit",
+                                )
+                            ),
                             "history_count": session.session_log.history_count,
                             "history_fingerprint": session.session_log._history_fingerprint(),
                         },

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Target a running worker before its first checkpoint and capture failure metadata."""
+"""Target a worker at its durable started checkpoint and capture failure metadata."""
 
 import json
 import subprocess
@@ -16,7 +16,9 @@ def controller() -> int:
 
     async def cold_owner(pool, query, *args, **kwargs):
         if query.startswith("SELECT id,lease_owner,lease_epoch FROM runs"):
-            query = query.replace(" LIMIT 1", " AND checkpoint IS NULL LIMIT 1", 1)
+            query = query.replace(
+                " LIMIT 1", " AND checkpoint::jsonb->>'phase'='started' LIMIT 1", 1
+            )
         return await fetchrow(pool, query, *args, **kwargs)
 
     async def diagnostics(pool, args):

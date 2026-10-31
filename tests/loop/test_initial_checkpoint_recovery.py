@@ -53,7 +53,17 @@ class Boundaries:
                     index = len(state.calls)
                     if selected:
                         state.calls.append(key)
-                    hit = selected and index == state.target
+                    events = (
+                        args[2]
+                        if name == "save_checkpoint_with_events"
+                        else (args[1] if name == "append_events" else [])
+                    )
+                    receipt_hit = isinstance(state.target, tuple) and any(
+                        getattr(event, "type", None) == "model_call"
+                        and (event.record["delivery_attempt_id"], event.record_kind) == state.target
+                        for event in events
+                    )
+                    hit = selected and (index == state.target or receipt_hit)
                     if hit and state.timing == "before":
                         state.dead = True
                         raise ProcessDeath()
@@ -95,6 +105,87 @@ class Transform:
         self.starts = state["starts"]
 
 
+class AccountedTransform(Transform):
+    @staticmethod
+    async def paid_action(ctx, delivery_id):
+        from linch.model_calls import ModelCallIntent, ModelCallReceipt
+        from linch.types import Usage
+
+        # A deterministic fake paid action exercises the runtime's real
+        # persistence callback without a network call or duplicate delivery.
+        ledger = ctx.session._model_call_ledger
+        if ledger.receipt_for(delivery_id) is not None:
+            return
+        intent = ModelCallIntent(
+            delivery_id, delivery_id, None, "primary", ctx.run_id, 0, "m", "startup-request", None
+        )
+        if ledger.intent_for(delivery_id) is None:
+            await ledger.begin(intent)
+        if delivery_id not in ledger._started:
+            await ledger.mark_dispatch_started(intent)
+        if ledger.receipt_for(delivery_id) is None:
+            await ledger.settle(
+                ModelCallReceipt(
+                    delivery_id,
+                    delivery_id,
+                    "primary",
+                    ctx.run_id,
+                    0,
+                    "m",
+                    "reported",
+                    Usage(input_tokens=111, output_tokens=22),
+                    0.125,
+                    "accepted",
+                    None,
+                    None,
+                    None,
+                    17,
+                    "startup-request",
+                    None,
+                    None,
+                )
+            )
+
+    async def on_user_prompt_submit(self, ctx):
+        await self.paid_action(ctx, "startup-delivery")
+        return super().on_user_prompt_submit(ctx)
+
+
+class EventAccountedTransform(AccountedTransform):
+    async def on_user_prompt_submit(self, ctx):
+        from linch.events import HookEventRecord
+
+        result = await super().on_user_prompt_submit(ctx)
+        result.metadata["events"] = [
+            HookEventRecord(event="UserPromptSubmit", hook="second", action="continue")
+        ]
+        return result
+
+    async def on_event_emit(self, ctx):
+        if ctx.event.type == "hook":
+            delivery = "event-second" if ctx.event.hook == "second" else "event-first"
+            await self.paid_action(ctx, delivery)
+
+
+class LoggedContext:
+    """Idempotent logged startup context; no external effects or SDK state edits."""
+
+    resume_policy_id = "startup-logged-context"
+
+    def __init__(self, *, same_as_prompt):
+        self.same_as_prompt = same_as_prompt
+        self.resume_policy_config = {"same_as_prompt": same_as_prompt}
+
+    async def on_user_prompt_submit(self, ctx):
+        from linch.loop.request import build_user_message
+
+        # Both messages include the normal env block. In the equal variant the
+        # context and the eventual SDK prompt are fully equal Message values.
+        message = build_user_message(ctx.prompt if self.same_as_prompt else "logged context")
+        if message not in ctx.session.full_history:
+            await ctx.session.append([message])
+
+
 def normalized(rows):
     identities = {}
 
@@ -118,8 +209,25 @@ def normalized(rows):
 
 
 @pytest.mark.parametrize("kind", ["memory", "postgres"])
-@pytest.mark.parametrize("variant", ["basic", "exact", "transform-identical-tail"])
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "basic",
+        "exact",
+        "transform-identical-tail",
+        "context-distinct",
+        "context-equal",
+        "accounted-transform",
+        "event-accounted-transform",
+    ],
+)
 async def test_startup_store_boundary_takeover_trace(kind, variant, pg_dsn):
+    transforming = variant in {
+        "transform-identical-tail",
+        "accounted-transform",
+        "event-accounted-transform",
+    }
+
     async def exercise(target=None, timing="before"):
         if kind == "memory":
             raw = InMemoryRunStore()
@@ -132,18 +240,25 @@ async def test_startup_store_boundary_takeover_trace(kind, variant, pg_dsn):
         rid, sid = str(uuid4()), str(uuid4())
 
         def make(store, session_store):
+            hooks = [Transform()] if transforming else []
+            if variant == "accounted-transform":
+                hooks = [AccountedTransform()]
+            elif variant == "event-accounted-transform":
+                hooks = [EventAccountedTransform()]
+            if variant.startswith("context-"):
+                hooks = [LoggedContext(same_as_prompt=variant == "context-equal")]
             agent = Agent(
                 model="m",
                 provider=provider,
                 run_store=store,
                 session_store=session_store,
                 tools=empty_tools(),
-                hooks=[Transform()] if variant == "transform-identical-tail" else [],
+                hooks=hooks,
                 durability=DurabilityOptions(exact_model_input=variant == "exact"),
                 permissions={"mode": "skip-dangerous"},
                 cwd=".",
             )
-            if variant == "transform-identical-tail":
+            if transforming:
                 from linch.skills.types import Skill, SkillFrontmatter
 
                 agent.skills = {
@@ -153,10 +268,10 @@ async def test_startup_store_boundary_takeover_trace(kind, variant, pg_dsn):
 
         first = make(gate.wrap(raw, "run"), gate.wrap(messages, "session"))
         session = await first.session(id=sid)
-        if variant == "transform-identical-tail":
-            await session.append(
-                [Message(role="user", content=[TextBlock(text="hello rewritten 1")])]
-            )
+        if transforming:
+            from linch.loop.request import build_user_message
+
+            await session.append([build_user_message("hello rewritten 1")])
         # Pending is the queue's durable row, before SDK adoption.
         if kind == "memory":
             await raw.create_run(sid, id=rid)
@@ -191,7 +306,11 @@ async def test_startup_store_boundary_takeover_trace(kind, variant, pg_dsn):
                 second = make(peer, messages)
                 fresh = await second.session(id=sid)
                 record = await peer.load_run(rid)
-                replayed_started = record.checkpoint is None or record.checkpoint.phase == "started"
+                replayed_started = record.checkpoint is None or (
+                    record.checkpoint.phase == "started"
+                    and "prepared_message"
+                    not in record.checkpoint.extension_state.get("linch.startup", {})
+                )
                 iterator = (
                     fresh.resume(rid)
                     if record.checkpoint
@@ -205,8 +324,8 @@ async def test_startup_store_boundary_takeover_trace(kind, variant, pg_dsn):
                 finally:
                     await second.close()
             record = await raw.load_run(rid)
-            assert record.status == "completed"
-            if variant == "transform-identical-tail" and replayed_started:
+            assert record.status == "completed", (target, timing, gate.calls)
+            if transforming and replayed_started:
                 assert record.checkpoint.extension_state["test.transform"] == {"starts": 1}
             rows = await raw.load_events(rid)
             assert [row.seq for row in rows] == list(range(1, len(rows) + 1))
@@ -215,8 +334,42 @@ async def test_startup_store_boundary_takeover_trace(kind, variant, pg_dsn):
             assert types.count("system") == types.count("user") == types.count("result") == 1
             assert types[-1] == "result"
             assert provider.calls == 1
+            if "accounted-transform" in variant:
+                paid = [
+                    row.event
+                    for row in rows
+                    if row.event.type == "model_call"
+                    and row.event.record["delivery_attempt_id"] == "startup-delivery"
+                ]
+                assert [event.record_kind for event in paid] == [
+                    "intent",
+                    "dispatch_started",
+                    "receipt",
+                ]
+                actions = 3 if variant == "event-accounted-transform" else 1
+                assert rows[-1].event.total_usage.input_tokens == 111 * actions
+                assert rows[-1].event.total_usage.output_tokens == 22 * actions
+                assert rows[-1].event.total_cost_usd == 0.125 * actions
+                assert rows[-1].event.usage_complete
+                if variant == "event-accounted-transform":
+                    hook_positions = [i for i, row in enumerate(rows) if row.event.type == "hook"]
+                    first_receipt = next(
+                        i
+                        for i, row in enumerate(rows)
+                        if row.event.type == "model_call"
+                        and row.event.record_kind == "receipt"
+                        and row.event.record["delivery_attempt_id"] == "event-first"
+                    )
+                    assert hook_positions[0] < first_receipt < hook_positions[1]
             history = [m for m in session.full_history if m.role == "user"]
-            assert len(history) == (2 if variant == "transform-identical-tail" else 1)
+            assert len(history) == (2 if transforming or variant.startswith("context-") else 1)
+            if variant.startswith("context-"):
+                assert history[0].content[-1].text == (
+                    "hello" if variant == "context-equal" else "logged context"
+                )
+                assert history[1].content[-1].text == "hello"
+                if variant == "context-equal":
+                    assert history[0] == history[1]
             return (
                 gate.calls,
                 normalized(rows),
@@ -232,8 +385,17 @@ async def test_startup_store_boundary_takeover_trace(kind, variant, pg_dsn):
 
     calls, baseline, history, view = await exercise()
     assert any(phase == "provider_pending" for _, _, phase in calls)
-    for target, boundary in enumerate(calls):
-        for timing in ("before", "committed", "returned"):
+    targets = list(enumerate(calls))
+    timings = ("before", "committed", "returned")
+    if "accounted-transform" in variant:
+        # In-flight billable dispatch changes accounting completeness by
+        # contract. Test completed durable callback facts, without filtering
+        # ModelCallEvent or weakening the full trace/history oracle.
+        delivery = "event-first" if variant == "event-accounted-transform" else "startup-delivery"
+        targets = [((delivery, "receipt"), "completed startup receipt")]
+        timings = ("committed", "returned")
+    for target, boundary in targets:
+        for timing in timings:
             _, trace, recovered_history, recovered_view = await exercise(target, timing)
             assert trace == baseline, (boundary, timing, trace, baseline)
             assert recovered_history == history, (boundary, timing)
@@ -265,7 +427,10 @@ async def test_graceful_startup_close_does_not_duplicate_durable_prefix(after_ev
     await iterator.aclose()
     record = await raw.load_run("r")
     assert record.checkpoint.phase == "started"
-    assert await raw.load_events("r") == []
+    prefix = await raw.load_events("r")
+    assert [row.event.type for row in prefix] == (["system"] if after_event == "hook" else [])
+    if after_event == "hook":
+        assert "prepared_message" in record.checkpoint.extension_state["linch.startup"]
     second = make()
     try:
         fresh = await second.session(id="s")
@@ -396,11 +561,61 @@ async def test_blocked_prompt_marks_skills_seen_only_after_terminal_commit(termi
         assert events[-1].type == "result"
         if terminal_failure:
             assert not session.skills_loaded_emitted
-            assert await store.load_events("blocked") == []
+            rows = await store.load_events("blocked")
+            assert [row.event.type for row in rows] == ["system", "skills_loaded"]
+            assert (await store.load_run("blocked")).status == "running"
         else:
             assert session.skills_loaded_emitted
+            assert (
+                "linch.startup" not in (await store.load_run("blocked")).checkpoint.extension_state
+            )
             events = [event async for event in session.run("allowed")]
             assert not any(event.type == "skills_loaded" for event in events)
             assert events[-1].subtype == "success"
+    finally:
+        await agent.close()
+
+
+@pytest.mark.parametrize(
+    ("handler", "expected_barriers"),
+    [
+        ("on_hook", 1),
+        ("on_agent_start", 1),
+        ("on_user_prompt_submit", 1),
+        ("on_event_emit", 1),
+        ("on_pre_tool_use", 0),
+        ("not_callable", 0),
+    ],
+)
+async def test_preparation_barrier_requires_actual_startup_handler(handler, expected_barriers):
+    from types import SimpleNamespace
+
+    class Store(InMemoryRunStore):
+        barriers = 0
+
+        async def save_checkpoint_with_events(self, run_id, checkpoint, events, **kwargs):
+            if checkpoint.phase == "started":
+                self.barriers += 1
+            return await super().save_checkpoint_with_events(run_id, checkpoint, events, **kwargs)
+
+    hook = SimpleNamespace(resume_policy_id="handler-selection")
+    if handler == "not_callable":
+        hook.on_user_prompt_submit = "not callable"
+    else:
+        setattr(hook, handler, lambda *args: None)
+    store = Store()
+    agent = Agent(
+        model="m",
+        provider=ScriptProvider(),
+        run_store=store,
+        session_store=InMemorySessionStore(),
+        tools=empty_tools(),
+        hooks=[hook],
+    )
+    try:
+        session = await agent.session()
+        events = [event async for event in session.run("hello")]
+        assert events[-1].subtype == "success"
+        assert store.barriers == expected_barriers
     finally:
         await agent.close()
