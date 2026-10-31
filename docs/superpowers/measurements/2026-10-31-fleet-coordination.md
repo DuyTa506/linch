@@ -1,6 +1,6 @@
 Candidate `6b1d8b2` (runtime/harness `70c7a68`) versus measured baseline `ac2033c` — fleet coordination, 2026-10-31.
 
-**Revised low-rate acceptance PASS:** M8/M1 worker CPU/TPS **1.55 ≤ 1.6**, Postgres CPU/TPS **1.47 ≤ 1.5**. Commits/turn ratio is **1.294**; the accepted residual is the shared broadcast/LISTEN internal-transaction floor.
+**Revised low-rate CPU acceptance PASS:** M8/M1 worker CPU/TPS **1.55 ≤ 1.6**, Postgres CPU/TPS **1.47 ≤ 1.5**. Commits/turn ratio is **1.294**; the accepted residual slope is consistent with the shared broadcast/LISTEN internal-transaction floor.
 **Full outage acceptance FAIL:** four runs durably failed during the 3 s blip; workers survived. M1 claim-wait p99 is 50.1 ms versus baseline 52.3 ms, above the earlier 45 ms reference. CPU acceptance does not establish improved capacity.
 
 Shared six-core / **12-logical-CPU** host; PostgreSQL 16.2/PgQueuer 1.6.0; RTT 1 ms, pool 16 per process, one reader, unlimited run concurrency, poll 1 s; warmup 15 s, steady 60 s, drain up to 120 s. Runs contain four simulated turns.
