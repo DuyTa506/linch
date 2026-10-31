@@ -13,6 +13,19 @@ T = TypeVar("T")
 
 @dataclass(slots=True)
 class RetryOptions:
+    """Configure attempt limits and exponential backoff for provider retries.
+
+    Args:
+        max_attempts: Maximum number of calls, including the first attempt.
+        base_delay_ms: Initial exponential-backoff delay in milliseconds.
+        max_delay_ms: Upper bound for a computed delay in milliseconds.
+        jitter: Fractional randomization applied to exponential delays.
+
+    Attributes:
+        jitter: A value of zero disables randomization; rate-limit retry-after
+            values still take precedence over exponential backoff.
+    """
+
     max_attempts: int = 5
     base_delay_ms: int = 1000
     max_delay_ms: int = 30000

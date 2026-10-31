@@ -45,6 +45,16 @@ class GeminiProviderOptions:
     ``api_key=None`` uses SDK environment discovery. Setting ``project`` selects
     Vertex AI with application default credentials and the given ``location``.
     ``default_generation_config`` accepts native options, including ``thinking_config``.
+
+    Args:
+        api_key: Optional Gemini API key used when Vertex AI is not selected.
+        project: Optional Google Cloud project; setting it selects Vertex AI.
+        location: Vertex AI location used with ``project``.
+        default_generation_config: Native generation settings applied to requests.
+
+    Attributes:
+        default_generation_config: A mutable mapping copied and extended with
+            request-level generation and thinking settings.
     """
 
     api_key: str | None = None
@@ -149,19 +159,44 @@ def _map_error(exc: Exception) -> LinchError:
 
 
 class GeminiProvider(BaseProvider):
-    """Async Gemini provider; client configuration is isolated per instance."""
+    """Async Gemini provider; client configuration is isolated per instance.
+
+    Args:
+        options: Optional Gemini or Vertex AI credentials and generation defaults.
+    """
 
     id = "gemini"
 
     def __init__(self, options: GeminiProviderOptions | None = None) -> None:
+        """Create an isolated Gemini provider client configuration.
+
+        Args:
+            options: Gemini or Vertex AI credentials and generation defaults.
+        """
         self._options = options or GeminiProviderOptions()
         self._client: Any = None
         self._client_loop: Any = None
 
     def context_window(self, model: ModelId) -> int:
+        """Return Gemini's configured context capacity for a model.
+
+        Args:
+            model: Gemini model identifier.
+
+        Returns:
+            The known model capacity, or the adapter fallback for unknown models.
+        """
         return _KNOWN_CONTEXT.get(model, 1_048_576)
 
     def capabilities(self, model: ModelId) -> ProviderCapabilities:
+        """Return capabilities for the selected Gemini model.
+
+        Args:
+            model: Gemini model identifier.
+
+        Returns:
+            Capability flags advertised by the Gemini adapter.
+        """
         return full_capabilities(self.context_window(model))
 
     def _get_client(self) -> Any:
@@ -187,6 +222,7 @@ class GeminiProvider(BaseProvider):
         return self._client
 
     async def aclose(self) -> None:
+        """Close the owned Gemini clients, if initialized."""
         client, self._client = self._client, None
         self._client_loop = None
         if client is not None:
@@ -218,6 +254,14 @@ class GeminiProvider(BaseProvider):
         return cfg
 
     async def stream(self, req: ProviderRequest) -> AsyncIterator[dict[str, Any]]:
+        """Yield normalized events for one Gemini request.
+
+        Args:
+            req: Request to send through the Google GenAI client.
+
+        Returns:
+            An async iterator of normalized message, thinking, tool, and usage events.
+        """
         try:
             client = self._get_client()
             from google.genai import types

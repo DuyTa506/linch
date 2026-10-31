@@ -33,6 +33,13 @@ def _freeze(value: Any) -> Any:
 class Profile:
     """Describe a versioned role, plugin selection, and run defaults.
 
+    Attributes:
+        plugins: Frozen ordered rows keyed by stable plugin id.
+        tool_allow: Optional offered-tool allowlist; an empty tuple offers none.
+        tool_deny: Tool names removed after the allowlist is applied.
+        output_schema: Frozen constructor data for structured output.
+        budget: Frozen constructor data for per-run spending limits.
+
     Args:
         id: Stable domain or tenant profile identifier.
         version: Revision selected by the caller, also required on resume.

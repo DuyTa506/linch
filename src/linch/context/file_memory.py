@@ -27,9 +27,22 @@ class FileMemoryContextBuilder:
     """
 
     def __init__(self) -> None:
+        """Create a builder with an empty per-run memory-index cache."""
         self._by_run: dict[str, str] = {}
 
     async def build(self, turn: ContextBuildTurn) -> ContextBuildResult:
+        """Inject the run's memory index into ephemeral system context.
+
+        Args:
+            turn: Active session and run dependencies used to locate the filesystem.
+
+        Returns:
+            System blocks containing the memory instructions and, when present,
+            the first 200 lines of ``/memories/MEMORY.md``.
+
+        Raises:
+            RuntimeError: If the session has no active run.
+        """
         run_id = turn.session.active_run_id
         if run_id is None:
             raise RuntimeError("File memory requires an active run")
@@ -59,4 +72,9 @@ class FileMemoryContextBuilder:
         return ContextBuildResult(system_blocks=blocks)
 
     def on_agent_stop(self, ctx: AgentStopContext) -> None:
+        """Discard the cached memory index for a completed run.
+
+        Args:
+            ctx: Agent-stop context identifying the run to remove.
+        """
         self._by_run.pop(ctx.run_id, None)

@@ -46,6 +46,11 @@ class RedactionRule:
     ``pattern`` is a regular expression compiled with :func:`re.compile`. An
     invalid pattern raises at :class:`RedactionHook` construction, not at
     runtime. Linch ships no rules — the host supplies them.
+
+    Args:
+        pattern: Regular expression identifying sensitive text.
+        replacement: Text substituted for each match.
+        flags: Flags passed to :func:`re.compile`.
     """
 
     pattern: str
@@ -59,6 +64,12 @@ class RedactionConfig:
 
     With the default empty ``rules`` the hook does nothing, so attaching it is
     safe before any policy exists.
+
+    Args:
+        rules: Ordered redaction rules applied to matching text.
+        redact_tool_results: Whether to redact post-tool result text.
+        redact_final_answer: Whether to redact final answer text.
+        redact_user_prompt: Whether to redact submitted user prompts.
     """
 
     rules: tuple[RedactionRule, ...] = field(default_factory=tuple)
@@ -76,11 +87,23 @@ class RedactionHook:
 
     Mechanism only: with no rules it is a no-op. The host decides what is
     sensitive and how to mask it, so no domain policy lives in core.
+
+    Args:
+        config: Optional redaction policy configuration.
     """
 
     name = "redaction"
 
     def __init__(self, config: RedactionConfig | None = None) -> None:
+        """Create a hook with eagerly compiled redaction rules.
+
+        Args:
+            config: Optional redaction policy configuration.
+
+        Raises:
+            re.error: If a configured regular-expression pattern is invalid.
+        """
+
         self.config = config or RedactionConfig()
         # Compile eagerly so a bad pattern fails fast at construction and each
         # call avoids recompiling.
@@ -89,8 +112,14 @@ class RedactionHook:
         )
 
     def redact(self, text: str) -> str:
-        """Apply every rule in order. Public so hosts can reuse the same masking
-        elsewhere (e.g. log scrubbing) with one source of truth."""
+        """Apply every configured rule in order.
+
+        Args:
+            text: Text to scrub.
+
+        Returns:
+            Text after all configured substitutions.
+        """
         if not text or not self._compiled:
             return text
         for pattern, replacement in self._compiled:
@@ -98,6 +127,18 @@ class RedactionHook:
         return text
 
     async def on_post_tool_use(self, ctx: PostToolUseContext) -> HookResult | None:
+        """Redact text fields in the legacy result before model exposure.
+
+        Canonical-only ``ctx.tool_output`` values are not processed by this
+        legacy result adapter.
+
+        Args:
+            ctx: Post-tool lifecycle context.
+
+        Returns:
+            A mutation when text changes; otherwise ``None``.
+        """
+
         if not self.config.redact_tool_results or not self._compiled:
             return None
         result = ctx.result
@@ -118,6 +159,15 @@ class RedactionHook:
         return HookResult.mutate(tool_result=scrubbed)
 
     async def on_before_final_answer(self, ctx: BeforeFinalAnswerContext) -> HookResult | None:
+        """Redact candidate final text before returning it.
+
+        Args:
+            ctx: Candidate final-answer context.
+
+        Returns:
+            A final-text mutation when text changes; otherwise ``None``.
+        """
+
         if not self.config.redact_final_answer or not self._compiled:
             return None
         text = ctx.final_text
@@ -129,6 +179,15 @@ class RedactionHook:
         return HookResult.mutate(final_text=redacted)
 
     async def on_user_prompt_submit(self, ctx: UserPromptSubmitContext) -> HookResult | None:
+        """Redact a user prompt when prompt scrubbing is enabled.
+
+        Args:
+            ctx: User-prompt lifecycle context.
+
+        Returns:
+            A prompt mutation when text changes; otherwise ``None``.
+        """
+
         if not self.config.redact_user_prompt or not self._compiled:
             return None
         text = ctx.prompt

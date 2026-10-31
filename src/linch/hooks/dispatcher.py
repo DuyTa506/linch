@@ -37,6 +37,17 @@ _log = logging.getLogger("linch.observability")
 
 @dataclass(slots=True)
 class HookDispatchResult:
+    """Collect the combined outcome of dispatching hooks for one event.
+
+    Attributes:
+        context: Context after all accepted mutations have been applied.
+
+    Args:
+        result: Combined hook action.
+        events: Telemetry events emitted during dispatch.
+        context: Final lifecycle context.
+    """
+
     result: HookResult = field(default_factory=HookResult.continue_)
     events: list[Any] = field(default_factory=list)
     # The context after all mutations were applied — lets callers read the final
@@ -46,11 +57,29 @@ class HookDispatchResult:
 
 
 class HookDispatcher:
+    """Dispatch lifecycle contexts to registered hooks in order.
+
+    Args:
+        hooks: Hook objects to invoke for matching lifecycle points.
+    """
+
     def __init__(self, hooks: Iterable[Any] | None = None) -> None:
+        """Create a dispatcher with an optional ordered hook collection.
+
+        Args:
+            hooks: Hook objects to retain for future dispatches.
+        """
+
         self._hooks = list(hooks or [])
 
     @property
     def active(self) -> bool:
+        """Return whether at least one hook is registered.
+
+        Returns:
+            Whether dispatch has any hooks to invoke.
+        """
+
         return bool(self._hooks)
 
     async def dispatch(
@@ -149,6 +178,15 @@ _METHODS = {
 
 
 def normalize_hooks(raw: Any) -> list[Any]:
+    """Normalize optional hook configuration to a list.
+
+    Args:
+        raw: A hook object, sequence of hooks, or ``None``.
+
+    Returns:
+        A new list containing hooks in registration order.
+    """
+
     if raw is None:
         return []
     if isinstance(raw, (list, tuple)):
