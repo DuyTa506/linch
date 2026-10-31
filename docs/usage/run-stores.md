@@ -108,9 +108,10 @@ Expiry alone permits takeover; writes are fenced by epoch, not by a local
 clock check. An expired lease cannot be renewed.
 
 Release clears ownership and advances the epoch when the lease still matches.
-Every release attempt also removes this instance's holder-local state for the
-run, including when it raises `LeaseLostError` after a takeover. Releasing a
-stale lease does not affect the current owner. A fenced write retains its local
+Every release attempt removes this instance's holder-local state only when its
+owner and epoch still match the released lease, including when it raises
+`LeaseLostError` after a takeover. A newer claim on the same instance retains
+its local state. Releasing a stale lease does not affect the current owner. A fenced write retains its local
 lease state until the host calls release, so further zombie writes stay fenced.
 
 Hosts call release in `finally` after stopping all work for the run. Release
