@@ -102,15 +102,15 @@ awaits cleanup and a later service registration eventually activates a fresh
 scope (registration emits synchronously, reconciliation is async):
 
 ```python
-from linch import Agent, plugins
+from linch import Agent, AskUserPlugin, MailboxPlugin
 
 agent = Agent(model="gpt-5")
-mount = await agent.use(plugins.ask_user, ask_user_handler)
+mount = await agent.use(AskUserPlugin(), ask_user_handler)
 await mount.dispose()  # idempotently removes the tool
 ```
 
-The built-in catalog is immutable and stateless. Mailbox coordination uses the
-same API: `await agent.use(plugins.mailbox, mailbox)`. Plugin-provided services
+Mailbox coordination uses the same API:
+`await agent.use(MailboxPlugin(), mailbox)`. Plugin-provided services
 are published only after setup passes the `provides` audit, and failed cleanup
 remains retryable through the returned handle or `agent.close()`.
 

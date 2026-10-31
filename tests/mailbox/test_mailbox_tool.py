@@ -2,7 +2,7 @@
 
 A session with a ``mailbox_address`` drains its inbox at the top of each turn
 (exactly like ``pending_notifications``); the ``send_message`` tool lets the
-agent address a peer. Opt-in via ``await agent.use(plugins.mailbox, mailbox)`` — with no mailbox the
+agent address a peer. Opt in via ``await agent.use(MailboxPlugin(), mailbox)`` — with no mailbox the
 tool is absent and no drain runs (byte-identical).
 
 linch imports happen inside the test bodies/helpers because sibling tests pop
@@ -15,7 +15,7 @@ from typing import Any
 
 
 async def _agent(provider: Any, *, mailbox: Any = None, **kwargs: Any) -> Any:
-    from linch import Agent, plugins
+    from linch import Agent, MailboxPlugin
     from linch.sessions import InMemorySessionStore
 
     agent = Agent(
@@ -27,7 +27,7 @@ async def _agent(provider: Any, *, mailbox: Any = None, **kwargs: Any) -> Any:
         **kwargs,
     )
     if mailbox is not None:
-        await agent.use(plugins.mailbox, mailbox)
+        await agent.use(MailboxPlugin(), mailbox)
     return agent
 
 
@@ -90,13 +90,13 @@ async def test_mailbox_registers_send_tool() -> None:
 
 
 async def test_same_mailbox_plugin_object_keeps_agents_and_boxes_isolated() -> None:
-    from linch import Agent, plugins
+    from linch import Agent, MailboxPlugin
     from linch.coordination.mailbox import InMemoryMailbox
     from linch.evals import ScriptedProvider
 
     first = Agent(model="m", provider=ScriptedProvider([]), result_offload=None)
     second = Agent(model="m", provider=ScriptedProvider([]), result_offload=None)
-    plugin = plugins.mailbox
+    plugin = MailboxPlugin()
     first_box = InMemoryMailbox()
     second_box = InMemoryMailbox()
 
@@ -117,7 +117,7 @@ async def test_no_mailbox_means_no_send_tool() -> None:
 
 
 async def test_mailbox_unmount_removes_tool_service_and_inbox() -> None:
-    from linch import Agent, plugins
+    from linch import Agent, MailboxPlugin
     from linch.coordination.mailbox import InMemoryMailbox
     from linch.evals import ScriptedProvider, TextTurn
 
@@ -126,7 +126,7 @@ async def test_mailbox_unmount_removes_tool_service_and_inbox() -> None:
         provider=ScriptedProvider([TextTurn(text="ok")]),
         result_offload=None,
     )
-    mounted = await agent.use(plugins.mailbox, InMemoryMailbox())
+    mounted = await agent.use(MailboxPlugin(), InMemoryMailbox())
     assert agent.mailbox is not None
     assert agent.tools.get("send_message") is not None
     assert agent.context._inbox
@@ -140,12 +140,12 @@ async def test_mailbox_unmount_removes_tool_service_and_inbox() -> None:
 async def test_mailbox_agent_close_does_not_deadlock_during_withdrawal() -> None:
     import asyncio
 
-    from linch import Agent, plugins
+    from linch import Agent, MailboxPlugin
     from linch.coordination.mailbox import InMemoryMailbox
     from linch.evals import ScriptedProvider
 
     agent = Agent(model="m", provider=ScriptedProvider([]), result_offload=None)
-    await agent.use(plugins.mailbox, InMemoryMailbox())
+    await agent.use(MailboxPlugin(), InMemoryMailbox())
     await asyncio.wait_for(agent.close(), timeout=2)
 
 
@@ -174,7 +174,7 @@ async def test_pending_mailbox_message_drains_into_next_turn() -> None:
 
 
 async def test_durable_mailbox_delivery_is_committed_once() -> None:
-    from linch import Agent, plugins
+    from linch import Agent, MailboxPlugin
     from linch.coordination.mailbox import InMemoryMailbox, MailboxMessage
     from linch.durability import DurabilityOptions
     from linch.evals import ScriptedProvider, TextTurn
@@ -188,7 +188,7 @@ async def test_durable_mailbox_delivery_is_committed_once() -> None:
         durability=DurabilityOptions(durable_inbox=True),
         result_offload=None,
     )
-    await agent.use(plugins.mailbox, box)
+    await agent.use(MailboxPlugin(), box)
     session = await agent.session()
     session.mailbox_address = "alice"
     await box.send(MailboxMessage(sender="bob", recipient="alice", content="durable", id="stable"))
@@ -220,7 +220,7 @@ async def test_no_drain_without_address() -> None:
 
 
 async def test_durable_mailbox_releases_unacknowledged_claims_on_error() -> None:
-    from linch import Agent, plugins
+    from linch import Agent, MailboxPlugin
     from linch.coordination.mailbox import InMemoryMailbox, MailboxMessage
     from linch.durability import DurabilityOptions
     from linch.evals import ScriptedProvider, TextTurn
@@ -250,7 +250,7 @@ async def test_durable_mailbox_releases_unacknowledged_claims_on_error() -> None
         durability=DurabilityOptions(durable_inbox=True),
         result_offload=None,
     )
-    await agent.use(plugins.mailbox, box)
+    await agent.use(MailboxPlugin(), box)
     session = await agent.session()
     session.mailbox_address = "alice"
     await box.send(MailboxMessage(sender="bob", recipient="alice", content="retry-me"))

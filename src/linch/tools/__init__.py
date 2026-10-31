@@ -1,6 +1,7 @@
 from .ask_user import (
     AskUserHandler,
     AskUserOption,
+    AskUserPlugin,
     AskUserQuestion,
     AskUserRequest,
     AskUserResponse,
@@ -37,6 +38,7 @@ __all__ = [
     "BashTool",
     "AskUserHandler",
     "AskUserOption",
+    "AskUserPlugin",
     "AskUserQuestion",
     "AskUserRequest",
     "AskUserResponse",

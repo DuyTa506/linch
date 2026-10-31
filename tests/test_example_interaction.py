@@ -128,7 +128,7 @@ async def test_ask_user_timeout_declines_instead_of_hanging() -> None:
 
 
 async def test_ask_user_plugin_unmount_restores_previous_tool() -> None:
-    from linch import Agent, plugins
+    from linch import Agent, AskUserPlugin
     from linch.evals import ScriptedProvider
     from linch.tools import AskUserTool
     from linch.tools.registry import empty_tools
@@ -140,7 +140,7 @@ async def test_ask_user_plugin_unmount_restores_previous_tool() -> None:
         tools=empty_tools(previous),
         result_offload=None,
     )
-    mounted = await agent.use(plugins.ask_user, lambda request, ctx: {"accepted": True})
+    mounted = await agent.use(AskUserPlugin(), lambda request, ctx: {"accepted": True})
     assert agent.tools.get("AskUser") is not previous
 
     await mounted.dispose()

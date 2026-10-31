@@ -26,15 +26,15 @@ isolation backend, a Redis mailbox), see [Extending](./extending.md).
 
 The core subagent model is parent→child: a worker runs once and returns a
 conclusion. `linch.coordination.mailbox` adds the other half — **peers that address
-each other** and exchange messages across turns. Opt in with the built-in plugin
-catalog and the `send_message` tool registers:
+each other** and exchange messages across turns. Opt in with the mailbox plugin;
+the `send_message` tool registers:
 
 ```python
-from linch import Agent, InMemoryMailbox, plugins
+from linch import Agent, InMemoryMailbox, MailboxPlugin
 
 box = InMemoryMailbox()
 agent = Agent(model="gpt-5")
-await agent.use(plugins.mailbox, box)   # registers send_message and inbox
+await agent.use(MailboxPlugin(), box)   # registers send_message and inbox
 ```
 
 Two mechanisms:

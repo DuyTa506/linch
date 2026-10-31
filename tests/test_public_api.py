@@ -63,12 +63,14 @@ def test_plugin_is_public() -> None:
     assert hasattr(Plugin, "setup")
 
 
-def test_builtin_plugin_catalog_is_public_and_stateless() -> None:
-    from linch import plugins
+def test_builtin_plugins_are_public_and_catalog_is_removed() -> None:
+    from linch import AskUserPlugin, MailboxPlugin
 
-    assert "plugins" in linch.__all__
-    assert plugins.mailbox is not plugins.mailbox
-    assert plugins.ask_user is not plugins.ask_user
+    assert {"AskUserPlugin", "MailboxPlugin"} <= set(linch.__all__)
+    assert hasattr(AskUserPlugin, "setup")
+    assert hasattr(MailboxPlugin, "setup")
+    assert "plugins" not in linch.__all__
+    assert not hasattr(linch, "plugins")
 
 
 def test_resume_rejection_error_is_public() -> None:

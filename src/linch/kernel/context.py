@@ -16,6 +16,12 @@ _PLUGIN_SCOPE: ContextVar[Any] = ContextVar("linch_plugin_scope", default=None)
 
 
 class Context:
+    """Own services, effects, and extension registrations for one agent tree.
+
+    Child contexts share the event bus but keep service registrations isolated;
+    lookups fall back to parent contexts.
+    """
+
     def __init__(
         self,
         *,
@@ -23,6 +29,13 @@ class Context:
         _bus: EventBus | None = None,
         _parent: Context | None = None,
     ) -> None:
+        """Create a context, optionally as a child of another context.
+
+        Args:
+            label: Human-readable label used in diagnostics.
+            _bus: Internal event bus shared with a parent or child scope.
+            _parent: Internal parent whose services are visible as fallbacks.
+        """
         self.label = label
         self.events: EventBus = _bus if _bus is not None else EventBus()
         self._scope = EffectScope()
@@ -35,7 +48,22 @@ class Context:
         self._inbox: list[tuple[object, Callable[[Any, str], Any]]] | None = None
 
     def register(self, key: str, service: Any) -> Disposable:
-        """Install a service and return its disposer; reject duplicate claims."""
+        """Install a service and return the disposer for that registration.
+
+        Args:
+            key: Service key to make available in this context.
+            service: Service value, including falsey values.
+
+        Returns:
+            A handle that removes exactly this registration. Removal awaits
+            interested service-change listeners and can be retried after a
+            listener failure.
+
+        Raises:
+            ConfigError: If this scope or a plugin export already claims the key,
+                or registration would escape the active plugin setup scope.
+            RuntimeError: If this context is closing or already disposed.
+        """
         self._ensure_active()
         if key in self._services:
             raise ConfigError(f"service {key!r} already registered in this scope")
@@ -65,7 +93,15 @@ class Context:
         return disposer
 
     def get(self, key: str, default: Any = None) -> Any:
-        """Read a service, walking up to parent scopes; *default* if unresolved."""
+        """Read a service, falling back through parent scopes if unresolved.
+
+        Args:
+            key: Service key to resolve.
+            default: Value returned when no live registration resolves the key.
+
+        Returns:
+            The nearest live service value, or ``default`` when unavailable.
+        """
         if not self._scope.closed and key in self._services:
             return self._services[key]
         exported = self._plugin_exports.get(key) if not self._scope.closed else None
@@ -91,7 +127,20 @@ class Context:
         return service
 
     def on(self, name: str, listener: Listener, *, prepend: bool = False) -> Disposable:
-        """Register an event listener owned by this scope (disposed with it)."""
+        """Register an event listener owned by this context.
+
+        Args:
+            name: Event name to listen for.
+            listener: Callable invoked by the event bus.
+            prepend: Whether to run this listener before existing listeners.
+
+        Returns:
+            A disposer that unregisters this listener.
+
+        Raises:
+            ConfigError: If plugin setup tries to register outside its scope.
+            RuntimeError: If this context is closing or already disposed.
+        """
         # Validate first: registering on the bus before a closed-scope failure
         # would leak an unowned listener.
         self._ensure_active()
@@ -100,11 +149,68 @@ class Context:
         return disposer
 
     def effect(self, fn: Callable[[], Any]) -> Disposable:
-        """Register a reversible effect owned by this scope."""
+        """Run and own a reversible effect in this context.
+
+        Args:
+            fn: Callable that performs the effect and returns its disposer.
+
+        Returns:
+            A disposer for this effect, also retained by context teardown. The
+            callback may return no cleanup, one disposer, or a group of
+            disposers.
+
+        Raises:
+            ConfigError: If plugin setup tries to register outside its scope.
+            RuntimeError: If this context is closing or already disposed.
+            TypeError: If the callback returns an unsupported cleanup value.
+        """
         self._ensure_active()
         return self._scope.effect(fn)
 
+    def setup_plugin(
+        self, setup: Callable[[Context, Any], Disposable], config: Any = None
+    ) -> Disposable:
+        """Run a synchronous plugin setup callback under this context's guard.
+
+        The guard is restored in a ``finally`` block, including when the
+        callback raises; callback exceptions propagate unchanged.
+
+        Args:
+            setup: Plugin callback receiving this activation context and config.
+            config: Optional plugin-specific configuration.
+
+        Returns:
+            The disposer returned by the setup callback.
+
+        Raises:
+            ConfigError: If setup tries to mutate a context outside this scope.
+            RuntimeError: If this context is closing or already disposed.
+        """
+        self._ensure_active()
+        token = _PLUGIN_SCOPE.set(self)
+        try:
+            return setup(self, config)
+        finally:
+            _PLUGIN_SCOPE.reset(token)
+
     def inbox(self, producer: Callable[[Any, str], Any]) -> Disposable:
+        """Register an inbox producer owned by this context.
+
+        Args:
+            producer: Callable receiving a session and run identifier and
+                returning an async iterator. ``Message`` values are appended to
+                the session and emitted as notification ``UserEvent`` values;
+                already-logged ``Event`` values are only persisted/yielded by
+                the loop. Producers run in registration order, and the target
+                agent context owns their registrations and cleanup.
+
+        Returns:
+            A disposer that removes exactly this producer registration.
+
+        Raises:
+            ConfigError: If plugin setup tries to register outside its scope.
+            RuntimeError: If this context is closing or already disposed.
+        """
         self._ensure_active()
         target = getattr(self.get("agent"), "context", self)
         bucket = target._inbox = target._inbox or []
@@ -113,7 +219,19 @@ class Context:
         return self._scope.add(Disposable(lambda: bucket.remove(entry)))
 
     def scope(self, label: str = "scope") -> Context:
-        """Return a child sharing the bus with isolated services and teardown."""
+        """Create a child context sharing this bus with isolated services.
+
+        Args:
+            label: Human-readable label for the child context.
+
+        Returns:
+            A child context whose teardown is owned by this context.
+
+        Raises:
+            ConfigError: If plugin setup tries to create a scope outside its
+                activation scope.
+            RuntimeError: If this context is closing or already disposed.
+        """
         self._ensure_active()
         child = Context(label=label, _bus=self.events, _parent=self)
         self._children.append(child)
@@ -167,4 +285,12 @@ class Context:
             self._parent._children.remove(self)
 
     async def dispose(self) -> None:
+        """Dispose this context and await all owned cleanup.
+
+        Plugin exports are withdrawn before asynchronous cleanup begins. Failed
+        cleanup remains retryable through a later call.
+
+        Raises:
+            BaseException: An owned cleanup failure after all cleanup attempts.
+        """
         await self._teardown.dispose()
