@@ -55,7 +55,7 @@ PROMOTED_EVAL_NAMES = frozenset(
         "tool_called",
     }
 )
-PROMOTED_PERMISSION_NAMES = frozenset({"BashRule", "PathRule", "ToolRule"})
+PROMOTED_PERMISSION_NAMES = frozenset({"BashRule", "PathRule", "Principal", "ToolRule"})
 
 
 def _imported_modules(path: Path, node: ast.Import | ast.ImportFrom, source_root: Path) -> set[str]:

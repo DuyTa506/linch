@@ -5,11 +5,14 @@ import json
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeAlias, cast
 
 from jsonschema import Draft202012Validator
 
 from .._json import walk_json
+
+if TYPE_CHECKING:
+    from ..permissions import Principal
 
 JsonValue: TypeAlias = None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
 RenderOutput: TypeAlias = Callable[[JsonValue], str]
@@ -76,6 +79,13 @@ class ToolContext:
     configured. Custom tools can consume this capability directly without
     reaching back through the Agent or global state. ``None`` on the legacy
     default path. Kept last for positional-constructor compatibility."""
+
+    _principal: Principal | None = field(default=None, kw_only=True, repr=False)
+
+    @property
+    def principal(self) -> Principal | None:
+        """The immutable principal captured for this tool call, if any."""
+        return self._principal
 
     def report_progress(self, message: str, data: dict[str, Any] | None = None) -> None:
         """Report transient execution progress to event-stream observers.

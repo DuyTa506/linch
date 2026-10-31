@@ -636,6 +636,13 @@ class RunRuntime:
             require_model_input_snapshot_store(agent) if runtime.exact_model_input else None
         )
         session.active_run_id = run_id
+        session._active_principal = opts.principal
+        if opts.principal is not None:
+            retained = session._principal_background_tasks.get(run_id, set())
+            session._principal_background_before.update(
+                task for task in session.background_tasks if task not in retained
+            )
+            session._run_principals.setdefault(run_id, opts.principal)
         initial_event_seq = 0
         if resume_checkpoint is not None and agent.run_store is not None:
             runtime.stored_events = await store_call(

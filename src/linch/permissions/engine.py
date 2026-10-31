@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Literal, cast
 
 from ..errors import AbortError
+from .principal import Principal
 from .rules import (
     BashRule,
     PathRule,
@@ -36,6 +37,7 @@ class PendingToolCall:
     tool: Any
     input: dict[str, Any]
     cwd: str | None = None
+    principal: Principal | None = None
 
 
 @dataclass(slots=True)
@@ -45,6 +47,7 @@ class CanUseToolRequest:
     input: dict[str, Any]
     summary: str
     mode: str
+    principal: Principal | None = None
 
 
 @dataclass(slots=True)
@@ -127,6 +130,7 @@ class PermissionEngine:
             input=call.input,
             summary=summary,
             mode=self.mode,
+            principal=call.principal,
         )
 
         try:
@@ -189,27 +193,39 @@ def evaluate_rule_list(
     """
     tool_name = call.tool.name
     for idx, rule in enumerate(rules):
-        if isinstance(rule, ToolRule) and match_tool_rule(rule, tool_name, call.input):
-            decision = rule.decision
-            if decision == "passthrough":
-                continue
-            return _rule_outcome(decision, rule.kind, tool_name)
-        if isinstance(rule, PathRule) and match_path_rule(
-            rule,
-            tool_name,
-            call.input,
-            project_root,
-            call.cwd,
+        if (
+            isinstance(rule, ToolRule)
+            and _rule_applies(rule, call.principal)
+            and match_tool_rule(rule, tool_name, call.input)
         ):
             decision = rule.decision
             if decision == "passthrough":
                 continue
             return _rule_outcome(decision, rule.kind, tool_name)
-        if isinstance(rule, BashRule) and tool_name == "Bash":
+        if (
+            isinstance(rule, PathRule)
+            and _rule_applies(rule, call.principal)
+            and match_path_rule(
+                rule,
+                tool_name,
+                call.input,
+                project_root,
+                call.cwd,
+            )
+        ):
+            decision = rule.decision
+            if decision == "passthrough":
+                continue
+            return _rule_outcome(decision, rule.kind, tool_name)
+        if (
+            isinstance(rule, BashRule)
+            and _rule_applies(rule, call.principal)
+            and tool_name == "Bash"
+        ):
             command = call.input.get("command")
             if not isinstance(command, str):
                 continue
-            bash_rules = _bash_rules_from(rules, idx)
+            bash_rules = _bash_rules_from(rules, idx, call.principal)
             bash_decision = evaluate_bash_rules(bash_rules, command)
             if bash_decision is not None and bash_decision != "passthrough":
                 return _rule_outcome(bash_decision, rule.kind, tool_name)
@@ -233,6 +249,8 @@ def _validate_pending_call(call: PendingToolCall) -> str | None:
         return "Invalid permission call: tool_use_id must be a non-empty string."
     if not isinstance(call.input, dict):
         return "Invalid permission call: input must be a dict."
+    if call.principal is not None and not isinstance(call.principal, Principal):
+        return "Invalid permission call: principal is invalid."
     if not _is_tool_like(call.tool):
         return "Invalid permission call: tool is invalid."
     return None
@@ -255,8 +273,26 @@ def _invalid_callback_response(tool_name: str) -> PermissionDecision:
     )
 
 
-def _bash_rules_from(rules: list[PermissionRule], start_index: int) -> list[BashRule]:
-    return [r for r in rules[start_index:] if isinstance(r, BashRule)]
+def _bash_rules_from(
+    rules: list[PermissionRule], start_index: int, principal: Principal | None
+) -> list[BashRule]:
+    return [
+        rule
+        for rule in rules[start_index:]
+        if isinstance(rule, BashRule) and _rule_applies(rule, principal)
+    ]
+
+
+_EMPTY_ROLES: frozenset[str] = frozenset()
+
+
+def _rule_applies(rule: PermissionRule, principal: Principal | None) -> bool:
+    if rule.role is None and rule.unless_role is None:
+        return True
+    roles = principal.roles if principal is not None else _EMPTY_ROLES
+    return (rule.role is None or rule.role in roles) and (
+        rule.unless_role is None or rule.unless_role not in roles
+    )
 
 
 async def _run_with_abort(coro: Any, signal: Any) -> Any:
