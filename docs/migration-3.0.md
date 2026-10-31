@@ -30,7 +30,7 @@ The tables below group the 2.x removals and replacements by area.
 | `Agent(mailbox=...)` | Mount the plugin: `await agent.use(MailboxPlugin(), mailbox)`; `from linch import MailboxPlugin` |
 | `Agent(ask_user=...)` | Mount the plugin: `await agent.use(AskUserPlugin(), handler)`; `from linch import AskUserPlugin` |
 | Large tool or skill catalogs | `ToolSearchPlugin` is mounted by default; use `await agent.tool_search.dispose()` to restore the unfiltered catalog, or mount `ToolSearchPlugin(max_tools=..., max_skills=...)` explicitly |
-| Shared `Agent(tools=registry)` ownership | Each agent copies the registry; register later tools on `agent.tools` to keep agent registrations isolated |
+| `Agent(tools=registry)` sharing later caller mutations | Each agent copies `registry` at construction; register later tools on `agent.tools` to keep agent registrations isolated |
 | `ToolActivation`, `ToolSurfaceReaderGuard`, `tool_activations`, and discovery codecs/capability gates | Removed; unknown content-block types and tool-result fields are rejected |
 | Missing-`jsonschema` validation bypass | `jsonschema` is core; configured output schemas are always validated |
 
