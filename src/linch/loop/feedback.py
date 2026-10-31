@@ -5,9 +5,9 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Any
 
-from .._telemetry import store_call
 from ..events import AssistantEvent, Event, UserEvent
 from ..model_calls import ModelCallReceipt, _projection_record
+from ..run_store import durable_call
 from ..session import Session
 from ..types import AssistantAssembly, Message, StopReason, TextBlock
 from .checkpoint import (
@@ -42,7 +42,7 @@ async def append_feedback(
     elif _replayed_feedback_present(session, messages):
         prefix = len(messages)
     if messages[prefix:]:
-        await store_call(session, "session.append", session.append(list(messages[prefix:])))
+        await durable_call(session, "session.append", session.append(list(messages[prefix:])))
     for index, message in enumerate(messages):
         event: Event = UserEvent(
             message=message, subtype="prompt" if paired and not index else "notification"

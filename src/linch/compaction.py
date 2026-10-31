@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Protocol, runtime_checkable
 from uuid import uuid4
 
-from ._telemetry import _TelemetryProvider, store_call, trace_compaction
+from ._telemetry import _TelemetryProvider, trace_compaction
 from ._token_estimation import custom_token_estimate
 from .abort import AbortContext
 from .errors import ConfigError, ProviderError
@@ -23,7 +23,7 @@ from .model_calls import (
     _projection_record,
 )
 from .providers.limiter import provider_slot
-from .run_store import LeaseLostError
+from .run_store import LeaseLostError, durable_call
 from .types import (
     Message,
     ProviderRequest,
@@ -592,7 +592,7 @@ async def _persist_compaction_skill_context(session: Any, ledger: _ModelCallLedg
     if not records:
         return
     try:
-        await store_call(
+        await durable_call(
             session,
             "session.set_invoked_skills",
             session.store.set_invoked_skills(

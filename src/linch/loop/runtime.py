@@ -15,7 +15,7 @@ from dataclasses import replace
 from functools import partial
 from typing import Any, cast
 
-from .._telemetry import end_step, start_step, store_call
+from .._telemetry import end_step, start_step
 from .._wire import UnsupportedWireVersionError
 from ..errors import AbortError, ConfigError
 from ..events import (
@@ -50,6 +50,7 @@ from ..run_store import (
     RunRecord,
     _StoreUnavailableError,
     decode_model_input_snapshot,
+    durable_call,
 )
 from ..session import Session
 from ..types import Message, ProviderRequest, TextBlock, ToolResultBlock, ToolUseBlock, Usage
@@ -212,7 +213,7 @@ async def drain_pending_notifications(session: Session, run_id: str) -> AsyncIte
                 "durable_inbox requires a SessionStore implementing "
                 "enqueue_inbox() and commit_inbox()"
             )
-        stored = await store_call(
+        stored = await durable_call(
             session,
             "session.commit_inbox",
             cast(Any, commit)(session.id, after_seq=session._last_seq),
@@ -233,7 +234,7 @@ async def drain_pending_notifications(session: Session, run_id: str) -> AsyncIte
     to_drain = list(notifications)
     notifications.clear()
     for note in to_drain:
-        await store_call(session, "session.append", session.append([note]))
+        await durable_call(session, "session.append", session.append([note]))
         event: Event = UserEvent(message=note, subtype="notification")
         await _persist_event(session, run_id, event)
         yield event
@@ -282,7 +283,7 @@ async def drain_mailbox(session: Session, run_id: str) -> AsyncIterator[Event]:
             for claimed in claims:
                 message = claimed.message
                 note = render_peer_message(message)
-                await store_call(
+                await durable_call(
                     session,
                     "session.enqueue_inbox",
                     session.notify(
@@ -305,7 +306,7 @@ async def drain_mailbox(session: Session, run_id: str) -> AsyncIterator[Event]:
     messages = await mailbox.drain(address)
     for message in messages:
         note = render_peer_message(message)
-        await store_call(session, "session.append", session.append([note]))
+        await durable_call(session, "session.append", session.append([note]))
         event: Event = UserEvent(message=note, subtype="notification")
         await _persist_event(session, run_id, event)
         yield event
@@ -348,7 +349,7 @@ async def drain_alignment(
                     entry.future.set_exception(ConfigError(block_reason))
                 continue
             user_message = build_user_message(prompt, images)
-            await store_call(session, "session.append", session.append([user_message]))
+            await durable_call(session, "session.append", session.append([user_message]))
             event: Event = UserEvent(message=user_message, subtype="alignment")
             await _persist_event(session, run_id, event)
             if not entry.future.done():
@@ -406,7 +407,7 @@ async def maybe_save_provider_snapshot(session: Session) -> None:
         projection_id=(session.last_compaction_info or {}).get("projection_id"),
     )
     try:
-        await store_call(session, "session.save_provider_snapshot", saver(session.id, snapshot))
+        await durable_call(session, "session.save_provider_snapshot", saver(session.id, snapshot))
     except LeaseLostError:
         raise
     except Exception as exc:
@@ -646,7 +647,7 @@ class RunRuntime:
             session._run_principals.setdefault(run_id, opts.principal)
         initial_event_seq = 0
         if resume_checkpoint is not None and agent.run_store is not None:
-            runtime.stored_events = await store_call(
+            runtime.stored_events = await durable_call(
                 session, "run.load_events", agent.run_store.load_events(run_id)
             )
             initial_event_seq = max((row.seq for row in runtime.stored_events), default=0)
@@ -999,7 +1000,7 @@ class RunRuntime:
             lambda: (
                 buf.flush_with_checkpoint(self.checkpoint, status="failed", error=error)
                 if buf is not None
-                else store_call(
+                else durable_call(
                     self.session,
                     "run.mark_failed",
                     store.mark_failed(self.run_id, self.checkpoint, error=error),
@@ -1071,7 +1072,7 @@ class RunRuntime:
             return
         if snapshot_id is not None:
             try:
-                await store_call(
+                await durable_call(
                     self.session,
                     "run.delete",
                     self.model_input_store.delete(snapshot_id, run_id=self.run_id),
@@ -1083,7 +1084,7 @@ class RunRuntime:
                     "Failed to delete model-input snapshot %s: %s", snapshot_id, exc
                 )
         try:
-            await store_call(
+            await durable_call(
                 self.session,
                 "run.prune",
                 self.model_input_store.prune(self.run_id, keep_ids=keep_ids),
@@ -1203,7 +1204,7 @@ class RunRuntime:
             assert buf is not None
             await buf.flush_with_checkpoint(self.checkpoint, status=status)
         else:
-            await store_call(
+            await durable_call(
                 self.session,
                 "run.save_checkpoint",
                 store.save_checkpoint(self.run_id, self.checkpoint, status=status),
@@ -1226,7 +1227,7 @@ class RunRuntime:
         # Preserve the store's original exception class.  The run-level error
         # terminal adds the stable ErrorEvent envelope; wrapping here would
         # erase useful backend/fencing types (for example LeaseLostError).
-        snapshot = await store_call(
+        snapshot = await durable_call(
             self.session,
             "run.save",
             self.model_input_store.save(self.run_id, provider_attempt, request),
@@ -1261,7 +1262,7 @@ class RunRuntime:
         if self.checkpoint.provider_attempt < 1:
             raise ConfigError("provider_pending checkpoint is missing a valid provider_attempt")
         try:
-            snapshot = await store_call(
+            snapshot = await durable_call(
                 self.session, "run.load", self.model_input_store.load(snapshot_id)
             )
         except (LeaseLostError, UnsupportedWireVersionError):
