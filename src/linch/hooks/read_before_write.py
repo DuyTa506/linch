@@ -28,6 +28,13 @@ class ReadBeforeWriteConfig:
     single error string for workspace edits. ``read_before_write=False`` disables
     this hook's gates; the builtin ``Edit`` read requirement is intrinsic to that
     tool and is not affected by the flag.
+
+    Args:
+        read_tools: Mapping of read tool names to backend kinds.
+        edit_tools: Mapping of edit tool names to backend kinds.
+        overwrite_tools: Mapping of overwrite tool names to backend kinds.
+        edit_error_message: Error returned when an unread edit is blocked.
+        overwrite_error_message: Error returned when an unread overwrite is blocked.
     """
 
     #: Tools whose successful, full-file result means "the target is now known"
@@ -66,14 +73,33 @@ class ReadBeforeWriteConfig:
 
 
 class ReadBeforeWriteHook:
-    """Block edit-in-place and blind-overwrite tools until the file has been read."""
+    """Block edit-in-place and blind-overwrite tools until the file has been read.
+
+    Args:
+        config: Optional backend and error-message configuration.
+    """
 
     name = "read_before_write"
 
     def __init__(self, config: ReadBeforeWriteConfig | None = None) -> None:
+        """Create a read-before-write gate.
+
+        Args:
+            config: Optional backend and error-message configuration.
+        """
+
         self.config = config or ReadBeforeWriteConfig()
 
     async def on_pre_tool_use(self, ctx: PreToolUseContext) -> HookResult | None:
+        """Block unread edits or existing-file overwrites before execution.
+
+        Args:
+            ctx: Pre-tool lifecycle context.
+
+        Returns:
+            A blocking result when the target is unread; otherwise ``None``.
+        """
+
         # Edit-in-place: always requires a prior read.
         kind = self.config.edit_tools.get(ctx.tool_name)
         if kind is not None:
@@ -87,6 +113,15 @@ class ReadBeforeWriteHook:
         return None
 
     async def on_post_tool_use(self, ctx: PostToolUseContext) -> HookResult | None:
+        """Mark a successful full-file read or whole-file write as known.
+
+        Args:
+            ctx: Post-tool lifecycle context.
+
+        Returns:
+            Always ``None`` because tracking is observational.
+        """
+
         kind = self.config.read_tools.get(ctx.tool_name)
         if kind is None:
             return None

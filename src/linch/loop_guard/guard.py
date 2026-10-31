@@ -25,6 +25,11 @@ class LoopGuard:
     with conservative thresholds.  Disable entirely with
     ``Agent(loop_guard=None)``.
 
+    Args:
+        max_identical_tool_calls: Repetition threshold for identical calls.
+        max_consecutive_failures: Failure-batch threshold.
+        force_final_answer: Whether to inject a tools-disabled final turn.
+
     Attributes:
         max_identical_tool_calls: Maximum number of times the same tool may
             be called with identical inputs before the guard trips.  Set to
@@ -48,6 +53,10 @@ class LoopGuardState:
     """Mutable per-run state tracked by the loop guard.
 
     One instance is created at the start of each ``run_loop`` invocation.
+
+    Args:
+        call_counts: Digest counts for repeated tool calls.
+        consecutive_failures: Number of consecutive all-failed batches.
     """
 
     call_counts: dict[str, int] = field(default_factory=dict)
@@ -67,6 +76,11 @@ class LoopGuardDecision:
             action is ``"continue"``.
         detail: Human-readable description of why the guard tripped.  Empty
             when action is ``"continue"``.
+
+    Args:
+        action: Decision to continue, stop, or force a final answer.
+        reason: Machine-readable trip reason.
+        detail: Human-readable trip description.
     """
 
     action: Literal["continue", "stop", "force_final"]
@@ -147,6 +161,12 @@ def normalize_loop_guard(value: Any) -> LoopGuard | None:
     * ``None`` / ``False`` → disabled (returns ``None``).
     * :class:`LoopGuard` instance → returned as-is.
     * ``dict`` → ``LoopGuard(**value)``.
+
+    Args:
+        value: Loop-guard instance, mapping, ``None``, or ``False``.
+
+    Returns:
+        Normalized configuration, or ``None`` when disabled.
 
     Raises :class:`TypeError` for any other type.
     """
