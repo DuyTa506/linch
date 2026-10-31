@@ -314,7 +314,7 @@ Examples are organized by subsystem under `examples/`.
 | `core/loop_guard_agent.py` | LoopGuard — identical-call and failure-streak detection |
 | `core/budget_capped_agent.py` | `RunBudget` — token cap, 90% warning event, graceful exceeded stop |
 | `core/compaction_ladder_agent.py` | `CompactionLadder` — micro-compact rung, reactive recovery, circuit breaker |
-| `core/workflow_fleet.py` | `agent.run_workflow()` — parallel fan-out, pipeline, shared budget, crash + journal resume |
+| `core/workflow_fleet.py` | `run_workflow(agent, ...)` — parallel fan-out, pipeline, shared budget, crash + journal resume |
 | `core/interactive_cli.py` | Interactive REPL |
 
 **`examples/tools/`** — tool patterns and scheduler
@@ -369,21 +369,13 @@ The supported, semver-governed API is exactly `linch.__all__`. Import supported 
 from the top-level package:
 
 ```python
-from linch import (
-    Agent,
-    BashRule,
-    EvalCase,
-    PathRule,
-    ScriptedProvider,
-    ToolRule,
-    run_eval,
-)
+from linch import Agent, BashRule, PathRule, ToolRule
+from linch.ext.evals import EvalCase, ScriptedProvider, run_eval
 ```
 
 This surface includes the core agent/session runtime, provider adapters, typed events,
-tools and extension contracts, workflow/deep-agent/loop primitives, permission rules,
-and the complete deterministic eval harness and built-in scorers. Submodule paths are
-implementation details rather than compatibility promises. See
+tools and extension contracts, plus permission rules. Workflow, deep-agent, loop,
+report, and eval primitives are explicit extensions under `linch.ext.*`. See
 [`docs/versioning.md`](docs/versioning.md) for the contract and pinning policy.
 
 ---
