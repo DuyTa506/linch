@@ -67,6 +67,7 @@ async def run() -> int:
             for _ in range(50):
                 try:
                     _, writer = await asyncio.open_connection("127.0.0.1", port)
+                    writer.close()
                     break
                 except OSError:
                     await asyncio.sleep(0.1)
@@ -83,7 +84,6 @@ async def run() -> int:
                 "pooled_error": pooled_error,
                 "direct_error": direct_error,
                 "backend_pool_size": 1,
-                "statement_cache_size": 0,
                 "observed_gap": gap,
             }
             print(json.dumps(result, indent=2))
