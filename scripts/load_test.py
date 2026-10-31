@@ -199,9 +199,9 @@ async def child(a: argparse.Namespace) -> None:
             ]
             pending: set[asyncio.Task[Any]] = set()
 
-            async def submit() -> None:
+            async def submit(arrival: float) -> None:
                 try:
-                    await enqueue_run(pool, uuid4().hex, "hello", meta={"arrival": time.time()})
+                    await enqueue_run(pool, uuid4().hex, "hello", meta={"arrival": arrival})
                 except Exception as exc:
                     metrics["errors"][type(exc).__name__] += 1
 
@@ -209,7 +209,7 @@ async def child(a: argparse.Namespace) -> None:
             next_at = a.start - offset
             while next_at < a.end - offset and not stop.is_set():
                 await asyncio.sleep(max(0, next_at - time.monotonic()))
-                task = asyncio.create_task(submit())
+                task = asyncio.create_task(submit(next_at + offset))
                 pending.add(task)
                 task.add_done_callback(pending.discard)
                 next_at += random.expovariate(a.rate)
