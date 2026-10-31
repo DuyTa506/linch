@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 from linch import Agent, ToolCacheConfig
-from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
 from linch.sessions import InMemorySessionStore
 from linch.tools import ToolRegistry, tool
 

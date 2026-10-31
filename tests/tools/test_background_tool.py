@@ -37,7 +37,7 @@ def _texts(message: Any) -> str:
 
 
 async def test_background_tool_returns_immediate_ack_then_notifies() -> None:
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.tools import ToolRegistry, tool
 
     gate = asyncio.Event()
@@ -86,7 +86,7 @@ async def test_background_tool_returns_immediate_ack_then_notifies() -> None:
 
 
 async def test_background_disabled_runs_inline() -> None:
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.tools import ToolRegistry, tool
 
     ran = asyncio.Event()
@@ -118,7 +118,7 @@ async def test_background_disabled_runs_inline() -> None:
 
 
 async def test_abort_cancels_background_tool() -> None:
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.tools import ToolRegistry, tool
 
     gate = asyncio.Event()

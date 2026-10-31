@@ -254,7 +254,7 @@ mutates session state.
 Load a report from a durable run store by `run_id`:
 
 ```python
-from linch import load_run_report
+from linch.ext.reports import load_run_report
 
 report = await load_run_report(agent.run_store, run_id)
 print(report.to_markdown())
@@ -272,7 +272,7 @@ For transient runs where you already collected events, build a report directly
 from the list you accumulated — no store required:
 
 ```python
-from linch import build_run_report
+from linch.ext.reports import build_run_report
 
 events = []
 async for event in session.run("Summarize the policy change."):
@@ -316,7 +316,7 @@ addition to the usual text, schema, tool, and cost checks — each returns
 `True`/`False`/`None`:
 
 ```python
-from linch.evals import (
+from linch.ext.evals import (
     context_metadata_contains,
     context_not_trimmed,
     context_selected_tool,

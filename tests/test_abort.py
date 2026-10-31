@@ -67,7 +67,7 @@ async def test_abort_during_foreground_tool_emits_aborted_result() -> None:
     cleanly rather than hanging."""
     from linch import Agent, ResultEvent, ToolResult
     from linch.abort import throw_if_aborted
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.sessions import InMemorySessionStore
     from linch.tools import ToolRegistry
 

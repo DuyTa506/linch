@@ -31,7 +31,7 @@ agent = Agent(model="gpt-5", tools=workspace_tools())
 For a durable planning/subagent preset, use the opt-in deep-agent factory:
 
 ```python
-from linch import create_deep_agent
+from linch.ext.deep_agent import create_deep_agent
 
 agent = create_deep_agent(model="gpt-5")
 ```

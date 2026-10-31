@@ -12,7 +12,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
-from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
 
 _EXAMPLES = Path(__file__).resolve().parents[1] / "examples" / "coordination"
 

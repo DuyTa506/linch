@@ -346,7 +346,7 @@ async def test_resumed_batch_cannot_unlock_its_own_prerequisite(pg_dsn, kind, cr
 @pytest.mark.parametrize("hooked", [False, True])
 async def test_literal_diagnostic_resumes_as_ordinary_answer(enabled, after, hooked):
     from linch import Agent, HookResult, ReliabilityPolicy
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.loop.turn_stopping import INVALID_RESPONSE_DIAGNOSTIC
 
     class Host:
@@ -391,7 +391,7 @@ async def test_literal_diagnostic_resumes_as_ordinary_answer(enabled, after, hoo
 @pytest.mark.parametrize("crash", [0, 1, 2])
 async def test_hook_created_background_ack_never_unlocks_dependency(pg_dsn, kind, crash):
     from linch import Agent, HookResult, ReliabilityPolicy, ToolPrerequisite
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.tools import tool
     from linch.tools.registry import empty_tools
 

@@ -8,7 +8,7 @@ from typing import Any
 async def test_same_name_session_override_uses_override_prompt_contribution() -> None:
     from linch import Agent, RunOptions
     from linch.config import FeatureFlags, SystemPromptSection
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.loop.request import _build_turn_request
     from linch.sessions import InMemorySessionStore
     from linch.tools import ToolContext, ToolRegistry, ToolResult

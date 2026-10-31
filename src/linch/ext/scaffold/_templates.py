@@ -106,10 +106,9 @@ from linch import (
     Agent,
     FeatureFlags,
     InMemorySessionStore,
-    ScriptedProvider,
-    TextTurn,
     empty_tools,
 )
+from linch.ext.evals import ScriptedProvider, TextTurn
 
 from ${package}.tools.greet import greet
 
@@ -173,7 +172,7 @@ TEST_AGENT = Template(
     '''\
 """Offline agent tests — no API key or network required."""
 
-from linch import ScriptedProvider, TextTurn, ToolUseTurn
+from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
 
 from ${package}.agent import build_agent
 

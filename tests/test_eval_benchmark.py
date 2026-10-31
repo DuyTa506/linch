@@ -24,7 +24,7 @@ def _write_json(path: Path, payload: object) -> None:
 @pytest.mark.asyncio
 async def test_eval_benchmark_compares_scripted_targets(tmp_path):
     from linch import Agent
-    from linch.evals import (
+    from linch.ext.evals import (
         EvalBenchmarkTarget,
         ScriptedProvider,
         TextTurn,

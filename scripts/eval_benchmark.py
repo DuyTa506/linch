@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Literal
 
 from linch import Agent
-from linch.evals import (
+from linch.ext.evals import (
     EvalBenchmarkResult,
     EvalBenchmarkTarget,
     ScriptedProvider,

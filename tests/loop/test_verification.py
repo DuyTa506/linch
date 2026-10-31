@@ -164,7 +164,7 @@ async def test_evaluate_verifiers_supports_async_and_swallows_errors():
 
 
 def test_scorer_verifier_maps_outcomes():
-    from linch.evals.scorers import text_contains
+    from linch.ext.evals.scorers import text_contains
     from linch.verification import ScorerVerifier, VerificationContext
 
     verifier = ScorerVerifier(text_contains("done"), feedback="say done")
@@ -199,7 +199,7 @@ _SCHEMA = {
 
 @pytest.mark.asyncio
 async def test_structured_output_retry_repairs_invalid_json():
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.types import OutputSchema
 
     provider = ScriptedProvider(
@@ -227,7 +227,7 @@ async def test_structured_output_retry_repairs_invalid_json():
 
 @pytest.mark.asyncio
 async def test_structured_output_no_retry_by_default():
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.types import OutputSchema
 
     provider = ScriptedProvider(turns=[TextTurn(text="not json at all")])
@@ -244,7 +244,7 @@ async def test_structured_output_no_retry_by_default():
 
 @pytest.mark.asyncio
 async def test_structured_output_retries_exhausted_surfaces_error():
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.types import OutputSchema
 
     provider = ScriptedProvider(
@@ -269,7 +269,7 @@ async def test_structured_output_retries_exhausted_surfaces_error():
 
 @pytest.mark.asyncio
 async def test_final_tool_structured_output_retry_repairs_schema_error():
-    from linch.evals import ScriptedProvider, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, ToolUseTurn
     from linch.types import OutputSchema
 
     provider = ScriptedProvider(
@@ -302,7 +302,7 @@ async def test_final_tool_retry_pairs_tool_use_with_tool_result():
     terminal tool_use with a tool_result.  Otherwise the next provider request
     carries a tool_use with no matching tool_result and real providers reject
     it.  This provider asserts pairing on every call."""
-    from linch.evals import ScriptedProvider, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, ToolUseTurn
     from linch.types import OutputSchema, ToolResultBlock, ToolUseBlock
 
     class PairingProvider(ScriptedProvider):
@@ -364,7 +364,7 @@ class _RequireFinal:
 
 @pytest.mark.asyncio
 async def test_verifier_retry_then_pass():
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.hooks import FinalAnswerVerifierHook
 
     provider = ScriptedProvider(turns=[TextTurn(text="draft"), TextTurn(text="FINAL answer")])
@@ -396,7 +396,7 @@ async def test_verifier_retry_then_pass():
 
 @pytest.mark.asyncio
 async def test_verifier_stop_fails_run():
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.hooks import FinalAnswerVerifierHook
     from linch.verification import Verdict
 
@@ -421,7 +421,7 @@ async def test_verifier_stop_fails_run():
 
 @pytest.mark.asyncio
 async def test_verifier_retries_exhausted_falls_through():
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.hooks import FinalAnswerVerifierHook
     from linch.verification import Verdict
 
@@ -446,8 +446,8 @@ async def test_verifier_retries_exhausted_falls_through():
 
 @pytest.mark.asyncio
 async def test_scorer_verifier_in_live_run():
-    from linch.evals import ScriptedProvider, TextTurn
-    from linch.evals.scorers import text_contains
+    from linch.ext.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals.scorers import text_contains
     from linch.hooks import FinalAnswerVerifierHook
     from linch.verification import ScorerVerifier
 
@@ -541,7 +541,7 @@ async def test_forced_final_turn_bypasses_verifiers():
 
 @pytest.mark.asyncio
 async def test_stop_when_predicate_stops_run_early():
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.hooks import StopPredicateHook
 
     provider = ScriptedProvider(
@@ -572,7 +572,7 @@ async def test_stop_when_predicate_stops_run_early():
 
 @pytest.mark.asyncio
 async def test_stop_when_faulty_predicate_does_not_crash():
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.hooks import StopPredicateHook
 
     def _boom(sess) -> bool:

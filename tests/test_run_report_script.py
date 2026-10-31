@@ -18,8 +18,8 @@ def _load_script():
 
 
 def test_run_report_summary_format_is_scannable():
-    from linch import build_run_report
     from linch.events import ResultEvent, ToolCallEndEvent
+    from linch.ext.reports import build_run_report
     from linch.types import Usage
 
     report = build_run_report(
