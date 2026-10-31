@@ -119,7 +119,7 @@ async def test_metrics_survive_noop_tracer_without_use_span(monkeypatch):
     from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
     from linch import Context, Usage
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
 
     def forbidden(*args, **kwargs):
         raise AssertionError("non-recording telemetry must not enter trace.use_span")

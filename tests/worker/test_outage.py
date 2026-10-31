@@ -248,7 +248,7 @@ async def test_three_second_database_outage_restores_dispatch_and_listen(
     outage_database, stop_during_outage
 ):
     from linch import ErrorEvent, ResultEvent
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.worker import Worker, enqueue_run
 
     admin, name, pool = outage_database

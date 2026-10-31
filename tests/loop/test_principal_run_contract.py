@@ -35,6 +35,7 @@ def _agent(
     session_store: Any,
     *,
     permissions: Any = None,
+    enable_background_tools: bool = False,
 ) -> Any:
     from linch import Agent
     from linch.config import FeatureFlags
@@ -51,6 +52,7 @@ def _agent(
         run_store=run_store,
         features=FeatureFlags(),
         result_offload=None,
+        enable_background_tools=enable_background_tools,
     )
 
 
@@ -64,7 +66,7 @@ async def _interrupt(session: Any, opts: Any) -> str:
 @pytest.mark.asyncio
 async def test_omitted_resume_principal_hydrates_from_durable_contract() -> None:
     from linch import Principal, RunOptions
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.run_store import InMemoryRunStore
     from linch.sessions import InMemorySessionStore
 
@@ -106,7 +108,7 @@ async def test_omitted_resume_principal_hydrates_from_durable_contract() -> None
 async def test_resume_rejects_tenant_user_or_role_change_before_provider_dispatch() -> None:
     from linch import Principal, RunOptions
     from linch.errors import ConfigError
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.run_store import InMemoryRunStore
     from linch.sessions import InMemorySessionStore
 
@@ -137,7 +139,7 @@ async def test_resume_rejects_tenant_user_or_role_change_before_provider_dispatc
 @pytest.mark.asyncio
 async def test_run_options_principal_is_snapshotted_before_caller_mutation() -> None:
     from linch import Principal, RunOptions
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.run_store import InMemoryRunStore
     from linch.sessions import InMemorySessionStore
 
@@ -178,7 +180,7 @@ def test_role_guards_are_optional_contract_fields() -> None:
 @pytest.mark.asyncio
 async def test_pending_run_adoption_hydrates_omitted_principal() -> None:
     from linch import Principal, RunOptions
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.loop.contracts import _build_run_contract
     from linch.run_store import InMemoryRunStore, run_meta_with_contract
     from linch.sessions import InMemorySessionStore
@@ -204,7 +206,7 @@ async def test_pending_run_adoption_hydrates_omitted_principal() -> None:
 async def test_changed_role_policy_rejects_resume(original_guard: str, changed_guard: str) -> None:
     from linch import Principal, RunOptions
     from linch.errors import ConfigError
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.permissions import ToolRule
     from linch.run_store import InMemoryRunStore
     from linch.sessions import InMemorySessionStore
@@ -249,7 +251,7 @@ async def test_changed_role_policy_rejects_resume(original_guard: str, changed_g
 @pytest.mark.asyncio
 async def test_explicit_same_principal_resume_succeeds() -> None:
     from linch import Principal, RunOptions
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.run_store import InMemoryRunStore
     from linch.sessions import InMemorySessionStore
 
@@ -286,7 +288,7 @@ async def test_explicit_same_principal_resume_succeeds() -> None:
 async def test_malformed_stored_principal_is_rejected_after_valid_contract_recompute() -> None:
     from linch import Principal, RunOptions
     from linch.errors import ConfigError
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.run_store import InMemoryRunStore, _run_contract_fingerprint, run_contract_from_meta
     from linch.sessions import InMemorySessionStore
 
@@ -325,7 +327,7 @@ async def test_cold_resume_after_lease_takeover_preserves_principal_for_role_rul
     import copy
 
     from linch import Principal, RunOptions
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.loop.contracts import _build_run_contract
     from linch.permissions import ToolRule
     from linch.run_store import InMemoryRunStore, RunCheckpoint, run_meta_with_contract
@@ -375,3 +377,95 @@ async def test_cold_resume_after_lease_takeover_preserves_principal_for_role_rul
     events = [event async for event in (await resumed.session(id="s")).resume("cold", RunOptions())]
     assert events[-1].subtype == "success"
     assert tool.seen == [principal]
+
+
+@pytest.mark.asyncio
+async def test_same_run_resume_preserves_pending_background_principal() -> None:
+    import asyncio
+
+    from linch import Principal, RunOptions
+    from linch.run_store import InMemoryRunStore
+    from linch.sessions import InMemorySessionStore
+    from linch.types import Usage
+
+    entered = asyncio.Event()
+    resume_started = asyncio.Event()
+    resume_release = asyncio.Event()
+    gate = asyncio.Event()
+
+    class _ResumeProvider:
+        id = "same-run-resume"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def context_window(self, model: str) -> int:
+            return 100_000
+
+        async def stream(self, request: Any) -> Any:
+            self.calls += 1
+            if self.calls == 1:
+                yield {"type": "message_start", "model": request.model}
+                yield {"type": "tool_use_start", "id": "bg", "name": "PrincipalTool"}
+                yield {
+                    "type": "tool_use_input_delta",
+                    "id": "bg",
+                    "json_delta": '{"run_in_background":true}',
+                }
+                yield {"type": "tool_use_end", "id": "bg"}
+                yield {"type": "message_end", "stop_reason": "tool_use", "usage": Usage()}
+                return
+            resume_started.set()
+            await resume_release.wait()
+            yield {"type": "message_start", "model": request.model}
+            yield {"type": "text_delta", "text": "resumed"}
+            yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
+
+    class _BlockingPrincipalTool(_PrincipalTool):
+        parallel = True
+
+        async def execute(self, input: dict[str, Any], ctx: Any) -> Any:
+            entered.set()
+            await gate.wait()
+            self.seen.append(ctx.principal)
+            from linch.tools import ToolResult
+
+            return ToolResult(content="background-complete")
+
+    principal = Principal("tenant-a", "alice", {"reader"})
+    tool = _BlockingPrincipalTool()
+    agent = _agent(
+        _ResumeProvider(),
+        tool,
+        InMemoryRunStore(),
+        InMemorySessionStore(),
+        enable_background_tools=True,
+    )
+    session = await agent.session(id="s")
+    iterator = session.run("go", RunOptions(principal=principal)).__aiter__()
+    event = await iterator.__anext__()
+    run_id = event.run_id
+    while True:
+        event = await iterator.__anext__()
+        if event.type == "tool_call_end":
+            break
+    old_tasks = list(session.background_tasks)
+    assert old_tasks and not entered.is_set()
+    await iterator.aclose()
+
+    resume_iterator = session.resume(run_id, RunOptions()).__aiter__()
+    resume_task = asyncio.create_task(_collect_events(resume_iterator))
+    await resume_started.wait()
+    gate.set()
+    await asyncio.gather(*old_tasks)
+    assert session._run_principals.get(run_id) is principal
+    assert len(tool.seen) == 1
+    assert tool.seen[0] is principal
+    resume_release.set()
+    events = await resume_task
+    assert events[-1].subtype == "success"
+    await agent.close()
+
+
+async def _collect_events(iterator: Any) -> list[Any]:
+    return [event async for event in iterator]

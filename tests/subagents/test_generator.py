@@ -58,7 +58,7 @@ async def test_rendered_generated_subagent_loads_from_disk(tmp_path) -> None:
 
 
 async def test_generate_subagent_definition_from_scripted_provider(tmp_path: Path) -> None:
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.subagents import generate_subagent_definition
 
     payload = {
@@ -94,7 +94,7 @@ async def test_write_subagent_definition_rejects_existing_file(tmp_path: Path) -
 
 async def test_generate_subagent_definition_rejects_existing_name(tmp_path: Path) -> None:
     from linch import ConfigError
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.subagents import generate_subagent_definition
 
     payload = {
@@ -110,7 +110,7 @@ async def test_generate_subagent_definition_rejects_existing_name(tmp_path: Path
 
 
 async def test_create_subagent_definition_writes_and_reloads(tmp_path: Path) -> None:
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.subagents import create_subagent_definition
 
     payload = {

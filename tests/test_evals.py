@@ -1,4 +1,4 @@
-"""Tests for Feature D — linch.evals harness (RED until implemented).
+"""Tests for Feature D — linch.ext.evals harness (RED until implemented).
 
 Tests cover:
 - ScriptedProvider: canonical scripted fake provider
@@ -21,7 +21,7 @@ import pytest
 @pytest.mark.asyncio
 async def test_scripted_provider_text_response():
     """ScriptedProvider with a text turn returns the configured text."""
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.types import ProviderRequest
 
     provider = ScriptedProvider(turns=[TextTurn(text="Paris is the capital.")])
@@ -38,7 +38,7 @@ async def test_scripted_provider_text_response():
 @pytest.mark.asyncio
 async def test_scripted_provider_tool_use_turn():
     """ScriptedProvider supports ToolUseTurn (tool call + final text)."""
-    from linch.evals import ScriptedProvider, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, ToolUseTurn
     from linch.types import ProviderRequest
 
     provider = ScriptedProvider(
@@ -64,7 +64,7 @@ async def test_scripted_provider_tool_use_turn():
 
 def test_eval_case_dataclass():
     """EvalCase holds prompt + expected + optional metadata."""
-    from linch.evals import EvalCase
+    from linch.ext.evals import EvalCase
 
     case = EvalCase(prompt="What is 2+2?", expected="4")
     assert case.prompt == "What is 2+2?"
@@ -73,7 +73,7 @@ def test_eval_case_dataclass():
 
 def test_case_result_dataclass():
     """CaseResult holds case + output + scorer verdicts."""
-    from linch.evals import CaseResult, EvalCase
+    from linch.ext.evals import CaseResult, EvalCase
 
     case = EvalCase(prompt="hi", expected="hello")
     result = CaseResult(case=case, output="hello world", passed=True, scores={})
@@ -83,7 +83,7 @@ def test_case_result_dataclass():
 
 def test_eval_result_dataclass():
     """EvalResult aggregates CaseResults with pass_rate."""
-    from linch.evals import CaseResult, EvalCase, EvalResult
+    from linch.ext.evals import CaseResult, EvalCase, EvalResult
 
     cases = [
         CaseResult(case=EvalCase(prompt="a", expected="x"), output="x", passed=True, scores={}),
@@ -97,8 +97,8 @@ def test_eval_result_dataclass():
 
 def test_eval_result_report_exports():
     """EvalResult exports dict and markdown reports with scores, tools, and cost."""
-    from linch.evals import CaseResult, EvalCase, EvalResult
     from linch.events import ResultEvent, ToolCallStartEvent
+    from linch.ext.evals import CaseResult, EvalCase, EvalResult
     from linch.types import Usage
 
     case_result = CaseResult(
@@ -144,14 +144,14 @@ def test_eval_result_report_exports():
 
 def test_text_contains_scorer_pass():
     """text_contains scorer passes when expected substring is in output."""
-    from linch.evals import text_contains
+    from linch.ext.evals import text_contains
 
     scorer = text_contains("Paris")
     assert scorer("The capital is Paris.") is True
 
 
 def test_text_contains_scorer_fail():
-    from linch.evals import text_contains
+    from linch.ext.evals import text_contains
 
     scorer = text_contains("Paris")
     assert scorer("The capital is London.") is False
@@ -159,7 +159,7 @@ def test_text_contains_scorer_fail():
 
 def test_text_contains_case_insensitive():
     """text_contains is case-insensitive by default."""
-    from linch.evals import text_contains
+    from linch.ext.evals import text_contains
 
     scorer = text_contains("paris")
     assert scorer("The capital is PARIS.") is True
@@ -167,8 +167,8 @@ def test_text_contains_case_insensitive():
 
 def test_tool_called_scorer_pass():
     """tool_called scorer passes when the expected tool name appears in events."""
-    from linch.evals import tool_called
     from linch.events import ToolCallStartEvent
+    from linch.ext.evals import tool_called
 
     scorer = tool_called("Read")
     events = [ToolCallStartEvent(tool_use_id="t1", tool_name="Read", input={}, summary="Read()")]
@@ -176,7 +176,7 @@ def test_tool_called_scorer_pass():
 
 
 def test_tool_called_scorer_fail():
-    from linch.evals import tool_called
+    from linch.ext.evals import tool_called
 
     scorer = tool_called("Read")
     assert scorer(events=[]) is False
@@ -184,7 +184,7 @@ def test_tool_called_scorer_fail():
 
 def test_schema_valid_scorer_pass():
     """schema_valid scorer passes when output is valid JSON matching the schema."""
-    from linch.evals import schema_valid
+    from linch.ext.evals import schema_valid
 
     schema = {
         "type": "object",
@@ -196,7 +196,7 @@ def test_schema_valid_scorer_pass():
 
 
 def test_schema_valid_scorer_fail_missing_key():
-    from linch.evals import schema_valid
+    from linch.ext.evals import schema_valid
 
     schema = {
         "type": "object",
@@ -208,14 +208,14 @@ def test_schema_valid_scorer_fail_missing_key():
 
 
 def test_schema_valid_scorer_fail_not_json():
-    from linch.evals import schema_valid
+    from linch.ext.evals import schema_valid
 
     scorer = schema_valid({"type": "object"})
     assert scorer("not json at all") is False
 
 
 def test_schema_valid_scorer_fails_closed_without_jsonschema(monkeypatch):
-    from linch.evals import schema_valid
+    from linch.ext.evals import schema_valid
 
     real_import = builtins.__import__
 
@@ -231,7 +231,7 @@ def test_schema_valid_scorer_fails_closed_without_jsonschema(monkeypatch):
 
 
 def test_schema_valid_scorer_rejects_invalid_schema():
-    from linch.evals import schema_valid
+    from linch.ext.evals import schema_valid
 
     scorer = schema_valid({"type": "not-a-json-schema-type"})
     assert scorer('{"capital": "Paris"}') is False
@@ -239,8 +239,8 @@ def test_schema_valid_scorer_rejects_invalid_schema():
 
 def test_cost_under_scorer_pass():
     """cost_under scorer passes when total_cost_usd is below the budget."""
-    from linch.evals import cost_under
     from linch.events import ResultEvent
+    from linch.ext.evals import cost_under
     from linch.types import Usage
 
     scorer = cost_under(0.10)
@@ -255,8 +255,8 @@ def test_cost_under_scorer_pass():
 
 
 def test_cost_under_scorer_fail():
-    from linch.evals import cost_under
     from linch.events import ResultEvent
+    from linch.ext.evals import cost_under
     from linch.types import Usage
 
     scorer = cost_under(0.01)
@@ -272,8 +272,8 @@ def test_cost_under_scorer_fail():
 
 def test_cost_under_scorer_none_cost():
     """cost_under returns None (unknown) when total_cost_usd is None."""
-    from linch.evals import cost_under
     from linch.events import ResultEvent
+    from linch.ext.evals import cost_under
     from linch.types import Usage
 
     scorer = cost_under(0.10)
@@ -288,8 +288,12 @@ def test_cost_under_scorer_none_cost():
 
 
 def test_long_run_context_scorers():
-    from linch.evals import context_metadata_contains, context_not_trimmed, context_selected_tool
     from linch.events import ContextBuildEvent
+    from linch.ext.evals import (
+        context_metadata_contains,
+        context_not_trimmed,
+        context_selected_tool,
+    )
 
     events = [
         ContextBuildEvent(
@@ -309,8 +313,8 @@ def test_long_run_context_scorers():
 
 
 def test_recovery_and_completion_scorers():
-    from linch.evals import recovery_succeeded, run_completed
     from linch.events import ResultEvent, ToolCallEndEvent
+    from linch.ext.evals import recovery_succeeded, run_completed
     from linch.types import Usage
 
     events = [
@@ -330,7 +334,7 @@ def test_recovery_and_completion_scorers():
 
 
 def test_scorer_factories_have_distinct_names():
-    from linch.evals import context_selected_tool, cost_under, text_contains
+    from linch.ext.evals import context_selected_tool, cost_under, text_contains
 
     names = {
         text_contains("Paris").__name__,
@@ -354,7 +358,7 @@ def test_scorer_factories_have_distinct_names():
 async def test_run_eval_single_case_text_match():
     """run_eval with a single case and text_contains scorer returns EvalResult."""
     from linch import Agent
-    from linch.evals import EvalCase, ScriptedProvider, TextTurn, run_eval, text_contains
+    from linch.ext.evals import EvalCase, ScriptedProvider, TextTurn, run_eval, text_contains
     from linch.sessions import InMemorySessionStore
     from linch.tools.registry import empty_tools
 
@@ -379,7 +383,7 @@ async def test_run_eval_single_case_text_match():
 async def test_run_eval_multiple_cases():
     """run_eval over multiple cases aggregates pass/fail correctly."""
     from linch import Agent
-    from linch.evals import EvalCase, ScriptedProvider, TextTurn, run_eval, text_contains
+    from linch.ext.evals import EvalCase, ScriptedProvider, TextTurn, run_eval, text_contains
     from linch.sessions import InMemorySessionStore
     from linch.tools.registry import empty_tools
 
@@ -408,7 +412,7 @@ async def test_run_eval_multiple_cases():
 async def test_run_eval_tool_called_scorer():
     """run_eval with tool_called scorer detects tool invocation."""
     from linch import Agent
-    from linch.evals import (
+    from linch.ext.evals import (
         EvalCase,
         ScriptedProvider,
         TextTurn,
@@ -469,7 +473,7 @@ async def test_run_eval_colliding_scorer_names_not_lost():
     verdict and report the case as passing. The case must be reported FAILED.
     """
     from linch import Agent
-    from linch.evals import EvalCase, ScriptedProvider, TextTurn, run_eval, schema_valid
+    from linch.ext.evals import EvalCase, ScriptedProvider, TextTurn, run_eval, schema_valid
     from linch.sessions import InMemorySessionStore
     from linch.tools.registry import empty_tools
 
@@ -505,7 +509,7 @@ async def test_run_eval_colliding_scorer_names_not_lost():
 async def test_run_eval_releases_sessions_per_case():
     """run_eval must not accumulate one session per case in agent._sessions (Bug B)."""
     from linch import Agent
-    from linch.evals import EvalCase, ScriptedProvider, TextTurn, run_eval
+    from linch.ext.evals import EvalCase, ScriptedProvider, TextTurn, run_eval
     from linch.sessions import InMemorySessionStore
     from linch.tools.registry import empty_tools
 

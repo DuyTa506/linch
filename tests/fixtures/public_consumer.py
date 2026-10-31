@@ -1,15 +1,14 @@
-"""Tiny external-consumer fixture: only the top-level Linch API is allowed."""
+"""Tiny external-consumer fixture: core and extensions use explicit APIs."""
 
 from linch import (
-    DEEP_AGENT_PROFILES,
     Agent,
-    DeepAgentProfile,
     FeatureFlags,
     RunContract,
     ToolProgressEvent,
     build_run_contract,
     workspace_tools,
 )
+from linch.ext.deep_agent import DEEP_AGENT_PROFILES, DeepAgentProfile
 
 
 def make_agent() -> Agent:

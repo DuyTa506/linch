@@ -10,7 +10,7 @@ from __future__ import annotations
 def test_call_key_stable_and_prompt_sensitive() -> None:
     import hashlib
 
-    from linch.workflow import call_key
+    from linch.ext.workflow import call_key
 
     a = call_key("researcher", "find the bug")
     b = call_key("researcher", "find the bug")
@@ -26,7 +26,7 @@ def test_call_key_stable_and_prompt_sensitive() -> None:
 
 
 def test_occurrence_counter_per_key() -> None:
-    from linch.workflow import WorkflowJournal, call_key
+    from linch.ext.workflow import WorkflowJournal, call_key
 
     journal = WorkflowJournal()
     key_a = call_key("researcher", "task A")
@@ -38,7 +38,7 @@ def test_occurrence_counter_per_key() -> None:
 
 
 def test_record_and_lookup() -> None:
-    from linch.workflow import WorkflowJournal, call_key
+    from linch.ext.workflow import WorkflowJournal, call_key
 
     journal = WorkflowJournal()
     key = call_key("researcher", "task A")
@@ -51,9 +51,9 @@ def test_record_and_lookup() -> None:
 
 def test_from_stored_events_rebuilds_lookup() -> None:
     from linch.events import AssistantEvent, WorkflowEvent
+    from linch.ext.workflow import WorkflowJournal, call_key
     from linch.run_store import StoredRunEvent
     from linch.types import Message, TextBlock
-    from linch.workflow import WorkflowJournal, call_key
 
     key = call_key("researcher", "task A")
     stored = [
@@ -105,8 +105,8 @@ def test_from_stored_events_rebuilds_lookup() -> None:
 
 
 def test_step_key_is_disjoint_from_call_key() -> None:
-    from linch.workflow import call_key
-    from linch.workflow.journal import step_key
+    from linch.ext.workflow import call_key
+    from linch.ext.workflow.journal import step_key
 
     # A step named like a subagent type must never collide with its call_key.
     assert step_key("fetch") != call_key("fetch", "")
@@ -117,9 +117,9 @@ def test_step_key_is_disjoint_from_call_key() -> None:
 
 def test_from_stored_events_folds_step_records_and_ignores_step_start() -> None:
     from linch.events import WorkflowEvent
+    from linch.ext.workflow import WorkflowJournal
+    from linch.ext.workflow.journal import step_key
     from linch.run_store import StoredRunEvent
-    from linch.workflow import WorkflowJournal
-    from linch.workflow.journal import step_key
 
     key = step_key("publish")
     stored = [
@@ -152,8 +152,8 @@ def test_from_stored_events_folds_step_records_and_ignores_step_start() -> None:
 
 
 def test_snapshot_round_trips_every_record() -> None:
-    from linch.workflow import WorkflowJournal, call_key
-    from linch.workflow.journal import step_key
+    from linch.ext.workflow import WorkflowJournal, call_key
+    from linch.ext.workflow.journal import step_key
 
     journal = WorkflowJournal()
     agent = call_key("researcher", "task A")
@@ -177,8 +177,8 @@ def test_snapshot_round_trips_every_record() -> None:
 
 def test_snapshot_is_overridden_by_a_later_stored_event() -> None:
     from linch.events import WorkflowEvent
+    from linch.ext.workflow import WorkflowJournal, call_key
     from linch.run_store import StoredRunEvent
-    from linch.workflow import WorkflowJournal, call_key
 
     key = call_key("researcher", "task A")
     snapshot = [{"key": key, "occurrence": 0, "result_text": "stale"}]
@@ -196,7 +196,7 @@ def test_snapshot_is_overridden_by_a_later_stored_event() -> None:
 
 
 def test_snapshot_ignores_malformed_rows() -> None:
-    from linch.workflow import WorkflowJournal
+    from linch.ext.workflow import WorkflowJournal
 
     # A snapshot is opaque extension_state; a hand-edited or truncated one must
     # degrade to "no cached record" rather than break the resume.

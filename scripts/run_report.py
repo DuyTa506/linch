@@ -6,7 +6,8 @@ import json
 import os
 from typing import Any, Literal
 
-from linch import PostgresRunStore, RunReport, load_run_report
+from linch import PostgresRunStore
+from linch.ext.reports import RunReport, load_run_report
 
 OutputFormat = Literal["summary", "markdown", "json"]
 

@@ -180,6 +180,9 @@ to every factory. Per-job adapters add churn; unverified per-job pool handles
 also repeat schema initialization and advisory locking. Agent teardown preserves
 these shared adapters and leaves the host pool open. The host closes its real
 pool after workers have drained.
+For a dedicated stateless Linch pool, use `asyncpg.create_pool(..., reset=reset_connection)` with `async def reset_connection(conn): pass`.
+asyncpg retains internal transaction cleanup; Worker closes its LISTEN connection when its manager ends.
+This callback is unsafe for pools shared with application code that changes session state or registers listeners.
 
 A worker reconnects after transient database or listener failure, with local
 exponential jitter capped at two seconds. Each retry rebuilds the manager and
@@ -222,15 +225,16 @@ all workers. `0` means unlimited; the default is one `default` run queue with
 unlimited concurrency. Queues must be registered on a worker to execute.
 These limits cap runs; use host limiters for provider request/token quotas.
 
-**Capacity.** On a shared 12-CPU host, four-turn simulated runs measured about 20
-runs/s with one worker, 25 total with four (~6 each), and 39 with eight (~5 each).
-More processes did not scale linearly; size connection pools and database write
-capacity first. At 24 offered runs/s, raising one pool from 16 to 32 helped until
-CPU approached 100%. PgBouncer transaction mode completed all jobs, but p99 wait
-before work started rose from 40 ms to 4.3 s. Use direct/session pooling for workers;
-preserving queue notifications with transaction pooling requires a separate connection.
-PgBouncer 1.16 also needs `statement_cache_size=0`. See the
-[capacity measurements](../superpowers/measurements/2026-10-31-scale-gate.md).
+**Capacity.** On the tested shared six-core / 12-logical-CPU host, four-turn
+simulated runs achieved about **20 runs/s with one worker, 31 with four, and 25
+with eight** (RTT 1 ms, pool 16/process, one reader). Stable / first-bad offered
+rate brackets were **20–24, 32–40, and 24–32 runs/s**; four/eight-worker efficiency
+was **38.8% / 15.7%** relative to one worker. These single-sample shared-host
+brackets do not establish a capacity improvement over the earlier campaign;
+size database writes and pools on the deployment host, without assuming linear scaling.
+See the [fleet measurements](../superpowers/measurements/2026-10-31-fleet-coordination.md).
+Use direct/session pooling for Worker LISTEN; transaction pooling needs a separate
+notification connection. [Earlier PgBouncer measurements](../superpowers/measurements/2026-10-31-scale-gate.md) also required `statement_cache_size=0` with PgBouncer 1.16.
 
 The queue only dispatches. A job separately claims the D1 run lease using the
 worker ID. Renewal starts immediately, then repeats every **lease TTL / 3**.

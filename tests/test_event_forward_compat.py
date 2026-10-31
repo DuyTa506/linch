@@ -19,7 +19,7 @@ from linch.events import (
     event_to_dict,
     is_ignorable_event,
 )
-from linch.reports import build_run_report
+from linch.ext.reports import build_run_report
 from linch.run_store import InMemoryRunStore
 from linch.run_stores.postgres import PostgresRunStore
 from linch.types import Message

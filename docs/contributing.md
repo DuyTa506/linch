@@ -307,13 +307,15 @@ src/linch/          core library
   mcp/                  MCP server adapters
   skills/               SKILL.md loader + skill context reminders
   subagents/            agents.yaml loader + child agent runner + WorkerHandle (workers.py)
-  workflow/             run_workflow engine — WorkflowContext, content-addressed journal
+  ext/workflow/         run_workflow engine — WorkflowContext, content-addressed journal
   observability/        RunObserver protocol + Logging/SpanCollector/OpenTelemetry (via RunTelemetryHook)
-  evals/                offline harness — ScriptedProvider, run_eval, scorers
-  reports.py            build_run_report / load_run_report read models
+  ext/evals/            offline harness — ScriptedProvider, run_eval, scorers
+  ext/reports.py        build_run_report / load_run_report read models
   pricing.py            USD cost table + cost_usd()
   run_store.py          InMemoryRunStore + RunCheckpoint; Postgres in run_stores/
-  deep_agent/           create_deep_agent factory; DEEP_AGENT_SYSTEM_PROMPT, COORDINATOR_SYSTEM_PROMPT; subagent roster
+  ext/deep_agent/       create_deep_agent factory; DEEP_AGENT_SYSTEM_PROMPT, COORDINATOR_SYSTEM_PROMPT; subagent roster
+  ext/loop_runner.py    host-driven recurring-loop runner and filesystem artifacts
+  ext/scaffold/         stdlib-only `linch` project scaffolding console script
 
 tests/
   context/              context builders + system-block parity (test_system_blocks.py)
