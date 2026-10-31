@@ -30,7 +30,7 @@ import json
 from typing import Any
 from uuid import uuid4
 
-from linch.durability import InboxDelivery, encode_inbox_delivery
+from linch.durability import InboxDelivery, decode_inbox_message, encode_inbox_delivery
 from linch.errors import ConfigError
 from linch.sessions.memory import now_iso
 from linch.sessions.store import (
@@ -439,7 +439,7 @@ class PostgresSessionStore:
             KeyError: If the session does not exist or a stored message omits
                 a required field.
             ConfigError: If ``after_seq`` is invalid or a pending row has no
-                message payload.
+                message payload, or the decoded payload is not an object.
             json.JSONDecodeError: If a stored message's JSON is malformed.
             TypeError: If a stored message field has an incompatible shape.
             ValueError: If a stored message contains an unknown content-block
@@ -461,12 +461,14 @@ class PostgresSessionStore:
                     id,
                 )
                 cur_seq = await _current_message_seq_pg(conn, id)
+                for row in pending:
+                    if row["message"] is None:  # pragma: no cover - database corruption guard
+                        raise ConfigError("pending inbox delivery has no message payload")
+                    decode_inbox_message(row["message"])
                 if pending:
                     ts = now_iso()
                     for row in pending:
                         payload = row["message"]
-                        if payload is None:  # pragma: no cover - database corruption guard
-                            raise ConfigError("pending inbox delivery has no message payload")
                         cur_seq += 1
                         await conn.execute(
                             "INSERT INTO messages (session_id, seq, appended_at, message) "
@@ -501,14 +503,14 @@ class PostgresSessionStore:
                     id,
                     after_seq,
                 )
-        return [
-            StoredMessage(
-                seq=row["seq"],
-                appended_at=row["appended_at"],
-                message=message_from_dict(json.loads(row["message"])),
-            )
-            for row in rows
-        ]
+                return [
+                    StoredMessage(
+                        seq=row["seq"],
+                        appended_at=row["appended_at"],
+                        message=message_from_dict(json.loads(row["message"])),
+                    )
+                    for row in rows
+                ]
 
     async def save_provider_snapshot(self, id: str, snapshot: ProviderViewSnapshot) -> None:
         """Persist the latest compacted provider-view snapshot.
@@ -597,16 +599,22 @@ class PostgresSessionStore:
         Args:
             id: Session identifier whose records should be replaced.
             skills: Skill records to store.
+
+        Raises:
+            KeyError: If the session does not exist.
         """
 
         pool = await self._ensure()
         async with pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE sessions SET invoked_skills = $1, updated_at = $2 WHERE id = $3",
+            updated = await conn.fetchval(
+                "UPDATE sessions SET invoked_skills = $1, updated_at = $2 WHERE id = $3 "
+                "RETURNING id",
                 json.dumps(skills),
                 now_iso(),
                 id,
             )
+            if updated is None:
+                raise KeyError(f"session not found: {id}")
 
     async def list(self, *, limit: int | None = None, offset: int = 0) -> list[SessionRecord]:
         """List sessions ordered by descending update timestamp.
