@@ -23,8 +23,6 @@ _SCHEMA_LOCK_KEY = 0x4C494E4348534348
 async def _reset_connection(_connection: Any) -> None:
     """Keep asyncpg's internal rollback cleanup without the default reset SQL."""
 
-    return None
-
 
 def _import_asyncpg() -> Any:
     """Return the ``asyncpg`` module or raise with an install hint."""
