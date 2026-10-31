@@ -260,6 +260,7 @@ class RunStore(Protocol):
         *,
         id: str | None = None,
         meta: dict[str, object] | None = None,
+        initial_checkpoint: RunCheckpoint | None = None,
     ) -> RunRecord: ...
 
     async def load_run(self, run_id: str) -> RunRecord | None: ...
@@ -1259,7 +1260,9 @@ class InMemoryRunStore:
         *,
         id: str | None = None,
         meta: dict[str, object] | None = None,
+        initial_checkpoint: RunCheckpoint | None = None,
     ) -> RunRecord:
+        checkpoint = _copy_checkpoint(initial_checkpoint)
         rid = id or str(uuid4())
         existing = self._runs.get(rid)
         if existing is not None:
@@ -1282,6 +1285,7 @@ class InMemoryRunStore:
                 merged_meta[RUN_CONTRACT_META_KEY] = stored_contract
             existing.meta = merged_meta
             existing.status = "running"
+            existing.checkpoint = checkpoint
             existing.updated_at = now_iso()
             return _copy_record(existing)
         ts = now_iso()
@@ -1292,6 +1296,7 @@ class InMemoryRunStore:
             created_at=ts,
             updated_at=ts,
             meta=_safe_meta(meta),
+            checkpoint=checkpoint,
         )
         self._runs[rid] = record
         self._events[rid] = []

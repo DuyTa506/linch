@@ -13,9 +13,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from .._telemetry import store_call
+from ..errors import ConfigError
 from ..events import ErrorEvent, Event, SkillsLoadedEvent, SystemEvent, UserEvent
 from ..hooks import AgentStartContext, AgentStopContext, HookEvent
 from ..hooks.contexts import _AgentResult
+from ..model_calls import _context_fingerprint
 from ..types import TextBlock
 from .checkpoint import _last_message_matches, _persist_event
 from .request import build_user_message
@@ -110,8 +112,7 @@ async def initialize_run(ctx: RunStartupContext) -> AsyncIterator[Event]:
         ),
     )
 
-    if ctx.resume_checkpoint is None:
-        await ctx.save_checkpoint("started")
+    if ctx.checkpoint.phase == "started":
         event: Event = SystemEvent(
             session_id=session.id,
             run_id=runtime.run_id,
@@ -123,8 +124,8 @@ async def initialize_run(ctx: RunStartupContext) -> AsyncIterator[Event]:
         await _persist_event(session, runtime.run_id, event)
         yield event
 
-        if not session.skills_loaded_emitted and agent.skills:
-            session.skills_loaded_emitted = True
+        emit_skills = not session.skills_loaded_emitted and bool(agent.skills)
+        if emit_skills:
             skills_data = [
                 {
                     "name": skill.name,
@@ -154,29 +155,33 @@ async def initialize_run(ctx: RunStartupContext) -> AsyncIterator[Event]:
             yield hook_event
         if block_reason is not None:
             async for event in _emit_prompt_block(ctx, block_reason):
+                if event.type == "result" and (
+                    agent.run_store is None or session._event_journal is None
+                ):
+                    session.skills_loaded_emitted |= emit_skills
                 yield event
             return
         user_message = _prompt_message(ctx, prompt, images)
-        await store_call(session, "session.append", session.append([user_message]))
-        await ctx.save_checkpoint("user_appended")
-        event = UserEvent(message=user_message, subtype="prompt")
-        await _persist_event(session, runtime.run_id, event)
-        yield event
-    elif ctx.checkpoint.phase == "started":
-        prompt, images, hook_events, block_reason = await ctx.dispatch_user_prompt(
-            prompt, ctx.opts.images, "run"
-        )
-        for hook_event in hook_events:
-            await _persist_event(session, runtime.run_id, hook_event)
-            yield hook_event
-        if block_reason is not None:
-            async for event in _emit_prompt_block(ctx, block_reason):
-                yield event
-            return
-        user_message = _prompt_message(ctx, prompt, images)
-        if not _last_message_matches(session, user_message):
+        baseline = ctx.checkpoint.extension_state.get("linch.startup")
+        append = ctx.resume_checkpoint is None or not _last_message_matches(session, user_message)
+        if baseline is not None and ctx.resume_checkpoint is not None:
+            count = baseline["history_count"]
+            fingerprint = baseline["history_fingerprint"]
+            current = session.session_log.history_count
+            if current == count and session.session_log._history_fingerprint() == fingerprint:
+                append = True
+            elif not (
+                current == count + 1
+                and not append
+                and _context_fingerprint(session.full_history[:count]) == fingerprint
+            ):
+                raise ConfigError("startup durable message baseline does not match")
+        if append:
             await store_call(session, "session.append", session.append([user_message]))
-        await ctx.save_checkpoint("user_appended")
         event = UserEvent(message=user_message, subtype="prompt")
         await _persist_event(session, runtime.run_id, event)
+        ctx.checkpoint.extension_state.pop("linch.startup", None)
+        await ctx.save_checkpoint("user_appended")
+        if emit_skills:
+            session.skills_loaded_emitted = True
         yield event

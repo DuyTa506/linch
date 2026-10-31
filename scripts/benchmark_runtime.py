@@ -866,6 +866,7 @@ class MeasuredStore:
                         for event in events
                     )
             if self.name == "run" and name in {
+                "create_run",
                 "save_checkpoint",
                 "save_checkpoint_with_events",
                 "mark_completed",

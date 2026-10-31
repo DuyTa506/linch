@@ -121,20 +121,38 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
         _require_model_input_snapshot_store(session.agent)
     await session.agent._ensure_provider_prepared()
     store = session.agent.run_store
+    run_id = opts.run_id or str(uuid4())
+    session.active_run_id = run_id
+    session.run_deps = opts.deps if opts.deps is not None else getattr(session.agent, "deps", None)
     run_record = (
         await store_call(
             session,
             "run.create_run",
             store.create_run(
                 session.id,
-                id=opts.run_id,
+                id=run_id,
                 meta=run_meta_with_contract(_build_run_contract(session, prompt, opts)),
+                initial_checkpoint=RunCheckpoint(
+                    phase="started",
+                    prompt=prompt,
+                    turn_index=0,
+                    total_usage=Usage(),
+                    extension_state={
+                        **_checkpoint_extension_state(
+                            _checkpointable_hooks(list(session.agent.hooks or [])), session, run_id
+                        ),
+                        "linch.startup": {
+                            "history_count": session.session_log.history_count,
+                            "history_fingerprint": session.session_log._history_fingerprint(),
+                        },
+                    },
+                ),
             ),
         )
         if store is not None
         else None
     )
-    run_id = run_record.id if run_record is not None else str(uuid4())
+    run_id = run_record.id if run_record is not None else run_id
     async with aclosing(
         _run_loop_impl(
             session,
@@ -966,7 +984,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                         snapshot_id=checkpoint.model_input_snapshot_id
                     )
                     checkpoint.model_input_snapshot_id = None
-                if checkpoint.phase != "tool_results_appended":
+                if checkpoint.phase not in {"started", "tool_results_appended"}:
                     await _flush_events(session)
         except LeaseLostError as exc:
             _runtime.lease_lost = exc
