@@ -81,6 +81,9 @@ class AssistantEvent:
 class PartialAssistantEvent:
     """Record a transient assistant delta while a response streams.
 
+    Attributes:
+        delta: Provider-normalized fields emitted for the current stream update.
+
     Args:
         delta: Provider-normalized delta payload.
         type: Wire discriminator for the event.
@@ -113,6 +116,12 @@ class ToolCallStartEvent:
 class ToolCallEndEvent:
     """Record the completed result of one tool invocation.
 
+    Attributes:
+        result: Textual projection of the completed result.
+        tool_result: Normalized legacy structured result, when supplied.
+        tool_output: Canonical V2 output retained alongside its result projections,
+            when supplied.
+
     Args:
         tool_use_id: Identifier assigned to the tool call.
         tool_name: Name of the invoked tool.
@@ -141,6 +150,10 @@ class ToolProgressEvent:
     Progress is observational only: it is never added to provider history and
     does not alter the final :class:`ToolResult`. The optional ``data``
     dictionary is passed to observers without validating its contents.
+
+    Attributes:
+        data: Optional observer payload dictionary whose contents are not
+            validated.
 
     Args:
         tool_use_id: Identifier assigned to the tool call.
@@ -191,6 +204,13 @@ class PermissionRequestEvent:
 class UsageEvent:
     """Record per-call and cumulative token usage.
 
+    Attributes:
+        usage: Usage reported for the current provider call.
+        cumulative: Usage accumulated across the run.
+        source: Optional label identifying the usage producer.
+        call_id: Optional provider call identifier.
+        logical_call_id: Optional identifier shared across retries.
+
     Args:
         usage: Usage reported for the current provider call.
         cumulative: Usage accumulated across the run.
@@ -220,6 +240,11 @@ class UsageEvent:
 @dataclass(frozen=True, slots=True)
 class ModelCallEvent:
     """Versioned accounting journal envelope with an isolated JSON record.
+
+    Attributes:
+        record_kind: Accounting transition represented by the record.
+        budget_owner_id: Optional owner used to attribute budget consumption.
+        schema_version: Wire schema version used to interpret the record.
 
     Args:
         run_id: Run associated with the accounting record.
@@ -281,6 +306,12 @@ class BudgetEvent:
 @dataclass(slots=True)
 class ResultEvent:
     """Record the terminal outcome of a run.
+
+    Attributes:
+        structured_error: Parsing or validation error for structured output,
+            when present.
+        usage_complete: Whether all accounted model usage is known.
+        trace_id: Optional trace correlation identifier for the run.
 
     Args:
         subtype: Terminal outcome category.
@@ -376,6 +407,11 @@ class ModelFallbackEvent:
 class ContextBuildEvent:
     """Record the context assembled for a provider request.
 
+    Attributes:
+        selected_tools: Tool names offered in this request, when recorded.
+        budget: Context-budget accounting details used for the request.
+        metadata: Additional context-builder metadata for observers.
+
     Args:
         system_blocks: Number of system blocks selected.
         messages: Number of conversation messages selected.
@@ -410,6 +446,10 @@ class SkillsLoadedEvent:
 class SkillInvokedEvent:
     """Record a skill invocation.
 
+    Attributes:
+        allowed_tools: Optional tool names allowed by the invoked skill.
+        model_override: Optional temporary model selected by the skill.
+
     Args:
         name: Invoked skill name.
         args: Optional argument text supplied to the skill.
@@ -443,6 +483,12 @@ class SkillCompletedEvent:
 @dataclass(slots=True)
 class SubagentEvent:
     """Wrap an event emitted by a subagent run.
+
+    Attributes:
+        parent_session_id: Session identifier used to correlate the child with
+            its parent.
+        subagent_run_id: Run identifier used to correlate nested events.
+        event: The nested event emitted by the subagent.
 
     Args:
         parent_session_id: Session that spawned the subagent.
@@ -599,6 +645,11 @@ class WorkflowEvent:
     persisted to the run store, they let an unchanged ``wf.agent`` / ``wf.step``
     call prefix replay cached results on resume. A step's value is carried as
     JSON in ``result_text``.
+
+    Attributes:
+        call_key: Stable workflow-call key used to correlate lifecycle records.
+        occurrence: Occurrence number distinguishing repeated calls.
+        result_text: JSON-serialized step result used for replay, when present.
 
     Args:
         kind: Workflow lifecycle kind.
@@ -813,6 +864,10 @@ class IgnorableEvent:
     telemetry and forwarding carry it forward unchanged. An unknown event without
     the flag is still rejected — the flag is the producer's promise it is safe to
     skip. Ports dsh's "required-on-read unless ignorable" session-log rule.
+
+    Attributes:
+        original_type: Unknown wire discriminator preserved for re-serialization.
+        raw: Validated, isolated original event envelope.
 
     Args:
         original_type: Unknown wire type preserved by the sentinel.
