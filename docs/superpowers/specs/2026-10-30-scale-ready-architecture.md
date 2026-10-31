@@ -35,7 +35,7 @@ deep-copy cost.
 
 Out of scope for 3.0: cross-process rate limiting in core (host `Limiter`
 adapter), partial-text persistence. Tool discovery moved back in scope (owner
-decision 2026-10-31): WP19, after the scale waves.
+decision 2026-10-31): WP19, a Wave 3 plugin after WP10.
 
 ## Decisions
 
@@ -215,7 +215,7 @@ Wave 1 (parallel, disjoint files):
 | 4 | `scale/durable-runs` | D1, D2, D9 | `run_store.py` (or a new `run_stores/` package), Postgres store, conformance tests; move `SqliteRunStore.save` serialization off the event loop |
 
 Merged into `integration/3.0`: WP1, WP2, WP4, WP3 (loop split only; see D4
-status), WP9a, WP9b, WP16, WP17, WP15, WP6, WP5. Remaining Wave 2: WP8, then WP7; WP18 (load test) runs now as a baseline and again as the scale-ready gate; then WP19 (tool discovery).
+status), WP9a, WP9b, WP16, WP17, WP15, WP6, WP5. Remaining Wave 2: WP8, then WP7; WP18 (load test) runs now as a baseline and again as the scale-ready gate. Then Wave 3: WP10 (plugins), WP19 (tool search plugin), WP11-WP14.
 Order (one merge at a time):
 
 | WP | Branch | Decisions | Scope |
@@ -229,7 +229,32 @@ Order (one merge at a time):
 | 8 | `scale/hot-path` | D15 + below | profile-driven hot path |
 | 7 | `scale/reliability` | D4 | reliability port onto the seams (brings the slim `turn-stopping` event) |
 | 18 | `scale/load-test` | acceptance | multi-process load test of the target deployment (enqueuer + M workers + Postgres behind injected network latency): capacity knee, bottleneck, chaos (worker kill, DB blip, drain). Built and baselined now on integration; rerun after WP8 and WP7 as the scale-ready gate |
-| 19 | `tools/discovery` | after the gate | finish tool search from `wip/tool-discovery-freeze-20261030` on the 3.0 seams (wire 3, bounded checkpoint), sized by the plan in `docs/superpowers/plans/2026-10-30-tool-discovery.md` |
+| 19 | `tools/search` | Wave 3, right after WP10 | slim tool search as a plugin (section below); replaces the frozen `wip/tool-discovery-freeze-20261030` design |
+
+WP19 tool search (owner decision 2026-10-31: slim, a plugin, opens on its own
+past a size threshold; modelled on Claude Code's deferred tools):
+- A WP10 plugin, `ToolSearchPlugin(max_tools=30, max_skills=50)`, mounted by
+  default; unmounting it restores today's behavior. At or below the thresholds
+  requests stay byte-identical: no `tool_search` tool, nothing deferred.
+- Above `max_tools` offered tools (native + MCP), every tool without
+  `always_load = True` (duck-typed attribute) is deferred: the `tool_search`
+  description lists deferred names only, no schemas. `tool_search(query)`
+  takes `select:a,b` or keywords (plain scoring over name + description, no
+  embeddings, no dependency), returns the matched schemas and loads them; they
+  join the offered tools from the next request for the rest of the session.
+  Above `max_skills`, the skill listing is deferred the same way and search
+  returns skill name + description (the Skill tool still loads the body).
+- Search changes what is offered, never what is allowed: permissions, hooks
+  and validation govern loaded tools as before. No activation or catalog
+  policy, no activation records, no contract fingerprints.
+- The loaded set survives resume and later runs of the session. Derive it
+  from durable history only if that is provably sufficient (see WP8's
+  loop-guard finding about bypass paths); otherwise keep a bounded name set in
+  checkpoint/session state.
+- Budget: one public name (the plugin) plus the `always_load` attribute, about
+  400 lines of src. Measure prompt tokens per request with 60 tools before and
+  after, and how often the offered tool list (the provider cache prefix)
+  changes. Reuse from the frozen branch only what fits.
 
 WP8 hot path, driven by the WP1 baseline
 (`docs/superpowers/measurements/2026-10-30-scale-baseline.md`):
