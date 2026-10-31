@@ -7,6 +7,9 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
 
 ## Unreleased
 
+- Commit terminal status and pending events atomically, preserving guard-tail
+  replay across crashes and cancellation.
+
 - Bound checkpoint recovery state with journal watermarks and fixed-size
   BLAKE2b loop-guard digests; remove the private guard-delta journal while
   retaining detached projection getters and the incremental history digest.

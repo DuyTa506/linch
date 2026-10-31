@@ -834,7 +834,7 @@ class MeasuredStore:
                         self.metrics.turn.set(turn)
             result = await method(*args, **kwargs)
             self.metrics.writes[self.name, name, turn] += 1
-            record = result[0] if name == "save_checkpoint_with_events" else result
+            record = result[0] if name in {"save_checkpoint_with_events", "mark_failed"} else result
             if (
                 self.name == "session"
                 and name == "append_messages"
@@ -847,18 +847,22 @@ class MeasuredStore:
                 )
             if (
                 self.name == "run"
-                and name in {"append_event", "append_events", "save_checkpoint_with_events"}
+                and name
+                in {"append_event", "append_events", "save_checkpoint_with_events", "mark_failed"}
                 and self.metrics.capture_payload_bytes
             ):
-                if name == "save_checkpoint_with_events":
+                if name == "mark_failed":
+                    events = kwargs.get("events", [])
+                elif name == "save_checkpoint_with_events":
                     events = args[2] if len(args) > 2 else kwargs.get("events", [])
                 else:
                     events = args[1] if len(args) > 1 else kwargs.get("events", [])
                     events = [events] if name == "append_event" else events
-                self.metrics.event_payloads[turn].extend(
-                    len(json.dumps(_json_safe_stored_event(event), allow_nan=False).encode())
-                    for event in events
-                )
+                if events:
+                    self.metrics.event_payloads[turn].extend(
+                        len(json.dumps(_json_safe_stored_event(event), allow_nan=False).encode())
+                        for event in events
+                    )
             if self.name == "run" and name in {
                 "save_checkpoint",
                 "save_checkpoint_with_events",

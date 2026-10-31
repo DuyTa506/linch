@@ -263,3 +263,5 @@ for worker topology and schedules.
 - **WP8:** Loop-guard checkpoint call-count keys are now 64-bit BLAKE2b digests of the permission decision key; pre-3.0 guard checkpoints are rejected.
 
 - `RunStore.create_run(session_id, id=existing_id)` adopts only a same-session `pending` run, merges metadata and checks existing contract compatibility; other existing IDs raise `ValueError`. Queue submission remains idempotent through `enqueue_run`.
+
+- Custom run stores must accept `mark_failed(..., *, events=())` and return `(run_record, event_seqs)` so failed terminals commit with their pending events.

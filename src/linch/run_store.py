@@ -292,7 +292,9 @@ class RunStore(Protocol):
         run_id: str,
         checkpoint: RunCheckpoint | None = None,
         error: dict[str, object] | None = None,
-    ) -> RunRecord: ...
+        *,
+        events: Sequence[Event] = (),
+    ) -> tuple[RunRecord, list[int]]: ...
 
 
 class RunEventBatchStore(Protocol):
@@ -1467,17 +1469,30 @@ class InMemoryRunStore:
         run_id: str,
         checkpoint: RunCheckpoint | None = None,
         error: dict[str, object] | None = None,
-    ) -> RunRecord:
+        *,
+        events: Sequence[Event] = (),
+    ) -> tuple[RunRecord, list[int]]:
         self._check_lease(run_id)
         rec = self._runs[run_id]
+        checkpoint_copy = _copy_checkpoint(checkpoint) if checkpoint is not None else rec.checkpoint
+        event_copies = [_copy_event(event) for event in events]
+        meta = _safe_meta(rec.meta)
+        if error is not None:
+            _append_run_error(meta, error)
         if checkpoint is not None:
             checkpoint.phase = "failed"
-            rec.checkpoint = _copy_checkpoint(checkpoint)
-        if error is not None:
-            _append_run_error(rec.meta, error)
-        rec.status = "failed"
-        rec.updated_at = now_iso()
-        return _copy_record(rec)
+            assert checkpoint_copy is not None
+            checkpoint_copy.phase = "failed"
+        bucket = self._events[run_id]
+        timestamp = now_iso()
+        seqs = list(range(len(bucket) + 1, len(bucket) + len(event_copies) + 1))
+        rec.checkpoint, rec.meta = checkpoint_copy, meta
+        rec.status, rec.updated_at = "failed", timestamp
+        bucket.extend(
+            StoredRunEvent(seq=seq, appended_at=timestamp, event=event)
+            for seq, event in zip(seqs, event_copies, strict=True)
+        )
+        return _copy_record(rec), seqs
 
     async def close(self) -> None:
         return None

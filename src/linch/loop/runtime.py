@@ -923,29 +923,45 @@ class RunRuntime:
             lambda event=event: _persist_event(self.session, self.run_id, event),
             original,
         )
-        if failure is None:
-            failure = await self._attempt(
-                "event flush", lambda: _flush_events(self.session), original
-            )
-            self.session._event_journal = None
-        store = self.agent.run_store
-        if failure is None and self.run_record is not None and store is not None:
-            self.checkpoint.phase = "aborted"
-            self.checkpoint.total_usage = self.total
+        if failure is None and self.run_record is not None and self.agent.run_store is not None:
             failure = await self._attempt(
                 "run.save_checkpoint",
-                lambda: store_call(
-                    self.session,
-                    "run.save_checkpoint",
-                    store.save_checkpoint(self.run_id, self.checkpoint, status="aborted"),
-                ),
+                lambda: self.save_checkpoint("aborted", status="aborted"),
                 original,
             )
+            if failure is None:
+                self.session._event_journal = None
         if failure is not None:
             async for item in self.emit_exception_terminal(failure):
                 yield item
         else:
             yield event
+
+    async def persist_failed(
+        self, error: dict[str, object] | None, *, original: Exception | None = None
+    ) -> Exception | None:
+        """Commit a failed status and its complete pending event prefix together."""
+        store = self.agent.run_store
+        if self.run_record is None or store is None:
+            return None
+        self.sync_checkpoint_accounting()
+        buf = self.session._event_journal
+        failure = await self._attempt(
+            "run.mark_failed",
+            lambda: (
+                buf.flush_with_checkpoint(self.checkpoint, status="failed", error=error)
+                if buf is not None
+                else store_call(
+                    self.session,
+                    "run.mark_failed",
+                    store.mark_failed(self.run_id, self.checkpoint, error=error),
+                )
+            ),
+            original or RuntimeError("terminal failed-status persistence"),
+        )
+        if failure is None:
+            self.session._event_journal = None
+        return failure
 
     async def emit_exception_terminal(
         self,
@@ -981,19 +997,7 @@ class RunRuntime:
                 lambda event=event: _persist_event(self.session, self.run_id, event),
                 original,
             )
-        await self._attempt("event flush", lambda: _flush_events(self.session), original)
-        self.session._event_journal = None
-        store = self.agent.run_store
-        if self.run_record is not None and store is not None:
-            await self._attempt(
-                "run.mark_failed",
-                lambda: store_call(
-                    self.session,
-                    "run.mark_failed",
-                    store.mark_failed(self.run_id, self.checkpoint, error=error),
-                ),
-                original,
-            )
+        await self.persist_failed(error, original=original)
         if self.lease_lost is not None:
             error = _error_payload(self.lease_lost)
             error["retryable"] = False

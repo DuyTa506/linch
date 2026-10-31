@@ -200,7 +200,7 @@ async def test_run_stores_replace_malformed_error_history(kind, pg_dsn, history)
             recursive_error: dict[str, object] = {"message": "new failure"}
             recursive_error["self"] = recursive_error
 
-            failed = await store.mark_failed(run_id, error=recursive_error)
+            failed, _ = await store.mark_failed(run_id, error=recursive_error)
             loaded = await store.load_run(run_id)
 
             assert failed.meta["errors"] == [
@@ -250,7 +250,7 @@ async def test_postgres_checkpoint_results_are_isolated_persisted_snapshots(
 
         error: dict[str, object] = {"message": "boom"}
         error["self"] = error
-        failed = await store.mark_failed("run-1", error=error)
+        failed, _ = await store.mark_failed("run-1", error=error)
         loaded_failed = await store.load_run("run-1")
 
         assert failed.checkpoint is not None
@@ -267,7 +267,7 @@ async def test_postgres_checkpoint_results_are_isolated_persisted_snapshots(
             turn_index=2,
             total_usage=Usage(),
         )
-        failed_with_checkpoint = await store.mark_failed("run-1", replacement)
+        failed_with_checkpoint, _ = await store.mark_failed("run-1", replacement)
         assert replacement.phase == "failed"
         assert failed_with_checkpoint.checkpoint is not replacement
         assert failed_with_checkpoint.checkpoint is not None
