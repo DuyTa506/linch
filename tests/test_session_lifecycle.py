@@ -555,7 +555,7 @@ async def test_agent_close_waits_for_actively_iterated_provider_finalizer() -> N
                 order.append("provider_stream_finalized")
 
     provider = PausingProvider()
-    agent = _agent(provider=provider)
+    agent = _agent(provider=provider, reliability=None)
     session = await agent.session(id="active")
 
     async def consume() -> None:

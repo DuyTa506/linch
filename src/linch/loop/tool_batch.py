@@ -37,8 +37,8 @@ from .checkpoint import (
     _interrupted_tool_result_block,
     _last_message_has_tool_results,
     _loop_guard_is_active,
-    _message_matches,
     _recover_completed_tool_results,
+    _replayed_feedback_present,
     _tool_result_block_from_end,
 )
 
@@ -63,9 +63,9 @@ class ToolBatchContext:
     persist_event: Callable[[Event], Awaitable[None]]
     dispatch_lifecycle: Callable[..., Awaitable[None]]
     emit_error_terminal: Callable[..., AsyncIterator[Event]]
-    before_permissions: Callable[[Any], Awaitable[str | None]] | None = None
-    on_foreground_result: Callable[[Any, Any, Any], Awaitable[None]] | None = None
-    reliability: Any = None
+    pre_execute_pipeline: Any = None
+    on_foreground_result: Callable[[str], Awaitable[None]] | None = None
+    before_batch: Callable[[], None] | None = None
     force_final_pending: bool = False
     terminal: bool = False
 
@@ -103,9 +103,8 @@ async def run_tool_batch(ctx: ToolBatchContext) -> AsyncIterator[Event]:
             completed_tool_results=completed_tool_results,
         )
 
-    reliability = getattr(ctx, "reliability", None)
-    if reliability is not None:
-        reliability.begin_batch()
+    if ctx.before_batch is not None:
+        ctx.before_batch()
 
     async def checkpoint_tool_executing() -> None:
         """Persist the resolved permission decisions before any tool starts."""
@@ -125,7 +124,7 @@ async def run_tool_batch(ctx: ToolBatchContext) -> AsyncIterator[Event]:
         ctx.signal,
         turn_index=ctx.turn_index,
         on_permissions_resolved=checkpoint_tool_executing,
-        before_permissions=ctx.before_permissions,
+        pre_execute_pipeline=ctx.pre_execute_pipeline,
         on_foreground_result=ctx.on_foreground_result,
     ):
         # Progress is intentionally transient.  Recovery-critical start/end
@@ -133,7 +132,11 @@ async def run_tool_batch(ctx: ToolBatchContext) -> AsyncIterator[Event]:
         if not isinstance(event, ToolProgressEvent):
             await ctx.persist_event(event)
         if isinstance(event, (ToolCallStartEvent, ToolCallEndEvent)):
-            await ctx.flush_events()
+            if isinstance(event, ToolCallEndEvent) and ctx.on_foreground_result is not None:
+                completed_tool_results[event.tool_use_id] = _tool_result_block_from_end(event)
+                await checkpoint_tool_executing()
+            else:
+                await ctx.flush_events()
         if isinstance(event, PermissionRequestEvent):
             await ctx.save_checkpoint(
                 "permission_pending",
@@ -266,7 +269,14 @@ async def _inject_force_final_reminder(ctx: ToolBatchContext) -> Event:
         "Please provide your final answer now without making further tool calls."
     )
     reminder_message = Message(role="user", content=[TextBlock(text=reminder_text)])
-    already_appended = _replayed_force_final_reminder_present(ctx, reminder_message)
+    already_appended = (
+        ctx.resume_checkpoint is not None
+        and ctx.turn_index == ctx.checkpoint.turn_index
+        and ctx.checkpoint.phase == "tool_results_appended"
+        and _replayed_feedback_present(
+            ctx.session, (reminder_message,), {b.id for b in ctx.checkpoint.pending_tool_blocks}
+        )
+    )
     if not already_appended:
         await store_call(ctx.session, "session.append", ctx.session.append([reminder_message]))
     ctx.force_final_pending = True
@@ -274,27 +284,3 @@ async def _inject_force_final_reminder(ctx: ToolBatchContext) -> Event:
     await ctx.persist_event(event)
     await ctx.save_checkpoint("turn_complete", turn_index=ctx.turn_index)
     return event
-
-
-def _replayed_force_final_reminder_present(ctx: ToolBatchContext, reminder: Message) -> bool:
-    """Find a prior reminder only in this replayed batch's history tail."""
-    if not (
-        ctx.resume_checkpoint is not None
-        and ctx.turn_index == ctx.checkpoint.turn_index
-        and ctx.checkpoint.phase == "tool_results_appended"
-    ):
-        return False
-    tool_ids = {
-        block.id for block in ctx.checkpoint.pending_tool_blocks if isinstance(block, ToolUseBlock)
-    }
-    if not tool_ids:
-        return False
-    for message in reversed(ctx.session.session_log._derived):
-        if _message_matches(message, reminder):
-            return True
-        result_ids = {
-            block.tool_use_id for block in message.content if isinstance(block, ToolResultBlock)
-        }
-        if message.role == "user" and result_ids == tool_ids:
-            return False
-    return False

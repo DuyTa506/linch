@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import math
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any, Literal, TypeAlias, cast
 
 from ._json import walk_json
@@ -409,8 +409,6 @@ class PromptCacheAdvisoryEvent:
 
 @dataclass(frozen=True, slots=True)
 class ReliabilityEvent:
-    """Sanitized record of a bounded reliability action."""
-
     mechanism: str
     action: str
     reason: str
@@ -1095,14 +1093,7 @@ def event_to_dict(event: Event) -> dict[str, Any]:
             "detail": event.detail,
         }
     if isinstance(event, ReliabilityEvent):
-        return {
-            "type": event.type,
-            "mechanism": event.mechanism,
-            "action": event.action,
-            "reason": event.reason,
-            "turn_index": event.turn_index,
-            "correction_count": event.correction_count,
-        }
+        return asdict(event)
     if isinstance(event, WorkflowEvent):
         d = {
             "type": event.type,

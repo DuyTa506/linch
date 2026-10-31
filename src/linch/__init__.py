@@ -242,6 +242,7 @@ if TYPE_CHECKING:
     )
     from .providers.retry import RetryOptions
     from .recovery import TruncationRecovery
+    from .reliability import CompletionGate, ReliabilityPolicy, ToolPrerequisite
     from .reports import RunReport, build_run_report, load_run_report
     from .run_store import (
         SCHEMA_VERSION as RUN_SCHEMA_VERSION,
