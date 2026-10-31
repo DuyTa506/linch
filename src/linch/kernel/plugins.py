@@ -6,6 +6,7 @@ from typing import Any, Protocol
 
 from linch.errors import ConfigError
 
+from .. import lifecycle
 from .context import Context
 from .effects import CleanupError, Disposable, EffectScope
 
@@ -56,7 +57,7 @@ class _PluginMount:
         self._closed = False
 
     async def start(self) -> Disposable:
-        self._listener = self.host.on("context/service", lambda c, k: self._reconcile(c, k))
+        self._listener = self.host.on(lifecycle.CONTEXT_SERVICE, lambda c, k: self._reconcile(c, k))
         handle = self.host.effect(lambda: Disposable(self._unmount))
         try:
             await self._reconcile()

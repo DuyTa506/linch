@@ -5,6 +5,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, cast
 
+from .. import lifecycle
 from ..abort import AbortContext, any_signal, throw_if_aborted
 from ..events import (
     AssistantEvent,
@@ -14,7 +15,6 @@ from ..events import (
 )
 from ..hooks import (
     HookDispatcher,
-    HookEvent,
     SubagentStartContext,
     SubagentStopContext,
 )
@@ -297,7 +297,7 @@ async def run_subagent(args: RunSubagentArgs) -> RunSubagentResult:
             child_session.cwd_override = await args.isolation.acquire()
         if hook_dispatcher.active:
             await hook_dispatcher.dispatch(
-                HookEvent.SUBAGENT_START,
+                lifecycle.SUBAGENT_START,
                 SubagentStartContext(
                     session=args.parent_session,
                     run_id=args.parent_session.active_run_id or "unknown",
@@ -331,7 +331,7 @@ async def run_subagent(args: RunSubagentArgs) -> RunSubagentResult:
         merged_signal.close()
         if hook_dispatcher.active:
             await hook_dispatcher.dispatch(
-                HookEvent.SUBAGENT_STOP,
+                lifecycle.SUBAGENT_STOP,
                 SubagentStopContext(
                     session=args.parent_session,
                     run_id=args.parent_session.active_run_id or "unknown",
@@ -391,7 +391,7 @@ async def continue_subagent(args: ContinueSubagentArgs) -> RunSubagentResult:
     try:
         if hook_dispatcher.active:
             await hook_dispatcher.dispatch(
-                HookEvent.SUBAGENT_START,
+                lifecycle.SUBAGENT_START,
                 SubagentStartContext(
                     session=args.parent_session,
                     run_id=args.parent_session.active_run_id or "unknown",
@@ -421,7 +421,7 @@ async def continue_subagent(args: ContinueSubagentArgs) -> RunSubagentResult:
         merged_signal.close()
         if hook_dispatcher.active:
             await hook_dispatcher.dispatch(
-                HookEvent.SUBAGENT_STOP,
+                lifecycle.SUBAGENT_STOP,
                 SubagentStopContext(
                     session=args.parent_session,
                     run_id=args.parent_session.active_run_id or "unknown",
