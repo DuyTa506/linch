@@ -26,6 +26,7 @@ import asyncpg
 import psutil  # pyright: ignore[reportMissingModuleSource]
 
 from linch.providers.base import BaseProvider
+from linch.storage._pg import _reset_connection
 
 TERMINAL = "('completed','failed','aborted')"
 
@@ -44,6 +45,7 @@ async def pool_for(a: argparse.Namespace, *, direct: bool = False, name: str = "
         command_timeout=10,
         server_settings=settings,
         connection_class=getattr(a, "connection_class", asyncpg.Connection),
+        reset=_reset_connection,
     )
     if getattr(a, "pgbouncer", False) and not direct:
         options["statement_cache_size"] = 0
