@@ -113,7 +113,7 @@ provider = AnthropicProvider(
 )
 
 # ── Google Gemini ────────────────────────────────────────────────────────────
-# Requires: pip install "linch[gemini]"
+# Requires: pip install "linch[gemini]" (google-genai; no google-generativeai)
 # Supports text, tool use, structured output, and large context windows.
 from linch.providers import GeminiProvider, GeminiProviderOptions
 
@@ -124,6 +124,29 @@ agent = Agent(
     ),
     session_store=InMemorySessionStore(),
 )
+
+# Vertex AI uses the same SDK with application default credentials:
+provider = GeminiProvider(
+    GeminiProviderOptions(project="my-project", location="us-central1")
+)
+
+# Native GenerateContentConfig defaults, including thinking on supported models.
+# Per-run thinking={"type": "enabled", "budget_tokens": 1024} overrides this.
+# Native thinking_budget/thinking_level dictionaries also work per run.
+# Budget ranges and support for disabling thinking depend on the model.
+provider = GeminiProvider(
+    GeminiProviderOptions(
+        api_key=os.environ["GOOGLE_API_KEY"],
+        default_generation_config={
+            "thinking_config": {"thinking_budget": 1024, "include_thoughts": True},
+        },
+    )
+)
+# Thought text streams as thinking_delta; output usage includes thought tokens.
+# Linch retains signed model parts in message metadata for subsequent tool turns.
+# Keep provider_metadata when copying assistant messages. Tools execute in Linch.
+# Gemini uses native JSON Schema for tool parameters and OutputSchema responses.
+# Agent teardown closes the provider; standalone callers should await provider.aclose().
 
 # ── DeepSeek native endpoint ────────────────────────────────────────────────
 # deepseek-v4-flash / deepseek-v4-pro are reasoning models that emit
