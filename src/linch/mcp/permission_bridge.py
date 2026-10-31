@@ -24,6 +24,12 @@ def mcp_permission_rules(tools: list[Any]) -> list[ToolRule]:
 
     Emits one ``ToolRule(name, "ask")`` per ``destructive`` tool. Read-only and
     plain tools get no rule (their scope already drives the default decision).
+
+    Args:
+        tools: MCP-wrapped tools carrying optional annotation-derived attributes.
+
+    Returns:
+        Permission rules that require approval for destructive MCP tools.
     """
     rules: list[ToolRule] = []
     for tool in tools:
