@@ -6,7 +6,18 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class Principal:
-    """The tenant and role identity used for one permission evaluation."""
+    """Identify the tenant, user, and roles used for one permission evaluation.
+
+    Args:
+        tenant: Tenant identifier associated with the caller.
+        user: User identifier associated with the caller.
+        roles: Immutable set of role names granted to the caller.
+
+    Attributes:
+        tenant: The non-empty tenant identifier.
+        user: The non-empty user identifier.
+        roles: The caller's validated, immutable role set.
+    """
 
     tenant: str
     user: str
