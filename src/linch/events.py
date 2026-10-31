@@ -407,6 +407,18 @@ class PromptCacheAdvisoryEvent:
     type: Literal["prompt_cache_advisory"] = "prompt_cache_advisory"
 
 
+@dataclass(frozen=True, slots=True)
+class ReliabilityEvent:
+    """Sanitized record of a bounded reliability action."""
+
+    mechanism: str
+    action: str
+    reason: str
+    turn_index: int
+    correction_count: int
+    type: Literal["reliability"] = "reliability"
+
+
 # Persistence encodes events with ``_json_safe(..., strict=False)``, which
 # substitutes ``"<max-depth>"`` past this depth rather than raising. An
 # ignorable event must round-trip verbatim, so it may not nest deeper than the
@@ -429,6 +441,7 @@ _KNOWN_EVENT_TYPES = frozenset(
         "partial_assistant",
         "permission_request",
         "prompt_cache_advisory",
+        "reliability",
         "result",
         "schedule",
         "skill_completed",
@@ -584,6 +597,7 @@ Event: TypeAlias = (
     | ScheduleEvent
     | WorkflowEvent
     | PromptCacheAdvisoryEvent
+    | ReliabilityEvent
     | IgnorableEvent
 )
 
@@ -1080,6 +1094,15 @@ def event_to_dict(event: Event) -> dict[str, Any]:
             "reason": event.reason,
             "detail": event.detail,
         }
+    if isinstance(event, ReliabilityEvent):
+        return {
+            "type": event.type,
+            "mechanism": event.mechanism,
+            "action": event.action,
+            "reason": event.reason,
+            "turn_index": event.turn_index,
+            "correction_count": event.correction_count,
+        }
     if isinstance(event, WorkflowEvent):
         d = {
             "type": event.type,
@@ -1386,6 +1409,20 @@ def event_from_dict(raw: dict[str, Any]) -> Event:
         return PromptCacheAdvisoryEvent(
             reason=cast(Any, _reason),
             detail=str(raw.get("detail", "")),
+        )
+    if typ == "reliability":
+        turn_index = raw.get("turn_index")
+        correction_count = raw.get("correction_count")
+        if type(turn_index) is not int or turn_index < 0:
+            raise ValueError("reliability turn_index must be a non-negative integer")
+        if type(correction_count) is not int or correction_count < 0:
+            raise ValueError("reliability correction_count must be a non-negative integer")
+        return ReliabilityEvent(
+            mechanism=str(raw.get("mechanism", "")),
+            action=str(raw.get("action", "")),
+            reason=str(raw.get("reason", "")),
+            turn_index=turn_index,
+            correction_count=correction_count,
         )
     if typ == "workflow":
         _kind = _required_discriminator(raw, "kind", WORKFLOW_EVENT_KINDS, "phase")

@@ -63,6 +63,8 @@ class ToolBatchContext:
     persist_event: Callable[[Event], Awaitable[None]]
     dispatch_lifecycle: Callable[..., Awaitable[None]]
     emit_error_terminal: Callable[..., AsyncIterator[Event]]
+    before_permissions: Callable[[Any], Awaitable[str | None]] | None = None
+    on_foreground_result: Callable[[Any, Any, Any], Awaitable[None]] | None = None
     force_final_pending: bool = False
     terminal: bool = False
 
@@ -118,6 +120,8 @@ async def run_tool_batch(ctx: ToolBatchContext) -> AsyncIterator[Event]:
         ctx.signal,
         turn_index=ctx.turn_index,
         on_permissions_resolved=checkpoint_tool_executing,
+        before_permissions=ctx.before_permissions,
+        on_foreground_result=ctx.on_foreground_result,
     ):
         # Progress is intentionally transient.  Recovery-critical start/end
         # events are persisted and flushed before crossing the yield boundary.

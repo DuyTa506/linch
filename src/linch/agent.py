@@ -16,11 +16,13 @@ from .durability import DurabilityOptions
 from .errors import ConfigError
 from .execution import ExecutionBackend
 from .kernel import Context
+from .loop.turn_stopping import TurnStoppingDispatcher
 from .openai_responses import OpenAIOptions, OpenAIReasoning
 from .permissions import BashRule, CanUseTool, PathRule, PermissionEngine, PermissionRule, ToolRule
 from .providers import BaseProvider, OpenAIResponsesProvider, OpenAIResponsesProviderOptions
 from .providers.limiter import Limiter, _SemaphoreLimiter
 from .recovery import TruncationRecovery
+from .reliability import ReliabilityPolicy
 from .run_store import RunStore
 from .session import Session
 from .sessions import InMemorySessionStore, SessionStore
@@ -44,6 +46,7 @@ _UNSET: Any = object()
 # default (offload on, threshold derived from context window) from an explicit
 # None (offload disabled).
 _DEFAULT_OFFLOAD: Any = object()
+_DEFAULT_RELIABILITY_POLICY = ReliabilityPolicy()
 
 _SECTION_PLACEMENTS = ("before_defaults", "after_defaults", "after_env")
 
@@ -430,6 +433,7 @@ class Agent:
         context: Context | None = None,
         tool_pipeline: ToolPipeline | None = None,
         ask_user: Any = None,
+        reliability: ReliabilityPolicy | None = _DEFAULT_RELIABILITY_POLICY,
     ) -> None:
         system_prompt = _resolve_system_prompt(system_prompt, system_prompt_config)
         if tool_batching_strategy not in ("greedy", "maximal"):
@@ -474,6 +478,10 @@ class Agent:
             else Context(label=f"agent:{model}")
         )
         self.tool_pipeline: ToolPipeline = tool_pipeline or ToolPipeline()
+        if reliability is not None and not isinstance(reliability, ReliabilityPolicy):
+            raise ConfigError("reliability must be ReliabilityPolicy or None")
+        self.reliability = reliability
+        self._turn_stopping_listeners: list[Any] = []
 
         inherited_execution = context.get("execution") if context is not None else None
         execution_source = (
@@ -647,6 +655,12 @@ class Agent:
         # Additional MCP connections attached mid-run (closed alongside the
         # primary connection in close()).
         self._extra_mcp_connections: list[Any] = []
+
+    def on_turn_stopping(self, listener: Any) -> Any:
+        """Register a run-finalization listener and return its disposable."""
+        dispatcher = TurnStoppingDispatcher(self._turn_stopping_listeners)
+        self._turn_stopping_listeners = dispatcher._listeners
+        return dispatcher.register(listener)
 
     def _set_subagent_tool_registry(self, registry: ToolRegistry) -> None:
         """Install a worker-only tool catalog without changing parent tools.
