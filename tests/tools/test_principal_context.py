@@ -53,7 +53,7 @@ def _scheduler_agent(tool: Any, *, permission_engine: Any = None, pipeline: Any 
     )
 
 
-def _scheduler_session() -> Any:
+def _scheduler_session(principal: Any = None) -> Any:
     async def notify(*args: Any, **kwargs: Any) -> None:
         return None
 
@@ -61,6 +61,8 @@ def _scheduler_session() -> Any:
         id="session",
         store=None,
         active_run_id="run",
+        _active_principal=principal,
+        _run_principals={"run": principal} if principal is not None else {},
         tools_override=None,
         current_turn_allowed_tools=None,
         current_turn_permission_decisions={},
@@ -92,7 +94,7 @@ async def test_principal_is_read_only_and_reaches_serial_parallel_and_background
     seen: list[Any] = []
     serial = _ContextTool("Serial", seen, scope="write", parallel=True)
     agent = _scheduler_agent(serial)
-    session = _scheduler_session()
+    session = _scheduler_session(principal)
     await _collect(
         execute_tool_calls(
             [
@@ -102,7 +104,6 @@ async def test_principal_is_read_only_and_reaches_serial_parallel_and_background
             agent,
             session,
             AbortContext(),
-            principal=principal,
         )
     )
 
@@ -117,7 +118,6 @@ async def test_principal_is_read_only_and_reaches_serial_parallel_and_background
             agent,
             session,
             AbortContext(),
-            principal=principal,
         )
     )
 
@@ -130,7 +130,6 @@ async def test_principal_is_read_only_and_reaches_serial_parallel_and_background
             agent,
             session,
             AbortContext(),
-            principal=principal,
         )
     ]
     await asyncio.gather(*session.background_tasks)
@@ -167,9 +166,8 @@ async def test_async_permission_resolution_receives_principal() -> None:
         async for event in execute_tool_calls(
             [ToolUseBlock(id="a1", name="Ask", input={})],
             agent,
-            _scheduler_session(),
+            _scheduler_session(principal),
             AbortContext(),
-            principal=principal,
         )
     ]
     assert events
@@ -199,9 +197,8 @@ async def test_pipeline_cannot_swap_private_principal_after_authorization() -> N
         async for event in execute_tool_calls(
             [ToolUseBlock(id="x1", name="Pipeline", input={})],
             agent,
-            _scheduler_session(),
+            _scheduler_session(principal),
             AbortContext(),
-            principal=principal,
         )
     ]
     end = next(event for event in events if event.type == "tool_call_end")
@@ -343,3 +340,114 @@ async def test_subagent_spawn_and_continue_forward_principal() -> None:
         assert continued[0].run_options.principal is principal
     finally:
         monkeypatch.undo()
+
+
+def _bind_fake_run(session: Any, run_id: str, principal: Any) -> None:
+    from linch.session import Session
+
+    session._active = True
+    session._active_gen = None
+    session._active_inner = None
+    session._active_started = False
+    session._model_call_ledger = None
+    session.active_run_id = run_id
+    session._active_principal = principal
+    session._run_principals = getattr(session, "_run_principals", {})
+    if principal is not None:
+        session._run_principals[run_id] = principal
+    session._principal_background_before = set()
+    session._idle = asyncio.Event()
+    session._idle.clear()
+    session._reject_pending_alignment = lambda _exc: None
+    session._finish_run = lambda: Session._finish_run(session)
+
+
+@pytest.mark.asyncio
+async def test_deferred_background_tool_keeps_origin_principal_after_next_run_begins() -> None:
+    from linch import Principal
+    from linch.abort import AbortContext
+    from linch.scheduler import execute_tool_calls
+    from linch.tools import ToolResult
+    from linch.types import ToolUseBlock
+
+    old = Principal("tenant-a", "alice", {"reader"})
+    new = Principal("tenant-b", "bob", {"admin"})
+    gate = asyncio.Event()
+    seen: list[Any] = []
+
+    class _DeferredTool(_ContextTool):
+        async def execute(self, input: dict[str, Any], ctx: Any) -> Any:
+            await gate.wait()
+            seen.append(ctx.principal)
+            return ToolResult(content="done")
+
+    session = _scheduler_session(old)
+    session._run_principals.clear()
+    _bind_fake_run(session, "old-run", old)
+    tool = _DeferredTool("Deferred", seen, scope="read", parallel=True)
+    iterator = execute_tool_calls(
+        [ToolUseBlock(id="bg", name="Deferred", input={"run_in_background": True})],
+        _scheduler_agent(tool),
+        session,
+        AbortContext(),
+    )
+    await iterator.__anext__()
+    await iterator.__anext__()
+    tasks = list(session.background_tasks)
+    await iterator.aclose()
+
+    session._finish_run()
+    session.active_run_id = "new-run"
+    session._active_principal = new
+    session._run_principals["new-run"] = new
+    gate.set()
+    await asyncio.gather(*tasks)
+    await asyncio.sleep(0)
+
+    assert seen == [old]
+    assert session._run_principals == {"new-run": new}
+
+
+def test_principal_snapshot_resets_for_anonymous_run_and_retires_without_background_work() -> None:
+    from linch import Principal
+
+    principal = Principal("tenant-a", "alice", {"reader"})
+    session = _scheduler_session(principal)
+    session._run_principals.clear()
+    _bind_fake_run(session, "run-with-principal", principal)
+    session._finish_run()
+
+    assert session._active_principal is None
+    assert session.active_run_id is None
+    assert session._run_principals == {}
+
+    _bind_fake_run(session, "anonymous", None)
+    session._finish_run()
+    assert session._active_principal is None
+    assert session._run_principals == {}
+
+
+@pytest.mark.asyncio
+async def test_old_principal_binding_does_not_accumulate_across_later_runs() -> None:
+    from linch import Principal
+
+    old = Principal("tenant-a", "alice", {"reader"})
+    gate = asyncio.Event()
+    old_task = asyncio.create_task(gate.wait())
+    session = _scheduler_session(old)
+    session._run_principals.clear()
+    session.background_tasks.append(old_task)
+    _bind_fake_run(session, "old-run", old)
+    session._finish_run()
+    assert session._run_principals == {"old-run": old}
+
+    for index in range(3):
+        _bind_fake_run(session, f"anonymous-{index}", None)
+        session._principal_background_before = {old_task}
+        session._finish_run()
+
+    assert session._run_principals == {"old-run": old}
+    old_task.cancel()
+    await asyncio.gather(old_task, return_exceptions=True)
+    await asyncio.sleep(0)
+    assert session._run_principals == {}
