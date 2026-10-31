@@ -18,7 +18,6 @@ import asyncpg
 
 from linch import Agent, PostgresRunStore, empty_tools
 from linch.evals import ScriptedProvider, TextTurn
-from linch.sessions.postgres import PostgresSessionStore
 from linch.worker import Worker, WorkerJob, enqueue_run, install
 
 
@@ -29,7 +28,7 @@ async def agent_factory(job: WorkerJob) -> Agent:
         provider=ScriptedProvider([TextTurn("Hello from a worker.")]),
         tools=empty_tools(),
         run_store=job.run_store,
-        session_store=PostgresSessionStore("", pool=job.pool),
+        session_store=job.session_store,
         permissions={"mode": "skip-dangerous"},
     )
 

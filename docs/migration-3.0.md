@@ -237,6 +237,7 @@ attempting a legacy database upgrade.
 - `validate_cron` is removed; worker cron definitions use `croniter` validation.
 - `assert_schedule_store_contract` is removed with the scheduling protocol.
 - `Agent(schedule_store=...)` is removed; hosts register worker tools explicitly.
+- Worker factories must reuse `job.session_store` as well as `job.run_store`; both adapters live for the worker lifetime.
 
 `InMemoryMailbox` remains available for process-lifetime messaging; durable
 mailbox adapters remain host-owned. See [Scale out](usage/production.md#scale-out)
