@@ -225,7 +225,13 @@ class GeminiProvider(BaseProvider):
             cfg = self._build_generation_config(req)
             cfg["system_instruction"] = "\n\n".join(b.text for b in req.system if b.text) or None
             cfg["tools"] = (
-                [types.Tool(function_declarations=_translate_tools(req.tools))]
+                [
+                    types.Tool(
+                        function_declarations=[
+                            types.FunctionDeclaration(**d) for d in _translate_tools(req.tools)
+                        ]
+                    )
+                ]
                 if req.tools
                 else None
             )
