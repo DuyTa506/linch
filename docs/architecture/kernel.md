@@ -118,6 +118,36 @@ audit complete, so failed setup is fully rolled back. Plugin mounts and inbox
 registrations are per-agent; sharing a parent `Context` does not share a
 mount's child services.
 
+### Domain profiles
+
+`Profile` (`profiles.py`) composes immutable declarative fields and plugin rows
+by stable id. `RunOptions(profile=...)` selects the composed definition. Before
+the loop starts, the session enters a run scope: a shallow configuration copy of
+the same Agent shares its provider, stores, and host dependencies, while tools,
+permission configuration, hook registrations, tool pipeline listener lists,
+turn-stopping registrations, and context event listener lists are local to the
+run. `agent.use` mounts selected plugins in that scope. Existing hooks and host
+service objects retain their normal shared ownership. No listener is registered
+unfiltered on the parent agent bus.
+
+The effective tool registry intersects the profile allow/deny names and any
+session tool override. A deny-only permission layer reinforces the restriction;
+host permission rules still decide authorization. Role instructions append to
+the existing system prompt, schemas use `OutputSchema`, and budget limits create
+a fresh `RunBudget`. Cleanup restores the session's original Agent and overrides
+and disposes the scope, including on early iterator close or setup failure.
+Scopes still referenced by retained children or detached tools remain owned
+by the parent Context until `Agent.close()` quiesces their work. Inherited
+service changes are relayed through a filtered parent-bus registration so
+run-local plugin dependencies still activate and deactivate normally.
+
+There is no registry: callers retain released definitions and pass the same
+profile on resume or takeover. `loop/contracts.py` records its id, version, and
+SHA-256 content hash in `RunContract.payload.run_options.profile`. The existing
+whole-contract compatibility check rejects omission or a changed definition,
+including plugin execution order. `profile=None` adds no contract fields or
+request changes. See [domain profiles](../usage/profiles.md) for the API.
+
 ---
 
 ## What builds on the kernel
