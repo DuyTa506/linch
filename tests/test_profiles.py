@@ -715,6 +715,8 @@ async def test_retained_child_keeps_profile_service_after_parent_scope_ends(
     from linch.subagents.workers import WorkerHandle
     from linch.tools import ToolRegistry
 
+    cleaned, cleanup_started, cleanup_release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
     class ServicePlugin:
         name = "retained-service"
         version = "1"
@@ -722,8 +724,16 @@ async def test_retained_child_keeps_profile_service_after_parent_scope_ends(
         requires = ()
 
         def setup(self, ctx: Any, config: Any = None) -> Any:
-            registration = ctx.register("profile.service", config)
-            return registration
+            from linch.kernel import Disposable
+
+            ctx.register("profile.service", config)
+
+            async def cleanup() -> None:
+                cleanup_started.set()
+                await cleanup_release.wait()
+                cleaned.set()
+
+            return Disposable(cleanup)
 
     store = InMemoryRunStore()
     agent = _agent(
@@ -767,8 +777,15 @@ async def test_retained_child_keeps_profile_service_after_parent_scope_ends(
         result = await task
     child = agent._sessions[result.child_session_id]
     assert child.agent.context.get("profile.service") == {"tenant": "acme"}
-    await agent.close()
+    releasing = asyncio.create_task(agent.release_session(child.id))
+    await asyncio.wait_for(cleanup_started.wait(), 1)
+    waited_for_cleanup = not releasing.done()
+    cleanup_release.set()
+    await releasing
+    await asyncio.wait_for(cleaned.wait(), 1)
+    assert waited_for_cleanup
     assert child.agent.context.get("profile.service") is None
+    await agent.close()
 
 
 async def _collect(session: Any, opts: Any) -> list[Any]:
@@ -819,4 +836,57 @@ async def test_profile_filter_preserves_host_ruleset_path_root() -> None:
     session = await agent.session()
     async with _profile_scope(session, Profile(id="support", version="1", tool_allow=("Write",))):
         assert session.agent.permission_engine.evaluate(call).decision == "deny"
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_profile_scope_disposes_after_last_background_task_finishes() -> None:
+    from linch import Profile, empty_tools
+    from linch.kernel import Disposable
+    from linch.profiles import _profile_scope
+
+    cleaned, release = asyncio.Event(), asyncio.Event()
+
+    class CleanupPlugin(_NamedPlugin):
+        def setup(self, ctx: Any, config: Any = None) -> Any:
+            return Disposable(cleaned.set)
+
+    agent = _agent(_CaptureProvider([]), empty_tools())
+    session = await agent.session()
+    profile = Profile(id="support", version="1", plugins={"cleanup": (CleanupPlugin("c", "1"), {})})
+    async with _profile_scope(session, profile):
+        tasks = [asyncio.create_task(release.wait()) for _ in range(2)]
+        session.background_tasks.extend(tasks)
+    assert not cleaned.is_set()
+    release.set()
+    await asyncio.gather(*tasks)
+    await asyncio.wait_for(cleaned.wait(), 1)
+    assert session.agent is agent
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_profile_plugin_listener_does_not_affect_concurrent_plain_run() -> None:
+    from linch import Profile, RunOptions, ToolCallEndEvent, empty_tools
+
+    provider = _ScopedProfileProvider()
+    agent = _agent(provider, empty_tools(_ConfiguredTool("plain")))
+    scoped, plain = await agent.session(), await agent.session()
+    profile = Profile(
+        id="support",
+        version="1",
+        system_prompt="support role",
+        plugins={"domain": (_ScopedProfilePlugin("support", []), {"label": "support"})},
+    )
+    running = asyncio.gather(
+        _collect(scoped, RunOptions(profile=profile)), _collect(plain, RunOptions())
+    )
+    await asyncio.wait_for(provider.both_started.wait(), 1)
+    provider.release.set()
+    profiled_events, plain_events = await running
+    profiled_end = next(e for e in profiled_events if isinstance(e, ToolCallEndEvent))
+    plain_end = next(e for e in plain_events if isinstance(e, ToolCallEndEvent))
+    assert profiled_end.result == "wrapped:support:tool:support"
+    assert plain_end.result == "tool:plain"
+    assert not agent.tool_pipeline.has_listeners()
     await agent.close()
