@@ -21,6 +21,18 @@ def load_skills_from_dir(
     config_dir: str,
     builtin_tool_names: set[str],
 ) -> tuple[list[Skill], list[SkippedSkill]]:
+    """Load valid project skills from a configuration directory.
+
+    Invalid, unreadable, symlinked, and colliding definitions are reported in
+    the skipped list; valid skills are returned in deterministic name order.
+
+    Args:
+        config_dir: Project configuration directory containing ``skills/``.
+        builtin_tool_names: Tool names that skill names must not collide with.
+
+    Returns:
+        A pair of loaded skills and skipped-definition diagnostics.
+    """
     skills_root = Path(config_dir) / "skills"
     if not skills_root.is_dir():
         return [], []

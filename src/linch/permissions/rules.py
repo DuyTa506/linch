@@ -11,6 +11,24 @@ BashRulePattern: TypeAlias = BashPattern | list[BashPattern]
 
 
 class ToolRule:
+    """Match a tool call by name and optionally by a Skill argument.
+
+    Args:
+        tool: Tool name to match, or ``"*"`` for every tool.
+        decision: Policy outcome when the rule matches.
+        arg: Optional Skill name to match for the ``Skill`` tool.
+        role: Optional role required for the rule to apply.
+        unless_role: Optional role whose presence disables the rule.
+
+    Attributes:
+        kind: The rule kind, always ``"tool"``.
+        tool: The tool name or wildcard being matched.
+        arg: The optional Skill argument constraint.
+        decision: The validated policy outcome.
+        role: The optional required role.
+        unless_role: The optional excluded role.
+    """
+
     __slots__ = ("kind", "tool", "arg", "decision", "role", "unless_role")
 
     decision: RuleDecision
@@ -24,6 +42,19 @@ class ToolRule:
         role: str | None = None,
         unless_role: str | None = None,
     ) -> None:
+        """Create a tool-name permission rule.
+
+        Args:
+            tool: Tool name to match, or ``"*"`` for every tool.
+            decision: Policy outcome when the rule matches.
+            arg: Optional Skill name to match for the ``Skill`` tool.
+            role: Optional role required for the rule to apply.
+            unless_role: Optional role whose presence disables the rule.
+
+        Raises:
+            ValueError: If ``decision`` is unsupported or a role is empty.
+            TypeError: If a supplied role is not a string.
+        """
         self.kind = "tool"
         self.tool = tool
         self.arg = arg
@@ -33,6 +64,24 @@ class ToolRule:
 
 
 class PathRule:
+    """Match file-oriented tool calls against project-relative path globs.
+
+    Args:
+        paths: Glob patterns evaluated against the resolved target path.
+        decision: Policy outcome when a path match is found.
+        tools: Tool names to which the path patterns apply; defaults to file-editing tools.
+        role: Optional role required for the rule to apply.
+        unless_role: Optional role whose presence disables the rule.
+
+    Attributes:
+        kind: The rule kind, always ``"path"``.
+        tools: Tool names covered by the path rule.
+        paths: Path glob patterns to evaluate.
+        decision: The validated policy outcome.
+        role: The optional required role.
+        unless_role: The optional excluded role.
+    """
+
     __slots__ = ("kind", "tools", "paths", "decision", "role", "unless_role")
 
     decision: RuleDecision
@@ -46,6 +95,19 @@ class PathRule:
         role: str | None = None,
         unless_role: str | None = None,
     ) -> None:
+        """Create a path-glob permission rule.
+
+        Args:
+            paths: Glob patterns evaluated against the resolved target path.
+            decision: Policy outcome when a path match is found.
+            tools: Tool names to which the path patterns apply; defaults to file-editing tools.
+            role: Optional role required for the rule to apply.
+            unless_role: Optional role whose presence disables the rule.
+
+        Raises:
+            ValueError: If ``decision`` is unsupported or a role is empty.
+            TypeError: If a supplied role is not a string.
+        """
         self.kind = "path"
         self.tools = tools
         self.paths = paths
@@ -55,6 +117,23 @@ class PathRule:
 
 
 class BashRule:
+    """Match Bash command segments with shell-aware glob or regex patterns.
+
+    Args:
+        pattern: One shell glob, token prefix, or regex mapping to match.
+        decision: Policy outcome when a command segment matches.
+        patterns: Alternative sequence of patterns; mutually exclusive with ``pattern``.
+        role: Optional role required for the rule to apply.
+        unless_role: Optional role whose presence disables the rule.
+
+    Attributes:
+        kind: The rule kind, always ``"bash"``.
+        pattern: The single pattern or normalized list of patterns.
+        decision: The validated policy outcome.
+        role: The optional required role.
+        unless_role: The optional excluded role.
+    """
+
     __slots__ = ("kind", "pattern", "decision", "role", "unless_role")
 
     pattern: BashRulePattern
@@ -69,6 +148,20 @@ class BashRule:
         role: str | None = None,
         unless_role: str | None = None,
     ) -> None:
+        """Create a Bash command permission rule.
+
+        Args:
+            pattern: One shell glob, token prefix, or regex mapping to match.
+            decision: Policy outcome when a command segment matches.
+            patterns: Alternative sequence of patterns; mutually exclusive with ``pattern``.
+            role: Optional role required for the rule to apply.
+            unless_role: Optional role whose presence disables the rule.
+
+        Raises:
+            ValueError: If neither or both pattern forms are supplied, the sequence is empty,
+                the decision is unsupported, or a role is empty.
+            TypeError: If a supplied role is not a string.
+        """
         if pattern is not None and patterns is not None:
             raise ValueError("BashRule accepts either pattern or patterns, not both")
         if patterns is not None:

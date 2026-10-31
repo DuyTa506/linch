@@ -24,16 +24,53 @@ from .rules import PermissionRule
 
 @dataclass(slots=True)
 class PermissionLayer:
+    """Name one ordered source of permission rules.
+
+    Args:
+        name: Stable label for the policy source.
+        rules: Flat rules evaluated in first-match order within this layer.
+
+    Attributes:
+        name: The layer's policy-source label.
+        rules: The layer's ordered rules.
+    """
+
     name: str
     rules: list[PermissionRule] = field(default_factory=list)
 
 
 class PermissionRuleSet:
+    """Combine named permission layers with deny-override semantics.
+
+    Args:
+        layers: Ordered layers from least to most specific.
+        project_root: Root used to resolve relative path patterns.
+
+    Attributes:
+        layers: A copy of the ordered policy layers.
+        project_root: Root used for path matching.
+    """
+
     def __init__(self, layers: list[PermissionLayer], *, project_root: str = "") -> None:
+        """Build a layered permission policy.
+
+        Args:
+            layers: Ordered layers from least to most specific.
+            project_root: Root used to resolve relative path patterns.
+        """
         self.layers = list(layers)
         self.project_root = project_root
 
     def evaluate(self, call: PendingToolCall) -> PermissionDecision | None:
+        """Evaluate one call across all layers.
+
+        Args:
+            call: Pending tool invocation to evaluate.
+
+        Returns:
+            A deny decision when any layer denies, otherwise the highest-precedence
+            non-abstaining decision, or ``None`` when every layer abstains.
+        """
         opinions: list[PermissionDecision] = []
         for layer in self.layers:
             decision = evaluate_rule_list(layer.rules, call, self.project_root)

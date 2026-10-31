@@ -55,7 +55,14 @@ BUILT_IN_SKILLS = [VERIFY_SKILL]
 
 
 def merge_builtin_skills(disk_skills: list[Skill]) -> list[Skill]:
-    """Return disk skills plus built-ins, with disk skills overriding by name."""
+    """Return disk skills plus built-ins, with disk skills overriding by name.
+
+    Args:
+        disk_skills: Valid project skills loaded from disk.
+
+    Returns:
+        All disk skills and non-overridden built-ins, sorted by name.
+    """
 
     disk_names = {skill.name.lower() for skill in disk_skills}
     builtins = [skill for skill in BUILT_IN_SKILLS if skill.name.lower() not in disk_names]

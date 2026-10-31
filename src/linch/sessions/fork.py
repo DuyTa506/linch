@@ -56,6 +56,22 @@ async def fork_session(
     sequence, or ``0`` for an empty prefix).  It does not inherit provider-view
     snapshots, run checkpoints, tasks, approvals, workers, filesystem state, or
     other process-local session state.
+
+    Args:
+        agent: Agent that owns the source and destination session lifecycle.
+        source_or_id: Live source session or durable source session ID.
+        before_seq: Exclusive source sequence boundary; it must identify a
+            stored message when provided.
+        id: Optional destination session ID to reserve.
+        meta: Optional metadata overrides for the destination session.
+
+    Returns:
+        The newly attached destination session.
+
+    Raises:
+        ConfigError: If the source, boundary, destination ID, metadata, or
+            conversation boundary is invalid, or the destination already exists.
+        RuntimeError: If a newly forked session unexpectedly becomes active.
     """
 
     from linch.session import Session
