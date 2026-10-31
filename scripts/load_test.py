@@ -315,6 +315,17 @@ def recovered(chaos: dict[str, Any]) -> bool:
     return chaos.get("recovery") is not None and chaos["recovery"]["seconds"] <= 7
 
 
+async def recovery_after(pool: Any, chaos: dict[str, Any]) -> dict[str, Any] | None:
+    query = """WITH moved AS (SELECT DISTINCT ON(n.run_id) n.run_id,n.epoch,n.at
+        FROM load_claims n WHERE extract(epoch FROM n.at)::float>$2 AND EXISTS(
+        SELECT 1 FROM load_claims o WHERE o.run_id=n.run_id AND o.owner=$1
+        AND o.epoch<n.epoch AND extract(epoch FROM o.at)<$2) ORDER BY n.run_id,n.at)
+        SELECT run_id,epoch,at::text,extract(epoch FROM at)::float-$2 seconds,
+        count(*) OVER() runs FROM moved ORDER BY at DESC LIMIT 1"""
+    row = await pool.fetchrow(query, chaos["lease_owner"], chaos["injected_at"])
+    return dict(row) if row else None
+
+
 async def summarize(pool: Any, a: argparse.Namespace) -> dict[str, Any]:
     query = f"""WITH e AS (SELECT run_id,count(*) n,min(seq) lo,max(seq) hi,
       count(*) FILTER(WHERE event::jsonb->'event'->>'type'='result') results,
@@ -369,8 +380,7 @@ async def run_point(a: argparse.Namespace) -> dict[str, Any]:
     from linch.worker import install
 
     a = argparse.Namespace(**vars(a))
-    a.schema = "load_" + uuid4().hex
-    a.logs = tempfile.mkdtemp(prefix="linch-load-")
+    a.schema, a.logs = "load_" + uuid4().hex, tempfile.mkdtemp(prefix="linch-load-")
     processes: dict[str, Any] = {}
     handles = []
     admin = await asyncpg.connect(a.dsn, command_timeout=10)
@@ -520,20 +530,11 @@ async def run_point(a: argparse.Namespace) -> dict[str, Any]:
                 chaos["lease_owner"],
                 chaos["injected_at"],
             )
-            query = """SELECT epoch,at::text,extract(epoch FROM at)::float-$3 seconds
-                FROM load_claims WHERE run_id=$1 AND epoch>$2 ORDER BY at LIMIT 1"""
-            recovery = await pool.fetchrow(
-                query, chaos["id"], chaos["lease_epoch"], chaos["injected_at"]
-            )
-            chaos["recovery"] = dict(recovery) if recovery else None
+            chaos["recovery"] = await recovery_after(pool, chaos)
         keys = "workers rate rtt logs pool_size readers concurrency poll_interval pgbouncer".split()
         result.update({key: getattr(a, key) for key in keys})
         checks = result["invariant_errors"]
-        ignored = (
-            "proxy",
-            "pgbouncer",
-            chaos.get("lease_owner") if a.chaos == "kill" else None,
-        )
+        ignored = ("proxy", "pgbouncer", chaos.get("lease_owner") if a.chaos == "kill" else None)
         codes = [p.returncode for n, p in processes.items() if n not in ignored]
         checks["processes"] = sum(code != 0 for code in codes)
         checks["chaos"] = int(a.chaos != "none" and not done_chaos)

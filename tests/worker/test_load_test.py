@@ -159,6 +159,49 @@ def test_kill_recovery_gate_enforces_the_seven_second_deadline(seconds, expected
     assert module.recovered({"recovery": recovery}) is expected
 
 
+@pytest.mark.skipif(not os.getenv("AGENT_KIT_TEST_PG_DSN"), reason="Postgres DSN required")
+async def test_recovery_deadline_covers_every_orphan_not_only_the_selected_run():
+    import importlib.util
+
+    import asyncpg
+
+    script = Path(__file__).resolve().parents[2] / "scripts/load_test.py"
+    spec = importlib.util.spec_from_file_location("load_orphans", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    conn = await asyncpg.connect(os.environ["AGENT_KIT_TEST_PG_DSN"])
+    try:
+        await conn.execute(
+            "CREATE TEMP TABLE load_claims(run_id text,owner text,epoch int,at timestamptz)"
+        )
+        await conn.executemany(
+            "INSERT INTO load_claims VALUES($1,$2,$3,to_timestamp($4::float))",
+            [
+                ("a", "w-0", 1, 999.0),
+                ("a", "w-1", 2, 1005.0),
+                ("b", "w-0", 1, 999.0),
+                ("b", "w-2", 2, 1006.9),
+                ("other", "w-1", 1, 999.0),
+                ("other", "w-2", 2, 1010.0),
+                ("later", "w-0", 1, 1001.0),
+                ("later", "w-1", 2, 1011.0),
+            ],
+        )
+        chaos = {"lease_owner": "w-0", "injected_at": 1000.0}
+        recovery = await module.recovery_after(conn, chaos)
+        assert recovery["runs"] == 2 and recovery["run_id"] == "b"
+        assert recovery["seconds"] == pytest.approx(6.9)
+        assert module.recovered({"recovery": recovery})
+        await conn.execute("INSERT INTO load_claims VALUES('b','w-3',3,to_timestamp(1012))")
+        assert (await module.recovery_after(conn, chaos))["seconds"] == pytest.approx(6.9)
+        await conn.execute("""INSERT INTO load_claims VALUES
+            ('c','w-0',1,to_timestamp(999)),('c','w-2',2,to_timestamp(1007.1))""")
+        assert not module.recovered({"recovery": await module.recovery_after(conn, chaos)})
+    finally:
+        await conn.close()
+
+
 def test_initialization_repro_selects_durable_started_victim(monkeypatch):
     import importlib.util
     from types import SimpleNamespace
