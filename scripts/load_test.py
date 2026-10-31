@@ -140,6 +140,14 @@ async def child(a: argparse.Namespace) -> None:
         return a.steady <= time.time() < a.end
 
     class CountedConnection(asyncpg.Connection):
+        def _process_notification(self, pid: int, channel: str, payload: str) -> None:
+            if steady():
+                with contextlib.suppress(ValueError, TypeError, AttributeError, KeyError):
+                    event = json.loads(payload)
+                    operation = event.get("operation") or event["type"]
+                    metrics["notifications_by_operation"][operation] += 1
+            super()._process_notification(pid, channel, payload)
+
         async def execute(self, query: str, *args: Any, **kwargs: Any) -> Any:
             if steady() and query == self.get_reset_query():
                 metrics["reset_queries"] += 1
@@ -176,20 +184,6 @@ async def child(a: argparse.Namespace) -> None:
 
     worker = None
     if a.identity != "api":
-        from pgqueuer.core import listeners
-
-        initialize = listeners.initialize_notice_event_listener
-
-        async def listen(connection: Any, channel: Any, event_handler: Any) -> None:
-            def counted(event: Any) -> None:
-                if steady():
-                    operation = getattr(event.root, "operation", event.root.type)
-                    metrics["notifications_by_operation"][str(operation)] += 1
-                event_handler(event)
-
-            await initialize(connection, channel, counted)
-
-        listeners.initialize_notice_event_listener = listen
         original = PostgresRunStore.renew
 
         async def renew(self: Any, lease: Any) -> Any:
