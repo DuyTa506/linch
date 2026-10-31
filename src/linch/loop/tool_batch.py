@@ -12,6 +12,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+from .. import lifecycle
 from ..events import (
     Event,
     LoopGuardEvent,
@@ -21,7 +22,7 @@ from ..events import (
     ToolProgressEvent,
     UserEvent,
 )
-from ..hooks import HookEvent, ToolUseStartContext, ToolUseStopContext
+from ..hooks import ToolUseStartContext, ToolUseStopContext
 from ..loop_guard import evaluate_loop_guard
 from ..run_store import durable_call
 from ..scheduler import execute_tool_calls
@@ -164,7 +165,7 @@ async def run_tool_batch(ctx: ToolBatchContext) -> AsyncIterator[Event]:
         yield event
         if isinstance(event, ToolCallStartEvent):
             await ctx.dispatch_lifecycle(
-                HookEvent.TOOL_USE_START,
+                lifecycle.TOOL_USE_START,
                 ToolUseStartContext(
                     session=session,
                     run_id=ctx.run_id,
@@ -178,7 +179,7 @@ async def run_tool_batch(ctx: ToolBatchContext) -> AsyncIterator[Event]:
             )
         elif isinstance(event, ToolCallEndEvent):
             await ctx.dispatch_lifecycle(
-                HookEvent.TOOL_USE_STOP,
+                lifecycle.TOOL_USE_STOP,
                 ToolUseStopContext(
                     session=session,
                     run_id=ctx.run_id,

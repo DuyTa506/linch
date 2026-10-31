@@ -48,6 +48,14 @@ remain for a later retry.
 `EventBus` (`kernel/events.py`) registers listeners with
 `on(name, listener, *, prepend=False) -> Disposable` and dispatches three ways:
 
+Lifecycle producers pass a `linch.kernel.events.LifecyclePoint` constant instead
+of repeating a string. The domain catalog re-exports the same descriptor for
+convenient imports. Each point declares its payload type and one dispatch mode;
+`EventBus` rejects `emit`, `serial`, or `waterfall` calls that do not match that
+mode. Hook points use the `hook` mode and are owned by `HookDispatcher`, which
+preserves user-hook ordering and mutation semantics. Plain string names remain
+available for host-defined events.
+
 | Dispatcher | Semantics |
 |---|---|
 | `emit(name, *args)` | Fire-and-forget. Non-vetoing; each listener is isolated by its own `try/except` so one failure never breaks the others. Coroutine listeners are scheduled. |

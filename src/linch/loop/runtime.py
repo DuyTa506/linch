@@ -15,6 +15,7 @@ from dataclasses import replace
 from functools import partial
 from typing import Any, cast
 
+from .. import lifecycle
 from .._telemetry import end_step, start_step
 from .._wire import UnsupportedWireVersionError
 from ..errors import AbortError, ConfigError
@@ -30,7 +31,6 @@ from ..events import (
 )
 from ..hooks import (
     HookDispatcher,
-    HookEvent,
     ProviderCallStartContext,
     ProviderCallStopContext,
     TurnStartContext,
@@ -369,7 +369,7 @@ class TurnLifecycle:
         self,
         session: Session,
         run_id: str,
-        dispatch: Callable[[HookEvent, Any], Awaitable[None]],
+        dispatch: Callable[[lifecycle.LifecyclePoint, Any], Awaitable[None]],
     ) -> None:
         self._session = session
         self._run_id = run_id
@@ -380,7 +380,7 @@ class TurnLifecycle:
     async def start_turn(self, turn_index: int) -> None:
         start_step(self._session, turn_index)
         await self._dispatch(
-            HookEvent.TURN_START,
+            lifecycle.TURN_START,
             TurnStartContext(
                 session=self._session,
                 run_id=self._run_id,
@@ -397,7 +397,7 @@ class TurnLifecycle:
         self.active_turn_index = None
         end_step(self._session)
         await self._dispatch(
-            HookEvent.TURN_STOP,
+            lifecycle.TURN_STOP,
             TurnStopContext(
                 session=self._session,
                 run_id=self._run_id,
@@ -409,7 +409,7 @@ class TurnLifecycle:
     async def start_provider_call(self, turn_index: int, model: str) -> None:
         started_at = time.perf_counter()
         await self._dispatch(
-            HookEvent.PROVIDER_CALL_START,
+            lifecycle.PROVIDER_CALL_START,
             ProviderCallStartContext(
                 session=self._session,
                 run_id=self._run_id,
@@ -428,7 +428,7 @@ class TurnLifecycle:
         turn_index, model, started_at = self.active_provider_call
         self.active_provider_call = None
         await self._dispatch(
-            HookEvent.PROVIDER_CALL_STOP,
+            lifecycle.PROVIDER_CALL_STOP,
             ProviderCallStopContext(
                 session=self._session,
                 run_id=self._run_id,

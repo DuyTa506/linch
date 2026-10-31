@@ -12,6 +12,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+from .. import lifecycle
 from ..errors import ConfigError
 from ..events import (
     ErrorEvent,
@@ -22,7 +23,7 @@ from ..events import (
     event_from_dict,
     event_to_dict,
 )
-from ..hooks import AgentStartContext, AgentStopContext, HookEvent
+from ..hooks import AgentStartContext, AgentStopContext
 from ..hooks.contexts import _AgentResult
 from ..model_calls import _context_fingerprint
 from ..run_store import durable_call
@@ -98,7 +99,7 @@ async def _emit_prompt_block(ctx: RunStartupContext, block_reason: str) -> Async
         yield event
     ctx.blocked = True
     await ctx.dispatch_lifecycle(
-        HookEvent.AGENT_STOP,
+        lifecycle.AGENT_STOP,
         AgentStopContext(
             session=runtime.session,
             run_id=runtime.run_id,
@@ -117,7 +118,7 @@ async def initialize_run(ctx: RunStartupContext) -> AsyncIterator[Event]:
     prompt = ctx.prompt
 
     await ctx.dispatch_lifecycle(
-        HookEvent.AGENT_START,
+        lifecycle.AGENT_START,
         AgentStartContext(
             session=session,
             run_id=runtime.run_id,

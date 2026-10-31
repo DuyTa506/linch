@@ -10,6 +10,13 @@ input/output, the final answer), or control the loop (block a tool, stop early,
 force another turn). Runtime traces and metrics come from OpenTelemetry at the
 I/O source; they do not require a telemetry hook.
 
+Every hook chokepoint is a `hook` point in the generated [lifecycle
+catalog](../architecture/events.md#typed-lifecycle-catalog); `HookDispatcher`
+awaits hooks in registration order. The separate `tools/pre-execute`,
+`tools/execute`, and `tools/post-execute` points are waterfalls for tool
+wrappers; user hooks stay on the adapter so mutation composition, failure
+isolation, and the security-sensitive `PreToolUse` ordering remain explicit.
+
 Hooks replace the older `middleware=`, `context_builder=`, `verifiers=`, and
 `RunOptions(stop_when=...)` parameters. Each of those is now a built-in
 **adapter** you wrap in a hook (see [Built-in adapters](#built-in-adapters)).
@@ -242,6 +249,12 @@ for Langfuse, Grafana Tempo, Datadog, or another OTLP collector; the Linch
 agent and hook configuration stays the same. See
 [`examples/observability/observability_agent.py`](../../examples/observability/observability_agent.py)
 for a self-contained console-exporter setup.
+
+To correlate host logs with a run, attach `TraceIdFilter` to a handler. It
+prefers an explicit `extra={"trace_id": ...}`, then the active OTel span,
+`record.run_id`, and an optional fallback. `ToolContext.trace_id` exposes the
+same value to tool implementations as a read-only property; tools can pass it
+explicitly with `logger.info("...", extra={"trace_id": ctx.trace_id})`.
 
 ---
 

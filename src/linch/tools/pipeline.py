@@ -27,11 +27,12 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from linch import lifecycle
 from linch.kernel import Disposable, EventBus
 
-PRE_EXECUTE = "tools/pre-execute"
-EXECUTE = "tools/execute"
-POST_EXECUTE = "tools/post-execute"
+PRE_EXECUTE = lifecycle.TOOL_PRE_EXECUTE
+EXECUTE = lifecycle.TOOL_EXECUTE
+POST_EXECUTE = lifecycle.TOOL_POST_EXECUTE
 
 Terminal = Callable[[], Any]
 
@@ -108,11 +109,11 @@ class ToolPipeline:
         processes.
         """
         return {
-            phase: [
-                _listener_resume_identity(listener, phase=phase)
-                for listener in self._bus._listeners.get(phase, ())
+            point.name: [
+                _listener_resume_identity(listener, phase=point.name)
+                for listener in self._bus._listeners.get(point.name, ())
             ]
-            for phase in (PRE_EXECUTE, EXECUTE, POST_EXECUTE)
+            for point in (PRE_EXECUTE, EXECUTE, POST_EXECUTE)
         }
 
     async def run(self, execution: ToolExecution, terminal: Terminal) -> Any:

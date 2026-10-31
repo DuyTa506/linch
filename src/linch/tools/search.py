@@ -11,6 +11,7 @@ from typing import Any
 from ..errors import ConfigError
 from ..events import ToolCallEndEvent
 from ..kernel import Context, Disposable
+from ..lifecycle import TOOL_RESOLVE
 from ..loop.turn_stopping import TurnStopping, TurnStoppingDecision
 from ..types import Message, TextBlock
 from .base import ToolContext, ToolResult
@@ -57,7 +58,7 @@ class ToolSearchPlugin:
         ctx.register("request_catalog", catalog)
         catalog.prepare()
         ctx.effect(lambda: agent._turn_stopping_dispatcher.register(catalog._guard_terminal))
-        ctx.on("tools/resolve", catalog._guard_call)
+        ctx.on(TOOL_RESOLVE, catalog._guard_call)
         return Disposable()
 
 

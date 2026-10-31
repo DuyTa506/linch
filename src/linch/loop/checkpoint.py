@@ -8,11 +8,14 @@ from copy import deepcopy
 from html import escape
 from typing import Any
 
+from .._tracing import trace_id_for
 from .._wire import WIRE_VERSION, require_wire_version
 from ..errors import ConfigError
 from ..events import (
     BackgroundWorkerEvent,
     Event,
+    ResultEvent,
+    SystemEvent,
     ToolCallEndEvent,
     ToolCallStartEvent,
     UsageEvent,
@@ -267,6 +270,9 @@ class RunEventBuffer:
 
 
 async def _persist_event(session: Session, run_id: str, event: Event) -> None:
+    if isinstance(event, SystemEvent) or isinstance(event, ResultEvent):
+        if event.trace_id is None:
+            event.trace_id = trace_id_for(run_id)
     buf = getattr(session, "_event_journal", None)
     if buf is not None and buf.run_id == run_id:
         await buf.append(event)

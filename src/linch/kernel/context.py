@@ -6,10 +6,9 @@ from collections.abc import Callable
 from contextvars import ContextVar
 from typing import Any
 
-from linch.errors import ConfigError
-
 from .effects import Disposable, EffectScope
-from .events import EventBus, Listener
+from .errors import ConfigError
+from .events import CONTEXT_SERVICE, EventBus, EventName, Listener
 
 _MISSING = object()
 _PLUGIN_SCOPE: ContextVar[Any] = ContextVar("linch_plugin_scope", default=None)
@@ -80,16 +79,16 @@ class Context:
                     if key not in self._services or self._services[key] is not service:
                         return
                     del self._services[key]
-                    if not self.events.has_listeners("context/service"):
+                    if not self.events.has_listeners(CONTEXT_SERVICE):
                         return
-                    notification = self.events._notification("context/service", self, key)
+                    notification = self.events._notification(CONTEXT_SERVICE, self, key)
                 return notification.dispose()
 
             return _remove
 
         disposer = self._scope.effect(_install)
-        if self.events.has_listeners("context/service") and _PLUGIN_SCOPE.get() is None:
-            self.events.emit("context/service", self, key)
+        if self.events.has_listeners(CONTEXT_SERVICE) and _PLUGIN_SCOPE.get() is None:
+            self.events.emit(CONTEXT_SERVICE, self, key)
         return disposer
 
     def get(self, key: str, default: Any = None) -> Any:
@@ -126,7 +125,7 @@ class Context:
             raise AttributeError(f"no service {name!r} registered on context {self.label!r}")
         return service
 
-    def on(self, name: str, listener: Listener, *, prepend: bool = False) -> Disposable:
+    def on(self, name: EventName, listener: Listener, *, prepend: bool = False) -> Disposable:
         """Register an event listener owned by this context.
 
         Args:
@@ -239,17 +238,17 @@ class Context:
             RuntimeError: If this context is closing or already disposed.
         """
         self._ensure_active()
-        bus = self.events.fork(exclude=("context/service",)) if isolate_events else self.events
+        bus = self.events.fork(exclude=(CONTEXT_SERVICE,)) if isolate_events else self.events
         child = Context(label=label, _bus=bus, _parent=self)
         self._children.append(child)
         self._scope.add(child._teardown)
         if isolate_events:
 
             async def service_changed(changed: Context, key: str) -> None:
-                if child._within(changed) and bus.has_listeners("context/service"):
-                    await bus._notification("context/service", changed, key).dispose()
+                if child._within(changed) and bus.has_listeners(CONTEXT_SERVICE):
+                    await bus._notification(CONTEXT_SERVICE, changed, key).dispose()
 
-            child.effect(lambda: self.events.on("context/service", service_changed))
+            child.effect(lambda: self.events.on(CONTEXT_SERVICE, service_changed))
         return child
 
     def _ensure_active(self) -> None:
@@ -278,16 +277,16 @@ class Context:
         if existing is not None and existing[0] is not owner:
             raise ConfigError(f"service {key!r} is already provided by another plugin")
         self._plugin_exports[key] = (owner, source)
-        if self.events.has_listeners("context/service"):
-            self.events.emit("context/service", self, key)
+        if self.events.has_listeners(CONTEXT_SERVICE):
+            self.events.emit(CONTEXT_SERVICE, self, key)
 
     def _withdraw_plugin(self, owner: Context, key: str) -> Disposable | None:
         existing = self._plugin_exports.get(key)
         if existing is None or existing[0] is not owner:
             return None
         del self._plugin_exports[key]
-        if self.events.has_listeners("context/service"):
-            return self.events._notification("context/service", self, key)
+        if self.events.has_listeners(CONTEXT_SERVICE):
+            return self.events._notification(CONTEXT_SERVICE, self, key)
         return None
 
     async def _dispose(self) -> None:

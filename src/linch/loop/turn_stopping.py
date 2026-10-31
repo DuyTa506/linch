@@ -3,10 +3,11 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from inspect import isawaitable
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from ..events import Event
-from ..kernel import Disposable
+from ..kernel import Disposable, EventBus
+from ..lifecycle import TURN_STOPPING
 from ..types import AssistantAssembly, Message, ToolUseBlock
 
 if TYPE_CHECKING:
@@ -43,32 +44,46 @@ TurnStoppingListener = Callable[
 
 
 class TurnStoppingDispatcher:
-    __slots__ = ("_listeners",)
+    __slots__ = ("_bus", "_listeners")
 
     def __init__(self, listeners: tuple[TurnStoppingListener, ...] = ()) -> None:
-        self._listeners = [(object(), listener) for listener in listeners]
+        self._bus = EventBus()
+        self._listeners: list[tuple[object, TurnStoppingListener, Disposable]] = []
+        for listener in listeners:
+            self.register(listener)
 
     @property
     def active(self) -> bool:
         return bool(self._listeners)
 
     def snapshot(self) -> tuple[TurnStoppingListener, ...]:
-        return tuple(listener for _token, listener in self._listeners)
+        return tuple(listener for _token, listener, _disposer in self._listeners)
 
     def register(self, listener: TurnStoppingListener) -> Disposable:
-        entry = (object(), listener)
-        self._listeners.append(entry)
-        return Disposable(
-            lambda: self._listeners.remove(entry) if entry in self._listeners else None
-        )
+        token = object()
 
-    async def dispatch(self, event: TurnStopping) -> TurnStoppingDecision:
-        for _token, listener in tuple(self._listeners):
+        async def wrapped(event: TurnStopping) -> TurnStoppingDecision | None:
             value = listener(event)
             if isawaitable(value):
                 value = await value
             if value is not None and not isinstance(value, TurnStoppingDecision):
                 raise TypeError("turn-stopping listeners must return TurnStoppingDecision or None")
-            if value is not None and value.action != "accept":
-                return value
+            return None if value is None or value.action == "accept" else value
+
+        bus_disposer = self._bus.on(TURN_STOPPING, wrapped)
+        entry = (token, listener, bus_disposer)
+        self._listeners.append(entry)
+
+        def remove() -> Any:
+            if entry not in self._listeners:
+                return None
+            self._listeners.remove(entry)
+            return bus_disposer.dispose()
+
+        return Disposable(remove)
+
+    async def dispatch(self, event: TurnStopping) -> TurnStoppingDecision:
+        value = await self._bus.serial(TURN_STOPPING, event)
+        if value is not None:
+            return value
         return TurnStoppingDecision("accept")
