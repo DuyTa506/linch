@@ -2,64 +2,147 @@
 
 > Part of the [Linch architecture guide](./README.md).
 
-| Module | Responsibility |
-|--------|---------------|
-| `agent.py` | Neutral SDK configuration; tool-aware system-block assembly; `session()` and safe `fork_session()` factories. A bare agent has no implicit workspace tools or project-local store. |
-| `session.py` | Per-conversation state: `session_log`, `run_deps`, `RunOptions`; `provider_view`/`full_history` are read-only projections of `session_log` |
-| `session_log.py` | The single append-only `SessionLog` + `MessageEntry`/`ProjectionEntry`; deep-copy projects the session-owned model-visible `provider_view` and audit `full_history` (per-request context is outside the log); compaction is a logged `record_projection` |
-| `kernel/` | Dependency-free IoC/effect kernel: `Context` (per-agent scope), `Disposable` (reversible effects), `EffectScope`, `EventBus` (emit/serial/waterfall). See [kernel.md](./kernel.md) |
-| `execution/` | Capability seam: `ExecutionBackend` protocol (`shell` + `fs`), `LocalExecutionBackend` (default), `RemoteExecutionBackend` (bundles supplied transports) |
-| `loop/` | Turn orchestration (`runner.py`), streaming + `ContextLengthError` recovery (`streaming.py`), `ProviderRequest` assembly (`request.py`), terminal event tails + gate evaluation (`terminals.py`), event persistence + checkpoint serialization (`checkpoint.py`) |
-| `types.py` | Shared dataclasses: `Message`, `ContentBlock`, `ProviderRequest`, `OutputSchema` |
-| `events.py` | All event dataclasses + round-trip serialization (`event_to_dict` / `event_from_dict`), including stream-only `ToolProgressEvent` |
-| `config.py` | `FeatureFlags`, `SystemPromptConfig` |
-| `context/` | `ContextBuilder` protocol, `ContextBuildResult`, `ContextBudget`, `apply_context_budget`; consumed by `ContextInjectionHook` in `hooks/adapters.py` |
-| `loop_guard/` | `LoopGuard`, `LoopGuardState`, `LoopGuardDecision`, `evaluate_loop_guard`, `normalize_loop_guard` |
-| `memory/` | *(removed in 3.0)* — file memory is `FileMemoryContextBuilder` in the context/hook path; semantic recall is host-owned (see the mem0 example) |
-| `filesystem/` | Explicit `FeatureFlags(filesystem=True)` capability: `FileBackend` protocol, `ScopedFileBackend`, `StateFileBackend`, `DiskFileBackend`, `PostgresFileBackend`, `CompositeFileBackend`, `OffloadConfig`, ls/read_file/write_file/edit_file tools |
-| `scheduler.py` | Canonical tool-call security pipeline (validate → offered-tool boundary → `PreToolUse` → revalidate → final permission), resource-aware bounded execution, stream-only tool progress, and enabled-filesystem offload at the result chokepoint |
-| `compaction.py` | Context-window management; calls `agent.provider` directly; `CompactionLadder` + `micro_compact` recovery rungs |
-| `budget.py` | `RunBudget` — token/USD spending caps shared across the agent tree; charged per turn in `loop/runner.py` |
-| `ext/workflow/` | Deterministic workflow engine: `WorkflowContext` (`context.py`), content-addressed journal (`journal.py`), `run_workflow` driver (`engine.py`) |
-| `coordination/` | Optional in-process peer messaging: `mailbox/` (peer message bus + `Correlator`) and `send_message.py`; durable scheduling and queue dispatch are in `linch.worker` |
-| `permissions/` | `PermissionEngine`: final canonical-input rule evaluation, event emission, loop suspension, durable same-turn permission decision keys |
-| `pricing.py` | `ModelPricing`, `_DEFAULT_PRICING`, `cost_usd()` for per-turn and cumulative cost events |
-| `ext/evals/` | Scripted provider, eval case/result dataclasses, built-in scorers, `run_eval()` |
-| `providers/` | `BaseProvider`, `ProviderCapabilities`; implementations: `OpenAIChatCompletionsProvider` (generic OpenAI-compatible endpoint), `DeepSeekProvider` (native thinking, JSON-object output, `reasoning_content` round-trip), `OpenAIResponsesProvider` (stateful, native reasoning effort/summary), `AnthropicProvider` (adaptive/extended thinking with signature, prompt caching), `GeminiProvider`, `LlamaCppProvider`, `VLLMProvider`, `SGLangProvider`; `limiter.py` — `Limiter` protocol and the `provider_slot` gate core holds around every live provider call |
-| `tools/` | Tool protocol, `ToolContext`, `ToolRegistry` (registration returns a `Disposable`), `ToolResult`, `Citation`, built-in tools, execution backends; `pipeline.py` — the open `tools/pre-execute → execute → post-execute` seam (`ToolPipeline`); `wrappers/` — `tools/execute` around-wrappers (metrics, timeout) |
-| `sessions/` | `SessionStore` protocol, `InMemorySessionStore`, `PostgresSessionStore`, provider-view snapshots, and portable safe-prefix session forking |
-| `mcp/` | MCP server connection → Linch tool adapters |
-| `skills/` | `SKILL.md`-based slash-commands with argument substitution |
-| `subagents/` | Specialized agent roles from `.linch/agents.yaml`; `workers.py` — `WorkerHandle` dataclass for per-worker state tracking; wiring for `SubagentContinueTool` |
-| `run_store.py` | `InMemoryRunStore` plus `PostgresRunStore` in `run_stores/postgres.py`, `RunCheckpoint`, and `RunContract` — durable checkpoints plus a canonical fingerprint of resume-safe execution inputs. Background completion events are status-only audit records; no durable result-delivery queue exists. |
-| `ext/deep_agent/` | Explicit `create_deep_agent` profiles/factory (`factory.py`); deep prompt layers (`prompts.py`); specialist roster — researcher, planner, implementer, verification (`subagents.py`) |
-| `ext/reports.py` | Run report construction and persisted report loading |
-| `ext/loop_runner.py` | Host-driven recurring-loop runner and filesystem artifacts |
-| `ext/scaffold/` | Stdlib-only `linch` project scaffolding console script |
-| `tools/subagent_continue.py` | `SubagentContinueTool` — continues a retained child session by worker id or display name |
-| `tools/subagent_stop.py` | `TaskStopTool` — cancels a background worker; handle remains in `session.workers` and is still continuable |
-| `tools/_worker_utils.py` | `resolve_worker` — shared id/display-name lookup helper used by continue and stop tools |
-| `recipes/` | *(removed)* — use `Agent(...)` directly; see `examples/` for domain patterns |
+This inventory follows the current `src/linch` tree. Names in the top-level
+package are public only when they are in `linch.__all__`; submodule paths and
+underscore-prefixed names are implementation details unless a page explicitly
+documents them as an adapter seam.
 
-## Design rationale
+## Kernel and run loop
 
-- **One module, one responsibility.** Each row has a single reason to change, so a bug
-  or feature touches a bounded surface. The `loop/` package is itself split by
-  responsibility (orchestration / streaming / request assembly / terminals /
-  checkpoint) for the same reason — the turn loop was too big to be one file.
-- **Protocols and implementations live together but stay separable.** A subsystem
-  exposes a protocol (`FileBackend`, `SessionStore`, `BaseProvider`) plus reference
-  implementations; an embedder can supply its own without forking core. File memory
-  composes with `FileBackend` rather than introducing a second store contract.
-- **Optional layers are physically grouped.** `coordination/` (and the optional
-  `ext/deep_agent/`, `ext/workflow/`, `ext/evals/`) sit apart from the always-on core, so the
-  load-bearing loop is easy to find and the opt-in extras don't inflate the mental model
-  of "what the SDK does by default."
+| Path | Responsibility |
+|---|---|
+| `__init__.py` | Lazy top-level API. It resolves the names in `linch.__all__` without importing optional provider, MCP, Postgres, or worker integrations eagerly. |
+| `agent.py` | `Agent` configuration, per-agent `Context`, registries, session lifecycle, provider preparation, permissions, hooks, filesystem setup, and default `ReliabilityPolicy()`. |
+| `session.py` | `Session`, `RunOptions`, session lifecycle, run/resume admission, append-only history access, per-run dependencies, principals, and background work. |
+| `session_log.py` | Append-only `SessionLog`; `provider_view` and `full_history` projections; logged compaction projections and history fingerprints. |
+| `kernel/` | Dependency-free `Context`, reversible `Disposable` effects, `EffectScope`, and `EventBus`. See [kernel.md](./kernel.md). |
+| `loop/runner.py` | `run_loop()` and `resume_loop()` entry points plus turn choreography and terminal cleanup. |
+| `loop/runtime.py` | Run-scoped checkpoint, ledger, lifecycle, hook, telemetry, and lease-loss state used by the runner. |
+| `loop/request.py` | User-message and `ProviderRequest` construction, context-builder output merge, and provider capability downgrades. |
+| `loop/provider_turn.py` | Provider-turn preparation, streaming handoff, accepted assistant persistence, and response-hook dispatch. |
+| `loop/streaming.py` | Normalized provider stream parsing and context-length/model-fallback recovery. |
+| `loop/tool_batch.py` | Tool-batch checkpoints, event projection, result-message append, recovery, and loop-guard evaluation. |
+| `loop/checkpoint.py` | Current wire-format checkpoint/event serialization, event buffering, model-call recovery cursors, and extension state. |
+| `loop/terminals.py` | Terminal result/event tails, structured-output validation, and completion gates. |
+| `loop/finalize.py` | Final text/final-tool finalization and `TurnStopping` dispatch before terminal-tool acknowledgement. |
+| `loop/turn_stopping.py` | `TurnStopping`, `TurnStoppingDecision`, `TurnStoppingDispatcher`, and the serial veto/continue/fail seam. |
+| `loop/feedback.py` | Durable feedback messages for rejected provider output, final-answer checks, and turn continuation. |
+| `loop/reliability.py` | Run-scoped reliability state and prerequisite hook implementation. |
+| `loop/contracts.py` | Resume-safe run-contract construction, including principal and reliability configuration. |
+| `loop/resume.py` | Checkpoint recovery and replay of pending provider/tool work. |
+| `loop/startup.py` | Durable startup phase and user-prompt append handling. |
+| `loop/dispatch.py` | Hook lifecycle dispatch adapters. |
+| `loop/__init__.py` | Public loop re-exports: `run_loop`, `resume_loop`, request helpers, and provider capability application. |
 
-The virtual filesystem/offload layer is one such explicit capability: set
-`FeatureFlags(filesystem=True)` or choose a preset that does so. A bare SDK agent
-does not create `.linch` state merely by opening a session.
+## Providers and model accounting
 
----
+| Path | Responsibility |
+|---|---|
+| `providers/base.py` | `BaseProvider`, `ProviderCapabilities`, thinking configuration, and normalized provider protocol. |
+| `providers/openai_chat.py` | OpenAI Chat Completions and OpenAI-compatible endpoints. |
+| `providers/openai_responses.py` | OpenAI Responses API, including stateful response ids and native reasoning options. |
+| `providers/anthropic.py` | Anthropic streaming, prompt caching, and thinking options. |
+| `providers/gemini.py` | Gemini/Vertex AI adapter using the optional `google-genai` SDK; SDK objects stay inside the adapter. |
+| `providers/deepseek.py` | DeepSeek-native options and reasoning-content handling. |
+| `providers/llamacpp.py` | llama.cpp OpenAI-compatible server adapter and context-window preparation. |
+| `providers/vllm.py` | vLLM OpenAI-compatible server adapter. |
+| `providers/sglang.py` | SGLang OpenAI-compatible server adapter. |
+| `providers/catalog.py` | Provider model metadata and model listing helpers. |
+| `providers/limiter.py` | Optional provider concurrency gate. |
+| `providers/retry.py` | Provider/tool retry options and retry wrapper. |
+| `model_calls.py` | Durable model-call intents, receipts, projections, and cumulative usage accounting. |
+| `openai_responses.py` | `OpenAIOptions`, `OpenAIReasoning`, Responses wire translation, and low-level streaming helpers used by the provider adapter. |
+| `compaction.py` | Context compaction strategies, compaction accounting, and provider-backed summaries. |
+| `budget.py` | Shared per-run and subagent token/cost budgets. |
+| `pricing.py` | Known model pricing and cost calculation. |
+| `_telemetry.py` | Private OpenTelemetry API adapter: run/step/chat/tool/compaction spans and token, duration, and store-duration histograms. |
+
+## Durable state and scale-out
+
+| Path | Responsibility |
+|---|---|
+| `run_store.py` | `RunStore`, optional `RunLeaseStore`, event-batch and model-input snapshot protocols; `RunCheckpoint`, `RunRecord`, `RunLease`, run contracts, wire codecs, and `InMemoryRunStore`. |
+| `run_stores/` | Optional durable run-store backends. `run_stores/postgres.py` implements `PostgresRunStore` with fenced writes, lease epochs, checkpoints, model-input snapshots, and `(run_id, seq)` event rows. |
+| `sessions/store.py` | `SessionStore`, `ProviderViewSnapshotStore`, `SessionInboxStore`, and session record/message types. |
+| `sessions/memory.py` | `InMemorySessionStore` for process-local tests and development. |
+| `sessions/postgres.py` | `PostgresSessionStore` for durable session messages, task rows, provider-view snapshots, and inbox delivery. Import it from `linch.sessions.postgres`. |
+| `storage/` | Internal shared asyncpg pool/schema lifecycle in `storage/_pg.py`; this package is not part of the public API. |
+| `worker/` | Optional PgQueuer dispatch runtime. `dispatch.py` atomically creates pending runs and jobs; `runtime.py` runs `Worker` jobs with a separate Linch lease; `schedules.py` provides UTC cron/interval definitions; `tools.py` mounts session-bound schedule tools. Install `linch[worker]` and import `linch.worker` explicitly. |
+| `durability.py` | Durable inbox options and delivery envelopes used by session/mailbox notification paths. |
+
+The worker uses `PostgresRunStore.claim()`/`renew()`/`release()` with a
+monotonic fencing epoch. It rebuilds PgQueuer managers after transient
+database/listener failures, retries infrastructure failures with
+`DatabaseRetryEntrypointExecutor`, and lets stale queue jobs be reclaimed by
+PgQueuer. The worker acknowledges a job only after a terminal run state is
+durable.
+
+## Tools, policy, and context
+
+| Path | Responsibility |
+|---|---|
+| `tools/base.py` | Duck-typed tool protocol, `ToolContext`, `ToolResult`, output contracts, scopes, resource accesses, citations, and stable idempotency keys. |
+| `tools/function.py` | `FunctionTool` and `tool()` adapter; synchronous functions run in bounded blocking workers. |
+| `tools/registry.py` | `ToolRegistry`, reversible registration, `empty_tools()`, and `workspace_tools()`. |
+| `tools/pipeline.py` | Open `tools/pre-execute` → `execute` → `post-execute` pipeline. |
+| `tools/builtin.py` | Workspace read/write/shell tools. |
+| `tools/tasks.py` | Session task tools. |
+| `tools/ask_user.py` | Host-provided user-question tool. |
+| `tools/skill.py` | Skill invocation tool. |
+| `tools/subagent.py` | Subagent spawning and input-aware parallel eligibility. |
+| `tools/subagent_continue.py` | Continue a retained child session by worker id or display name. |
+| `tools/subagent_stop.py` | Stop a background worker while retaining its handle for later continuation. |
+| `tools/_worker_utils.py` | Shared worker id/display-name resolution. |
+| `tools/isolation.py` | Per-subagent isolation backend and temporary directory support. |
+| `tools/wrappers/` | Optional timeout and metrics execution wrappers. |
+| `scheduler.py` | Canonical tool-call resolution, offered-tool boundary, `PreToolUse`, revalidation, permission evaluation, bounded batching, resource conflict checks, retries/timeouts, and result offload. Only read work is parallel by default; input-aware predicates fail closed. |
+| `permissions/engine.py` | Canonical-input permission decisions, approval callbacks, and durable same-turn decision handling. |
+| `permissions/rules.py` | `ToolRule`, `PathRule`, and `BashRule`, including role conditions. |
+| `permissions/ruleset.py` | Layered permission rule sets. |
+| `permissions/principal.py` | Immutable `Principal(tenant, user, roles)` identity used by one run and its tool calls. |
+| `context/builder.py` | Async context-builder protocol, context budgets, builder chains, and ephemeral request context. |
+| `context/file_memory.py` | `FileMemoryContextBuilder`, which caches `/memories/MEMORY.md` for one run and injects at most 200 lines. |
+| `rag/` | Request-scoped retrieval protocol (`RagConnector`, `RetrievedChunk`), sourced context injection, checkpointed retrieval state, and optional citation grounding on `TurnStopping`. |
+| `filesystem/backend.py` | Virtual `FileBackend`, path normalization, scoped backends, in-memory state, and composite routing. |
+| `filesystem/disk.py` | Disk-backed virtual files. |
+| `filesystem/postgres.py` | `PostgresFileBackend` for durable virtual files; import it from `linch.filesystem.postgres`. |
+| `filesystem/offload.py` | Threshold-based large-result offload to a virtual filesystem. |
+| `filesystem/tools.py` | `ls`, `read_file`, `write_file`, and `edit_file` virtual filesystem tools. |
+| `hooks/` | Typed hook contexts, lifecycle dispatcher, context injection, tool middleware, redaction, read-before-write, caching, verification, and stop hooks. |
+| `middleware.py` | Tool middleware context and input/result records consumed by `ToolMiddlewareHook`. |
+| `skills/` | `SKILL.md` loading, listing, substitution, overlays, built-in skills, and system reminders. |
+| `subagents/` | Named agent definitions, child-agent construction, in-process worker handles, and subagent runners. |
+| `coordination/` | In-process mailbox and peer-message tools. Durable scheduling and PgQueuer dispatch are in `worker/`. |
+| `mcp/` | Optional MCP server configuration, client connection, naming, permission bridge, and tool adapters. |
+
+## Events, types, and support
+
+| Path | Responsibility |
+|---|---|
+| `events.py` | Typed stream events and strict current-wire serialization, including `ErrorEvent`, `ResultEvent`, tool events, `ReliabilityEvent`, and `BackgroundWorkerEvent`. |
+| `types.py` | Messages, content blocks, provider requests, usage, output schemas, tool choices, and stop reasons. |
+| `config.py` | `FeatureFlags` and system-prompt configuration. |
+| `loop_guard/` | Bounded repeated-call/failure/max-turn detection and checkpointable guard state. |
+| `errors.py` | Public Linch error hierarchy, including `RunNotResumableError`, `ToolTimeoutError`, and provider errors. |
+| `recovery.py` | Optional output-truncation recovery policy. |
+| `execution/` | Unified shell/filesystem execution capability seam and local/remote implementations. |
+| `verification.py` | Final-answer verifier protocols and verdict evaluation. |
+| `testing/` | Reusable provider, tool, mailbox, filesystem, and isolation contract checks. |
+| `_wire.py`, `_json.py` | Current wire-version enforcement and strict JSON traversal helpers. |
+
+## Explicit extensions
+
+| Path | Responsibility |
+|---|---|
+| `ext/deep_agent/` | Deep-agent profiles, prompts, factory, and specialist subagent definitions. |
+| `ext/evals/` | Scripted providers, evaluation cases/results, benchmark harness, and scorers. |
+| `ext/workflow/` | Deterministic workflow context, journal, engine, and suspension/errors. |
+| `ext/reports.py` | Run report construction and persisted report loading. |
+| `ext/loop_runner.py` | Host-driven recurring-loop runner and filesystem artifacts. |
+| `ext/scaffold/` | Stdlib-only project scaffolding console implementation. |
+| `ext/__init__.py` | Documents the explicit extension namespace without exporting extension names into `linch.__all__`. |
+
+File memory uses `context/file_memory.py` and `FileBackend`; queue dispatch and
+schedules use `linch.worker`.
 
 Back to the [architecture index](./README.md).
