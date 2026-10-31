@@ -160,8 +160,16 @@ database I/O asynchronously.
 
 ## Failure semantics
 
-After a run has been created, if a session-store or run-store write fails, the
-iterator ends with an `ErrorEvent` carrying the exception's class name and
+During an active resumable run, transient connection failures in session/run
+store operations interrupt the attempt without terminal events or a failed status. The loop stops
+background work and skips buffered writes and snapshot cleanup, preserving the
+last durable checkpoint for worker retry or lease takeover. This covers asyncpg
+connection/interface and availability errors, `OSError` (including connection
+and timeout errors), and explicit causes wrapped by a store. Provider/tool
+errors and agents without a run store keep their ordinary failure behavior.
+
+After a run has been created, a non-transient session-store or run-store write
+failure ends the iterator with an `ErrorEvent` carrying the exception's class name and
 retryability, followed by a `ResultEvent(subtype="error")`. The loop attempts
 terminal persistence once; if that also fails, it logs the secondary failure
 with the run ID and keeps the terminal events available to the caller.
@@ -174,8 +182,9 @@ never created.
 
 Optional provider-view snapshot caching and model-input snapshot deletion or
 pruning are best-effort: ordinary failures are logged and the run continues.
-Saving model-input snapshots remains required and a failure ends the run with
-the typed error pair above.
+Saving model-input snapshots remains required: non-transient failures end the
+run with the typed error pair above; transient connection failures interrupt it
+for recovery from the durable checkpoint.
 
 `LeaseLostError` means another holder owns the run. The loop cancels background
 workers and stops writing immediately, including terminal persistence, buffered

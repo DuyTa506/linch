@@ -164,6 +164,35 @@ class LeaseLostError(RuntimeError):
     """Raised when a holder attempts a write after its fencing epoch changed."""
 
 
+class _StoreUnavailableError(LeaseLostError):
+    """Transient store failure leaves the run retryable."""
+
+
+def _is_transient_store_error(error: BaseException) -> bool:
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (OSError, ConnectionError)):
+            return True
+        if any(
+            base.__module__.startswith("asyncpg.")
+            and base.__name__
+            in (
+                "PostgresConnectionError",
+                "InterfaceError",
+                "AdminShutdownError",
+                "CrashShutdownError",
+                "CannotConnectNowError",
+                "TooManyConnectionsError",
+            )
+            for base in type(current).__mro__
+        ):
+            return True
+        current = current.__cause__
+    return False
+
+
 class RunLeaseStore(Protocol):
     """Optional capability implemented by stores that support run leases."""
 
