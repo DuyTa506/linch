@@ -31,12 +31,29 @@ class ShellBackend(Protocol):
         cwd: str,
         timeout_s: float,
         signal: Any = None,
-    ) -> ExecResult: ...
+    ) -> ExecResult:
+        """Run a shell command within the requested working directory.
+
+        Args:
+            command: Shell command to execute.
+            cwd: Working directory for the command.
+            timeout_s: Maximum execution time in seconds.
+            signal: Optional abort signal observed by the implementation.
+
+        Returns:
+            Execution result containing stdout, stderr, exit status, and timeout state.
+        """
+        ...
 
 
 @runtime_checkable
 class ExecutionBackend(Protocol):
-    """One execution world: a shell backend and a filesystem backend together."""
+    """One execution world: a shell backend and a filesystem backend together.
+
+    Attributes:
+        shell: Subprocess or remote shell transport.
+        fs: Virtual filesystem transport for the same execution world.
+    """
 
     shell: ShellBackend
     fs: FileBackend
@@ -47,7 +64,19 @@ def normalize_execution_backend(
     *,
     filesystem: FileBackend | None = None,
 ) -> ExecutionBackend:
-    """Validate one indivisible shell/filesystem execution world."""
+    """Validate one indivisible shell/filesystem execution world.
+
+    Args:
+        backend: Candidate object exposing both ``shell`` and ``fs`` capabilities.
+        filesystem: Optional filesystem that must be the exact ``backend.fs`` object.
+
+    Returns:
+        The validated execution backend.
+
+    Raises:
+        TypeError: If ``backend`` does not satisfy the protocol or ``filesystem``
+            is a different object from ``backend.fs``.
+    """
     if not isinstance(backend, ExecutionBackend):
         raise TypeError("execution_backend must expose both .shell and .fs")
     if filesystem is not None and filesystem is not backend.fs:
@@ -59,7 +88,15 @@ def normalize_execution_backend(
 
 
 def resume_policy_descriptor(component: Any) -> dict[str, object] | None:
-    """Return a stable durable identity for one transport, or ``None`` if opaque."""
+    """Describe a transport's stable durable identity when it declares one.
+
+    Args:
+        component: Shell or filesystem transport to inspect.
+
+    Returns:
+        A JSON-compatible policy descriptor, or ``None`` when the component is
+        opaque or has not opted into a resume identity.
+    """
     policy_id = getattr(component, "resume_policy_id", None)
     if not isinstance(policy_id, str) or not policy_id:
         return None

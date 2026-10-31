@@ -278,7 +278,18 @@ def filesystem_tools(
     write_file: bool = True,
     edit_file: bool = True,
 ) -> list:
-    """Return a list of filesystem tool instances, optionally filtered."""
+    """Create the selected virtual filesystem tool instances.
+
+    Args:
+        ls: Whether to include the ``ls`` listing tool.
+        read_file: Whether to include the ``read_file`` tool.
+        write_file: Whether to include the ``write_file`` tool.
+        edit_file: Whether to include the ``edit_file`` tool.
+
+    Returns:
+        New tool instances in registration order: ``ls``, ``read_file``,
+        ``write_file``, then ``edit_file`` for the enabled options.
+    """
     out = []
     if ls:
         out.append(LsTool())
