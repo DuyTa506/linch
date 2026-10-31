@@ -174,6 +174,7 @@ if TYPE_CHECKING:
     from .middleware import MiddlewareContext, ToolCallMiddlewareInput, ToolCallMiddlewareResult
     from .openai_responses import OpenAIOptions, OpenAIReasoning
     from .permissions import BashRule, PathRule, Principal, ToolRule
+    from .profiles import Profile
     from .providers import (
         AnthropicProvider,
         AnthropicProviderOptions,
@@ -327,6 +328,7 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
     ),
     ".config": ("FeatureFlags", "SystemPromptConfig", "SystemPromptSection"),
     ".kernel": ("Context", "Disposable", "Plugin"),
+    ".profiles": ("Profile",),
     ".context": (
         "ContextBudget",
         "ContextBuilder",
@@ -656,6 +658,7 @@ __all__ = [
     "Context",
     "Disposable",
     "Plugin",
+    "Profile",
     "MailboxPlugin",
     "AskUserPlugin",
     "IgnorableEvent",

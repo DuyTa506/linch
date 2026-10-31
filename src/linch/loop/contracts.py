@@ -405,6 +405,8 @@ def _build_run_contract(session: Session, prompt: str, opts: RunOptions) -> Any:
     principal_contract = _principal_contract(opts.principal)
     if principal_contract is not None:
         run_options["principal"] = principal_contract
+    if opts.profile is not None:
+        run_options["profile"] = opts.profile._contract()
     return build_run_contract(
         primary_model=agent.model,
         fallback_models=getattr(agent, "fallback_models", None),

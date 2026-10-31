@@ -17,6 +17,7 @@ from .types import InvokedSkillRecord, Message, SkillOverlay, Usage
 if TYPE_CHECKING:
     from .agent import Agent
     from .permissions import Principal
+    from .profiles import Profile
     from .tools import ToolRegistry
 
 
@@ -83,6 +84,9 @@ class RunOptions:
 
     principal: Principal | None = None
     """Immutable tenant/user/role identity for this run's authorization."""
+
+    profile: Profile | None = None
+    """Versioned run defaults; pass the same definition again when resuming."""
 
 
 @dataclass(slots=True)
@@ -232,9 +236,10 @@ class Session:
 
         from .loop import run_loop
 
-        inner = run_loop(self, prompt, opts or RunOptions())
+        options = opts or RunOptions()
+        inner = run_loop(self, prompt, options)
         self._active_inner = inner
-        it = self._iterate(inner, "")
+        it = self._iterate(inner, "", options)
         self._active_gen = it
         return it
 
@@ -255,9 +260,10 @@ class Session:
 
         from .loop import resume_loop
 
-        inner = resume_loop(self, run_id, opts or RunOptions())
+        options = opts or RunOptions()
+        inner = resume_loop(self, run_id, options)
         self._active_inner = inner
-        it = self._iterate(inner, run_id)
+        it = self._iterate(inner, run_id, options)
         self._active_gen = it
         return it
 
@@ -265,12 +271,20 @@ class Session:
         self,
         inner: AsyncIterator[Event],
         run_id_fallback: str,
+        opts: RunOptions,
     ) -> AsyncIterator[Event]:
         from .hooks import EventEmitContext, HookDispatcher, HookEvent
 
         self._active_started = True
-        hooks = HookDispatcher(getattr(self.agent, "hooks", None))
+        scope = None
         try:
+            if opts.profile is not None:
+                from .profiles import _profile_scope
+
+                pending_scope = _profile_scope(self, opts.profile)
+                await pending_scope.__aenter__()
+                scope = pending_scope
+            hooks = HookDispatcher(getattr(self.agent, "hooks", None))
             async for event in inner:
                 yield event
                 if hooks.active:
@@ -288,9 +302,13 @@ class Session:
             try:
                 await _aclose_generator(inner)
             finally:
-                self._finish_run()
-                if self.agent.max_idle_sessions is not None:
-                    await self.agent._session_became_idle(self)
+                try:
+                    if scope is not None:
+                        await scope.__aexit__(None, None, None)
+                finally:
+                    self._finish_run()
+                    if self.agent.max_idle_sessions is not None:
+                        await self.agent._session_became_idle(self)
 
     def _finish_run(self) -> None:
         """Release the single-run admission token and publish true idleness."""
