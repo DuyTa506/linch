@@ -202,7 +202,7 @@ async def test_scale_smoke_uses_one_shared_store_and_validates_five_runs(tmp_pat
     assert result["runs_per_second"] > 0
     assert result["store_writes"]["by_store"]["session"]["create"] == 5
     assert result["store_writes"]["by_store"]["run"]["create_run"] == 5
-    assert result["store_writes"]["by_store"]["run"]["mark_completed"] == 5
+    assert result["store_writes"]["by_store"]["run"]["save_checkpoint_with_events"] >= 5
     assert result["store_writes"]["total"] == sum(
         row["total"] for row in result["store_writes"]["by_turn"]
     )
@@ -297,20 +297,15 @@ async def test_measured_store_wraps_atomic_checkpoint_capability_and_final_paylo
             events,
             *,
             status="running",
-            prepare_checkpoint=None,
         ):
             calls.append((run_id, candidate, events, status))
-            assert prepare_checkpoint is not None
-            prepare_checkpoint(42)
             candidate.prompt = "prepared"
             return SimpleNamespace(checkpoint=candidate), [17]
 
     metrics = benchmark.ScaleStoreMetrics()
     store = benchmark.MeasuredStore(AtomicStore(), "run", metrics)
 
-    result = await store.save_checkpoint_with_events(
-        "run-id", checkpoint, [event], prepare_checkpoint=lambda seq: None
-    )
+    result = await store.save_checkpoint_with_events("run-id", checkpoint, [event])
 
     assert result[1] == [17]
     assert calls == [("run-id", checkpoint, [event], "running")]
@@ -327,19 +322,14 @@ async def test_measured_store_wraps_atomic_checkpoint_capability_and_final_paylo
     assert metrics.event_payloads[3] == [expected_event_bytes]
 
 
-def test_measured_store_preserves_optional_atomic_capability_none_and_absence():
+def test_measured_store_exposes_required_atomic_capability():
     benchmark = _load_script()
     from linch import InMemoryRunStore
 
-    class LegacyStore:
-        save_checkpoint_with_events = None
-
     metrics = benchmark.ScaleStoreMetrics()
-    assert (
-        benchmark.MeasuredStore(LegacyStore(), "run", metrics).save_checkpoint_with_events is None
+    assert callable(
+        benchmark.MeasuredStore(InMemoryRunStore(), "run", metrics).save_checkpoint_with_events
     )
-    with pytest.raises(AttributeError):
-        _ = benchmark.MeasuredStore(InMemoryRunStore(), "run", metrics).save_checkpoint_with_events
 
 
 @pytest.mark.asyncio

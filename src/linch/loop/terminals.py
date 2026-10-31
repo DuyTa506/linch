@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any, Literal
 
 import jsonschema  # type: ignore[import]
@@ -101,11 +101,10 @@ async def _complete_with_pending_events(session: Session, run_id: str, checkpoin
     store = session.agent.run_store
     assert store is not None
     buf = session._event_journal
-    if buf is not None and buf.can_flush_with_checkpoint:
-        candidate = replace(checkpoint, phase="completed")
-        if await buf.flush_with_checkpoint(candidate, status="completed"):
-            checkpoint.phase = "completed"
-            return
+    if buf is not None and buf._pending:
+        checkpoint.phase = "completed"
+        await buf.flush_with_checkpoint(checkpoint, status="completed")
+        return
     await _flush_events(session)
     await store_call(session, "run.mark_completed", store.mark_completed(run_id, checkpoint))
 

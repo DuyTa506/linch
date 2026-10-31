@@ -88,6 +88,10 @@ class _PhaseRecordingRunStore(InMemoryRunStore):
         self.saved_phases.append(checkpoint.phase)
         return await super().save_checkpoint(run_id, checkpoint, status=status)
 
+    async def save_checkpoint_with_events(self, run_id, checkpoint, events, *, status="running"):
+        self.saved_phases.append(checkpoint.phase)
+        return await super().save_checkpoint_with_events(run_id, checkpoint, events, status=status)
+
 
 def _agent(**kwargs):
     from linch import Agent

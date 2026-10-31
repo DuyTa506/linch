@@ -13,6 +13,7 @@ import pytest
 _RUN_WRITES = {
     "create_run",
     "save_checkpoint",
+    "save_checkpoint_with_events",
     "append_event",
     "append_events",
     "mark_completed",
@@ -123,11 +124,18 @@ class _Takeover:
                     # Secondary terminal loss must replace the original OSError
                     # tail, whether detected by flush or failed-status persistence.
                     secondary = state.target.startswith("secondary_")
-                    if secondary and name == "mark_completed" and not state.primary_failed:
+                    logical_name = name
+                    if name == "save_checkpoint_with_events":
+                        logical_name = (
+                            "mark_completed"
+                            if kwargs.get("status") == "completed"
+                            else "append_events"
+                        )
+                    if secondary and logical_name == "mark_completed" and not state.primary_failed:
                         state.primary_failed = True
                         raise OSError("primary completion failure")
                     target = state.target.removeprefix("secondary_")
-                    matches = name == target and (not secondary or state.primary_failed)
+                    matches = logical_name == target and (not secondary or state.primary_failed)
                     if target == "ledger_flush":
                         matches = name == "append_events" and any(
                             event.type == "model_call" for event in args[1]

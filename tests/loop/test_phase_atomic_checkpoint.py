@@ -20,14 +20,11 @@ class _AtomicBufferStore:
         self.tail = PartialAssistantEvent(delta={"text": "tail"})
         self.saved: list[Any] = []
 
-    async def save_checkpoint_with_events(self, run_id, checkpoint, events, **kwargs):
+    async def save_checkpoint_with_events(self, run_id, checkpoint, events, *, status="running"):
         assert self.buffer is not None
         await self.buffer.append(self.tail)
         if self.failure is not None:
             raise self.failure()
-        prepare = kwargs.get("prepare_checkpoint")
-        if prepare is not None:
-            prepare(9)
         self.saved.extend(events)
         return None, [8, 9]
 
@@ -40,10 +37,8 @@ async def test_atomic_buffer_failure_retains_pending_prefix_and_concurrent_tail(
     events = [PartialAssistantEvent(delta={"text": text}) for text in ("a", "b")]
     for event in events:
         await buffer.append(event)
-    capability = getattr(buffer, "flush_with_checkpoint", None)
-    assert callable(capability), "event buffer must support optional phase-atomic flush"
     with pytest.raises(failure):
-        await capability(RunCheckpoint("turn_complete", "hi", 0, Usage()))
+        await buffer.flush_with_checkpoint(RunCheckpoint("turn_complete", "hi", 0, Usage()))
     assert buffer.last_seq == 4
     assert buffer._pending == [*events, store.tail]
     assert store.saved == []
@@ -56,21 +51,15 @@ async def test_atomic_buffer_commits_actual_seq_and_preserves_concurrent_tail() 
     events = [PartialAssistantEvent(delta={"text": text}) for text in ("a", "b")]
     for event in events:
         await buffer.append(event)
-    bound = []
-    capability = getattr(buffer, "flush_with_checkpoint", None)
-    assert callable(capability), "event buffer must support optional phase-atomic flush"
-    assert await capability(
-        RunCheckpoint("turn_complete", "hi", 0, Usage()), prepare_checkpoint=bound.append
-    )
-    assert bound == [9]
+    await buffer.flush_with_checkpoint(RunCheckpoint("turn_complete", "hi", 0, Usage()))
     assert buffer.last_seq == 9
     assert buffer._pending == [store.tail]
     assert store.saved == events
 
 
 class _RecordingStore:
-    def __init__(self, inner, *, atomic=True, fail_after_prepare=False):
-        self.inner, self.atomic, self.fail_after_prepare = inner, atomic, fail_after_prepare
+    def __init__(self, inner):
+        self.inner = inner
         self.writes = []
         self.atomic_phases = []
         self.event_batches = []
@@ -91,124 +80,73 @@ class _RecordingStore:
         self.writes.append("completed")
         return await self.inner.mark_completed(run_id, checkpoint)
 
-    @property
-    def save_checkpoint_with_events(self):
-        return self._atomic if self.atomic else None
-
-    async def _atomic(self, run_id, checkpoint, events, *, prepare_checkpoint=None, **kwargs):
-        def prepare(seq):
-            if prepare_checkpoint is not None:
-                prepare_checkpoint(seq)
-            if self.fail_after_prepare:
-                raise OSError("failed after binding checkpoint cursor")
-
+    async def save_checkpoint_with_events(self, run_id, checkpoint, events, *, status="running"):
         self.writes.append("atomic")
         self.atomic_phases.append(checkpoint.phase)
         return await self.inner.save_checkpoint_with_events(
-            run_id, checkpoint, events, prepare_checkpoint=prepare, **kwargs
+            run_id, checkpoint, events, status=status
         )
 
 
 async def test_phase_atomic_run_reduces_writes_and_keeps_tool_guard_durable(pg_dsn):
-    import dataclasses
-    import json
-    import re
-
     from test_run_resume import CountingTool, ScriptProvider, _agent, _memory_session_store
 
     from linch.run_stores.postgres import PostgresRunStore
     from linch.tools import ToolRegistry
 
-    traces, write_counts = [], []
-    for atomic in (False, True):
-        store = _RecordingStore(PostgresRunStore(pg_dsn), atomic=atomic)
-        checked = []
+    store = _RecordingStore(PostgresRunStore(pg_dsn))
+    checked = []
 
-        class DurableTool(CountingTool):
-            async def execute(self, input, ctx, _store=store, _checked=checked):
-                record = await _store.load_run(ctx.run_id)
-                assert record.checkpoint.phase == "tool_executing"
-                _checked.append(True)
-                return await super().execute(input, ctx)
+    class DurableTool(CountingTool):
+        async def execute(self, input, ctx, _store=store, _checked=checked):
+            record = await _store.load_run(ctx.run_id)
+            assert record.checkpoint.phase == "tool_executing"
+            _checked.append(True)
+            return await super().execute(input, ctx)
 
-        tools = ToolRegistry()
-        tools.register(DurableTool("A", {}))
-        agent = _agent(
-            model="gpt-5",
-            provider=ScriptProvider(tool_names=["A"]),
-            session_store=_memory_session_store(),
-            run_store=store,
-            tools=tools,
-            cwd=".",
-            permissions={"mode": "skip-dangerous"},
-        )
-        try:
-            session = await agent.session()
-            events = []
-            run_id = ""
-            async for event in session.run("hello"):
-                events.append(event)
-                if event.type == "system":
-                    run_id = event.run_id
-                if event.type in {"tool_call_start", "tool_call_end"}:
-                    assert (await store.load_events(run_id))[-1].event.type == event.type
-            assert checked == [True]
-            assert events[-1].subtype == "success"
-            assert (await store.load_run(run_id)).status == "completed"
-            encoded = [dataclasses.asdict(event) for event in events]
+    tools = ToolRegistry()
+    tools.register(DurableTool("A", {}))
+    agent = _agent(
+        model="gpt-5",
+        provider=ScriptProvider(tool_names=["A"]),
+        session_store=_memory_session_store(),
+        run_store=store,
+        tools=tools,
+        cwd=".",
+        permissions={"mode": "skip-dangerous"},
+    )
+    try:
+        session = await agent.session()
+        events = []
+        run_id = ""
+        async for event in session.run("hello"):
+            events.append(event)
+            if event.type == "system":
+                run_id = event.run_id
+            if event.type in {"tool_call_start", "tool_call_end"}:
+                assert (await store.load_events(run_id))[-1].event.type == event.type
+        assert checked == [True]
+        assert events[-1].subtype == "success"
+        assert (await store.load_run(run_id)).status == "completed"
 
-            def scrub(value):
-                if isinstance(value, dict):
-                    return {
-                        key: "<time>"
-                        if key in {"duration_ms", "elapsed_ms", "timestamp"}
-                        else scrub(item)
-                        for key, item in value.items()
-                    }
-                if isinstance(value, list):
-                    return [scrub(item) for item in value]
-                if isinstance(value, str):
-                    return re.sub(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", "<id>", value)
-                return value
-
-            traces.append(json.dumps(scrub(encoded), sort_keys=True))
-            write_counts.append(len(store.writes))
-            if atomic:
-                assert "turn_complete" in store.atomic_phases
-                assert "completed" in store.atomic_phases
-                assert not {
-                    "assistant_appended",
-                    "tool_batch_pending",
-                    "tool_executing",
-                }.intersection(store.atomic_phases)
-                for batch in store.event_batches:
-                    if "tool_call_start" in batch or "tool_call_end" in batch:
-                        assert len(batch) == 1
-        finally:
-            await agent.close()
-    assert traces[0] == traces[1]
-    assert write_counts[1] < write_counts[0]
+        assert "turn_complete" in store.atomic_phases
+        assert "completed" in store.atomic_phases
+        assert {
+            "user_appended",
+            "provider_pending",
+            "tool_batch_pending",
+        }.issubset(store.atomic_phases)
+    finally:
+        await agent.close()
 
 
-async def test_forwarded_bound_atomic_capability_preserves_adapter_event_override() -> None:
+async def test_required_atomic_method_is_called_directly() -> None:
     inner = _AtomicBufferStore(None)
-    observed = []
-
-    class Adapter:
-        def __getattr__(self, name):
-            return getattr(inner, name)
-
-        async def append_events(self, run_id, events):
-            observed.extend(events)
-            return [5, 6]
-
-    buffer = RunEventBuffer(Adapter(), "run", initial_seq=4)
+    buffer = RunEventBuffer(inner, "run", initial_seq=4)
     inner.buffer = buffer
     events = [PartialAssistantEvent(delta={"text": text}) for text in ("a", "b")]
     for event in events:
         await buffer.append(event)
-    assert not buffer.can_flush_with_checkpoint
-    assert not await buffer.flush_with_checkpoint(RunCheckpoint("turn_complete", "hi", 0, Usage()))
-    assert await buffer.flush() == 6
-    assert observed == events
-    assert inner.saved == []
+    await buffer.flush_with_checkpoint(RunCheckpoint("turn_complete", "hi", 0, Usage()))
+    assert buffer.last_seq == 9
+    assert inner.saved == events

@@ -28,6 +28,12 @@ class _RecordingRunStore(InMemoryRunStore):
         self.batches.append([event.type for event in events])
         return await super().append_events(run_id, events)
 
+    async def save_checkpoint_with_events(
+        self, run_id: str, checkpoint: Any, events: list[Any], *, status: str = "running"
+    ) -> tuple[Any, list[int]]:
+        self.batches.append([event.type for event in events])
+        return await super().save_checkpoint_with_events(run_id, checkpoint, events, status=status)
+
 
 class _FailOnceBatchStore:
     def __init__(self) -> None:

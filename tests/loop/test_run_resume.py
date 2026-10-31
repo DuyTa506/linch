@@ -127,6 +127,20 @@ class _CheckpointCrashStore:
             raise _Crash(self.boundary)
         return await self.store.save_checkpoint(run_id, checkpoint, **kwargs)
 
+    async def save_checkpoint_with_events(
+        self, run_id: str, checkpoint: Any, events: list[Any], **kwargs: Any
+    ) -> Any:
+        if (
+            not self.crashed
+            and self.boundary is not None
+            and self.boundary == f"checkpoint:{checkpoint.phase}"
+        ):
+            self.crashed = True
+            raise _Crash(self.boundary)
+        if self.drop_assistant_events:
+            events = [event for event in events if getattr(event, "type", None) != "assistant"]
+        return await self.store.save_checkpoint_with_events(run_id, checkpoint, events, **kwargs)
+
     async def append_event(self, run_id: str, event: Any) -> int:
         if self.drop_assistant_events and getattr(event, "type", None) == "assistant":
             return 0
@@ -409,6 +423,14 @@ async def test_tool_batch_checkpoint_is_not_saved_after_each_tool_end() -> None:
         async def save_checkpoint(self, run_id, checkpoint, *, status="running"):
             self.saved_phases.append(checkpoint.phase)
             return await super().save_checkpoint(run_id, checkpoint, status=status)
+
+        async def save_checkpoint_with_events(
+            self, run_id, checkpoint, events, *, status="running"
+        ):
+            self.saved_phases.append(checkpoint.phase)
+            return await super().save_checkpoint_with_events(
+                run_id, checkpoint, events, status=status
+            )
 
     session_store = _memory_session_store()
     run_store = CountingRunStore()

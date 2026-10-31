@@ -4,7 +4,6 @@ resume recovery, and message-identity checks used on resume."""
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from html import escape
 from typing import Any
@@ -199,43 +198,25 @@ class RunEventBuffer:
         if self.store is not None:
             self._pending.append(event)
 
-    @property
-    def can_flush_with_checkpoint(self) -> bool:
-        return bool(self._pending) and self._checkpoint_writer is not None
-
-    @property
-    def _checkpoint_writer(self) -> Callable[..., Awaitable[tuple[Any, list[int]]]] | None:
-        writer: Callable[..., Awaitable[tuple[Any, list[int]]]] | None = getattr(
-            self.store, "save_checkpoint_with_events", None
-        )
-        # A legacy adapter's __getattr__ may forward an inner bound method while
-        # overriding ordinary writes. Require deliberate wrapping to opt in.
-        if not callable(writer) or getattr(writer, "__self__", self.store) is not self.store:
-            return None
-        return writer
-
     async def flush_with_checkpoint(
         self,
         checkpoint: RunCheckpoint,
         *,
         status: str = "running",
-        prepare_checkpoint: Callable[[int], None] | None = None,
-    ) -> bool:
-        """Commit a pending prefix with its checkpoint, or leave fallback alone."""
-        writer = self._checkpoint_writer
-        if not self._pending or writer is None:
-            return False
+    ) -> None:
+        """Commit a pending prefix with its checkpoint."""
+        if not self._pending:
+            return
         pending, self._pending = self._pending, []
         try:
             _, seqs = await store_call(
                 self.session,
                 "run.save_checkpoint_with_events",
-                writer(
+                self.store.save_checkpoint_with_events(
                     self.run_id,
                     checkpoint,
                     pending,
                     status=status,
-                    prepare_checkpoint=prepare_checkpoint,
                 ),
             )
         except BaseException:
@@ -243,7 +224,6 @@ class RunEventBuffer:
             raise
         if seqs:
             self._last_seq = max(self._last_seq, *seqs)
-        return True
 
     async def flush(self) -> int:
         if self.store is None or not self._pending:
