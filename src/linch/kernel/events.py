@@ -20,9 +20,10 @@ from __future__ import annotations
 import inspect
 import logging
 from collections.abc import Awaitable, Callable
+from functools import partial
 from typing import Any
 
-from .effects import Disposable
+from .effects import Disposable, _dispose_reverse
 
 logger = logging.getLogger("linch.kernel.events")
 
@@ -99,6 +100,11 @@ class EventBus:
             if result is not None and result is not False:
                 return result
         return None
+
+    def _notification(self, name: str, *args: Any) -> Disposable:
+        """Snapshot a broadcast as a retryable, ordered disposable."""
+        listeners = [Disposable(partial(listener, *args)) for listener in self._listeners[name]]
+        return Disposable(lambda: _dispose_reverse(list(reversed(listeners))))
 
     async def waterfall(self, name: str, *args: Any, next: Next) -> Any:
         """Run listeners as a middleware chain ending in the built-in *next*.

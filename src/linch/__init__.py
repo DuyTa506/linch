@@ -52,6 +52,7 @@ if TYPE_CHECKING:
         Mailbox,
         MailboxClaim,
         MailboxMessage,
+        MailboxPlugin,
     )
     from .durability import DurabilityOptions, InboxDelivery
     from .errors import (
@@ -155,7 +156,7 @@ if TYPE_CHECKING:
         UserPromptSubmitContext,
         normalize_hooks,
     )
-    from .kernel import Context, Disposable
+    from .kernel import Context, Disposable, Plugin
     from .loop import apply_provider_capabilities
     from .loop_guard import (
         LoopGuard,
@@ -263,6 +264,7 @@ if TYPE_CHECKING:
     from .tools import (
         AskUserHandler,
         AskUserOption,
+        AskUserPlugin,
         AskUserQuestion,
         AskUserRequest,
         AskUserResponse,
@@ -324,7 +326,7 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
         "DetailedCompaction",
     ),
     ".config": ("FeatureFlags", "SystemPromptConfig", "SystemPromptSection"),
-    ".kernel": ("Context", "Disposable"),
+    ".kernel": ("Context", "Disposable", "Plugin"),
     ".context": (
         "ContextBudget",
         "ContextBuilder",
@@ -340,6 +342,7 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
         "Mailbox",
         "MailboxClaim",
         "MailboxMessage",
+        "MailboxPlugin",
     ),
     ".durability": ("DurabilityOptions", "InboxDelivery"),
     ".errors": (
@@ -556,6 +559,7 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
     ".tools": (
         "AskUserHandler",
         "AskUserOption",
+        "AskUserPlugin",
         "AskUserQuestion",
         "AskUserRequest",
         "AskUserResponse",
@@ -651,6 +655,9 @@ __all__ = [
     "LinchError",
     "Context",
     "Disposable",
+    "Plugin",
+    "MailboxPlugin",
+    "AskUserPlugin",
     "IgnorableEvent",
     "is_ignorable_event",
     "ToolExecution",

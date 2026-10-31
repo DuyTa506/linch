@@ -78,6 +78,23 @@ def _imported_modules(path: Path, node: ast.Import | ast.ImportFrom, source_root
     return {module, *(f"{module}.{alias.name}" for alias in node.names)}
 
 
+def test_plugin_is_public() -> None:
+    from linch import Plugin
+
+    assert "Plugin" in linch.__all__
+    assert hasattr(Plugin, "setup")
+
+
+def test_builtin_plugins_are_public_and_catalog_is_removed() -> None:
+    from linch import AskUserPlugin, MailboxPlugin
+
+    assert {"AskUserPlugin", "MailboxPlugin"} <= set(linch.__all__)
+    assert hasattr(AskUserPlugin, "setup")
+    assert hasattr(MailboxPlugin, "setup")
+    assert "plugins" not in linch.__all__
+    assert not hasattr(linch, "plugins")
+
+
 def test_resume_rejection_error_is_public() -> None:
     from linch import LinchError, RunNotResumableError
 

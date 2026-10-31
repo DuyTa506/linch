@@ -5,13 +5,14 @@ Run:
     DEEPSEEK_API_KEY=sk-...  python examples/core/ask_user_agent.py
 
 The AskUser tool lets the model pause and ask the *user* a multiple-choice
-question mid-run instead of guessing. You register it by passing a handler to
-``Agent(ask_user=...)``; the handler renders the question however your app likes
+question mid-run instead of guessing. You register it with
+``await agent.use(AskUserPlugin(), handler)``; the handler renders the question
+however your app likes
 (CLI prompt, web modal, Slack buttons) and returns the user's choice. The model
 receives the answer as the tool result and continues.
 
 What this example shows:
-  - ``Agent(ask_user=handler)`` auto-registers the AskUser tool.
+  - ``await agent.use(AskUserPlugin(), handler)`` registers the AskUser tool.
   - The handler returns an ``AskUserResponse`` (or a plain dict the SDK coerces).
   - **Fail-closed**: a handler that returns ``None`` / ``{}`` (e.g. the user
     dismissed the dialog) is treated as *declined*, never as silent consent.
@@ -30,7 +31,7 @@ import asyncio
 import os
 from typing import Any
 
-from linch import Agent
+from linch import Agent, AskUserPlugin
 from linch.config import FeatureFlags, SystemPromptConfig
 from linch.sessions import InMemorySessionStore
 from linch.tools import AskUserRequest, AskUserResponse, AskUserTool
@@ -66,7 +67,7 @@ def cli_handler(request: AskUserRequest, ctx: Any) -> AskUserResponse:
     return AskUserResponse(accepted=True, answers=answers)
 
 
-def build_ask_user_agent(
+async def build_ask_user_agent(
     handler: Any,
     *,
     provider: Any = None,
@@ -78,19 +79,17 @@ def build_ask_user_agent(
     Pass ``provider`` + ``model`` (e.g. a ``ScriptedProvider``) to drive it
     deterministically. ``timeout_s`` registers the tool with an unanswered-prompt
     deadline — when set we register ``AskUserTool`` directly instead of via the
-    ``ask_user=`` shortcut, which is the only difference.
+    ``AskUserPlugin()`` mount, which is the only difference.
     """
     kwargs: dict[str, Any] = {}
     if provider is not None:
         kwargs["provider"] = provider
     if timeout_s is None:
-        # The common case: the shortcut wires AskUser(handler) into the registry.
-        kwargs["ask_user"] = handler
         tools = empty_tools()
     else:
         tools = empty_tools(AskUserTool(handler, timeout_s=timeout_s))
 
-    return Agent(
+    agent = Agent(
         model=model or "ask-user-demo",
         tools=tools,
         system_prompt_config=SystemPromptConfig(replace_defaults=True, append=SYSTEM),
@@ -99,6 +98,9 @@ def build_ask_user_agent(
         permissions={"mode": "skip-dangerous"},
         **kwargs,
     )
+    if timeout_s is None:
+        await agent.use(AskUserPlugin(), handler)
+    return agent
 
 
 async def main() -> None:
@@ -115,7 +117,7 @@ async def main() -> None:
     provider = OpenAIChatCompletionsProvider(
         OpenAIChatProviderOptions(api_key=api_key, base_url=base_url)
     )
-    agent = build_ask_user_agent(cli_handler, provider=provider, model="gpt-4o-mini")
+    agent = await build_ask_user_agent(cli_handler, provider=provider, model="gpt-4o-mini")
     session = await agent.session()
 
     print("→ Giving the agent a deliberately ambiguous task...")

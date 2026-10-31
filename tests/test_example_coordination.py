@@ -46,7 +46,7 @@ async def test_team_mailbox_peer_messaging_and_correlator() -> None:
             TextTurn(text="On it."),
         ]
     )
-    agent, box = example.build_team(provider=provider, model="m")
+    agent, box = await example.build_team(provider=provider, model="m")
 
     lead = await agent.session()
     lead.mailbox_address = "lead"

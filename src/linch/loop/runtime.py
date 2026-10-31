@@ -52,7 +52,7 @@ from ..run_store import (
     decode_model_input_snapshot,
 )
 from ..session import Session
-from ..types import Message, ProviderRequest, TextBlock, ToolResultBlock, ToolUseBlock, Usage
+from ..types import Message, ProviderRequest, ToolResultBlock, ToolUseBlock, Usage
 from .checkpoint import (
     RunEventBuffer,
     _alignment_queue_to_dicts,
@@ -239,76 +239,24 @@ async def drain_pending_notifications(session: Session, run_id: str) -> AsyncIte
         yield event
 
 
-def render_peer_message(message: Any) -> Message:
-    """Wrap a drained mailbox message as a provider-visible user message."""
-    from xml.sax.saxutils import escape
-
-    parts = [
-        "<peer-message>",
-        f"<from>{escape(message.sender)}</from>",
-        f"<type>{escape(message.type)}</type>",
-    ]
-    if message.request_id:
-        parts.append(f"<request-id>{escape(message.request_id)}</request-id>")
-    if message.in_reply_to:
-        parts.append(f"<in-reply-to>{escape(message.in_reply_to)}</in-reply-to>")
-    parts.append(f"<content>{escape(message.content)}</content>")
-    parts.append("</peer-message>")
-    return Message(role="user", content=[TextBlock(text="".join(parts))])
-
-
-async def drain_mailbox(session: Session, run_id: str) -> AsyncIterator[Event]:
-    """Drain peer messages for this session into provider-visible history."""
-    mailbox = getattr(session.agent, "mailbox", None)
-    address = getattr(session, "mailbox_address", None)
-    if mailbox is None or not address:
-        return
-    durability = getattr(session.agent, "durability", None)
-    if getattr(durability, "durable_inbox", False):
-        claim = getattr(mailbox, "claim", None)
-        ack = getattr(mailbox, "ack", None)
-        release = getattr(mailbox, "release", None)
-        if not all(callable(method) for method in (claim, ack, release)):
-            raise ConfigError(
-                "durable_inbox with mailbox requires ClaimableMailbox claim(), ack(), and release()"
-            )
-        claims = await cast(Any, claim)(
-            address,
-            owner=f"session:{session.id}",
-            lease_s=cast(Any, durability).delivery_lease_s,
-        )
-        delivered = []
+async def drain_inbox(session: Session, run_id: str) -> AsyncIterator[Event]:
+    """Consume context inbox producers at the top of a turn."""
+    producers = tuple(session.agent.context._inbox or ())
+    for _token, producer in producers:
+        iterator = producer(session, run_id)
         try:
-            for claimed in claims:
-                message = claimed.message
-                note = render_peer_message(message)
-                await store_call(
-                    session,
-                    "session.enqueue_inbox",
-                    session.notify(
-                        note,
-                        delivery_id=f"mailbox:{message.id}",
-                        source="mailbox",
-                        metadata={"message_id": message.id, "recipient": message.recipient},
-                    ),
-                )
-                await cast(Any, ack)([claimed])
-                delivered.append(claimed)
-        except BaseException:
-            pending = [item for item in claims if item not in delivered]
-            if pending:
-                await cast(Any, release)(pending)
-            raise
-        async for event in drain_pending_notifications(session, run_id):
-            yield event
-        return
-    messages = await mailbox.drain(address)
-    for message in messages:
-        note = render_peer_message(message)
-        await store_call(session, "session.append", session.append([note]))
-        event: Event = UserEvent(message=note, subtype="notification")
-        await _persist_event(session, run_id, event)
-        yield event
+            async for item in iterator:
+                if isinstance(item, Message):
+                    await store_call(session, "session.append", session.append([item]))
+                    event: Event = UserEvent(message=item, subtype="notification")
+                else:
+                    event = item
+                await _persist_event(session, run_id, event)
+                yield event
+        finally:
+            close = getattr(iterator, "aclose", None)
+            if callable(close):
+                await cast(Any, close)()
 
 
 async def drain_alignment(

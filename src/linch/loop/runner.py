@@ -89,7 +89,7 @@ from .runtime import (
     drain_child_events as _drain_child_events,
 )
 from .runtime import (
-    drain_mailbox as _drain_mailbox,
+    drain_inbox as _drain_inbox,
 )
 from .runtime import (
     drain_pending_notifications as _drain_pending_notifications,
@@ -544,8 +544,10 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             if not _replaying_frozen_attempt:
                 async for note_event in _drain_pending_notifications(session, run_id):
                     yield note_event
-                async for mail_event in _drain_mailbox(session, run_id):
-                    yield mail_event
+                if session.agent.context._inbox:
+                    async with aclosing(_drain_inbox(session, run_id)) as inbox:
+                        async for inbox_event in inbox:
+                            yield inbox_event
             # Bubble accumulated subagent events (incl. child PermissionRequests).
             async for child_event in _drain_child_events(session, run_id):
                 yield child_event
