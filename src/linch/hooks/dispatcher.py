@@ -59,7 +59,7 @@ class HookDispatcher:
         """Run hooks for one lifecycle point while preserving hook ordering.
 
         Args:
-            event: Catalog point or legacy hook name.
+            event: Catalog point or hook name.
             ctx: Mutable context passed to matching hooks.
 
         Returns:

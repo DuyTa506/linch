@@ -249,13 +249,14 @@ class _RunTrace:
 def trace_run(function: Any) -> Any:
     @wraps(function)
     def wrapped(session: Any, prompt: str, opts: Any, **kwargs: Any) -> Any:
-        telemetry = telemetry_for(session.agent)
-        attrs = attributes(session, "invoke_agent")
-        attrs[RUN_ID] = kwargs["run_id"]
-        attrs[RESUMED] = kwargs["resume_checkpoint"] is not None
-        span = telemetry.tracer.start_span("invoke_agent", attributes=attrs)
-        if span.is_recording() and capture_content():
-            span.set_attribute(INPUT_MESSAGES, _json(prompt))
+        span = kwargs.pop("_trace_span", None)
+        if span is None:
+            span = start_run_span(
+                session,
+                prompt,
+                kwargs["run_id"],
+                resumed=kwargs["resume_checkpoint"] is not None,
+            )
         return in_span(
             function(session, prompt, opts, **kwargs),
             span,
@@ -264,6 +265,28 @@ def trace_run(function: Any) -> Any:
         )
 
     return wrapped
+
+
+def start_run_span(session: Any, prompt: str, run_id: str, *, resumed: bool = False) -> Any:
+    """Start the run span before durable creation so its trace can be stored.
+
+    Args:
+        session: Session owning the run.
+        prompt: Initial prompt used for optional content capture.
+        run_id: Stable identifier for the run.
+        resumed: Whether this is a resumed run.
+
+    Returns:
+        The span used for the run's instrumentation boundary.
+    """
+    telemetry = telemetry_for(session.agent)
+    attrs = attributes(session, "invoke_agent")
+    attrs[RUN_ID] = run_id
+    attrs[RESUMED] = resumed
+    span = telemetry.tracer.start_span("invoke_agent", attributes=attrs)
+    if span.is_recording() and capture_content():
+        span.set_attribute(INPUT_MESSAGES, _json(prompt))
+    return span
 
 
 def start_step(session: Any, turn_index: int) -> None:
