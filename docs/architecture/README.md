@@ -1,21 +1,22 @@
-# Linch Architecture
+# Linch 3.0 Architecture
 
-Professional reference for the V2 harness. Covers every subsystem, its contract, the complete data flow, and the invariants that must not break.
+Reference for the headless Linch agent kernel. It describes the current
+subsystem contracts, data flow, durability boundaries, and invariants.
 
 ---
 
 This guide is split by topic so you can jump to a subsystem instead of scrolling one long file. For *how to use* these features, see the [usage guide](../usage/README.md).
 
-The SDK/application boundary and the Linch 2.0 compatibility changes are
-summarized in the [migration guide](../migration-2.0.md).
+The SDK/application boundary and the Linch 3.0 compatibility changes are
+summarized in the [migration guide](../migration-3.0.md).
 
 ## Sections
 
 | Section | What it covers |
 |---|---|
-| 1. [System Overview](./overview.md) | System overview, layering, and the top-level data-flow diagram |
+| 1. [System Overview](./overview.md) | Headless kernel, host boundary, deployment topology, and data flow |
 | 2. [Turn Lifecycle](./turn-lifecycle.md) | What happens on each turn: request assembly → provider stream → tools → repeat |
-| 3. [Subsystems](./subsystems.md) | The subsystems in depth: loop, providers, tools, permissions, memory, filesystem, more |
+| 3. [Subsystems](./subsystems.md) | The subsystems in depth: loop, providers, tools, permissions, context/RAG, filesystem, and more |
 | 4. [Event Taxonomy](./events.md) | The event taxonomy — every event type the loop emits |
 | 5. [Key Data Types](./data-types.md) | Key data types: messages, blocks, requests, results, usage |
 | 6. [Module Inventory](./module-inventory.md) | Module-by-module inventory of the source tree |

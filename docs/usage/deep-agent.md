@@ -18,11 +18,12 @@ Unlike a [workflow](./workflows.md), a deep agent is LLM-driven: the model itsel
 ```python
 import os
 from linch import (
-    CompositeFileBackend, PostgresFileBackend, PostgresRunStore,
-    PostgresSessionStore, StateFileBackend,
+    CompositeFileBackend, PostgresRunStore, StateFileBackend,
 )
 from linch.ext.deep_agent import create_deep_agent
+from linch.filesystem.postgres import PostgresFileBackend
 from linch.providers import OpenAIChatCompletionsProvider
+from linch.sessions.postgres import PostgresSessionStore
 
 dsn = os.environ["LINCH_POSTGRES_DSN"]
 agent = create_deep_agent(
@@ -176,11 +177,16 @@ agent = create_deep_agent(
     durable=False,
     permissions={"mode": "skip-dangerous"},
 )
-# Parent has no Edit/Write/Bash/Grep/Glob/Read — only Subagent/SubagentContinue/TaskStop + task tools
-# Workers receive full tool access via SubagentTool → build_child_tools
+# Parent omits the built-in Edit/Write/Bash/Grep/Glob/Read tools.
+# It still has orchestration tools, and may also expose Skill, supplied tools,
+# or configured MCP tools. Workers use the configured worker tool registry.
 ```
 
-With `coordinator=True` the parent agent is stripped of heavy tools and is left to orchestrate only — it plans and delegates, while the workers it spawns get full tool access. This keeps the coordinator's context focused on task management rather than file contents and command output.
+With `coordinator=True` the parent agent omits the built-in heavy workspace
+tools and keeps the orchestration surface. The default profile also enables the
+`Skill` tool; caller-supplied tools and configured MCP servers can add more
+tools. Workers use the configured worker registry, which keeps the coordinator's
+context focused on task management rather than file contents and command output.
 
 To stop a running background worker: `TaskStop(task_id='agent-xxxx')`. The handle stays in `session.workers` so it can be continued later with `SubagentContinue`. Stopping cancels the in-flight task but does not discard the worker — you can re-engage it once you have what you need.
 

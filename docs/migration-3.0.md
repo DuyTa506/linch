@@ -1,127 +1,304 @@
-# Migrating to Linch 3.0
+# Migrating from Linch 2.x to 3.0
 
-This guide tracks the ongoing 3.0 transition, including the original
-`3.0.0a1` Release-A accounting slice and subsequent API cleanup. Python 3.11+
-is required. During 3.0 development, compatibility breaks do not require a
-warning window or compatibility shim.
+Linch 3.0 is a headless agent kernel. Python 3.11+ is required. There are no
+compatibility shims or readers for pre-3.0 persisted data. Start new runs and
+use fresh Postgres schemas; built-in stores reject incompatible existing
+schemas rather than upgrading them. The package version remains `3.0.0a1`
+during development; pin the exact prerelease and lock its dependencies.
 
-All persisted envelopes share wire generation **3**, including checkpoints,
-run contracts, model-call intents/receipts and journals, exact model-input
-snapshots, permission decisions, session/provider-view snapshots, events, and
-workflow run metadata. Missing, pre-3.0, or unknown versions are rejected;
-start new runs and use fresh databases. Built-in stores do not upgrade old
-schemas. `linch.RUN_SCHEMA_VERSION` reflects the shared private wire version.
+Kernel exports are listed in `linch.__all__`. Extensions are imported
+explicitly from `linch.ext.*` and are absent from the kernel's top-level API.
+The tables below group the 2.x removals and replacements by area.
 
-## API and internal cleanup
+## Agent, sessions, and tools
 
-- **WP7 reliability:** `Agent` now defaults to `ReliabilityPolicy()` for bounded
-  invalid-response corrections; pass `reliability=None` to opt out. Optional
-  `ToolPrerequisite` and `CompletionGate` rules use successful foreground calls
-  in the current run. Text `<tool_call>` rescue is dropped: whole-text envelopes
-  request a native resend and never execute tools. Reliability policy is part
-  of the resume contract; changed policies require a new run.
-- **D16 extension split:** Workflow, evals, deep-agent, reports, loop runner, and
-  scaffolding imports moved from `linch.*`/top-level exports to explicit
-  `linch.ext.*` paths. The old top-level names are removed; import each feature
-  from its extension package instead.
-- **D16 workflow entry point:** `Agent.run_workflow(...)` is removed. Import
-  `run_workflow` from `linch.ext.workflow` and call
-  `await run_workflow(agent, fn, ...)` with the same options.
+| Removed or changed in 3.0 | Replacement |
+|---|---|
+| Python 3.10; scaffold TOML fallback readers | Python 3.11+ and valid TOML |
+| `AgentOptions` | Configure `Agent(...)`; `from linch import Agent` |
+| `Agent.openai` provider property | `agent.provider`; the separate `Agent(openai=...)` configuration argument remains |
+| `Agent(execution_backend=...)` with only shell support | A coherent `.shell`/`.fs` backend; `from linch import LocalExecutionBackend, RemoteExecutionBackend` |
+| `BashTool(backend=...)` | `BashTool(execution=...)`; `from linch.tools.builtin import BashTool` |
+| `coding_tools`, `default_tools`, `defaultTools`, `tools_from_defaults` | `workspace_tools(exclude=..., extra=...)`; `from linch import workspace_tools` |
+| `ToolRegistry.add/remove` | `register/unregister`; `register` and `replace` return reversible `Disposable` handles; `from linch import ToolRegistry` |
+| `Session(provider_view=..., full_history=...)` | `session_log=SessionLog.seed(historical=..., visible=...)`; `from linch import Session, SessionLog` |
+| `SessionLog.derive_messages()` | Read `session.provider_view`; append with `await session.append(...)` |
+| Mutation of `provider_view` / `full_history` | Detached sequence snapshots; append messages or record a logged projection |
+| `AgentMiddleware` and obsolete middleware dispatch/outcome helpers | Duck-typed hooks through `ToolMiddlewareHook`; `from linch import ToolMiddlewareHook` |
+| Background completion writing directly into notification lists | Custom sessions implement async `notify(...)` |
+| `parallel_safe` fallback | Declare `parallel`: read tools use a boolean opt-in; an input-aware predicate may also admit calls in another scope, such as a subagent restricted to read tools |
+| `ToolActivation`, `ToolSurfaceReaderGuard`, `tool_activations`, and discovery codecs/capability gates | Removed; unknown content-block types and tool-result fields are rejected |
+| Missing-`jsonschema` validation bypass | `jsonschema` is core; configured output schemas are always validated |
 
-Each item below records a removal or consolidation in the legacy sweep.
-Private helper names are listed for maintainers; supported application imports
-remain the names in `linch.__all__`.
+Constructor aliases now use these exact spellings:
 
-- **Run startup:** custom `RunStore.create_run` implementations must accept `initial_checkpoint` and persist it atomically with creation or pending adoption; the SDK no longer creates a running run without a checkpoint.
-- **Python / K16:** Python 3.10 support and the CLI scaffold's `tomllib` import/line-scan fallbacks are removed; use Python 3.11+ and valid TOML.
-- **A01:** `Session(provider_view=..., full_history=...)` is removed; pass `session_log=SessionLog.seed(historical=..., visible=...)`.
-- **A02:** `SessionLog.derive_messages()` is removed; read `provider_view`.
-- **A03:** Shell-only `Agent(execution_backend=...)` values are removed; supply one coherent `.shell`/`.fs` world with `LocalExecutionBackend` or `RemoteExecutionBackend`.
-- **A04:** `BashTool(backend=...)` is removed; use `BashTool(execution=...)` with a coherent execution backend.
-- **A05:** Agent constructor aliases `systemPrompt`, `maxRetries`, `maxOutputTokens`, `includePartialMessages`, `maxTurns`, `maxToolConcurrency`, `toolBatchingStrategy`, `toolTimeoutMs`, `cacheTtl`, `configDir`, `mcpServers`, and `loopGuard` are removed; use their snake_case spellings.
-- **A06:** The `Agent.openai` provider property is removed; use `agent.provider`; the separate `Agent(openai=...)` configuration argument remains supported.
-- **A07:** The unused `AgentOptions` configuration DTO is removed; configure `Agent(...)` directly.
-- **A08:** `coding_tools`, `default_tools`, `defaultTools`, and `tools_from_defaults` are removed; use `workspace_tools(exclude=..., extra=...)` for the configurable workspace preset.
-- **A09:** `ToolRegistry.add/remove` are removed; use `register/unregister`; `register` and `replace` still return reversible `Disposable` handles.
-- **A10:** Tool-context aliases `sessionId`, `runId`, `sessionStore`, `fileReadTracker`, `idempotencyKey`, `reportProgress`, and middleware aliases `sessionId`, `runId`, `turnIndex`, `toolUseId`, `toolName` are removed; use snake_case attributes and `report_progress`.
-- **A11:** The unused `AgentMiddleware` base is removed; implement the duck-typed hooks consumed by `ToolMiddlewareHook`.
-- **D01:** Obsolete middleware outcome/dispatch helpers are removed; the active `ToolMiddlewareHook` adapter remains.
-- **D02:** Background-tool completion no longer appends directly to a duck session's notification list; custom session implementations must supply async `notify(...)`.
-- **D03:** The `parallel_safe` fallback is removed; read tools must declare `parallel` to opt into concurrent scheduling.
-- **D04:** The dormant runtime-control codec capability gate and store capability attributes are removed with deferred discovery support.
-- **P01:** Checkpoint field defaults on read are removed; every serialized current checkpoint field is required, including empty extension state and nullable fields.
-- **P02:** Default-version and missing-fingerprint run-contract readers are removed; current contracts require a verified fingerprint.
-- **P03:** `RunOptions.allow_legacy_resume` and contractless resume are removed; start a new run with a current execution contract.
-- **Resume:** Terminal runs and runs without checkpoints raise `RunNotResumableError` with `run_id` and `status`; start a new run.
-- **P04:** Cursorless assistant-boundary tool recovery is removed; tool recovery requires a valid `tool_batch_event_after_seq` cursor.
-- **WP8:** Runtime checkpoints use private model-call journal watermarks and bounded loop-guard digests; old receipt snapshots and pre-3.0 guard shapes are rejected, so start a new run.
-- **P07:** Pre-3.0 permission readers and the null `updated_input` wire marker are removed; non-null persisted input rewrites and live approval rewrites remain rejected.
-- **P09:** Automatic SQLite/Postgres schema upgrades are removed; built-in database stores create complete version-3 schemas and reject old, missing, or unknown schema metadata on existing databases.
-- **WP8 Postgres:** Fresh run/session schemas require their durable event/message sequence counters; old shapes are rejected before DDL. `ModelInputSnapshotStore.delete` now requires `run_id` so cleanup can be fenced in one statement.
-- **P10:** Legacy scalar/malformed failure-history preservation is removed; failure writes append only to a valid current list of error objects, replacing malformed history.
-- **Workflow journals:** Old call-key algorithm readers and `fingerprint_version` branches are removed; durable workflow metadata requires `schema_version=3`, and incompatible runs must start anew.
-- **P08:** `ToolActivation`, `ToolSurfaceReaderGuard`, `tool_activations`, and their discovery codecs/projection plumbing are removed; unknown message-block types and unknown tool-result fields fail closed, while ordinary message-copy isolation remains intact.
-- **D05:** The unused runtime `PermissionDecision.updated_input` field is removed; persisted non-null input rewrites remain rejected (the null marker was subsequently removed by P07).
-- **D06:** The unused private `add_usage` helper is removed; use `Usage.add`.
-- **D07:** The unused private `make_pool` factory is removed; Postgres stores own their pool configuration through the shared lifecycle helper.
-- **D08:** The unaccounted `stream_turn` entry point is removed; parser tests use `_stream_turn`, while loop deliveries use the required-ledger accounted path.
-- **D09:** The obsolete `glob.glob` TypeError retry is removed; supported Python versions accept `root_dir` and `recursive` directly.
-- **D12:** The `linch.memory` package and its `MemoryStore` contract are removed; use scoped file memory through `FileMemoryContextBuilder` and the existing `FileBackend` tools.
-- **D12:** `ConsolidationGate` is removed; application-owned file-memory policy can update or delete stale fact files through the backend.
-- **D12:** `InMemoryKeywordMemoryStore` is removed; use `StateFileBackend` for test memory files.
-- **D12:** `MemoryContextBuilder` is removed; use `FileMemoryContextBuilder` with `ContextInjectionHook`.
-- **D12:** `MemoryExtractionContext` is removed; terminal-turn extraction is application policy or an optional recipe.
-- **D12:** `MemoryExtractor` is removed; application hooks may write facts through the existing file tools.
-- **D12:** `MemoryItem` is removed; store one fact per filesystem file.
-- **D12:** `MemorySearchResult` is removed; semantic search result types belong to the host or optional plugin.
-- **D12:** `MemorySearchTool` is removed; the model uses the existing filesystem tools for memory files.
-- **D12:** `MemoryUpsertTool` is removed; the model uses the existing filesystem tools for memory files.
-- **D12:** `PostgresMemoryStore` is removed; configure the production `FileBackend` (typically Postgres-backed) in run dependencies.
-- **D12:** `SqliteMemoryStore` is removed; SQLite memory persistence is not supported in 3.0.
-- **D12:** `TieredMemoryStore` is removed; represent durable facts as files and apply host-specific policy around them.
-- **D12:** `format_memory_context` is removed with the memory package.
-- **D12:** `latest_user_text` is removed with the memory package.
-- **D12:** `resolve_memory_store` is removed with the memory package.
-- **D12:** `MemoryExtractionHook` is removed; use `ContextInjectionHook(FileMemoryContextBuilder())` or an application-owned hook.
-- **D12:** `assert_memory_store_contract` is removed from `linch.testing`; use the file-backend contract helper.
-- **D12:** The `memory_recalled` eval scorer is removed; score host-owned semantic recall or inspect file-memory events in application evals.
-- **D12:** Legacy `RunReport.long_run` memory-search, recalled-id, and tier-count metrics are removed; report host-owned file-memory or semantic-recall signals instead.
-- **D10:** The missing-`jsonschema` validation bypass is removed; `jsonschema` is a core dependency and structured output is always validated against its configured schema.
-- **M01:** Duplicate compaction retry drivers are consolidated into `_stream_turn_with_recovery`, preserving one retry per turn without a ladder and the ladder's per-run forced-compaction limit, ordering, and accounting.
-- **M02:** Duplicate strict JSON traversals share a private traversal core with separate boundary adapters; serialized bytes, fingerprints, depth/error policies, and permissive metadata conversion are preserved.
-- **M03:** Compaction, context building, and offload share custom-estimator invocation; each retains its message/text counting and fallback policy.
-- **M04:** Loop-guard signatures use `permission_decision_key` instead of a duplicate canonicalizer; canonical JSON bytes and ASCII escaping are unchanged.
-- **M05:** Four Postgres stores share pool initialization/close helpers; locking, schema transactions, retry, supplied-pool handling, and run-store advisory-lock/reset policies remain unchanged.
-- **M06:** OpenAI Chat uses the existing async client-close helper; client fields still reset before closing and close errors propagate.
-- **M07:** Mailbox and scheduling claims share a neutral validator; validation order and error messages are unchanged.
-- **Studio leftovers:** The `linch_ui/` ignore rule and stale Studio branch/DeepSeek documentation references are removed.
+| Removed alias | Replacement |
+|---|---|
+| `systemPrompt` | `system_prompt` |
+| `maxRetries` | `max_retries` |
+| `maxOutputTokens` | `max_output_tokens` |
+| `includePartialMessages` | `include_partial_messages` |
+| `maxTurns` | `max_turns` |
+| `maxToolConcurrency` | `max_tool_concurrency` |
+| `toolBatchingStrategy` | `tool_batching_strategy` |
+| `toolTimeoutMs` | `tool_timeout_ms` |
+| `cacheTtl` | `cache_ttl` |
+| `configDir` | `config_dir` |
+| `mcpServers` | `mcp_servers` |
+| `loopGuard` | `loop_guard` |
 
-P05 accounting recovery safeguards remain: aggregate usage is not a substitute
-for valid delivery receipts. P06 event readers remain strict: unknown required
-events fail, and only valid unknown envelopes explicitly marked `ignorable: true`
-round-trip as `IgnorableEvent`.
+Tool-context aliases `sessionId`, `runId`, `sessionStore`, `fileReadTracker`,
+`idempotencyKey`, and `reportProgress` become `session_id`, `run_id`,
+`session_store`, `file_read_tracker`, `idempotency_key`, and `report_progress`.
+Middleware aliases `sessionId`, `runId`, `turnIndex`, `toolUseId`, and `toolName`
+become `session_id`, `run_id`, `turn_index`, `tool_use_id`, and `tool_name`.
 
-## Accounting introduced in 3.0.0a1
+## Explicit extension imports
 
-The following sections preserve the accounting contract introduced by the
-first prerelease. That slice kept the neutral Agent persona/prompts and the
-existing compaction strategies; it did not itself introduce later reliability
-or distributed accounting features.
+| Old package or root exports | Replacement import |
+|---|---|
+| `linch.workflow`; root workflow context/journal/result/error helpers | `from linch.ext.workflow import WorkflowContext, WorkflowJournal, StepOutcome, WorkflowError, WorkflowSuspended, WorkflowTimeoutError, call_key, interrupt_key, step_key, run_workflow` |
+| `Agent.run_workflow(fn, ...)` | `await run_workflow(agent, fn, ...)` from `linch.ext.workflow` |
+| `linch.evals`; root harness exports | `from linch.ext.evals import EvalCase, CaseResult, EvalResult, run_eval` |
+| Root eval suite/benchmark exports | `from linch.ext.evals import EvalSuite, EvalBenchmarkTarget, EvalTargetResult, EvalBenchmarkResult, load_eval_suite, load_scripted_turns, run_eval_benchmark` |
+| Root scripted-provider exports | `from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn` |
+| Root eval scorers (except removed `memory_recalled`) | `from linch.ext.evals import text_contains, tool_called, schema_valid, cost_under, context_selected_tool, context_not_trimmed, context_metadata_contains, recovery_succeeded, run_completed` |
+| `linch.deep_agent`; root preset/profile/prompt exports | `from linch.ext.deep_agent import create_deep_agent, DeepAgentProfile, DEEP_AGENT_PROFILES, DEEP_AGENT_SYSTEM_PROMPT, DEEP_AGENT_SUBAGENTS` |
+| `linch.reports`; root report helpers | `from linch.ext.reports import RunReport, build_run_report, load_run_report` |
+| `linch.loop_runner`; root loop spec/runner exports | `from linch.ext.loop_runner import LoopSpec, LoopTrigger, LoopTickResult, LoopRunner` |
+| Root loop artifact/lease exports | `from linch.ext.loop_runner import LoopArtifactStore, LoopLease, LoopLeaseStore, FileLoopArtifactStore, FileLoopLeaseStore, InMemoryLoopLeaseStore` |
+| `linch.cli` / console target `linch.cli:main` | `from linch.ext.scaffold import main`; console target `linch.ext.scaffold:main`; the `linch` command remains |
 
-## Pin the prerelease deliberately
+For example:
 
-Pin this prerelease while reviewing the new accounting fields and durable-run
-semantics:
-
-```toml
-dependencies = ["linch==3.0.0a1"]
+```python
+from linch import Agent, InMemorySessionStore
+from linch.ext.deep_agent import create_deep_agent
+from linch.ext.evals import EvalCase, ScriptedProvider, TextTurn, run_eval
+from linch.ext.loop_runner import LoopRunner, LoopSpec
+from linch.ext.reports import RunReport, build_run_report
+from linch.ext.workflow import WorkflowContext, run_workflow
 ```
 
-Keep the optional extras needed by your application and resolve their declared
-dependency ranges in your lockfile. The accounting feature itself does not
-require an unrelated dependency upgrade.
+`create_deep_agent(durable=True)` requires explicit `session_store`,
+`run_store`, and an explicit `filesystem` when enabled. Use Postgres adapters
+for restart durability or `durable=False` for an ephemeral preset. Explicit
+InMemory overrides are accepted, but retain state only for the process lifetime.
 
-## Accounted usage is cumulative
+## Postgres stores, leases, and resume
+
+Install `linch[postgres]`. Hosts read configuration and pass DSNs explicitly;
+the SDK does not discover DSNs from the environment.
+
+| Removed or changed | Replacement |
+|---|---|
+| `SqliteRunStore` | `from linch import PostgresRunStore, InMemoryRunStore` |
+| `SqliteSessionStore` | `from linch.sessions.postgres import PostgresSessionStore`; `from linch import InMemorySessionStore` for tests/dev |
+| `SqliteFileBackend` | `from linch.filesystem.postgres import PostgresFileBackend`; `from linch import StateFileBackend` for ephemeral files |
+| `SqliteMailbox` | `from linch import InMemoryMailbox, Mailbox`; durable mailbox adapters are host-owned |
+| `SqliteMemoryStore` | File memory below; SQLite durability is removed |
+| Automatic SQLite/Postgres schema upgrades | Fresh Postgres schemas and new runs; all SQLite stores and `storage/_executor.py` are removed |
+| `RunOptions.allow_legacy_resume` and contractless resume | A current execution contract and wire generation 3; `from linch import RunOptions` |
+| Silent resume of terminal runs or runs without checkpoints | Raises `RunNotResumableError` with `run_id` and `status`; `from linch import RunNotResumableError` |
+| Cursorless assistant-boundary tool recovery | A valid `tool_batch_event_after_seq` cursor is required |
+| Old receipt snapshots, loop-guard shapes, checkpoint field defaults, and missing contract fingerprints | Current complete checkpoints, journal watermarks, bounded BLAKE2b guard digests, and verified contracts |
+| `scripts/run_report.py --runs-db` | `--dsn` or host script environment `LINCH_POSTGRES_DSN`; `load_report` / `render_report` now take a Postgres DSN |
+
+All persisted envelopes share generation **3** (`linch.RUN_SCHEMA_VERSION`):
+checkpoints, run contracts, model-call intents/receipts/journals, exact model
+input, permission decisions, session/provider-view snapshots, events, and
+workflow metadata. Missing, pre-3.0, and unknown versions are rejected. Workflow
+journals no longer read old call-key algorithms or `fingerprint_version`
+branches. Unknown required events fail; only valid unknown envelopes marked
+`ignorable: true` round-trip as `IgnorableEvent`.
+
+Custom store implementations must follow these changed contracts:
+
+- `RunStore.create_run(..., initial_checkpoint=...)` atomically persists the
+  checkpoint with creation or adoption. An existing ID is adopted only for a
+  same-session `pending` run, with metadata merging and contract checking;
+  other existing IDs raise `ValueError`.
+- `mark_failed(..., events=())` returns `(run_record, event_seqs)` so a failed
+  status and pending terminal events commit together.
+- `RunStore.save_checkpoint_with_events(...)` atomically commits a checkpoint
+  and its pending events; this is required when a phase has pending events.
+- `ModelInputSnapshotStore.delete` requires `run_id` for fenced cleanup.
+- Postgres schemas require durable event/message sequence counters. Lease
+  capabilities fence writes with owner/epoch; workers drive renewal. Import
+  `RunLease`, `RunLeaseStore`, `RunLeaseConflictError`, and `LeaseLostError`
+  from `linch` when implementing ownership handling.
+
+Writes remain durable before guarded side effects. Lease loss ends execution
+without further writes. Transient durable-store connection failures interrupt
+resumable runs for worker retry/takeover rather than writing a failed terminal.
+See [Run stores](usage/run-stores.md) and [Production](usage/production.md).
+
+## Worker dispatch and schedules
+
+Install `linch[worker,postgres]` and import the runtime explicitly:
+
+```python
+from linch.worker import Worker, enqueue_run, register_schedule_tools
+```
+
+| Removed scheduling API | Replacement |
+|---|---|
+| `Schedule`, `ScheduleOccurrence`, `ScheduleStore` | `from linch.worker import ScheduleDefinition, create_schedule, list_schedules, cancel_schedule` |
+| `ClaimingScheduleStore`, `LeasedScheduleStore`, `InMemoryScheduleStore`, `SqliteScheduleStore` | Worker/Postgres schedule definitions and PgQueuer job claims/retries |
+| `SchedulerLoop` | `Worker` and PgQueuer dispatch |
+| `schedule_tools` | `register_schedule_tools(...)`, returning a `Disposable` |
+| `Agent(schedule_store=...)` | Hosts register worker schedule tools explicitly |
+| `render_schedule_message` | Schedule fires dispatch separate runs |
+| `cron_matches`, `next_cron_time`, `validate_cron` | Worker cron definitions use `croniter`; no core scheduling helpers |
+| `assert_schedule_store_contract` | Removed with the scheduling protocol |
+
+Worker factories must reuse both `job.session_store` and `job.run_store`.
+These adapters are initialized once per worker. `enqueue_run` provides
+idempotent queue submission; leases fence execution independently of dispatch.
+See [Scale out](usage/production.md#scale-out).
+
+## File memory
+
+The `linch.memory` package is removed. Use filesystem files: an index at
+`/memories/MEMORY.md`, bounded to 200 lines, and one file per fact. Scope the
+backend with `ScopedFileBackend` in `RunOptions(deps=...)`.
+
+```python
+from linch import (
+    ContextInjectionHook,
+    FileMemoryContextBuilder,
+    ScopedFileBackend,
+    StateFileBackend,
+    assert_file_backend_contract,
+)
+```
+
+| Removed memory API | Replacement |
+|---|---|
+| `MemoryStore`, `PostgresMemoryStore`, `TieredMemoryStore` | A scoped `FileBackend`; production may use `PostgresFileBackend` |
+| `InMemoryKeywordMemoryStore` | `StateFileBackend` for test/dev memory files |
+| `MemoryContextBuilder` | `ContextInjectionHook(FileMemoryContextBuilder())` |
+| `MemorySearchTool`, `MemoryUpsertTool` | Existing filesystem tools read/write fact files |
+| `MemoryItem` | One fact per file |
+| `MemorySearchResult` | Host-owned semantic retrieval result types |
+| `MemoryExtractor`, `MemoryExtractionContext`, `MemoryExtractionHook`, `ConsolidationGate` | Application hooks/file-memory policy; semantic recall is an optional host recipe |
+| `format_memory_context`, `latest_user_text`, `resolve_memory_store` | Removed with the package; compose context through public hooks |
+| `assert_memory_store_contract` | `assert_file_backend_contract` |
+| `memory_recalled` eval scorer | Host scorer for file-memory or semantic-recall signals |
+| `RunReport.long_run` memory-search, recalled-id, and tier-count metrics | Host-owned file-memory/recall reporting |
+
+See [Context and memory](usage/context-and-memory.md) for the optional mem0
+recipe. File-memory index loading happens at most once per run.
+
+## OpenTelemetry
+
+The custom `linch.observability` package and `[otel]` extra are removed.
+`opentelemetry-api` is a core dependency. Hosts install/configure
+`opentelemetry-sdk` and an exporter; `Agent(context=...)` accepts scoped tracer
+and meter services.
+
+| Removed API | Replacement |
+|---|---|
+| `RunObserver`, `BaseObserver`, `observers=` | OTel for telemetry; native hooks for behavior |
+| `ObserverDispatcher`, `normalize_observers` | SDK span processors/exporters |
+| `LoggingObserver` | `from opentelemetry.sdk.trace.export import ConsoleSpanExporter` |
+| `SpanCollector` | `from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter` |
+| `OpenTelemetryObserver`, `RunTelemetryHook` | Direct runtime OTel instrumentation; remove the hook |
+| `RunInfo`, `RunResultInfo` | `invoke_agent` span attributes or agent lifecycle hooks |
+| `TurnInfo` | Step spans or turn hooks |
+| `ProviderCallInfo`, `ProviderCallResult` | `chat` spans or provider-call hooks |
+| `ToolInfo`, `ToolResultInfo` | `execute_tool` spans or tool hooks |
+| `Span` | `from opentelemetry.sdk.trace import ReadableSpan` |
+| `examples/observability/custom_observer.py` | `examples/observability/observability_agent.py` |
+
+Content capture requires `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT`.
+No host SDK means the API is a no-op. See [Events and telemetry](usage/events.md).
+
+Behavioral hook contexts remain available independently of telemetry:
+
+```python
+from linch import AfterProviderCallContext, BeforeProviderCallContext
+from linch.hooks import (
+    AgentStartContext,
+    AgentStopContext,
+    ProviderCallStartContext,
+    ProviderCallStopContext,
+    ToolUseStartContext,
+    ToolUseStopContext,
+    TurnStartContext,
+    TurnStopContext,
+)
+```
+
+## Gemini
+
+The `gemini` extra now installs `google-genai` in place of
+`google-generativeai`. Replace direct SDK imports of `google.generativeai`
+with `google.genai` in host integrations. Linch's provider imports remain:
+
+```python
+from linch import GeminiProvider, GeminiProviderOptions
+```
+
+`GeminiProviderOptions.project` selects Vertex AI; `location` and application
+default credentials apply there. `default_generation_config` accepts native
+`GenerateContentConfig` fields, including `thinking_config`. Signed model parts
+are retained for replay. No options fields were removed: `api_key`, `project`,
+`location`, and `default_generation_config` remain.
+
+For host code using SDK objects directly:
+
+| Old SDK API/configuration | Replacement |
+|---|---|
+| `genai.configure` / `GenerativeModel` | `genai.Client` |
+| `generate_content_async` | `client.aio.models.generate_content_stream` |
+| Tool schema key `parameters` | `parameters_json_schema` |
+| Structured-output key `response_schema` | `response_json_schema` |
+
+The Linch adapter disables automatic SDK function calling; Linch schedules
+and authorizes tools. See [Providers](usage/providers.md).
+
+## Reliability, identity, and retrieval
+
+`Agent` defaults to `ReliabilityPolicy()` for bounded invalid-response
+corrections; pass `reliability=None` to opt out. `ToolPrerequisite` and
+`CompletionGate` use successful foreground calls in the current run. Whole-text
+`<tool_call>` envelopes request a native resend and never execute tools.
+Reliability policy is part of the resume contract; changing it requires a new
+run. The extension seam is the serial-veto turn-stopping event.
+
+`RunOptions(principal=Principal(...))` supplies immutable tenant/user/role
+identity. `ToolRule`, `PathRule`, and `BashRule` accept `role=` and
+`unless_role=`. Resume restores an omitted principal and rejects a different
+explicit identity; role order is canonicalized. Hosts authenticate and supply
+the identity and roles.
+
+Retrieval uses `RagConnector` / `RetrievedChunk`, installed with
+`register_rag_connector`. `register_grounding_check` checks `[doc:<id>]`
+citations against retrieved IDs before finalization. Registrations return
+`Disposable` handles.
+
+```python
+from linch import (
+    CompletionGate,
+    Principal,
+    RagConnector,
+    ReliabilityPolicy,
+    RetrievedChunk,
+    RunOptions,
+    ToolPrerequisite,
+    register_grounding_check,
+    register_rag_connector,
+)
+```
+
+See [Permissions](usage/tools.md#per-run-principals-and-role-rules),
+[RAG](usage/context-and-memory.md#sourced-retrieval-and-grounding), and
+[Agent configuration](usage/agent.md).
+
+## Accounting and compaction
+
+### Accounted usage is cumulative
 
 Every physical provider delivery that reaches normalized `message_end` with
 valid `Usage` is settled once by delivery ID. The run total includes:
@@ -147,7 +324,7 @@ a dispatched delivery is cancelled, fails, or ends before valid final usage,
 the usage is unknown rather than zero and the terminal result sets
 `usage_complete=False`. An uncapped run may finish with that lower bound.
 
-## Budget behavior changes at the compaction boundary
+### Budget behavior changes at the compaction boundary
 
 Compaction is charged against the same run budget as the primary turn. Receipt
 settlement happens before summary application, hooks continue, or another
@@ -166,7 +343,7 @@ budget fails closed rather than replaying charges. These are in-process
 guarantees only: distributed-tree recovery, exactly-once external-provider
 billing, and reservations against concurrent admissions are not promised.
 
-## Durable compaction replay
+### Durable compaction replay
 
 `DefaultCompaction` and `DetailedCompaction` retain their existing strategy
 semantics and prompts. In a durable run, an accepted summary carries a bounded
@@ -182,7 +359,7 @@ is verification material, not source authority. Old in-flight accounting state
 also fails closed; start a new run rather than asking Linch to guess whether an
 interrupted delivery was billed.
 
-## Custom and standalone compaction
+### Custom and standalone compaction
 
 The public `CompactionStrategy` protocol is unchanged. A custom strategy that
 uses the provider facade receives accounting, run cancellation, and one
@@ -196,7 +373,7 @@ its existing direct-provider behavior. Calling it outside the normal run does
 not create a durable run receipt or add usage to a `RunBudget` unless the host
 integrates that accounting itself.
 
-## Pricing and compatibility limits
+### Pricing and compatibility limits
 
 Unknown or unpriced models never receive a synthetic USD price. Their reported
 tokens remain in cumulative usage, while cost fields and known-cost aggregates
@@ -204,80 +381,26 @@ are partial (`None` where no price is known). A USD cap cannot enforce an
 unknown price; use a custom pricing table when the host knows the model's
 rates.
 
-The original accounting slice did not itself add reliability correction
-policy, bounded feedback, or default-on reliability controls. Its accounting
-contract does not promise distributed accounting, exact external billing, or a
-reservation protocol. Later 3.0 changes are tracked separately above and in
-the changelog.
-
 See [Events](usage/events.md), [Agent & session](usage/agent.md), and
 [Compaction architecture](architecture/compaction.md) for the operational
 details.
 
-## Postgres-only durable state (WP17 / D13)
+## Internal cleanup for adapter maintainers
 
-- `SqliteRunStore` is removed; use `PostgresRunStore(dsn)` for durable runs or `InMemoryRunStore` for process-lifetime tests/dev.
-- `SqliteSessionStore` is removed; use `PostgresSessionStore(dsn)` for durable history or `InMemorySessionStore` for process-lifetime tests/dev.
-- `SqliteFileBackend` is removed; use `PostgresFileBackend(dsn)` for durable virtual files or `StateFileBackend` for ephemeral state.
-- `SqliteMailbox` is removed; use `InMemoryMailbox` for process-lifetime messaging or a host-owned `Mailbox` adapter for external infrastructure.
-- `create_deep_agent(durable=True)` requires explicit `session_store`, `run_store`, and an explicit `filesystem` when enabled; supply Postgres adapters for restart durability or use `durable=False` for an ephemeral preset. Explicit InMemory overrides remain accepted.
-- `scripts/run_report.py --runs-db` is removed; pass `--dsn` or set `LINCH_POSTGRES_DSN`. `load_report` and `render_report` now take a Postgres DSN string.
-
-The SDK does not read DSNs from the environment automatically. Hosts read their
-configuration and construct the stores explicitly. Install `linch[postgres]`
-and follow the [local Docker Postgres setup](./usage/quickstart.md#5-keep-state-when-the-process-restarts).
-Existing incompatible persisted data is rejected; start fresh runs rather than
-attempting a legacy database upgrade.
-
-## Coordination scope
-
-- `Schedule` is removed; define schedules through `linch.worker`.
-- `ScheduleOccurrence` is removed; worker schedule fires use queue payloads.
-- `ScheduleStore` is removed; use the worker Postgres schedule-definition table.
-- `ClaimingScheduleStore` is removed; PgQueuer claims deferred jobs.
-- `LeasedScheduleStore` is removed; worker queue delivery handles retries.
-- `InMemoryScheduleStore` is removed; use an explicit worker/Postgres adapter.
-- `SchedulerLoop` is removed; PgQueuer dispatches runs and deferred schedule jobs.
-- `schedule_tools` is removed; use `linch.worker.register_schedule_tools` (returns a `Disposable`).
-- `render_schedule_message` is removed; a schedule fire dispatches a separate run.
-- `cron_matches` is removed; worker cron definitions use `croniter`.
-- `next_cron_time` is removed; worker cron definitions use `croniter`.
-- `validate_cron` is removed; worker cron definitions use `croniter` validation.
-- `assert_schedule_store_contract` is removed with the scheduling protocol.
-- `Agent(schedule_store=...)` is removed; hosts register worker tools explicitly.
-- Worker factories must reuse `job.session_store` as well as `job.run_store`; both adapters live for the worker lifetime.
-
-`InMemoryMailbox` remains available for process-lifetime messaging; durable
-mailbox adapters remain host-owned. See [Scale out](usage/production.md#scale-out)
-for worker topology and schedules.
-
-## Direct OpenTelemetry (WP15 / D11)
-
-- **D11:** `RunObserver` is removed; configure an OpenTelemetry API tracer/meter through Agent Context.
-- **D11:** `BaseObserver` is removed; use native hooks for application behavior and OTel for telemetry.
-- **D11:** `ObserverDispatcher` is removed; OTel SDK span processors/exporters provide telemetry fan-out.
-- **D11:** `LoggingObserver` is removed; configure an OTel ConsoleSpanExporter.
-- **D11:** `SpanCollector` is removed; use the SDK InMemorySpanExporter in tests.
-- **D11:** `OpenTelemetryObserver` is removed; Linch emits OTel spans directly; hosts configure SDK providers.
-- **D11:** `RunTelemetryHook` is removed; remove the hook; OTel source instrumentation is always present.
-- **D11:** `RunInfo` is removed; use invoke_agent span attributes or native AgentStartContext.
-- **D11:** `RunResultInfo` is removed; use invoke_agent span attributes or native AgentStopContext.result.
-- **D11:** `TurnInfo` is removed; use step spans or native turn hook contexts.
-- **D11:** `ProviderCallInfo` is removed; use chat span attributes or native provider hook contexts.
-- **D11:** `ProviderCallResult` is removed; use chat usage/finish attributes or native provider hook contexts.
-- **D11:** `ToolInfo` is removed; use execute_tool span attributes or native tool hook contexts.
-- **D11:** `ToolResultInfo` is removed; use execute_tool span attributes or native tool hook contexts.
-- **D11:** `Span` is removed; use the SDK ReadableSpan type.
-- **D11:** `normalize_observers` is removed; configure SDK processors/exporters directly.
-- **D11:** `observers=` is removed; pass OTel services through `Agent(context=...)`.
-- **D11:** `linch.observability` is removed; use `opentelemetry` directly.
-- **D11:** The `[otel]` extra is removed; install `opentelemetry-sdk` and your exporter in the host application.
-- **D11:** `examples/observability/custom_observer.py` is removed; use the console/OTLP exporter example.
-
-## Pending run adoption
-
-- **WP8:** Loop-guard checkpoint call-count keys are now 64-bit BLAKE2b digests of the permission decision key; pre-3.0 guard checkpoints are rejected.
-
-- `RunStore.create_run(session_id, id=existing_id)` adopts only a same-session `pending` run, merges metadata and checks existing contract compatibility; other existing IDs raise `ValueError`. Queue submission remains idempotent through `enqueue_run`.
-
-- Custom run stores must accept `mark_failed(..., *, events=())` and return `(run_record, event_seqs)` so failed terminals commit with their pending events.
+- The unused `PermissionDecision.updated_input` field, pre-3.0 permission
+  readers, and null wire marker are removed. Live approval rewrites and
+  persisted non-null input rewrites remain rejected.
+- Checkpoint readers require every current field, including empty extension
+  state and nullable values. Malformed failure history is replaced instead of
+  preserving scalar or invalid error entries. Valid accounting receipts are
+  required; aggregate usage cannot replace them.
+- The unaccounted `stream_turn` entry point is removed; parser tests use
+  `_stream_turn`, while runtime calls use the required-ledger accounted path.
+- The unused private `add_usage` and `make_pool` helpers are removed; use
+  `Usage.add` and the shared Postgres pool lifecycle, respectively.
+- Compaction retries share `_stream_turn_with_recovery`. Strict JSON traversal,
+  custom token estimation, permission-key canonicalization, Postgres pool
+  lifecycle, client close, and claim validation are consolidated without
+  changing their caller-specific validation or accounting policies.
+- The obsolete `glob.glob` TypeError retry and scaffold TOML fallbacks are
+  removed on Python 3.11+.
