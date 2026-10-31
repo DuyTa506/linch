@@ -1277,6 +1277,31 @@ async def _finish_task(task: asyncio.Task[Any] | None, timeout: float) -> Any:
         return None
 
 
+def _cpu_breakdown(
+    process_cpu: dict[str, float], worker_pids: list[int], proxy_pid: int
+) -> dict[str, Any]:
+    """Partition sampled CPU, including Postgres PIDs discovered mid-window."""
+
+    worker_keys = {str(pid) for pid in worker_pids}
+    proxy_key = str(proxy_pid)
+    postgres = {
+        pid: value
+        for pid, value in process_cpu.items()
+        if pid not in worker_keys and pid != proxy_key
+    }
+    return {
+        "processes": process_cpu,
+        "workers": {str(pid): process_cpu.get(str(pid), 0.0) for pid in sorted(worker_pids)},
+        "postgres": postgres,
+        "proxy": process_cpu.get(proxy_key, 0.0),
+        "pid_metadata": {
+            "worker_pids": sorted(worker_pids),
+            "proxy_pid": proxy_pid,
+            "postgres_pids": sorted(int(pid) for pid in postgres if pid.isdigit()),
+        },
+    }
+
+
 async def run_point(point: Point, dsn: str, *, quick: bool = False) -> dict[str, Any]:
     import asyncpg
 
@@ -1554,12 +1579,7 @@ async def run_point(point: Point, dsn: str, *, quick: bool = False) -> dict[str,
             pg_window,
             worker_files,
             stream_file,
-            {
-                "processes": process_cpu,
-                "workers": {str(p.pid): process_cpu.get(str(p.pid), 0.0) for p in workers},
-                "postgres": {str(pid): process_cpu.get(str(pid), 0.0) for pid in postgres_pids},
-                "proxy": process_cpu.get(str(proxy.pid), 0.0),
-            },
+            _cpu_breakdown(process_cpu, [worker.pid for worker in workers], proxy.pid),
             calibration,
             drain_time,
         )

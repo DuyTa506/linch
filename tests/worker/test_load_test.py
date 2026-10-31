@@ -351,3 +351,20 @@ async def test_run_points_accepts_healthy_quick_completion(monkeypatch):
         [point], SimpleNamespace(), SimpleNamespace(output=None), experiment="quick", quick=True
     )
     assert accepted is True
+
+
+def test_cpu_breakdown_includes_postgres_pids_discovered_mid_window():
+    """Dynamic Postgres backends stay in the database CPU bucket."""
+
+    harness = _load_harness_module()
+    process_cpu = {"101": 12.5, "202": 4.0, "303": 7.5, "404": 2.0}
+    breakdown = harness._cpu_breakdown(process_cpu, [101, 202], 303)
+
+    assert breakdown["workers"] == {"101": 12.5, "202": 4.0}
+    assert breakdown["proxy"] == 7.5
+    assert breakdown["postgres"] == {"404": 2.0}
+    assert breakdown["pid_metadata"] == {
+        "worker_pids": [101, 202],
+        "proxy_pid": 303,
+        "postgres_pids": [404],
+    }
