@@ -10,6 +10,58 @@ when a run starts.
 
 ---
 
+## Sourced retrieval and grounding
+
+A `RagConnector` implements async `retrieve(query, *, k, principal=None)` and
+returns `RetrievedChunk(id, source, text, score, metadata)` values. Install it
+with reversible registrations:
+
+```python
+from linch import Agent, register_grounding_check, register_rag_connector
+
+agent = Agent(...)
+retrieval = register_rag_connector(agent, connector, k=5, principal=host_principal)
+grounding = register_grounding_check(agent)
+# Later: await grounding.dispose(); await retrieval.dispose()
+```
+
+Only one connector may be active per agent. `k` must be a positive integer.
+Chunk ids must be nonempty strings without `]`, carriage returns or newlines.
+Each request renders `[doc:<id>]`, source and text into ephemeral system blocks.
+Retrieval uses the submitted user query across correction retries and durable
+resume; an alignment prompt replaces that query. The principal is passed through
+unchanged: the connector and host own access checks and knowledge scoping.
+
+Grounding requires at least one citation to an id returned by the latest
+retrieval, and rejects any unknown cited id. It checks every final text block,
+forced finals, and recursively checks string values in terminal-tool inputs.
+It verifies citation membership, not whether the cited text supports a claim.
+Empty retrieval cannot ground an answer. Retrieval errors fail visibly.
+
+An ungrounded answer receives short correction feedback, then fails after
+`agent.reliability.max_correction_turns` corrections. This is a separate per-run
+counter from built-in reliability corrections; each mechanism can consume its
+own bound. `reliability=None` allows zero grounding corrections. Query, latest retrieved
+ids and counter survive checkpoints. `required=False` disables interventions;
+without an active connector grounding is a no-op.
+
+Retrieved bodies and chunk metadata stay outside the session log and stored
+session messages. Typed `ContextBuildEvent.metadata["rag"]` audits only `ids`
+and `sources`, including empty retrieval. Context budget trimming does not
+change retrieval membership: a trimmed chunk id remains eligible for citation
+until the next retrieval replaces the ids. Grounding interventions emit typed
+`VerificationEvent` records without retrieved bodies. Exact-model-input snapshots
+may contain retrieved text because they preserve the outgoing request.
+
+For durable runs, connectors should expose stable `resume_policy_id`,
+`resume_policy_version` and JSON-safe `resume_policy_config` identifying the
+knowledge scope and corpus revision; these participate in resume identity.
+See [the in-memory keyword connector](../../examples/rag/keyword_connector.py)
+for a dependency-free reference. Disposing registrations or closing the agent
+removes their hooks, listener and run state.
+
+---
+
 ## Per-turn context building (RAG)
 
 A `ContextBuilder` is a duck-typed object with an async `build(turn)` method.
