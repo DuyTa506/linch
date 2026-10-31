@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from .._prompt_cache import prompt_cache_advisories, tool_signature
-from .._telemetry import store_call
 from ..compaction import build_compaction_event, reset_read_tracker_after_compaction
 from ..context import context_budget_to_dict
 from ..errors import ConfigError
@@ -30,7 +29,7 @@ from ..model_calls import (
     _ModelCallLedger,
     _projection_record,
 )
-from ..run_store import LeaseLostError
+from ..run_store import LeaseLostError, durable_call
 from ..types import AssistantAssembly, Message, ProviderRequest, Usage
 from .checkpoint import _message_digest, _primary_control_message
 from .feedback import correct_invalid_response
@@ -432,7 +431,7 @@ async def run_provider_turn(ctx: ProviderTurnContext) -> AsyncIterator[Event]:
                 yield event
             return
         await ctx.end_provider_call(stop_reason=assembly.stop_reason, usage=_provider_usage)
-        await store_call(session, "session.append", session.append([assembly.message]))
+        await durable_call(session, "session.append", session.append([assembly.message]))
         ctx.force_final_pending = False
         await ctx.save_checkpoint(
             "assistant_appended",

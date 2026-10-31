@@ -558,6 +558,40 @@ async def test_transient_checkpoint_store_error_stops_without_terminal_and_resum
     assert len(tool_result_blocks) == 1
 
 
+async def test_transient_checkpoint_failure_ignores_telemetry_operation_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from linch import ErrorEvent, ResultEvent
+    from linch.loop import checkpoint
+    from linch.run_store import durable_call
+
+    async def opaque_durable_call(session: Any, op: str, awaitable: Any) -> Any:
+        return await durable_call(session, "checkpoint-write", awaitable)
+
+    monkeypatch.setattr(checkpoint, "durable_call", opaque_durable_call)
+    injected = _TransientCheckpointStore(_memory_run_store())
+    counts: dict[str, int] = {}
+    agent = _agent(
+        model="gpt-5",
+        provider=ScriptProvider(tool_names=["A"]),
+        tools=_registry(counts, "A"),
+        permissions={"mode": "skip-dangerous"},
+        session_store=_memory_session_store(),
+        run_store=injected,
+        cwd=".",
+    )
+    session = await agent.session(id="opaque-checkpoint")
+    events = await _collect(session.run("use tool"))
+    run_id = next(event.run_id for event in events if event.type == "system")
+
+    assert injected.failure_seen
+    assert not any(isinstance(event, (ErrorEvent, ResultEvent)) for event in events)
+    assert injected.after_failure_calls == []
+    record = await injected.load_run(run_id)
+    assert record is not None and record.status == "running"
+    assert counts == {}
+
+
 async def test_tool_batch_checkpoint_is_not_saved_after_each_tool_end() -> None:
     from linch.run_store import InMemoryRunStore
 
