@@ -16,6 +16,7 @@ from .types import InvokedSkillRecord, Message, SkillOverlay, Usage
 
 if TYPE_CHECKING:
     from .agent import Agent
+    from .permissions import Principal
     from .tools import ToolRegistry
 
 
@@ -79,6 +80,9 @@ class RunOptions:
 
     run_id: str | None = None
     """Adopt this pending run ID when starting a queued run."""
+
+    principal: Principal | None = None
+    """Immutable tenant/user/role identity for this run's authorization."""
 
 
 @dataclass(slots=True)

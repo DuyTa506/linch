@@ -32,7 +32,7 @@ from .hooks import (
     PostToolUseFailureContext,
     PreToolUseContext,
 )
-from .permissions import PendingToolCall, PermissionDecision
+from .permissions import PendingToolCall, PermissionDecision, Principal
 from .permissions.keys import permission_decision_key as _permission_key
 from .providers.retry import RetryOptions, _delay_for_error
 from .tools import (
@@ -310,6 +310,7 @@ async def _run_background_tool(
     session: Any,
     signal: AbortContext,
     *,
+    principal: Principal | None,
     bg_id: str,
     turn_index: int | None,
     middleware_error: str | None,
@@ -330,6 +331,7 @@ async def _run_background_tool(
             agent,
             session,
             signal,
+            principal=principal,
             turn_index=turn_index,
             middleware_error=middleware_error,
             run_id=origin_run_id,
@@ -435,6 +437,7 @@ async def _execute_one(
     middleware_error: str | None = None,
     on_progress: Callable[[ToolProgressEvent], None] | None = None,
     run_id: str | None = None,
+    principal: Principal | None = None,
 ) -> ToolExecutionOutcome:
     throw_if_aborted(signal)
 
@@ -518,6 +521,7 @@ async def _execute_one(
         # Stable across resume: run_id is reused by resume_loop and call.id comes
         # from the persisted provider_view, so a re-executed tool sees the same key.
         idempotency_key=f"{execution_run_id}:{call.id}",
+        _principal=principal,
     )
     try:
         return await _execute_tool_attempts(
@@ -574,6 +578,7 @@ def _dispatch_execute(
             # permission would redirect the approved call to another workspace.
             "execution",
             "idempotency_key",
+            "principal",
         )
     }
     execution = ToolExecution(
@@ -1189,6 +1194,7 @@ def _evaluate_permissions(
     agent: Any,
     session: Any,
     *,
+    principal: Principal | None,
     middleware_errors: dict[str, str] | None = None,
 ) -> tuple[list[PermissionDecision], list[int]]:
     """First (synchronous) permission pass.
@@ -1215,6 +1221,7 @@ def _evaluate_permissions(
                 tool=tool_obj,
                 input=call.input,
                 cwd=_effective_cwd(session, agent),
+                principal=principal,
             )
         )
         if initial.decision != "ask":
@@ -1251,6 +1258,8 @@ async def _resolve_ask_decisions(
     agent: Any,
     session: Any,
     signal: AbortContext,
+    *,
+    principal: Principal | None,
 ) -> None:
     """Second (async) permission pass: drive ``resolve()`` for each ``ask`` call,
     mutating *decisions* in place.
@@ -1266,6 +1275,7 @@ async def _resolve_ask_decisions(
                     tool=call.tool,
                     input=call.input,
                     cwd=_effective_cwd(session, agent),
+                    principal=principal,
                 ),
                 signal,
             )
@@ -1293,6 +1303,7 @@ async def _run_serial_batch(
     hook_dispatcher: HookDispatcher,
     middleware_errors: dict[str, str],
     turn_index: int | None,
+    principal: Principal | None,
 ) -> AsyncIterator[Event]:
     """Run a serial (one-call-at-a-time) batch, yielding skill + start/end events."""
     for call, _idx, decision in batch["calls"]:
@@ -1316,6 +1327,7 @@ async def _run_serial_batch(
             agent,
             session,
             signal,
+            principal=principal,
             turn_index=turn_index,
             middleware_error=middleware_errors.get(call.id),
         )
@@ -1374,6 +1386,7 @@ async def _run_parallel_batch(
     hook_dispatcher: HookDispatcher,
     middleware_errors: dict[str, str],
     turn_index: int | None,
+    principal: Principal | None,
 ) -> AsyncIterator[Event]:
     """Run a parallel batch: emit all starts, gather concurrently, then all ends.
 
@@ -1404,6 +1417,7 @@ async def _run_parallel_batch(
             agent,
             session,
             signal,
+            principal=principal,
             turn_index=turn_index,
             middleware_error=middleware_errors.get(call.id),
         )
@@ -1488,6 +1502,7 @@ def _start_tool_execution(
     *,
     turn_index: int | None,
     middleware_error: str | None,
+    principal: Principal | None,
 ) -> _RunningTool:
     # One pending update per call. A fast producer coalesces to its latest
     # progress instead of creating an unbounded queue behind a slow consumer.
@@ -1511,6 +1526,7 @@ def _start_tool_execution(
             agent,
             session,
             signal,
+            principal=principal,
             turn_index=turn_index,
             middleware_error=middleware_error,
             on_progress=_on_progress,
@@ -1583,6 +1599,7 @@ async def execute_tool_calls(
     session: Any,
     signal: AbortContext,
     *,
+    principal: Principal | None = None,
     turn_index: int | None = None,
     on_permissions_resolved: Callable[[], Awaitable[None]] | None = None,
 ) -> AsyncIterator[Event]:
@@ -1630,7 +1647,11 @@ async def execute_tool_calls(
 
     # Final permission evaluation binds to the canonical, post-hook input.
     decisions, ask_indices = _evaluate_permissions(
-        resolved, agent, session, middleware_errors=middleware_errors
+        resolved,
+        agent,
+        session,
+        principal=principal,
+        middleware_errors=middleware_errors,
     )
 
     # Emit single aggregated PermissionRequestEvent before resolve
@@ -1649,7 +1670,15 @@ async def execute_tool_calls(
         yield PermissionRequestEvent(requests=items)
 
     # Second pass: async resolve()
-    await _resolve_ask_decisions(resolved, ask_indices, decisions, agent, session, signal)
+    await _resolve_ask_decisions(
+        resolved,
+        ask_indices,
+        decisions,
+        agent,
+        session,
+        signal,
+        principal=principal,
+    )
 
     for i, call in enumerate(resolved):
         if decisions[i].decision == "allow" and call.id in precomputed_results:
@@ -1695,6 +1724,7 @@ async def execute_tool_calls(
                     agent,
                     session,
                     signal,
+                    principal=principal,
                     bg_id=bg_id,
                     turn_index=turn_index,
                     middleware_error=middleware_errors.get(call.id),
@@ -1740,6 +1770,7 @@ async def execute_tool_calls(
             hook_dispatcher=hook_dispatcher,
             middleware_errors=middleware_errors,
             turn_index=turn_index,
+            principal=principal,
         )
         try:
             async for event in lane_events:
