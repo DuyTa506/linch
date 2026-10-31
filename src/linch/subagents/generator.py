@@ -22,6 +22,19 @@ if TYPE_CHECKING:
 
 @dataclass(slots=True)
 class GeneratedSubagentDefinition:
+    """Hold a generated subagent's prompt and optional tool allowlist.
+
+    Args:
+        name: Lowercase identifier used for the subagent file and registry.
+        description: Catalog description explaining when to use the subagent.
+        body: Complete system prompt written to the subagent definition.
+        tools: Optional parent-tool allowlist; ``None`` inherits parent access.
+
+    Attributes:
+        tools: An empty list explicitly gives the generated subagent no tools;
+            ``None`` has the distinct meaning of inherited access.
+    """
+
     name: str
     description: str
     body: str
@@ -30,6 +43,19 @@ class GeneratedSubagentDefinition:
 
 @dataclass(slots=True)
 class CreatedSubagentDefinition:
+    """Describe a generated definition after it has been written and loaded.
+
+    Args:
+        definition: Normalized generated content used for the file.
+        file_path: Path of the written Markdown definition.
+        agent_definition: Parsed registry definition returned by the loader.
+
+    Attributes:
+        definition: Normalized values used to render the file.
+        agent_definition: Loader representation, which may include source and
+            frontmatter details not present in ``definition``.
+    """
+
     definition: GeneratedSubagentDefinition
     file_path: str
     agent_definition: AgentDefinition
@@ -92,7 +118,17 @@ Design rules:
 
 
 def render_subagent_markdown(definition: GeneratedSubagentDefinition) -> str:
-    """Render a generated subagent as Linch's disk-backed Markdown format."""
+    """Render a generated subagent as Linch's disk-backed Markdown format.
+
+    Args:
+        definition: Generated content to normalize and render.
+
+    Returns:
+        Markdown with YAML frontmatter and the normalized prompt body.
+
+    Raises:
+        ConfigError: If the definition has an invalid name or empty content.
+    """
 
     normalized = _normalize_generated_definition(definition)
     frontmatter: dict[str, object] = {
@@ -115,7 +151,23 @@ async def generate_subagent_definition(
     existing_names: list[str] | None = None,
     signal: Any = None,
 ) -> GeneratedSubagentDefinition:
-    """Generate a Linch subagent definition from a natural-language request."""
+    """Generate a Linch subagent definition from a natural-language request.
+
+    Args:
+        agent: Agent whose provider, tools, and existing subagents guide generation.
+        request: Natural-language role or behavior requested for the new subagent.
+        tools: Optional fixed tool allowlist to impose on the generated definition.
+        existing_names: Optional names to reject before writing a definition.
+        signal: Optional abort signal passed to the provider call.
+
+    Returns:
+        A normalized generated subagent definition.
+
+    Raises:
+        ConfigError: If the request, tool allowlist, or generated definition is invalid.
+        ProviderError: If the provider response is empty or malformed; other typed
+            provider errors propagate unchanged.
+    """
 
     if not isinstance(request, str) or request.strip() == "":
         raise ConfigError("request must be a non-empty string")
@@ -155,7 +207,20 @@ async def write_subagent_definition(
     *,
     overwrite: bool = False,
 ) -> AgentDefinition:
-    """Write a generated subagent definition under ``config_dir/agents``."""
+    """Write a generated subagent definition under ``config_dir/agents``.
+
+    Args:
+        definition: Generated content to normalize and persist.
+        config_dir: Linch configuration directory containing the ``agents`` folder.
+        overwrite: Whether an existing definition with the same name may be replaced.
+
+    Returns:
+        The parsed agent definition loaded from disk after writing.
+
+    Raises:
+        ConfigError: If validation fails, the file exists without overwrite, or
+            the written definition cannot be loaded.
+    """
 
     normalized = _normalize_generated_definition(definition)
     agents_dir = Path(config_dir) / "agents"
@@ -187,7 +252,24 @@ async def create_subagent_definition(
     reload: bool = True,
     signal: Any = None,
 ) -> CreatedSubagentDefinition:
-    """Generate, write, and optionally hot-reload a disk-backed subagent."""
+    """Generate, write, and optionally hot-reload a disk-backed subagent.
+
+    Args:
+        agent: Agent whose provider and registry receive the generated definition.
+        request: Natural-language role or behavior requested for the subagent.
+        tools: Optional fixed tool allowlist for the generated definition.
+        overwrite: Whether an existing definition with the same name may be replaced.
+        reload: Whether to refresh the agent's live subagent registry after writing.
+        signal: Optional abort signal passed to generation.
+
+    Returns:
+        The generated definition, file path, and loaded registry definition.
+
+    Raises:
+        ConfigError: If generation, writing, or reloading validation fails.
+        ProviderError: If the generation response is empty or malformed; other typed
+            provider errors propagate unchanged.
+    """
 
     config_dir = Path(str(getattr(agent, "_config_dir", Path(agent.cwd) / ".linch")))
     existing_names = sorted(await _existing_subagent_names(agent))
