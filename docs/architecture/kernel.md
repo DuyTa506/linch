@@ -85,9 +85,12 @@ safe.
   independent and idempotently removable, and an iterator's `aclose()` is
   awaited when present. No producer means the loop does not allocate or dispatch
   an inbox coroutine.
-- `scope(label) -> Context` — a **child** sharing the bus but with an isolated
+- `scope(label, isolate_events=False) -> Context` — a **child** sharing the bus but with an isolated
   service overlay and its own child `EffectScope`, so per-agent (or per-subagent)
-  teardown disposes only that branch.
+  teardown disposes only that branch. With `isolate_events=True`, listener
+  registrations are snapshotted onto an independent bus; filtered parent service
+  changes still reach the child. `EventBus.fork()` and `ToolPipeline.fork()` own
+  the listener-copy mechanics and preserve registration ordering and ownership.
 
 `Agent` creates one owned child `Context` for its lifetime. When `context=` is
 supplied it is the parent/host scope, which remains alive when the Agent closes;
@@ -136,13 +139,15 @@ host permission rules still decide authorization. Role instructions append to
 the existing system prompt, schemas use `OutputSchema`, and budget limits create
 a fresh `RunBudget`. Cleanup restores the session's original Agent and overrides
 and disposes the scope, including on early iterator close or setup failure.
-Scopes still referenced by retained children or detached tools remain owned
-by the parent Context until `Agent.close()` quiesces their work. Inherited
-service changes are relayed through a filtered parent-bus registration so
-run-local plugin dependencies still activate and deactivate normally.
+Detached work releases the scope when its last task finishes; retained child
+sessions retain their services until released. Session close notifications and
+task callbacks trigger disposal without requiring Agent shutdown. The parent
+Context retains retry ownership if disposal fails. Inherited service changes
+are relayed by the kernel's isolated scope so run-local plugin dependencies
+still activate and deactivate normally.
 
-There is no registry: callers retain released definitions and pass the same
-profile on resume or takeover. `loop/contracts.py` records its id, version, and
+Direct callers pass the same profile on resume; workers resolve it from their
+supplied `profiles` definitions on queue launch and takeover. `loop/contracts.py` records its id, version, and
 SHA-256 content hash in `RunContract.payload.run_options.profile`. The existing
 whole-contract compatibility check rejects omission or a changed definition,
 including plugin execution order. `profile=None` adds no contract fields or

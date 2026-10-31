@@ -76,16 +76,8 @@ def _principal_contract(principal: Principal | None) -> dict[str, Any] | None:
     }
 
 
-def _principal_from_contract(contract: Any) -> Principal | None:
-    payload = getattr(contract, "payload", None)
-    if not isinstance(payload, dict):
-        raise ConfigError("stored run contract has an invalid principal shape")
-    options = payload.get("run_options", {})
-    if not isinstance(options, dict):
-        raise ConfigError("stored run contract has an invalid principal shape")
-    if "principal" not in options:
-        return None
-    raw = options["principal"]
+def _principal_from_value(raw: Any) -> Principal:
+    """Decode a JSON-safe principal value."""
     if not isinstance(raw, dict) or set(raw) != {"tenant", "user", "roles"}:
         raise ConfigError("stored run contract has an invalid principal shape")
     roles = raw["roles"]
@@ -95,6 +87,18 @@ def _principal_from_contract(contract: Any) -> Principal | None:
         return Principal(tenant=raw["tenant"], user=raw["user"], roles=frozenset(roles))
     except (TypeError, ValueError) as exc:
         raise ConfigError(f"stored run contract has an invalid principal: {exc}") from None
+
+
+def _principal_from_contract(contract: Any) -> Principal | None:
+    payload = getattr(contract, "payload", None)
+    if not isinstance(payload, dict):
+        raise ConfigError("stored run contract has an invalid principal shape")
+    options = payload.get("run_options", {})
+    if not isinstance(options, dict):
+        raise ConfigError("stored run contract has an invalid principal shape")
+    if "principal" not in options:
+        return None
+    return _principal_from_value(options["principal"])
 
 
 def _permission_policy_contract(agent: Any) -> dict[str, Any]:

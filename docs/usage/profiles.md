@@ -54,8 +54,8 @@ merge by their stable mapping key: replacing a row keeps its position, and new
 rows append. The final layer supplies the effective id and version. Empty tool
 tuples replace a tool list; budget and schema mappings replace the whole field.
 An output schema must supply valid `name` and `schema` arguments.
-`profile.resolve()` returns a
-detached JSON-safe dictionary suitable for inspection or configuration dumps.
+`profile.resolve()` returns a detached JSON-safe dictionary suitable for
+inspection or configuration dumps.
 
 Plugins use the existing `Plugin` protocol and `agent.use` lifecycle:
 
@@ -82,9 +82,10 @@ implementations. Live dependencies belong in agent `Context` services or
 version when its implementation changes.
 
 Ordinary runs dispose their plugin scopes when iteration finishes or closes.
-If retained children or detached background tools still use a run's services,
-the scope stays owned by the parent Agent until `agent.close()` drains that
-work and disposes its resources.
+Detached work keeps the scope alive until its last task completes. Retained
+children keep their services for continuation until their sessions are released;
+releasing the last child also disposes the scope. `agent.close()` remains the
+fallback for draining work and retrying failed disposal.
 
 `output_schema` contains the existing `OutputSchema` constructor arguments.
 `budget` contains `RunBudget` limit arguments (`max_tokens`, `max_cost_usd`,
@@ -94,9 +95,9 @@ limit. Profiles do not introduce another execution or structured-output engine.
 
 ## Resume and rollout
 
-There is no profile registry. The caller supplies the profile definition on
-launch, resume, and queued-run adoption. Keep released definitions available in
-the host application for as long as their runs may resume:
+There is no mutable profile registry. Direct callers supply the profile
+definition on launch and resume. Keep released definitions available in the
+host application for as long as their runs may resume:
 
 ```python
 async for event in session.resume(run_id, RunOptions(profile=support)):
@@ -111,6 +112,34 @@ compare the whole contract before provider or tool execution. Missing profiles,
 different versions, and changed content under the same version are rejected.
 Rolling out a new profile affects new runs; existing runs must use their pinned
 definition. `profile=None` preserves the existing request and contract shape.
+
+## Queued runs and worker takeover
+
+Pass the selected profile and principal when enqueueing, and supply the released
+definitions to each worker:
+
+```python
+from linch import Principal
+from linch.worker import RunRequest, Worker, enqueue_run, enqueue_runs
+
+principal = Principal(tenant="acme", user="alice", roles={"support"})
+run_id = await enqueue_run(pool, session_id, "Reset my access",
+                           profile=support, principal=principal)
+await enqueue_runs(pool, [RunRequest(other_session_id, "Find my invoice",
+                                    profile=billing, principal=principal)])
+worker = Worker(pool, agent_factory, profiles=(support, billing))
+await worker.run()
+```
+
+Pending run metadata and job payloads contain only the profile's
+`{id, version, content_hash}` reference and the serialized principal; plugin
+objects and profile definitions stay in the host process. The worker resolves
+the exact reference before execution and passes the definition through
+`RunOptions`. Missing definitions or mismatched content fail the run with an
+actionable `ConfigError`. Once launch writes a RunContract, its pinned profile
+and principal take precedence on resume and lease takeover. Every worker that
+may reclaim the run must retain that released definition. See
+[production wiring](./production.md#scale-out) for the worker factory.
 
 `linch.ext.deep_agent.DeepAgentProfile` stays separate: it configures factory-time
 durability, coordinator behavior, and worker retention. Domain profiles select
