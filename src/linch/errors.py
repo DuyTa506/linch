@@ -2,17 +2,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from .kernel.errors import ConfigError as ConfigError
+from .kernel.errors import LinchError
+
 if TYPE_CHECKING:
     from .run_store import RunStatus
-
-
-class LinchError(Exception):
-    kind = "linch"
-    retryable = False
-
-
-class ConfigError(LinchError):
-    kind = "config"
 
 
 class RunNotResumableError(LinchError):

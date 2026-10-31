@@ -10,6 +10,7 @@ from typing import Any, Literal, cast
 from uuid import uuid4
 from xml.sax.saxutils import escape
 
+from . import lifecycle
 from ._telemetry import trace_tool
 from ._wire import UnsupportedWireVersionError
 from .abort import AbortContext, throw_if_aborted
@@ -27,7 +28,6 @@ from .events import (
 )
 from .hooks import (
     HookDispatcher,
-    HookEvent,
     PostToolUseContext,
     PostToolUseFailureContext,
     PreToolUseContext,
@@ -855,7 +855,7 @@ async def _dispatch_pre_tool_use(
     turn_index: int | None,
 ) -> tuple[dict[str, Any], str | None, Any, list[Event]]:
     outcome = await dispatcher.dispatch(
-        HookEvent.PRE_TOOL_USE,
+        lifecycle.PRE_TOOL_USE,
         PreToolUseContext(
             session=session,
             run_id=session.active_run_id or "unknown",
@@ -933,7 +933,7 @@ async def _dispatch_post_tool_use(
     turn_index: int | None,
 ) -> tuple[ToolExecutionOutcome, list[Event]]:
     dispatched = await dispatcher.dispatch(
-        HookEvent.POST_TOOL_USE,
+        lifecycle.POST_TOOL_USE,
         PostToolUseContext(
             session=session,
             run_id=session.active_run_id or "unknown",
@@ -1016,7 +1016,7 @@ async def _dispatch_post_tool_use_failure(
     if not dispatcher.active or tool_result is None or not getattr(tool_result, "is_error", False):
         return []
     dispatched = await dispatcher.dispatch(
-        HookEvent.POST_TOOL_USE_FAILURE,
+        lifecycle.POST_TOOL_USE_FAILURE,
         PostToolUseFailureContext(
             session=session,
             run_id=session.active_run_id or "unknown",
@@ -1617,10 +1617,10 @@ async def execute_tool_calls(
 
     effective_tools = getattr(session, "tools_override", None) or agent.tools
     bus = getattr(getattr(agent, "context", None), "events", None)
-    if bus is not None and bus.has_listeners("tools/resolve"):
+    if bus is not None and bus.has_listeners(lifecycle.TOOL_RESOLVE):
         resolved = []
         for block in blocks:
-            reason = await bus.serial("tools/resolve", block.name, block.input, session)
+            reason = await bus.serial(lifecycle.TOOL_RESOLVE, block.name, block.input, session)
             resolved.append(_resolve_call(block, effective_tools, agent.cwd, reason))
     else:
         resolved = [_resolve_call(b, effective_tools, agent.cwd) for b in blocks]

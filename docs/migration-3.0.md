@@ -214,10 +214,16 @@ and meter services.
 | `ProviderCallInfo`, `ProviderCallResult` | `chat` spans or provider-call hooks |
 | `ToolInfo`, `ToolResultInfo` | `execute_tool` spans or tool hooks |
 | `Span` | `from opentelemetry.sdk.trace import ReadableSpan` |
+| No run trace correlation on boundary events, tools, or logs | `SystemEvent.trace_id`, `ResultEvent.trace_id`, read-only `ToolContext.trace_id`, and opt-in `TraceIdFilter` |
 | `examples/observability/custom_observer.py` | `examples/observability/observability_agent.py` |
 
 Content capture requires `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT`.
 No host SDK means the API is a no-op. See [Events and telemetry](usage/events.md).
+
+Kernel lifecycle dispatch sites now use the internal typed catalog in
+`linch.lifecycle`; the bus rejects a mode mismatch while user-facing hook
+methods and their ordering remain unchanged. See the generated catalog in
+[architecture/events.md](architecture/events.md#typed-lifecycle-catalog).
 
 Behavioral hook contexts remain available independently of telemetry:
 

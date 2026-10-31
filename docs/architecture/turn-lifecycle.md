@@ -68,6 +68,25 @@ sequenceDiagram
     end
 ```
 
+## Typed lifecycle points
+
+The sequence is backed by the catalog in [events.md](./events.md). Run, turn,
+provider, and security hooks use `hook` points such as `AgentStart`,
+`UserPromptSubmit`, `TurnStart`, `BeforeProviderCall`, `PreToolUse`, and
+`AgentStop`. `HookDispatcher` awaits them in registration order and keeps the
+security-sensitive mutation and permission ordering explicit.
+
+The three kernel tool points — `tools/pre-execute`, `tools/execute`, and
+`tools/post-execute` — are waterfalls. A wrapper must await its `next` callback
+to continue the chain. `turn-stopping` is a serial veto point used before a
+candidate finalization; an accepting listener returns control to the normal
+terminal path, while a continue or fail decision changes that path. The bus
+rejects dispatch through a mode that does not match the point's contract.
+
+`HookDispatcher` remains the user-hook adapter rather than becoming a generic
+bus listener. It threads mutations across hooks, isolates hook failures, and
+preserves the canonical `PreToolUse` validation and permission ordering.
+
 ## Design rationale
 
 - **The model decides when to stop, not a step counter.** The loop continues while

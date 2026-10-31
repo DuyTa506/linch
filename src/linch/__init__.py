@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     # skipped at runtime (TYPE_CHECKING is False), so `import linch` stays lazy —
     # the runtime resolution path is `__getattr__` below. Keep it in sync with
     # `_EXPORTS`/`_ALIASES`; drift surfaces as pyright/ruff errors.
+    from ._tracing import TraceIdFilter
     from .agent import Agent
     from .budget import RunBudget
     from .compaction import (
@@ -319,6 +320,7 @@ if TYPE_CHECKING:
 # name). Flattened into ``_LAZY`` below; ``_ALIASES`` covers the few names whose
 # source attribute differs from the exported name.
 _EXPORTS: dict[str, tuple[str, ...]] = {
+    "._tracing": ("TraceIdFilter",),
     ".agent": ("Agent",),
     ".budget": ("RunBudget",),
     ".compaction": (
@@ -798,6 +800,7 @@ __all__ = [
     "ToolCallStartEvent",
     "ToolProgressEvent",
     "ToolContext",
+    "TraceIdFilter",
     "ToolOutput",
     "ToolOutputError",
     "ToolExecutionError",

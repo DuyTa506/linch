@@ -841,10 +841,11 @@ async def _run_compaction_impl(
     dispatcher = _compaction_hook_dispatcher(agent)
     run_id = getattr(session, "active_run_id", None) or "unknown"
     if dispatcher is not None:
-        from .hooks import HookEvent, PreCompactContext
+        from .hooks import PreCompactContext
+        from .lifecycle import PRE_COMPACT
 
         await dispatcher.dispatch(
-            HookEvent.PRE_COMPACT,
+            PRE_COMPACT,
             PreCompactContext(
                 session=session,
                 run_id=run_id,
@@ -940,11 +941,12 @@ async def _run_compaction_impl(
     }
 
     if dispatcher is not None:
-        from .hooks import HookEvent, PostCompactContext
+        from .hooks import PostCompactContext
+        from .lifecycle import POST_COMPACT
 
         info = session.last_compaction_info
         await dispatcher.dispatch(
-            HookEvent.POST_COMPACT,
+            POST_COMPACT,
             PostCompactContext(
                 session=session,
                 run_id=run_id,
