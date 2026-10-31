@@ -227,7 +227,13 @@ def _v2_contract_error(
     )
 
 
-def _resolve_call(block: ToolUseBlock, tools: Any, cwd: str) -> ResolvedCall:
+def _resolve_call(
+    block: ToolUseBlock, tools: Any, cwd: str, error_reason: str | None = None
+) -> ResolvedCall:
+    if error_reason:
+        return ResolvedCall(
+            block.id, block, None, block.input, f"{block.name}(unavailable)", True, error_reason
+        )
     if block.input.get("__invalid_json"):
         raw = str(block.input.get("raw", ""))
         return ResolvedCall(
@@ -1610,7 +1616,14 @@ async def execute_tool_calls(
     blocks, bg_ids = _strip_background_hints(blocks, agent)
 
     effective_tools = getattr(session, "tools_override", None) or agent.tools
-    resolved = [_resolve_call(b, effective_tools, agent.cwd) for b in blocks]
+    bus = getattr(getattr(agent, "context", None), "events", None)
+    if bus is not None and bus.has_listeners("tools/resolve"):
+        resolved = []
+        for block in blocks:
+            reason = await bus.serial("tools/resolve", block.name, block.input, session)
+            resolved.append(_resolve_call(block, effective_tools, agent.cwd, reason))
+    else:
+        resolved = [_resolve_call(b, effective_tools, agent.cwd) for b in blocks]
     principal = getattr(session, "_active_principal", None)
     if principal is not None:
         for call in resolved:
