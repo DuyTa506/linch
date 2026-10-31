@@ -35,6 +35,26 @@ async def test_serial_bails_on_first_truthy() -> None:
 
 
 @pytest.mark.asyncio
+async def test_emit_async_attempts_all_listeners_before_raising() -> None:
+    seen: list[str] = []
+
+    async def boom(_payload: object) -> None:
+        seen.append("boom")
+        raise RuntimeError("listener failed")
+
+    async def sibling(_payload: object) -> None:
+        seen.append("sibling")
+
+    bus = EventBus()
+    bus.on("evt", boom)
+    bus.on("evt", sibling)
+
+    with pytest.raises(RuntimeError, match="listener failed"):
+        await bus.emit_async("evt", None)
+    assert seen == ["boom", "sibling"]
+
+
+@pytest.mark.asyncio
 async def test_waterfall_composes_outer_to_inner() -> None:
     order: list[str] = []
 

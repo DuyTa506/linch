@@ -20,9 +20,10 @@ from __future__ import annotations
 import inspect
 import logging
 from collections.abc import Awaitable, Callable
+from functools import partial
 from typing import Any
 
-from .effects import Disposable
+from .effects import Disposable, _dispose_reverse
 
 logger = logging.getLogger("linch.kernel.events")
 
@@ -99,6 +100,22 @@ class EventBus:
             if result is not None and result is not False:
                 return result
         return None
+
+    async def emit_async(self, name: str, *args: Any) -> None:
+        """Await every listener for a non-vetoing broadcast.
+
+        Unlike :meth:`emit`, this method waits for coroutine listeners. Every
+        listener is attempted even when one fails; a single failure is raised
+        directly and multiple failures are collected in :class:`CleanupError`.
+        """
+        if not self.has_listeners(name):
+            return
+        await self._notification(name, *args).dispose()
+
+    def _notification(self, name: str, *args: Any) -> Disposable:
+        """Snapshot a broadcast as a retryable, ordered disposable."""
+        listeners = [Disposable(partial(listener, *args)) for listener in self._listeners[name]]
+        return Disposable(lambda: _dispose_reverse(list(reversed(listeners))))
 
     async def waterfall(self, name: str, *args: Any, next: Next) -> Any:
         """Run listeners as a middleware chain ending in the built-in *next*.
