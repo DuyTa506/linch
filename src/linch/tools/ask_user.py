@@ -30,6 +30,10 @@ class AskUserOption:
 class AskUserQuestion:
     """Describe one question in an AskUser request.
 
+    Attributes:
+        id: Stable identifier used to associate a submitted answer with this
+            question.
+
     Args:
         id: Stable identifier for the answer.
         header: Short display header, at most twelve characters.
@@ -59,6 +63,9 @@ class AskUserRequest:
 @dataclass(frozen=True, slots=True)
 class AskUserResponse:
     """Represent the user's response to an AskUser request.
+
+    Attributes:
+        answers: Submitted values keyed by the question identifiers.
 
     Args:
         accepted: Whether the user accepted and answered the request.

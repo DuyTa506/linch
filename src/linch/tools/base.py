@@ -26,6 +26,9 @@ ResourceMode = Literal["read", "write"]
 class ResourceAccess:
     """Describe a resource a tool reads or writes.
 
+    Attributes:
+        resource: Stable resource identifier used for conflict detection.
+
     Args:
         resource: Stable resource identifier used for conflict checks.
         mode: Access mode requested by the tool.
@@ -38,6 +41,11 @@ class ResourceAccess:
 @dataclass(slots=True)
 class Citation:
     """Attach a source citation to a tool result.
+
+    Attributes:
+        source: Locator or document identifier from which the citation came.
+        chunk: Optional excerpt supporting the citation.
+        metadata: Additional citation details retained for consumers.
 
     Args:
         id: Stable citation identifier.
@@ -177,6 +185,12 @@ class ToolContext:
 class ToolResult:
     """Represent the legacy text projection of a tool invocation.
 
+    Attributes:
+        metadata: Additional result details for host consumers.
+        citations: Source references associated with the result.
+        attachments: Host-defined attachments without an enforced reference shape.
+        recovery_hint: Guidance the loop can append after an all-error tool batch.
+
     Args:
         content: Provider-facing result text.
         summary: Short human-readable result summary.
@@ -207,6 +221,9 @@ class ToolAttachment:
     ``reference`` is deliberately not a bytes payload. Hosts can use a URI, an
     object-store key, or a JSON object containing their own stable locator.
 
+    Attributes:
+        reference: JSON-safe locator used to retrieve the external payload.
+
     Args:
         reference: JSON-safe locator for the external payload.
         name: Optional attachment name.
@@ -223,6 +240,9 @@ class ToolAttachment:
 @dataclass(slots=True)
 class ToolOutput:
     """Canonical successful output from a V2 tool.
+
+    Attributes:
+        value: Primary JSON-safe result value before rendering for a provider.
 
     Args:
         value: JSON-safe primary result value.
@@ -242,6 +262,9 @@ class ToolOutputError:
     Error outputs intentionally bypass the tool's success ``output_schema``.
     ``message`` is the provider-facing error text; structured error details can
     be retained separately without forcing them into that text projection.
+
+    Attributes:
+        details: Optional JSON-safe structured information about the failure.
 
     Args:
         message: Provider-facing error text.

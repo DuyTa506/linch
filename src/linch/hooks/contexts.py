@@ -12,6 +12,10 @@ from ..types import AssistantAssembly, ProviderRequest, StopReason, ToolUseBlock
 class HookContext:
     """Carry run identity and dependencies to a lifecycle hook.
 
+    Attributes:
+        session: Session object associated with the lifecycle event.
+        deps: Run-scoped dependency object made available to the hook.
+
     Args:
         session: Session associated with the lifecycle event.
         run_id: Run identifier associated with the event.
@@ -110,6 +114,11 @@ class TurnStopContext(HookContext):
 class BeforeProviderCallContext(HookContext):
     """Expose a provider request before dispatch.
 
+    Attributes:
+        request: Provider request being prepared, or ``None`` on resume paths
+            that have not reconstructed it yet.
+        context_result: Context-builder output used to assemble the request.
+
     Args:
         session: Session making the provider call.
         run_id: Run identifier making the call.
@@ -163,6 +172,9 @@ class ProviderCallStopContext(HookContext):
 @dataclass(slots=True)
 class AfterProviderCallContext(HookContext):
     """Expose the assembled assistant response after a provider call.
+
+    Attributes:
+        assembly: Normalized assistant response and provider accounting.
 
     Args:
         session: Session that made the provider call.
@@ -223,6 +235,12 @@ class ToolUseStartContext(HookContext):
 class ToolUseStopContext(HookContext):
     """Describe a completed tool execution.
 
+    Attributes:
+        result: Legacy textual result retained for compatibility.
+        tool_result: Normalized legacy structured result, when available.
+        tool_output: Canonical output supplied by an integration, when
+            available; it is distinct from ``tool_result``.
+
     Args:
         session: Session that executed the tool.
         run_id: Run identifier that executed the tool.
@@ -250,6 +268,12 @@ class ToolUseStopContext(HookContext):
 class PostToolUseContext(HookContext):
     """Expose a tool result after execution, including failed results.
 
+    Attributes:
+        result: Legacy normalized result, including an error result when one
+            was produced.
+        tool_output: Canonical output supplied by an integration, when
+            available; canonical-only output bypasses legacy result adapters.
+
     Args:
         session: Session that executed the tool.
         run_id: Run identifier that executed the tool.
@@ -272,6 +296,10 @@ class PostToolUseContext(HookContext):
 @dataclass(slots=True)
 class PostToolUseFailureContext(HookContext):
     """Expose a failed tool result after execution.
+
+    Attributes:
+        result: Legacy failed result, when available.
+        tool_output: Canonical failed output, when supplied by an integration.
 
     Args:
         session: Session that executed the tool.
@@ -338,6 +366,10 @@ class PostCompactContext(HookContext):
 class BeforeFinalAnswerContext(HookContext):
     """Expose a candidate final answer before it is returned.
 
+    Attributes:
+        structured_error: Structured-output parsing or validation error, when
+            present.
+
     Args:
         session: Session producing the candidate answer.
         run_id: Run identifier producing the answer.
@@ -378,6 +410,9 @@ class StopContext(HookContext):
 class SubagentStartContext(HookContext):
     """Describe a subagent run starting.
 
+    Attributes:
+        subagent_run_id: Child run identifier used to correlate nested events.
+
     Args:
         session: Parent session that spawned the subagent.
         run_id: Parent run identifier.
@@ -400,6 +435,10 @@ class SubagentStartContext(HookContext):
 @dataclass(slots=True)
 class SubagentStopContext(HookContext):
     """Describe a subagent run stopping.
+
+    Attributes:
+        subagent_run_id: Child run identifier used to correlate nested events.
+        result: Child terminal result, when supplied by the runner.
 
     Args:
         session: Parent session that spawned the subagent.

@@ -54,6 +54,9 @@ class LoopGuardState:
 
     One instance is created at the start of each ``run_loop`` invocation.
 
+    Attributes:
+        call_counts: Counts keyed by digests of repeated tool calls.
+
     Args:
         call_counts: Digest counts for repeated tool calls.
         consecutive_failures: Number of consecutive all-failed batches.
