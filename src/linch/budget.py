@@ -203,7 +203,7 @@ class RunBudget:
 
     @property
     def remaining_tokens(self) -> int | None:
-        """Return the uncapped token allowance, or ``None`` when uncapped.
+        """Return the remaining token allowance, or ``None`` when no limit exists.
 
         Returns:
             Remaining tokens before the configured token limit is reached, or
@@ -215,7 +215,7 @@ class RunBudget:
 
     @property
     def remaining_usd(self) -> float | None:
-        """Return the uncapped USD allowance, or ``None`` when uncapped.
+        """Return the remaining USD allowance, or ``None`` when no limit exists.
 
         Returns:
             Remaining USD before the configured cost limit is reached, or

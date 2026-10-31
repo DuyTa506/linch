@@ -203,10 +203,17 @@ def decode_inbox_message(payload: str) -> Message:
         payload: JSON object containing a serialized user message.
 
     Returns:
-        The decoded user-role message.
+        The reconstructed message from the payload. The decoder preserves the
+        role value accepted by the message codec and does not enforce
+        ``role="user"``.
 
     Raises:
-        ConfigError: If the payload is not a valid stored message object.
+        ConfigError: If the decoded JSON value is not an object.
+        json.JSONDecodeError: If ``payload`` is not valid JSON.
+        KeyError: If required message or content-block fields are missing.
+        TypeError: If a message or content-block field has an incompatible
+            shape.
+        ValueError: If the payload contains an unknown content-block type.
     """
     raw: Any = json.loads(payload)
     if not isinstance(raw, dict):  # pragma: no cover - store corruption guard
