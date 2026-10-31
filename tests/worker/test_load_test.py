@@ -5,10 +5,24 @@ import contextlib
 import json
 import os
 import signal
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+
+def test_fractional_rtt_is_rejected_before_starting_processes():
+    script = Path(__file__).resolve().parents[2] / "scripts/load_test.py"
+    result = subprocess.run(
+        [sys.executable, str(script), "--rtt", "1.5", "--duration", "0"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 2
+    assert "argument --rtt" in result.stderr
 
 
 @pytest.mark.skipif(not os.getenv("AGENT_KIT_TEST_PG_DSN"), reason="Postgres DSN required")

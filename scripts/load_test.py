@@ -522,23 +522,23 @@ async def experiments(a: argparse.Namespace) -> dict[str, Any]:
     elif a.command == "point":
         await point()
     elif a.command == "capacity":
-        for workers in (1, 2, 4, 8):
-            rate, stable, baseline = a.rate, None, None
+        for m in (1, 2, 4, 8):
+            rate, stable, base = a.rate, None, None
             for _ in range(6):
-                result = await point(workers=workers, rate=rate, rtt=1)
+                result = await point(workers=m, rate=rate, rtt=1, readers=a.readers if base else 0)
                 latency = result["latency_ms"]["p99"]
-                baseline = baseline or latency
+                base = base or latency
                 bad = (
                     latency is None
-                    or latency > 2 * baseline
+                    or latency > 2 * base
                     or any(result["invariant_errors"].values())
                 )
                 if bad:
-                    brackets[str(workers)] = {"last_stable": stable, "first_bad": rate}
+                    brackets[str(m)] = {"last_stable": stable, "first_bad": rate}
                     break
                 stable, rate = rate, rate * 2
             else:
-                brackets[str(workers)] = {"last_stable": stable, "first_bad": None}
+                brackets[str(m)] = {"last_stable": stable, "first_bad": None}
     elif a.command == "network":
         for rtt in (0, 1, 2):
             await point(workers=4, rtt=rtt, readers=0)
@@ -564,7 +564,7 @@ def main() -> None:
     p.add_argument("--concurrency", type=int, default=0)
     p.add_argument("--readers", type=int, default=0)
     p.add_argument("--rate", type=float, default=1)
-    p.add_argument("--rtt", type=float, default=1)
+    p.add_argument("--rtt", type=int, default=1)
     p.add_argument("--warmup", type=float, default=15)
     p.add_argument("--duration", type=float, default=60)
     p.add_argument("--ttft", type=float, default=0.3)
