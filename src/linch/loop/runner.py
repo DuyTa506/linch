@@ -11,14 +11,12 @@ from dataclasses import replace
 from typing import Any
 from uuid import uuid4
 
+from .. import lifecycle
 from .._telemetry import store_call, trace_run
 from .._wire import UnsupportedWireVersionError
 from ..errors import AbortError, ConfigError, RunNotResumableError
 from ..events import Event, ResultEvent, UserEvent
-from ..hooks import (
-    AgentStopContext,
-    HookEvent,
-)
+from ..hooks import AgentStopContext
 from ..hooks.contexts import _AgentResult
 from ..model_calls import (
     ModelCallIntent,
@@ -1024,7 +1022,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         )
         if not _startup_ctx.blocked:
             await _dispatch_lifecycle(
-                HookEvent.AGENT_STOP,
+                lifecycle.AGENT_STOP,
                 AgentStopContext(
                     session=session,
                     run_id=run_id,

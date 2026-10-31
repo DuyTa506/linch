@@ -4,32 +4,33 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Literal, Protocol, runtime_checkable
 
+from .. import lifecycle
 from ..tools import CanonicalToolOutput, ToolResult
 from ..types import AssistantAssembly, ProviderRequest
 
 
 class HookEvent(StrEnum):
-    AGENT_START = "AgentStart"
-    AGENT_STOP = "AgentStop"
-    USER_PROMPT_SUBMIT = "UserPromptSubmit"
-    TURN_START = "TurnStart"
-    TURN_STOP = "TurnStop"
-    BEFORE_PROVIDER_CALL = "BeforeProviderCall"
-    PROVIDER_CALL_START = "ProviderCallStart"
-    PROVIDER_CALL_STOP = "ProviderCallStop"
-    AFTER_PROVIDER_CALL = "AfterProviderCall"
-    PRE_TOOL_USE = "PreToolUse"
-    TOOL_USE_START = "ToolUseStart"
-    TOOL_USE_STOP = "ToolUseStop"
-    POST_TOOL_USE = "PostToolUse"
-    POST_TOOL_USE_FAILURE = "PostToolUseFailure"
-    PRE_COMPACT = "PreCompact"
-    POST_COMPACT = "PostCompact"
-    BEFORE_FINAL_ANSWER = "BeforeFinalAnswer"
-    STOP = "Stop"
-    SUBAGENT_START = "SubagentStart"
-    SUBAGENT_STOP = "SubagentStop"
-    EVENT_EMIT = "EventEmit"
+    AGENT_START = lifecycle.AGENT_START.name
+    AGENT_STOP = lifecycle.AGENT_STOP.name
+    USER_PROMPT_SUBMIT = lifecycle.USER_PROMPT_SUBMIT.name
+    TURN_START = lifecycle.TURN_START.name
+    TURN_STOP = lifecycle.TURN_STOP.name
+    BEFORE_PROVIDER_CALL = lifecycle.BEFORE_PROVIDER_CALL.name
+    PROVIDER_CALL_START = lifecycle.PROVIDER_CALL_START.name
+    PROVIDER_CALL_STOP = lifecycle.PROVIDER_CALL_STOP.name
+    AFTER_PROVIDER_CALL = lifecycle.AFTER_PROVIDER_CALL.name
+    PRE_TOOL_USE = lifecycle.PRE_TOOL_USE.name
+    TOOL_USE_START = lifecycle.TOOL_USE_START.name
+    TOOL_USE_STOP = lifecycle.TOOL_USE_STOP.name
+    POST_TOOL_USE = lifecycle.POST_TOOL_USE.name
+    POST_TOOL_USE_FAILURE = lifecycle.POST_TOOL_USE_FAILURE.name
+    PRE_COMPACT = lifecycle.PRE_COMPACT.name
+    POST_COMPACT = lifecycle.POST_COMPACT.name
+    BEFORE_FINAL_ANSWER = lifecycle.BEFORE_FINAL_ANSWER.name
+    STOP = lifecycle.STOP.name
+    SUBAGENT_START = lifecycle.SUBAGENT_START.name
+    SUBAGENT_STOP = lifecycle.SUBAGENT_STOP.name
+    EVENT_EMIT = lifecycle.EVENT_EMIT.name
 
 
 HookAction = Literal[

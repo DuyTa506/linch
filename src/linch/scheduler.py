@@ -10,6 +10,7 @@ from typing import Any, Literal, cast
 from uuid import uuid4
 from xml.sax.saxutils import escape
 
+from . import lifecycle
 from ._telemetry import trace_tool
 from ._wire import UnsupportedWireVersionError
 from .abort import AbortContext, throw_if_aborted
@@ -27,7 +28,6 @@ from .events import (
 )
 from .hooks import (
     HookDispatcher,
-    HookEvent,
     PostToolUseContext,
     PostToolUseFailureContext,
     PreToolUseContext,
@@ -849,7 +849,7 @@ async def _dispatch_pre_tool_use(
     turn_index: int | None,
 ) -> tuple[dict[str, Any], str | None, Any, list[Event]]:
     outcome = await dispatcher.dispatch(
-        HookEvent.PRE_TOOL_USE,
+        lifecycle.PRE_TOOL_USE,
         PreToolUseContext(
             session=session,
             run_id=session.active_run_id or "unknown",
@@ -927,7 +927,7 @@ async def _dispatch_post_tool_use(
     turn_index: int | None,
 ) -> tuple[ToolExecutionOutcome, list[Event]]:
     dispatched = await dispatcher.dispatch(
-        HookEvent.POST_TOOL_USE,
+        lifecycle.POST_TOOL_USE,
         PostToolUseContext(
             session=session,
             run_id=session.active_run_id or "unknown",
@@ -1010,7 +1010,7 @@ async def _dispatch_post_tool_use_failure(
     if not dispatcher.active or tool_result is None or not getattr(tool_result, "is_error", False):
         return []
     dispatched = await dispatcher.dispatch(
-        HookEvent.POST_TOOL_USE_FAILURE,
+        lifecycle.POST_TOOL_USE_FAILURE,
         PostToolUseFailureContext(
             session=session,
             run_id=session.active_run_id or "unknown",

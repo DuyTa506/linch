@@ -266,7 +266,8 @@ class Session:
         inner: AsyncIterator[Event],
         run_id_fallback: str,
     ) -> AsyncIterator[Event]:
-        from .hooks import EventEmitContext, HookDispatcher, HookEvent
+        from .hooks import EventEmitContext, HookDispatcher
+        from .lifecycle import EVENT_EMIT
 
         self._active_started = True
         hooks = HookDispatcher(getattr(self.agent, "hooks", None))
@@ -275,7 +276,7 @@ class Session:
                 yield event
                 if hooks.active:
                     await hooks.dispatch(
-                        HookEvent.EVENT_EMIT,
+                        EVENT_EMIT,
                         EventEmitContext(
                             session=self,
                             run_id=self.active_run_id or run_id_fallback,
