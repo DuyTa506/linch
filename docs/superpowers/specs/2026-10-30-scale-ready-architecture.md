@@ -33,9 +33,9 @@ Pre-3.0 runs and checkpoints are rejected rather than read through legacy
 paths; immutable message types are allowed if they remove the SessionLog
 deep-copy cost.
 
-Out of scope for 3.0: tool discovery (deferred, measured need first),
-cross-process rate limiting in core (host `Limiter` adapter), partial-text
-persistence.
+Out of scope for 3.0: cross-process rate limiting in core (host `Limiter`
+adapter), partial-text persistence. Tool discovery moved back in scope (owner
+decision 2026-10-31): WP19, after the scale waves.
 
 ## Decisions
 
@@ -215,7 +215,7 @@ Wave 1 (parallel, disjoint files):
 | 4 | `scale/durable-runs` | D1, D2, D9 | `run_store.py` (or a new `run_stores/` package), Postgres store, conformance tests; move `SqliteRunStore.save` serialization off the event loop |
 
 Merged into `integration/3.0`: WP1, WP2, WP4, WP3 (loop split only; see D4
-status), WP9a, WP9b, WP16, WP17, WP15, WP6, WP5. Remaining Wave 2: WP8, then WP7.
+status), WP9a, WP9b, WP16, WP17, WP15, WP6, WP5. Remaining Wave 2: WP8, then WP7; WP18 (load test) runs now as a baseline and again as the scale-ready gate; then WP19 (tool discovery).
 Order (one merge at a time):
 
 | WP | Branch | Decisions | Scope |
@@ -228,6 +228,8 @@ Order (one merge at a time):
 | 6 | `scale/worker` | D14 | `linch.worker` on PgQueuer, scheduling package replaced, "scale out" section in `docs/usage/production.md` |
 | 8 | `scale/hot-path` | D15 + below | profile-driven hot path |
 | 7 | `scale/reliability` | D4 | reliability port onto the seams (brings the slim `turn-stopping` event) |
+| 18 | `scale/load-test` | acceptance | multi-process load test of the target deployment (enqueuer + M workers + Postgres behind injected network latency): capacity knee, bottleneck, chaos (worker kill, DB blip, drain). Built and baselined now on integration; rerun after WP8 and WP7 as the scale-ready gate |
+| 19 | `tools/discovery` | after the gate | finish tool search from `wip/tool-discovery-freeze-20261030` on the 3.0 seams (wire 3, bounded checkpoint), sized by the plan in `docs/superpowers/plans/2026-10-30-tool-discovery.md` |
 
 WP8 hot path, driven by the WP1 baseline
 (`docs/superpowers/measurements/2026-10-30-scale-baseline.md`):
