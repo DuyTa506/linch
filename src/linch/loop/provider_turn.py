@@ -22,7 +22,6 @@ from ..events import (
     ErrorEvent,
     Event,
     PromptCacheAdvisoryEvent,
-    UserEvent,
 )
 from ..model_calls import (
     ModelCallReceipt,
@@ -32,18 +31,15 @@ from ..model_calls import (
     _projection_record,
 )
 from ..run_store import LeaseLostError
-from ..types import AssistantAssembly, Message, ProviderRequest, TextBlock, Usage
+from ..types import AssistantAssembly, Message, ProviderRequest, Usage
 from .checkpoint import _message_digest, _primary_control_message
+from .feedback import correct_invalid_response
 from .request import _build_context_result, _build_turn_request, _context_selected_tool_names
 from .streaming import (
     _AccountedPrimaryAssembly,
     _PrimaryPartial,
     _stream_turn_with_recovery,
     maybe_compact_resilient,
-)
-from .turn_stopping import (
-    INVALID_RESPONSE_DIAGNOSTIC,
-    TurnStopping,
 )
 
 
@@ -370,80 +366,13 @@ async def run_provider_turn(ctx: ProviderTurnContext) -> AsyncIterator[Event]:
             raise RuntimeError("accounted primary stream ended without a reported receipt")
         _provider_usage = primary_receipt.usage
         ctx.sync_ledger_totals()
-        invalid_reason = (
-            "rejected_native_arguments"
-            if primary_rejected_native
-            else _invalid_response_reason(assembly)
-            if ctx.turn_stopping.active
-            else None
-        )
-        decision = None
-        if invalid_reason and ctx.turn_stopping.active:
-            decision = await ctx.turn_stopping.dispatch(
-                TurnStopping(
-                    session,
-                    ctx.run_id,
-                    turn_index,
-                    "invalid_response",
-                    assembly,
-                    forced_final=ctx.force_final_pending,
-                    error_reason=invalid_reason,
-                )
-            )
-        if decision is not None and decision.action != "accept":
-            async for event in ctx.emit_primary_usage(primary_receipt):
+        if ctx.turn_stopping.active:
+            async for event in correct_invalid_response(
+                ctx, assembly, primary_receipt, primary_rejected_native
+            ):
                 yield event
-            if decision.action == "continue":
-                messages = list(decision.feedback)
-                events: list[Event] = [
-                    UserEvent(message=m, subtype="notification") for m in messages
-                ]
-                if not primary_rejected_native:
-                    diagnostic = Message(
-                        role="assistant", content=[TextBlock(text=INVALID_RESPONSE_DIAGNOSTIC)]
-                    )
-                    # The existing receipt projection can reconstruct one canonical text
-                    # control; arbitrary host messages remain intact in the session log.
-                    if (
-                        len(messages) == 1
-                        and len(messages[0].content) == 1
-                        and isinstance(messages[0].content[0], TextBlock)
-                    ):
-                        assert ctx.active_primary is not None
-                        await ledger.record_projection(
-                            _projection_record(
-                                projection_kind="primary_append",
-                                run_id=ctx.run_id,
-                                **{
-                                    key: value
-                                    for key, value in ctx.active_primary.items()
-                                    if key != "version"
-                                },
-                                assistant_sha256=_message_digest(diagnostic),
-                                assistant_stop_reason=assembly.stop_reason,
-                                after_action="continue",
-                                after_feedback=messages[0].content[0].text,
-                                control_message_sha256=_message_digest(messages[0]),
-                            )
-                        )
-                    messages.insert(0, diagnostic)
-                    events.insert(
-                        0, AssistantEvent(message=diagnostic, stop_reason=assembly.stop_reason)
-                    )
-                await ctx.flush_events()
-                await store_call(session, "session.append", session.append(messages))
-                for event in events:
-                    await ctx.persist_event(event)
-                    yield event
-            if decision.event is not None:
-                await ctx.persist_event(decision.event)
-                yield decision.event
-            if decision.action == "fail":
-                raise decision.error or ValueError("turn-stopping listener failed")
-            await ctx.end_provider_call(stop_reason=assembly.stop_reason, usage=_provider_usage)
-            await ctx.save_checkpoint("turn_complete", turn_index=turn_index)
-            ctx.continued = True
-            return
+            if ctx.continued:
+                return
         if primary_rejected_native:
             ctx.terminal = True
             await ctx.save_checkpoint("provider_pending", turn_index=turn_index)
@@ -526,16 +455,3 @@ async def run_provider_turn(ctx: ProviderTurnContext) -> AsyncIterator[Event]:
     ctx.primary_rejected_native = primary_rejected_native
     ctx.projection = projection if not resumed_assistant else None
     ctx.control = control if not resumed_assistant else None
-
-
-def _invalid_response_reason(assembly: AssistantAssembly) -> str | None:
-    if assembly.stop_reason != "end_turn":
-        return None
-    text = "".join(
-        block.text for block in assembly.message.content if isinstance(block, TextBlock)
-    ).strip()
-    if not text:
-        return "empty_end_turn"
-    if text.startswith("<tool_call>") and text.endswith("</tool_call>"):
-        return "text_tool_call_envelope"
-    return None

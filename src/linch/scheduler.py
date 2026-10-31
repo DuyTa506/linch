@@ -1284,9 +1284,6 @@ async def _resolve_ask_decisions(
             )
 
 
-ForegroundObserver = Callable[[str], Awaitable[None]]
-
-
 async def _run_serial_batch(
     batch: Any,
     *,
@@ -1296,7 +1293,6 @@ async def _run_serial_batch(
     hook_dispatcher: HookDispatcher,
     middleware_errors: dict[str, str],
     turn_index: int | None,
-    on_foreground_result: ForegroundObserver | None = None,
 ) -> AsyncIterator[Event]:
     """Run a serial (one-call-at-a-time) batch, yielding skill + start/end events."""
     for call, _idx, decision in batch["calls"]:
@@ -1327,13 +1323,6 @@ async def _run_serial_batch(
             async for progress in _drain_tool_execution(running):
                 yield progress
             outcome = running.task.result()
-            eligible = (
-                on_foreground_result is not None
-                and not call.is_immediate_error
-                and call.id not in middleware_errors
-                and decision.decision == "allow"
-                and not input.get("run_in_background")
-            )
             outcome, hook_events = await _dispatch_post_tool_use(
                 hook_dispatcher,
                 call,
@@ -1363,7 +1352,7 @@ async def _run_serial_batch(
             if not running.task.done():
                 running.task.cancel()
                 await asyncio.gather(running.task, return_exceptions=True)
-        end_event = ToolCallEndEvent(
+        yield ToolCallEndEvent(
             tool_use_id=call.id,
             tool_name=_tool_name(call),
             result=str(outcome.block.content),
@@ -1372,9 +1361,6 @@ async def _run_serial_batch(
             tool_result=outcome.tool_result,
             tool_output=outcome.tool_output,
         )
-        if on_foreground_result is not None and eligible and not end_event.is_error:
-            await on_foreground_result(_tool_name(call))
-        yield end_event
         if skill_name is not None:
             yield SkillCompletedEvent(name=skill_name, is_error=outcome.block.is_error)
 
@@ -1388,7 +1374,6 @@ async def _run_parallel_batch(
     hook_dispatcher: HookDispatcher,
     middleware_errors: dict[str, str],
     turn_index: int | None,
-    on_foreground_result: ForegroundObserver | None = None,
 ) -> AsyncIterator[Event]:
     """Run a parallel batch: emit all starts, gather concurrently, then all ends.
 
@@ -1435,13 +1420,6 @@ async def _run_parallel_batch(
                 yield progress
             outcome = execution.task.result()
             input = _effective_input(call, decision)
-            eligible = (
-                on_foreground_result is not None
-                and not call.is_immediate_error
-                and call.id not in middleware_errors
-                and decision.decision == "allow"
-                and not input.get("run_in_background")
-            )
             outcome, hook_events = await _dispatch_post_tool_use(
                 hook_dispatcher,
                 call,
@@ -1453,7 +1431,7 @@ async def _run_parallel_batch(
             )
             for hook_event in hook_events:
                 yield hook_event
-            end_event = ToolCallEndEvent(
+            yield ToolCallEndEvent(
                 tool_use_id=call.id,
                 tool_name=_tool_name(call),
                 result=str(outcome.block.content),
@@ -1462,9 +1440,6 @@ async def _run_parallel_batch(
                 tool_result=outcome.tool_result,
                 tool_output=outcome.tool_output,
             )
-            if on_foreground_result is not None and eligible and not end_event.is_error:
-                await on_foreground_result(_tool_name(call))
-            yield end_event
             emitted_ids.add(call.id)
             sn = skill_names.get(call.id)
             if sn is not None:
@@ -1610,8 +1585,6 @@ async def execute_tool_calls(
     *,
     turn_index: int | None = None,
     on_permissions_resolved: Callable[[], Awaitable[None]] | None = None,
-    pre_execute_pipeline: Any = None,
-    on_foreground_result: ForegroundObserver | None = None,
 ) -> AsyncIterator[Event]:
     if not blocks:
         return
@@ -1654,37 +1627,6 @@ async def execute_tool_calls(
                 middleware_errors[call.id] = blocked_reason
             elif precomputed_result is not None:
                 precomputed_results[call.id] = precomputed_result
-
-    if pre_execute_pipeline is not None:
-        blocked: list[ResolvedCall] = []
-        for call in resolved:
-            if call.is_immediate_error or call.id in middleware_errors:
-                continue
-            execution = ToolExecution(
-                tool_name=_tool_name(call),
-                tool_use_id=call.id,
-                input=copy.deepcopy(call.input),
-                ctx=None,
-                tool=call.tool,
-            )
-            proceed = object()
-
-            async def _proceed(marker: object = proceed) -> object:
-                return marker
-
-            result = await pre_execute_pipeline.run_pre_execute(execution, _proceed)
-            reason = (
-                "Tool pre-execute changed the canonical call."
-                if execution.tool is not call.tool or execution.input != call.input
-                else None
-                if result is proceed
-                else str(getattr(result, "content", result))
-            )
-            if reason is not None:
-                call.is_immediate_error, call.immediate_error_reason = True, reason
-                blocked.append(call)
-        # Immediate errors are serial barriers: seal denials before executable calls.
-        resolved = blocked + [call for call in resolved if call not in blocked]
 
     # Final permission evaluation binds to the canonical, post-hook input.
     decisions, ask_indices = _evaluate_permissions(
@@ -1798,7 +1740,6 @@ async def execute_tool_calls(
             hook_dispatcher=hook_dispatcher,
             middleware_errors=middleware_errors,
             turn_index=turn_index,
-            on_foreground_result=on_foreground_result,
         )
         try:
             async for event in lane_events:

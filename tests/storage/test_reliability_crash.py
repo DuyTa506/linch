@@ -198,9 +198,10 @@ async def test_resume_poisoned_reliability_namespace_fails_closed(raw):
     assert provider.calls == 1
 
 
+@pytest.mark.parametrize("kind", ["memory", "postgres"])
 @pytest.mark.parametrize("crash", [False, True])
 @pytest.mark.parametrize("parallel", [False, True])
-async def test_resumed_batch_cannot_unlock_its_own_prerequisite(crash, parallel):
+async def test_resumed_batch_cannot_unlock_its_own_prerequisite(pg_dsn, kind, crash, parallel):
     from linch import Agent, ReliabilityPolicy, ToolPrerequisite
     from linch.tools import tool
     from linch.tools.registry import empty_tools
@@ -210,10 +211,6 @@ async def test_resumed_batch_cannot_unlock_its_own_prerequisite(crash, parallel)
 
     @tool(scope="read" if parallel else "write", parallel=parallel)
     async def first() -> str:
-        assert any(
-            row.event.type == "tool_call_end" and row.event.tool_name == "second"
-            for row in await runs.load_events(session.active_run_id)
-        )
         calls.append("first")
         return "success"
 
@@ -241,13 +238,13 @@ async def test_resumed_batch_cannot_unlock_its_own_prerequisite(crash, parallel)
 
     class FirstResultCrash(_CrashWrites):
         async def _write(self, name, *args, **kwargs):
-            if name == "save_checkpoint_with_events" and any(
-                event.type == "tool_call_end" and event.tool_name == "first" for event in args[2]
+            if name == "append_events" and any(
+                event.type == "tool_call_end" and event.tool_name == "first" for event in args[1]
             ):
                 self.point, self.armed, self.after = name, True, True
             return await super()._write(name, *args, **kwargs)
 
-    sessions, runs = await _stores("memory", "")
+    sessions, runs = await _stores(kind, pg_dsn)
     provider = Provider("batch")
 
     def agent(store):
@@ -269,16 +266,17 @@ async def test_resumed_batch_cannot_unlock_its_own_prerequisite(crash, parallel)
                 run_id = event.run_id
     except _ProcessDeath:
         assert crash
+        assert "linch.reliability" not in (await runs.load_run(run_id)).checkpoint.extension_state
+        sessions, runs = await _reopen(kind, pg_dsn, sessions, runs)
         session = await agent(runs).session(id=session.id)
         _ = [event async for event in session.resume(run_id)]
     else:
         assert not crash
     assert calls == ["first"]
     rows = await runs.load_events(run_id)
-    assert [row.event.tool_name for row in rows if row.event.type == "tool_call_end"] == [
-        "second",
-        "first",
-    ]
+    assert [row.event.tool_name for row in rows if row.event.type == "tool_call_end"] == (
+        ["first"] if crash and parallel else ["first", "second"]
+    )
     results = [
         block.tool_use_id
         for message in session.full_history
@@ -286,9 +284,17 @@ async def test_resumed_batch_cannot_unlock_its_own_prerequisite(crash, parallel)
         if block.type == "tool_result"
     ]
     assert results == ["first", "second"]
+    assert next(
+        block
+        for message in session.full_history
+        for block in message.content
+        if block.type == "tool_result" and block.tool_use_id == "second"
+    ).is_error
     assert (await runs.load_run(run_id)).checkpoint.extension_state["linch.reliability"][
         "succeeded"
     ] == ["first"]
+
+    await _close(sessions, runs)
 
 
 @pytest.mark.parametrize("enabled", [False, True])

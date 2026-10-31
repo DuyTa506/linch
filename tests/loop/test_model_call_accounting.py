@@ -243,11 +243,14 @@ async def test_fallback_deliveries_get_fresh_ids_under_one_logical_operation() -
     "raw_input",
     ['{"secret": "native-leak"', '["native-leak"]', "", "   "],
 )
-async def test_rejected_native_arguments_are_charged_but_never_durable(raw_input: str) -> None:
+@pytest.mark.parametrize("flag_disabled", [False, True])
+async def test_rejected_native_arguments_are_charged_but_never_durable(
+    raw_input: str, flag_disabled: bool
+) -> None:
     """Malformed native input drains final usage without an SDK raw-argument leak."""
     import json
 
-    from linch import Agent
+    from linch import Agent, ReliabilityPolicy
     from linch.events import (
         ErrorEvent,
         ModelCallEvent,
@@ -289,7 +292,7 @@ async def test_rejected_native_arguments_are_charged_but_never_durable(raw_input
     agent = Agent(
         model="offline-model",
         provider=Provider(),
-        reliability=None,
+        reliability=ReliabilityPolicy(retry_invalid_responses=False) if flag_disabled else None,
         session_store=InMemorySessionStore(),
         run_store=run_store,
         permissions={"mode": "skip-dangerous"},

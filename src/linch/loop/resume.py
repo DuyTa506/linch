@@ -13,7 +13,7 @@ from typing import Any
 
 from ..compaction import _reconcile_paid_compactions
 from ..errors import ConfigError
-from ..events import AssistantEvent, ErrorEvent, Event, UserEvent
+from ..events import ErrorEvent, Event
 from ..model_calls import _ModelCallLedger, _primary_request_fingerprint
 from ..types import Message, ProviderRequest, TextBlock
 from .checkpoint import (
@@ -22,7 +22,8 @@ from .checkpoint import (
     _queue_crashed_worker_notifications,
     _receipt_message_prefix,
 )
-from .turn_stopping import INVALID_RESPONSE_DIAGNOSTIC, TurnStopping, append_feedback
+from .feedback import append_feedback
+from .turn_stopping import INVALID_RESPONSE_DIAGNOSTIC, TurnStopping
 
 
 @dataclass(slots=True)
@@ -37,6 +38,8 @@ class ResumeState:
     terminal_kind: str | None = None
     terminal_feedback: str | None = None
     terminal: bool = False
+    replayed_feedback: tuple[Message, ...] = ()
+    invalid_feedback: tuple[Message, ...] = ()
 
 
 @dataclass(slots=True)
@@ -79,23 +82,23 @@ async def recover_resume(ctx: ResumeContext) -> AsyncIterator[Event]:
 
     if ctx.checkpoint.phase in {"provider_pending", "assistant_appended"}:
         await _reconcile_active_primary(ctx)
-        async for event in _replay_primary_events(ctx):
-            yield event
-        if ctx.state.terminal_kind == "rejected_native":
-            assert ctx.state.terminal_event is not None
-            decision = await _resume_invalid_decision(ctx)
-            if decision.action == "continue":
-                async for event in append_feedback(ctx.session, ctx.run_id, decision):
-                    yield event
-            if decision.event is not None:
-                await ctx.persist_event(decision.event)
-                yield decision.event
+        if ctx.state.terminal_kind in {"invalid_text", "rejected_native"}:
+            decision = await ctx.turn_stopping.dispatch(
+                TurnStopping(ctx.session, ctx.run_id, ctx.checkpoint.turn_index, "invalid_response")
+            )
+            async for event in append_feedback(
+                ctx.session,
+                ctx.run_id,
+                ctx.state.invalid_feedback or decision.feedback,
+                prefix=ctx.state.recovered_primary_prefix,
+                decision=decision,
+            ):
+                yield event
             if decision.action == "continue":
                 await ctx.save_checkpoint("turn_complete", turn_index=ctx.checkpoint.turn_index)
                 ctx.state.start_turn = ctx.checkpoint.turn_index + 1
                 return
-            if decision.action == "fail":
-                raise decision.error or ValueError("turn-stopping listener failed")
+            assert ctx.state.terminal_event is not None
             await ctx.persist_event(ctx.state.terminal_event)
             yield ctx.state.terminal_event
             async for event in ctx.emit_error_terminal():
@@ -125,32 +128,6 @@ async def recover_resume(ctx: ResumeContext) -> AsyncIterator[Event]:
         yield worker_event
     if ctx.checkpoint.background_workers:
         await ctx.save_checkpoint(ctx.checkpoint.phase, turn_index=ctx.checkpoint.turn_index)
-
-
-async def _replay_primary_events(ctx: ResumeContext) -> AsyncIterator[Event]:
-    projection = ctx.state.recovered_primary_projection
-    if ctx.state.terminal_kind != "invalid_text":
-        return
-    assert projection is not None
-    base = projection["full_history_base_count"]
-    history = list(ctx.session.full_history)
-    assistant = history[base]
-    control = history[base + 1]
-    for event in (
-        AssistantEvent(message=assistant, stop_reason=projection["assistant_stop_reason"]),
-        UserEvent(message=control, subtype="notification"),
-    ):
-        await ctx.persist_event(event)
-        yield event
-    decision = await _resume_invalid_decision(ctx)
-    if decision.event is not None:
-        await ctx.persist_event(decision.event)
-        yield decision.event
-
-
-async def _resume_invalid_decision(ctx: ResumeContext) -> Any:
-    candidate = TurnStopping(ctx.session, ctx.run_id, ctx.checkpoint.turn_index, "invalid_response")
-    return await ctx.turn_stopping.dispatch(candidate)
 
 
 async def _reconcile_active_primary(ctx: ResumeContext) -> None:
@@ -212,7 +189,7 @@ async def _reconcile_active_primary(ctx: ResumeContext) -> None:
         and projection["assistant_sha256"] == _message_digest(diagnostic)
     )
     if ctx.checkpoint.phase == "assistant_appended" and len(history) > base + len(expected):
-        ctx.turn_stopping.replayed_feedback = tuple(history[base + len(expected) :])
+        ctx.state.replayed_feedback = tuple(history[base + len(expected) :])
         history = history[: base + len(expected)]
     ctx.state.recovered_primary_prefix = (
         0
@@ -229,10 +206,8 @@ async def _reconcile_active_primary(ctx: ResumeContext) -> None:
         control = _primary_control_message(diagnostic, projection["after_feedback"], wrap=False)
         if _message_digest(control) == projection["control_message_sha256"]:
             ctx.state.terminal_kind = "invalid_text"
-            missing = [diagnostic, control][ctx.state.recovered_primary_prefix :]
-            if missing:
-                await ctx.session.append(missing)
-            ctx.state.recovered_primary_prefix = 2
+            ctx.state.invalid_feedback = (diagnostic, control)
+            return
 
     if receipt is not None and receipt.disposition == "rejected_native":
         event = ErrorEvent(

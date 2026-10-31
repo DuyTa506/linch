@@ -14,12 +14,29 @@ def test_default_policy_and_opt_out_are_distinct() -> None:
     assert linch.Agent(model="test", reliability=None).reliability is None
 
 
-def test_prerequisite_listener_is_a_run_local_pre_execute_pipeline() -> None:
-    policy = linch.ReliabilityPolicy(
-        prerequisites=(linch.ToolPrerequisite("b", ("a",)),),
-    )
-    runtime = ReliabilityRuntime(policy)
-    assert runtime.pre_execute_pipeline.has_listeners()
+async def test_prerequisite_hook_registration_and_run_disposal() -> None:
+    from types import SimpleNamespace
+
+    policy = linch.ReliabilityPolicy(prerequisites=(linch.ToolPrerequisite("b", ("a",)),))
+    agent = linch.Agent(model="test", reliability=policy, hooks=[object()])
+    hook = agent.hooks[0]
+    one, two = ReliabilityRuntime(policy), ReliabilityRuntime(policy)
+    first, second = one.bind(agent, "one"), two.bind(agent, "two")
+    ctx = SimpleNamespace(session=SimpleNamespace(agent=agent), run_id="one", tool_name="b")
+    assert hook.on_pre_tool_use(ctx).action == "block"
+    one.succeeded.add("a")
+    assert hook.on_pre_tool_use(ctx) is None
+    ctx.run_id = "two"
+    assert hook.on_pre_tool_use(ctx).action == "block"
+    replacement = two.bind(agent, "one")
+    await first.dispose()
+    await first.dispose()
+    assert agent.context.get("reliability_runs") == {"one": two, "two": two}
+    await replacement.dispose()
+    await second.dispose()
+    assert agent.context.get("reliability_runs") == {}
+    await agent.close()
+    assert hook not in agent.hooks
 
 
 def test_policy_validation_rejects_bad_graph_and_terminal_evidence() -> None:
@@ -104,32 +121,15 @@ async def test_turn_stopping_accept_is_non_vetoing() -> None:
 
 
 @pytest.mark.asyncio
-async def test_prerequisites_snapshot_and_checkpoint_state() -> None:
-    policy = linch.ReliabilityPolicy(
-        prerequisites=(linch.ToolPrerequisite("b", ("a",)),),
-        completion=linch.CompletionGate(("a",)),
-    )
+async def test_batch_success_and_checkpoint_state() -> None:
+    from linch.types import ToolResultBlock, ToolUseBlock
+
+    policy = linch.ReliabilityPolicy(prerequisites=(linch.ToolPrerequisite("b", ("a",)),))
     runtime = ReliabilityRuntime(policy)
-    runtime.begin_batch()
-    from linch.tools.pipeline import ToolExecution
-
-    class Tool:
-        name = "b"
-
-    class Call:
-        tool = Tool()
-
-    marker = object()
-
-    async def proceed() -> object:
-        return marker
-
-    execution = ToolExecution("b", "id", {}, None, Tool())
-    assert await runtime.pre_execute_pipeline.run_pre_execute(execution, proceed) is not marker
-    await runtime.foreground_result("a")
-    assert runtime.succeeded == {"a"}
-    # The same batch's snapshot remains closed even after the observed result.
-    assert await runtime.pre_execute_pipeline.run_pre_execute(execution, proceed) is not marker
+    runtime.observe_results(
+        [ToolUseBlock(id="a", name="a", input={})],
+        {"a": ToolResultBlock(tool_use_id="a", content="ok")},
+    )
     state = runtime.checkpoint_state()
     assert state == {"v": 1, "corrections": 0, "succeeded": ["a"]}
     assert ReliabilityRuntime(policy).restore(state).succeeded == {"a"}
@@ -616,6 +616,7 @@ async def test_valid_non_envelope_routes_have_no_reliability_effect(text, stop):
 @pytest.mark.parametrize(
     "raw",
     [
+        None,
         {},
         {"v": 2, "corrections": 0, "succeeded": []},
         {"v": True, "corrections": 0, "succeeded": []},
@@ -647,9 +648,9 @@ def test_canonical_policy_ignores_edge_order_and_rejects_duplicate_rules():
 
 async def test_unused_evidence_and_disabled_listener_stay_empty():
     runtime = ReliabilityRuntime(linch.ReliabilityPolicy(retry_invalid_responses=False))
-    await runtime.foreground_result("unreferenced")
+    runtime.observe_results([], {})
     assert runtime.checkpoint_state() == {}
-    assert runtime.pre_execute_pipeline is None
+    assert linch.Agent(model="test", reliability=runtime.policy).hooks == []
 
 
 async def test_force_final_cannot_bypass_completion():
@@ -717,3 +718,80 @@ async def test_inferred_terminal_tool_cannot_be_completion_evidence():
     with pytest.raises(ValueError, match="terminal"):
         _ = [event async for event in (await agent.session()).run("go")]
     assert provider._index == 0
+
+
+async def test_same_agent_concurrent_runs_keep_prerequisites_isolated():
+    import asyncio
+
+    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.sessions import InMemorySessionStore
+    from linch.tools import tool
+    from linch.tools.registry import empty_tools
+
+    barrier, prepared = asyncio.Barrier(2), asyncio.Event()
+    calls = []
+
+    @tool
+    async def prepare() -> str:
+        return "ready"
+
+    @tool
+    async def dependent() -> str:
+        calls.append("dependent")
+        return "done"
+
+    class Provider:
+        id = "concurrent-reliability"
+        streams = {
+            "one": ScriptedProvider(
+                [ToolUseTurn("prepare", {}), ToolUseTurn("dependent", {}), TextTurn("done")]
+            ),
+            "two": ScriptedProvider([ToolUseTurn("dependent", {}), TextTurn("done")]),
+        }
+        counts = {"one": 0, "two": 0}
+
+        def context_window(self, model):
+            return 100_000
+
+        async def stream(self, request):
+            tag = next(
+                block.text
+                for message in request.messages
+                for block in message.content
+                if getattr(block, "text", None) in {"one", "two"}
+            )
+            self.counts[tag] += 1
+            if self.counts[tag] == 1:
+                await barrier.wait()
+                assert len(agent.context.get("reliability_runs")) == 2
+            if tag == "one" and self.counts[tag] == 2:
+                prepared.set()
+            if tag == "two":
+                await prepared.wait()
+            async for event in self.streams[tag].stream(request):
+                yield event
+
+    agent = linch.Agent(
+        model="test",
+        provider=Provider(),
+        tools=empty_tools(prepare, dependent),
+        permissions={"mode": "skip-dangerous"},
+        session_store=InMemorySessionStore(),
+        reliability=linch.ReliabilityPolicy(
+            prerequisites=(linch.ToolPrerequisite("dependent", ("prepare",)),)
+        ),
+    )
+    sessions = [await agent.session(), await agent.session()]
+
+    async def collect(session, prompt):
+        return [event async for event in session.run(prompt)]
+
+    one, two = await asyncio.wait_for(
+        asyncio.gather(collect(sessions[0], "one"), collect(sessions[1], "two")), 5
+    )
+    assert calls == ["dependent"], [
+        event for event in one + two if event.type in {"error", "tool_call_end"}
+    ]
+    assert any(event.type == "tool_call_end" and event.is_error for event in two)
+    assert one[-1].subtype == two[-1].subtype == "success"
+    assert agent.context.get("reliability_runs") == {}

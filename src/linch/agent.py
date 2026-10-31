@@ -16,6 +16,7 @@ from .durability import DurabilityOptions
 from .errors import ConfigError
 from .execution import ExecutionBackend
 from .kernel import Context, Disposable
+from .loop.reliability import PrerequisiteHook
 from .loop.turn_stopping import TurnStoppingDispatcher, TurnStoppingListener
 from .openai_responses import OpenAIOptions, OpenAIReasoning
 from .permissions import BashRule, CanUseTool, PathRule, PermissionEngine, PermissionRule, ToolRule
@@ -616,6 +617,8 @@ class Agent:
             read_before_write=read_before_write,
             tool_cache=tool_cache,
         )
+        if self.reliability is not None and self.reliability.prerequisites:
+            self.context.effect(lambda: PrerequisiteHook(self).install(self))
         self._configure_filesystem(filesystem, result_offload)
         self._configure_mailbox(mailbox)
         self.context.register("tool_pipeline", self.tool_pipeline)

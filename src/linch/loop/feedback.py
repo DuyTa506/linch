@@ -1,0 +1,114 @@
+"""Canonical continuation messages and rejected-provider recovery projection."""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from typing import Any
+
+from .._telemetry import store_call
+from ..events import AssistantEvent, Event, UserEvent
+from ..model_calls import ModelCallReceipt, _projection_record
+from ..session import Session
+from ..types import AssistantAssembly, Message, StopReason, TextBlock
+from .checkpoint import _flush_events, _message_digest, _persist_event, _replayed_feedback_present
+from .turn_stopping import INVALID_RESPONSE_DIAGNOSTIC, TurnStopping, TurnStoppingDecision
+
+
+async def append_feedback(
+    session: Session,
+    run_id: str,
+    messages: tuple[Message, ...],
+    *,
+    stop_reason: StopReason = "end_turn",
+    paired: bool = False,
+    prefix: int = 0,
+    decision: TurnStoppingDecision | None = None,
+) -> AsyncIterator[Event]:
+    await _flush_events(session)
+    if messages and not _replayed_feedback_present(session, messages):
+        await store_call(session, "session.append", session.append(list(messages[prefix:])))
+    for index, message in enumerate(messages):
+        event = (
+            AssistantEvent(message=message, stop_reason=stop_reason)
+            if message.role == "assistant"
+            else UserEvent(
+                message=message, subtype="prompt" if paired and not index else "notification"
+            )
+        )
+        await _persist_event(session, run_id, event)
+        yield event
+    if decision is not None:
+        if decision.event is not None:
+            await _persist_event(session, run_id, decision.event)
+            yield decision.event
+        if decision.action == "fail":
+            raise decision.error or ValueError("turn-stopping listener failed")
+
+
+async def correct_invalid_response(
+    ctx: Any,
+    assembly: AssistantAssembly,
+    receipt: ModelCallReceipt,
+    rejected_native: bool,
+) -> AsyncIterator[Event]:
+    reason = "rejected_native_arguments" if rejected_native else _invalid_response_reason(assembly)
+    if reason is None:
+        return
+    decision = await ctx.turn_stopping.dispatch(
+        TurnStopping(
+            ctx.session,
+            ctx.run_id,
+            ctx.turn_index,
+            "invalid_response",
+            assembly,
+            forced_final=ctx.force_final_pending,
+            error_reason=reason,
+        )
+    )
+    if decision.action == "accept":
+        return
+    async for event in ctx.emit_primary_usage(receipt):
+        yield event
+    messages = decision.feedback
+    if decision.action == "continue" and not rejected_native:
+        diagnostic = Message(
+            role="assistant", content=[TextBlock(text=INVALID_RESPONSE_DIAGNOSTIC)]
+        )
+        if (
+            len(messages) == 1
+            and len(messages[0].content) == 1
+            and isinstance(messages[0].content[0], TextBlock)
+        ):
+            await ctx.ledger.record_projection(
+                _projection_record(
+                    projection_kind="primary_append",
+                    run_id=ctx.run_id,
+                    **{key: value for key, value in ctx.active_primary.items() if key != "version"},
+                    assistant_sha256=_message_digest(diagnostic),
+                    assistant_stop_reason=assembly.stop_reason,
+                    after_action="continue",
+                    after_feedback=messages[0].content[0].text,
+                    control_message_sha256=_message_digest(messages[0]),
+                )
+            )
+        messages = (diagnostic, *messages)
+    async for event in append_feedback(
+        ctx.session, ctx.run_id, messages, stop_reason=assembly.stop_reason, decision=decision
+    ):
+        yield event
+    await ctx.end_provider_call(stop_reason=assembly.stop_reason, usage=receipt.usage)
+    await ctx.save_checkpoint("turn_complete", turn_index=ctx.turn_index)
+    ctx.continued = True
+
+
+def _invalid_response_reason(assembly: AssistantAssembly) -> str | None:
+    if assembly.stop_reason != "end_turn":
+        return None
+    text = "".join(
+        block.text for block in assembly.message.content if isinstance(block, TextBlock)
+    ).strip()
+    if not text:
+        return "empty_end_turn"
+    if text.startswith("<tool_call>") and text.endswith("</tool_call>"):
+        return "text_tool_call_envelope"
+    return None

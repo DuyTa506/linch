@@ -21,7 +21,6 @@ from ..events import (
     Event,
     LoopGuardEvent,
     ResultEvent,
-    UserEvent,
     VerificationEvent,
 )
 from ..session import Session
@@ -36,8 +35,8 @@ from .checkpoint import (
     _flush_events,
     _persist_event,
     _primary_control_message,
-    _replayed_feedback_present,
 )
+from .feedback import append_feedback
 from .request import final_text
 
 _FENCED_JSON_RE = re.compile(r"```(?:json)?\s*\n?(.*?)```", re.DOTALL | re.IGNORECASE)
@@ -326,10 +325,8 @@ async def _gate_retry_tail(
     from ..skills.system_reminder import wrap_in_system_reminder
 
     message = Message(role="user", content=[TextBlock(text=wrap_in_system_reminder(feedback))])
-    await store_call(session, "session.append", session.append([message]))
-    event: Event = UserEvent(message=message)
-    await _persist_event(session, run_id, event)
-    yield event
+    async for event in append_feedback(session, run_id, (message,), paired=True):
+        yield event
 
 
 async def _final_tool_retry_tail(
@@ -338,7 +335,7 @@ async def _final_tool_retry_tail(
     run_id: str,
     tool_blocks: list[ToolUseBlock],
     final_id: str,
-    feedback: tuple[Message, ...] | str = (),
+    feedback: str,
     final_is_error: bool = True,
 ) -> AsyncIterator[Event]:
     """Bounce a final-tool answer back into the loop with *feedback*.
@@ -352,17 +349,11 @@ async def _final_tool_retry_tail(
     executed — which both satisfies pairing and delivers the instruction."""
     paired = _primary_control_message(
         Message(role="assistant", content=list(tool_blocks)),
-        feedback if isinstance(feedback, str) else "Final tool was not executed.",
+        feedback,
         final_id,
         final_is_error,
     )
-    messages = (paired, *(feedback if isinstance(feedback, tuple) else ()))
-    await _flush_events(session)
-    if not _replayed_feedback_present(session, messages):
-        await store_call(session, "session.append", session.append(list(messages)))
-    for index, message in enumerate(messages):
-        event: Event = UserEvent(message=message, subtype="notification" if index else "prompt")
-        await _persist_event(session, run_id, event)
+    async for event in append_feedback(session, run_id, (paired,), paired=True):
         yield event
 
 
