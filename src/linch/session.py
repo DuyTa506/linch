@@ -16,6 +16,7 @@ from .types import InvokedSkillRecord, Message, SkillOverlay, Usage
 
 if TYPE_CHECKING:
     from .agent import Agent
+    from .permissions import Principal
     from .tools import ToolRegistry
 
 
@@ -80,6 +81,9 @@ class RunOptions:
     run_id: str | None = None
     """Adopt this pending run ID when starting a queued run."""
 
+    principal: Principal | None = None
+    """Immutable tenant/user/role identity for this run's authorization."""
+
 
 @dataclass(slots=True)
 class AlignmentEntry:
@@ -107,6 +111,12 @@ class Session:
     """Set only when the run iterator and all of its finalizers are finished."""
     _telemetry_run: Any = field(default=None, repr=False)
     active_run_id: str | None = None
+    _active_principal: Principal | None = field(default=None, repr=False)
+    _run_principals: dict[str, Principal] = field(default_factory=dict, repr=False)
+    _principal_background_tasks: dict[str, set[asyncio.Task[Any]]] = field(
+        default_factory=dict, repr=False
+    )
+    _principal_background_before: set[Any] = field(default_factory=set, repr=False)
     _active_gen: Any = None
     """The async generator driving the in-flight ``run``/``resume`` iterator.
     Captured so a forced ``aclose`` can finalize an abandoned run generator
@@ -289,6 +299,36 @@ class Session:
 
     def _finish_run(self) -> None:
         """Release the single-run admission token and publish true idleness."""
+        run_id = self.active_run_id
+        principal = self._active_principal
+        if run_id is not None and principal is not None:
+            run_tasks = self._principal_background_tasks.setdefault(run_id, set())
+            new_tasks = {
+                task
+                for task in self.background_tasks
+                if isinstance(task, asyncio.Task)
+                and not task.done()
+                and task not in self._principal_background_before
+                and task not in run_tasks
+            }
+            run_tasks.update(new_tasks)
+            if run_tasks:
+                run_principals = self._run_principals
+                principal_background_tasks = self._principal_background_tasks
+
+                def retire(task: asyncio.Task[Any]) -> None:
+                    run_tasks.discard(task)
+                    if not run_tasks and self.active_run_id != run_id:
+                        run_principals.pop(run_id, None)
+                        principal_background_tasks.pop(run_id, None)
+
+                for task in new_tasks:
+                    task.add_done_callback(retire)
+            else:
+                self._run_principals.pop(run_id, None)
+                self._principal_background_tasks.pop(run_id, None)
+        self._active_principal = None
+        self._principal_background_before.clear()
         self._active_gen = None
         self._active_inner = None
         self._active_started = False

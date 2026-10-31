@@ -518,6 +518,7 @@ async def _execute_one(
         # Stable across resume: run_id is reused by resume_loop and call.id comes
         # from the persisted provider_view, so a re-executed tool sees the same key.
         idempotency_key=f"{execution_run_id}:{call.id}",
+        _principal=getattr(session, "_run_principals", {}).get(execution_run_id),
     )
     try:
         return await _execute_tool_attempts(
@@ -574,6 +575,7 @@ def _dispatch_execute(
             # permission would redirect the approved call to another workspace.
             "execution",
             "idempotency_key",
+            "principal",
         )
     }
     execution = ToolExecution(
@@ -1215,6 +1217,7 @@ def _evaluate_permissions(
                 tool=tool_obj,
                 input=call.input,
                 cwd=_effective_cwd(session, agent),
+                principal=getattr(session, "_active_principal", None),
             )
         )
         if initial.decision != "ask":
@@ -1266,6 +1269,7 @@ async def _resolve_ask_decisions(
                     tool=call.tool,
                     input=call.input,
                     cwd=_effective_cwd(session, agent),
+                    principal=getattr(session, "_active_principal", None),
                 ),
                 signal,
             )

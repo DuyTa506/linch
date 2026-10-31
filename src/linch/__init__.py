@@ -172,7 +172,7 @@ if TYPE_CHECKING:
     )
     from .middleware import MiddlewareContext, ToolCallMiddlewareInput, ToolCallMiddlewareResult
     from .openai_responses import OpenAIOptions, OpenAIReasoning
-    from .permissions import BashRule, PathRule, ToolRule
+    from .permissions import BashRule, PathRule, Principal, ToolRule
     from .providers import (
         AnthropicProvider,
         AnthropicProviderOptions,
@@ -458,7 +458,7 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
     ),
     ".middleware": ("MiddlewareContext", "ToolCallMiddlewareInput", "ToolCallMiddlewareResult"),
     ".openai_responses": ("OpenAIOptions", "OpenAIReasoning"),
-    ".permissions": ("BashRule", "PathRule", "ToolRule"),
+    ".permissions": ("BashRule", "PathRule", "Principal", "ToolRule"),
     ".providers": (
         "AnthropicProvider",
         "AnthropicProviderOptions",
@@ -876,6 +876,7 @@ __all__ = [
     "write_subagent_definition",
     "BashRule",
     "PathRule",
+    "Principal",
     "ToolRule",
     # Session-store types (Phase 3.2): let canonical examples import the concrete
     # stores from the top-level package instead of the linch.sessions submodule.
