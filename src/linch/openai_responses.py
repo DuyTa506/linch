@@ -59,8 +59,9 @@ class OpenAIReasoning:
             the provider default.
         summary: Reasoning-summary detail requested from the model, or ``None``
             to omit the setting.
-        previous_response_id: Whether to continue from the latest response ID
-            automatically or disable response chaining.
+        previous_response_id: Response-chaining policy: ``"auto"`` continues
+            from the latest response ID, while ``"disabled"`` sends no prior
+            response ID.
         encrypted_content: Whether to request encrypted reasoning content in
             the response.
 
