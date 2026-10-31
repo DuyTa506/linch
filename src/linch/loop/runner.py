@@ -13,7 +13,7 @@ from uuid import uuid4
 from .._telemetry import store_call, trace_run
 from .._wire import UnsupportedWireVersionError
 from ..errors import AbortError, ConfigError, RunNotResumableError
-from ..events import Event, ReliabilityEvent, ResultEvent, UserEvent
+from ..events import Event, ResultEvent, UserEvent
 from ..hooks import (
     AgentStopContext,
     HookEvent,
@@ -799,6 +799,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 budget=_budget,
                 force_final_pending=_force_final_pending,
                 reliability=_runtime.reliability,
+                turn_stopping=_runtime.turn_stopping,
             )
 
             async def _bind_provider_primary(
@@ -895,6 +896,9 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                                 feedback=feedback,
                             ):
                                 yield event
+                            if stopping.event is not None:
+                                await _persist_event(session, run_id, stopping.event)
+                                yield stopping.event
                             async for event in _emit_error_terminal(final_text_value=feedback):
                                 yield event
                             return
@@ -906,53 +910,12 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                             feedback=feedback,
                         ):
                             yield event
+                        if stopping.event is not None:
+                            await _persist_event(session, run_id, stopping.event)
+                            yield stopping.event
                         await _end_active_turn()
                         await _save_checkpoint("turn_complete", turn_index=turn_index)
                         continue
-                    if _runtime.reliability is not None:
-                        missing = _runtime.reliability.missing_completion()
-                        if missing:
-                            feedback = (
-                                "[Linch] Completion requirements are missing: "
-                                + ", ".join(missing)
-                                + ". Nothing was executed; continue with the required tools."
-                            )
-                            if (
-                                _runtime.reliability.corrections
-                                >= _runtime.reliability.policy.max_correction_turns
-                            ):
-                                async for event in _final_tool_retry_tail(
-                                    session,
-                                    run_id=run_id,
-                                    tool_blocks=tool_blocks,
-                                    final_id=final_block.id,
-                                    feedback=feedback,
-                                ):
-                                    yield event
-                                async for event in _emit_error_terminal(final_text_value=feedback):
-                                    yield event
-                                return
-                            _runtime.reliability.corrections += 1
-                            async for event in _final_tool_retry_tail(
-                                session,
-                                run_id=run_id,
-                                tool_blocks=tool_blocks,
-                                final_id=final_block.id,
-                                feedback=feedback,
-                            ):
-                                yield event
-                            reliability_event = ReliabilityEvent(
-                                mechanism="completion",
-                                action="continue",
-                                reason="missing_requirements",
-                                turn_index=turn_index,
-                                correction_count=_runtime.reliability.corrections,
-                            )
-                            await _persist_event(session, run_id, reliability_event)
-                            yield reliability_event
-                            await _end_active_turn()
-                            await _save_checkpoint("turn_complete", turn_index=turn_index)
-                            continue
                     async for event in _finalize_final_tool_answer(
                         turn_index, tool_blocks, final_block
                     ):
@@ -1007,6 +970,9 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                             for block in getattr(message, "content", ())
                         ) or feedback
                     if stopping.action == "fail":
+                        if stopping.event is not None:
+                            await _persist_event(session, run_id, stopping.event)
+                            yield stopping.event
                         async for event in _emit_error_terminal(final_text_value=feedback):
                             yield event
                         return
@@ -1016,43 +982,12 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                         feedback=feedback,
                     ):
                         yield event
+                    if stopping.event is not None:
+                        await _persist_event(session, run_id, stopping.event)
+                        yield stopping.event
                     await _end_active_turn()
                     await _save_checkpoint("turn_complete", turn_index=turn_index)
                     continue
-                if _runtime.reliability is not None:
-                    missing = _runtime.reliability.missing_completion()
-                    if missing:
-                        feedback = (
-                            "[Linch] Completion requirements are missing: "
-                            + ", ".join(missing)
-                            + ". Nothing was executed; continue with the required tools."
-                        )
-                        if (
-                            _runtime.reliability.corrections
-                            >= _runtime.reliability.policy.max_correction_turns
-                        ):
-                            async for event in _emit_error_terminal(final_text_value=feedback):
-                                yield event
-                            return
-                        _runtime.reliability.corrections += 1
-                        async for event in _gate_retry_tail(
-                            session,
-                            run_id=run_id,
-                            feedback=feedback,
-                        ):
-                            yield event
-                        reliability_event = ReliabilityEvent(
-                            mechanism="completion",
-                            action="continue",
-                            reason="missing_requirements",
-                            turn_index=turn_index,
-                            correction_count=_runtime.reliability.corrections,
-                        )
-                        await _persist_event(session, run_id, reliability_event)
-                        yield reliability_event
-                        await _end_active_turn()
-                        await _save_checkpoint("turn_complete", turn_index=turn_index)
-                        continue
                 async for event in _finalize_text_answer(
                     turn_index, _assembly_with_truncation_prefix(assembly)
                 ):
