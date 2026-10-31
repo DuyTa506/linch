@@ -231,9 +231,7 @@ def build_run_report(
     final: dict[str, Any] | None = None
     timeline: list[dict[str, Any]] = []
 
-    visible_events = list(events)
-
-    for index, item in enumerate(visible_events, start=1):
+    for index, item in enumerate(events, start=1):
         seq, appended_at, event = _event_parts(item, index)
         timeline.append(
             {
@@ -342,7 +340,7 @@ def build_run_report(
         session_id=session_id,
         status=status,
         phase=phase,
-        event_count=len(visible_events),
+        event_count=len(events),
         tool_calls=tool_calls,
         permission_requests=permission_requests,
         context_builds=context_builds,
