@@ -147,6 +147,29 @@ async def _run_sync_callable(fn: Callable[..., Any], kwargs: dict[str, Any]) -> 
 
 @dataclass(slots=True)
 class FunctionTool:
+    """Adapt a Python callable to the :class:`~linch.tools.base.Tool` protocol.
+
+    The callable signature supplies a default input schema; explicit metadata
+    overrides inferred names, descriptions, and output behavior.
+
+    Args:
+        fn: Callable invoked with validated keyword arguments.
+        name: Optional model-visible tool name.
+        description: Optional model-visible description.
+        input_schema: Optional explicit input schema.
+        scope: Access scope used for scheduling and policy.
+        parallel: Whether calls may run in parallel.
+        tags: Search and selection tags.
+        summary: Static or callable invocation summary.
+        resources_fn: Optional resource-access calculator.
+        retryable: Whether provider-level retries may repeat the call.
+        execution_timeout_ms: Optional execution timeout.
+        output_schema: Optional canonical output schema.
+        render_output: Optional synchronous output renderer.
+        renderer_id: Optional renderer identity for durable contracts.
+        renderer_version: Optional renderer version for durable contracts.
+    """
+
     fn: Callable[..., Any]
     name: str | None = None
     description: str | None = None
@@ -186,6 +209,18 @@ class FunctionTool:
                 break
 
     def validate(self, raw: dict[str, Any]) -> dict[str, Any]:
+        """Validate and filter provider-supplied input.
+
+        Args:
+            raw: Untrusted input mapping from the provider.
+
+        Returns:
+            Input containing required and declared callable parameters.
+
+        Raises:
+            ValueError: If a required parameter is missing.
+        """
+
         for name in self._required:
             if name not in raw:
                 raise ValueError(f"{name} is required")
@@ -196,6 +231,20 @@ class FunctionTool:
     async def execute(
         self, input: dict[str, Any], ctx: ToolContext
     ) -> ToolResult | CanonicalToolOutput | JsonValue:
+        """Invoke the wrapped callable with validated input.
+
+        Args:
+            input: Validated tool arguments.
+            ctx: Runtime context injected when the callable accepts it.
+
+        Returns:
+            Callable result as a legacy or canonical output, or the raw value
+            for scheduler normalization when ``output_schema`` is configured.
+
+        Raises:
+            ToolOutputContractError: If a V2 callable returns a legacy result.
+        """
+
         kwargs = dict(input)
         if self._ctx_param is not None:
             kwargs[self._ctx_param] = ctx
@@ -216,9 +265,27 @@ class FunctionTool:
         return _result_from_value(value, self.summarize(input))
 
     def summarize(self, input: dict[str, Any]) -> str:
+        """Return the configured summary for a validated call.
+
+        Args:
+            input: Validated tool arguments.
+
+        Returns:
+            Human-readable invocation summary.
+        """
+
         return _summary_text(self.summary, input, str(self.name))
 
     def resources(self, input: dict[str, Any]) -> list[ResourceAccess] | list[dict[str, Any]]:
+        """Return resources accessed by a validated call.
+
+        Args:
+            input: Validated tool arguments.
+
+        Returns:
+            Resource descriptors, or an empty list when none are configured.
+        """
+
         if self.resources_fn is None:
             return []
         return self.resources_fn(input)
@@ -244,7 +311,39 @@ def tool(
     retryable: bool = False,
     execution_timeout_ms: float | None = None,
 ) -> FunctionTool | Callable[[Callable[..., Any]], FunctionTool]:
+    """Create a :class:`FunctionTool` directly or as a decorator.
+
+    Args:
+        fn: Optional callable to wrap immediately.
+        name: Optional model-visible tool name.
+        description: Optional model-visible description.
+        input_schema: Optional explicit input schema.
+        output_schema: Optional canonical output schema.
+        render_output: Optional synchronous output renderer.
+        renderer_id: Optional renderer identity.
+        renderer_version: Optional renderer version.
+        scope: Access scope used for scheduling and policy.
+        parallel: Whether calls may run in parallel.
+        tags: Search and selection tags.
+        summary: Static or callable invocation summary.
+        resources: Optional resource-access calculator.
+        retryable: Whether provider-level retries may repeat the call.
+        execution_timeout_ms: Optional execution timeout.
+
+    Returns:
+        A configured tool or decorator returning one.
+    """
+
     def wrap(inner: Callable[..., Any]) -> FunctionTool:
+        """Wrap one callable using the decorator configuration.
+
+        Args:
+            inner: Callable to adapt as a tool.
+
+        Returns:
+            Configured :class:`FunctionTool`.
+        """
+
         return FunctionTool(
             inner,
             name=name,
