@@ -215,7 +215,7 @@ Wave 1 (parallel, disjoint files):
 | 4 | `scale/durable-runs` | D1, D2, D9 | `run_store.py` (or a new `run_stores/` package), Postgres store, conformance tests; move `SqliteRunStore.save` serialization off the event loop |
 
 Merged into `integration/3.0`: WP1, WP2, WP4, WP3 (loop split only; see D4
-status), WP9a, WP9b, WP16, WP17, WP15, WP6, WP5. Remaining Wave 2: WP8, then WP7; WP18 (load test) runs now as a baseline and again as the scale-ready gate. Then Wave 3: WP10 (plugins), WP19 (tool search plugin), WP11-WP14.
+status), WP9a, WP9b, WP16, WP17, WP15, WP6, WP5, WP8 (f23d726; a follow-up making failure terminals write their pending events in the same statement is in review). Remaining Wave 2: WP7; WP18 (load test) runs now as a baseline and again as the scale-ready gate after WP7. Then Wave 3: WP10 (plugins), WP19 (tool search plugin), WP11-WP14.
 Order (one merge at a time):
 
 | WP | Branch | Decisions | Scope |
@@ -228,7 +228,7 @@ Order (one merge at a time):
 | 6 | `scale/worker` | D14 | `linch.worker` on PgQueuer, scheduling package replaced, "scale out" section in `docs/usage/production.md` |
 | 8 | `scale/hot-path` | D15 + below | profile-driven hot path |
 | 7 | `scale/reliability` | D4 | reliability port onto the seams (brings the slim `turn-stopping` event) |
-| 18 | `scale/load-test` | acceptance | multi-process load test of the target deployment (enqueuer + M workers + Postgres behind injected network latency): capacity knee, bottleneck, chaos (worker kill, DB blip, drain). Built and baselined now on integration; rerun after WP8 and WP7 as the scale-ready gate |
+| 18 | `scale/load-test` | acceptance | multi-process load test of the target deployment (enqueuer + M workers + Postgres behind injected network latency): capacity knee, bottleneck, chaos (worker kill, DB blip, drain). Built and baselined now on integration; rerun after WP8 and WP7 as the scale-ready gate. Owner decision 2026-10-31: no hand-written infrastructure where a maintained tool exists, so faults and latency come from Toxiproxy, process CPU from psutil, and percentiles and exactly-once checks from SQL; harness at most 600 lines |
 | 19 | `tools/search` | Wave 3, right after WP10 | slim tool search as a plugin (section below); replaces the frozen `wip/tool-discovery-freeze-20261030` design |
 
 WP19 tool search (owner decision 2026-10-31: slim, a plugin, opens on its own
@@ -278,6 +278,16 @@ WP8 hot path, driven by the WP1 baseline
 - Session projections as pure folds with a cached state and tail replay
   (DeepSeek Harness idea below), so reads and checkpoints cost O(new entries).
 - D15: msgspec codecs only with a measured win.
+
+Status (2026-10-31): merged as f23d726. Postgres writes are one fenced
+statement each (owner and epoch in the WHERE, events through a data-modifying
+CTE, seqs from `last_event_seq` / `last_message_seq`), checkpoint and events are
+one required RunStore write, and store-owned pools skip the reset query.
+Postgres 200 x 4 went from 94.9 to 15.5 protocol cycles per turn and from
+12.1 to 19.9 runs/s; memory 200 x 4 from 23.0 to 30.8; checkpoints at turns
+0/24/49 are 1.6/2.2/2.8 KB (the residual is ~25 B per distinct tool call in
+the digest-keyed loop guard). msgspec was dropped (under 1%). src +298 net.
+See `docs/superpowers/measurements/2026-10-31-hot-path.md`.
 
 ## Wave 3 — harness kernel surface (owner target, 2026-10-31)
 
