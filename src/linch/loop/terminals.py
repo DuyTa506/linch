@@ -14,7 +14,6 @@ from typing import Any, Literal
 
 import jsonschema  # type: ignore[import]
 
-from .._telemetry import store_call
 from ..events import (
     BudgetEvent,
     ErrorEvent,
@@ -23,6 +22,7 @@ from ..events import (
     ResultEvent,
     VerificationEvent,
 )
+from ..run_store import durable_call
 from ..session import Session
 from ..types import (
     Message,
@@ -108,7 +108,7 @@ async def _complete_with_pending_events(session: Session, run_id: str, checkpoin
         await buf.flush_with_checkpoint(checkpoint, status="completed")
         return
     await _flush_events(session)
-    await store_call(session, "run.mark_completed", store.mark_completed(run_id, checkpoint))
+    await durable_call(session, "run.mark_completed", store.mark_completed(run_id, checkpoint))
 
 
 async def _budget_exhausted_tail(

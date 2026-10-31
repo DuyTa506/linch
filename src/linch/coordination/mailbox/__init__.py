@@ -5,7 +5,7 @@ from functools import partial
 from typing import Any, cast
 from xml.sax.saxutils import escape
 
-from ..._telemetry import store_call
+from ...run_store import durable_call
 from ...errors import ConfigError
 from ...events import Event, UserEvent
 from ...kernel import Context, Disposable
@@ -71,7 +71,7 @@ async def _mailbox_producer(
     try:
         for claimed in claims:
             message = claimed.message
-            await store_call(
+            await durable_call(
                 session,
                 "session.enqueue_inbox",
                 session.notify(
@@ -89,7 +89,7 @@ async def _mailbox_producer(
             await cast(Any, release)(pending)
         raise
 
-    stored = await store_call(
+    stored = await durable_call(
         session,
         "session.commit_inbox",
         session.store.commit_inbox(session.id, after_seq=session._last_seq),

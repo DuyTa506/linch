@@ -12,7 +12,6 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from .._telemetry import store_call
 from ..errors import ConfigError
 from ..events import (
     ErrorEvent,
@@ -26,6 +25,7 @@ from ..events import (
 from ..hooks import AgentStartContext, AgentStopContext, HookEvent
 from ..hooks.contexts import _AgentResult
 from ..model_calls import _context_fingerprint
+from ..run_store import durable_call
 from ..types import TextBlock, message_from_dict, message_to_dict
 from .checkpoint import _last_message_matches, _persist_event
 from .request import build_user_message
@@ -218,7 +218,7 @@ async def initialize_run(ctx: RunStartupContext) -> AsyncIterator[Event]:
             ):
                 raise ConfigError("startup durable message baseline does not match")
         if append:
-            await store_call(session, "session.append", session.append([user_message]))
+            await durable_call(session, "session.append", session.append([user_message]))
         event = UserEvent(message=user_message, subtype="prompt")
         await _persist_event(session, runtime.run_id, event)
         ctx.checkpoint.extension_state.pop("linch.startup", None)

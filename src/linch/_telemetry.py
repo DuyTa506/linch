@@ -21,7 +21,6 @@ try:  # Private API; without it the default provider counts as active (slower, s
 except ImportError:  # pragma: no cover
     _ProxyMeterProvider = metrics.NoOpMeterProvider
 
-from .run_store import _is_transient_store_error, _StoreUnavailableError
 from .types import Usage
 
 if TYPE_CHECKING:
@@ -391,18 +390,7 @@ def trace_compaction(function: Any) -> Any:
 async def store_call(session: Any, op: str, awaitable: Awaitable[_T]) -> _T:
     if session is None:
         return await awaitable
-    try:
-        return await telemetry_for(session.agent).store_call(op, awaitable)
-    except Exception as exc:
-        if (
-            getattr(session.agent, "run_store", None) is not None
-            and getattr(session, "active_run_id", None) is not None
-            and op != "run.create_run"
-            and (op.startswith("run.") or op.startswith("session."))
-        ):
-            if not isinstance(exc, _StoreUnavailableError) and _is_transient_store_error(exc):
-                raise _StoreUnavailableError(f"transient store failure during {op}") from exc
-        raise
+    return await telemetry_for(session.agent).store_call(op, awaitable)
 
 
 def trace_tool(function: Any) -> Any:

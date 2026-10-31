@@ -30,6 +30,7 @@ from ..run_store import (
     RunContractMismatchError,
     RunRecord,
     _require_tool_recovery_cursor,
+    durable_call,
     ensure_run_contract_compatible,
     run_contract_from_meta,
     run_meta_with_contract,
@@ -122,7 +123,7 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
     opts = replace(opts)
     store = session.agent.run_store
     if store is not None and opts.run_id is not None and opts.principal is None:
-        existing = await store_call(session, "run.load_run", store.load_run(opts.run_id))
+        existing = await durable_call(session, "run.load_run", store.load_run(opts.run_id))
         if existing is not None and "run_contract" in existing.meta:
             stored = run_contract_from_meta(existing.meta)
             principal = _principal_from_contract(stored)
@@ -195,7 +196,7 @@ async def resume_loop(session: Session, run_id: str, opts: RunOptions) -> AsyncI
     store = session.agent.run_store
     if store is None:
         raise RuntimeError("Agent has no run_store configured")
-    run_record = await store_call(session, "run.load_run", store.load_run(run_id))
+    run_record = await durable_call(session, "run.load_run", store.load_run(run_id))
     if run_record is None:
         raise KeyError(f"run not found: {run_id}")
     if run_record.session_id != session.id:
@@ -847,7 +848,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                         raise ConfigError(
                             "primary control message differs from its acceptance projection"
                         )
-                    await store_call(session, "session.append", session.append([control]))
+                    await durable_call(session, "session.append", session.append([control]))
                     event = UserEvent(message=control)
                     await _persist_event(session, run_id, event)
                     yield event
