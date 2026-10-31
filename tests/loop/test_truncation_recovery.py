@@ -42,7 +42,7 @@ async def _collect(session: Any, prompt: str = "go") -> list[Any]:
 
 @pytest.mark.asyncio
 async def test_truncated_text_is_finalized_by_default() -> None:
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
 
     provider = ScriptedProvider([TextTurn(text="cut off here", stop_reason="max_tokens")])
     agent = _agent(provider)  # no truncation_recovery
@@ -63,7 +63,7 @@ async def test_truncated_text_is_finalized_by_default() -> None:
 @pytest.mark.asyncio
 async def test_recovery_continues_after_truncation() -> None:
     from linch import TruncationRecovery, UserEvent
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
 
     provider = ScriptedProvider(
         [
@@ -91,7 +91,7 @@ async def test_recovery_continues_after_truncation() -> None:
 @pytest.mark.asyncio
 async def test_recovery_is_bounded_by_max_attempts() -> None:
     from linch import TruncationRecovery
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
 
     # Always truncated: one recovery attempt, then the truncated answer stands.
     provider = ScriptedProvider(
@@ -114,7 +114,7 @@ async def test_recovery_is_bounded_by_max_attempts() -> None:
 @pytest.mark.asyncio
 async def test_recovery_does_not_trigger_on_normal_completion() -> None:
     from linch import TruncationRecovery
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
 
     provider = ScriptedProvider([TextTurn(text="all done", stop_reason="end_turn")])
     agent = _agent(provider, truncation_recovery=TruncationRecovery(max_attempts=3))
@@ -130,7 +130,7 @@ async def test_recovery_does_not_trigger_on_normal_completion() -> None:
 @pytest.mark.asyncio
 async def test_custom_feedback_is_used() -> None:
     from linch import TruncationRecovery, UserEvent
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
 
     provider = ScriptedProvider(
         [
@@ -171,7 +171,7 @@ def test_empty_feedback_raises() -> None:
 
 def test_agent_rejects_invalid_truncation_recovery() -> None:
     from linch import ConfigError
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
 
     invalid: Any = object()
     with pytest.raises(ConfigError, match="truncation_recovery"):
@@ -182,7 +182,7 @@ def test_agent_rejects_invalid_truncation_recovery() -> None:
 async def test_recovery_attempts_are_restored_on_resume() -> None:
     from linch import Agent, TruncationRecovery
     from linch.config import FeatureFlags
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.run_store import InMemoryRunStore
     from linch.sessions import InMemorySessionStore
 
@@ -249,8 +249,8 @@ async def test_recovery_attempts_are_restored_on_resume() -> None:
 async def test_pending_recovery_feedback_is_appended_on_resume() -> None:
     from linch import Agent, TruncationRecovery
     from linch.config import FeatureFlags
-    from linch.evals import ScriptedProvider, TextTurn
     from linch.events import ResultEvent, UserEvent
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.run_store import InMemoryRunStore, RunCheckpoint
     from linch.sessions import InMemorySessionStore
     from linch.types import Message, TextBlock, Usage

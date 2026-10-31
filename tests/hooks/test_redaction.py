@@ -207,7 +207,7 @@ def test_redaction_symbols_are_public() -> None:
 async def test_final_answer_is_redacted_end_to_end(tmp_path: Any) -> None:
     from linch import Agent, RedactionConfig, RedactionHook, RedactionRule, ResultEvent
     from linch.config import FeatureFlags
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.sessions import InMemorySessionStore
 
     hook = RedactionHook(

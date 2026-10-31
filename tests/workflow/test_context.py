@@ -13,7 +13,7 @@ import pytest
 
 
 def _make_context(**kwargs: Any) -> Any:
-    from linch.workflow import WorkflowContext
+    from linch.ext.workflow import WorkflowContext
 
     return WorkflowContext(agent=None, host_session=None, **kwargs)
 
@@ -261,7 +261,7 @@ async def test_step_key_argument_distinguishes_calls() -> None:
 
 
 async def test_step_timeout_raises_workflow_timeout_error() -> None:
-    from linch.workflow import WorkflowTimeoutError
+    from linch.ext.workflow import WorkflowTimeoutError
 
     wf = _make_context()
 
@@ -273,7 +273,7 @@ async def test_step_timeout_raises_workflow_timeout_error() -> None:
 
 
 async def test_step_timeout_falls_back_to_the_context_default() -> None:
-    from linch.workflow import WorkflowTimeoutError
+    from linch.ext.workflow import WorkflowTimeoutError
 
     wf = _make_context(step_timeout_ms=10)
 
@@ -307,7 +307,7 @@ async def test_no_timeout_never_reaches_wait_for(monkeypatch: Any) -> None:
 
 
 async def test_step_timeout_cleans_up_the_cancelled_function() -> None:
-    from linch.workflow import WorkflowTimeoutError
+    from linch.ext.workflow import WorkflowTimeoutError
 
     wf = _make_context()
     cleaned: list[bool] = []

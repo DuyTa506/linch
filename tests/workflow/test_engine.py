@@ -43,6 +43,12 @@ class CountingTextProvider:
         }
 
 
+async def _run_workflow(agent: Any, fn: Any, **kwargs: Any) -> Any:
+    from linch.ext.workflow import run_workflow
+
+    return await run_workflow(agent, fn, **kwargs)
+
+
 class SchemaNameProvider:
     """Returns JSON derived from the requested output schema name."""
 
@@ -91,7 +97,7 @@ async def test_run_workflow_returns_function_value() -> None:
         await wf.phase("noop")
         return {"answer": 42}
 
-    result = await agent.run_workflow(flow)
+    result = await _run_workflow(agent, flow)
 
     assert result == {"answer": 42}
 
@@ -104,7 +110,7 @@ async def test_wf_agent_runs_subagent_and_returns_final_text() -> None:
     async def flow(wf: Any) -> str:
         return await wf.agent("summarize the repo", label="summarizer")
 
-    result = await agent.run_workflow(flow, on_event=seen.append)
+    result = await _run_workflow(agent, flow, on_event=seen.append)
 
     assert result == "result-1"
     kinds = [e.kind for e in seen if e.type == "workflow"]
@@ -133,7 +139,7 @@ async def test_wf_agent_returns_json_string_for_structured_output() -> None:
     async def flow(wf: Any) -> str:
         return await wf.agent("extract", output_schema=schema)
 
-    result = await agent.run_workflow(flow, on_event=seen.append)
+    result = await _run_workflow(agent, flow, on_event=seen.append)
 
     assert json.loads(result) == {"schema": "alpha"}
     end = [e for e in seen if e.type == "workflow" and e.kind == "agent_end"][0]
@@ -159,8 +165,8 @@ async def test_wf_agent_structured_output_replays_from_journal() -> None:
     async def flow(wf: Any) -> str:
         return await wf.agent("extract", output_schema=schema)
 
-    first = await agent.run_workflow(flow, run_id="wf-structured", on_event=seen.append)
-    second = await agent.run_workflow(flow, run_id="wf-structured", on_event=seen.append)
+    first = await _run_workflow(agent, flow, run_id="wf-structured", on_event=seen.append)
+    second = await _run_workflow(agent, flow, run_id="wf-structured", on_event=seen.append)
 
     assert first == second == '{"schema":"alpha"}'
     assert provider.calls == 1
@@ -183,8 +189,8 @@ async def test_wf_agent_run_options_are_part_of_replay_key() -> None:
     async def flow_b(wf: Any) -> str:
         return await wf.agent("same prompt", output_schema=schema_b)
 
-    first = await agent.run_workflow(flow_a, run_id="wf-key")
-    second = await agent.run_workflow(flow_b, run_id="wf-key")
+    first = await _run_workflow(agent, flow_a, run_id="wf-key")
+    second = await _run_workflow(agent, flow_b, run_id="wf-key")
 
     assert json.loads(first) == {"schema": "alpha"}
     assert json.loads(second) == {"schema": "beta"}
@@ -203,9 +209,9 @@ async def test_wf_agent_tool_filter_is_part_of_replay_key() -> None:
     async def flow_with_no_tools(wf: Any) -> str:
         return await wf.agent("same prompt", tools=[])
 
-    first = await agent.run_workflow(flow_with_defaults, run_id="wf-tool-key")
-    second = await agent.run_workflow(flow_with_no_tools, run_id="wf-tool-key")
-    replay = await agent.run_workflow(flow_with_no_tools, run_id="wf-tool-key")
+    first = await _run_workflow(agent, flow_with_defaults, run_id="wf-tool-key")
+    second = await _run_workflow(agent, flow_with_no_tools, run_id="wf-tool-key")
+    replay = await _run_workflow(agent, flow_with_no_tools, run_id="wf-tool-key")
 
     assert first == "result-1"
     assert second == replay == "result-2"
@@ -236,9 +242,9 @@ async def test_wf_agent_inherited_subagent_tool_filter_is_part_of_replay_key() -
     async def flow(wf: Any) -> str:
         return await wf.agent("same prompt", name="reviewer")
 
-    first = await agent.run_workflow(flow, run_id="wf-inherited-tool-key")
+    first = await _run_workflow(agent, flow, run_id="wf-inherited-tool-key")
     definition.frontmatter.tools = ["Grep"]
-    second = await agent.run_workflow(flow, run_id="wf-inherited-tool-key")
+    second = await _run_workflow(agent, flow, run_id="wf-inherited-tool-key")
 
     assert first == "result-1"
     assert second == "result-2"
@@ -246,7 +252,7 @@ async def test_wf_agent_inherited_subagent_tool_filter_is_part_of_replay_key() -
 
 
 async def test_wf_agent_passes_isolation_to_subagent() -> None:
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.tools import ToolRegistry, tool
     from linch.tools.isolation import TempDirIsolation
 
@@ -269,7 +275,7 @@ async def test_wf_agent_passes_isolation_to_subagent() -> None:
     async def flow(wf: Any) -> str:
         return await wf.agent("go", isolation=iso)
 
-    await agent.run_workflow(flow)
+    await _run_workflow(agent, flow)
 
     assert len(recorded) == 1
     assert recorded[0] != agent.cwd
@@ -284,11 +290,11 @@ async def test_wf_agent_unknown_name_raises_config_error() -> None:
         return await wf.agent("do it", name="no-such-agent")
 
     with pytest.raises(ConfigError, match="no-such-agent"):
-        await agent.run_workflow(flow)
+        await _run_workflow(agent, flow)
 
 
 async def test_wf_agent_child_error_raises_workflow_error() -> None:
-    from linch.workflow import WorkflowError
+    from linch.ext.workflow import WorkflowError
 
     agent = _make_agent(CountingTextProvider(fail_on_call=1))
 
@@ -296,7 +302,7 @@ async def test_wf_agent_child_error_raises_workflow_error() -> None:
         return await wf.agent("doomed task")
 
     with pytest.raises(WorkflowError, match="provider blew up"):
-        await agent.run_workflow(flow)
+        await _run_workflow(agent, flow)
 
 
 async def test_budget_shared_across_workflow_children() -> None:
@@ -312,7 +318,7 @@ async def test_budget_shared_across_workflow_children() -> None:
         assert wf.budget is budget
         return [first, second]
 
-    result = await agent.run_workflow(flow, budget=budget)
+    result = await _run_workflow(agent, flow, budget=budget)
 
     assert result == ["result-1", "result-2"]
     assert budget.spent_tokens == 200
@@ -322,7 +328,7 @@ async def test_resume_replays_unchanged_prefix(
     pg_dsn,
 ) -> None:
     from linch import PostgresRunStore
-    from linch.workflow import WorkflowError
+    from linch.ext.workflow import WorkflowError
 
     async def flow(wf: Any) -> list[str]:
         one = await wf.agent("step one")
@@ -334,7 +340,7 @@ async def test_resume_replays_unchanged_prefix(
     provider1 = CountingTextProvider(fail_on_call=3)
     agent1 = _make_agent(provider1, run_store=PostgresRunStore(pg_dsn))
     with pytest.raises(WorkflowError):
-        await agent1.run_workflow(flow, run_id="wf-resume-1")
+        await _run_workflow(agent1, flow, run_id="wf-resume-1")
     assert provider1.calls == 3
     saved = await agent1.run_store.load_run("wf-resume-1")
     assert saved is not None
@@ -346,7 +352,7 @@ async def test_resume_replays_unchanged_prefix(
     provider2 = CountingTextProvider()
     agent2 = _make_agent(provider2, run_store=PostgresRunStore(pg_dsn))
     seen: list[Any] = []
-    result = await agent2.run_workflow(flow, run_id="wf-resume-1", on_event=seen.append)
+    result = await _run_workflow(agent2, flow, run_id="wf-resume-1", on_event=seen.append)
 
     assert provider2.calls == 1
     replays = [e for e in seen if e.type == "workflow" and e.kind == "agent_replayed"]
@@ -369,7 +375,7 @@ async def test_changed_prompt_invalidates_cache(
 
     provider1 = CountingTextProvider()
     agent1 = _make_agent(provider1, run_store=PostgresRunStore(pg_dsn))
-    await agent1.run_workflow(flow_v1, run_id="wf-edit-1")
+    await _run_workflow(agent1, flow_v1, run_id="wf-edit-1")
     assert provider1.calls == 2
 
     # Edited workflow: step one unchanged (replays), step two reworded (runs).
@@ -380,7 +386,7 @@ async def test_changed_prompt_invalidates_cache(
 
     provider2 = CountingTextProvider()
     agent2 = _make_agent(provider2, run_store=PostgresRunStore(pg_dsn))
-    result = await agent2.run_workflow(flow_v2, run_id="wf-edit-1")
+    result = await _run_workflow(agent2, flow_v2, run_id="wf-edit-1")
 
     assert provider2.calls == 1
     assert result == ["result-1", "result-1"]
@@ -396,7 +402,7 @@ async def test_resume_rejects_incompatible_workflow_version(
     from linch import InMemoryRunStore
     from linch._wire import UnsupportedWireVersionError
     from linch.events import WorkflowEvent
-    from linch.workflow.journal import call_key
+    from linch.ext.workflow.journal import call_key
 
     store = InMemoryRunStore()
     await store.create_run(
@@ -426,7 +432,7 @@ async def test_resume_rejects_incompatible_workflow_version(
         return await wf.agent("same prompt", tools=[])
 
     with pytest.raises(UnsupportedWireVersionError, match="start a new run"):
-        await agent.run_workflow(flow, run_id="wf-old-resume")
+        await _run_workflow(agent, flow, run_id="wf-old-resume")
 
     assert invoked is False
     assert provider.calls == 0
@@ -441,18 +447,18 @@ async def test_run_id_without_run_store_raises_config_error() -> None:
         return None
 
     with pytest.raises(ConfigError, match="run_store"):
-        await agent.run_workflow(flow, run_id="wf-1")
+        await _run_workflow(agent, flow, run_id="wf-1")
 
 
 async def test_workflow_timeout_error_is_a_retryable_workflow_error() -> None:
-    from linch import WorkflowError, WorkflowTimeoutError
+    from linch.ext.workflow import WorkflowError, WorkflowTimeoutError
 
     assert issubclass(WorkflowTimeoutError, WorkflowError)
     assert WorkflowTimeoutError("x").retryable is True
 
 
 async def test_agent_timeout_cancels_the_child_and_leaks_no_tasks() -> None:
-    from linch.workflow import WorkflowTimeoutError
+    from linch.ext.workflow import WorkflowTimeoutError
 
     class BlockingProvider(CountingTextProvider):
         async def stream(self, req: Any) -> AsyncIterator[dict[str, object]]:
@@ -465,7 +471,7 @@ async def test_agent_timeout_cancels_the_child_and_leaks_no_tasks() -> None:
         return await wf.agent("hangs forever", timeout_ms=50)
 
     with pytest.raises(WorkflowTimeoutError, match="timed out"):
-        await agent.run_workflow(flow)
+        await _run_workflow(agent, flow)
 
     await asyncio.sleep(0)
     await asyncio.sleep(0)
@@ -487,14 +493,14 @@ async def test_run_workflow_signal_stops_agent_and_step_calls() -> None:
         return await wf.agent("never runs")
 
     with pytest.raises(AbortError):
-        await agent.run_workflow(flow, signal=signal)
+        await _run_workflow(agent, flow, signal=signal)
     assert provider.calls == 0
 
     async def step_flow(wf: Any) -> str:
         return await wf.step("never runs", lambda: ran.append("x") or "x")
 
     with pytest.raises(AbortError):
-        await agent.run_workflow(step_flow, signal=signal)
+        await _run_workflow(agent, step_flow, signal=signal)
     assert ran == []
 
 
@@ -512,7 +518,7 @@ async def test_wf_agent_retry_reruns_a_failed_subagent_and_journals_once() -> No
             retry=RetryOptions(max_attempts=3, base_delay_ms=0, max_delay_ms=0, jitter=0.0),
         )
 
-    result = await agent.run_workflow(flow, run_id="wf-retry-1")
+    result = await _run_workflow(agent, flow, run_id="wf-retry-1")
 
     assert result == "result-2"
     assert provider.calls == 2
@@ -523,9 +529,9 @@ async def test_wf_agent_retry_reruns_a_failed_subagent_and_journals_once() -> No
 
 
 async def test_wf_agent_retry_exhaustion_journals_nothing_and_reruns_on_resume() -> None:
+    from linch.ext.workflow import WorkflowError
     from linch.providers.retry import RetryOptions
     from linch.run_store import InMemoryRunStore
-    from linch.workflow import WorkflowError
 
     class AlwaysFailingProvider(CountingTextProvider):
         async def stream(self, req: Any) -> AsyncIterator[dict[str, object]]:
@@ -544,19 +550,19 @@ async def test_wf_agent_retry_exhaustion_journals_nothing_and_reruns_on_resume()
 
     agent1 = _make_agent(always_failing, run_store=store)
     with pytest.raises(WorkflowError):
-        await agent1.run_workflow(flow, run_id="wf-retry-2")
+        await _run_workflow(agent1, flow, run_id="wf-retry-2")
     assert always_failing.calls == 2
 
     stored = await store.load_events("wf-retry-2")
     assert [s.event for s in stored if getattr(s.event, "kind", None) == "agent_end"] == []
 
     agent2 = _make_agent(CountingTextProvider(), run_store=store)
-    assert await agent2.run_workflow(flow, run_id="wf-retry-2") == "result-1"
+    assert await _run_workflow(agent2, flow, run_id="wf-retry-2") == "result-1"
 
 
 async def test_interrupt_suspends_without_marking_the_run_failed() -> None:
+    from linch.ext.workflow import WorkflowSuspended
     from linch.run_store import InMemoryRunStore
-    from linch.workflow import WorkflowSuspended
 
     store = InMemoryRunStore()
     agent = _make_agent(CountingTextProvider(), run_store=store)
@@ -566,7 +572,7 @@ async def test_interrupt_suspends_without_marking_the_run_failed() -> None:
         return await wf.interrupt("approve", {"diff": "one line"})
 
     with pytest.raises(WorkflowSuspended) as excinfo:
-        await agent.run_workflow(flow, run_id="wf-hitl-1", on_event=seen.append)
+        await _run_workflow(agent, flow, run_id="wf-hitl-1", on_event=seen.append)
 
     assert excinfo.value.key == "approve"
     assert excinfo.value.payload == {"diff": "one line"}
@@ -584,8 +590,8 @@ async def test_interrupt_suspends_without_marking_the_run_failed() -> None:
 
 
 async def test_workflow_suspended_escapes_a_user_except_exception() -> None:
+    from linch.ext.workflow import WorkflowSuspended
     from linch.run_store import InMemoryRunStore
-    from linch.workflow import WorkflowSuspended
 
     agent = _make_agent(CountingTextProvider(), run_store=InMemoryRunStore())
     swallowed: list[str] = []
@@ -598,13 +604,13 @@ async def test_workflow_suspended_escapes_a_user_except_exception() -> None:
             return "swallowed"
 
     with pytest.raises(WorkflowSuspended):
-        await agent.run_workflow(flow, run_id="wf-hitl-2")
+        await _run_workflow(agent, flow, run_id="wf-hitl-2")
     assert swallowed == []
 
 
 async def test_resume_supplies_the_interrupt_value_and_completes() -> None:
+    from linch.ext.workflow import WorkflowSuspended
     from linch.run_store import InMemoryRunStore
-    from linch.workflow import WorkflowSuspended
 
     store = InMemoryRunStore()
     provider = CountingTextProvider()
@@ -616,10 +622,10 @@ async def test_resume_supplies_the_interrupt_value_and_completes() -> None:
         return [first, approved]
 
     with pytest.raises(WorkflowSuspended):
-        await agent.run_workflow(flow, run_id="wf-hitl-3")
+        await _run_workflow(agent, flow, run_id="wf-hitl-3")
     assert provider.calls == 1
 
-    result = await agent.run_workflow(flow, run_id="wf-hitl-3", resume={"approve": True})
+    result = await _run_workflow(agent, flow, run_id="wf-hitl-3", resume={"approve": True})
 
     assert result == ["result-1", True]
     assert provider.calls == 1  # the agent prefix replayed
@@ -630,7 +636,7 @@ async def test_resume_supplies_the_interrupt_value_and_completes() -> None:
 
     # A later resume needs no resume mapping: the answer itself is journaled.
     seen: list[Any] = []
-    assert await agent.run_workflow(flow, run_id="wf-hitl-3", on_event=seen.append) == [
+    assert await _run_workflow(agent, flow, run_id="wf-hitl-3", on_event=seen.append) == [
         "result-1",
         True,
     ]
@@ -639,8 +645,8 @@ async def test_resume_supplies_the_interrupt_value_and_completes() -> None:
 
 async def test_interrupt_inside_parallel_cancels_siblings_and_suspends() -> None:
     """Documented limitation: a fan-out cannot collect several interrupts."""
+    from linch.ext.workflow import WorkflowSuspended
     from linch.run_store import InMemoryRunStore
-    from linch.workflow import WorkflowSuspended
 
     agent = _make_agent(CountingTextProvider(), run_store=InMemoryRunStore())
     cleaned: list[str] = []
@@ -656,14 +662,14 @@ async def test_interrupt_inside_parallel_cancels_siblings_and_suspends() -> None
         return await wf.parallel([lambda: wf.interrupt("approve"), sibling])
 
     with pytest.raises(WorkflowSuspended):
-        await agent.run_workflow(flow, run_id="wf-hitl-4")
+        await _run_workflow(agent, flow, run_id="wf-hitl-4")
 
     assert cleaned == ["sibling"]
 
 
 async def test_deadline_stops_the_workflow_and_marks_the_run_failed() -> None:
+    from linch.ext.workflow import WorkflowTimeoutError
     from linch.run_store import InMemoryRunStore
-    from linch.workflow import WorkflowTimeoutError
 
     store = InMemoryRunStore()
     agent = _make_agent(CountingTextProvider(), run_store=store)
@@ -680,7 +686,7 @@ async def test_deadline_stops_the_workflow_and_marks_the_run_failed() -> None:
         return await wf.step("slow", slow)
 
     with pytest.raises(WorkflowTimeoutError, match="deadline"):
-        await agent.run_workflow(flow, run_id="wf-deadline-1", deadline_ms=20)
+        await _run_workflow(agent, flow, run_id="wf-deadline-1", deadline_ms=20)
 
     assert cleaned == ["slow"]  # the in-flight step was cancelled, not orphaned
     record = await store.load_run("wf-deadline-1")
@@ -690,8 +696,8 @@ async def test_deadline_stops_the_workflow_and_marks_the_run_failed() -> None:
 
 
 async def test_deadline_leaves_the_journaled_prefix_resumable() -> None:
+    from linch.ext.workflow import WorkflowTimeoutError
     from linch.run_store import InMemoryRunStore
-    from linch.workflow import WorkflowTimeoutError
 
     store = InMemoryRunStore()
     provider = CountingTextProvider()
@@ -711,9 +717,9 @@ async def test_deadline_leaves_the_journaled_prefix_resumable() -> None:
         return await flow(wf, stall=False)
 
     with pytest.raises(WorkflowTimeoutError):
-        await agent.run_workflow(stalling, run_id="wf-deadline-2", deadline_ms=30)
+        await _run_workflow(agent, stalling, run_id="wf-deadline-2", deadline_ms=30)
 
-    assert await agent.run_workflow(finishing, run_id="wf-deadline-2") == "result-1"
+    assert await _run_workflow(agent, finishing, run_id="wf-deadline-2") == "result-1"
     assert side_effects == ["published"]  # replayed, not re-executed
 
 
@@ -728,7 +734,7 @@ async def test_no_deadline_never_reaches_wait_for(monkeypatch: Any) -> None:
     async def flow(wf: Any) -> str:
         return "ok"
 
-    assert await agent.run_workflow(flow) == "ok"
+    assert await _run_workflow(agent, flow) == "ok"
 
 
 class ConcurrencyTrackingProvider(CountingTextProvider):
@@ -757,7 +763,7 @@ async def test_max_agent_concurrency_caps_live_subagent_runs() -> None:
     async def flow(wf: Any) -> list[str]:
         return await wf.parallel([lambda i=i: wf.agent(f"task {i}") for i in range(6)])
 
-    results = await agent.run_workflow(flow, max_concurrency=8, max_agent_concurrency=2)
+    results = await _run_workflow(agent, flow, max_concurrency=8, max_agent_concurrency=2)
 
     assert len(results) == 6
     assert provider.high_water == 2
@@ -770,7 +776,7 @@ async def test_max_agent_concurrency_unset_leaves_the_fan_out_uncapped() -> None
     async def flow(wf: Any) -> list[str]:
         return await wf.parallel([lambda i=i: wf.agent(f"task {i}") for i in range(6)])
 
-    await agent.run_workflow(flow, max_concurrency=6)
+    await _run_workflow(agent, flow, max_concurrency=6)
 
     assert provider.high_water == 6
 
@@ -786,8 +792,8 @@ async def test_max_agent_concurrency_does_not_gate_the_replay_path() -> None:
     async def flow(wf: Any) -> list[str]:
         return await wf.parallel([lambda i=i: wf.agent(f"task {i}") for i in range(4)])
 
-    first = await agent.run_workflow(flow, run_id="wf-gate-1", max_agent_concurrency=1)
-    second = await agent.run_workflow(flow, run_id="wf-gate-1", max_agent_concurrency=1)
+    first = await _run_workflow(agent, flow, run_id="wf-gate-1", max_agent_concurrency=1)
+    second = await _run_workflow(agent, flow, run_id="wf-gate-1", max_agent_concurrency=1)
 
     assert second == first
     assert provider.calls == 4
@@ -816,7 +822,7 @@ async def test_snapshot_is_off_by_default() -> None:
     async def flow(wf: Any) -> list[Any]:
         return [await wf.step(f"s{i}", lambda i=i: i) for i in range(4)]
 
-    assert await agent.run_workflow(flow, run_id="wf-snap-0") == [0, 1, 2, 3]
+    assert await _run_workflow(agent, flow, run_id="wf-snap-0") == [0, 1, 2, 3]
 
     record = await store.load_run("wf-snap-0")
     assert record is not None
@@ -825,7 +831,7 @@ async def test_snapshot_is_off_by_default() -> None:
 
 
 async def test_snapshot_lets_resume_skip_the_folded_event_prefix() -> None:
-    from linch.workflow import WorkflowSuspended
+    from linch.ext.workflow import WorkflowSuspended
 
     store = _recording_store()
     provider = CountingTextProvider()
@@ -839,7 +845,7 @@ async def test_snapshot_lets_resume_skip_the_folded_event_prefix() -> None:
         return await wf.interrupt("ship")
 
     with pytest.raises(WorkflowSuspended):
-        await agent.run_workflow(flow, run_id="wf-snap-1", journal_snapshot_every=2)
+        await _run_workflow(agent, flow, run_id="wf-snap-1", journal_snapshot_every=2)
     assert side_effects == ["s0", "s1", "s2", "s3"]
 
     saved = await store.load_run("wf-snap-1")
@@ -850,7 +856,7 @@ async def test_snapshot_lets_resume_skip_the_folded_event_prefix() -> None:
     assert len(snapshot["records"]) == 4  # the 4 steps; the agent came later
 
     store.after_seqs.clear()
-    resumed = await agent.run_workflow(flow, run_id="wf-snap-1", resume={"ship": True})
+    resumed = await _run_workflow(agent, flow, run_id="wf-snap-1", resume={"ship": True})
 
     assert resumed is True
     assert store.after_seqs == [snapshot["after_seq"]]  # tail only
@@ -859,7 +865,7 @@ async def test_snapshot_lets_resume_skip_the_folded_event_prefix() -> None:
 
 
 async def test_snapshot_survives_a_suspend() -> None:
-    from linch.workflow import WorkflowSuspended
+    from linch.ext.workflow import WorkflowSuspended
 
     store = _recording_store()
     agent = _make_agent(CountingTextProvider(), run_store=store)
@@ -871,7 +877,7 @@ async def test_snapshot_survives_a_suspend() -> None:
         return await wf.interrupt("approve")
 
     with pytest.raises(WorkflowSuspended):
-        await agent.run_workflow(flow, run_id="wf-snap-2", journal_snapshot_every=2)
+        await _run_workflow(agent, flow, run_id="wf-snap-2", journal_snapshot_every=2)
 
     saved = await store.load_run("wf-snap-2")
     assert saved is not None
@@ -880,14 +886,14 @@ async def test_snapshot_survives_a_suspend() -> None:
     # The suspend checkpoint must carry the snapshot forward, not wipe it.
     assert len(saved.checkpoint.extension_state["linch.workflow"]["records"]) == 2
 
-    assert await agent.run_workflow(flow, run_id="wf-snap-2", resume={"approve": "yes"}) == "yes"
+    assert await _run_workflow(agent, flow, run_id="wf-snap-2", resume={"approve": "yes"}) == "yes"
     assert side_effects == ["published", "notified"]
 
 
 async def test_an_oversized_snapshot_is_skipped_not_stored(monkeypatch: Any) -> None:
     """A journal too big to checkpoint falls back to folding the event log."""
-    from linch.workflow import WorkflowSuspended
-    from linch.workflow import context as wf_context
+    from linch.ext.workflow import WorkflowSuspended
+    from linch.ext.workflow import context as wf_context
 
     store = _recording_store()
     agent = _make_agent(CountingTextProvider(), run_store=store)
@@ -898,7 +904,7 @@ async def test_an_oversized_snapshot_is_skipped_not_stored(monkeypatch: Any) -> 
         return await wf.interrupt("approve")
 
     with pytest.raises(WorkflowSuspended):
-        await agent.run_workflow(flow, run_id="wf-snap-3", journal_snapshot_every=1)
+        await _run_workflow(agent, flow, run_id="wf-snap-3", journal_snapshot_every=1)
 
     saved = await store.load_run("wf-snap-3")
     assert saved is not None
@@ -906,7 +912,7 @@ async def test_an_oversized_snapshot_is_skipped_not_stored(monkeypatch: Any) -> 
     assert "linch.workflow" not in saved.checkpoint.extension_state
 
     store.after_seqs.clear()
-    assert await agent.run_workflow(flow, run_id="wf-snap-3", resume={"approve": "yes"}) == "yes"
+    assert await _run_workflow(agent, flow, run_id="wf-snap-3", resume={"approve": "yes"}) == "yes"
     assert store.after_seqs == [0]  # no watermark, so the whole log is folded
 
 
@@ -947,11 +953,11 @@ async def test_step_replays_on_resume_without_reexecuting() -> None:
 
     agent = _make_agent(CountingTextProvider(), run_store=InMemoryRunStore())
 
-    assert await agent.run_workflow(flow, run_id="wf-step-1") == 42
+    assert await _run_workflow(agent, flow, run_id="wf-step-1") == 42
     assert calls == [1]
 
     seen: list[Any] = []
-    assert await agent.run_workflow(flow, run_id="wf-step-1", on_event=seen.append) == 42
+    assert await _run_workflow(agent, flow, run_id="wf-step-1", on_event=seen.append) == 42
 
     assert calls == [1]
     replays = [e for e in seen if e.type == "workflow" and e.kind == "step_replayed"]
@@ -964,7 +970,7 @@ async def test_step_and_agent_prefix_replay_together_after_failure(
     """The double-execution hole: a resumed workflow must re-run neither its
     journaled agent calls nor its journaled code steps."""
     from linch import PostgresRunStore
-    from linch.workflow import WorkflowError
+    from linch.ext.workflow import WorkflowError
 
     side_effects: list[str] = []
 
@@ -981,14 +987,14 @@ async def test_step_and_agent_prefix_replay_together_after_failure(
     provider1 = CountingTextProvider(fail_on_call=2)
     agent1 = _make_agent(provider1, run_store=PostgresRunStore(pg_dsn))
     with pytest.raises(WorkflowError):
-        await agent1.run_workflow(flow, run_id="wf-mixed-1")
+        await _run_workflow(agent1, flow, run_id="wf-mixed-1")
     assert side_effects == ["published"]
 
     await agent1.close()
 
     provider2 = CountingTextProvider()
     agent2 = _make_agent(provider2, run_store=PostgresRunStore(pg_dsn))
-    result = await agent2.run_workflow(flow, run_id="wf-mixed-1")
+    result = await _run_workflow(agent2, flow, run_id="wf-mixed-1")
 
     assert side_effects == ["published"]  # ran exactly once across both attempts
     assert provider2.calls == 1
@@ -1015,11 +1021,11 @@ async def test_step_in_a_loop_replays_per_occurrence() -> None:
 
     agent = _make_agent(CountingTextProvider(), run_store=InMemoryRunStore())
 
-    assert await agent.run_workflow(flow, run_id="wf-loop-1") == [0, 10, 20]
+    assert await _run_workflow(agent, flow, run_id="wf-loop-1") == [0, 10, 20]
     assert calls == [0, 1, 2]
 
     seen: list[Any] = []
-    assert await agent.run_workflow(flow, run_id="wf-loop-1", on_event=seen.append) == [0, 10, 20]
+    assert await _run_workflow(agent, flow, run_id="wf-loop-1", on_event=seen.append) == [0, 10, 20]
 
     assert calls == [0, 1, 2]
     replays = [e for e in seen if e.type == "workflow" and e.kind == "step_replayed"]
@@ -1038,7 +1044,7 @@ async def test_adding_a_step_does_not_invalidate_the_existing_agent_journal(
 
     provider1 = CountingTextProvider()
     agent1 = _make_agent(provider1, run_store=PostgresRunStore(pg_dsn))
-    await agent1.run_workflow(flow_v1, run_id="wf-add-step-1")
+    await _run_workflow(agent1, flow_v1, run_id="wf-add-step-1")
     assert provider1.calls == 2
 
     async def flow_v2(wf: Any) -> list[Any]:
@@ -1049,7 +1055,7 @@ async def test_adding_a_step_does_not_invalidate_the_existing_agent_journal(
 
     provider2 = CountingTextProvider()
     agent2 = _make_agent(provider2, run_store=PostgresRunStore(pg_dsn))
-    result = await agent2.run_workflow(flow_v2, run_id="wf-add-step-1")
+    result = await _run_workflow(agent2, flow_v2, run_id="wf-add-step-1")
 
     assert provider2.calls == 0
     assert result == ["added later", "result-1", "result-2"]

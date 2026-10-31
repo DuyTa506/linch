@@ -18,10 +18,10 @@ import hashlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from ..events import WorkflowEvent
+from ...events import WorkflowEvent
 
 if TYPE_CHECKING:
-    from ..run_store import StoredRunEvent
+    from ...run_store import StoredRunEvent
 
 # The WorkflowEvent kinds that carry a journaled result. Keep in lockstep with
 # WORKFLOW_EVENT_KINDS in events.py — a new kind only replays if it is listed here.

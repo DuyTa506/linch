@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..types import Usage
+from ...types import Usage
 from .harness import EvalCase, EvalResult, run_eval
 from .scorers import (
     context_metadata_contains,

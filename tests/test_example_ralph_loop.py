@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
 
 _RECIPE = Path(__file__).resolve().parents[1] / "examples" / "recipes" / "ralph_loop.py"
 

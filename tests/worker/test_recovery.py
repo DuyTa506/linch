@@ -14,7 +14,7 @@ _CRASH_WORKER = r"""
 import asyncio, sys
 import asyncpg
 from linch import Agent, empty_tools
-from linch.evals import ScriptedProvider, TextTurn
+from linch.ext.evals import ScriptedProvider, TextTurn
 from linch.worker import Worker
 
 class Blocked(ScriptedProvider):

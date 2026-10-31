@@ -46,7 +46,7 @@ async def seed_pending(store, dsn, run_id, session_id="s"):
 
 def make_agent(store):
     from linch import Agent, empty_tools
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.sessions import InMemorySessionStore
 
     return Agent(

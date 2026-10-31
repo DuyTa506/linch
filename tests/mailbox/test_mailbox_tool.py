@@ -81,14 +81,14 @@ async def test_send_message_tool_falls_back_to_session_id_address() -> None:
 
 async def test_mailbox_registers_send_tool() -> None:
     from linch.coordination.mailbox import InMemoryMailbox
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
 
     agent = _agent(ScriptedProvider([TextTurn(text="ok")]), mailbox=InMemoryMailbox())
     assert agent.tools.get("send_message") is not None
 
 
 async def test_no_mailbox_means_no_send_tool() -> None:
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
 
     agent = _agent(ScriptedProvider([TextTurn(text="ok")]))
     assert agent.tools.get("send_message") is None
@@ -99,7 +99,7 @@ async def test_no_mailbox_means_no_send_tool() -> None:
 
 async def test_pending_mailbox_message_drains_into_next_turn() -> None:
     from linch.coordination.mailbox import InMemoryMailbox, MailboxMessage
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
 
     box = InMemoryMailbox()
     agent = _agent(ScriptedProvider([TextTurn(text="done")]), mailbox=box)
@@ -120,7 +120,7 @@ async def test_pending_mailbox_message_drains_into_next_turn() -> None:
 
 async def test_no_drain_without_address() -> None:
     from linch.coordination.mailbox import InMemoryMailbox, MailboxMessage
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
 
     box = InMemoryMailbox()
     agent = _agent(ScriptedProvider([TextTurn(text="done")]), mailbox=box)
@@ -138,7 +138,7 @@ async def test_no_drain_without_address() -> None:
 
 async def test_spawned_worker_gets_its_display_name_as_address() -> None:
     from linch.coordination.mailbox import InMemoryMailbox
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.subagents.default_agent import DEFAULT_AGENT
     from linch.subagents.runner import RunSubagentArgs, run_subagent
 
@@ -163,7 +163,7 @@ async def test_spawned_worker_gets_its_display_name_as_address() -> None:
 
 
 async def test_worker_address_unset_without_mailbox() -> None:
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.subagents.default_agent import DEFAULT_AGENT
     from linch.subagents.runner import RunSubagentArgs, run_subagent
 
@@ -188,7 +188,7 @@ async def test_worker_address_unset_without_mailbox() -> None:
 
 async def test_agent_sends_to_peer_via_tool_during_turn() -> None:
     from linch.coordination.mailbox import InMemoryMailbox
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
 
     box = InMemoryMailbox()
     provider = ScriptedProvider(
