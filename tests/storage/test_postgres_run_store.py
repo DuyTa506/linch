@@ -480,3 +480,42 @@ async def test_postgres_pool_reuses_clean_connection_after_cancel_and_failed_wri
         assert [event.seq for event in await store.load_events(run_id)] == [1]
     finally:
         await store.close()
+
+
+async def test_pending_initial_checkpoint_adoption_transaction_rolls_back(pg_dsn):
+    from linch.run_store import RunCheckpoint
+    from linch.run_stores.postgres import PostgresRunStore
+    from linch.types import Usage
+
+    store = PostgresRunStore(pg_dsn)
+    rid = f"initial-rollback-{uuid4()}"
+    pool = await store._ensure()
+    try:
+        async with pool.acquire() as conn:
+            await store.create_pending_run(conn, "s", id=rid, meta={"queue": "original"})
+        lease = await store.claim(rid, "owner", 30)
+        await pool.execute("""
+            CREATE FUNCTION reject_initial_adoption() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+                IF NEW.status = 'running' THEN RAISE EXCEPTION 'adoption rollback'; END IF;
+                RETURN NEW;
+            END $$;
+            CREATE TRIGGER reject_initial_adoption AFTER UPDATE ON runs
+            FOR EACH ROW EXECUTE FUNCTION reject_initial_adoption();
+        """)
+        with pytest.raises(Exception, match="adoption rollback"):
+            await store.create_run(
+                "s",
+                id=rid,
+                meta={"new": "metadata"},
+                initial_checkpoint=RunCheckpoint("started", "hello", 0, Usage()),
+            )
+        record = await store.load_run(rid)
+        assert record.status == "pending"
+        assert record.checkpoint is None
+        assert record.meta == {"queue": "original"}
+        assert await store.load_events(rid) == []
+        await pool.execute("DROP TRIGGER reject_initial_adoption ON runs")
+        await store.release(lease)
+    finally:
+        await store.close()

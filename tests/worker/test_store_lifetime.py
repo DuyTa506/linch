@@ -263,8 +263,11 @@ async def test_worker_jobs_reuse_verified_stores_without_schema_protocol_calls(p
             await fresh._ensure()
         assert sum(metrics.protocol_exchanges.values()) == 0
         assert not measured.is_closing()
+        worker.stop()
 
-    worker._manager.run = jobs_instead_of_dequeue
+    worker._make_manager = lambda conn: SimpleNamespace(
+        run=jobs_instead_of_dequeue, shutdown=asyncio.Event()
+    )
     try:
         await worker.run()
     finally:
@@ -341,8 +344,9 @@ async def test_worker_startup_verification_failure_never_starts_jobs_and_retries
 
     async def manager(**kwargs):
         started.append(True)
+        retry.stop()
 
-    retry._manager.run = manager
+    retry._make_manager = lambda conn: SimpleNamespace(run=manager, shutdown=asyncio.Event())
     with pytest.raises(Exception, match="start a new run"):
         await retry.run()
     assert started == [] and not pool.is_closing()

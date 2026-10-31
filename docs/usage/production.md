@@ -181,6 +181,21 @@ also repeat schema initialization and advisory locking. Agent teardown preserves
 these shared adapters and leaves the host pool open. The host closes its real
 pool after workers have drained.
 
+A worker reconnects after transient database or listener failure, with local
+exponential jitter capped at two seconds. Each retry rebuilds the manager and
+restores LISTEN on one fresh connection borrowed for serialized queue SQL;
+run/session writes use the remaining host pool. The previous cycle fully drains before its connection is
+closed, so delayed failure buffers cannot reconnect and hold a nonterminal job.
+The existing stale-job recovery then reclaims interrupted work. Authentication,
+schema, and configuration failures still propagate. Startup and connection
+acquisition are bounded to two seconds per attempt.
+
+`stop()` also interrupts reconnect backoff and prevents another dequeue; pending
+startup/acquisition finishes within its attempt bound. Cancelling `run()` signals
+stop and waits for active callbacks and teardown, including repeated
+cancellation, before propagating cancellation. Active jobs have no forced drain
+deadline; hosts must keep the pool open until `run()` returns.
+
 The borrowed pool caches successful schema verification for its fixed database
 and search path. Additional stores on `job.pool` reuse that verification without
 schema SQL. Keep its database, role, and search path stable; after changing them
@@ -218,6 +233,12 @@ aborted runs are acknowledged without invocation; every nonterminal exit,
 including cancellation and ownership loss, is retried from its checkpoint.
 Queue-callback cancellation stops the run task while shielding cleanup and the
 terminal-state check, preventing PgQueuer from acknowledging unfinished work.
+Factory and session setup failures atomically commit failed status, error
+metadata, an `ErrorEvent`, and one final `ResultEvent`. On takeover, terminal
+totals and usage completeness come from the durable model-call journal, including
+receipts newer than the last checkpoint. A failed or fenced terminal write leaves
+the job retryable.
+
 An agent failure is a durable result, not a queue retry. Infrastructure errors
 such as an unreachable store or a competing live lease use
 `DatabaseRetryEntrypointExecutor` backoff; exhausted jobs are held for host
@@ -231,7 +252,9 @@ that meet a live owner back off again. Queue ownership alone does not fence run
 writes. The worker acknowledges only a persisted terminal run.
 
 On process death, queue and lease heartbeats both stop. PgQueuer re-picks the
-stale `picked` job after `stall_timeout_s`, plus up to the polling interval. The
+stale `picked` job once its last queue heartbeat is older than
+`stall_timeout_s`. The next dequeue also includes polling, database and scheduling
+delays; this is not a wall-clock recovery deadline from process death. The
 new worker claims the expired lease and resumes the checkpoint, verifying the
 stored execution contract. Choose a stall timeout at least as long as the lease
 TTL, with margin for scheduling/DB delays. Durable tool receipts replay; external

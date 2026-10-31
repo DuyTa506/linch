@@ -141,7 +141,12 @@ async def test_measured_store_preserves_capabilities_and_counts_terminal_payload
     connection = await asyncpg.connect(pg_dsn)
     store = benchmark.MeasuredStore(inner, "run", metrics)
     try:
-        run = await store.create_run("s")
+        run = await store.create_run(
+            "s", initial_checkpoint=RunCheckpoint("started", "héllo", 0, Usage())
+        )
+        raw = await connection.fetchval("SELECT checkpoint FROM runs WHERE id = $1", run.id)
+        initial_bytes = len(raw.encode("utf-8"))
+        assert metrics.payloads[-1, "started"] == [initial_bytes]
         checkpoint = RunCheckpoint("user_appended", "héllo", 0, Usage())
         await store.save_checkpoint(run.id, checkpoint)
         raw = await connection.fetchval("SELECT checkpoint FROM runs WHERE id = $1", run.id)
@@ -180,7 +185,7 @@ async def test_measured_store_preserves_capabilities_and_counts_terminal_payload
         "mark_failed": 2,
     }
     assert writes["total"] == 9
-    assert payloads["total"] == first_bytes + terminal_bytes + 2 * failed_bytes
+    assert payloads["total"] == initial_bytes + first_bytes + terminal_bytes + 2 * failed_bytes
     assert payloads["by_phase"]["completed"]["total"] == terminal_bytes
     assert payloads["by_phase"]["failed"]["total"] == 2 * failed_bytes
     assert not hasattr(benchmark.MeasuredStore(object(), "run", metrics), "append_events")

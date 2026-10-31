@@ -144,17 +144,23 @@ class PostgresRunStore:
         *,
         id: str | None = None,
         meta: dict[str, object] | None = None,
+        initial_checkpoint: RunCheckpoint | None = None,
     ) -> RunRecord:
         pool = await self._ensure()
         rid = id or str(uuid4())
         safe_meta = _safe_meta(meta)
+        payload = (
+            json.dumps(checkpoint_to_dict(initial_checkpoint), allow_nan=False)
+            if initial_checkpoint is not None
+            else None
+        )
         async with pool.acquire() as conn:
             ts = now_iso()
             row = await conn.fetchrow(
                 """
                 INSERT INTO runs
                     (id, session_id, status, created_at, updated_at, checkpoint, meta)
-                VALUES ($1, $2, 'running', $3, $3, NULL, $4)
+                VALUES ($1, $2, 'running', $3, $3, $5, $4)
                 ON CONFLICT (id) DO NOTHING
                 RETURNING id, session_id, status, created_at, updated_at, checkpoint, meta
                 """,
@@ -162,6 +168,7 @@ class PostgresRunStore:
                 session_id,
                 ts,
                 json.dumps(safe_meta, allow_nan=False),
+                payload,
             )
             if row is not None:
                 return _row_record(row)
@@ -200,13 +207,14 @@ class PostgresRunStore:
                 row = await conn.fetchrow(
                     """
                     UPDATE runs
-                    SET status = 'running', updated_at = $1, meta = $2
+                    SET status = 'running', updated_at = $1, meta = $2, checkpoint = $4
                     WHERE id = $3
                     RETURNING id, session_id, status, created_at, updated_at, checkpoint, meta
                     """,
                     ts,
                     json.dumps(merged_meta, allow_nan=False),
                     rid,
+                    payload,
                 )
                 assert row is not None
                 return _row_record(row)

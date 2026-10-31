@@ -49,6 +49,23 @@ its callback when sharing a pool with other workloads.
 
 ## Atomic phase writes
 
+`create_run(session_id, *, id=None, meta=None, initial_checkpoint=None)` must
+commit the supplied initial checkpoint with a fresh running row or the fenced
+adoption of a pending row. The SDK always supplies a `started` checkpoint, so
+worker-owned running runs are resumable even before startup returns. The optional
+default supports direct store callers; it does not make manually created runs
+without a checkpoint resumable. Custom stores must accept the new keyword.
+
+Startup events commit with the checkpoint that owns their progress. Ordinary
+runs use `user_appended`; startup-affecting hooks also have a preparation boundary
+that freezes the prompt, remaining hook events, and post-hook history baseline
+before the SDK appends its prompt. This distinguishes hook context from the
+prompt even when their messages are identical. Hook-free runs need no extra
+checkpoint. The initial checkpoint captures hook state before `AgentStart`;
+startup accounting writes preserve that snapshot until preparation completes.
+Startup hooks must be repeatable across takeover; arbitrary external hook side
+effects do not have an exactly-once guarantee.
+
 Every `RunStore` implements
 `save_checkpoint_with_events(run_id, checkpoint, events, *, status="running")`.
 The loop uses it whenever a phase has pending events, committing those events
@@ -118,6 +135,10 @@ Hosts call release in `finally` after stopping all work for the run. Release
 ends fencing for that run on this instance; do not write to it after releasing
 it. The local ownership maps therefore track active ownership rather than
 growing with every run a long-lived worker has ever claimed.
+
+Worker reconnect cycles retain these adapters and ownership maps; they drain
+the old manager before rebuilding queue dispatch on a fresh connection. The host
+pool remains open throughout recovery and graceful shutdown.
 
 The host owns claiming, renewal, and stopping work after lease loss; the agent
 loop does not start a heartbeat. A lease fences the run store's writes. Host
