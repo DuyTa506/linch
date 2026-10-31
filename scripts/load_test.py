@@ -4,6 +4,7 @@
 import argparse
 import asyncio
 import contextlib
+import cProfile
 import json
 import os
 import random
@@ -42,6 +43,7 @@ async def pool_for(a: argparse.Namespace, *, direct: bool = False, name: str = "
         max_size=a.pool_size,
         command_timeout=10,
         server_settings=settings,
+        connection_class=getattr(a, "connection_class", asyncpg.Connection),
     )
     if getattr(a, "pgbouncer", False) and not direct:
         options["statement_cache_size"] = 0
@@ -128,9 +130,23 @@ async def child(a: argparse.Namespace) -> None:
     from linch import Agent, PostgresRunStore
     from linch.worker import Worker, enqueue_run
 
-    pool = await pool_for(a, name=a.identity)
     stop = asyncio.Event()
     metrics: dict[str, Any] = defaultdict(int, errors=Counter(), lag=[], pool=[], renew_failures=0)
+    for key in "dequeue_calls empty_dequeues executed_jobs reset_queries".split():
+        metrics[key] = 0
+    metrics["notifications_by_operation"] = Counter()
+
+    def steady() -> bool:
+        return a.steady <= time.time() < a.end
+
+    class CountedConnection(asyncpg.Connection):
+        async def execute(self, query: str, *args: Any, **kwargs: Any) -> Any:
+            if steady() and query == self.get_reset_query():
+                metrics["reset_queries"] += 1
+            return await super().execute(query, *args, **kwargs)
+
+    a.connection_class = CountedConnection
+    pool = await pool_for(a, name=a.identity)
     path = Path(a.logs) / f"{a.identity}.json"
 
     def save() -> None:
@@ -148,6 +164,7 @@ async def child(a: argparse.Namespace) -> None:
             save()
 
     async def factory(job: Any) -> Agent:
+        metrics["executed_jobs"] += int(steady())
         return Agent(
             model="load-test",
             provider=TimedProvider(a),
@@ -159,6 +176,20 @@ async def child(a: argparse.Namespace) -> None:
 
     worker = None
     if a.identity != "api":
+        from pgqueuer.core import listeners
+
+        initialize = listeners.initialize_notice_event_listener
+
+        async def listen(connection: Any, channel: Any, event_handler: Any) -> None:
+            def counted(event: Any) -> None:
+                if steady():
+                    operation = getattr(event.root, "operation", event.root.type)
+                    metrics["notifications_by_operation"][str(operation)] += 1
+                event_handler(event)
+
+            await initialize(connection, channel, counted)
+
+        listeners.initialize_notice_event_listener = listen
         original = PostgresRunStore.renew
 
         async def renew(self: Any, lease: Any) -> Any:
@@ -178,6 +209,23 @@ async def child(a: argparse.Namespace) -> None:
             stall_timeout_s=a.stall_timeout,
             poll_interval_s=a.poll_interval,
         )
+        make_manager = worker._make_manager
+
+        def counted_manager(connection: Any) -> Any:
+            manager = make_manager(connection)
+            dequeue = manager.queries.dequeue
+
+            async def counted_dequeue(*args: Any, **kwargs: Any) -> Any:
+                active = steady()
+                metrics["dequeue_calls"] += int(active)
+                jobs = await dequeue(*args, **kwargs)
+                metrics["empty_dequeues"] += int(active and not jobs)
+                return jobs
+
+            manager.queries.dequeue = counted_dequeue
+            return manager
+
+        worker._make_manager = counted_manager
 
     def stopping() -> None:
         if worker:
@@ -188,6 +236,12 @@ async def child(a: argparse.Namespace) -> None:
     for sig in (signal.SIGTERM, signal.SIGINT):
         asyncio.get_running_loop().add_signal_handler(sig, stopping)
     monitoring = asyncio.create_task(monitor())
+
+    profiler = cProfile.Profile() if a.profile and a.identity == "w-0" else None
+    if profiler:
+        loop = asyncio.get_running_loop()
+        profile_start = loop.call_later(max(0, a.steady - time.time()), profiler.enable)
+        profile_end = loop.call_later(max(0, a.end - time.time()), profiler.disable)
     readers = []
     try:
         save()
@@ -220,6 +274,11 @@ async def child(a: argparse.Namespace) -> None:
             await stop.wait()
     finally:
         stop.set()
+        if profiler:
+            profile_start.cancel()
+            profile_end.cancel()
+            profiler.disable()
+            profiler.dump_stats(str(Path(a.logs) / "w-0.prof"))
         for task in readers:
             task.cancel()
         await asyncio.gather(*readers, return_exceptions=True)
@@ -656,6 +715,7 @@ def main() -> None:
     p.add_argument("--direct", action="store_true")
     p.add_argument("--pgbouncer", action="store_true")
     p.add_argument("--quick", action="store_true")
+    p.add_argument("--profile", action="store_true", help="profile w-0 during the steady window")
     p.add_argument("--output")
     a = p.parse_args()
     if a.direct:

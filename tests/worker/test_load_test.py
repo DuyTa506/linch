@@ -117,6 +117,13 @@ async def test_two_process_workers_finish_once_without_duplicate_notes(tmp_path)
     assert point["runs"] > 0
     assert point["completed"] == point["terminal"] == point["runs"], point
     assert point["invariant_errors"] and not any(point["invariant_errors"].values()), point
+    workers = [point["clients"][f"w-{i}"] for i in range(2)]
+    assert sum(w["executed_jobs"] for w in workers) > 0
+    for metrics in workers:
+        assert metrics["dequeue_calls"] >= metrics["empty_dequeues"] > 0
+        assert metrics["reset_queries"] > 0
+        assert metrics["notifications_by_operation"]["insert"] > 0
+        assert all(count >= 0 for count in metrics["notifications_by_operation"].values())
 
 
 @pytest.mark.parametrize("command,readers", [("network", 100), ("capacity", 1)])
