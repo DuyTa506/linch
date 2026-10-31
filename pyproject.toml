@@ -44,6 +44,7 @@ postgres = [
 ]
 dev = [
   "opentelemetry-sdk>=1.20",
+  "psutil>=7.2.2",
   "pytest>=8.0,<9.0",
   "pytest-asyncio>=0.23,<1.0",
   "pytest-timeout>=2.3",
