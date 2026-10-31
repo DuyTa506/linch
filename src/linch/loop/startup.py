@@ -14,11 +14,19 @@ from typing import Any
 
 from .._telemetry import store_call
 from ..errors import ConfigError
-from ..events import ErrorEvent, Event, SkillsLoadedEvent, SystemEvent, UserEvent
+from ..events import (
+    ErrorEvent,
+    Event,
+    SkillsLoadedEvent,
+    SystemEvent,
+    UserEvent,
+    event_from_dict,
+    event_to_dict,
+)
 from ..hooks import AgentStartContext, AgentStopContext, HookEvent
 from ..hooks.contexts import _AgentResult
 from ..model_calls import _context_fingerprint
-from ..types import TextBlock
+from ..types import TextBlock, message_from_dict, message_to_dict
 from .checkpoint import _last_message_matches, _persist_event
 from .request import build_user_message
 from .terminals import _error_result_tail
@@ -69,6 +77,7 @@ async def _emit_prompt_block(ctx: RunStartupContext, block_reason: str) -> Async
     )
     await _persist_event(runtime.session, runtime.run_id, event)
     yield event
+    ctx.checkpoint.extension_state.pop("linch.startup", None)
     async for event in _error_result_tail(
         runtime.session,
         runtime=runtime,
@@ -113,45 +122,75 @@ async def initialize_run(ctx: RunStartupContext) -> AsyncIterator[Event]:
     )
 
     if ctx.checkpoint.phase == "started":
-        event: Event = SystemEvent(
-            session_id=session.id,
-            run_id=runtime.run_id,
-            model=agent.model,
-            tools=sorted(tool.name for tool in agent.tools.list()),
-            permission_mode=agent.permission_engine.mode,
-            cwd=agent.cwd,
-        )
-        await _persist_event(session, runtime.run_id, event)
-        yield event
+        baseline = ctx.checkpoint.extension_state.get("linch.startup")
+        prepared = baseline.get("prepared_message") if baseline else None
+        if prepared is not None:
+            user_message = message_from_dict(prepared)
+            emit_skills = baseline["emit_skills"]
+            hook_events = [event_from_dict(event) for event in baseline["hook_events"]]
+            block_reason = baseline["block_reason"]
+        else:
+            if not (baseline and baseline.get("system_emitted")):
+                event: Event = SystemEvent(
+                    session_id=session.id,
+                    run_id=runtime.run_id,
+                    model=agent.model,
+                    tools=sorted(tool.name for tool in agent.tools.list()),
+                    permission_mode=agent.permission_engine.mode,
+                    cwd=agent.cwd,
+                )
+                await _persist_event(session, runtime.run_id, event)
+                if baseline and baseline.get("preparation_required"):
+                    baseline["system_emitted"] = True
+                yield event
 
-        emit_skills = not session.skills_loaded_emitted and bool(agent.skills)
-        if emit_skills:
-            skills_data = [
-                {
-                    "name": skill.name,
-                    "description": skill.frontmatter.description,
-                    **(
-                        {"when_to_use": skill.frontmatter.when_to_use}
-                        if skill.frontmatter.when_to_use
-                        else {}
-                    ),
-                    **(
-                        {"argument_hint": skill.frontmatter.argument_hint}
-                        if skill.frontmatter.argument_hint
-                        else {}
-                    ),
-                }
-                for skill in sorted(agent.skills.values(), key=lambda item: item.name)
-            ]
-            event = SkillsLoadedEvent(skills=skills_data)
-            await _persist_event(session, runtime.run_id, event)
-            yield event
+            emit_skills = not session.skills_loaded_emitted and bool(agent.skills)
+            if emit_skills and not (baseline and baseline.get("skills_emitted")):
+                skills_data = [
+                    {
+                        "name": skill.name,
+                        "description": skill.frontmatter.description,
+                        **(
+                            {"when_to_use": skill.frontmatter.when_to_use}
+                            if skill.frontmatter.when_to_use
+                            else {}
+                        ),
+                        **(
+                            {"argument_hint": skill.frontmatter.argument_hint}
+                            if skill.frontmatter.argument_hint
+                            else {}
+                        ),
+                    }
+                    for skill in sorted(agent.skills.values(), key=lambda item: item.name)
+                ]
+                event = SkillsLoadedEvent(skills=skills_data)
+                await _persist_event(session, runtime.run_id, event)
+                if baseline and baseline.get("preparation_required"):
+                    baseline["skills_emitted"] = True
+                yield event
 
-        prompt, images, hook_events, block_reason = await ctx.dispatch_user_prompt(
-            prompt, ctx.opts.images, "run"
-        )
-        for hook_event in hook_events:
+            prompt, images, hook_events, block_reason = await ctx.dispatch_user_prompt(
+                prompt, ctx.opts.images, "run"
+            )
+            user_message = _prompt_message(ctx, prompt, images)
+            if baseline and baseline.get("preparation_required"):
+                baseline.update(
+                    {
+                        "history_count": session.session_log.history_count,
+                        "history_fingerprint": session.session_log._history_fingerprint(),
+                        "prepared_message": message_to_dict(user_message),
+                        "emit_skills": emit_skills,
+                        "hook_events": [event_to_dict(event) for event in hook_events],
+                        "hook_event_cursor": 0,
+                        "block_reason": block_reason,
+                    }
+                )
+                await ctx.save_checkpoint("started")
+        cursor = baseline.get("hook_event_cursor", 0) if baseline else 0
+        for index, hook_event in enumerate(hook_events[cursor:], start=cursor):
             await _persist_event(session, runtime.run_id, hook_event)
+            if baseline and baseline.get("preparation_required"):
+                baseline["hook_event_cursor"] = index + 1
             yield hook_event
         if block_reason is not None:
             async for event in _emit_prompt_block(ctx, block_reason):
@@ -161,8 +200,6 @@ async def initialize_run(ctx: RunStartupContext) -> AsyncIterator[Event]:
                     session.skills_loaded_emitted |= emit_skills
                 yield event
             return
-        user_message = _prompt_message(ctx, prompt, images)
-        baseline = ctx.checkpoint.extension_state.get("linch.startup")
         append = ctx.resume_checkpoint is None or not _last_message_matches(session, user_message)
         if baseline is not None and ctx.resume_checkpoint is not None:
             count = baseline["history_count"]
