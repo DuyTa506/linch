@@ -15,6 +15,17 @@ def register_schedule_tools(registry: ToolRegistry, pool: Any, *, session_id: st
 
     The host binds the authorized session target; model input cannot select a
     different session. No Agent constructor flag or automatic registration.
+
+    Args:
+        registry: Tool registry receiving the three schedule tools.
+        pool: Host-owned asyncpg pool used by the bound tools.
+        session_id: Authorized session target for schedule operations.
+
+    Returns:
+        An idempotent disposer that removes exactly these registrations.
+
+    Raises:
+        ConfigError: If one of the schedule tool names is already registered.
     """
 
     async def create(

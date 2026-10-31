@@ -68,6 +68,20 @@ class WorkerJob:
 
     A fresh agent is owned and closed by the worker. ``pool`` is a borrowed
     asyncpg pool handle: closing a store using it does not close the host pool.
+
+    Args:
+        run: Durable run record claimed for this job.
+        run_store: Worker-owned run store using the host's borrowed pool.
+        pool: Borrowed pool handle supplied to the agent factory.
+        session_store: Worker-owned session store using the borrowed pool.
+        queue: Queue from which the job was dequeued, if supplied.
+
+    Attributes:
+        run: Claimed durable run record.
+        run_store: Run store that owns the lease and writes.
+        pool: Borrowed host pool handle.
+        session_store: Session store shared by worker jobs.
+        queue: Dequeued queue name, when supplied.
     """
 
     run: RunRecord
@@ -137,7 +151,23 @@ class Worker:
     is cooperative shutdown, while process death leaves jobs for stall recovery.
 
     Args:
+        pool: Host-owned asyncpg pool shared by worker stores and PgQueuer.
+        agent_factory: Async factory returning a fresh agent for each job.
+        worker_id: Stable owner identifier used for run leases.
+        queues: Queue names mapped to fleet-wide concurrency limits; zero is unlimited.
+        lease_ttl_s: Duration for each claimed run lease.
+        stall_timeout_s: PgQueuer heartbeat timeout for stale jobs.
+        poll_interval_s: Dequeue polling interval when notifications are quiet.
+        retry_delay_s: Initial database-retry delay for queue callbacks.
         profiles: Released definitions available for queued runs and takeover.
+
+    Attributes:
+        agent_factory: Async factory used to construct each job's agent.
+        worker_id: Owner identifier used for run leases.
+        lease_ttl_s: Configured lease duration.
+        stall_timeout_s: Queue heartbeat timeout.
+        poll_interval_s: Queue polling interval.
+        retry_delay_s: Initial infrastructure retry delay.
     """
 
     def __init__(
@@ -153,6 +183,22 @@ class Worker:
         retry_delay_s: float = 1,
         profiles: Iterable[Profile] = (),
     ) -> None:
+        """Configure a fleet worker over a host-owned asyncpg pool.
+
+        Args:
+            pool: Host-owned asyncpg pool shared by worker stores and PgQueuer.
+            agent_factory: Async factory returning a fresh agent for each job.
+            worker_id: Stable owner identifier used for run leases.
+            queues: Queue names mapped to fleet-wide concurrency limits; zero is unlimited.
+            lease_ttl_s: Duration for each claimed run lease.
+            stall_timeout_s: PgQueuer heartbeat timeout for stale jobs.
+            poll_interval_s: Dequeue polling interval when notifications are quiet.
+            retry_delay_s: Initial database-retry delay for queue callbacks.
+            profiles: Released definitions available for queued runs and takeover.
+
+        Raises:
+            ValueError: If the pool, queue limits, or timing settings are invalid.
+        """
         self._pool = pool if isinstance(pool, _BorrowedPool) else _BorrowedPool(pool)
         if self._pool.get_max_size() < 2:
             raise ValueError("worker pool must allow at least two connections")
