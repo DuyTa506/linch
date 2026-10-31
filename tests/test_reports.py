@@ -3,33 +3,6 @@ from __future__ import annotations
 import pytest
 
 
-def test_run_report_ignores_private_loop_guard_facts() -> None:
-    from linch import build_run_report
-    from linch.events import ResultEvent, _LoopGuardEvaluationEvent
-    from linch.types import Usage
-
-    private_fact = _LoopGuardEvaluationEvent(
-        batch_id="batch-1",
-        turn_index=0,
-        count_deltas={'search:{"q":"x"}': 1},
-        count_before={'search:{"q":"x"}': 0},
-        failures_before=0,
-        consecutive_failures=0,
-        action="continue",
-    )
-    result = ResultEvent(
-        subtype="success",
-        stop_reason="end_turn",
-        total_usage=Usage(),
-        duration_ms=1,
-    )
-
-    with_private = build_run_report([private_fact, result])
-    without_private = build_run_report([result])
-
-    assert with_private == without_private
-
-
 def test_build_run_report_summarizes_events():
     from linch import build_run_report
     from linch.events import (

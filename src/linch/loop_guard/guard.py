@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from ..permissions.keys import permission_decision_key
+
+
+def _call_digest(name: str, input_value: Any) -> str:
+    """Return the fixed-size key used by live and checkpointed guard state."""
+    key = permission_decision_key(name, input_value).encode()
+    return hashlib.blake2b(key, digest_size=8).hexdigest()
 
 
 @dataclass(slots=True)
@@ -93,7 +100,7 @@ def evaluate_loop_guard(
     # ── Repeated identical tool-call check ────────────────────────────────
     if guard.max_identical_tool_calls > 0:
         for block in tool_blocks:
-            sig = permission_decision_key(block.name, block.input)
+            sig = _call_digest(block.name, block.input)
             state.call_counts[sig] = state.call_counts.get(sig, 0) + 1
             if state.call_counts[sig] >= guard.max_identical_tool_calls:
                 action: Literal["stop", "force_final"] = (

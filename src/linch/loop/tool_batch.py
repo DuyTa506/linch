@@ -22,11 +22,9 @@ from ..events import (
     ToolCallStartEvent,
     ToolProgressEvent,
     UserEvent,
-    _LoopGuardEvaluationEvent,
 )
 from ..hooks import HookEvent, ToolUseStartContext, ToolUseStopContext
 from ..loop_guard import evaluate_loop_guard
-from ..permissions.keys import permission_decision_key
 from ..scheduler import execute_tool_calls
 from ..types import (
     AssistantAssembly,
@@ -39,8 +37,9 @@ from ..types import (
 from .checkpoint import (
     _interrupted_tool_result_block,
     _last_message_has_tool_results,
-    _loop_guard_batch_id,
+    _last_message_matches,
     _loop_guard_is_active,
+    _message_matches,
     _recover_completed_tool_results,
     _tool_result_block_from_end,
 )
@@ -60,9 +59,6 @@ class ToolBatchContext:
     resume_checkpoint: Any
     guard: Any
     guard_state: Any
-    guard_evaluation_ids: set[str] | None
-    guard_evaluation_facts: dict[str, _LoopGuardEvaluationEvent] | None
-    record_guard_evaluation: Callable[[], None] | None
     save_checkpoint: Callable[..., Awaitable[None]]
     flush_events: Callable[[], Awaitable[None]]
     persist_event: Callable[[Event], Awaitable[None]]
@@ -75,6 +71,12 @@ class ToolBatchContext:
 async def run_tool_batch(ctx: ToolBatchContext) -> AsyncIterator[Event]:
     """Execute one assistant tool-use batch and yield its durable projection."""
     session = ctx.session
+    replaying_results_checkpoint = (
+        ctx.resume_checkpoint is not None
+        and ctx.turn_index == ctx.checkpoint.turn_index
+        and ctx.checkpoint.phase == "tool_results_appended"
+    )
+    replay_event_after_seq = ctx.checkpoint.tool_batch_event_after_seq
     tool_blocks = [
         block for block in ctx.assembly.message.content if isinstance(block, ToolUseBlock)
     ]
@@ -91,14 +93,15 @@ async def run_tool_batch(ctx: ToolBatchContext) -> AsyncIterator[Event]:
     )
     recovery_hints: dict[str, str] = {}
     missing_tool_blocks = [block for block in tool_blocks if block.id not in completed_tool_results]
-    await ctx.save_checkpoint(
-        "tool_batch_pending",
-        turn_index=ctx.turn_index,
-        assistant_message=ctx.assembly.message,
-        assistant_stop_reason=ctx.assembly.stop_reason,
-        pending_tool_blocks=tool_blocks,
-        completed_tool_results=completed_tool_results,
-    )
+    if not (replaying_results_checkpoint and not missing_tool_blocks):
+        await ctx.save_checkpoint(
+            "tool_batch_pending",
+            turn_index=ctx.turn_index,
+            assistant_message=ctx.assembly.message,
+            assistant_stop_reason=ctx.assembly.stop_reason,
+            pending_tool_blocks=tool_blocks,
+            completed_tool_results=completed_tool_results,
+        )
 
     async def checkpoint_tool_executing() -> None:
         """Persist the resolved permission decisions before any tool starts."""
@@ -187,7 +190,7 @@ async def run_tool_batch(ctx: ToolBatchContext) -> AsyncIterator[Event]:
     already_appended = (
         ctx.resume_checkpoint is not None
         and ctx.turn_index == ctx.checkpoint.turn_index
-        and _last_message_has_tool_results(session, tool_blocks)
+        and (replaying_results_checkpoint or _last_message_has_tool_results(session, tool_blocks))
     )
     if not already_appended:
         await store_call(session, "session.append", session.append([result_message]))
@@ -206,46 +209,7 @@ async def run_tool_batch(ctx: ToolBatchContext) -> AsyncIterator[Event]:
 
     guard_decision = None
     if _loop_guard_is_active(ctx.guard) and ctx.guard_state is not None:
-        durable_guard_facts = (
-            ctx.guard_evaluation_ids is not None and ctx.guard_evaluation_facts is not None
-        )
-        before_counts: dict[str, int] = {}
-        if durable_guard_facts and getattr(ctx.guard, "max_identical_tool_calls", 0) > 0:
-            for block in tool_blocks:
-                signature = permission_decision_key(block.name, block.input)
-                before_counts.setdefault(signature, ctx.guard_state.call_counts.get(signature, 0))
-        before_failures = ctx.guard_state.consecutive_failures
         guard_decision = evaluate_loop_guard(ctx.guard, ctx.guard_state, tool_blocks, result_blocks)
-        if durable_guard_facts:
-            assert ctx.guard_evaluation_ids is not None
-            assert ctx.guard_evaluation_facts is not None
-            count_deltas = {
-                signature: ctx.guard_state.call_counts.get(signature, 0) - count
-                for signature, count in before_counts.items()
-                if ctx.guard_state.call_counts.get(signature, 0) > count
-            }
-            batch_id = _loop_guard_batch_id(ctx.turn_index, tool_blocks)
-            guard_fact = _LoopGuardEvaluationEvent(
-                batch_id=batch_id,
-                turn_index=ctx.turn_index,
-                count_deltas=count_deltas,
-                count_before={signature: before_counts[signature] for signature in count_deltas},
-                failures_before=before_failures,
-                consecutive_failures=ctx.guard_state.consecutive_failures,
-                action=guard_decision.action,
-                reason=guard_decision.reason,
-                detail=guard_decision.detail,
-            )
-            prior_fact = ctx.guard_evaluation_facts.get(batch_id)
-            if prior_fact is not None and prior_fact != guard_fact:
-                raise ConfigError("loop-guard journal fact differs from live evaluation")
-            if batch_id not in ctx.guard_evaluation_ids:
-                await ctx.persist_event(guard_fact)
-                ctx.guard_evaluation_ids.add(batch_id)
-                ctx.guard_evaluation_facts[batch_id] = guard_fact
-            if ctx.record_guard_evaluation is None:
-                raise ConfigError("durable loop-guard runtime lacks evaluation recorder")
-            ctx.record_guard_evaluation()
 
     if guard_decision is not None and guard_decision.action != "continue":
         event = LoopGuardEvent(
@@ -253,8 +217,15 @@ async def run_tool_batch(ctx: ToolBatchContext) -> AsyncIterator[Event]:
             detail=guard_decision.detail,
             action=guard_decision.action,
         )
-        await ctx.persist_event(event)
-        yield event
+        guard_event_seen = await _replayed_guard_event_seen(
+            ctx,
+            event,
+            replaying_results_checkpoint=replaying_results_checkpoint,
+            after_seq=replay_event_after_seq,
+        )
+        if not guard_event_seen:
+            await ctx.persist_event(event)
+            yield event
         if guard_decision.action == "force_final":
             reminder_event = await _inject_force_final_reminder(ctx)
             yield reminder_event
@@ -298,9 +269,74 @@ async def _inject_force_final_reminder(ctx: ToolBatchContext) -> Event:
         "Please provide your final answer now without making further tool calls."
     )
     reminder_message = Message(role="user", content=[TextBlock(text=reminder_text)])
-    await store_call(ctx.session, "session.append", ctx.session.append([reminder_message]))
+    already_appended = (
+        ctx.resume_checkpoint is not None
+        and ctx.turn_index == ctx.checkpoint.turn_index
+        and _last_message_matches(ctx.session, reminder_message)
+    )
+    if not already_appended:
+        already_appended = _replayed_force_final_reminder_present(ctx, reminder_message)
+    if not already_appended:
+        await store_call(ctx.session, "session.append", ctx.session.append([reminder_message]))
     ctx.force_final_pending = True
     await ctx.save_checkpoint("turn_complete", turn_index=ctx.turn_index)
     event: Event = UserEvent(message=reminder_message, subtype="notification")
     await ctx.persist_event(event)
     return event
+
+
+def _replayed_force_final_reminder_present(ctx: ToolBatchContext, reminder: Message) -> bool:
+    """Find a prior reminder only in this replayed batch's history tail."""
+    if not (
+        ctx.resume_checkpoint is not None
+        and ctx.turn_index == ctx.checkpoint.turn_index
+        and ctx.checkpoint.phase == "tool_results_appended"
+    ):
+        return False
+    tool_ids = {
+        block.id for block in ctx.checkpoint.pending_tool_blocks if isinstance(block, ToolUseBlock)
+    }
+    if not tool_ids:
+        return False
+    reminder_seen = False
+    for message in reversed(ctx.session.session_log._derived):
+        if _message_matches(message, reminder):
+            reminder_seen = True
+        result_ids = {
+            block.tool_use_id for block in message.content if isinstance(block, ToolResultBlock)
+        }
+        if message.role == "user" and result_ids == tool_ids:
+            return reminder_seen
+    return False
+
+
+async def _replay_events(ctx: ToolBatchContext, *, after_seq: int | None) -> list[Any]:
+    """Load only durable events from the replayed tool batch."""
+    store = ctx.session.agent.run_store
+    if store is None:
+        return []
+    rows = await store_call(
+        ctx.session,
+        "run.load_events",
+        store.load_events(ctx.run_id, after_seq=max(0, after_seq or 0)),
+    )
+    return [row.event for row in rows]
+
+
+async def _replayed_guard_event_seen(
+    ctx: ToolBatchContext,
+    expected: LoopGuardEvent,
+    *,
+    replaying_results_checkpoint: bool,
+    after_seq: int | None,
+) -> bool:
+    if not replaying_results_checkpoint:
+        return False
+    prior = [
+        event
+        for event in await _replay_events(ctx, after_seq=after_seq)
+        if isinstance(event, LoopGuardEvent)
+    ]
+    if any(event != expected for event in prior):
+        raise ConfigError("resumed loop-guard decision differs from durable event")
+    return bool(prior)
