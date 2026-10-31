@@ -1,5 +1,3 @@
-"""The single typed, serial veto seam used before terminal turn finalization."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -28,11 +26,10 @@ class TurnStoppingDecision:
     action: Literal["accept", "continue", "fail"]
     feedback: tuple[Any, ...] = ()
     error: Exception | None = None
+    event: Any = None
 
 
 class TurnStoppingDispatcher:
-    """Ordered run-local listeners; the first decision is authoritative."""
-
     __slots__ = ("_listeners",)
 
     def __init__(self, listeners: tuple[Any, ...] = ()) -> None:

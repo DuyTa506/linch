@@ -32,6 +32,23 @@ def test_policy_validation_rejects_bad_graph_and_terminal_evidence() -> None:
         ).validate(("final",), final_tool_name="final")
 
 
+@pytest.mark.asyncio
+async def test_agent_validates_after_tools_are_loaded() -> None:
+    from linch.sessions import InMemorySessionStore
+    from linch.tools.registry import empty_tools
+
+    agent = linch.Agent(
+        model="test",
+        tools=empty_tools(),
+        session_store=InMemorySessionStore(),
+        reliability=linch.ReliabilityPolicy(
+            prerequisites=(linch.ToolPrerequisite("missing", ()),)
+        ),
+    )
+    with pytest.raises(ValueError, match="unknown"):
+        await (await agent.session()).run("hello").__anext__()
+
+
 def test_reliability_event_round_trips_without_provider_payload() -> None:
     event = linch.ReliabilityEvent("completion", "continue", "missing", 3, 1)
     raw = event_to_dict(event)

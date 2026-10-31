@@ -560,10 +560,11 @@ class RunRuntime:
             ReliabilityRuntime(policy) if policy is not None else None
         )
         configured = getattr(self.agent, "_turn_stopping_dispatcher", None)
+        listeners = list(configured.snapshot()) if configured is not None else []
+        if self.reliability is not None:
+            listeners.insert(0, self.reliability.listener)
         self.turn_stopping = (
-            TurnStoppingDispatcher(configured.snapshot())
-            if configured is not None
-            else TurnStoppingDispatcher()
+            TurnStoppingDispatcher(tuple(listeners))
         )
 
     async def _attempt(

@@ -1,5 +1,3 @@
-"""Small, provider-neutral reliability configuration and validation."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -30,7 +28,6 @@ class ReliabilityPolicy:
         *,
         final_tool_name: str | None = None,
     ) -> None:
-        """Validate a policy against the canonical tools offered by a run."""
         if type(self.max_correction_turns) is not int or self.max_correction_turns < 0:
             raise ValueError("reliability.max_correction_turns must be a non-negative int")
         if type(self.retry_invalid_responses) is not bool:
@@ -42,7 +39,7 @@ class ReliabilityPolicy:
                 raise ValueError("reliability.prerequisites must contain ToolPrerequisite values")
             if prerequisite.tool_name not in names:
                 raise ValueError(f"unknown prerequisite tool {prerequisite.tool_name!r}")
-            seen: set[str] = set()
+            seen = edges.setdefault(prerequisite.tool_name, set())
             for required in prerequisite.requires_success:
                 if required not in names:
                     raise ValueError(f"unknown prerequisite dependency {required!r}")
@@ -53,7 +50,6 @@ class ReliabilityPolicy:
                         f"duplicate prerequisite edge {prerequisite.tool_name!r}->{required!r}"
                     )
                 seen.add(required)
-                edges.setdefault(prerequisite.tool_name, set()).add(required)
         completion = self.completion
         if completion is not None:
             if not isinstance(completion, CompletionGate):
@@ -101,13 +97,13 @@ def canonical_reliability_policy(policy: ReliabilityPolicy | None) -> dict[str, 
         "prerequisites": [
             {
                 "tool_name": item.tool_name,
-                "requires_success": list(item.requires_success),
+                "requires_success": sorted(item.requires_success),
             }
-            for item in policy.prerequisites
+            for item in sorted(policy.prerequisites, key=lambda value: value.tool_name)
         ],
         "completion": (
             {
-                "required_successful_tools": list(policy.completion.required_successful_tools),
+                "required_successful_tools": sorted(policy.completion.required_successful_tools),
             }
             if policy.completion is not None
             else None

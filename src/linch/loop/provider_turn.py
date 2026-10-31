@@ -22,7 +22,6 @@ from ..events import (
     ErrorEvent,
     Event,
     PromptCacheAdvisoryEvent,
-    ReliabilityEvent,
     UserEvent,
 )
 from ..model_calls import (
@@ -42,6 +41,7 @@ from .streaming import (
     _stream_turn_with_recovery,
     maybe_compact_resilient,
 )
+from .turn_stopping import TurnStopping, TurnStoppingDecision
 
 
 @dataclass(slots=True)
@@ -87,6 +87,7 @@ class ProviderTurnContext:
     terminal: bool = False
     continued: bool = False
     reliability: Any = None
+    turn_stopping: Any = None
 
 
 @dataclass(slots=True)
@@ -371,15 +372,22 @@ async def run_provider_turn(ctx: ProviderTurnContext) -> AsyncIterator[Event]:
             ctx.assembly = assembly
             ctx.primary_receipt = primary_receipt
             ctx.primary_rejected_native = primary_rejected_native
-            reliability = ctx.reliability
-            if (
-                reliability is not None
-                and reliability.policy.retry_invalid_responses
-                and reliability.corrections < reliability.policy.max_correction_turns
-            ):
+            decision: TurnStoppingDecision | None = None
+            if ctx.turn_stopping is not None and ctx.turn_stopping.active:
+                decision = await ctx.turn_stopping.dispatch(
+                    TurnStopping(
+                        session=session,
+                        run_id=ctx.run_id,
+                        turn_index=turn_index,
+                        reason="invalid_response",
+                        assembly=assembly,
+                        forced_final=ctx.force_final_pending,
+                        error_reason="rejected_native_arguments",
+                    )
+                )
+            if decision is not None and decision.action == "continue":
                 async for event in ctx.emit_primary_usage(primary_receipt):
                     yield event
-                reliability.corrections += 1
                 feedback = Message(
                     role="user",
                     content=[
@@ -397,15 +405,9 @@ async def run_provider_turn(ctx: ProviderTurnContext) -> AsyncIterator[Event]:
                     event = UserEvent(message=feedback, subtype="notification")
                     await ctx.persist_event(event)
                     yield event
-                event = ReliabilityEvent(
-                    mechanism="invalid_response",
-                    action="continue",
-                    reason="rejected_native_arguments",
-                    turn_index=turn_index,
-                    correction_count=reliability.corrections,
-                )
-                await ctx.persist_event(event)
-                yield event
+                if decision.event is not None:
+                    await ctx.persist_event(decision.event)
+                    yield decision.event
                 await ctx.end_provider_call(stop_reason="error", usage=_provider_usage)
                 await ctx.save_checkpoint("turn_complete", turn_index=turn_index)
                 ctx.continued = True
@@ -430,17 +432,29 @@ async def run_provider_turn(ctx: ProviderTurnContext) -> AsyncIterator[Event]:
         for partial_event in accepted_partials:
             await ctx.persist_event(partial_event)
 
+        invalid_reason = (
+            _invalid_response_reason(assembly) if assembly.stop_reason != "tool_use" else None
+        )
+        decision: TurnStoppingDecision | None = None
         if (
-            ctx.reliability is not None
-            and ctx.reliability.policy.retry_invalid_responses
-            and assembly.stop_reason != "tool_use"
-            and _invalid_response_reason(assembly) is not None
-            and ctx.reliability.corrections < ctx.reliability.policy.max_correction_turns
+            invalid_reason is not None
+            and ctx.turn_stopping is not None
+            and ctx.turn_stopping.active
         ):
+            decision = await ctx.turn_stopping.dispatch(
+                TurnStopping(
+                    session=session,
+                    run_id=ctx.run_id,
+                    turn_index=turn_index,
+                    reason="invalid_response",
+                    assembly=assembly,
+                    forced_final=ctx.force_final_pending,
+                    error_reason=invalid_reason,
+                )
+            )
+        if decision is not None and decision.action == "continue":
             async for event in ctx.emit_primary_usage(primary_receipt):
                 yield event
-            ctx.reliability.corrections += 1
-            reason = _invalid_response_reason(assembly) or "invalid_response"
             feedback = Message(
                 role="user",
                 content=[
@@ -457,18 +471,23 @@ async def run_provider_turn(ctx: ProviderTurnContext) -> AsyncIterator[Event]:
                 event = UserEvent(message=feedback, subtype="notification")
                 await ctx.persist_event(event)
                 yield event
-            event = ReliabilityEvent(
-                mechanism="invalid_response",
-                action="continue",
-                reason=reason,
-                turn_index=turn_index,
-                correction_count=ctx.reliability.corrections,
-            )
-            await ctx.persist_event(event)
-            yield event
+            if decision.event is not None:
+                await ctx.persist_event(decision.event)
+                yield decision.event
             await ctx.end_provider_call(stop_reason=assembly.stop_reason, usage=_provider_usage)
             await ctx.save_checkpoint("turn_complete", turn_index=turn_index)
             ctx.continued = True
+            return
+        if decision is not None and decision.action == "fail":
+            ctx.terminal = True
+            await ctx.save_checkpoint("provider_pending", turn_index=turn_index)
+            async for event in ctx.emit_primary_usage(primary_receipt):
+                yield event
+            if decision.event is not None:
+                await ctx.persist_event(decision.event)
+                yield decision.event
+            async for event in ctx.emit_error_terminal(end_provider_call_usage=_provider_usage):
+                yield event
             return
 
         (
