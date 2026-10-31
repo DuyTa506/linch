@@ -8,6 +8,20 @@ from linch.kernel import EventBus
 
 
 @pytest.mark.asyncio
+async def test_fork_preserves_order_and_owns_independent_registrations() -> None:
+    bus = EventBus()
+    first = bus.on("evt", lambda: "first")
+    bus.on("evt", lambda: "inherited")
+    fork = bus.fork()
+    await first.dispose()
+    added = fork.on("evt", lambda: "local", prepend=True)
+    assert await fork.serial("evt") == "local"
+    assert await bus.serial("evt") == "inherited"
+    await added.dispose()
+    assert await fork.serial("evt") == "first"
+
+
+@pytest.mark.asyncio
 async def test_emit_isolates_throwing_listener() -> None:
     seen: list[str] = []
 

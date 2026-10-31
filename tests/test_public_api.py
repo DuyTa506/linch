@@ -92,6 +92,14 @@ def test_tool_search_plugin_is_public() -> None:
     assert hasattr(ToolSearchPlugin, "setup")
 
 
+def test_profile_is_public() -> None:
+    from linch import Profile, RunOptions
+
+    profile = Profile(id="support", version="1")
+    assert "Profile" in linch.__all__
+    assert RunOptions(profile=profile).profile is profile
+
+
 def test_builtin_plugins_are_public_and_catalog_is_removed() -> None:
     from linch import AskUserPlugin, MailboxPlugin
 

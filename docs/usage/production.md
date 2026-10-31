@@ -153,12 +153,14 @@ process; each process creates its own pool. Reserve at least one pool connection
 per worker for LISTEN and enough additional connections for queries and runs.
 
 ```python
-from linch import Agent, empty_tools
+from linch import Agent, Principal, Profile, empty_tools
 from linch.worker import Worker, WorkerJob, enqueue_run, install
 
 await install(pool)  # once at process startup; serializes concurrent installers
+support = Profile(id="support", version="1", system_prompt="Help resolve product issues.")
+principal = Principal(tenant=tenant_id, user=user_id, roles={"support"})
 run_id = await enqueue_run(pool, session_id, prompt, queue="provider-a",
-                           meta={"tenant_id": tenant_id})
+                           meta={"tenant_id": tenant_id}, profile=support, principal=principal)
 
 async def agent_factory(job: WorkerJob) -> Agent:
     provider = await provider_for_tenant(job.run.meta["tenant_id"])
@@ -169,7 +171,7 @@ async def agent_factory(job: WorkerJob) -> Agent:
     )
 
 worker = Worker(pool, agent_factory, queues={"provider-a": 8, "premium": 4},
-                lease_ttl_s=30, stall_timeout_s=60, poll_interval_s=1)
+                profiles=(support,), lease_ttl_s=30, stall_timeout_s=60, poll_interval_s=1)
 await worker.run()
 ```
 
@@ -216,9 +218,20 @@ transaction. The job JSON includes run/session IDs, prompt, optional queue and
 the caller's W3C `traceparent`. The worker restores it before execution, so the
 kernel's `invoke_agent` span joins the caller's trace.
 
+`enqueue_run(..., profile=..., principal=...)` and the matching `RunRequest`
+fields select the domain configuration and authorization identity. The pending
+run metadata and job JSON persist only the profile reference (id, version,
+content hash) and serialized principal. Configure `Worker(profiles=(...))` with
+every released definition its jobs may need. Missing definitions and hash
+mismatches fail the run with an actionable `ConfigError` before provider or tool
+execution; definitions and live plugin objects are never serialized.
+
 The worker passes its plain `PostgresRunStore` to the factory and starts pending
-runs with `RunOptions(run_id=run_id)`. Runs with a checkpoint use
-`session.resume(run_id)` instead; both paths keep the store's claimed lease.
+runs with `RunOptions(run_id=run_id, profile=resolved_profile, principal=principal)`.
+Runs with a checkpoint use `session.resume(run_id, options)` instead; both paths
+keep the store's claimed lease. Resume and takeover restore identity from the
+stored RunContract, so a new deployment must retain the exact pinned profile
+definition while its runs can resume. See [domain profiles](./profiles.md).
 
 Each named run queue is a PgQueuer entrypoint with a database-enforced
 `concurrency_limit` across the **whole fleet**. Configure the same limits on

@@ -220,11 +220,15 @@ class Context:
         bucket.append(entry)
         return self._scope.add(Disposable(lambda: bucket.remove(entry)))
 
-    def scope(self, label: str = "scope") -> Context:
-        """Create a child context sharing this bus with isolated services.
+    def scope(self, label: str = "scope", *, isolate_events: bool = False) -> Context:
+        """Create an owned child with isolated services and optional event isolation.
+
+        Profile plugins need isolated listener registrations so they cannot affect
+        other runs on the same Agent. Parent service changes still reach the child.
 
         Args:
             label: Human-readable label for the child context.
+            isolate_events: Whether to snapshot listeners into an independent bus.
 
         Returns:
             A child context whose teardown is owned by this context.
@@ -235,9 +239,17 @@ class Context:
             RuntimeError: If this context is closing or already disposed.
         """
         self._ensure_active()
-        child = Context(label=label, _bus=self.events, _parent=self)
+        bus = self.events.fork(exclude=("context/service",)) if isolate_events else self.events
+        child = Context(label=label, _bus=bus, _parent=self)
         self._children.append(child)
         self._scope.add(child._teardown)
+        if isolate_events:
+
+            async def service_changed(changed: Context, key: str) -> None:
+                if child._within(changed) and bus.has_listeners("context/service"):
+                    await bus._notification("context/service", changed, key).dispose()
+
+            child.effect(lambda: self.events.on("context/service", service_changed))
         return child
 
     def _ensure_active(self) -> None:
