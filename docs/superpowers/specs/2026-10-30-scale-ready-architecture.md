@@ -337,6 +337,7 @@ market, desktop/web UI, Remote/Typert gateway, JSONL file sessions.
 - Broadcast LISTEN floor: after WP8 r8, per-run cost at 8 workers is still about 1.5x one worker, because Postgres opens an internal transaction per listening backend per notification. Options when needed: fewer listeners per database (one dispatcher per host feeding local workers), or short jittered polling instead of LISTEN.
 - Write commits per turn (about 18 after r8) and WAL flush waits set the single-database ceiling; batching more writes per turn is the next lever.
 - Worker CPU per run (about 35-40 ms for a 4-turn run; `_json_safe`, checkpoint save and telemetry wrappers show in the profile).
+- WP13 principal retention: session.py tracks background tasks per run to keep the principal alive after the run ends (about 40 lines); capturing the principal into the background launch would be simpler.
 - PgBouncer transaction mode: a separate direct connection for the queue LISTEN, only if a deployment needs the connection savings.
 
 ## Rules for every worker
