@@ -153,20 +153,9 @@ async def _budget_exhausted_tail(
     checkpoint = runtime.checkpoint
     if runtime.run_record is not None and store is not None:
         checkpoint.total_usage = total
-        original = RuntimeError("terminal failed-status persistence")
-        failure = await runtime._attempt("event flush", lambda: _flush_events(session), original)
-        session._event_journal = None
-        status_failure = await runtime._attempt(
-            "run.mark_failed",
-            lambda: store_call(
-                session,
-                "run.mark_failed",
-                store.mark_failed(run_id, checkpoint, error=budget_error),
-            ),
-            failure or original,
-        )
-        if failure is not None or status_failure is not None:
-            async for item in runtime.emit_exception_terminal(failure or status_failure):
+        failure = await runtime.persist_failed(budget_error)
+        if failure is not None:
+            async for item in runtime.emit_exception_terminal(failure):
                 yield item
             return
     yield event
@@ -230,18 +219,9 @@ async def _error_result_tail(
     checkpoint = runtime.checkpoint
     if runtime.run_record is not None and store is not None:
         checkpoint.total_usage = total
-        original = RuntimeError("terminal failed-status persistence")
-        failure = await runtime._attempt("event flush", lambda: _flush_events(session), original)
-        session._event_journal = None
-        status_failure = await runtime._attempt(
-            "run.mark_failed",
-            lambda: store_call(
-                session, "run.mark_failed", store.mark_failed(run_id, checkpoint, error=None)
-            ),
-            failure or original,
-        )
-        if failure is not None or status_failure is not None:
-            async for item in runtime.emit_exception_terminal(failure or status_failure):
+        failure = await runtime.persist_failed(None)
+        if failure is not None:
+            async for item in runtime.emit_exception_terminal(failure):
                 yield item
             return
     yield event
@@ -325,18 +305,9 @@ async def _max_turns_tail(
     checkpoint = runtime.checkpoint
     if runtime.run_record is not None and store is not None:
         checkpoint.total_usage = total
-        original = RuntimeError("terminal failed-status persistence")
-        failure = await runtime._attempt("event flush", lambda: _flush_events(session), original)
-        session._event_journal = None
-        status_failure = await runtime._attempt(
-            "run.mark_failed",
-            lambda: store_call(
-                session, "run.mark_failed", store.mark_failed(run_id, checkpoint, error=turn_error)
-            ),
-            failure or original,
-        )
-        if failure is not None or status_failure is not None:
-            async for item in runtime.emit_exception_terminal(failure or status_failure):
+        failure = await runtime.persist_failed(turn_error)
+        if failure is not None:
+            async for item in runtime.emit_exception_terminal(failure):
                 yield item
             return
     yield event

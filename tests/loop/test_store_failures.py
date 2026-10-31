@@ -148,6 +148,8 @@ class _FailCompletedAndFailedStore(_FailCompletedStore):
         run_id: str,
         checkpoint: Any = None,
         error: dict[str, object] | None = None,
+        *,
+        events: list[Any] = (),
     ) -> Any:
         raise RuntimeError("secondary failure")
 
@@ -237,6 +239,8 @@ class _FailMarkFailedStore:
         run_id: str,
         checkpoint: Any = None,
         error: dict[str, object] | None = None,
+        *,
+        events: list[Any] = (),
     ) -> Any:
         self.mark_failed_calls += 1
         raise OSError("failed status write")
@@ -313,8 +317,15 @@ async def test_error_pair_is_durable_when_failed_status_becomes_visible(failure:
                 run_id, checkpoint, events, status=status
             )
 
-        async def mark_failed(self, run_id: str, checkpoint: Any = None, error: Any = None) -> Any:
-            record = await super().mark_failed(run_id, checkpoint, error=error)
+        async def mark_failed(
+            self,
+            run_id: str,
+            checkpoint: Any = None,
+            error: Any = None,
+            *,
+            events: list[Any] = (),
+        ) -> Any:
+            record = await super().mark_failed(run_id, checkpoint, error=error, events=events)
             visible = await self.load_run(run_id)
             assert visible is not None and visible.status == "failed"
             events = await self.load_events(run_id)
@@ -576,9 +587,16 @@ async def test_abort_terminal_write_failure_persists_error_pair_before_failed_st
                 run_id, checkpoint, events, status=status
             )
 
-        async def mark_failed(self, run_id: str, checkpoint: Any = None, error: Any = None) -> Any:
+        async def mark_failed(
+            self,
+            run_id: str,
+            checkpoint: Any = None,
+            error: Any = None,
+            *,
+            events: list[Any] = (),
+        ) -> Any:
             self.failed_calls += 1
-            record = await super().mark_failed(run_id, checkpoint, error=error)
+            record = await super().mark_failed(run_id, checkpoint, error=error, events=events)
             visible = await self.load_run(run_id)
             assert visible is not None and visible.status == "failed"
             events = await self.load_events(run_id)
@@ -625,3 +643,76 @@ async def test_blocked_prompt_stops_once_even_when_closed_at_terminal(
     finally:
         await iterator.aclose()
     assert stop.calls == 1
+
+
+@pytest.mark.parametrize("route", ["budget", "max_turns", "stop", "abort", "interrupt"])
+async def test_each_terminal_route_commits_result_with_status(route: str) -> None:
+    from linch import HookResult, RunBudget
+    from linch.run_store import InMemoryRunStore
+    from linch.sessions import InMemorySessionStore
+
+    class Store(InMemoryRunStore):
+        terminals: list[list[Any]]
+
+        async def append_events(self, run_id, events):
+            assert not any(event.type == "result" for event in events)
+            return await super().append_events(run_id, events)
+
+        async def save_checkpoint_with_events(self, run_id, checkpoint, events, **kw):
+            if kw.get("status") in {"aborted", "completed"}:
+                self.terminals.append(list(events))
+            return await super().save_checkpoint_with_events(run_id, checkpoint, events, **kw)
+
+        async def mark_failed(self, run_id, checkpoint=None, error=None, *, events=()):
+            self.terminals.append(list(events))
+            return await super().mark_failed(run_id, checkpoint, error, events=events)
+
+    class Stop:
+        resume_policy_id = "test.atomic-stop"
+        resume_policy_version = "1"
+
+        def on_before_final_answer(self, ctx):
+            return HookResult.stop("stop")
+
+    store = Store()
+    store.terminals = []
+    options: dict[str, Any] = {}
+    if route == "budget":
+        options["budget"] = RunBudget(max_tokens=1)
+    if route == "max_turns":
+        options["max_turns"] = 1
+    agent = _agent(
+        session_store=InMemorySessionStore(),
+        run_store=store,
+        hooks=[Stop()] if route == "stop" else None,
+        **options,
+    )
+    if route in {"budget", "max_turns"}:
+
+        class ToolProvider(_TextProvider):
+            async def stream(self, request):
+                from linch.types import Usage
+
+                yield {"type": "message_start", "model": request.model}
+                yield {"type": "tool_use_start", "id": "tool", "name": "Unavailable"}
+                yield {"type": "tool_use_end", "id": "tool"}
+                yield {"type": "message_end", "stop_reason": "tool_use", "usage": Usage(1, 1)}
+
+        agent.provider = ToolProvider()
+    session = await agent.session()
+    iterator = session.run("hello")
+    try:
+        await anext(iterator)
+        if route == "abort":
+            session.abort()
+        if route == "interrupt":
+            session.interrupt()
+        events = [event async for event in iterator]
+        assert len(store.terminals) == 1
+        assert store.terminals[0][-1] == events[-1]
+        assert events[-1].subtype == {
+            "abort": "aborted",
+            "interrupt": "interrupted",
+        }.get(route, "error")
+    finally:
+        await agent.close()

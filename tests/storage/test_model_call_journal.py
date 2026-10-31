@@ -48,6 +48,13 @@ class _FaultStore:
     async def append_events(self, run_id: str, events: list[Any]) -> list[int]:
         return [await self.append_event(run_id, event) for event in events]
 
+    async def mark_failed(
+        self, run_id: str, checkpoint: Any = None, error: Any = None, *, events: Any = ()
+    ) -> Any:
+        for event in events:
+            self._check(f"event:{getattr(event, 'record_kind', event.type)}")
+        return await self.store.mark_failed(run_id, checkpoint, error, events=events)
+
     async def save(self, run_id: str, attempt: int, request: Any) -> Any:
         self._check("snapshot")
         return await self.store.save(run_id, attempt, request)

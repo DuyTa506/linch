@@ -425,8 +425,9 @@ class PostgresRunStore:
         run_id: str,
         checkpoint: RunCheckpoint | None = None,
         error: dict[str, object] | None = None,
-    ) -> RunRecord:
-        pool = await self._ensure()
+        *,
+        events: Sequence[Event] = (),
+    ) -> tuple[RunRecord, list[int]]:
         checkpoint_json = None
         if checkpoint is not None:
             checkpoint.phase = "failed"
@@ -436,49 +437,38 @@ class PostgresRunStore:
             if error is not None
             else None
         )
-        ts = now_iso()
+        encoded = [json.dumps(_json_safe_stored_event(event), allow_nan=False) for event in events]
         owner, epoch = self._fence_values(run_id)
-        async with pool.acquire() as conn:
-            updated = await conn.fetchrow(
-                """
-                UPDATE runs
-                SET updated_at = $1,
-                    status = 'failed',
-                    checkpoint = COALESCE($2, checkpoint),
-                    meta = CASE
-                        WHEN $3::jsonb IS NULL THEN meta
-                        WHEN jsonb_typeof(meta::jsonb -> 'errors') = 'array'
-                         AND NOT EXISTS (
-                             SELECT 1
-                             FROM jsonb_array_elements(meta::jsonb -> 'errors') AS error_item
-                             WHERE jsonb_typeof(error_item) <> 'object'
-                         )
-                        THEN jsonb_set(
-                            meta::jsonb,
-                            '{errors}',
-                            (meta::jsonb -> 'errors') || jsonb_build_array($3::jsonb)
-                        )::text
-                        ELSE jsonb_set(
-                            meta::jsonb,
-                            '{errors}',
-                            jsonb_build_array($3::jsonb)
-                        )::text
-                    END
-                WHERE id = $4
-                  AND ($5::text IS NULL OR
-                       (lease_owner = $5 AND COALESCE(lease_epoch, 0) = $6))
-                RETURNING id, session_id, status, created_at, updated_at, checkpoint, meta
-                """,
-                ts,
-                checkpoint_json,
-                error_json,
-                run_id,
-                owner,
-                epoch,
-            )
-            if updated is None:
-                await self._classify_write_failure(conn, run_id)
-        return _row_record(updated)
+        row, seqs = await self._write_event_rows(
+            run_id,
+            (run_id, now_iso(), checkpoint_json, error_json, len(encoded), encoded, owner, epoch),
+            update="""
+                updated_at = $2, status = 'failed', checkpoint = COALESCE($3, checkpoint),
+                last_event_seq = last_event_seq + $5,
+                meta = CASE
+                    WHEN $4::jsonb IS NULL THEN meta
+                    WHEN jsonb_typeof(meta::jsonb -> 'errors') = 'array'
+                     AND NOT EXISTS (
+                         SELECT 1 FROM jsonb_array_elements(meta::jsonb -> 'errors') AS error_item
+                         WHERE jsonb_typeof(error_item) <> 'object'
+                     )
+                    THEN jsonb_set(meta::jsonb, '{errors}',
+                        (meta::jsonb -> 'errors') || jsonb_build_array($4::jsonb))::text
+                    ELSE jsonb_set(meta::jsonb, '{errors}', jsonb_build_array($4::jsonb))::text
+                END
+            """,
+            event_arg="$6",
+            fence="$7::text IS NULL OR (lease_owner = $7 AND COALESCE(lease_epoch, 0) = $8)",
+            returning=(
+                "session_id, status, created_at, updated_at, checkpoint, meta, "
+                "last_event_seq - $5 AS first_seq"
+            ),
+            result=(
+                "updated.id, updated.session_id, updated.status, updated.created_at, "
+                "updated.updated_at, updated.checkpoint, updated.meta,"
+            ),
+        )
+        return _row_record(row), seqs
 
     async def claim(self, run_id: str, owner: str, ttl_s: float) -> RunLease:
         ttl_s = _validate_lease_ttl(ttl_s)

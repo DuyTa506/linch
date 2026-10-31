@@ -103,6 +103,7 @@ from .runtime import (
 )
 from .startup import RunStartupContext, initialize_run
 from .terminals import (
+    _complete_with_pending_events,
     _final_tool_retry_tail,
     _gate_retry_tail,
     _max_turns_tail,
@@ -543,10 +544,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 store = agent.run_store
                 if run_record is not None and store is not None:
                     checkpoint.total_usage = total
-                    await _flush_events(session)
-                    await store_call(
-                        session, "run.mark_completed", store.mark_completed(run_id, checkpoint)
-                    )
+                    await _complete_with_pending_events(session, run_id, checkpoint)
                 yield event
                 return
             if turn_index != _align_defer_turn:
@@ -968,7 +966,8 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                         snapshot_id=checkpoint.model_input_snapshot_id
                     )
                     checkpoint.model_input_snapshot_id = None
-                await _flush_events(session)
+                if checkpoint.phase != "tool_results_appended":
+                    await _flush_events(session)
         except LeaseLostError as exc:
             _runtime.lease_lost = exc
             async for _ in _runtime.emit_exception_terminal(exc):

@@ -55,6 +55,12 @@ The loop uses it whenever a phase has pending events, committing those events
 and its checkpoint in one fenced statement before a guarded tool runs. It returns
 `(run_record, event_seqs)`.
 
+Terminal writes follow the same atomic boundary.
+`mark_failed(run_id, checkpoint=None, error=None, *, events=())` commits the
+failed status, checkpoint, error metadata, and pending events together and
+returns `(run_record, event_seqs)`. Success, interruption, and abort commit
+their terminal checkpoint and events with `save_checkpoint_with_events`.
+
 The statement fences the run and atomically advances its sequence counter,
 then inserts the events through a data-modifying CTE. Encoding, writing, or
 fencing failure changes neither the checkpoint nor the events; the loop
@@ -158,6 +164,8 @@ in the persisted reconnect log. `AgentStop` fires once for either failure.
 
 Resuming a terminal run, or a run without a checkpoint, raises the public
 `RunNotResumableError`. Its `run_id` and `status` identify the rejected run.
+Prompt-cache advisories are per-process diagnostics; resume restarts the comparison,
+so the first post-resume request may lack an advisory an uninterrupted run would emit.
 
 The host owns lease renewal and releases the lease in `finally`, after all run
 work has stopped. A stale release can itself raise `LeaseLostError`; it cannot
