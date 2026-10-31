@@ -134,6 +134,10 @@ ends fencing for that run on this instance; do not write to it after releasing
 it. The local ownership maps therefore track active ownership rather than
 growing with every run a long-lived worker has ever claimed.
 
+Worker reconnect cycles retain these adapters and ownership maps; they drain
+the old manager before rebuilding queue dispatch on a fresh connection. The host
+pool remains open throughout recovery and graceful shutdown.
+
 The host owns claiming, renewal, and stopping work after lease loss; the agent
 loop does not start a heartbeat. A lease fences the run store's writes. Host
 tools still need their own idempotency or fencing for external effects.
