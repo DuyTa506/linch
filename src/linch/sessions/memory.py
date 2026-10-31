@@ -224,8 +224,14 @@ class InMemorySessionStore:
             Stored messages with sequence numbers greater than ``after_seq``.
 
         Raises:
-            KeyError: If the session does not exist.
-            ConfigError: If ``after_seq`` is invalid or a pending payload is corrupt.
+            KeyError: If the session does not exist or a pending message omits
+                a required field.
+            ConfigError: If ``after_seq`` is invalid, a pending row has no
+                message payload, or the decoded payload is not an object.
+            json.JSONDecodeError: If a pending message's JSON is malformed.
+            TypeError: If a pending message field has an incompatible shape.
+            ValueError: If a pending message contains an unknown content-block
+                type.
         """
 
         if id not in self._sessions:

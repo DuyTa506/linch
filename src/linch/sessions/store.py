@@ -439,8 +439,15 @@ class SessionInboxStore(Protocol):
             including rows committed by earlier calls.
 
         Raises:
-            KeyError: If the session does not exist.
-            ConfigError: If ``after_seq`` is invalid or a pending payload is corrupt.
+            KeyError: If the session does not exist or a stored message omits
+                a required field.
+            ConfigError: If ``after_seq`` is invalid, a pending row has no
+                message payload, or an implementation rejects a non-object
+                decoded payload.
+            json.JSONDecodeError: If stored message JSON is malformed.
+            TypeError: If a stored message field has an incompatible shape.
+            ValueError: If a stored message contains an unknown content-block
+                type.
         """
 
         ...

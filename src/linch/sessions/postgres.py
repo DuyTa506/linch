@@ -436,8 +436,14 @@ class PostgresSessionStore:
             Stored messages with sequence numbers greater than ``after_seq``.
 
         Raises:
-            KeyError: If the session does not exist.
-            ConfigError: If ``after_seq`` is invalid or a pending payload is corrupt.
+            KeyError: If the session does not exist or a stored message omits
+                a required field.
+            ConfigError: If ``after_seq`` is invalid or a pending row has no
+                message payload.
+            json.JSONDecodeError: If a stored message's JSON is malformed.
+            TypeError: If a stored message field has an incompatible shape.
+            ValueError: If a stored message contains an unknown content-block
+                type.
         """
 
         if isinstance(after_seq, bool) or not isinstance(after_seq, int) or after_seq < 0:
@@ -958,7 +964,12 @@ class PostgresSessionStore:
                 return await _get_task_pg(conn, session_id, task_id)
 
     async def close(self) -> None:
-        """Close the store-owned Postgres pool."""
+        """Close the pool held by this store.
+
+        Store-created pools and raw caller-supplied pools are closed. A
+        worker-supplied ``_BorrowedPool`` handle is retained for the worker or
+        host to close.
+        """
 
         await close_pool(self)
 
