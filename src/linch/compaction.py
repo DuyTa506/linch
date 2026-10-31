@@ -65,6 +65,12 @@ class CompactionLadder:
             be edited (the ``Edit`` tool gates on ``has_read``). Cheap insurance
             against blind edits on stale content; worst case is a redundant
             re-read of a file still present in the kept recent tail.
+
+        Args:
+            micro: Whether to elide old tool-result contents before summarization.
+            keep_recent_turns: Number of recent assistant turns protected from elision.
+            max_forced_compactions: Maximum forced LLM compactions allowed per run.
+            reset_read_tracker: Whether compaction clears the file-read tracker.
     """
 
     micro: bool = True
@@ -415,15 +421,33 @@ class _AccountedCompactionProvider:
 
 
 class DefaultCompaction:
+    """Summarize older messages while retaining the ten most recent turns.
+
+    Args:
+        prompt: System instructions supplied to the summarization provider.
+    """
+
     id = "default-keep-recent-10"
 
     def __init__(self, *, prompt: str = _SUMMARY_PROMPT) -> None:
-        """*prompt* lets a non-coding embedder reword the summary instructions
-        without reimplementing the strategy; defaults to the built-in
-        coding-oriented :data:`_SUMMARY_PROMPT`."""
+        """Create a summarizer with optional host-specific instructions.
+
+        Args:
+            prompt: Summary instructions; defaults to the coding-oriented built-in prompt.
+        """
         self.prompt = prompt
 
     async def compact(self, ctx: CompactionContext, provider: Any) -> list[Message]:
+        """Summarize messages older than the retained ten-turn tail.
+
+        Args:
+            ctx: Conversation messages and provider-call context.
+            provider: Provider used for the summary request.
+
+        Returns:
+            A summary user message followed by the retained recent messages,
+            or the original messages when there is no older history to summarize.
+        """
         recent = last_n_turn_boundaries(ctx.messages, 10)
         boundary = len(ctx.messages) - len(recent)
         older = ctx.messages[:boundary] if boundary > 0 else []
@@ -442,7 +466,13 @@ class DefaultCompaction:
 
 
 class DetailedCompaction:
-    """Continuation-safe compaction with detailed, domain-neutral handoff sections."""
+    """Continuation-safe compaction with detailed, domain-neutral handoff sections.
+
+    Args:
+        keep_recent_turns: Number of recent assistant turns to retain.
+        max_output_tokens: Summary output cap forwarded to the provider.
+        prompt: System instructions for the detailed handoff summary.
+    """
 
     id = "detailed-continuation-keep-recent-10"
 
@@ -453,6 +483,16 @@ class DetailedCompaction:
         max_output_tokens: int = 8192,
         prompt: str = _DETAILED_SUMMARY_PROMPT,
     ) -> None:
+        """Configure the retained tail and detailed summary request.
+
+        Args:
+            keep_recent_turns: Number of recent assistant turns to retain.
+            max_output_tokens: Maximum tokens requested for the summary.
+            prompt: Summary instructions supplied to the provider.
+
+        Raises:
+            ValueError: If ``keep_recent_turns`` is less than one.
+        """
         if keep_recent_turns < 1:
             raise ValueError("detailed_compaction.keep_recent_turns must be >= 1")
         self.keep_recent_turns = keep_recent_turns
@@ -460,6 +500,16 @@ class DetailedCompaction:
         self.prompt = prompt
 
     async def compact(self, ctx: CompactionContext, provider: Any) -> list[Message]:
+        """Summarize older messages using the detailed continuation format.
+
+        Args:
+            ctx: Conversation messages and provider-call context.
+            provider: Provider used for the summary request.
+
+        Returns:
+            A detailed summary user message followed by the retained recent messages,
+            or the original messages when there is no older history to summarize.
+        """
         recent = last_n_turn_boundaries(ctx.messages, self.keep_recent_turns)
         boundary = len(ctx.messages) - len(recent)
         older = ctx.messages[:boundary] if boundary > 0 else []
