@@ -17,7 +17,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
 
 _EXAMPLES = Path(__file__).resolve().parents[1] / "examples" / "core"
 

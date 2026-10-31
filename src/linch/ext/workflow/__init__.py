@@ -12,10 +12,10 @@ the work, and every ``wf.agent`` / ``wf.step`` result is journaled for resume.
         ])
         return findings
 
-    result = await agent.run_workflow(review, budget=RunBudget(max_tokens=500_000))
+    result = await run_workflow(agent, review, budget=RunBudget(max_tokens=500_000))
 """
 
-from ..errors import WorkflowError, WorkflowSuspended, WorkflowTimeoutError
+from ...errors import WorkflowError, WorkflowSuspended, WorkflowTimeoutError
 from .context import StepOutcome, WorkflowContext
 from .engine import run_workflow
 from .journal import WorkflowJournal, call_key, interrupt_key, step_key

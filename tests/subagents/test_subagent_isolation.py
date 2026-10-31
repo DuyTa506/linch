@@ -33,7 +33,7 @@ def _agent(provider: Any, tools: Any) -> Any:
 
 
 async def test_isolation_overrides_child_cwd_and_cleans_up() -> None:
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.subagents.default_agent import DEFAULT_AGENT
     from linch.subagents.runner import RunSubagentArgs, run_subagent
     from linch.tools import ToolRegistry, tool
@@ -79,7 +79,7 @@ async def test_isolation_overrides_child_cwd_and_cleans_up() -> None:
 
 
 async def test_isolation_keep_preserves_dir_and_artifacts() -> None:
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.subagents.default_agent import DEFAULT_AGENT
     from linch.subagents.runner import RunSubagentArgs, run_subagent
     from linch.tools import ToolRegistry, tool
@@ -125,7 +125,7 @@ async def test_isolation_keep_preserves_dir_and_artifacts() -> None:
 
 
 async def test_custom_isolation_backend_slots_in_via_protocol() -> None:
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.subagents.default_agent import DEFAULT_AGENT
     from linch.subagents.runner import RunSubagentArgs, run_subagent
     from linch.tools import ToolRegistry
@@ -166,7 +166,7 @@ async def test_custom_isolation_backend_slots_in_via_protocol() -> None:
 
 
 async def test_no_isolation_uses_agent_cwd() -> None:
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.subagents.default_agent import DEFAULT_AGENT
     from linch.subagents.runner import RunSubagentArgs, run_subagent
     from linch.tools import ToolRegistry, tool

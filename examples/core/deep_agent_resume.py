@@ -53,8 +53,8 @@ async def run_durable_planning(work_dir: str) -> None:
         PostgresRunStore,
         PostgresSessionStore,
         StateFileBackend,
-        create_deep_agent,
     )
+    from linch.ext.deep_agent import create_deep_agent
 
     dsn = os.environ["LINCH_POSTGRES_DSN"]
     session_id = f"demo-planning-{uuid4().hex}"
@@ -123,7 +123,7 @@ async def run_background_worker(work_dir: str) -> None:
     """Spawn a researcher subagent in the background.
     The parent turn returns immediately with an ack; a <task-notification>
     is injected into the conversation on the next session.run() call."""
-    from linch import create_deep_agent
+    from linch.ext.deep_agent import create_deep_agent
 
     agent = create_deep_agent(
         model=MODEL,
@@ -181,7 +181,7 @@ async def run_background_worker(work_dir: str) -> None:
 async def run_fork_continue(work_dir: str) -> None:
     """Spawn a researcher, then continue it with a follow-up question.
     The worker's full prior conversation is preserved across continuations."""
-    from linch import create_deep_agent
+    from linch.ext.deep_agent import create_deep_agent
 
     agent = create_deep_agent(
         model=MODEL,
@@ -238,7 +238,7 @@ async def run_fork_continue(work_dir: str) -> None:
 async def run_coordinator(work_dir: str) -> None:
     """Coordinator mode: parent only orchestrates — no Bash/Edit/Write/Read.
     Workers receive full tool access via SubagentTool → build_child_tools."""
-    from linch import create_deep_agent
+    from linch.ext.deep_agent import create_deep_agent
 
     agent = create_deep_agent(
         model=MODEL,

@@ -46,7 +46,7 @@ class CaseResult:
             "total_cost_usd": _total_cost_usd(self.events),
         }
         if include_events:
-            from ..events import event_to_dict
+            from ...events import event_to_dict
 
             out["events"] = [event_to_dict(event) for event in self.events]
         return out
@@ -143,13 +143,13 @@ async def run_eval(
     Args:
         agent:   A configured ``Agent`` instance.
         cases:   List of ``EvalCase`` objects.
-        scorers: Optional list of scorer callables from ``linch.evals``.
+        scorers: Optional list of scorer callables from ``linch.ext.evals``.
                  If empty/None, cases pass if the run completes without error.
 
     Returns:
         ``EvalResult`` with aggregated pass/fail counts and per-case details.
     """
-    from ..events import ResultEvent
+    from ...events import ResultEvent
 
     scorers = scorers or []
     results: list[CaseResult] = []

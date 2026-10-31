@@ -37,7 +37,7 @@ class WriteThing:
 
 async def test_subagent_permission_request_surfaces_to_parent() -> None:
     from linch import Agent, PermissionRequestEvent, SubagentEvent, ToolRegistry
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.sessions import InMemorySessionStore
     from linch.subagents.default_agent import DEFAULT_AGENT
     from linch.subagents.runner import RunSubagentArgs, run_subagent

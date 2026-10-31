@@ -42,7 +42,8 @@ class HostAdapter:
 async def test_durable_deep_agent_rejects_missing_host_storage(
     tmp_path: Path, missing: str
 ) -> None:
-    from linch import ConfigError, InMemoryRunStore, InMemorySessionStore, create_deep_agent
+    from linch import ConfigError, InMemoryRunStore, InMemorySessionStore
+    from linch.ext.deep_agent import create_deep_agent
     from linch.filesystem import StateFileBackend
 
     kwargs: dict[str, Any] = {
@@ -81,7 +82,7 @@ def test_durable_storage_validation_precedes_agent_creation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from linch import ConfigError
-    from linch.deep_agent import factory
+    from linch.ext.deep_agent import factory
 
     def reject_creation(**kwargs: Any) -> None:
         raise AssertionError("Agent construction reached before storage validation")
@@ -96,7 +97,8 @@ def test_durable_storage_validation_precedes_agent_creation(
 async def test_deep_agent_preserves_explicit_host_adapters(
     tmp_path: Path, durable: bool, host_adapters: bool
 ) -> None:
-    from linch import InMemoryRunStore, InMemorySessionStore, create_deep_agent
+    from linch import InMemoryRunStore, InMemorySessionStore
+    from linch.ext.deep_agent import create_deep_agent
     from linch.filesystem import StateFileBackend
 
     sessions: Any = InMemorySessionStore()
@@ -131,8 +133,8 @@ async def test_durable_deep_agent_allows_disabled_filesystem(tmp_path: Path) -> 
         FeatureFlags,
         InMemoryRunStore,
         InMemorySessionStore,
-        create_deep_agent,
     )
+    from linch.ext.deep_agent import create_deep_agent
 
     agent = create_deep_agent(
         model="offline",
@@ -152,7 +154,7 @@ async def test_durable_deep_agent_allows_disabled_filesystem(tmp_path: Path) -> 
 
 
 async def test_ephemeral_deep_agent_needs_no_host_storage(tmp_path: Path) -> None:
-    from linch import create_deep_agent
+    from linch.ext.deep_agent import create_deep_agent
     from linch.filesystem import StateFileBackend
 
     agent = create_deep_agent(

@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from linch.cli import main
+from linch.ext.scaffold import main
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -45,7 +45,7 @@ def _assert_only_top_level_linch_imports(path: Path) -> None:
                 alias.name for alias in node.names if alias.name.startswith("linch")
             )
     assert imported_modules
-    assert set(imported_modules) == {"linch"}
+    assert set(imported_modules) <= {"linch", "linch.ext.evals"}
 
 
 async def _final_text(agent) -> str:
@@ -70,7 +70,7 @@ def _bare_project(tmp_path: Path, name: str, packages: list[str]) -> Path:
 
 def test_console_script_declared():
     text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    assert 'linch = "linch.cli:main"' in text
+    assert 'linch = "linch.ext.scaffold:main"' in text
 
 
 def test_help_returns_zero(capsys):
@@ -80,7 +80,7 @@ def test_help_returns_zero(capsys):
 
 def test_module_entrypoint():
     proc = subprocess.run(
-        [sys.executable, "-m", "linch.cli", "--help"],
+        [sys.executable, "-m", "linch.ext.scaffold", "--help"],
         capture_output=True,
         text=True,
         cwd=REPO_ROOT,
@@ -179,7 +179,7 @@ async def test_generated_greet_tool_passes_contract(tmp_path):
 
 
 async def test_generated_agent_runs_offline(tmp_path, monkeypatch):
-    from linch import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
 
     proj = _new_project(tmp_path, "offline-proof")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -198,7 +198,7 @@ async def test_generated_agent_runs_offline(tmp_path, monkeypatch):
 
 
 async def test_generated_agent_tool_wiring(tmp_path, monkeypatch):
-    from linch import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
 
     proj = _new_project(tmp_path, "wiring-proof")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)

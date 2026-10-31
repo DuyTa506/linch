@@ -93,7 +93,7 @@ async def test_hook_dispatcher_orders_sync_async_and_isolates_errors() -> None:
 @pytest.mark.asyncio
 async def test_prompt_and_request_hooks_mutate_provider_request() -> None:
     from linch import HookResult, TextBlock
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.types import SystemBlock
 
     class CaptureProvider(ScriptedProvider):
@@ -135,7 +135,7 @@ async def test_prompt_and_request_hooks_mutate_provider_request() -> None:
 @pytest.mark.asyncio
 async def test_tool_hooks_rewrite_input_block_and_result() -> None:
     from linch import HookResult, ToolCallEndEvent, ToolCallStartEvent, ToolRegistry
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
 
     tool = RecordingTool()
     registry = ToolRegistry()
@@ -167,7 +167,7 @@ async def test_tool_hooks_rewrite_input_block_and_result() -> None:
 @pytest.mark.asyncio
 async def test_tool_hook_can_block_execution() -> None:
     from linch import HookResult, ToolCallEndEvent, ToolRegistry
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
 
     tool = RecordingTool()
     registry = ToolRegistry()
@@ -193,7 +193,7 @@ async def test_tool_hook_can_block_execution() -> None:
 @pytest.mark.asyncio
 async def test_final_answer_hook_retries_then_mutates_final_text() -> None:
     from linch import HookResult
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
 
     class Hooks:
         def __init__(self) -> None:
@@ -219,7 +219,7 @@ async def test_final_answer_hook_retries_then_mutates_final_text() -> None:
 @pytest.mark.asyncio
 async def test_stop_hook_force_continue_counts_as_another_turn() -> None:
     from linch import HookResult
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
 
     class Hooks:
         def __init__(self) -> None:
@@ -244,7 +244,7 @@ async def test_stop_hook_force_continue_counts_as_another_turn() -> None:
 
 @pytest.mark.asyncio
 async def test_agent_lifecycle_and_event_hooks_fire() -> None:
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
 
     calls: list[str] = []
 
@@ -293,7 +293,7 @@ async def test_tool_middleware_raising_before_call_fails_closed() -> None:
     """Regression: a before_tool_call middleware that raises must block the
     tool (fail closed), not let it run with the original input."""
     from linch import ToolCallEndEvent, ToolRegistry
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.hooks import ToolMiddlewareHook
 
     tool = RecordingTool()
@@ -321,7 +321,7 @@ async def test_tool_middleware_raising_after_result_fails_closed() -> None:
     """Regression: an after_tool_result middleware that raises must yield an
     error result, not let the original (unredacted) result pass through."""
     from linch import ToolCallEndEvent, ToolRegistry
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.hooks import ToolMiddlewareHook
 
     tool = RecordingTool()
@@ -349,7 +349,7 @@ async def test_blocked_prompt_still_dispatches_agent_stop() -> None:
     """Regression: a UserPromptSubmit block returns before the main
     try/finally, but AgentStop/on_run_end must still fire."""
     from linch import HookResult
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
 
     stops: list[str] = []
 
@@ -376,7 +376,7 @@ async def test_before_final_answer_force_continue_retries() -> None:
     """Regression: force_continue at BeforeFinalAnswer must bounce the loop,
     not be silently ignored."""
     from linch import HookResult
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
 
     class Hooks:
         def __init__(self) -> None:
@@ -403,7 +403,7 @@ async def test_after_provider_call_force_continue_retries() -> None:
     """Regression: retry/force_continue at AfterProviderCall must bounce the
     loop instead of being dropped."""
     from linch import HookResult
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
 
     class Hooks:
         def __init__(self) -> None:
@@ -431,8 +431,8 @@ async def test_after_provider_call_mutation_keeps_provider_usage() -> None:
     """Regression: an AfterProviderCall mutation that rebuilds the assembly with
     fresh Usage() must not undercharge — accounting uses the provider's usage."""
     from linch import HookResult
-    from linch.evals import ScriptedProvider, TextTurn
     from linch.events import UsageEvent
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.types import AssistantAssembly, Message, TextBlock, Usage
 
     class Hooks:
@@ -462,7 +462,7 @@ async def test_after_provider_call_mutation_keeps_provider_usage() -> None:
 @pytest.mark.asyncio
 async def test_stop_when_runs_through_before_provider_hook() -> None:
     from linch import HookEventRecord
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.hooks import StopPredicateHook
 
     provider = ScriptedProvider(
@@ -527,7 +527,7 @@ async def test_pre_tool_hook_allow_cannot_bypass_config_deny() -> None:
     # cannot resurrect the tool.
     from linch import Agent, HookResult, ToolCallEndEvent, ToolRegistry
     from linch.config import FeatureFlags
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.permissions.rules import ToolRule
     from linch.sessions import InMemorySessionStore
 
@@ -567,7 +567,7 @@ async def test_pre_tool_hook_allow_cannot_bypass_config_deny() -> None:
 @pytest.mark.asyncio
 async def test_post_tool_use_failure_hook_fires_only_on_error() -> None:
     from linch import ToolRegistry
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
 
     failing = FailingTool()
     ok = RecordingTool()
@@ -609,7 +609,7 @@ async def test_before_final_answer_reentry_guard_caps_retries() -> None:
     # guard honors the retry once, then accepts the answer as-is.
     from linch import Agent, HookResult
     from linch.config import FeatureFlags
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.sessions import InMemorySessionStore
 
     class Hooks:
@@ -662,7 +662,7 @@ async def test_hook_exception_at_lifecycle_chokepoint_does_not_crash_run(method:
     """Embedding gate: a hook that raises at any lifecycle chokepoint must not
     crash the run loop — the exception is isolated and the run still completes
     successfully."""
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
 
     def _raise(self: Any, ctx: Any) -> None:
         raise RuntimeError("hook boom")
@@ -685,7 +685,7 @@ async def test_provider_path_hook_exception_is_surfaced_as_error_event(method: s
     """On the per-turn provider path the isolated hook error is also forwarded to
     the event stream as a ``HookEventRecord`` with ``action='error'``."""
     from linch import HookEventRecord
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
 
     def _raise(self: Any, ctx: Any) -> None:
         raise RuntimeError("hook boom")
@@ -711,7 +711,7 @@ async def test_lifecycle_hook_exception_is_logged(caplog: Any) -> None:
     never swallowed silently."""
     import logging
 
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
 
     def _raise(self: Any, ctx: Any) -> None:
         raise RuntimeError("hook boom")
@@ -737,7 +737,7 @@ async def test_post_tool_use_hook_exception_does_not_crash_tool_loop() -> None:
     the run completes (the unmutated result is used, since the hook never
     returned a mutation)."""
     from linch import HookEventRecord, ToolCallEndEvent, ToolRegistry
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
 
     tool = RecordingTool()
     registry = ToolRegistry()
