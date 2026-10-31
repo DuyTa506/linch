@@ -55,7 +55,7 @@ async def test_ask_user_handler_answer_rides_back_on_tool_result() -> None:
             TextTurn(text="Using pytest as you chose."),
         ]
     )
-    agent = example.build_ask_user_agent(
+    agent = await example.build_ask_user_agent(
         lambda request, ctx: AskUserResponse(accepted=True, answers={"framework": "pytest"}),
         provider=provider,
         model="m",
@@ -85,7 +85,11 @@ async def test_ask_user_malformed_handler_fails_closed() -> None:
         ]
     )
     # Handler returns nothing (e.g. the user dismissed the dialog).
-    agent = example.build_ask_user_agent(lambda request, ctx: None, provider=provider, model="m")
+    agent = await example.build_ask_user_agent(
+        lambda request, ctx: None,
+        provider=provider,
+        model="m",
+    )
     session = await agent.session()
 
     summaries = [
@@ -110,7 +114,7 @@ async def test_ask_user_timeout_declines_instead_of_hanging() -> None:
         await asyncio.sleep(10)
         return {"accepted": True}
 
-    agent = example.build_ask_user_agent(
+    agent = await example.build_ask_user_agent(
         never_answers, provider=provider, model="m", timeout_s=0.05
     )
     session = await agent.session()
@@ -121,6 +125,26 @@ async def test_ask_user_timeout_declines_instead_of_hanging() -> None:
         if event.type == "tool_call_end" and event.tool_name == "AskUser"
     ]
     assert summaries == ["User declined AskUser"]
+
+
+async def test_ask_user_plugin_unmount_restores_previous_tool() -> None:
+    from linch import Agent, AskUserPlugin
+    from linch.ext.evals import ScriptedProvider
+    from linch.tools import AskUserTool
+    from linch.tools.registry import empty_tools
+
+    previous = AskUserTool(lambda request, ctx: {"accepted": False})
+    agent = Agent(
+        model="m",
+        provider=ScriptedProvider([]),
+        tools=empty_tools(previous),
+        result_offload=None,
+    )
+    mounted = await agent.use(AskUserPlugin(), lambda request, ctx: {"accepted": True})
+    assert agent.tools.get("AskUser") is not previous
+
+    await mounted.dispose()
+    assert agent.tools.get("AskUser") is previous
 
 
 def _align_script() -> ScriptedProvider:

@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from ..abort import throw_if_aborted
 from ..errors import AbortError
+from ..kernel import Context, Disposable
 from .base import ToolContext, ToolResult, ToolScope
 
 
@@ -45,6 +46,27 @@ class AskUserHandler(Protocol):
         request: AskUserRequest,
         ctx: ToolContext,
     ) -> AskUserResponse | dict[str, Any] | Any: ...
+
+
+class AskUserPlugin:
+    """Provide the opt-in ``AskUser`` tool through the plugin lifecycle."""
+
+    name = "ask_user"
+    version = "1"
+    provides: Iterable[str] = ()
+    requires: Iterable[str] = ("agent",)
+
+    def setup(self, ctx: Context, config: Any = None) -> Disposable:
+        """Install an ``AskUser`` tool using the supplied handler.
+
+        Args:
+            ctx: Plugin activation context containing the owning agent.
+            config: AskUser handler callable.
+
+        Returns:
+            A disposer that restores the tool registry state before mounting.
+        """
+        return ctx.agent.tools.replace(AskUserTool(config))
 
 
 def _option_from_raw(raw: Any) -> AskUserOption:

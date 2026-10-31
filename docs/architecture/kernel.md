@@ -7,8 +7,8 @@ that gives Linch three things the rest of the SDK builds on: **reversible
 effects**, a **typed event bus**, and **per-agent `Context` scopes** (a scoped
 IoC container). It is async-first and ships no third-party dependency.
 
-Public names: `linch.Context`, `linch.Disposable`. `EffectScope`, `EventBus`,
-and `Next` live under `linch.kernel` for internal use.
+Public names: `linch.Context`, `linch.Disposable`, and `linch.Plugin`.
+`EffectScope`, `EventBus`, and `Next` live under `linch.kernel` for internal use.
 
 Why it exists: extension points (tool wrappers, capability providers, listeners)
 must be **addable and removable** without editing the loop, and N agents must run
@@ -66,6 +66,10 @@ it rather than through module globals — that is what makes Linch multi-tenant
 safe.
 
 - `register(key, service) -> Disposable` — add a service; dispose to remove it.
+  Registration and removal publish `context/service` with `(context, key)` on
+  the shared bus after the registry changes. Removal awaits every listener;
+  failed notifications remain retryable through the same disposer. With no
+  listeners, no event is dispatched.
 - `ctx.<name>` — read a **required** capability as an attribute (e.g.
   `ctx.execution`); `AttributeError` if unresolved. Underscore names raise, to
   avoid recursion.
@@ -73,19 +77,46 @@ safe.
   unresolved. Both walk up to parent scopes, so a child sees a service its
   parent registered unless it shadows the name.
 - `on(...)` / `effect(...)` — delegate to the bus / scope.
+- `inbox(producer) -> Disposable` — add an ordered, agent-local run-boundary
+  producer. The producer is called as `producer(session, run_id)` and returns an
+  async iterator of `Message` or already-committed `Event` values. Messages are
+  appended to session history and emitted as notification `UserEvent`s; Events
+  are emitted/persisted without another history append. The registration is
+  independent and idempotently removable, and an iterator's `aclose()` is
+  awaited when present. No producer means the loop does not allocate or dispatch
+  an inbox coroutine.
 - `scope(label) -> Context` — a **child** sharing the bus but with an isolated
   service overlay and its own child `EffectScope`, so per-agent (or per-subagent)
   teardown disposes only that branch.
 
-`Agent` creates one `Context` for its lifetime (or accepts a supplied one), then
-registers the agent's pipeline and effective execution world in that scope.
-The Agent owns the supplied scope and disposes it during close; hosts that need
-to retain a parent scope should pass `parent.scope("agent")` rather than the
-parent itself. Sessions and child agents resolve capabilities through the scope;
+`Agent` creates one owned child `Context` for its lifetime. When `context=` is
+supplied it is the parent/host scope, which remains alive when the Agent closes;
+hosts may also pass `parent.scope("agent")` when they want an explicit child.
+The Agent registers its pipeline and effective execution world in its owned
+scope. Sessions and child agents resolve capabilities through the scope;
 they do not use process-global services. `await agent.close()` first quiesces
 the agent and then disposes the context. Context teardown is transactional:
 successful registrations are not repeated, while a failed disposer remains
 retryable and a later `close()` resumes the unfinished teardown.
+
+### Plugins
+
+`Plugin` is a duck-typed protocol with `name`, `version`, `provides`,
+`requires`, and synchronous `setup(ctx, config) -> Disposable`. Mount one with
+`await agent.use(plugin, config)`. A mount is dormant until every required
+service resolves in the agent context; it gets a fresh child scope for each
+activation. Removing a requirement withdraws published services before awaiting
+cleanup, and a later reappearance activates a fresh scope. The returned
+`Disposable` unmounts the mount and retries failed teardown on a later dispose
+or `agent.close()`. A synchronous `Context.register` emits its change event
+immediately; activation reconciliation runs asynchronously, while removal waits
+for dependent cleanup.
+
+Only services declared in `provides` may be registered by a plugin, including
+nested scopes. Services are not published to the agent until setup and the
+audit complete, so failed setup is fully rolled back. Plugin mounts and inbox
+registrations are per-agent; sharing a parent `Context` does not share a
+mount's child services.
 
 ---
 

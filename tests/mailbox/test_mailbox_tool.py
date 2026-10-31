@@ -2,7 +2,7 @@
 
 A session with a ``mailbox_address`` drains its inbox at the top of each turn
 (exactly like ``pending_notifications``); the ``send_message`` tool lets the
-agent address a peer. Opt-in via ``Agent(mailbox=...)`` — with no mailbox the
+agent address a peer. Opt in via ``await agent.use(MailboxPlugin(), mailbox)`` — with no mailbox the
 tool is absent and no drain runs (byte-identical).
 
 linch imports happen inside the test bodies/helpers because sibling tests pop
@@ -14,19 +14,21 @@ from __future__ import annotations
 from typing import Any
 
 
-def _agent(provider: Any, *, mailbox: Any = None, **kwargs: Any) -> Any:
-    from linch import Agent
+async def _agent(provider: Any, *, mailbox: Any = None, **kwargs: Any) -> Any:
+    from linch import Agent, MailboxPlugin
     from linch.sessions import InMemorySessionStore
 
-    return Agent(
+    agent = Agent(
         model="m",
         provider=provider,
         session_store=InMemorySessionStore(),
         permissions={"mode": "skip-dangerous"},
         cwd=".",
-        mailbox=mailbox,
         **kwargs,
     )
+    if mailbox is not None:
+        await agent.use(MailboxPlugin(), mailbox)
+    return agent
 
 
 def _texts(message: Any) -> str:
@@ -83,15 +85,68 @@ async def test_mailbox_registers_send_tool() -> None:
     from linch.coordination.mailbox import InMemoryMailbox
     from linch.ext.evals import ScriptedProvider, TextTurn
 
-    agent = _agent(ScriptedProvider([TextTurn(text="ok")]), mailbox=InMemoryMailbox())
+    agent = await _agent(ScriptedProvider([TextTurn(text="ok")]), mailbox=InMemoryMailbox())
     assert agent.tools.get("send_message") is not None
+
+
+async def test_same_mailbox_plugin_object_keeps_agents_and_boxes_isolated() -> None:
+    from linch import Agent, MailboxPlugin
+    from linch.coordination.mailbox import InMemoryMailbox
+    from linch.ext.evals import ScriptedProvider
+
+    first = Agent(model="m", provider=ScriptedProvider([]), result_offload=None)
+    second = Agent(model="m", provider=ScriptedProvider([]), result_offload=None)
+    plugin = MailboxPlugin()
+    first_box = InMemoryMailbox()
+    second_box = InMemoryMailbox()
+
+    await first.use(plugin, first_box)
+    await second.use(plugin, second_box)
+
+    assert first.mailbox is first_box
+    assert second.mailbox is second_box
+    assert first.tools.get("send_message")._mailbox is first_box
+    assert second.tools.get("send_message")._mailbox is second_box
 
 
 async def test_no_mailbox_means_no_send_tool() -> None:
     from linch.ext.evals import ScriptedProvider, TextTurn
 
-    agent = _agent(ScriptedProvider([TextTurn(text="ok")]))
+    agent = await _agent(ScriptedProvider([TextTurn(text="ok")]))
     assert agent.tools.get("send_message") is None
+
+
+async def test_mailbox_unmount_removes_tool_service_and_inbox() -> None:
+    from linch import Agent, MailboxPlugin
+    from linch.coordination.mailbox import InMemoryMailbox
+    from linch.ext.evals import ScriptedProvider, TextTurn
+
+    agent = Agent(
+        model="m",
+        provider=ScriptedProvider([TextTurn(text="ok")]),
+        result_offload=None,
+    )
+    mounted = await agent.use(MailboxPlugin(), InMemoryMailbox())
+    assert agent.mailbox is not None
+    assert agent.tools.get("send_message") is not None
+    assert agent.context._inbox
+
+    await mounted.dispose()
+    assert agent.mailbox is None
+    assert agent.tools.get("send_message") is None
+    assert not agent.context._inbox
+
+
+async def test_mailbox_agent_close_does_not_deadlock_during_withdrawal() -> None:
+    import asyncio
+
+    from linch import Agent, MailboxPlugin
+    from linch.coordination.mailbox import InMemoryMailbox
+    from linch.ext.evals import ScriptedProvider
+
+    agent = Agent(model="m", provider=ScriptedProvider([]), result_offload=None)
+    await agent.use(MailboxPlugin(), InMemoryMailbox())
+    await asyncio.wait_for(agent.close(), timeout=2)
 
 
 # --- drain into next turn ----------------------------------------------------
@@ -102,7 +157,7 @@ async def test_pending_mailbox_message_drains_into_next_turn() -> None:
     from linch.ext.evals import ScriptedProvider, TextTurn
 
     box = InMemoryMailbox()
-    agent = _agent(ScriptedProvider([TextTurn(text="done")]), mailbox=box)
+    agent = await _agent(ScriptedProvider([TextTurn(text="done")]), mailbox=box)
     session = await agent.session()
     session.mailbox_address = "alice"
     await box.send(
@@ -118,12 +173,40 @@ async def test_pending_mailbox_message_drains_into_next_turn() -> None:
     assert any(m.role == "user" and "hello-alice" in _texts(m) for m in session.provider_view)
 
 
+async def test_durable_mailbox_delivery_is_committed_once() -> None:
+    from linch import Agent, MailboxPlugin
+    from linch.coordination.mailbox import InMemoryMailbox, MailboxMessage
+    from linch.durability import DurabilityOptions
+    from linch.ext.evals import ScriptedProvider, TextTurn
+    from linch.sessions import InMemorySessionStore
+
+    box = InMemoryMailbox()
+    agent = Agent(
+        model="m",
+        provider=ScriptedProvider([TextTurn(text="one"), TextTurn(text="two")]),
+        session_store=InMemorySessionStore(),
+        durability=DurabilityOptions(durable_inbox=True),
+        result_offload=None,
+    )
+    await agent.use(MailboxPlugin(), box)
+    session = await agent.session()
+    session.mailbox_address = "alice"
+    await box.send(MailboxMessage(sender="bob", recipient="alice", content="durable", id="stable"))
+
+    first = [event async for event in session.run("go")]
+    second = [event async for event in session.run("again")]
+
+    assert sum(event.type == "user" and event.subtype == "notification" for event in first) == 1
+    assert not any(event.type == "user" and event.subtype == "notification" for event in second)
+    assert sum("durable" in _texts(message) for message in session.provider_view) == 1
+
+
 async def test_no_drain_without_address() -> None:
     from linch.coordination.mailbox import InMemoryMailbox, MailboxMessage
     from linch.ext.evals import ScriptedProvider, TextTurn
 
     box = InMemoryMailbox()
-    agent = _agent(ScriptedProvider([TextTurn(text="done")]), mailbox=box)
+    agent = await _agent(ScriptedProvider([TextTurn(text="done")]), mailbox=box)
     session = await agent.session()
     # No mailbox_address set → nothing is drained even though a message exists
     # for some other address.
@@ -136,13 +219,57 @@ async def test_no_drain_without_address() -> None:
     assert len(await box.drain("alice")) == 1
 
 
+async def test_durable_mailbox_releases_unacknowledged_claims_on_error() -> None:
+    from linch import Agent, MailboxPlugin
+    from linch.coordination.mailbox import InMemoryMailbox, MailboxMessage
+    from linch.durability import DurabilityOptions
+    from linch.ext.evals import ScriptedProvider, TextTurn
+    from linch.sessions import InMemorySessionStore
+
+    class FailingAckMailbox(InMemoryMailbox):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fail = True
+            self.released = 0
+
+        async def ack(self, claims: Any) -> None:
+            if self.fail:
+                self.fail = False
+                raise RuntimeError("ack failed")
+            await super().ack(claims)
+
+        async def release(self, claims: Any) -> None:
+            self.released += len(claims)
+            await super().release(claims)
+
+    box = FailingAckMailbox()
+    agent = Agent(
+        model="m",
+        provider=ScriptedProvider([TextTurn(text="recovered")]),
+        session_store=InMemorySessionStore(),
+        durability=DurabilityOptions(durable_inbox=True),
+        result_offload=None,
+    )
+    await agent.use(MailboxPlugin(), box)
+    session = await agent.session()
+    session.mailbox_address = "alice"
+    await box.send(MailboxMessage(sender="bob", recipient="alice", content="retry-me"))
+
+    failed = [event async for event in session.run("first")]
+    recovered = [event async for event in session.run("second")]
+
+    assert any(event.type == "error" for event in failed)
+    assert box.released == 1
+    assert any(event.type == "user" and event.subtype == "notification" for event in recovered)
+
+
 async def test_spawned_worker_gets_its_display_name_as_address() -> None:
     from linch.coordination.mailbox import InMemoryMailbox
     from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.subagents.default_agent import DEFAULT_AGENT
     from linch.subagents.runner import RunSubagentArgs, run_subagent
 
-    agent = _agent(ScriptedProvider([TextTurn(text="done")]), mailbox=InMemoryMailbox())
+    agent = await _agent(ScriptedProvider([TextTurn(text="done")]), mailbox=InMemoryMailbox())
     parent = await agent.session()
 
     result = await run_subagent(
@@ -167,7 +294,7 @@ async def test_worker_address_unset_without_mailbox() -> None:
     from linch.subagents.default_agent import DEFAULT_AGENT
     from linch.subagents.runner import RunSubagentArgs, run_subagent
 
-    agent = _agent(ScriptedProvider([TextTurn(text="done")]))  # no mailbox
+    agent = await _agent(ScriptedProvider([TextTurn(text="done")]))  # no mailbox
     parent = await agent.session()
 
     result = await run_subagent(
@@ -200,7 +327,7 @@ async def test_agent_sends_to_peer_via_tool_during_turn() -> None:
             TextTurn(text="sent"),
         ]
     )
-    agent = _agent(provider, mailbox=box)
+    agent = await _agent(provider, mailbox=box)
     session = await agent.session()
     session.mailbox_address = "alice"
 
