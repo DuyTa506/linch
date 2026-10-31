@@ -37,8 +37,8 @@ from .checkpoint import (
     _interrupted_tool_result_block,
     _last_message_has_tool_results,
     _loop_guard_is_active,
-    _message_matches,
     _recover_completed_tool_results,
+    _replayed_feedback_present,
     _tool_result_block_from_end,
 )
 
@@ -63,6 +63,7 @@ class ToolBatchContext:
     persist_event: Callable[[Event], Awaitable[None]]
     dispatch_lifecycle: Callable[..., Awaitable[None]]
     emit_error_terminal: Callable[..., AsyncIterator[Event]]
+    observe_results: Callable[[list[ToolUseBlock], dict[str, ToolResultBlock]], None] | None = None
     force_final_pending: bool = False
     terminal: bool = False
 
@@ -87,6 +88,17 @@ async def run_tool_batch(ctx: ToolBatchContext) -> AsyncIterator[Event]:
         )
         if resuming_turn
         else {}
+    )
+    background_calls = (
+        {
+            (row.event.tool_use_id, row.event.tool_name)
+            for row in ctx.stored_events
+            if row.seq > (ctx.checkpoint.tool_batch_event_after_seq or 0)
+            and isinstance(row.event, ToolCallStartEvent)
+            and row.event.input.get("run_in_background")
+        }
+        if ctx.observe_results is not None
+        else None
     )
     recovery_hints: dict[str, str] = {}
     missing_tool_blocks = [block for block in tool_blocks if block.id not in completed_tool_results]
@@ -136,6 +148,8 @@ async def run_tool_batch(ctx: ToolBatchContext) -> AsyncIterator[Event]:
                 status="waiting_permission",
             )
         elif isinstance(event, ToolCallStartEvent):
+            if background_calls is not None and event.input.get("run_in_background"):
+                background_calls.add((event.tool_use_id, event.tool_name))
             # A started-but-unfinished tool is recovered as interrupted from
             # the durable event log if a consumer crashes at the yield below.
             completed_tool_results.setdefault(
@@ -190,6 +204,11 @@ async def run_tool_batch(ctx: ToolBatchContext) -> AsyncIterator[Event]:
     if not already_appended:
         await store_call(session, "session.append", session.append([result_message]))
 
+    if ctx.observe_results is not None and background_calls is not None:
+        ctx.observe_results(
+            [block for block in tool_blocks if (block.id, block.name) not in background_calls],
+            completed_tool_results,
+        )
     await ctx.save_checkpoint(
         "tool_results_appended",
         turn_index=ctx.turn_index,
@@ -257,7 +276,14 @@ async def _inject_force_final_reminder(ctx: ToolBatchContext) -> Event:
         "Please provide your final answer now without making further tool calls."
     )
     reminder_message = Message(role="user", content=[TextBlock(text=reminder_text)])
-    already_appended = _replayed_force_final_reminder_present(ctx, reminder_message)
+    already_appended = (
+        ctx.resume_checkpoint is not None
+        and ctx.turn_index == ctx.checkpoint.turn_index
+        and ctx.checkpoint.phase == "tool_results_appended"
+        and _replayed_feedback_present(
+            ctx.session, (reminder_message,), {b.id for b in ctx.checkpoint.pending_tool_blocks}
+        )
+    )
     if not already_appended:
         await store_call(ctx.session, "session.append", ctx.session.append([reminder_message]))
     ctx.force_final_pending = True
@@ -265,27 +291,3 @@ async def _inject_force_final_reminder(ctx: ToolBatchContext) -> Event:
     await ctx.persist_event(event)
     await ctx.save_checkpoint("turn_complete", turn_index=ctx.turn_index)
     return event
-
-
-def _replayed_force_final_reminder_present(ctx: ToolBatchContext, reminder: Message) -> bool:
-    """Find a prior reminder only in this replayed batch's history tail."""
-    if not (
-        ctx.resume_checkpoint is not None
-        and ctx.turn_index == ctx.checkpoint.turn_index
-        and ctx.checkpoint.phase == "tool_results_appended"
-    ):
-        return False
-    tool_ids = {
-        block.id for block in ctx.checkpoint.pending_tool_blocks if isinstance(block, ToolUseBlock)
-    }
-    if not tool_ids:
-        return False
-    for message in reversed(ctx.session.session_log._derived):
-        if _message_matches(message, reminder):
-            return True
-        result_ids = {
-            block.tool_use_id for block in message.content if isinstance(block, ToolResultBlock)
-        }
-        if message.role == "user" and result_ids == tool_ids:
-            return False
-    return False

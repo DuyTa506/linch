@@ -21,20 +21,22 @@ from ..events import (
     Event,
     LoopGuardEvent,
     ResultEvent,
-    UserEvent,
     VerificationEvent,
 )
 from ..session import Session
 from ..types import (
-    ContentBlock,
     Message,
     StopReason,
     TextBlock,
-    ToolResultBlock,
     ToolUseBlock,
     Usage,
 )
-from .checkpoint import _flush_events, _persist_event
+from .checkpoint import (
+    _flush_events,
+    _persist_event,
+    _primary_control_message,
+)
+from .feedback import append_feedback
 from .request import final_text
 
 _FENCED_JSON_RE = re.compile(r"```(?:json)?\s*\n?(.*?)```", re.DOTALL | re.IGNORECASE)
@@ -323,10 +325,8 @@ async def _gate_retry_tail(
     from ..skills.system_reminder import wrap_in_system_reminder
 
     message = Message(role="user", content=[TextBlock(text=wrap_in_system_reminder(feedback))])
-    await store_call(session, "session.append", session.append([message]))
-    event: Event = UserEvent(message=message)
-    await _persist_event(session, run_id, event)
-    yield event
+    async for event in append_feedback(session, run_id, (message,), paired=True):
+        yield event
 
 
 async def _final_tool_retry_tail(
@@ -347,29 +347,14 @@ async def _final_tool_retry_tail(
     ``tool_result``).  So we answer every ``tool_use`` in the assistant turn —
     the terminal one carries the repair *feedback*, any others are marked not
     executed — which both satisfies pairing and delivers the instruction."""
-    content: list[ContentBlock] = []
-    for block in tool_blocks:
-        if block.id == final_id:
-            content.append(
-                ToolResultBlock(
-                    tool_use_id=block.id,
-                    content=feedback,
-                    is_error=final_is_error,
-                )
-            )
-        else:
-            content.append(
-                ToolResultBlock(
-                    tool_use_id=block.id,
-                    content="Tool not executed; revise and resubmit your final answer.",
-                    is_error=True,
-                )
-            )
-    message = Message(role="user", content=content)
-    await store_call(session, "session.append", session.append([message]))
-    event: Event = UserEvent(message=message)
-    await _persist_event(session, run_id, event)
-    yield event
+    paired = _primary_control_message(
+        Message(role="assistant", content=list(tool_blocks)),
+        feedback,
+        final_id,
+        final_is_error,
+    )
+    async for event in append_feedback(session, run_id, (paired,), paired=True):
+        yield event
 
 
 @dataclass(slots=True)

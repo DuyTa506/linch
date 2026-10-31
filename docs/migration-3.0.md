@@ -14,6 +14,13 @@ schemas. `linch.RUN_SCHEMA_VERSION` reflects the shared private wire version.
 
 ## API and internal cleanup
 
+- **WP7 reliability:** `Agent` now defaults to `ReliabilityPolicy()` for bounded
+  invalid-response corrections; pass `reliability=None` to opt out. Optional
+  `ToolPrerequisite` and `CompletionGate` rules use successful foreground calls
+  in the current run. Text `<tool_call>` rescue is dropped: whole-text envelopes
+  request a native resend and never execute tools. Reliability policy is part
+  of the resume contract; changed policies require a new run.
+
 Each item below records a removal or consolidation in the legacy sweep.
 Private helper names are listed for maintainers; supported application imports
 remain the names in `linch.__all__`.

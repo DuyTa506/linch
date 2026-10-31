@@ -376,6 +376,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         dispatch_lifecycle=_dispatch_lifecycle,
     )
     try:
+        _runtime.bind_run()
         async for _startup_event in initialize_run(_startup_ctx):
             yield _startup_event
         if _startup_ctx.blocked:
@@ -414,6 +415,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             dispatch_before_final_answer=_dispatch_before_final_answer,
             dispatch_stop=_dispatch_stop,
             usage_complete=lambda: ledger.usage_complete,
+            turn_stopping=_runtime.turn_stopping,
         )
         _finalization = RunFinalization(_fctx, _runtime)
 
@@ -433,34 +435,12 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 yield event
             _final_result = _finalization.result
 
-        async def _finalize_final_tool_answer(
-            turn_index: int,
-            tool_blocks: list[ToolUseBlock],
-            final_block: ToolUseBlock,
-        ) -> AsyncIterator[Event]:
+        async def _finalize_answer(turn_index: int, **answer: Any) -> AsyncIterator[Event]:
             nonlocal _final_result, active_primary
             active_primary = None
             _runtime.active_primary = None
-            async for event in _finalization.finalize_final_tool(
-                turn_index=turn_index,
-                tool_blocks=tool_blocks,
-                final_block=final_block,
-                forced_final_turn=_forced_final_turn,
-            ):
-                yield event
-            _final_result = _finalization.result
-
-        async def _finalize_text_answer(
-            turn_index: int,
-            assembly: AssistantAssembly,
-        ) -> AsyncIterator[Event]:
-            nonlocal _final_result, active_primary
-            active_primary = None
-            _runtime.active_primary = None
-            async for event in _finalization.finalize_text(
-                turn_index=turn_index,
-                assembly=assembly,
-                forced_final_turn=_forced_final_turn,
+            async for event in _finalization.finalize(
+                turn_index=turn_index, forced_final_turn=_forced_final_turn, **answer
             ):
                 yield event
             _final_result = _finalization.result
@@ -508,12 +488,14 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             emit_error_terminal=_emit_error_terminal,
             drain_auxiliary_usage=_drain_auxiliary_usage,
             save_checkpoint=_save_checkpoint,
+            turn_stopping=_runtime.turn_stopping,
             state=_resume_state,
         )
         async for _resume_event in recover_resume(_resume_ctx):
             yield _resume_event
         if _resume_state.terminal:
             return
+        _runtime.replayed_feedback = _resume_state.replayed_feedback
         _recovered_primary_projection = _resume_state.recovered_primary_projection
         _recovered_primary_prefix = _resume_state.recovered_primary_prefix
         _recovered_compaction = _resume_state.recovered_compaction
@@ -790,6 +772,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 active_primary=active_primary,
                 budget=_budget,
                 force_final_pending=_force_final_pending,
+                turn_stopping=_runtime.turn_stopping,
             )
 
             async def _bind_provider_primary(
@@ -817,6 +800,10 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             _provider_ctx.save_checkpoint = _save_provider_checkpoint
             async for _provider_event in run_provider_turn(_provider_ctx):
                 yield _provider_event
+            if _provider_ctx.continued:
+                _recovered_primary_projection = None
+                await _end_active_turn()
+                continue
             assembly = _provider_ctx.assembly
             projection = _provider_ctx.projection
             control = _provider_ctx.control
@@ -858,8 +845,8 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 tool_blocks = [b for b in assembly.message.content if isinstance(b, ToolUseBlock)]
                 final_block = next((b for b in tool_blocks if b.name == effective_final_tool), None)
                 if final_block is not None:
-                    async for event in _finalize_final_tool_answer(
-                        turn_index, tool_blocks, final_block
+                    async for event in _finalize_answer(
+                        turn_index, tool_blocks=tool_blocks, final_block=final_block
                     ):
                         yield event
                     if _final_result is not None:
@@ -898,8 +885,8 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                     await _end_active_turn()
                     await _save_checkpoint("turn_complete", turn_index=turn_index)
                     continue
-                async for event in _finalize_text_answer(
-                    turn_index, _assembly_with_truncation_prefix(assembly)
+                async for event in _finalize_answer(
+                    turn_index, assembly=_assembly_with_truncation_prefix(assembly)
                 ):
                     yield event
                 if _final_result is not None:
@@ -926,6 +913,12 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 dispatch_lifecycle=_dispatch_lifecycle,
                 emit_error_terminal=_emit_error_terminal,
                 force_final_pending=_force_final_pending,
+                observe_results=(
+                    _runtime.reliability.observe_results
+                    if _runtime.reliability is not None
+                    and _runtime.reliability.policy.referenced_tools
+                    else None
+                ),
             )
 
             async def _save_tool_checkpoint(
@@ -983,6 +976,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         ):
             yield event
     finally:
+        await _runtime.unbind_run()
         try:
             if _runtime.lease_lost is None:
                 if (

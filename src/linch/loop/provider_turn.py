@@ -16,7 +16,13 @@ from .._telemetry import store_call
 from ..compaction import build_compaction_event, reset_read_tracker_after_compaction
 from ..context import context_budget_to_dict
 from ..errors import ConfigError
-from ..events import AssistantEvent, CompactionEvent, ErrorEvent, Event, PromptCacheAdvisoryEvent
+from ..events import (
+    AssistantEvent,
+    CompactionEvent,
+    ErrorEvent,
+    Event,
+    PromptCacheAdvisoryEvent,
+)
 from ..model_calls import (
     ModelCallReceipt,
     _AccountedAuxiliaryCaller,
@@ -27,6 +33,7 @@ from ..model_calls import (
 from ..run_store import LeaseLostError
 from ..types import AssistantAssembly, Message, ProviderRequest, Usage
 from .checkpoint import _message_digest, _primary_control_message
+from .feedback import correct_invalid_response
 from .request import _build_context_result, _build_turn_request, _context_selected_tool_names
 from .streaming import (
     _AccountedPrimaryAssembly,
@@ -72,11 +79,11 @@ class ProviderTurnContext:
     budget: Any = None
     force_final_pending: bool = False
     assembly: AssistantAssembly | None = None
-    primary_receipt: ModelCallReceipt | None = None
-    primary_rejected_native: bool = False
     projection: dict[str, Any] | None = None
     control: Message | None = None
     terminal: bool = False
+    continued: bool = False
+    turn_stopping: Any = None
 
 
 @dataclass(slots=True)
@@ -357,10 +364,14 @@ async def run_provider_turn(ctx: ProviderTurnContext) -> AsyncIterator[Event]:
             raise RuntimeError("accounted primary stream ended without a reported receipt")
         _provider_usage = primary_receipt.usage
         ctx.sync_ledger_totals()
+        if ctx.turn_stopping.active:
+            async for event in correct_invalid_response(
+                ctx, assembly, primary_receipt, primary_rejected_native
+            ):
+                yield event
+            if ctx.continued:
+                return
         if primary_rejected_native:
-            ctx.assembly = assembly
-            ctx.primary_receipt = primary_receipt
-            ctx.primary_rejected_native = primary_rejected_native
             ctx.terminal = True
             await ctx.save_checkpoint("provider_pending", turn_index=turn_index)
             async for event in ctx.emit_primary_usage(primary_receipt):
@@ -377,7 +388,6 @@ async def run_provider_turn(ctx: ProviderTurnContext) -> AsyncIterator[Event]:
             async for event in ctx.emit_error_terminal(end_provider_call_usage=_provider_usage):
                 yield event
             return
-
         for partial_event in accepted_partials:
             await ctx.persist_event(partial_event)
 
@@ -411,8 +421,6 @@ async def run_provider_turn(ctx: ProviderTurnContext) -> AsyncIterator[Event]:
         await ledger.record_projection(projection)
         if after_action == "stop":
             ctx.assembly = assembly
-            ctx.primary_receipt = primary_receipt
-            ctx.primary_rejected_native = primary_rejected_native
             ctx.projection = projection
             ctx.terminal = True
             async for event in ctx.emit_primary_usage(primary_receipt):
@@ -439,7 +447,5 @@ async def run_provider_turn(ctx: ProviderTurnContext) -> AsyncIterator[Event]:
             yield event
 
     ctx.assembly = assembly
-    ctx.primary_receipt = primary_receipt
-    ctx.primary_rejected_native = primary_rejected_native
     ctx.projection = projection if not resumed_assistant else None
     ctx.control = control if not resumed_assistant else None

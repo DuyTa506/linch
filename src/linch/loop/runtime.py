@@ -74,8 +74,10 @@ from .dispatch import (
     dispatch_stop,
     dispatch_user_prompt,
 )
+from .reliability import ReliabilityRuntime
 from .request import build_user_message
 from .terminals import _budget_exhausted_tail
+from .turn_stopping import TurnStoppingDispatcher
 
 
 def _error_payload(exc: Exception) -> dict[str, object]:
@@ -553,6 +555,18 @@ class RunRuntime:
         self._checkpointable_hooks_fn: Callable[..., dict[str, Any]] | None = None
         self._checkpoint_extension_state_fn: Callable[..., dict[str, Any]] | None = None
         self.lease_lost: LeaseLostError | None = None
+        policy = getattr(self.agent, "reliability", None)
+        self.reliability: ReliabilityRuntime | None = (
+            ReliabilityRuntime(policy)
+            if policy is not None and (policy.retry_invalid_responses or policy.referenced_tools)
+            else None
+        )
+        self.run_registration = None
+        self.replayed_feedback: tuple[Message, ...] = ()
+        listeners = list(self.agent._turn_stopping_dispatcher.snapshot())
+        if self.reliability is not None:
+            listeners.insert(0, self.reliability.listener)
+        self.turn_stopping = TurnStoppingDispatcher(tuple(listeners))
 
     async def _attempt(
         self, operation: str, awaitable: Callable[[], Awaitable[Any]], original: Exception
@@ -611,6 +625,12 @@ class RunRuntime:
             resume_checkpoint=resume_checkpoint,
         )
         agent = runtime.agent
+        runtime.effective_final_tool = effective_final_tool_name(agent, opts)
+        if (policy := getattr(agent, "reliability", None)) is not None:
+            policy.validate(
+                (tool.name for tool in (session.tools_override or agent.tools).list()),
+                final_tool_name=runtime.effective_final_tool,
+            )
         runtime.exact_model_input = exact_model_input_enabled(agent)
         runtime.model_input_store = (
             require_model_input_snapshot_store(agent) if runtime.exact_model_input else None
@@ -686,7 +706,6 @@ class RunRuntime:
             or getattr(agent, "budget", None)
         )
         session.active_budget = runtime.budget
-        runtime.effective_final_tool = effective_final_tool_name(agent, opts)
         runtime.guard = getattr(agent, "loop_guard", None)
         runtime.guard_state = (
             loop_guard_state_factory() if _loop_guard_is_active(runtime.guard) else None
@@ -716,6 +735,10 @@ class RunRuntime:
             runtime.truncation_attempts = resume_checkpoint.truncation_attempts
             runtime.truncation_prefix = resume_checkpoint.truncation_prefix
             runtime.pending_truncation_feedback = resume_checkpoint.pending_truncation_feedback
+            if "linch.reliability" in resume_checkpoint.extension_state:
+                if runtime.reliability is None:
+                    raise ConfigError("invalid linch.reliability checkpoint state")
+                runtime.reliability.restore(resume_checkpoint.extension_state["linch.reliability"])
             if resume_checkpoint.pending_alignment:
                 session.alignment_queue.extend(
                     alignment_entries_from_checkpoint(resume_checkpoint.pending_alignment)
@@ -791,6 +814,14 @@ class RunRuntime:
             ):
                 raise ConfigError("active primary journal is missing its intent")
         return runtime
+
+    def bind_run(self) -> None:
+        if self.reliability is not None and self.reliability.policy.prerequisites:
+            self.run_registration = self.reliability.bind(self.agent, self.run_id)
+
+    async def unbind_run(self) -> None:
+        if self.run_registration is not None:
+            await self.run_registration.dispose()
 
     async def persist_model_call(self, event: ModelCallEvent) -> None:
         await _persist_event(self.session, self.run_id, event)
@@ -1135,6 +1166,12 @@ class RunRuntime:
             for key in self.checkpointable_hooks:
                 self.checkpoint.extension_state.pop(key, None)
             self.checkpoint.extension_state.update(hook_state)
+        if self.reliability is not None:
+            state = self.reliability.checkpoint_state()
+            if state:
+                self.checkpoint.extension_state["linch.reliability"] = state
+            else:
+                self.checkpoint.extension_state.pop("linch.reliability", None)
         if phase == "tool_batch_pending" or (
             phase == "assistant_appended"
             and self.checkpoint.assistant_message is not None
@@ -1143,7 +1180,11 @@ class RunRuntime:
                 for block in self.checkpoint.assistant_message.content
             )
         ):
-            self.checkpoint.tool_batch_event_after_seq = buf.last_seq if buf is not None else None
+            # Re-checkpointed results still depend on the original batch start events.
+            if phase != "tool_batch_pending" or not self.checkpoint.completed_tool_results:
+                self.checkpoint.tool_batch_event_after_seq = (
+                    buf.last_seq if buf is not None else None
+                )
         elif phase not in ("permission_pending", "tool_executing", "tool_results_appended"):
             self.checkpoint.tool_batch_event_after_seq = None
         if has_pending_events:

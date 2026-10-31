@@ -160,6 +160,7 @@ async def test_empty_text_with_output_schema_reports_parse_error():
     agent = Agent(
         model="gpt-5",
         provider=provider,
+        reliability=None,
         tools=empty_tools(),
         permissions={"mode": "skip-dangerous"},
         session_store=InMemorySessionStore(),
