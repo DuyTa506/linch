@@ -16,7 +16,15 @@ from .._telemetry import store_call
 from ..compaction import build_compaction_event, reset_read_tracker_after_compaction
 from ..context import context_budget_to_dict
 from ..errors import ConfigError
-from ..events import AssistantEvent, CompactionEvent, ErrorEvent, Event, PromptCacheAdvisoryEvent
+from ..events import (
+    AssistantEvent,
+    CompactionEvent,
+    ErrorEvent,
+    Event,
+    PromptCacheAdvisoryEvent,
+    ReliabilityEvent,
+    UserEvent,
+)
 from ..model_calls import (
     ModelCallReceipt,
     _AccountedAuxiliaryCaller,
@@ -25,7 +33,7 @@ from ..model_calls import (
     _projection_record,
 )
 from ..run_store import LeaseLostError
-from ..types import AssistantAssembly, Message, ProviderRequest, Usage
+from ..types import AssistantAssembly, Message, ProviderRequest, TextBlock, Usage
 from .checkpoint import _message_digest, _primary_control_message
 from .request import _build_context_result, _build_turn_request, _context_selected_tool_names
 from .streaming import (
@@ -77,6 +85,8 @@ class ProviderTurnContext:
     projection: dict[str, Any] | None = None
     control: Message | None = None
     terminal: bool = False
+    continued: bool = False
+    reliability: Any = None
 
 
 @dataclass(slots=True)
@@ -361,6 +371,45 @@ async def run_provider_turn(ctx: ProviderTurnContext) -> AsyncIterator[Event]:
             ctx.assembly = assembly
             ctx.primary_receipt = primary_receipt
             ctx.primary_rejected_native = primary_rejected_native
+            reliability = ctx.reliability
+            if (
+                reliability is not None
+                and reliability.policy.retry_invalid_responses
+                and reliability.corrections < reliability.policy.max_correction_turns
+            ):
+                async for event in ctx.emit_primary_usage(primary_receipt):
+                    yield event
+                reliability.corrections += 1
+                feedback = Message(
+                    role="user",
+                    content=[
+                        TextBlock(
+                            text=(
+                                "[Linch] The provider response contained invalid native tool "
+                                "arguments. Nothing was executed. Please resend the tool call "
+                                "using native format."
+                            )
+                        )
+                    ],
+                )
+                if not session.full_history or session.full_history[-1] != feedback:
+                    await store_call(session, "session.append", session.append([feedback]))
+                    event = UserEvent(message=feedback, subtype="notification")
+                    await ctx.persist_event(event)
+                    yield event
+                event = ReliabilityEvent(
+                    mechanism="invalid_response",
+                    action="continue",
+                    reason="rejected_native_arguments",
+                    turn_index=turn_index,
+                    correction_count=reliability.corrections,
+                )
+                await ctx.persist_event(event)
+                yield event
+                await ctx.end_provider_call(stop_reason="error", usage=_provider_usage)
+                await ctx.save_checkpoint("turn_complete", turn_index=turn_index)
+                ctx.continued = True
+                return
             ctx.terminal = True
             await ctx.save_checkpoint("provider_pending", turn_index=turn_index)
             async for event in ctx.emit_primary_usage(primary_receipt):
@@ -380,6 +429,47 @@ async def run_provider_turn(ctx: ProviderTurnContext) -> AsyncIterator[Event]:
 
         for partial_event in accepted_partials:
             await ctx.persist_event(partial_event)
+
+        if (
+            ctx.reliability is not None
+            and ctx.reliability.policy.retry_invalid_responses
+            and assembly.stop_reason != "tool_use"
+            and _invalid_response_reason(assembly) is not None
+            and ctx.reliability.corrections < ctx.reliability.policy.max_correction_turns
+        ):
+            async for event in ctx.emit_primary_usage(primary_receipt):
+                yield event
+            ctx.reliability.corrections += 1
+            reason = _invalid_response_reason(assembly) or "invalid_response"
+            feedback = Message(
+                role="user",
+                content=[
+                    TextBlock(
+                        text=(
+                            "[Linch] The provider response was invalid. Nothing was executed. "
+                            "Please resend the response using native tool-call format."
+                        )
+                    )
+                ],
+            )
+            if not session.full_history or session.full_history[-1] != feedback:
+                await store_call(session, "session.append", session.append([feedback]))
+                event = UserEvent(message=feedback, subtype="notification")
+                await ctx.persist_event(event)
+                yield event
+            event = ReliabilityEvent(
+                mechanism="invalid_response",
+                action="continue",
+                reason=reason,
+                turn_index=turn_index,
+                correction_count=ctx.reliability.corrections,
+            )
+            await ctx.persist_event(event)
+            yield event
+            await ctx.end_provider_call(stop_reason=assembly.stop_reason, usage=_provider_usage)
+            await ctx.save_checkpoint("turn_complete", turn_index=turn_index)
+            ctx.continued = True
+            return
 
         (
             assembly,
@@ -443,3 +533,15 @@ async def run_provider_turn(ctx: ProviderTurnContext) -> AsyncIterator[Event]:
     ctx.primary_rejected_native = primary_rejected_native
     ctx.projection = projection if not resumed_assistant else None
     ctx.control = control if not resumed_assistant else None
+
+
+def _invalid_response_reason(assembly: AssistantAssembly) -> str | None:
+    """Recognize only the fixed invalid-response shapes, never prose examples."""
+    text = "".join(
+        block.text for block in assembly.message.content if isinstance(block, TextBlock)
+    ).strip()
+    if not text:
+        return "empty_end_turn"
+    if text.startswith("<tool_call>") and text.endswith("</tool_call>"):
+        return "text_tool_call_envelope"
+    return None

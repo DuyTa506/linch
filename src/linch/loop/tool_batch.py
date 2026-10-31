@@ -65,6 +65,7 @@ class ToolBatchContext:
     emit_error_terminal: Callable[..., AsyncIterator[Event]]
     before_permissions: Callable[[Any], Awaitable[str | None]] | None = None
     on_foreground_result: Callable[[Any, Any, Any], Awaitable[None]] | None = None
+    reliability: Any = None
     force_final_pending: bool = False
     terminal: bool = False
 
@@ -101,6 +102,10 @@ async def run_tool_batch(ctx: ToolBatchContext) -> AsyncIterator[Event]:
             pending_tool_blocks=tool_blocks,
             completed_tool_results=completed_tool_results,
         )
+
+    reliability = getattr(ctx, "reliability", None)
+    if reliability is not None:
+        reliability.begin_batch()
 
     async def checkpoint_tool_executing() -> None:
         """Persist the resolved permission decisions before any tool starts."""

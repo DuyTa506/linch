@@ -36,26 +36,29 @@ class TurnStoppingDispatcher:
     __slots__ = ("_listeners",)
 
     def __init__(self, listeners: tuple[Any, ...] = ()) -> None:
-        self._listeners = list(listeners)
+        self._listeners = [(object(), listener) for listener in listeners]
 
     @property
     def active(self) -> bool:
         return bool(self._listeners)
 
+    def snapshot(self) -> tuple[Any, ...]:
+        return tuple(listener for _token, listener in self._listeners)
+
     def register(self, listener: Any) -> Disposable:
-        self._listeners.append(listener)
-        marker = listener
+        token = object()
+        self._listeners.append((token, listener))
 
         def remove() -> None:
             try:
-                self._listeners.remove(marker)
+                self._listeners.remove((token, listener))
             except ValueError:
-                pass
+                return
 
         return Disposable(remove)
 
     async def dispatch(self, event: TurnStopping) -> TurnStoppingDecision:
-        for listener in tuple(self._listeners):
+        for _token, listener in tuple(self._listeners):
             value = listener(event)
             if hasattr(value, "__await__"):
                 value = await value
@@ -63,7 +66,5 @@ class TurnStoppingDispatcher:
                 continue
             if isinstance(value, TurnStoppingDecision):
                 return value
-            if isinstance(value, str) and value == "accept":
-                return TurnStoppingDecision("accept")
             raise TypeError("turn-stopping listeners must return TurnStoppingDecision or None")
         return TurnStoppingDecision("accept")

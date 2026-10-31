@@ -74,8 +74,10 @@ from .dispatch import (
     dispatch_stop,
     dispatch_user_prompt,
 )
+from .reliability import ReliabilityRuntime
 from .request import build_user_message
 from .terminals import _budget_exhausted_tail
+from .turn_stopping import TurnStoppingDispatcher
 
 
 def _error_payload(exc: Exception) -> dict[str, object]:
@@ -553,6 +555,16 @@ class RunRuntime:
         self._checkpointable_hooks_fn: Callable[..., dict[str, Any]] | None = None
         self._checkpoint_extension_state_fn: Callable[..., dict[str, Any]] | None = None
         self.lease_lost: LeaseLostError | None = None
+        policy = getattr(self.agent, "reliability", None)
+        self.reliability: ReliabilityRuntime | None = (
+            ReliabilityRuntime(policy) if policy is not None else None
+        )
+        configured = getattr(self.agent, "_turn_stopping_dispatcher", None)
+        self.turn_stopping = (
+            TurnStoppingDispatcher(configured.snapshot())
+            if configured is not None
+            else TurnStoppingDispatcher()
+        )
 
     async def _attempt(
         self, operation: str, awaitable: Callable[[], Awaitable[Any]], original: Exception
@@ -712,6 +724,11 @@ class RunRuntime:
             runtime.truncation_attempts = resume_checkpoint.truncation_attempts
             runtime.truncation_prefix = resume_checkpoint.truncation_prefix
             runtime.pending_truncation_feedback = resume_checkpoint.pending_truncation_feedback
+            if runtime.reliability is not None:
+                runtime.reliability = ReliabilityRuntime.restore(
+                    runtime.reliability.policy,
+                    resume_checkpoint.extension_state.get("linch.reliability"),
+                )
             if resume_checkpoint.pending_alignment:
                 session.alignment_queue.extend(
                     alignment_entries_from_checkpoint(resume_checkpoint.pending_alignment)
@@ -1126,6 +1143,12 @@ class RunRuntime:
             for key in self.checkpointable_hooks:
                 self.checkpoint.extension_state.pop(key, None)
             self.checkpoint.extension_state.update(hook_state)
+        if self.reliability is not None:
+            state = self.reliability.checkpoint_state()
+            if state:
+                self.checkpoint.extension_state["linch.reliability"] = state
+            else:
+                self.checkpoint.extension_state.pop("linch.reliability", None)
         if phase == "tool_batch_pending" or (
             phase == "assistant_appended"
             and self.checkpoint.assistant_message is not None
