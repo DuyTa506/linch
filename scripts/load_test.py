@@ -30,7 +30,11 @@ TERMINAL = "('completed','failed','aborted')"
 
 
 async def pool_for(a: argparse.Namespace, *, direct: bool = False, name: str = "audit") -> Any:
-    settings = {"application_name": name}
+    dsn = a.dsn if direct else a.proxy_dsn
+    if getattr(a, "pgbouncer", False) and not direct:
+        parsed = urlsplit(dsn)
+        dsn = parsed._replace(netloc=f"{name}@{parsed.hostname}:{parsed.port}").geturl()
+    settings = {} if getattr(a, "pgbouncer", False) and not direct else {"application_name": name}
     if direct or not getattr(a, "pgbouncer", False):
         settings["search_path"] = a.schema
     options: dict[str, Any] = dict(
@@ -42,7 +46,7 @@ async def pool_for(a: argparse.Namespace, *, direct: bool = False, name: str = "
     if getattr(a, "pgbouncer", False) and not direct:
         options["statement_cache_size"] = 0
     return await asyncpg.create_pool(
-        a.dsn if direct else a.proxy_dsn,
+        dsn,
         **options,
     )
 
@@ -271,15 +275,9 @@ def free_port() -> int:
         return sock.getsockname()[1]
 
 
-def pgbouncer_config(
-    schema: str, port: int, logfile: str, pidfile: str, authfile: str, user: str
-) -> str:
-    database = (
-        f"postgres = host=127.0.0.1 port=55432 dbname=postgres user={user} "
-        f'''connect_query='SET search_path TO "{schema}",public' '''.rstrip()
-    )
+def pgbouncer_config(port: int, logfile: str, pidfile: str, authfile: str) -> str:
     return f"""[databases]
-{database}
+postgres = host=127.0.0.1 port=55432 dbname=postgres
 
 [pgbouncer]
 listen_addr = 127.0.0.1
@@ -288,7 +286,7 @@ unix_socket_dir =
 pool_mode = transaction
 auth_type = trust
 auth_file = {authfile}
-ignore_startup_parameters = search_path,application_name
+ignore_startup_parameters = search_path
 max_client_conn = 512
 default_pool_size = 64
 logfile = {logfile}
@@ -389,23 +387,23 @@ async def run_point(a: argparse.Namespace) -> dict[str, Any]:
             api, port = free_port(), free_port()
             upstream_port = 55432
             if a.pgbouncer:
-                a.pg_user = "load_" + uuid4().hex[:16]
-                await admin.execute(f'CREATE ROLE "{a.pg_user}" LOGIN SUPERUSER')
-                await admin.execute(
-                    f'ALTER ROLE "{a.pg_user}" SET search_path TO "{a.schema}",public'
-                )
+                a.pg_roles = []
+                for role in [*(f"w-{i}" for i in range(a.workers)), "api"]:
+                    await admin.execute(f'CREATE ROLE "{role}" LOGIN SUPERUSER')
+                    await admin.execute(
+                        f'ALTER ROLE "{role}" SET search_path TO "{a.schema}",public'
+                    )
+                    a.pg_roles.append(role)
                 upstream_port = free_port()
                 authfile = Path(a.logs) / "pgbouncer.users"
-                authfile.write_text(f'"{a.pg_user}" ""\n')
+                authfile.write_text("".join(f'"{role}" ""\n' for role in a.pg_roles))
                 config = Path(a.logs) / "pgbouncer.ini"
                 config.write_text(
                     pgbouncer_config(
-                        a.schema,
                         upstream_port,
                         str(Path(a.logs) / "pgbouncer.log"),
                         str(Path(a.logs) / "pgbouncer.pid"),
                         str(authfile),
-                        a.pg_user,
                     )
                 )
                 await spawn("pgbouncer", ["/usr/sbin/pgbouncer", str(config)])
@@ -436,13 +434,12 @@ async def run_point(a: argparse.Namespace) -> dict[str, Any]:
                 toxic["attributes"] = dict(latency=delay, jitter=0)
                 await http(api, "/proxies/pg/toxics", toxic)
             parsed = urlsplit(a.dsn)
-            address = (
-                f"{getattr(a, 'pg_user', None) or parsed.username or 'postgres'}@127.0.0.1:{port}"
-            )
+            address = f"{parsed.username or 'postgres'}@127.0.0.1:{port}"
             a.proxy_dsn = parsed._replace(netloc=address).geturl()
         pool = await pool_for(a, direct=True)
         await install(pool)
-        await pool.execute(AUDIT_DDL)
+        ddl = AUDIT_DDL.replace("current_setting('application_name')", "current_user")
+        await pool.execute(ddl if a.pgbouncer else AUDIT_DDL)
         a.start = time.time() + 2
         a.steady = a.start + a.warmup
         a.end = a.steady + a.duration
@@ -573,8 +570,8 @@ async def run_point(a: argparse.Namespace) -> dict[str, Any]:
             pool.terminate()
         try:
             await admin.execute(f'DROP SCHEMA IF EXISTS "{a.schema}" CASCADE')
-            if getattr(a, "pg_user", None):
-                await admin.execute(f'DROP ROLE IF EXISTS "{a.pg_user}"')
+            for role in getattr(a, "pg_roles", []):
+                await admin.execute(f'DROP ROLE IF EXISTS "{role}"')
         finally:
             await asyncio.wait_for(admin.close(), 10)
 
