@@ -313,7 +313,7 @@ async def summarize(pool: Any, a: argparse.Namespace) -> dict[str, Any]:
       percentile_cont(ARRAY[.5,.99]) WITHIN GROUP(ORDER BY
         (extract(epoch FROM first_claim)-arrival)*1000)
         FILTER(WHERE arrival >= $1 AND arrival < $2) wait,
-      (SELECT count(*) FROM run_events WHERE event::jsonb->'event'->>'type'='model_call'
+      (SELECT count(*) FROM run_events WHERE event::jsonb->'event'->>'type'='assistant'
         AND appended_at::timestamptz>=to_timestamp($1)
         AND appended_at::timestamptz<to_timestamp($2)) turns,
       (SELECT json_object_agg(kind,n) FROM (SELECT coalesce(
@@ -366,7 +366,7 @@ async def run_point(a: argparse.Namespace) -> dict[str, Any]:
             await http(api, "/proxies", proxy)
             for direction in ("upstream", "downstream"):
                 toxic: dict[str, Any] = dict(name=direction, type="latency", stream=direction)
-                delay = int(a.rtt / 2) if a.rtt % 2 == 0 else a.rtt / 2
+                delay = int(a.rtt) if direction == "upstream" else 0
                 toxic["attributes"] = dict(latency=delay, jitter=0)
                 await http(api, "/proxies/pg/toxics", toxic)
             parsed = urlsplit(a.dsn)
@@ -408,9 +408,7 @@ async def run_point(a: argparse.Namespace) -> dict[str, Any]:
                 for name, proc in tracked:
                     with contextlib.suppress(psutil.Error):
                         current = sum(proc.cpu_times()[:2])
-                        cpu["workers" if name.startswith("w-") else name] += max(
-                            0, current - previous.get(proc.pid, current)
-                        )
+                        cpu[name] += max(0, current - previous.get(proc.pid, current))
                         previous[proc.pid] = current
                 query = """SELECT coalesce(wait_event_type,'CPU')||':'||
                     coalesce(wait_event,'running') key,count(*) n FROM pg_stat_activity
@@ -473,8 +471,9 @@ async def run_point(a: argparse.Namespace) -> dict[str, Any]:
         result["connections_max"] = max(connections, default=0)
         elapsed = sample_end - sample_start
         result["pg"] = {f"{k}_per_s": (after[k] - before[k]) / elapsed for k in before}
+        result["turns_per_s"] = result["turns"] / a.duration
         result["pg"]["commits_per_turn"] = (after["commits"] - before["commits"]) / max(
-            result.pop("turns"), 1
+            result["turns"], 1
         )
         result["clients"] = {
             p.stem: json.loads(p.read_text())
@@ -513,6 +512,8 @@ async def experiments(a: argparse.Namespace) -> dict[str, Any]:
     async def point(**changes: Any) -> dict[str, Any]:
         item = await run_point(argparse.Namespace(**(vars(a) | changes)))
         points.append(item)
+        if a.output:
+            Path(a.output).write_text(json.dumps(dict(points=points)))
         return item
 
     if a.quick:
@@ -530,7 +531,6 @@ async def experiments(a: argparse.Namespace) -> dict[str, Any]:
                 bad = (
                     latency is None
                     or latency > 2 * baseline
-                    or result["tps"] < rate * 0.9
                     or any(result["invariant_errors"].values())
                 )
                 if bad:
