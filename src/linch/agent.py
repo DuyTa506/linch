@@ -529,7 +529,7 @@ class Agent:
         # Linch is an SDK, not an implicit coding harness.  A bare Agent gets
         # no shell/filesystem authority; applications opt in with their own
         # registry or ``workspace_tools()``/a higher-level preset.
-        self.tools = tools if tools is not None else ToolRegistry()
+        self.tools = tools.copy() if tools is not None else ToolRegistry()
         if self.execution_backend is not None:
             from .tools.builtin import BashTool
 
@@ -618,6 +618,8 @@ class Agent:
         if self.execution_backend is not None:
             self.context.register("execution", self.execution_backend)
         self.context.register("agent", self)
+        self.tool_search = Disposable()
+        self._tool_search_mounted = False
 
     def _initialize_extension_state(
         self,
@@ -1314,6 +1316,11 @@ class Agent:
         # before shared stores are released.
         async with self._session_lock:
             self._require_open()
+            if not self._tool_search_mounted and not self.tool_search.disposed:
+                from .tools.search import ToolSearchPlugin
+
+                self.tool_search = await self.use(ToolSearchPlugin())
+                self._tool_search_mounted = True
             if self.features.mcp:
                 await self.connect_mcp()
             if self.features.skills:
@@ -1550,9 +1557,9 @@ class Agent:
     async def close(self) -> None:
         """Quiesce sessions, then tear down shared resources transactionally.
 
-        Concurrent callers await one shielded task. Caller cancellation never
-        cancels teardown; failures leave the agent quiescing so a later call can
-        retry only resources that have not already closed successfully.
+        Concurrent callers await one shielded task. Caller cancellation waits
+        for owned teardown before propagating; failures leave the agent quiescing
+        so a later call can retry resources that have not closed successfully.
         """
         if self._lifecycle_state == _CLOSED:
             return
@@ -1564,7 +1571,11 @@ class Agent:
             task = asyncio.create_task(self._close_impl())
             task.add_done_callback(_consume_task_exception)
             self._close_task = task
-        await asyncio.shield(task)
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await asyncio.shield(task)
+            raise
 
     async def _close_resource_once(self, resource: Any) -> None:
         """Close one owned resource once, recording success only after it returns."""

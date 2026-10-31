@@ -30,6 +30,7 @@ class MyTool:
     # Optional Phase-11 reliability attributes (all duck-typed via getattr)
     execution_timeout_ms: float                    # per-tool timeout; 0 = opt-out
     retryable: bool                                # opt write/exec tool into retry
+    always_load: bool                              # keep in deferred catalogs when truthy
 
     def validate(self, raw: dict) -> dict: ...
     def resources(self, input: dict) -> list[ResourceAccess]: ...
@@ -72,12 +73,20 @@ external systems.
 
 The scheduler resolves one canonical input before execution:
 
-1. decode and validate the provider's tool call;
-2. reject the call unless that tool was offered in the current provider request;
-3. run `PreToolUse` hooks, which may transform or short-circuit it;
-4. validate the transformed input again;
-5. evaluate rules and `can_use_tool` on that final input;
-6. persist resolved decisions and execute the tool.
+1. decode the provider's raw tool call;
+2. run the optional `tools/resolve` serial veto with the tool name, raw input,
+   and session; the first nonempty reason returns an immediate tool error;
+3. resolve and validate the tool call, then reject it unless that tool was
+   offered in the current provider request;
+4. run `PreToolUse` hooks, which may transform or short-circuit it;
+5. validate the transformed input again;
+6. evaluate rules and `can_use_tool` on that final input;
+7. persist resolved decisions and execute the tool.
+
+The `tools/resolve` callback treats raw input as read-only and runs before tool
+validation, hooks, and permissions. A shared parent `Context` may share its
+event bus across agents, so listeners filter on the supplied session (the
+default tool-search listener checks the owning agent) before returning a veto.
 
 Approval callbacks cannot return Linch 1.x's `updatedInput` rewrite. Input
 mutation belongs in `PreToolUse`, where it is revalidated and permission
@@ -132,7 +141,47 @@ the previous registration when it still owns the slot; disposing a stale handle
 never removes a newer tool. Because teardown may be async, always use
 `await disposer.dispose()` (or `await disposer()`). See [kernel.md](./kernel.md).
 
+### Deferred tool search
+
+`ToolSearchPlugin` is the default request-catalog plugin. It defers tools when
+the offered catalog exceeds 30 tools and defers skill descriptions when more
+than 50 model-invokable skills are present. A tool with a truthy duck-typed
+`always_load` attribute stays offered; all other deferred tools are represented
+by names in the `tool_search` description, without schemas. `tool_search` accepts
+`select:a,b` and plain keyword queries over names and descriptions, returns the
+matching schemas or skill descriptions, and loads the selected names for the
+next request.
+
+Filtering is attached to request construction through the agent's
+`request_catalog` capability. It changes provider offerings only: the normal
+offered-tool boundary, validation, hooks, and permission engine still govern
+execution. A deferred call that bypasses provider compliance receives an
+actionable “search first” tool error. Loaded names are persisted in bounded
+`Session.meta["linch.tool_search"]`; durable metadata is the source of truth
+because search-result content may be offloaded, transformed by middleware, or
+removed from the provider projection during compaction.
+
+The request builder calls `request_catalog.prepare()` before selecting tools so
+late MCP registrations and other dynamic catalogs are evaluated against the
+current counts. Below both thresholds `prepare()` leaves the registry untouched:
+no `tool_search` registration is added and the resolver returns no veto, so the
+request remains byte-identical. Once a threshold is crossed, the catalog
+registers `tool_search`, filters the request after context selection, and
+enables the deferred-call guard; `scheduler.py` does not gain a discovery
+branch. The terminal-tool path retains a turn-stopping guard so a deferred
+terminal call emits the logged search-first feedback before the next request.
+
+The selected-name set is durable session metadata. The current per-request
+candidate/offered/skill-name snapshot is JSON-only session extension state,
+mirrored into `checkpoint.extension_state["linch.session"]` by the runtime for
+mid-turn replay; the plugin does not implement a checkpointable hook.
+
 ### Tool pipeline
+
+Before validation, `agent.context.on("tools/resolve", listener)` registers a
+serial veto. The listener receives `(tool_name, raw_input, session)` and returns
+an immediate-error reason or `None`. Registrations return a `Disposable`; with
+no listeners, resolution uses the original path without dispatching the bus.
 
 `ToolPipeline` is an optional per-Agent extension seam around every tool call:
 

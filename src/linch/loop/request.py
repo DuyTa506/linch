@@ -63,7 +63,11 @@ def final_text(message: Message) -> str | None:
 
 def _re_inject_skill_context(session: Session) -> None:
     agent = session.agent
-    if not agent.skill_listing_text and not session.invoked_skills:
+    listing = agent.skill_listing_text
+    catalog = agent.context.get("request_catalog")
+    if catalog is not None:
+        listing = catalog.skill_listing(session, listing)
+    if not listing and not session.invoked_skills:
         return
     from ..skills.system_reminder import wrap_in_system_reminder
 
@@ -79,8 +83,8 @@ def _re_inject_skill_context(session: Session) -> None:
         if isinstance(block, TextBlock)
     }
 
-    if agent.skill_listing_text:
-        text = wrap_in_system_reminder(agent.skill_listing_text)
+    if listing:
+        text = wrap_in_system_reminder(listing)
         if text not in present_text:
             session.session_log.append(
                 Message(role="user", content=[TextBlock(text=text)]), historical=False
@@ -182,7 +186,12 @@ def _build_turn_request(
     """
     agent = session.agent
 
+    catalog = agent.context.get("request_catalog")
+    if catalog is not None:
+        catalog.prepare()
     tools = _select_context_tools(session, context)
+    if catalog is not None:
+        tools = catalog.select_tools(session, tools)
     if session.system_blocks_override is not None:
         base_system = list(session.system_blocks_override)
     else:

@@ -20,6 +20,7 @@ SKILL_TOOL_SCHEMA = {
 
 class SkillTool:
     name = "Skill"
+    always_load = True
     description = (
         "Invoke a skill by name. Skills are listed in the skill_listing system-reminder. "
         "The skill's body is returned to you so you can act on its instructions in the next turn."
