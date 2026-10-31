@@ -10,9 +10,9 @@ input/output, the final answer), or control the loop (block a tool, stop early,
 force another turn). Runtime traces and metrics come from OpenTelemetry at the
 I/O source; they do not require a telemetry hook.
 
-Every hook chokepoint is a serial point in the generated [lifecycle
-catalog](../architecture/events.md#typed-lifecycle-catalog), so hooks are
-awaited in registration order. The separate `tools/pre-execute`,
+Every hook chokepoint is a `hook` point in the generated [lifecycle
+catalog](../architecture/events.md#typed-lifecycle-catalog); `HookDispatcher`
+awaits hooks in registration order. The separate `tools/pre-execute`,
 `tools/execute`, and `tools/post-execute` points are waterfalls for tool
 wrappers; user hooks stay on the adapter so mutation composition, failure
 isolation, and the security-sensitive `PreToolUse` ordering remain explicit.

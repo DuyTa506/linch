@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from linch.hooks import AgentStartContext, HookDispatcher
+from linch.hooks import AgentStartContext, HookDispatcher, HookEvent
 from linch.kernel import EventBus
 from linch.lifecycle import (
     AGENT_START,
@@ -17,6 +17,10 @@ def test_catalog_points_have_names_payloads_and_modes() -> None:
     assert LIFECYCLE_POINTS
     assert all(point.name and point.payload_type and point.mode for point in LIFECYCLE_POINTS)
     assert TOOL_EXECUTE.payload_type.__name__ == "ToolExecution"
+    hook_names = {event.value for event in HookEvent}
+    hook_points = [point for point in LIFECYCLE_POINTS if point.name in hook_names]
+    assert len(hook_points) == 21
+    assert all(point.mode == "hook" for point in hook_points)
 
 
 @pytest.mark.asyncio
@@ -31,6 +35,20 @@ async def test_event_bus_rejects_a_dispatch_mode_mismatch_without_listeners() ->
 
     with pytest.raises(ValueError, match="turn-stopping.*serial"):
         bus.emit(TURN_STOPPING, object())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["emit", "serial", "waterfall"])
+async def test_event_bus_rejects_hook_points_for_every_kernel_dispatcher(method: str) -> None:
+    bus = EventBus()
+    dispatch = getattr(bus, method)
+    with pytest.raises(ValueError, match="AgentStart.*hook"):
+        if method == "emit":
+            dispatch(AGENT_START, object())
+        elif method == "serial":
+            await dispatch(AGENT_START, object())
+        else:
+            await dispatch(AGENT_START, object(), next=lambda: None)
 
 
 @pytest.mark.asyncio

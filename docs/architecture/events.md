@@ -53,32 +53,32 @@ run `python scripts/generate_event_catalog.py --check` to detect drift.
 <!-- BEGIN GENERATED LIFECYCLE CATALOG -->
 | Point | Payload | Mode | Producers | Consumers |
 |---|---|---|---|---|
-| `AgentStart` | `AgentStartContext` | `serial` | `linch.loop.startup:initialize_run` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
-| `AgentStop` | `AgentStopContext` | `serial` | `linch.loop.runner:_run_loop_impl`<br>`linch.loop.startup:_emit_prompt_block` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
-| `UserPromptSubmit` | `UserPromptSubmitContext` | `serial` | `linch.loop.dispatch:dispatch_user_prompt` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
-| `TurnStart` | `TurnStartContext` | `serial` | `linch.loop.runtime:TurnLifecycle.start_turn` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
-| `TurnStop` | `TurnStopContext` | `serial` | `linch.loop.runtime:TurnLifecycle.end_active_turn` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
-| `BeforeProviderCall` | `BeforeProviderCallContext` | `serial` | `linch.loop.dispatch:dispatch_before_provider_call` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
-| `ProviderCallStart` | `ProviderCallStartContext` | `serial` | `linch.loop.runtime:TurnLifecycle.start_provider_call` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
-| `ProviderCallStop` | `ProviderCallStopContext` | `serial` | `linch.loop.runtime:TurnLifecycle.end_active_provider_call` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
-| `AfterProviderCall` | `AfterProviderCallContext` | `serial` | `linch.loop.dispatch:dispatch_after_provider_call` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
-| `PreToolUse` | `PreToolUseContext` | `serial` | `linch.scheduler:_dispatch_pre_tool_use` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
-| `ToolUseStart` | `ToolUseStartContext` | `serial` | `linch.loop.tool_batch:run_tool_batch` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
-| `ToolUseStop` | `ToolUseStopContext` | `serial` | `linch.loop.tool_batch:run_tool_batch` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
-| `PostToolUse` | `PostToolUseContext` | `serial` | `linch.scheduler:_dispatch_post_tool_use` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
-| `PostToolUseFailure` | `PostToolUseFailureContext` | `serial` | `linch.scheduler:_dispatch_post_tool_use_failure` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
-| `PreCompact` | `PreCompactContext` | `serial` | `linch.compaction:_run_compaction_impl` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
-| `PostCompact` | `PostCompactContext` | `serial` | `linch.compaction:_run_compaction_impl` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
-| `BeforeFinalAnswer` | `BeforeFinalAnswerContext` | `serial` | `linch.loop.dispatch:dispatch_before_final_answer` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
-| `Stop` | `StopContext` | `serial` | `linch.loop.dispatch:dispatch_stop` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
-| `SubagentStart` | `SubagentStartContext` | `serial` | `linch.subagents.runner:continue_subagent`<br>`linch.subagents.runner:run_subagent` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
-| `SubagentStop` | `SubagentStopContext` | `serial` | `linch.subagents.runner:continue_subagent`<br>`linch.subagents.runner:run_subagent` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
-| `EventEmit` | `EventEmitContext` | `serial` | `linch.session:Session._iterate` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
+| `context/service` | `Context + key` | `emit` | `linch.kernel.context:Context._publish_plugin`<br>`linch.kernel.context:Context._withdraw_plugin`<br>`linch.kernel.context:Context.register` | `linch.kernel.plugins:_PluginMount.start` |
+| `AgentStart` | `AgentStartContext` | `hook` | `linch.loop.startup:initialize_run` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
+| `AgentStop` | `AgentStopContext` | `hook` | `linch.loop.runner:_run_loop_impl`<br>`linch.loop.startup:_emit_prompt_block` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
+| `UserPromptSubmit` | `UserPromptSubmitContext` | `hook` | `linch.loop.dispatch:dispatch_user_prompt` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
+| `TurnStart` | `TurnStartContext` | `hook` | `linch.loop.runtime:TurnLifecycle.start_turn` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
+| `TurnStop` | `TurnStopContext` | `hook` | `linch.loop.runtime:TurnLifecycle.end_active_turn` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
+| `BeforeProviderCall` | `BeforeProviderCallContext` | `hook` | `linch.loop.dispatch:dispatch_before_provider_call` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
+| `ProviderCallStart` | `ProviderCallStartContext` | `hook` | `linch.loop.runtime:TurnLifecycle.start_provider_call` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
+| `ProviderCallStop` | `ProviderCallStopContext` | `hook` | `linch.loop.runtime:TurnLifecycle.end_active_provider_call` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
+| `AfterProviderCall` | `AfterProviderCallContext` | `hook` | `linch.loop.dispatch:dispatch_after_provider_call` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
+| `PreToolUse` | `PreToolUseContext` | `hook` | `linch.scheduler:_dispatch_pre_tool_use` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
+| `ToolUseStart` | `ToolUseStartContext` | `hook` | `linch.loop.tool_batch:run_tool_batch` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
+| `ToolUseStop` | `ToolUseStopContext` | `hook` | `linch.loop.tool_batch:run_tool_batch` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
+| `PostToolUse` | `PostToolUseContext` | `hook` | `linch.scheduler:_dispatch_post_tool_use` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
+| `PostToolUseFailure` | `PostToolUseFailureContext` | `hook` | `linch.scheduler:_dispatch_post_tool_use_failure` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
+| `PreCompact` | `PreCompactContext` | `hook` | `linch.compaction:_run_compaction_impl` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
+| `PostCompact` | `PostCompactContext` | `hook` | `linch.compaction:_run_compaction_impl` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
+| `BeforeFinalAnswer` | `BeforeFinalAnswerContext` | `hook` | `linch.loop.dispatch:dispatch_before_final_answer` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
+| `Stop` | `StopContext` | `hook` | `linch.loop.dispatch:dispatch_stop` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
+| `SubagentStart` | `SubagentStartContext` | `hook` | `linch.subagents.runner:continue_subagent`<br>`linch.subagents.runner:run_subagent` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
+| `SubagentStop` | `SubagentStopContext` | `hook` | `linch.subagents.runner:continue_subagent`<br>`linch.subagents.runner:run_subagent` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
+| `EventEmit` | `EventEmitContext` | `hook` | `linch.session:Session._iterate` | `linch.hooks.dispatcher:HookDispatcher.dispatch` |
 | `tools/pre-execute` | `ToolExecution` | `waterfall` | `linch.tools.pipeline:ToolPipeline.run_pre_execute` | `linch.tools.pipeline:ToolPipeline.on_pre_execute` |
 | `tools/execute` | `ToolExecution` | `waterfall` | `linch.tools.pipeline:ToolPipeline.run_execute` | `linch.tools.pipeline:ToolPipeline.on_execute` |
 | `tools/post-execute` | `ToolExecution + result` | `waterfall` | `linch.tools.pipeline:ToolPipeline.run_post_execute` | `linch.tools.pipeline:ToolPipeline.on_post_execute` |
 | `turn-stopping` | `TurnStopping` | `serial` | `linch.loop.turn_stopping:TurnStoppingDispatcher.dispatch` | `linch.loop.turn_stopping:TurnStoppingDispatcher.register` |
-| `context/service` | `Context + key` | `emit` | `linch.kernel.context:Context._publish_plugin`<br>`linch.kernel.context:Context._withdraw_plugin`<br>`linch.kernel.context:Context.register` | `linch.kernel.plugins:_PluginMount.start` |
 <!-- END GENERATED LIFECYCLE CATALOG -->
 
 `BackgroundWorkerEvent` is emitted when a background worker task completes (success or failure); it carries `worker_id`, `status`, and `display_name`.

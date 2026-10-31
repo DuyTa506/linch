@@ -4,11 +4,10 @@ import asyncio
 from collections.abc import Iterable
 from typing import Any, Protocol
 
-from linch.errors import ConfigError
-
-from .. import lifecycle
 from .context import Context
 from .effects import CleanupError, Disposable, EffectScope
+from .errors import ConfigError
+from .events import CONTEXT_SERVICE
 
 
 class Plugin(Protocol):
@@ -57,7 +56,7 @@ class _PluginMount:
         self._closed = False
 
     async def start(self) -> Disposable:
-        self._listener = self.host.on(lifecycle.CONTEXT_SERVICE, lambda c, k: self._reconcile(c, k))
+        self._listener = self.host.on(CONTEXT_SERVICE, lambda c, k: self._reconcile(c, k))
         handle = self.host.effect(lambda: Disposable(self._unmount))
         try:
             await self._reconcile()

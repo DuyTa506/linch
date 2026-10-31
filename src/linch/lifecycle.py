@@ -2,39 +2,13 @@
 
 from __future__ import annotations
 
-import importlib
-from dataclasses import dataclass
-from typing import Any, Literal
-
-DispatchMode = Literal["emit", "serial", "waterfall"]
-
-
-@dataclass(frozen=True, slots=True)
-class LifecyclePoint:
-    """Name one lifecycle point and its payload and dispatch contracts."""
-
-    name: str
-    _payload_ref: str | tuple[str, ...]
-    mode: DispatchMode
-
-    @property
-    def payload_type(self) -> type[Any] | tuple[type[Any], ...]:
-        """Resolve and return the payload type(s) for this point."""
-        refs = self._payload_ref if isinstance(self._payload_ref, tuple) else (self._payload_ref,)
-        resolved = tuple(_resolve_type(ref) for ref in refs)
-        return resolved[0] if len(resolved) == 1 else resolved
-
-
-def _resolve_type(ref: str) -> type[Any]:
-    module_name, _, qualname = ref.rpartition(".")
-    value: Any = importlib.import_module(module_name)
-    for part in qualname.split("."):
-        value = getattr(value, part)
-    return value
+from .kernel.events import CONTEXT_SERVICE as CONTEXT_SERVICE
+from .kernel.events import DispatchMode as DispatchMode
+from .kernel.events import LifecyclePoint as LifecyclePoint
 
 
 def _hook(name: str, payload: str) -> LifecyclePoint:
-    return LifecyclePoint(name, "linch.hooks.contexts." + payload, "serial")
+    return LifecyclePoint(name, "linch.hooks.contexts." + payload, "hook")
 
 
 AGENT_START = _hook("AgentStart", "AgentStartContext")
@@ -69,8 +43,5 @@ TOOL_POST_EXECUTE = LifecyclePoint(
     "waterfall",
 )
 TURN_STOPPING = LifecyclePoint("turn-stopping", "linch.loop.turn_stopping.TurnStopping", "serial")
-CONTEXT_SERVICE = LifecyclePoint(
-    "context/service", ("linch.kernel.context.Context", "builtins.str"), "emit"
-)
 
 LIFECYCLE_POINTS = tuple(value for value in globals().values() if isinstance(value, LifecyclePoint))

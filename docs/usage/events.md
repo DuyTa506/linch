@@ -245,7 +245,9 @@ An explicit `extra={"trace_id": ...}` wins, followed by the active OTel span,
 value explicitly: `logger.info("search complete", extra={"trace_id": ctx.trace_id})`.
 See the generated lifecycle
 catalog in [the architecture guide](../architecture/events.md#typed-lifecycle-catalog)
-for each point's payload and dispatch mode.
+for each point's payload and dispatch mode. Hook points are owned by the
+ordered `HookDispatcher`; tool pipeline points are waterfalls, while
+`turn-stopping` is the serial veto seam.
 
 ---
 

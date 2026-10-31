@@ -20,13 +20,46 @@ from __future__ import annotations
 import inspect
 import logging
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from functools import partial
-from typing import Any
+from typing import Any, Literal
 
-from ..lifecycle import LifecyclePoint
 from .effects import Disposable, _dispose_reverse
 
 logger = logging.getLogger("linch.kernel.events")
+
+DispatchMode = Literal["emit", "serial", "waterfall", "hook"]
+
+
+@dataclass(frozen=True, slots=True)
+class LifecyclePoint:
+    """Name one lifecycle point and its payload and dispatch contracts."""
+
+    name: str
+    _payload_ref: str | tuple[str, ...]
+    mode: DispatchMode
+
+    @property
+    def payload_type(self) -> type[Any] | tuple[type[Any], ...]:
+        """Resolve and return the payload type(s) for this point."""
+        refs = self._payload_ref if isinstance(self._payload_ref, tuple) else (self._payload_ref,)
+        resolved = tuple(_resolve_type(ref) for ref in refs)
+        return resolved[0] if len(resolved) == 1 else resolved
+
+
+def _resolve_type(ref: str) -> type[Any]:
+    import importlib
+
+    module_name, _, qualname = ref.rpartition(".")
+    value: Any = importlib.import_module(module_name)
+    for part in qualname.split("."):
+        value = getattr(value, part)
+    return value
+
+
+CONTEXT_SERVICE = LifecyclePoint(
+    "context/service", ("linch.kernel.context.Context", "builtins.str"), "emit"
+)
 
 Listener = Callable[..., Any]
 Next = Callable[[], Awaitable[Any]]
