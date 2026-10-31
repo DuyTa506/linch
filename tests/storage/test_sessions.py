@@ -4,7 +4,7 @@ import pytest
 
 from linch.sessions import InMemorySessionStore
 from linch.sessions.postgres import PostgresSessionStore
-from linch.sessions.tasks import CreateTaskInput
+from linch.sessions.tasks import CreateTaskInput, TaskPatch
 from linch.types import (
     ImageBlock,
     Message,
@@ -12,6 +12,152 @@ from linch.types import (
     ToolResultBlock,
     ToolUseBlock,
 )
+
+
+@pytest.fixture(params=["memory", "postgres"])
+async def store_case(request, pg_dsn):
+    store = InMemorySessionStore() if request.param == "memory" else PostgresSessionStore(pg_dsn)
+    try:
+        yield store
+    finally:
+        await store.close()
+
+
+async def test_message_batch_encoding_failure_is_atomic(store_case) -> None:
+    store = store_case
+    session = await store.create()
+    message = Message(role="user", content=[TextBlock(text="before")])
+    await store.append_messages(session.id, [message])
+    before = await store.load_messages(session.id)
+    record = await store.load(session.id)
+    with pytest.raises(TypeError):
+        await store.append_messages(session.id, [message, Message(role="user", content=[object()])])
+    assert await store.load_messages(session.id) == before
+    assert await store.load(session.id) == record
+    assert (await store.append_messages(session.id, [message]))[0].seq == 2
+
+
+async def test_set_invoked_skills_missing_session_raises(store_case) -> None:
+    with pytest.raises(KeyError):
+        await store_case.set_invoked_skills("missing", [{"name": "skill"}])
+    assert await store_case.load("missing") is None
+
+
+@pytest.mark.parametrize(
+    "boundary", ["create", "create_if_absent", "create_existing", "load", "list", "update_meta"]
+)
+async def test_session_records_are_detached(store_case, boundary) -> None:
+    from uuid import uuid4
+
+    store = store_case
+    meta = {"nested": {"labels": ["before"]}}
+    if boundary == "create_if_absent":
+        record = await store.create_if_absent(id=str(uuid4()), meta=meta)
+    else:
+        record = await store.create(meta=meta)
+    session_id = record.id
+    await store.set_invoked_skills(session_id, [{"name": "before"}])
+    if boundary == "create_existing":
+        record = await store.create(id=session_id)
+    elif boundary == "load":
+        record = await store.load(session_id)
+    elif boundary == "list":
+        record = (await store.list())[0]
+    elif boundary == "update_meta":
+        record = await store.update_meta(session_id, {"extra": "value"})
+
+    record.id = "caller mutation"
+    record.meta["nested"]["labels"].append("caller mutation")
+    if record.invoked_skills:
+        record.invoked_skills[0]["name"] = "caller mutation"
+    record.invoked_skills.append({"name": "caller mutation"})
+    reloaded = await store.load(session_id)
+    assert reloaded.id == session_id
+    assert reloaded.meta["nested"] == {"labels": ["before"]}
+    assert reloaded.invoked_skills == [{"name": "before"}]
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        "create_task",
+        "get_task",
+        "list_tasks",
+        "update_task",
+        "claim_task",
+        "ready_tasks",
+        "release_task",
+        "release_completed_task",
+    ],
+)
+async def test_task_results_are_detached(store_case, boundary) -> None:
+    store = store_case
+    session = await store.create()
+    task = await store.create_task(
+        session.id,
+        CreateTaskInput(subject="before", description="details", metadata={"nested": ["before"]}),
+    )
+    task_id = task.id
+    if boundary == "get_task":
+        task = await store.get_task(session.id, task_id)
+    elif boundary == "list_tasks":
+        task = (await store.list_tasks(session.id))[0]
+    elif boundary == "update_task":
+        task = await store.update_task(session.id, task_id, TaskPatch(description="details"))
+    elif boundary == "claim_task":
+        task = await store.claim_task(session.id, task_id, "worker")
+    elif boundary == "ready_tasks":
+        task = (await store.ready_tasks(session.id))[0]
+    elif boundary == "release_task":
+        await store.claim_task(session.id, task_id, "worker")
+        task = await store.release_task(session.id, task_id)
+    elif boundary == "release_completed_task":
+        await store.update_task(session.id, task_id, TaskPatch(status="completed"))
+        task = await store.release_task(session.id, task_id)
+
+    task.id = "caller mutation"
+    task.subject = "caller mutation"
+    task.metadata["nested"].append("caller mutation")
+    task.blocks.append("caller mutation")
+    task.blocked_by.append("caller mutation")
+    reloaded = await store.get_task(session.id, task_id)
+    assert reloaded.id == task_id
+    assert reloaded.subject == "before"
+    assert reloaded.metadata == {"nested": ["before"]}
+    assert reloaded.blocks == reloaded.blocked_by == []
+
+
+@pytest.mark.parametrize(
+    "boundary", ["create", "update_meta", "set_invoked_skills", "create_task", "update_task"]
+)
+async def test_session_store_detaches_write_inputs(store_case, boundary) -> None:
+    store = store_case
+    values = ["before"]
+    if boundary == "create":
+        session = await store.create(meta={"nested": values})
+    else:
+        session = await store.create()
+    task_id = None
+    if boundary == "update_meta":
+        await store.update_meta(session.id, {"nested": values})
+    elif boundary == "set_invoked_skills":
+        await store.set_invoked_skills(session.id, [{"nested": values}])
+    elif boundary in ("create_task", "update_task"):
+        task = await store.create_task(
+            session.id, CreateTaskInput(subject="task", description="", metadata={"nested": values})
+        )
+        task_id = task.id
+        if boundary == "update_task":
+            values = ["before"]
+            await store.update_task(session.id, task_id, TaskPatch(metadata={"nested": values}))
+
+    values.append("caller mutation")
+    if task_id is not None:
+        assert (await store.get_task(session.id, task_id)).metadata == {"nested": ["before"]}
+    elif boundary == "set_invoked_skills":
+        assert (await store.load(session.id)).invoked_skills == [{"nested": ["before"]}]
+    else:
+        assert (await store.load(session.id)).meta == {"nested": ["before"]}
 
 
 async def test_memory_store_round_trip() -> None:

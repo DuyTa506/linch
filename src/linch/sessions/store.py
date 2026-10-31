@@ -136,8 +136,8 @@ class SessionStore(Protocol):
     Implementations persist each successful mutation before returning. Message
     sequences are ordered per session; explicit session creation is idempotent,
     while task claims and inbox delivery provide their own atomicity rules.
-    The protocol does not require all-or-nothing behavior for a multi-message
-    append, so callers should validate a batch before submitting it.
+    Multi-message appends are all-or-nothing. Inputs and returned session,
+    message, and task graphs are detached from stored state.
     """
 
     async def create(
@@ -183,7 +183,7 @@ class SessionStore(Protocol):
         ...
 
     async def append_messages(self, id: str, messages: list[Message]) -> list[StoredMessage]:
-        """Append messages in input order and assign consecutive session sequences.
+        """Atomically append messages in order and assign consecutive session sequences.
 
         Args:
             id: Session identifier receiving the messages.
@@ -220,6 +220,9 @@ class SessionStore(Protocol):
         Args:
             id: Session identifier whose skill records should be replaced.
             skills: Skill records to persist for the session.
+
+        Raises:
+            KeyError: If the session does not exist.
         """
 
         ...
@@ -428,7 +431,7 @@ class SessionInboxStore(Protocol):
         ...
 
     async def commit_inbox(self, id: str, *, after_seq: int) -> list[StoredMessage]:
-        """Commit pending inbox deliveries and return messages after a cursor.
+        """Atomically commit pending inbox deliveries and return messages after a cursor.
 
         Args:
             id: Session identifier whose inbox should be committed.
@@ -442,8 +445,7 @@ class SessionInboxStore(Protocol):
             KeyError: If the session does not exist or a stored message omits
                 a required field.
             ConfigError: If ``after_seq`` is invalid, a pending row has no
-                message payload, or an implementation rejects a non-object
-                decoded payload.
+                message payload, or the decoded payload is not an object.
             json.JSONDecodeError: If stored message JSON is malformed.
             TypeError: If a stored message field has an incompatible shape.
             ValueError: If a stored message contains an unknown content-block

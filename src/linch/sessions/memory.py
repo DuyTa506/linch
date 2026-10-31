@@ -50,6 +50,7 @@ class InMemorySessionStore:
 
     The store is intended for tests and development. Mutations are visible
     immediately within the process but are not durable across restarts.
+    Inputs and returned session, message, and task graphs are detached copies.
     """
 
     def __init__(self) -> None:
@@ -81,15 +82,15 @@ class InMemorySessionStore:
         sid = id or str(uuid4())
         existing = self._sessions.get(sid)
         if existing is not None:
-            return existing
+            return deepcopy(existing)
         ts = now_iso()
-        record = SessionRecord(id=sid, created_at=ts, updated_at=ts, meta=dict(meta or {}))
+        record = SessionRecord(id=sid, created_at=ts, updated_at=ts, meta=deepcopy(meta or {}))
         self._sessions[sid] = record
         self._messages.setdefault(sid, [])
         self._tasks.setdefault(sid, {})
         self._task_counter.setdefault(sid, self._next_task_id(sid))
         self._inbox.setdefault(sid, {})
-        return record
+        return deepcopy(record)
 
     async def create_if_absent(
         self, *, id: str, meta: dict[str, object] | None = None
@@ -122,7 +123,7 @@ class InMemorySessionStore:
             The current session record, or ``None`` when the ID is unknown.
         """
 
-        return self._sessions.get(id)
+        return deepcopy(self._sessions.get(id))
 
     async def load_messages(self, id: str) -> list[StoredMessage]:
         """Load stored messages in ascending sequence order.
@@ -144,7 +145,7 @@ class InMemorySessionStore:
         ]
 
     async def append_messages(self, id: str, messages: list[Message]) -> list[StoredMessage]:
-        """Append messages in input order and assign consecutive sequences.
+        """Atomically append messages in input order and assign consecutive sequences.
 
         Args:
             id: Session identifier receiving the messages.
@@ -161,24 +162,19 @@ class InMemorySessionStore:
             raise KeyError(f"session not found: {id}")
         ts = now_iso()
         bucket = self._messages[id]
-        stored: list[StoredMessage] = []
-        for message in messages:
-            row = StoredMessage(
-                seq=len(bucket) + 1,
+        stored = [
+            StoredMessage(
+                seq=len(bucket) + index,
                 appended_at=ts,
                 message=_copy_message(message),
             )
-            bucket.append(row)
-            stored.append(
-                StoredMessage(
-                    seq=row.seq,
-                    appended_at=row.appended_at,
-                    message=_copy_message(row.message),
-                )
-            )
+            for index, message in enumerate(messages, start=1)
+        ]
+        result = deepcopy(stored)
+        bucket.extend(stored)
         rec = self._sessions[id]
         rec.updated_at = ts
-        return stored
+        return result
 
     async def enqueue_inbox(self, id: str, delivery: InboxDelivery) -> None:
         """Enqueue one inbox delivery with delivery-ID/digest deduplication.
@@ -214,7 +210,7 @@ class InMemorySessionStore:
         )
 
     async def commit_inbox(self, id: str, *, after_seq: int) -> list[StoredMessage]:
-        """Commit pending inbox rows and return messages after a cursor.
+        """Atomically commit pending inbox rows and return messages after a cursor.
 
         Args:
             id: Session identifier whose inbox should be committed.
@@ -241,12 +237,14 @@ class InMemorySessionStore:
 
         ts = now_iso()
         messages = self._messages[id]
+        pending: list[tuple[_InboxRow, Message]] = []
         for row in self._inbox.setdefault(id, {}).values():
             if row.message_seq is not None:
                 continue
             if row.message_json is None:  # pragma: no cover - internal corruption guard
                 raise ConfigError("pending inbox delivery has no message payload")
-            message = decode_inbox_message(row.message_json)
+            pending.append((row, decode_inbox_message(row.message_json)))
+        for row, message in pending:
             seq = len(messages) + 1
             messages.append(StoredMessage(seq=seq, appended_at=ts, message=message))
             row.message_seq = seq
@@ -257,7 +255,7 @@ class InMemorySessionStore:
             row.metadata_json = None
         if messages and messages[-1].seq > after_seq:
             self._sessions[id].updated_at = ts
-        return [row for row in messages if row.seq > after_seq]
+        return deepcopy([row for row in messages if row.seq > after_seq])
 
     async def save_provider_snapshot(self, id: str, snapshot: ProviderViewSnapshot) -> None:
         """Save a wire-normalized compacted provider-view snapshot.
@@ -298,9 +296,9 @@ class InMemorySessionStore:
         """
 
         rec = self._sessions[id]
-        rec.meta.update(meta)
+        rec.meta.update(deepcopy(meta))
         rec.updated_at = now_iso()
-        return rec
+        return deepcopy(rec)
 
     async def set_invoked_skills(self, id: str, skills: list[dict[str, object]]) -> None:
         """Replace persisted invoked-skill records for a session.
@@ -314,7 +312,7 @@ class InMemorySessionStore:
         """
 
         rec = self._sessions[id]
-        rec.invoked_skills = list(skills)
+        rec.invoked_skills = deepcopy(skills)
         rec.updated_at = now_iso()
 
     async def list(self, *, limit: int | None = None, offset: int = 0) -> list[SessionRecord]:
@@ -333,7 +331,7 @@ class InMemorySessionStore:
             rows = rows[offset:]
         if limit is not None:
             rows = rows[:limit]
-        return rows
+        return deepcopy(rows)
 
     async def delete(self, id: str) -> None:
         """Delete a session and all process-local state associated with it.
@@ -377,13 +375,13 @@ class InMemorySessionStore:
             description=input.description,
             active_form=input.active_form,
             status="pending",
-            metadata=dict(input.metadata or {}),
+            metadata=deepcopy(input.metadata or {}),
             created_at=ts,
             updated_at=ts,
         )
         self._tasks.setdefault(session_id, {})[task_id] = task
         self._sessions[session_id].updated_at = ts
-        return task
+        return deepcopy(task)
 
     def _next_task_id(self, session_id: str) -> int:
         numeric_ids = (
@@ -402,7 +400,7 @@ class InMemorySessionStore:
             The task, or ``None`` when it does not exist.
         """
 
-        return self._tasks.get(session_id, {}).get(task_id)
+        return deepcopy(self._tasks.get(session_id, {}).get(task_id))
 
     async def list_tasks(self, session_id: str) -> list[Task]:
         """List a session's tasks in ascending numeric task-ID order.
@@ -415,7 +413,7 @@ class InMemorySessionStore:
         """
 
         tasks = self._tasks.get(session_id, {})
-        return sorted(tasks.values(), key=lambda t: int(t.id))
+        return deepcopy(sorted(tasks.values(), key=lambda t: int(t.id)))
 
     async def update_task(self, session_id: str, task_id: str, patch: TaskPatch) -> Task | None:
         """Apply a partial task update and dependency-edge changes.
@@ -451,7 +449,7 @@ class InMemorySessionStore:
                 if value is None:
                     task.metadata.pop(key, None)
                 else:
-                    task.metadata[key] = value
+                    task.metadata[key] = deepcopy(value)
 
         if patch.add_blocks:
             for tid in patch.add_blocks:
@@ -469,7 +467,7 @@ class InMemorySessionStore:
 
         task.updated_at = now_iso()
         self._sessions[session_id].updated_at = task.updated_at
-        return task
+        return deepcopy(task)
 
     async def delete_task(self, session_id: str, task_id: str) -> bool:
         """Delete a task and remove references to it from other tasks.
@@ -510,7 +508,7 @@ class InMemorySessionStore:
         task.owner = owner
         task.updated_at = now_iso()
         self._sessions[session_id].updated_at = task.updated_at
-        return task
+        return deepcopy(task)
 
     async def ready_tasks(self, session_id: str) -> list[Task]:
         """List pending, unowned tasks whose dependencies are complete.
@@ -532,7 +530,7 @@ class InMemorySessionStore:
                 for bid in task.blocked_by
             ):
                 out.append(task)
-        return out
+        return deepcopy(out)
 
     async def release_task(self, session_id: str, task_id: str) -> Task | None:
         """Release a task owner and reset unfinished tasks to pending.
@@ -550,12 +548,12 @@ class InMemorySessionStore:
         if task is None:
             return None
         if task.status == "completed":
-            return task
+            return deepcopy(task)
         task.owner = None
         task.status = "pending"
         task.updated_at = now_iso()
         self._sessions[session_id].updated_at = task.updated_at
-        return task
+        return deepcopy(task)
 
     async def close(self) -> None:
         """Close the process-local store; this implementation has no resources."""
