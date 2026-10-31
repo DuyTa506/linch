@@ -316,6 +316,8 @@ async def test_three_second_database_outage_restores_dispatch_and_listen(
             ),
             15,
         )
+        assert await pool.fetchval("SELECT count(*) FROM runs WHERE status='failed'") == 0
+        assert await pool.fetchval("SELECT status='completed' FROM runs WHERE id=$1", rid)
         after = worker._manager
         assert after is not before
         assert after.queries.driver._connection.get_server_pid() != before_pid

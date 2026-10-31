@@ -80,7 +80,7 @@ class _FailCheckpointStore:
     ) -> Any:
         self.calls += 1
         if self.calls == 1:
-            raise OSError("checkpoint write failed")
+            raise ValueError("checkpoint write failed")
         return await self._inner.save_checkpoint(run_id, checkpoint, status=status)
 
     async def save_checkpoint_with_events(
@@ -88,7 +88,7 @@ class _FailCheckpointStore:
     ) -> Any:
         self.calls += 1
         if self.calls == 1:
-            raise OSError("checkpoint write failed")
+            raise ValueError("checkpoint write failed")
         return await self._inner.save_checkpoint_with_events(
             run_id, checkpoint, events, status=status
         )
@@ -104,12 +104,31 @@ class _FailEventStore:
         return getattr(self._inner, name)
 
     async def append_events(self, run_id: str, events: list[Any]) -> list[int]:
-        raise OSError("event flush failed")
+        raise ValueError("event flush failed")
 
     async def save_checkpoint_with_events(
         self, run_id: str, checkpoint: Any, events: list[Any], *, status: str = "running"
     ) -> Any:
-        raise OSError("event flush failed")
+        raise ValueError("event flush failed")
+
+
+class _FailModelCallJournalStore:
+    def __init__(self) -> None:
+        from linch.run_store import InMemoryRunStore
+
+        self._inner = InMemoryRunStore()
+        self.failed = False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    async def append_events(self, run_id: str, events: list[Any]) -> list[int]:
+        if not self.failed and any(
+            getattr(event, "type", None) == "model_call" for event in events
+        ):
+            self.failed = True
+            raise OSError("model-call journal connection lost")
+        return await self._inner.append_events(run_id, events)
 
 
 class _FailCompletedStore:
@@ -122,13 +141,13 @@ class _FailCompletedStore:
         return getattr(self._inner, name)
 
     async def mark_completed(self, run_id: str, checkpoint: Any) -> Any:
-        raise OSError("completion write failed")
+        raise ValueError("completion write failed")
 
     async def save_checkpoint_with_events(
         self, run_id: str, checkpoint: Any, events: list[Any], *, status: str = "running"
     ) -> Any:
         if status == "completed":
-            raise OSError("completion write failed")
+            raise ValueError("completion write failed")
         return await self._inner.save_checkpoint_with_events(
             run_id, checkpoint, events, status=status
         )
@@ -195,7 +214,7 @@ class _FailPruneStore:
         return getattr(self._inner, name)
 
     async def prune(self, run_id: str, keep_ids: tuple[str, ...] = ()) -> int:
-        raise OSError("snapshot prune failed")
+        raise ValueError("snapshot prune failed")
 
 
 class _FailDeleteStore:
@@ -208,7 +227,7 @@ class _FailDeleteStore:
         return getattr(self._inner, name)
 
     async def delete(self, snapshot_id: str, *, run_id: str) -> None:
-        raise OSError("snapshot delete failed")
+        raise ValueError("snapshot delete failed")
 
 
 class _FailProviderSnapshotStore:
@@ -243,15 +262,15 @@ class _FailMarkFailedStore:
         events: list[Any] = (),
     ) -> Any:
         self.mark_failed_calls += 1
-        raise OSError("failed status write")
+        raise ValueError("failed status write")
 
 
 @pytest.mark.parametrize(
     ("store_factory", "expected"),
     [
-        (_FailCheckpointStore, "OSError"),
-        (_FailEventStore, "OSError"),
-        (_FailCompletedStore, "OSError"),
+        (_FailCheckpointStore, "ValueError"),
+        (_FailEventStore, "ValueError"),
+        (_FailCompletedStore, "ValueError"),
     ],
 )
 async def test_run_store_write_failure_is_error_result_and_single_stop(
@@ -274,6 +293,32 @@ async def test_run_store_write_failure_is_error_result_and_single_stop(
     assert events[-2].error["retryable"] is False
     assert events[-1].subtype == "error"
     assert stop.calls == 1
+
+
+async def test_transient_model_call_journal_failure_resumes_without_terminal() -> None:
+    from linch import ErrorEvent, ResultEvent
+    from linch.sessions import InMemorySessionStore
+
+    store = _FailModelCallJournalStore()
+    session_store = InMemorySessionStore()
+    agent = _agent(session_store=session_store, run_store=store)
+    session = await agent.session(id="model-call-journal")
+    first = await _events(session)
+    run_id = next(event.run_id for event in first if event.type == "system")
+
+    assert store.failed
+    assert not any(isinstance(event, (ErrorEvent, ResultEvent)) for event in first)
+    record = await store.load_run(run_id)
+    assert record is not None and record.status == "running"
+
+    restarted = _agent(session_store=session_store, run_store=store)
+    resumed = await restarted.session(id="model-call-journal")
+    events = [event async for event in resumed.resume(run_id)]
+
+    assert events[-1].type == "result" and events[-1].subtype == "success"
+    stored = await store.load_events(run_id)
+    assert sum(isinstance(row.event, ResultEvent) for row in stored) == 1
+    assert [row.seq for row in stored] == list(range(1, len(stored) + 1))
 
 
 async def test_session_append_failure_without_run_store_is_terminalized() -> None:
@@ -305,14 +350,14 @@ async def test_error_pair_is_durable_when_failed_status_becomes_visible(failure:
             self, run_id: str, checkpoint: Any, *, status: str = "running"
         ) -> Any:
             if failure == "checkpoint":
-                raise OSError("checkpoint unavailable")
+                raise ValueError("checkpoint unavailable")
             return await super().save_checkpoint(run_id, checkpoint, status=status)
 
         async def save_checkpoint_with_events(
             self, run_id: str, checkpoint: Any, events: list[Any], *, status: str = "running"
         ) -> Any:
             if failure == "checkpoint":
-                raise OSError("checkpoint unavailable")
+                raise ValueError("checkpoint unavailable")
             return await super().save_checkpoint_with_events(
                 run_id, checkpoint, events, status=status
             )
@@ -332,6 +377,10 @@ async def test_error_pair_is_durable_when_failed_status_becomes_visible(failure:
             self.visible_terminal_pairs.append([row.event.type for row in events[-2:]])
             return record
 
+    class NonTransientSessionStore(_FailSessionStore):
+        async def append_messages(self, session_id: str, messages: list[Any]) -> Any:
+            raise ValueError("session append unavailable")
+
     class FailProvider(_TextProvider):
         async def stream(self, request: Any) -> AsyncIterator[dict[str, object]]:
             raise OSError("provider unavailable")
@@ -340,7 +389,9 @@ async def test_error_pair_is_durable_when_failed_status_becomes_visible(failure:
     store = RecordingStore()
     stop = _StopCounter()
     agent = _agent(
-        session_store=_FailSessionStore() if failure == "session" else InMemorySessionStore(),
+        session_store=(
+            NonTransientSessionStore() if failure == "session" else InMemorySessionStore()
+        ),
         run_store=store,
         hooks=[stop],
     )
@@ -395,14 +446,14 @@ async def test_secondary_terminal_write_is_logged_with_run_and_original_context(
 
     events = await _events(session)
 
-    assert events[-2].error["name"] == "OSError"
+    assert events[-2].error["name"] == "ValueError"
     assert stop.calls == 1
     record = next(record for record in caplog.records if "run.mark_failed" in record.message)
     assert stop.run_ids and stop.run_ids[0] in record.message
     assert record.exc_info is not None
     assert isinstance(record.exc_info[1], RuntimeError)
     assert record.exc_info[1].__context__ is not None
-    assert record.exc_info[1].__context__.__class__ is OSError
+    assert record.exc_info[1].__context__.__class__ is ValueError
 
 
 async def test_retryable_attribute_is_propagated_to_error_event() -> None:
@@ -471,7 +522,7 @@ async def test_startup_failure_closing_after_terminal_event_still_dispatches_sto
             pytest.fail("the injected checkpoint failure must emit an error")
         events = [event, *[await anext(iterator) for _ in range(events_to_consume - 1)]]
         assert events[0].type == "error"
-        assert events[0].error["name"] == "OSError"
+        assert events[0].error["name"] == "ValueError"
         assert "checkpoint write failed" in events[0].error["message"]
         if events_to_consume == 2:
             assert events[1].type == "result"
@@ -566,7 +617,7 @@ async def test_terminal_mark_failed_failure_has_one_bounded_error_status_attempt
     events = await _events(session)
 
     assert [event.type for event in events[-2:]] == ["error", "result"]
-    assert events[-2].error["name"] == "OSError"
+    assert events[-2].error["name"] == "ValueError"
     assert events[-2].error["message"] == "failed status write"
     assert store.mark_failed_calls == 2
 
@@ -587,14 +638,14 @@ async def test_abort_terminal_write_failure_persists_error_pair_before_failed_st
             self, run_id: str, checkpoint: Any, *, status: str = "running"
         ) -> Any:
             if status == "aborted":
-                raise OSError("abort status failed")
+                raise ValueError("abort status failed")
             return await super().save_checkpoint(run_id, checkpoint, status=status)
 
         async def save_checkpoint_with_events(
             self, run_id: str, checkpoint: Any, events: list[Any], *, status: str = "running"
         ) -> Any:
             if status == "aborted":
-                raise OSError("abort status failed")
+                raise ValueError("abort status failed")
             return await super().save_checkpoint_with_events(
                 run_id, checkpoint, events, status=status
             )
@@ -628,7 +679,7 @@ async def test_abort_terminal_write_failure_persists_error_pair_before_failed_st
     assert store.failed_calls == 1
     assert store.visible_terminal_pairs == [["error", "result"]]
     assert [event.type for event in events[-2:]] == ["error", "result"]
-    assert events[-2].error["name"] == "OSError"
+    assert events[-2].error["name"] == "ValueError"
     assert stop.calls == 1
 
 

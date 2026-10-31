@@ -268,7 +268,7 @@ async def test_exact_mode_requires_snapshot_store_capabilities() -> None:
 async def test_snapshot_write_failure_makes_zero_provider_calls() -> None:
     class _FailingStore(InMemoryRunStore):
         async def save(self, run_id: str, provider_attempt: int, request: Any) -> Any:
-            raise OSError("snapshot disk unavailable")
+            raise ValueError("snapshot disk unavailable")
 
     store = _FailingStore()
     provider = _CaptureProvider()
@@ -282,7 +282,7 @@ async def test_snapshot_write_failure_makes_zero_provider_calls() -> None:
     events = [event async for event in session.run("hello")]
 
     error = next(event for event in events if event.type == "error")
-    assert error.error["name"] == "OSError"
+    assert error.error["name"] == "ValueError"
     assert error.error["message"] == "snapshot disk unavailable"
     assert provider.requests == []
 

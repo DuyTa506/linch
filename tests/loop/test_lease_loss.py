@@ -121,7 +121,8 @@ class _Takeover:
                         state.run_id = record.id
                         state.lease = await state.first.claim(record.id, "holder-a", 0.001)
                         return record
-                    # Secondary terminal loss must replace the original OSError
+                    # Secondary terminal loss must replace the original non-transient
+                    # completion error while preserving the fencing assertion.
                     # tail, whether detected by flush or failed-status persistence.
                     secondary = state.target.startswith("secondary_")
                     logical_name = name
@@ -133,7 +134,7 @@ class _Takeover:
                         )
                     if secondary and logical_name == "mark_completed" and not state.primary_failed:
                         state.primary_failed = True
-                        raise OSError("primary completion failure")
+                        raise ValueError("primary completion failure")
                     target = state.target.removeprefix("secondary_")
                     matches = logical_name == target and (not secondary or state.primary_failed)
                     if target == "ledger_flush":
@@ -262,7 +263,7 @@ async def test_model_call_journal_failure_keeps_original_store_error_class() -> 
     class FailLedgerStore(InMemoryRunStore):
         async def append_events(self, run_id: str, events: list[Any]) -> list[int]:
             if any(event.type == "model_call" for event in events):
-                raise OSError("model-call store unavailable")
+                raise ValueError("model-call store unavailable")
             return await super().append_events(run_id, events)
 
     agent = Agent(
@@ -276,7 +277,7 @@ async def test_model_call_journal_failure_keeps_original_store_error_class() -> 
     session = await agent.session()
     try:
         events = [event async for event in session.run("hello")]
-        assert events[-2].error["name"] == "OSError"
+        assert events[-2].error["name"] == "ValueError"
         assert events[-2].error["message"] == "model-call store unavailable"
         assert events[-1].subtype == "error"
     finally:
