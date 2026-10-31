@@ -748,7 +748,6 @@ class RunRuntime:
         if model_call_events or journal_count or consumed_auxiliary_receipt_ids:
             try:
                 await runtime.ledger.restore(
-                    None,
                     model_call_events,
                     consumed_auxiliary_receipt_ids=consumed_auxiliary_receipt_ids,
                 )
@@ -799,13 +798,10 @@ class RunRuntime:
 
     def sync_checkpoint_accounting(self) -> None:
         self.sync_ledger_totals()
-        if not isinstance(self.checkpoint.extension_state, dict):
-            raise ConfigError("RunCheckpoint.extension_state must be a dict")
         _model_call_runtime_to_extension(
             self.checkpoint.extension_state,
-            ledger_snapshot=None,
             active_primary=self.active_primary,
-            journal_count=self.ledger._journal_count(),
+            journal_count=len(self.ledger._journal),
         )
         self.checkpoint.total_usage = self.total
 
@@ -1020,7 +1016,9 @@ class RunRuntime:
         if snapshot_id is not None:
             try:
                 await store_call(
-                    self.session, "run.delete", self.model_input_store.delete(snapshot_id)
+                    self.session,
+                    "run.delete",
+                    self.model_input_store.delete(snapshot_id, run_id=self.run_id),
                 )
             except LeaseLostError:
                 raise

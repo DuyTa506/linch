@@ -20,6 +20,12 @@ from .._wire import WIRE_VERSION, require_wire_version
 _SCHEMA_LOCK_KEY = 0x4C494E4348534348
 
 
+async def _reset_connection(_connection: Any) -> None:
+    """Keep asyncpg's internal rollback cleanup without the default reset SQL."""
+
+    return None
+
+
 def _import_asyncpg() -> Any:
     """Return the ``asyncpg`` module or raise with an install hint."""
     try:
@@ -40,6 +46,7 @@ async def ensure_pool(
     *,
     schema_key: str,
     tables: tuple[str, ...],
+    required_columns: dict[str, tuple[str, ...]] | None = None,
     advisory_lock_key: int | None = None,
     allow_missing_pool_on_error: bool = False,
 ) -> Any:
@@ -56,7 +63,10 @@ async def ensure_pool(
         asyncpg = import_asyncpg()
         if store._pool is None:
             store._pool = await asyncpg.create_pool(
-                store._dsn, min_size=store._min_size, max_size=store._max_size
+                store._dsn,
+                min_size=store._min_size,
+                max_size=store._max_size,
+                reset=_reset_connection,
             )
         try:
             async with store._pool.acquire() as conn:
@@ -80,6 +90,20 @@ async def ensure_pool(
                                 require_wire_version(None)
                     else:
                         require_wire_version(metadata["version"])
+                        for table, columns in (required_columns or {}).items():
+                            present = await conn.fetchval(
+                                """
+                                SELECT count(*) = cardinality($2::text[])
+                                FROM pg_attribute
+                                WHERE attrelid = to_regclass($1::text)
+                                  AND attnum > 0 AND NOT attisdropped
+                                  AND attname = ANY($2::text[])
+                                """,
+                                table,
+                                list(columns),
+                            )
+                            if not present:
+                                require_wire_version(None)
                     await conn.execute(
                         "CREATE TABLE IF NOT EXISTS linch_schema_meta "
                         "(store TEXT PRIMARY KEY, version INTEGER NOT NULL)"

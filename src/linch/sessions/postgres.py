@@ -53,7 +53,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL,
     meta        TEXT NOT NULL DEFAULT '{}',
-    invoked_skills TEXT NOT NULL DEFAULT '[]'
+    invoked_skills TEXT NOT NULL DEFAULT '[]',
+    last_message_seq BIGINT NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -167,6 +168,7 @@ class PostgresSessionStore:
                 "session_snapshots",
                 "session_inbox",
             ),
+            required_columns={"sessions": ("last_message_seq",)},
         )
 
     # ── SessionStore protocol ────────────────────────────────────────────────
@@ -274,31 +276,46 @@ class PostgresSessionStore:
         ]
 
     async def append_messages(self, id: str, messages: list[Message]) -> list[StoredMessage]:
+        if not messages:
+            return []
         pool = await self._ensure()
         ts = now_iso()
+        encoded = [json.dumps(message_to_dict(message), allow_nan=False) for message in messages]
         async with pool.acquire() as conn:
-            async with conn.transaction():
-                # MAX(seq) alone is racy under READ COMMITTED: concurrent
-                # transactions can observe the same maximum and collide on the
-                # primary key.  Every append first locks the stable parent row,
-                # serialising allocation per session while unrelated sessions
-                # continue in parallel.
-                await _lock_session_pg(conn, id)
-                cur_seq = await _current_message_seq_pg(conn, id)
-                stored: list[StoredMessage] = []
-                for msg in messages:
-                    cur_seq += 1
-                    await conn.execute(
-                        "INSERT INTO messages (session_id, seq, appended_at, message) "
-                        "VALUES ($1, $2, $3, $4)",
-                        id,
-                        cur_seq,
-                        ts,
-                        json.dumps(message_to_dict(msg)),
-                    )
-                    stored.append(StoredMessage(seq=cur_seq, appended_at=ts, message=msg))
-                await conn.execute("UPDATE sessions SET updated_at = $1 WHERE id = $2", ts, id)
-        return stored
+            row = await conn.fetchrow(
+                """
+                WITH updated AS (
+                    UPDATE sessions
+                    SET updated_at = $2,
+                        last_message_seq = last_message_seq + cardinality($3::text[])
+                    WHERE id = $1
+                    RETURNING id,
+                              last_message_seq - cardinality($3::text[]) AS first_seq
+                ), inserted AS (
+                    INSERT INTO messages (session_id, seq, appended_at, message)
+                    SELECT updated.id, updated.first_seq + ordinality, $2, message_json
+                    FROM updated
+                    CROSS JOIN unnest($3::text[])
+                        WITH ORDINALITY AS messages(message_json, ordinality)
+                    RETURNING seq
+                )
+                SELECT (SELECT id FROM updated) AS session_id,
+                       COALESCE(
+                           (SELECT array_agg(seq ORDER BY seq) FROM inserted),
+                           ARRAY[]::BIGINT[]
+                       ) AS allocated_seqs
+                """,
+                id,
+                ts,
+                encoded,
+            )
+            if row is None or row["session_id"] is None:
+                raise KeyError(f"session not found: {id}")
+        seqs = [int(seq) for seq in row["allocated_seqs"]]
+        return [
+            StoredMessage(seq=seq, appended_at=ts, message=message)
+            for seq, message in zip(seqs, messages, strict=True)
+        ]
 
     async def enqueue_inbox(self, id: str, delivery: InboxDelivery) -> None:
         pool = await self._ensure()
@@ -378,7 +395,12 @@ class PostgresSessionStore:
                             id,
                             row["delivery_id"],
                         )
-                    await conn.execute("UPDATE sessions SET updated_at = $1 WHERE id = $2", ts, id)
+                    await conn.execute(
+                        "UPDATE sessions SET updated_at = $1, last_message_seq = $2 WHERE id = $3",
+                        ts,
+                        cur_seq,
+                        id,
+                    )
                 rows = await conn.fetch(
                     """
                     SELECT seq, appended_at, message FROM messages
@@ -735,7 +757,7 @@ async def _lock_session_pg(conn: Any, session_id: str) -> None:
 
 async def _current_message_seq_pg(conn: Any, session_id: str) -> int:
     value = await conn.fetchval(
-        "SELECT COALESCE(MAX(seq), 0) FROM messages WHERE session_id = $1",
+        "SELECT last_message_seq FROM sessions WHERE id = $1",
         session_id,
     )
     return int(value or 0)

@@ -116,9 +116,9 @@ async def test_gateway_settles_before_return_and_gates_only_one_delivery() -> No
     assert provider.requests[0].tools == []
     assert provider.requests[0].system[0].text == "Exact summary prompt."
     assert provider.requests[0].max_output_tokens == 4096
-    receipt = ledger.snapshot()["receipts"][0]
-    assert receipt["turn_index"] == 2
-    assert UUID(receipt["delivery_attempt_id"]).version == 4
+    receipt = ledger.receipts()[0]
+    assert receipt.turn_index == 2
+    assert UUID(receipt.delivery_attempt_id).version == 4
 
 
 @pytest.mark.parametrize("output", ["", "  ", "tool", "thinking", "oversized", "native-json"])
@@ -208,7 +208,7 @@ async def test_invalid_normalized_stream_never_fabricates_usage(fault: str):
         await _text(caller)
     assert ledger.total_usage == Usage()
     assert not ledger.usage_complete
-    assert ledger.snapshot()["receipts"][0]["usage_status"] == "unknown"
+    assert ledger.receipts()[0].usage_status == "unknown"
     assert limiter.held == 0
 
 
@@ -243,7 +243,7 @@ async def test_predispatch_abort_is_unbilled_abandonment() -> None:
     assert provider.requests == []
     assert ledger.usage_complete
     assert budget.spent_tokens == 0
-    assert ledger.snapshot()["receipts"] == []
+    assert ledger.receipts() == []
     assert journal[-1].record_kind == "abandoned"
     assert journal[-1].record["usage_status"] == "not_dispatched"
     assert limiter.held == 0
@@ -279,7 +279,7 @@ async def test_abort_during_hanging_stream_records_unknown_and_releases_slot(can
     with pytest.raises(asyncio.CancelledError if cancel_task else AbortError):
         await asyncio.wait_for(task, timeout=1)
     assert not ledger.usage_complete
-    assert ledger.snapshot()["receipts"][0]["disposition"] == "cancelled"
+    assert ledger.receipts()[0].disposition == "cancelled"
     assert limiter.held == 0
     assert provider.closed == 1
     with pytest.raises(_ModelCallError, match="unknown use"):
@@ -301,7 +301,7 @@ async def test_persistence_failure_stops_and_retains_observed_spend(failing_kind
     assert exc.value.code == "persistence_failed"
     assert len(provider.requests) == (1 if failing_kind == "receipt" else 0)
     assert ledger.total_usage == (Usage(111, 22) if failing_kind == "receipt" else Usage())
-    assert ledger.snapshot()["receipts"] == []
+    assert ledger.receipts() == []
     assert limiter.held == 0
     with pytest.raises(_ModelCallError) as continuation:
         await _text(caller)
@@ -375,10 +375,10 @@ async def test_builtins_use_injected_gateway_without_nested_slot(detailed: bool)
     assert session.session_log.full_history == original_history
     assert len(provider.requests) == 1
     assert limiter.acquired == limiter.released == ["requested-model"]
-    receipt = ledger.snapshot()["receipts"][0]
-    assert receipt["strategy_id"] == strategy.id
-    assert receipt["logical_call_id"] == "compaction-op"
-    assert receipt["source_context_fingerprint"]
+    receipt = ledger.receipts()[0]
+    assert receipt.strategy_id == strategy.id
+    assert receipt.logical_call_id == "compaction-op"
+    assert receipt.source_context_fingerprint
     assert provider.requests[0].system[0].text == strategy.prompt
     assert provider.requests[0].max_output_tokens == (8192 if detailed else 4096)
 
@@ -403,7 +403,7 @@ async def test_custom_provider_settles_before_end_or_closes_early_stream(early_b
                     break
                 if event["type"] == "message_end":
                     assert ledger.total_usage.input_tokens == 111
-                    assert ledger.snapshot()["receipts"][0]["usage_status"] == "reported"
+                    assert ledger.receipts()[0].usage_status == "reported"
                     break
             return ctx.messages
 
@@ -413,9 +413,9 @@ async def test_custom_provider_settles_before_end_or_closes_early_stream(early_b
     )
     assert limiter.acquired == limiter.released == ["requested-model"]
     assert provider.closed == 1
-    receipt = ledger.snapshot()["receipts"][0]
-    assert receipt["usage_status"] == ("unknown" if early_break else "reported")
-    assert receipt["strategy_id"] == "custom-fixture"
+    receipt = ledger.receipts()[0]
+    assert receipt.usage_status == ("unknown" if early_break else "reported")
+    assert receipt.strategy_id == "custom-fixture"
 
 
 async def test_opaque_custom_work_is_outside_supplied_provider_guarantee() -> None:
@@ -432,7 +432,7 @@ async def test_opaque_custom_work_is_outside_supplied_provider_guarantee() -> No
 
     session, agent = _compaction_fixture(strategy=Opaque(), provider=provider, limiter=limiter)
     await run_forced_compaction(session, agent, AbortContext(), auxiliary_caller=caller)
-    assert ledger.snapshot()["receipts"] == []
+    assert ledger.receipts() == []
     assert provider.requests == []
     assert limiter.acquired == []
 
@@ -472,7 +472,7 @@ async def test_abort_while_waiting_for_slot_abandons_without_dispatch_or_fence(c
         await asyncio.wait_for(task, timeout=1)
     assert provider.requests == []
     assert ledger.usage_complete
-    assert ledger.snapshot()["receipts"] == []
+    assert ledger.receipts() == []
     assert limiter.held == 1
     limiter.release(model="held-by-sibling")
     await asyncio.sleep(0)
@@ -491,7 +491,7 @@ async def test_admission_denial_is_unbilled_and_releases_slot() -> None:
     assert exc.value.code == "budget_exceeded"
     assert provider.requests == []
     assert ledger.usage_complete
-    assert ledger.snapshot()["receipts"] == []
+    assert ledger.receipts() == []
     assert limiter.acquired == limiter.released == ["requested-model"]
 
 
@@ -511,7 +511,7 @@ async def test_transport_failure_keeps_unknown_use_and_closes_stream() -> None:
     assert provider.closed == 1
     assert limiter.held == 0
     assert not ledger.usage_complete
-    assert ledger.snapshot()["receipts"][0]["disposition"] == "failed"
+    assert ledger.receipts()[0].disposition == "failed"
 
 
 async def test_valid_usage_is_preserved_when_end_structure_is_invalid() -> None:
@@ -525,7 +525,7 @@ async def test_valid_usage_is_preserved_when_end_structure_is_invalid() -> None:
         await _text(caller)
     assert ledger.total_usage == Usage(111, 22)
     assert ledger.usage_complete
-    assert ledger.snapshot()["receipts"][0]["disposition"] == "rejected"
+    assert ledger.receipts()[0].disposition == "rejected"
     assert limiter.held == 0
 
 
@@ -548,7 +548,7 @@ async def test_facade_uses_run_signal_and_durable_known_usage_survives_consumer_
     assert provider.requests[0].signal is signal
     assert ledger.total_usage == Usage(111, 22)
     assert ledger.usage_complete
-    assert len(ledger.snapshot()["receipts"]) == 1
+    assert len(ledger.receipts()) == 1
     assert limiter.held == 0
 
 
@@ -577,7 +577,7 @@ async def test_facade_closes_all_streams_even_when_one_provider_close_fails() ->
     with pytest.raises(OSError, match="close failed"):
         await facade.aclose()
     assert provider.closed == 2
-    assert len(ledger.snapshot()["receipts"]) == 2
+    assert len(ledger.receipts()) == 2
     assert not ledger.usage_complete
 
 
@@ -597,11 +597,11 @@ async def test_valid_end_followed_by_invalid_tail_is_charged_once_and_rejected(t
         await _text(caller)
     assert ledger.total_usage == Usage(111, 22)
     assert ledger.usage_complete
-    receipts = ledger.snapshot()["receipts"]
+    receipts = ledger.receipts()
     assert len(receipts) == 1
-    assert receipts[0]["usage_status"] == "reported"
-    assert receipts[0]["disposition"] == "rejected"
-    assert receipts[0]["accepted_text"] is None
+    assert receipts[0].usage_status == "reported"
+    assert receipts[0].disposition == "rejected"
+    assert receipts[0].accepted_text is None
     assert provider.closed == 1
     assert limiter.held == 0
 
@@ -632,7 +632,7 @@ async def test_abort_after_observed_end_preserves_known_usage_and_rejects_output
         await asyncio.wait_for(task, timeout=1)
     assert ledger.total_usage == Usage(111, 22)
     assert ledger.usage_complete
-    assert ledger.snapshot()["receipts"][0]["disposition"] == "rejected"
+    assert ledger.receipts()[0].disposition == "rejected"
     assert provider.closed == 1
     assert limiter.held == 0
 
@@ -656,12 +656,12 @@ async def test_abort_on_clean_completion_rejects_paid_output_and_charges_once() 
     with pytest.raises(AbortError):
         await _text(caller)
 
-    receipts = ledger.snapshot()["receipts"]
+    receipts = ledger.receipts()
     assert len(receipts) == 1
-    assert receipts[0]["usage_status"] == "reported"
-    assert receipts[0]["disposition"] == "rejected"
-    assert receipts[0]["accepted_text"] is None
-    assert receipts[0]["accepted_text_sha256"] is None
+    assert receipts[0].usage_status == "reported"
+    assert receipts[0].disposition == "rejected"
+    assert receipts[0].accepted_text is None
+    assert receipts[0].accepted_text_sha256 is None
     assert ledger.total_usage == Usage(111, 22)
     assert ledger.usage_complete
     assert budget.spent_tokens == 133

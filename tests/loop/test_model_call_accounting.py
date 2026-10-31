@@ -668,7 +668,6 @@ async def test_resume_rejects_an_unproven_legacy_offset_alongside_new_receipts()
     extension_state: dict[str, Any] = {}
     _model_call_runtime_to_extension(
         extension_state,
-        ledger_snapshot=None,
         active_primary=None,
     )
     await run_store.save_checkpoint(
@@ -789,7 +788,6 @@ async def test_resume_merges_journal_after_receipt_backed_checkpoint_without_dou
     extension_state: dict[str, Any] = {}
     _model_call_runtime_to_extension(
         extension_state,
-        ledger_snapshot=None,
         active_primary=None,
         journal_count=checkpoint_event_count,
     )

@@ -61,6 +61,16 @@ class _RollbackConnection:
     def transaction(self, *args: Any, **kwargs: Any) -> _RollbackTransaction:
         return _RollbackTransaction(self._real.transaction(*args, **kwargs), self._failure_type)
 
+    async def fetchrow(self, query: str, *args: Any) -> Any:
+        if "UPDATE runs" in query and "lease_owner" in query:
+            failure = (
+                asyncio.CancelledError()
+                if self._failure_type is asyncio.CancelledError
+                else RuntimeError("forced lease statement failure")
+            )
+            raise failure
+        return await self._real.fetchrow(query, *args)
+
     def __getattr__(self, name: str) -> Any:
         return getattr(self._real, name)
 
@@ -153,7 +163,8 @@ async def test_postgres_concurrent_snapshot_delete_and_prune() -> None:
         request = ProviderRequest(model="test", system=[], tools=[], messages=[])
         snapshots = [await store.save(run_id, index, request) for index in range(1, 11)]
         await asyncio.wait_for(
-            asyncio.gather(store.delete(snapshots[0].id), peer.prune(run_id)), timeout=5
+            asyncio.gather(store.delete(snapshots[0].id, run_id=run_id), peer.prune(run_id)),
+            timeout=5,
         )
         remaining = [await store.load(snapshot.id) for snapshot in snapshots]
         assert all(snapshot is None for snapshot in remaining)
@@ -256,11 +267,11 @@ class _InspectConnection:
         return self._real.transaction(*args, **kwargs)
 
     async def fetchrow(self, query: str, *args: Any) -> Any:
-        if "UPDATE runs SET updated_at" in query:
+        if "UPDATE runs" in query and "checkpoint = $4" in query:
             if self._pool.before_update is not None:
                 await self._pool.before_update()
             if self._pool.fail_update:
-                raise OSError("checkpoint update failed")
+                raise self._pool.failure or OSError("checkpoint update failed")
         return await self._real.fetchrow(query, *args)
 
     def __getattr__(self, name: str) -> Any:
@@ -279,8 +290,18 @@ class _InspectAcquire:
 
 
 class _InspectPool:
-    def __init__(self, real: Any, *, before_update: Any = None, fail_update: bool = False):
-        self.real, self.before_update, self.fail_update = real, before_update, fail_update
+    def __init__(
+        self,
+        real: Any,
+        *,
+        before_update: Any = None,
+        fail_update: bool = False,
+        failure: BaseException | None = None,
+    ):
+        self.real = real
+        self.before_update = before_update
+        self.fail_update = fail_update or failure is not None
+        self.failure = failure
         self.transactions = 0
 
     def acquire(self) -> _InspectAcquire:
@@ -290,7 +311,7 @@ class _InspectPool:
         return getattr(self.real, name)
 
 
-async def test_atomic_checkpoint_events_share_one_transaction_and_visibility(pg_dsn) -> None:
+async def test_atomic_checkpoint_events_share_one_statement_and_visibility(pg_dsn) -> None:
     from linch.run_stores.postgres import PostgresRunStore
 
     store, peer = PostgresRunStore(pg_dsn), PostgresRunStore(pg_dsn)
@@ -316,7 +337,7 @@ async def test_atomic_checkpoint_events_share_one_transaction_and_visibility(pg_
             [_atomic_event("one"), _atomic_event("two")],
             status="completed",
         )
-        assert inspected.transactions == 1
+        assert inspected.transactions == 0
         assert observations == [("before", 1)]
         assert seqs == [2, 3]
         assert record.status == "completed"
@@ -343,10 +364,12 @@ async def test_atomic_checkpoint_failure_rolls_back_events_and_checkpoint(pg_dsn
         real_pool = store._pool
         failure_type = asyncio.CancelledError if failure == "cancelled" else RuntimeError
         if failure == "update":
-            store._pool = _InspectPool(real_pool, fail_update=True)
+            store._pool = _InspectPool(real_pool, failure=OSError("checkpoint update failed"))
             failure_type = OSError
-        elif failure in {"commit", "cancelled"}:
-            store._pool = _RollbackPool(real_pool, failure_type)
+        elif failure == "commit":
+            store._pool = _InspectPool(real_pool, failure=RuntimeError("forced statement failure"))
+        elif failure == "cancelled":
+            store._pool = _InspectPool(real_pool, failure=asyncio.CancelledError())
 
         with pytest.raises(failure_type):
             await store.save_checkpoint_with_events(
@@ -388,3 +411,72 @@ async def test_atomic_checkpoint_fencing_leaves_both_components_unchanged(pg_dsn
         assert store._held_leases[run_id] == lease.epoch
     finally:
         await asyncio.gather(store.close(), peer.close())
+
+
+@needs_postgres
+async def test_missing_local_lease_owner_fails_closed(pg_dsn) -> None:
+    from linch.run_store import LeaseLostError
+    from linch.run_stores.postgres import PostgresRunStore
+
+    store = PostgresRunStore(pg_dsn)
+    run_id = f"lease-owner-missing-{uuid4()}"
+    try:
+        await store.create_run("session", id=run_id)
+        store._held_leases[run_id] = 1
+        with pytest.raises(LeaseLostError):
+            await store.save_checkpoint(run_id, _atomic_checkpoint())
+        assert await store.load_run(run_id) is not None
+    finally:
+        await store.close()
+
+
+@needs_postgres
+async def test_postgres_pool_reuses_clean_connection_after_cancel_and_failed_write() -> None:
+    """Cancellation and a fenced failure must not poison the one-connection pool."""
+    import asyncpg
+
+    from linch.run_store import RunCheckpoint
+    from linch.run_stores.postgres import PostgresRunStore
+    from linch.types import Usage
+
+    store = PostgresRunStore(os.environ["AGENT_KIT_TEST_PG_DSN"], min_size=1, max_size=1)
+    run_id = f"pool-reset-{uuid4()}"
+    try:
+        await store.create_run("session", id=run_id)
+        pool = await store._ensure()
+        async with pool.acquire() as conn:
+            backend_pid = await conn.fetchval("SELECT pg_backend_pid()")
+
+        async with pool.acquire() as conn:
+            query = asyncio.create_task(conn.execute("SELECT pg_sleep(10)"))
+            await asyncio.sleep(0.02)
+            query.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await query
+
+        async with pool.acquire() as conn:
+            assert await conn.fetchval("SELECT pg_backend_pid()") == backend_pid
+
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "ALTER TABLE runs ADD CONSTRAINT wp8_failed_status_guard CHECK (status <> 'failed')"
+            )
+        with pytest.raises(asyncpg.CheckViolationError):
+            await store.mark_failed(run_id, _atomic_checkpoint("forced failure"))
+        async with pool.acquire() as conn:
+            await conn.execute("ALTER TABLE runs DROP CONSTRAINT wp8_failed_status_guard")
+
+        checkpoint = RunCheckpoint(
+            phase="turn_complete", prompt="after reset", turn_index=1, total_usage=Usage()
+        )
+        with pytest.raises(KeyError, match="run not found: missing"):
+            await store.save_checkpoint("missing", checkpoint)
+        await store.save_checkpoint(run_id, checkpoint)
+        assert await store.append_event(run_id, _atomic_event("after reset")) == 1
+        record = await store.load_run(run_id)
+        assert record is not None
+        assert record.checkpoint is not None
+        assert record.checkpoint.prompt == "after reset"
+        assert [event.seq for event in await store.load_events(run_id)] == [1]
+    finally:
+        await store.close()

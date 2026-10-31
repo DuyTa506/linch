@@ -40,7 +40,7 @@ gemini = [
 ]
 worker = ["pgqueuer[asyncpg]>=1.6"]
 postgres = [
-  "asyncpg>=0.29",
+  "asyncpg>=0.32",
 ]
 dev = [
   "opentelemetry-sdk>=1.20",

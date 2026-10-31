@@ -1226,6 +1226,7 @@ async def run_scale_case(
 
         from linch.run_stores.postgres import PostgresRunStore
         from linch.sessions.postgres import PostgresSessionStore
+        from linch.storage import _pg as postgres_runtime
 
         try:
             _write_scale_schema_marker(progress_path, case, schema)
@@ -1237,12 +1238,22 @@ async def run_scale_case(
                 min_size=1,
                 max_size=10,
                 connection_class=_instrument_connection_class(metrics, "session"),
+                **(
+                    {"reset": postgres_runtime._reset_connection}
+                    if getattr(postgres_runtime, "_reset_connection", None) is not None
+                    else {}
+                ),
             )
             run_pool = await asyncpg.create_pool(
                 dsn,
                 min_size=1,
                 max_size=10,
                 connection_class=_instrument_connection_class(metrics, "run"),
+                **(
+                    {"reset": postgres_runtime._reset_connection}
+                    if getattr(postgres_runtime, "_reset_connection", None) is not None
+                    else {}
+                ),
             )
             session_store = PostgresSessionStore(dsn, pool=session_pool)
             run_store = PostgresRunStore(dsn, pool=run_pool)

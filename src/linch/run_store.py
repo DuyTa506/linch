@@ -317,7 +317,7 @@ class ModelInputSnapshotStore(Protocol):
 
     async def load(self, snapshot_id: str) -> ModelInputSnapshot | None: ...
 
-    async def delete(self, snapshot_id: str) -> None: ...
+    async def delete(self, snapshot_id: str, *, run_id: str) -> None: ...
 
     async def prune(self, run_id: str, keep_ids: Sequence[str] = ()) -> int: ...
 
@@ -1436,10 +1436,11 @@ class InMemoryRunStore:
         snapshot = self._model_input_snapshots.get(snapshot_id)
         return _validate_model_input_snapshot(snapshot) if snapshot is not None else None
 
-    async def delete(self, snapshot_id: str) -> None:
+    async def delete(self, snapshot_id: str, *, run_id: str) -> None:
+        self._check_lease(run_id)
         snapshot = self._model_input_snapshots.get(snapshot_id)
-        if snapshot is not None:
-            self._check_lease(snapshot.run_id)
+        if snapshot is not None and snapshot.run_id != run_id:
+            return
         self._model_input_snapshots.pop(snapshot_id, None)
 
     async def prune(self, run_id: str, keep_ids: Sequence[str] = ()) -> int:

@@ -205,7 +205,7 @@ class _FailDeleteStore:
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
 
-    async def delete(self, snapshot_id: str) -> None:
+    async def delete(self, snapshot_id: str, *, run_id: str) -> None:
         raise OSError("snapshot delete failed")
 
 

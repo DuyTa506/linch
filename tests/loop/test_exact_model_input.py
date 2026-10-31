@@ -196,7 +196,7 @@ async def test_missing_pending_snapshot_fails_closed_before_provider_call() -> N
     assert record is not None and record.checkpoint is not None
     snapshot_id = record.checkpoint.model_input_snapshot_id
     assert snapshot_id is not None
-    await run_store.delete(snapshot_id)
+    await run_store.delete(snapshot_id, run_id=run_id)
 
     provider = _CaptureProvider()
     restarted = Agent(

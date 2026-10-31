@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from linch.storage._pg import _SCHEMA_LOCK_KEY
+from linch.storage._pg import _SCHEMA_LOCK_KEY, _reset_connection
 
 _STORES = [
     ("linch.sessions.postgres", "PostgresSessionStore"),
@@ -106,7 +106,15 @@ async def test_lazy_initialization_is_locked_transactional_and_closes_supplied_p
     assert store._pool is pool
     assert store._initialized is True
     assert len(adapter.imports) == 2  # constructor and first initializer only
-    assert adapter.creations == ([] if supplied else [("test-dsn", {"min_size": 2, "max_size": 7})])
+    if supplied:
+        assert adapter.creations == []
+    else:
+        assert len(adapter.creations) == 1
+        dsn, kwargs = adapter.creations[0]
+        assert dsn == "test-dsn"
+        assert kwargs["min_size"] == 2
+        assert kwargs["max_size"] == 7
+        assert kwargs["reset"] is _reset_connection
     assert pool.log[:3] == [
         ("enter", "acquire"),
         ("enter", "transaction"),
