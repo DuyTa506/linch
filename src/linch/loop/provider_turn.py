@@ -79,8 +79,6 @@ class ProviderTurnContext:
     budget: Any = None
     force_final_pending: bool = False
     assembly: AssistantAssembly | None = None
-    primary_receipt: ModelCallReceipt | None = None
-    primary_rejected_native: bool = False
     projection: dict[str, Any] | None = None
     control: Message | None = None
     terminal: bool = False
@@ -423,8 +421,6 @@ async def run_provider_turn(ctx: ProviderTurnContext) -> AsyncIterator[Event]:
         await ledger.record_projection(projection)
         if after_action == "stop":
             ctx.assembly = assembly
-            ctx.primary_receipt = primary_receipt
-            ctx.primary_rejected_native = primary_rejected_native
             ctx.projection = projection
             ctx.terminal = True
             async for event in ctx.emit_primary_usage(primary_receipt):
@@ -451,7 +447,5 @@ async def run_provider_turn(ctx: ProviderTurnContext) -> AsyncIterator[Event]:
             yield event
 
     ctx.assembly = assembly
-    ctx.primary_receipt = primary_receipt
-    ctx.primary_rejected_native = primary_rejected_native
     ctx.projection = projection if not resumed_assistant else None
     ctx.control = control if not resumed_assistant else None

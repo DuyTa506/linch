@@ -1171,7 +1171,11 @@ class RunRuntime:
                 for block in self.checkpoint.assistant_message.content
             )
         ):
-            self.checkpoint.tool_batch_event_after_seq = buf.last_seq if buf is not None else None
+            # Re-checkpointed results still depend on the original batch start events.
+            if phase != "tool_batch_pending" or not self.checkpoint.completed_tool_results:
+                self.checkpoint.tool_batch_event_after_seq = (
+                    buf.last_seq if buf is not None else None
+                )
         elif phase not in ("permission_pending", "tool_executing", "tool_results_appended"):
             self.checkpoint.tool_batch_event_after_seq = None
         if has_pending_events:
