@@ -220,6 +220,33 @@ unless `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true` is set. Use
 an OTLP exporter for Langfuse, Tempo, Datadog, or another collector; no custom
 telemetry hook is required.
 
+The run boundary events expose the same correlation value as `trace_id`. With a
+valid active OpenTelemetry context this is the 32-character trace ID; without
+one, Linch reuses the durable `run_id` so the fallback costs no extra trace
+setup. The creation/origin ID is stored in `RunRecord.meta["trace_id"]` and is
+read-only on each tool's `ToolContext.trace_id`. A resumed attempt follows its
+caller's active trace, or the same durable run ID when no active trace exists.
+Hosts can add it to ordinary log records without installing global logging
+state:
+
+```python
+import logging
+
+from linch import TraceIdFilter
+
+handler = logging.StreamHandler()
+handler.addFilter(TraceIdFilter())
+handler.setFormatter(logging.Formatter("%(trace_id)s %(message)s"))
+logging.getLogger("my-service").addHandler(handler)
+```
+
+An explicit `extra={"trace_id": ...}` wins, followed by the active OTel span,
+`record.run_id`, and an optional filter fallback. A tool can pass its captured
+value explicitly: `logger.info("search complete", extra={"trace_id": ctx.trace_id})`.
+See the generated lifecycle
+catalog in [the architecture guide](../architecture/events.md#typed-lifecycle-catalog)
+for each point's payload and dispatch mode.
+
 ---
 
 ## Backpressure
