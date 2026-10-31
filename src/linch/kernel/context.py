@@ -50,16 +50,35 @@ class Context:
         if key in self._services:
             raise ConfigError(f"service {key!r} already registered in this scope")
 
-        def _install() -> Callable[[], None]:
+        def _install() -> Callable[[], Any]:
+            removed = False
+            notified = False
+            notification: Disposable | None = None
             self._services[key] = service
 
-            def _remove() -> None:
-                if key in self._services and self._services[key] is service:
+            async def _remove() -> None:
+                nonlocal notified, notification, removed
+                if not removed:
+                    if key not in self._services or self._services[key] is not service:
+                        return
                     del self._services[key]
+                    removed = True
+                if notified:
+                    return
+                if notification is None:
+                    if not self.events.has_listeners("context/service"):
+                        notified = True
+                        return
+                    notification = self.events._notification("context/service", self, key)
+                await notification.dispose()
+                notified = True
 
             return _remove
 
-        return self._scope.effect(_install)
+        disposer = self._scope.effect(_install)
+        if self.events.has_listeners("context/service"):
+            self.events.emit("context/service", self, key)
+        return disposer
 
     def get(self, key: str, default: Any = None) -> Any:
         """Read a service, walking up to parent scopes; *default* if unresolved."""

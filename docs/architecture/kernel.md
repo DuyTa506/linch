@@ -66,6 +66,10 @@ it rather than through module globals — that is what makes Linch multi-tenant
 safe.
 
 - `register(key, service) -> Disposable` — add a service; dispose to remove it.
+  Registration and removal publish `context/service` with `(context, key)` on
+  the shared bus after the registry changes. Removal awaits every listener;
+  failed notifications remain retryable through the same disposer. With no
+  listeners, no event is dispatched.
 - `ctx.<name>` — read a **required** capability as an attribute (e.g.
   `ctx.execution`); `AttributeError` if unresolved. Underscore names raise, to
   avoid recursion.
