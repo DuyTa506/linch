@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import importlib.util
 import sys
 from collections import defaultdict
 from collections.abc import Iterable
@@ -52,12 +53,17 @@ class _SourceVisitor(ast.NodeVisitor):
 
     def visit_Import(self, node: ast.Import) -> None:
         for alias in node.names:
-            if alias.name.endswith(".lifecycle"):
+            if alias.name.endswith(".lifecycle") or alias.name.endswith(".kernel.events"):
                 self.aliases[alias.asname or alias.name.rsplit(".", 1)[-1]] = "*"
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-        is_lifecycle = bool(node.module and node.module.endswith("lifecycle"))
-        is_root_lifecycle = node.module in {None, "linch"}
+        package = ".".join(self.path.relative_to(SRC).with_suffix("").parts[:-1])
+        try:
+            module = importlib.util.resolve_name("." * node.level + (node.module or ""), package)
+        except ImportError:
+            module = node.module or ""
+        is_lifecycle = module in {"linch.lifecycle", "linch.kernel.events"}
+        is_root_lifecycle = module == "linch"
         for alias in node.names:
             if is_lifecycle:
                 self.aliases[alias.asname or alias.name] = alias.name

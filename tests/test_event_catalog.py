@@ -33,4 +33,4 @@ def test_hook_event_values_are_catalog_points() -> None:
         and point._payload_ref.startswith("linch.hooks.contexts.")
     }
     assert {event.value for event in HookEvent} == hook_points
-    assert all(point.mode == "serial" for point in LIFECYCLE_POINTS if point.name in hook_points)
+    assert all(point.mode == "hook" for point in LIFECYCLE_POINTS if point.name in hook_points)

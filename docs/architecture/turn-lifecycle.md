@@ -70,12 +70,11 @@ sequenceDiagram
 
 ## Typed lifecycle points
 
-The sequence is backed by the catalog in [events.md](./events.md). Run and
-turn hooks use the serial points `AgentStart`, `UserPromptSubmit`, `TurnStart`,
-`BeforeProviderCall`, `ProviderCallStart`, `ProviderCallStop`,
-`AfterProviderCall`, `TurnStop`, and `AgentStop`. Tool security hooks keep
-their serial ordering around the tool pipeline: `PreToolUse`, `ToolUseStart`,
-`PostToolUse` (or `PostToolUseFailure`), and `ToolUseStop`.
+The sequence is backed by the catalog in [events.md](./events.md). Run, turn,
+provider, and security hooks use `hook` points such as `AgentStart`,
+`UserPromptSubmit`, `TurnStart`, `BeforeProviderCall`, `PreToolUse`, and
+`AgentStop`. `HookDispatcher` awaits them in registration order and keeps the
+security-sensitive mutation and permission ordering explicit.
 
 The three kernel tool points — `tools/pre-execute`, `tools/execute`, and
 `tools/post-execute` — are waterfalls. A wrapper must await its `next` callback

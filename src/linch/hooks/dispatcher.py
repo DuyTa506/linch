@@ -66,10 +66,10 @@ class HookDispatcher:
             The combined hook action, telemetry events, and final context.
         """
         if isinstance(event, lifecycle.LifecyclePoint):
-            if event.mode != "serial":
+            if event.mode != "hook":
                 raise ValueError(
                     f"hook lifecycle point {event.name!r} uses {event.mode} dispatch; "
-                    "HookDispatcher requires serial"
+                    "HookDispatcher requires hook"
                 )
             event_value = event.name
         else:
