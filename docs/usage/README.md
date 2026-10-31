@@ -7,10 +7,9 @@ agent, and using each subsystem. If you are new to the SDK, start with
 For the *why* behind the design (data flow, the turn pipeline, module
 boundaries) see [`../architecture.md`](../architecture.md).
 
-If you are upgrading from Linch 1.x, read the
-[Linch 2.0 migration guide](../migration-2.0.md) first. Linch is an SDK: a
-coding workspace and its trust policy are now explicit choices at the call
-site.
+If you are upgrading to Linch 3.0, read the
+[Linch 3.0 migration guide](../migration-3.0.md) first. Linch is an SDK: a
+coding workspace and its trust policy are explicit choices at the call site.
 
 ---
 
@@ -41,7 +40,7 @@ from linch.sessions import InMemorySessionStore
 agent = Agent(
     model="gpt-5",                              # or any supported model
     session_store=InMemorySessionStore(),
-    permissions={"mode": "skip-dangerous"},     # auto-approve all tool calls
+    permissions={"mode": "skip-dangerous"},     # allow tools without prompting
 )
 
 async def main():
@@ -90,11 +89,11 @@ One `Agent`, many `Session`s is the canonical web-app shape — see
 | [Providers](./providers.md) | Choosing a provider, model catalog, capabilities, thinking events |
 | [Events](./events.md) | Event stream, cost fields, run reports, long-run eval scorers |
 | [Evals and benchmarks](./evals.md) | `EvalSuite`, `run_eval_benchmark`, and `scripts/eval_benchmark.py` for CI/provider comparison |
-| [Tools](./tools.md) | `@tool`, `FunctionTool`, class tools, scheduler, timeouts/retry, Bash backend, deps, permissions |
+| [Tools](./tools.md) | `@tool`, `FunctionTool`, class tools, scheduler, timeouts/retry, Bash backend, deps, permissions, per-run principals and roles |
 | [Structured output](./structured-output.md) | `OutputSchema`, final-tool capture, schema repair |
 | [Hooks](./hooks.md) | The canonical extension mechanism: chokepoints, `HookResult`, built-in adapters |
 | [Tool cache](./tool-cache.md) | Opt-in per-run memoization of read-scope tool calls (`tool_cache=`) |
-| [Context & memory](./context-and-memory.md) | Per-turn RAG context, scoped file memory, and the optional mem0 recipe |
+| [Context & memory](./context-and-memory.md) | `RagConnector` retrieval and grounding, per-turn context, scoped file memory, and the optional mem0 recipe |
 | [Virtual filesystem](./filesystem.md) | Large-result offloading and the `ls`/`read_file`/`write_file`/`edit_file` tools |
 | [Workflows](./workflows.md) | Deterministic fleet loops (`run_workflow`), journaling, resume |
 | [Outer loop runner](./loop-runner.md) | `LoopSpec` + `LoopRunner.run_once()` for cron, CI, webhooks, and manual recurring work |

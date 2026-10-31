@@ -186,7 +186,7 @@ Notes:
   (`Write`/`write_file`) are allowed by default — that is their purpose — but a
   host can opt into overwrite-gating of *existing* files via
   `ReadBeforeWriteConfig(overwrite_tools=...)`. A windowed (`offset`/`limit`)
-  read does not unlock edits to the unseen parts of a file. A bare Linch 2.0
+  read does not unlock edits to the unseen parts of a file. A bare Linch 3.0
   `Agent` has no filesystem tools, no offload backend, and no read-before-write
   hook unless the embedder opts into them.
 - **Tool progress is live-only.** `ToolContext.report_progress(...)` is

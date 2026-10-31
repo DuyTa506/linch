@@ -142,16 +142,23 @@ synchronous `render_output` also requires stable `renderer_id` and
 
 ## The scheduler
 
-The scheduler runs independent read/search tools in parallel, serializes
-write/exec tools, respects `Agent(max_tool_concurrency=...)`, and uses optional
-`ResourceAccess` declarations to avoid read/write conflicts on the same file,
-database, index, or other host-defined resource.
+The scheduler runs independent parallel-safe tools concurrently, respects
+`Agent(max_tool_concurrency=...)`, and uses optional `ResourceAccess`
+declarations to avoid read/write conflicts on the same file, database, index,
+or other host-defined resource. With a plain boolean `parallel=True`, only
+read-scoped tools are admitted; write/exec tools remain serial.
 
-In practice this means: when the model emits several tool calls in one turn,
-read-scoped tools marked `parallel=True` fan out concurrently, while
-write/exec tools take an exclusive lane so two writes never race. The default
-concurrency limit is the CPU count; cap it with `Agent(max_tool_concurrency=...)`
-or the `AGENTKIT_MAX_TOOL_CONCURRENCY` environment variable.
+A tool may instead expose an input-aware `parallel(input) -> bool` callable.
+That callable is the exception for tools whose safety depends on the invocation.
+The built-in `Subagent` tool uses it to return `True` only for a named
+subagent whose resolved tools are all read-scoped; general-purpose, inherited,
+unknown, and background subagents fail closed and remain serial.
+
+In practice, when the model emits several tool calls in one turn, calls admitted
+by their boolean or callable `parallel` declaration can fan out concurrently.
+Resource conflicts still serialize those calls. The default concurrency limit
+is the CPU count; cap it with `Agent(max_tool_concurrency=...)` or the
+`AGENTKIT_MAX_TOOL_CONCURRENCY` environment variable.
 
 `ResourceAccess` is the finer-grained control. Two tools that both declare a
 `read` on `"kb:default"` may overlap; a `read` and a `write` on the same
@@ -194,8 +201,8 @@ The default is `None` — no timeout, zero overhead, fully backward compatible.
 When set, a timeout converts to an `is_error=True` result rather than raising,
 so a slow tool never takes down its parallel siblings; the model sees an
 actionable message and can react. The typed exception `ToolTimeoutError`
-(`kind="tool_timeout"`, `retryable=True`) is available for observers and
-policies.
+(`kind="tool_timeout"`, `retryable=True`) is available to event consumers and
+policy hooks.
 
 ---
 

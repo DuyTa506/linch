@@ -11,13 +11,13 @@ import asyncio
 
 from linch import (
     Agent,
-    EvalBenchmarkTarget,
-    EvalSuite,
     InMemorySessionStore,
     empty_tools,
 )
 from linch.ext.evals import (
+    EvalBenchmarkTarget,
     EvalCase,
+    EvalSuite,
     ScriptedProvider,
     TextTurn,
     run_eval_benchmark,
@@ -130,7 +130,8 @@ scorers:
     budget_usd: 0.05
 ```
 
-Supported scorer types map to the built-in scorers exported from `linch`:
+Supported scorer types map to the built-in scorers exported from
+`linch.ext.evals`:
 
 | Type | Fields |
 |---|---|

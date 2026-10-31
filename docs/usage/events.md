@@ -19,19 +19,33 @@ as the turn progresses:
 async for event in session.run("hello"):
     match event.type:
         case "system":    # run started — model, tools, cwd
+            pass
         case "user":      # user message appended
+            pass
         case "assistant": # full assistant turn (final)
+            pass
         case "partial_assistant":  # streaming text/thinking delta
+            pass
         case "tool_call_start":   # tool about to run
+            pass
         case "tool_call_end":     # tool finished, has .result
+            pass
         case "tool_progress":     # transient progress from an in-flight tool
+            pass
         case "permission_request": # user approval needed (mode="default")
+            pass
         case "usage":     # primary or auxiliary token counts
+            pass
         case "budget":    # RunBudget warning (90%) or exhaustion
-        case "result":    # run finished — .subtype in ("success","error","aborted")
+            pass
+        case "result":    # .subtype: "success", "error", "aborted", "interrupted"
+            pass
         case "error":     # provider/tool error details
+            pass
         case "compaction": # context was summarised (or micro-compacted)
+            pass
         case "workflow":  # workflow engine progress / journal records
+            pass
 ```
 
 A few lifecycle rules worth internalizing:
@@ -44,9 +58,9 @@ A few lifecycle rules worth internalizing:
   [Providers → Reading thinking events](./providers.md#reading-thinking-events)).
   Without that flag you still get the full `assistant` event at the end of each
   turn.
-- **`tool_call_end` carries the result** on `.result`, including the rich
-  `ToolResult` fields (summary, metadata, citations) even when the model only
-  saw a truncated/offloaded preview.
+- **`tool_call_end` carries rendered result text** on `.result`; the rich
+  `ToolResult` fields (summary, metadata, citations) are on `.tool_result`,
+  even when the model only saw a truncated/offloaded preview.
 - **`tool_call_end.tool_output` carries Canonical Tool Output V2** for tools
   declaring `output_schema`: the validated JSON value or structured error and
   JSON-reference attachments remain available beside the legacy projections.
@@ -70,8 +84,9 @@ async for event in session.run("hello"):
 # `event.final_text` (or `event.structured_output` when using an OutputSchema).
 ```
 
-`event.subtype` is one of `"success"`, `"error"`, or `"aborted"` — branch on it
-to decide whether to surface the answer, an error, or a cancellation.
+`event.subtype` is one of `"success"`, `"error"`, `"aborted"`, or
+`"interrupted"` — branch on it to decide whether to surface the answer, an
+error, or a cancellation/interruption.
 
 The same event stream is mirrored to hooks at the `on_event_emit` chokepoint, so
 anything you can do in this loop you can also do in a reusable hook — see
@@ -202,8 +217,8 @@ and call id; Linch adds run and turn identifiers. It records
 `gen_ai.client.token.usage`, `gen_ai.client.operation.duration`, and
 `linch.store.duration` (tagged with `op`) metrics. Content fields are omitted
 unless `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true` is set. Use
-an OTLP exporter for Langfuse, Tempo, Datadog, or another collector; no Linch
-observer or telemetry hook is required.
+an OTLP exporter for Langfuse, Tempo, Datadog, or another collector; no custom
+telemetry hook is required.
 
 ---
 

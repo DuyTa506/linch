@@ -16,7 +16,7 @@ talking to.
 |---|---|
 | OpenAI reasoning-native models (`o1`, `o3`, `gpt-5`) with effort/summary controls and stateful `previous_response_id` | `OpenAIResponsesProvider` |
 | Standard OpenAI Chat Completions (`gpt-4o`, `gpt-5-nano`) | `OpenAIChatCompletionsProvider` |
-| Any OpenAI-compatible endpoint (Azure, Groq, Together) | `OpenAIChatCompletionsProvider(base_url=...)` |
+| Any OpenAI-compatible endpoint (Azure, Groq, Together) | `OpenAIChatCompletionsProvider(OpenAIChatProviderOptions(base_url=...))` |
 | DeepSeek native API — thinking controls, tool-loop reasoning, JSON-object output | `DeepSeekProvider` |
 | Anthropic Claude — adaptive thinking, prompt caching, signed thinking blocks | `AnthropicProvider` |
 | Google Gemini — large context windows, Google tool semantics | `GeminiProvider` (`[gemini]` extra) |
@@ -113,7 +113,7 @@ provider = AnthropicProvider(
 )
 
 # ── Google Gemini ────────────────────────────────────────────────────────────
-# Requires: pip install "linch[gemini]" (google-genai; no google-generativeai)
+# Requires: pip install "linch[gemini]" (uses google-genai)
 # Supports text, tool use, structured output, and large context windows.
 from linch.providers import GeminiProvider, GeminiProviderOptions
 
@@ -276,9 +276,10 @@ Responses for stateful reasoning controls, Anthropic for explicit prompt-cache
 markers and Claude thinking signatures, Gemini for Google model/tool semantics, and
 llama.cpp, vLLM, or SGLang for self-hosted local servers.
 
-Use `OpenAIChatCompletionsProvider(base_url=...)` when a service implements the
-OpenAI Chat Completions protocol. This is the recommended path for Azure, Groq,
-Together, and similar OpenAI-compatible endpoints. Use `DeepSeekProvider` for
+Use `OpenAIChatCompletionsProvider(OpenAIChatProviderOptions(base_url=...))` when
+a service implements the OpenAI Chat Completions protocol. This is the
+recommended path for Azure, Groq, Together, and similar OpenAI-compatible
+endpoints. Use `DeepSeekProvider` for
 the native DeepSeek API, where it owns DeepSeek-specific thinking and
 JSON-object semantics.
 
