@@ -56,6 +56,13 @@ PROMOTED_EVAL_NAMES = frozenset(
 PROMOTED_PERMISSION_NAMES = frozenset({"BashRule", "PathRule", "ToolRule"})
 
 
+def test_plugin_is_public() -> None:
+    from linch import Plugin
+
+    assert "Plugin" in linch.__all__
+    assert hasattr(Plugin, "setup")
+
+
 def test_resume_rejection_error_is_public() -> None:
     from linch import LinchError, RunNotResumableError
 

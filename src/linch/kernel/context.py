@@ -14,6 +14,7 @@ process without global state.
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextvars import ContextVar
 from typing import Any
 
 from linch.errors import ConfigError
@@ -22,6 +23,7 @@ from .effects import Disposable, EffectScope
 from .events import EventBus, Listener
 
 _MISSING = object()
+_PLUGIN_SCOPE: ContextVar[Any] = ContextVar("linch_plugin_scope", default=None)
 
 
 class Context:
@@ -39,6 +41,8 @@ class Context:
         self._scope = EffectScope()
         self._services: dict[str, Any] = {}
         self._parent = _parent
+        self._children: list[Context] = []
+        self._plugin_exports: dict[str, tuple[Context, Context]] = {}
 
     def register(self, key: str, service: Any) -> Disposable:
         """Install *service* under *key* in this scope; returns a disposer.
@@ -47,8 +51,13 @@ class Context:
         (a child may still shadow a parent's service under the same key).
         """
         self._scope.ensure_active()
+        active_scope = _PLUGIN_SCOPE.get()
+        if active_scope is not None and not self._within(active_scope):
+            raise ConfigError("plugin setup may only register services in its activation scope")
         if key in self._services:
             raise ConfigError(f"service {key!r} already registered in this scope")
+        if key in self._plugin_exports:
+            raise ConfigError(f"service {key!r} is already provided by a plugin")
 
         def _install() -> Callable[[], Any]:
             removed = False
@@ -76,14 +85,21 @@ class Context:
             return _remove
 
         disposer = self._scope.effect(_install)
-        if self.events.has_listeners("context/service"):
+        if self.events.has_listeners("context/service") and _PLUGIN_SCOPE.get() is None:
             self.events.emit("context/service", self, key)
         return disposer
 
     def get(self, key: str, default: Any = None) -> Any:
         """Read a service, walking up to parent scopes; *default* if unresolved."""
-        if key in self._services:
+        if not self._scope.closed and key in self._services:
             return self._services[key]
+        exported = self._plugin_exports.get(key) if not self._scope.closed else None
+        if exported is not None:
+            owner, source = exported
+            if not owner._scope.closed and not source._scope.closed:
+                service = source._services.get(key, _MISSING)
+                if service is not _MISSING:
+                    return service
         if self._parent is not None:
             return self._parent.get(key, default)
         return default
@@ -119,10 +135,53 @@ class Context:
         child (or the parent) is disposed.
         """
         self._scope.ensure_active()
+        active_scope = _PLUGIN_SCOPE.get()
+        if active_scope is not None and not self._within(active_scope):
+            raise ConfigError("plugin setup may only create scopes in its activation scope")
         child = Context(label=label, _bus=self.events, _parent=self)
-        self._scope.add(Disposable(child._scope.dispose))
+        self._children.append(child)
+        self._scope.add(Disposable(child.dispose))
         return child
+
+    def _within(self, ancestor: Context) -> bool:
+        current: Context | None = self
+        while current is not None:
+            if current is ancestor:
+                return True
+            current = current._parent
+        return False
+
+    def _plugin_services(self) -> list[tuple[str, Context]]:
+        services = list(self._services.items())
+        result: list[tuple[str, Context]] = [(key, self) for key, _service in services]
+        for child in self._children:
+            result.extend(child._plugin_services())
+        return result
+
+    def _publish_plugin(self, owner: Context, key: str, source: Context) -> None:
+        if key in self._services:
+            raise ConfigError(f"service {key!r} already exists in the mounting context")
+        existing = self._plugin_exports.get(key)
+        if existing is not None and existing[0] is not owner:
+            raise ConfigError(f"service {key!r} is already provided by another plugin")
+        self._plugin_exports[key] = (owner, source)
+        if self.events.has_listeners("context/service"):
+            self.events.emit("context/service", self, key)
+
+    def _withdraw_plugin(self, owner: Context, key: str) -> Disposable | None:
+        existing = self._plugin_exports.get(key)
+        if existing is None or existing[0] is not owner:
+            return None
+        del self._plugin_exports[key]
+        if self.events.has_listeners("context/service"):
+            return self.events._notification("context/service", self, key)
+        return None
 
     async def dispose(self) -> None:
         """Unwind every registration, listener, and child scope owned here."""
         await self._scope.dispose()
+        if self._parent is not None:
+            try:
+                self._parent._children.remove(self)
+            except ValueError:
+                pass

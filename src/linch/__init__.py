@@ -186,7 +186,7 @@ if TYPE_CHECKING:
         UserPromptSubmitContext,
         normalize_hooks,
     )
-    from .kernel import Context, Disposable
+    from .kernel import Context, Disposable, Plugin
     from .loop import apply_provider_capabilities
     from .loop_guard import (
         LoopGuard,
@@ -375,7 +375,7 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
         "DetailedCompaction",
     ),
     ".config": ("FeatureFlags", "SystemPromptConfig", "SystemPromptSection"),
-    ".kernel": ("Context", "Disposable"),
+    ".kernel": ("Context", "Disposable", "Plugin"),
     ".context": (
         "ContextBudget",
         "ContextBuilder",
@@ -744,6 +744,7 @@ __all__ = [
     "LinchError",
     "Context",
     "Disposable",
+    "Plugin",
     "IgnorableEvent",
     "is_ignorable_event",
     "ToolExecution",

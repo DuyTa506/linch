@@ -15,7 +15,7 @@ from .config import FeatureFlags, SystemPromptConfig
 from .durability import DurabilityOptions
 from .errors import ConfigError
 from .execution import ExecutionBackend
-from .kernel import Context, Disposable
+from .kernel import Context, Disposable, Plugin
 from .loop.reliability import PrerequisiteHook
 from .loop.turn_stopping import TurnStoppingDispatcher, TurnStoppingListener
 from .openai_responses import OpenAIOptions, OpenAIReasoning
@@ -624,6 +624,7 @@ class Agent:
         self.context.register("tool_pipeline", self.tool_pipeline)
         if self.execution_backend is not None:
             self.context.register("execution", self.execution_backend)
+        self.context.register("agent", self)
 
     def _initialize_extension_state(
         self,
@@ -661,6 +662,14 @@ class Agent:
 
     def on_turn_stopping(self, listener: TurnStoppingListener) -> Disposable:
         return self.context.effect(lambda: self._turn_stopping_dispatcher.register(listener))
+
+    async def use(self, plugin: Plugin, config: Any = None) -> Disposable:
+        """Mount a duck-typed plugin into this agent's Context."""
+        if self._lifecycle_state != _OPEN:
+            raise RuntimeError("agent is closed")
+        from .kernel.plugins import mount_plugin
+
+        return await mount_plugin(self.context, plugin, config)
 
     def _set_subagent_tool_registry(self, registry: ToolRegistry) -> None:
         """Install a worker-only tool catalog without changing parent tools.

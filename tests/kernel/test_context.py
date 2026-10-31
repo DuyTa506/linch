@@ -137,6 +137,8 @@ async def test_context_dispose_retries_failed_notification_after_listener_teardo
     ctx.on("context/service", failed)
     ctx.on("context/service", ok)
     ctx.register("svc", _Svc("context-retry"))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
 
     with pytest.raises(RuntimeError, match="listener failed"):
         await ctx.dispose()
@@ -144,6 +146,25 @@ async def test_context_dispose_retries_failed_notification_after_listener_teardo
 
     await ctx.dispose()
     assert calls == {"failed": 2, "ok": 1}
+
+
+@pytest.mark.asyncio
+async def test_context_hides_services_while_disposal_is_running() -> None:
+    ctx = Context()
+    ctx.register("svc", _Svc("hidden"))
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def teardown() -> None:
+        started.set()
+        await release.wait()
+
+    ctx.effect(lambda: teardown)
+    disposing = asyncio.create_task(ctx.dispose())
+    await started.wait()
+    assert ctx.get("svc") is None
+    release.set()
+    await disposing
 
 
 @pytest.mark.asyncio
