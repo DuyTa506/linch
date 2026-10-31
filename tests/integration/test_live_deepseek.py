@@ -275,7 +275,7 @@ async def test_deepseek_fork_continue_worker():
 @pytest.mark.asyncio
 async def test_deepseek_coordinator_mode_roster():
     """create_deep_agent(coordinator=True) strips heavy tools from the parent."""
-    from linch.deep_agent import create_deep_agent
+    from linch.ext.deep_agent import create_deep_agent
 
     agent = create_deep_agent(
         model=MODEL,
@@ -307,7 +307,7 @@ async def test_deepseek_taskstop_cancels_worker():
 
     Spawns the worker via SubagentTool.execute() directly to avoid prompt-following flakiness.
     """
-    from linch.deep_agent import create_deep_agent
+    from linch.ext.deep_agent import create_deep_agent
     from linch.tools.base import ToolContext
 
     agent = create_deep_agent(

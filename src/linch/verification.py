@@ -100,7 +100,7 @@ async def evaluate_verifiers(verifiers: list[Any], ctx: VerificationContext) -> 
 
 
 class ScorerVerifier:
-    """Lift an evals scorer (``linch.evals.scorers``) into a live verifier.
+    """Lift an evals scorer (``linch.ext.evals.scorers``) into a live verifier.
 
     The scorer is called with ``output=ctx.final_text``; ``False`` maps to
     *on_fail* (default ``"retry"`` with *feedback*), ``True``/``None`` map to

@@ -12,8 +12,8 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..providers.base import BaseProvider, ProviderCapabilities
-from ..types import Usage
+from ...providers.base import BaseProvider, ProviderCapabilities
+from ...types import Usage
 
 
 @dataclass

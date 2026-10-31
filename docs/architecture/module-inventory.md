@@ -20,11 +20,11 @@
 | `scheduler.py` | Canonical tool-call security pipeline (validate → offered-tool boundary → `PreToolUse` → revalidate → final permission), resource-aware bounded execution, stream-only tool progress, and enabled-filesystem offload at the result chokepoint |
 | `compaction.py` | Context-window management; calls `agent.provider` directly; `CompactionLadder` + `micro_compact` recovery rungs |
 | `budget.py` | `RunBudget` — token/USD spending caps shared across the agent tree; charged per turn in `loop/runner.py` |
-| `workflow/` | Deterministic workflow engine: `WorkflowContext` (`context.py`), content-addressed journal (`journal.py`), `run_workflow` driver (`engine.py`) |
+| `ext/workflow/` | Deterministic workflow engine: `WorkflowContext` (`context.py`), content-addressed journal (`journal.py`), `run_workflow` driver (`engine.py`) |
 | `coordination/` | Optional in-process peer messaging: `mailbox/` (peer message bus + `Correlator`) and `send_message.py`; durable scheduling and queue dispatch are in `linch.worker` |
 | `permissions/` | `PermissionEngine`: final canonical-input rule evaluation, event emission, loop suspension, durable same-turn permission decision keys |
 | `pricing.py` | `ModelPricing`, `_DEFAULT_PRICING`, `cost_usd()` for per-turn and cumulative cost events |
-| `evals/` | Scripted provider, eval case/result dataclasses, built-in scorers, `run_eval()` |
+| `ext/evals/` | Scripted provider, eval case/result dataclasses, built-in scorers, `run_eval()` |
 | `providers/` | `BaseProvider`, `ProviderCapabilities`; implementations: `OpenAIChatCompletionsProvider` (generic OpenAI-compatible endpoint), `DeepSeekProvider` (native thinking, JSON-object output, `reasoning_content` round-trip), `OpenAIResponsesProvider` (stateful, native reasoning effort/summary), `AnthropicProvider` (adaptive/extended thinking with signature, prompt caching), `GeminiProvider`, `LlamaCppProvider`, `VLLMProvider`, `SGLangProvider`; `limiter.py` — `Limiter` protocol and the `provider_slot` gate core holds around every live provider call |
 | `tools/` | Tool protocol, `ToolContext`, `ToolRegistry` (registration returns a `Disposable`), `ToolResult`, `Citation`, built-in tools, execution backends; `pipeline.py` — the open `tools/pre-execute → execute → post-execute` seam (`ToolPipeline`); `wrappers/` — `tools/execute` around-wrappers (metrics, timeout) |
 | `sessions/` | `SessionStore` protocol, `InMemorySessionStore`, `PostgresSessionStore`, provider-view snapshots, and portable safe-prefix session forking |
@@ -32,7 +32,10 @@
 | `skills/` | `SKILL.md`-based slash-commands with argument substitution |
 | `subagents/` | Specialized agent roles from `.linch/agents.yaml`; `workers.py` — `WorkerHandle` dataclass for per-worker state tracking; wiring for `SubagentContinueTool` |
 | `run_store.py` | `InMemoryRunStore` plus `PostgresRunStore` in `run_stores/postgres.py`, `RunCheckpoint`, and `RunContract` — durable checkpoints plus a canonical fingerprint of resume-safe execution inputs. Background completion events are status-only audit records; no durable result-delivery queue exists. |
-| `deep_agent/` | Explicit `create_deep_agent` profiles/factory (`factory.py`); deep prompt layers (`prompts.py`); specialist roster — researcher, planner, implementer, verification (`subagents.py`) |
+| `ext/deep_agent/` | Explicit `create_deep_agent` profiles/factory (`factory.py`); deep prompt layers (`prompts.py`); specialist roster — researcher, planner, implementer, verification (`subagents.py`) |
+| `ext/reports.py` | Run report construction and persisted report loading |
+| `ext/loop_runner.py` | Host-driven recurring-loop runner and filesystem artifacts |
+| `ext/scaffold/` | Stdlib-only `linch` project scaffolding console script |
 | `tools/subagent_continue.py` | `SubagentContinueTool` — continues a retained child session by worker id or display name |
 | `tools/subagent_stop.py` | `TaskStopTool` — cancels a background worker; handle remains in `session.workers` and is still continuable |
 | `tools/_worker_utils.py` | `resolve_worker` — shared id/display-name lookup helper used by continue and stop tools |
@@ -49,7 +52,7 @@
   implementations; an embedder can supply its own without forking core. File memory
   composes with `FileBackend` rather than introducing a second store contract.
 - **Optional layers are physically grouped.** `coordination/` (and the optional
-  `deep_agent/`, `workflow/`, `evals/`) sit apart from the always-on core, so the
+  `ext/deep_agent/`, `ext/workflow/`, `ext/evals/`) sit apart from the always-on core, so the
   load-bearing loop is easy to find and the opt-in extras don't inflate the mental model
   of "what the SDK does by default."
 

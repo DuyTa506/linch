@@ -36,7 +36,7 @@ keep their existing concurrency declarations.
 
 **MCP** — `connect_mcp_servers(configs)` wraps each MCP tool as a duck-typed Linch tool. Names are normalized via `mcp/naming.py`. The connection closes on `agent.close()`. Gated by `FeatureFlags(mcp=True)`.
 
-### Deep agent preset (`deep_agent/`)
+### Deep agent preset (`ext/deep_agent/`)
 
 `create_deep_agent(model, profile, durable, coordinator, cwd, ...)` is an
 explicit factory that assembles a full deep-agent configuration in one call:
@@ -102,9 +102,9 @@ reusable. A `BudgetEvent(kind="warning")` fires once per budget object at
 `warn_ratio` (default 0.9). Because parent and children charge the *same
 object*, child spending is visible to the parent's next pre-call check.
 
-### Workflow engine (`workflow/`)
+### Workflow engine (`ext/workflow/`)
 
-`agent.run_workflow(fn)` drives a deterministic "closed fleet loop": *fn* is a
+`run_workflow(agent, fn)` drives a deterministic "closed fleet loop": *fn* is a
 plain async function receiving a `WorkflowContext` (`wf`) and orchestrating
 subagents via `wf.agent` / `wf.step` / `wf.interrupt` / `wf.parallel` /
 `wf.settled` / `wf.pipeline` / `wf.phase`, with `wf.budget` exposing the shared

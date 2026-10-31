@@ -6,9 +6,9 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from .._wire import WIRE_VERSION, require_wire_version
-from ..errors import ConfigError, WorkflowSuspended, WorkflowTimeoutError
-from ..events import Event
+from ..._wire import WIRE_VERSION, require_wire_version
+from ...errors import ConfigError, WorkflowSuspended, WorkflowTimeoutError
+from ...events import Event
 from .context import SNAPSHOT_NAMESPACE, WorkflowContext, workflow_checkpoint
 from .journal import WorkflowJournal
 

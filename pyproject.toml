@@ -23,7 +23,7 @@ Homepage = "https://github.com/DuyTa506/linch"
 Repository = "https://github.com/DuyTa506/linch"
 
 [project.scripts]
-linch = "linch.cli:main"
+linch = "linch.ext.scaffold:main"
 
 [project.optional-dependencies]
 # mcp 2.0 renamed the streamable-HTTP transport, moved headers onto a
