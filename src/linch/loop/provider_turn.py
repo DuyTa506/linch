@@ -41,7 +41,10 @@ from .streaming import (
     _stream_turn_with_recovery,
     maybe_compact_resilient,
 )
-from .turn_stopping import TurnStopping, TurnStoppingDecision
+from .turn_stopping import (
+    INVALID_RESPONSE_DIAGNOSTIC,
+    TurnStopping,
+)
 
 
 @dataclass(slots=True)
@@ -86,7 +89,6 @@ class ProviderTurnContext:
     control: Message | None = None
     terminal: bool = False
     continued: bool = False
-    reliability: Any = None
     turn_stopping: Any = None
 
 
@@ -368,50 +370,81 @@ async def run_provider_turn(ctx: ProviderTurnContext) -> AsyncIterator[Event]:
             raise RuntimeError("accounted primary stream ended without a reported receipt")
         _provider_usage = primary_receipt.usage
         ctx.sync_ledger_totals()
-        if primary_rejected_native:
-            ctx.assembly = assembly
-            ctx.primary_receipt = primary_receipt
-            ctx.primary_rejected_native = primary_rejected_native
-            decision: TurnStoppingDecision | None = None
-            if ctx.turn_stopping is not None and ctx.turn_stopping.active:
-                decision = await ctx.turn_stopping.dispatch(
-                    TurnStopping(
-                        session=session,
-                        run_id=ctx.run_id,
-                        turn_index=turn_index,
-                        reason="invalid_response",
-                        assembly=assembly,
-                        forced_final=ctx.force_final_pending,
-                        error_reason="rejected_native_arguments",
-                    )
+        invalid_reason = (
+            "rejected_native_arguments"
+            if primary_rejected_native
+            else _invalid_response_reason(assembly)
+            if ctx.turn_stopping.active
+            else None
+        )
+        decision = None
+        if invalid_reason and ctx.turn_stopping.active:
+            decision = await ctx.turn_stopping.dispatch(
+                TurnStopping(
+                    session,
+                    ctx.run_id,
+                    turn_index,
+                    "invalid_response",
+                    assembly,
+                    forced_final=ctx.force_final_pending,
+                    error_reason=invalid_reason,
                 )
-            if decision is not None and decision.action == "continue":
-                async for event in ctx.emit_primary_usage(primary_receipt):
-                    yield event
-                feedback = Message(
-                    role="user",
-                    content=[
-                        TextBlock(
-                            text=(
-                                "[Linch] The provider response contained invalid native tool "
-                                "arguments. Nothing was executed. Please resend the tool call "
-                                "using native format."
+            )
+        if decision is not None and decision.action != "accept":
+            async for event in ctx.emit_primary_usage(primary_receipt):
+                yield event
+            if decision.action == "continue":
+                messages = list(decision.feedback)
+                events: list[Event] = [
+                    UserEvent(message=m, subtype="notification") for m in messages
+                ]
+                if not primary_rejected_native:
+                    diagnostic = Message(
+                        role="assistant", content=[TextBlock(text=INVALID_RESPONSE_DIAGNOSTIC)]
+                    )
+                    # The existing receipt projection can reconstruct one canonical text
+                    # control; arbitrary host messages remain intact in the session log.
+                    if (
+                        len(messages) == 1
+                        and len(messages[0].content) == 1
+                        and isinstance(messages[0].content[0], TextBlock)
+                    ):
+                        assert ctx.active_primary is not None
+                        await ledger.record_projection(
+                            _projection_record(
+                                projection_kind="primary_append",
+                                run_id=ctx.run_id,
+                                **{
+                                    key: value
+                                    for key, value in ctx.active_primary.items()
+                                    if key != "version"
+                                },
+                                assistant_sha256=_message_digest(diagnostic),
+                                assistant_stop_reason=assembly.stop_reason,
+                                after_action="continue",
+                                after_feedback=messages[0].content[0].text,
+                                control_message_sha256=_message_digest(messages[0]),
                             )
                         )
-                    ],
-                )
-                if not session.full_history or session.full_history[-1] != feedback:
-                    await store_call(session, "session.append", session.append([feedback]))
-                    event = UserEvent(message=feedback, subtype="notification")
+                    messages.insert(0, diagnostic)
+                    events.insert(
+                        0, AssistantEvent(message=diagnostic, stop_reason=assembly.stop_reason)
+                    )
+                await ctx.flush_events()
+                await store_call(session, "session.append", session.append(messages))
+                for event in events:
                     await ctx.persist_event(event)
                     yield event
-                if decision.event is not None:
-                    await ctx.persist_event(decision.event)
-                    yield decision.event
-                await ctx.end_provider_call(stop_reason="error", usage=_provider_usage)
-                await ctx.save_checkpoint("turn_complete", turn_index=turn_index)
-                ctx.continued = True
-                return
+            if decision.event is not None:
+                await ctx.persist_event(decision.event)
+                yield decision.event
+            if decision.action == "fail":
+                raise decision.error or ValueError("turn-stopping listener failed")
+            await ctx.end_provider_call(stop_reason=assembly.stop_reason, usage=_provider_usage)
+            await ctx.save_checkpoint("turn_complete", turn_index=turn_index)
+            ctx.continued = True
+            return
+        if primary_rejected_native:
             ctx.terminal = True
             await ctx.save_checkpoint("provider_pending", turn_index=turn_index)
             async for event in ctx.emit_primary_usage(primary_receipt):
@@ -428,67 +461,8 @@ async def run_provider_turn(ctx: ProviderTurnContext) -> AsyncIterator[Event]:
             async for event in ctx.emit_error_terminal(end_provider_call_usage=_provider_usage):
                 yield event
             return
-
         for partial_event in accepted_partials:
             await ctx.persist_event(partial_event)
-
-        invalid_reason = (
-            _invalid_response_reason(assembly) if assembly.stop_reason != "tool_use" else None
-        )
-        decision: TurnStoppingDecision | None = None
-        if (
-            invalid_reason is not None
-            and ctx.turn_stopping is not None
-            and ctx.turn_stopping.active
-        ):
-            decision = await ctx.turn_stopping.dispatch(
-                TurnStopping(
-                    session=session,
-                    run_id=ctx.run_id,
-                    turn_index=turn_index,
-                    reason="invalid_response",
-                    assembly=assembly,
-                    forced_final=ctx.force_final_pending,
-                    error_reason=invalid_reason,
-                )
-            )
-        if decision is not None and decision.action == "continue":
-            async for event in ctx.emit_primary_usage(primary_receipt):
-                yield event
-            feedback = Message(
-                role="user",
-                content=[
-                    TextBlock(
-                        text=(
-                            "[Linch] The provider response was invalid. Nothing was executed. "
-                            "Please resend the response using native tool-call format."
-                        )
-                    )
-                ],
-            )
-            if not session.full_history or session.full_history[-1] != feedback:
-                await store_call(session, "session.append", session.append([feedback]))
-                event = UserEvent(message=feedback, subtype="notification")
-                await ctx.persist_event(event)
-                yield event
-            if decision.event is not None:
-                await ctx.persist_event(decision.event)
-                yield decision.event
-            await ctx.end_provider_call(stop_reason=assembly.stop_reason, usage=_provider_usage)
-            await ctx.save_checkpoint("turn_complete", turn_index=turn_index)
-            ctx.continued = True
-            return
-        if decision is not None and decision.action == "fail":
-            ctx.terminal = True
-            await ctx.save_checkpoint("provider_pending", turn_index=turn_index)
-            async for event in ctx.emit_primary_usage(primary_receipt):
-                yield event
-            if decision.event is not None:
-                await ctx.persist_event(decision.event)
-                yield decision.event
-            async for event in ctx.emit_error_terminal(end_provider_call_usage=_provider_usage):
-                yield event
-            return
 
         (
             assembly,
@@ -555,7 +529,8 @@ async def run_provider_turn(ctx: ProviderTurnContext) -> AsyncIterator[Event]:
 
 
 def _invalid_response_reason(assembly: AssistantAssembly) -> str | None:
-    """Recognize only the fixed invalid-response shapes, never prose examples."""
+    if assembly.stop_reason != "end_turn":
+        return None
     text = "".join(
         block.text for block in assembly.message.content if isinstance(block, TextBlock)
     ).strip()

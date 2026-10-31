@@ -14,11 +14,19 @@ def test_default_policy_and_opt_out_are_distinct() -> None:
     assert linch.Agent(model="test", reliability=None).reliability is None
 
 
+def test_prerequisite_listener_is_a_run_local_pre_execute_pipeline() -> None:
+    policy = linch.ReliabilityPolicy(
+        prerequisites=(linch.ToolPrerequisite("b", ("a",)),),
+    )
+    runtime = ReliabilityRuntime(policy)
+    assert runtime.pre_execute_pipeline.has_listeners()
+
+
 def test_policy_validation_rejects_bad_graph_and_terminal_evidence() -> None:
     with pytest.raises(ValueError, match="duplicate"):
-        linch.ReliabilityPolicy(
-            prerequisites=(linch.ToolPrerequisite("b", ("a", "a")),)
-        ).validate(("a", "b"))
+        linch.ReliabilityPolicy(prerequisites=(linch.ToolPrerequisite("b", ("a", "a")),)).validate(
+            ("a", "b")
+        )
     with pytest.raises(ValueError, match="cycle"):
         linch.ReliabilityPolicy(
             prerequisites=(
@@ -41,9 +49,7 @@ async def test_agent_validates_after_tools_are_loaded() -> None:
         model="test",
         tools=empty_tools(),
         session_store=InMemorySessionStore(),
-        reliability=linch.ReliabilityPolicy(
-            prerequisites=(linch.ToolPrerequisite("missing", ()),)
-        ),
+        reliability=linch.ReliabilityPolicy(prerequisites=(linch.ToolPrerequisite("missing", ()),)),
     )
     with pytest.raises(ValueError, match="unknown"):
         await (await agent.session()).run("hello").__anext__()
@@ -83,6 +89,21 @@ async def test_turn_stopping_registration_is_identity_safe_and_serial() -> None:
 
 
 @pytest.mark.asyncio
+async def test_turn_stopping_accept_is_non_vetoing() -> None:
+    dispatcher = TurnStoppingDispatcher()
+
+    async def accept(_event: object) -> TurnStoppingDecision:
+        return TurnStoppingDecision("accept")
+
+    async def continue_(_event: object) -> TurnStoppingDecision:
+        return TurnStoppingDecision("continue")
+
+    dispatcher.register(accept)
+    dispatcher.register(continue_)
+    assert (await dispatcher.dispatch(object())).action == "continue"  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
 async def test_prerequisites_snapshot_and_checkpoint_state() -> None:
     policy = linch.ReliabilityPolicy(
         prerequisites=(linch.ToolPrerequisite("b", ("a",)),),
@@ -90,6 +111,7 @@ async def test_prerequisites_snapshot_and_checkpoint_state() -> None:
     )
     runtime = ReliabilityRuntime(policy)
     runtime.begin_batch()
+    from linch.tools.pipeline import ToolExecution
 
     class Tool:
         name = "b"
@@ -97,13 +119,758 @@ async def test_prerequisites_snapshot_and_checkpoint_state() -> None:
     class Call:
         tool = Tool()
 
-    assert await runtime.before_permission(Call())
-    success_call = type("Call", (), {"tool": type("Tool", (), {"name": "a"})()})()
-    await runtime.foreground_result(success_call, None, None)
-    assert runtime.missing_completion() == ()
+    marker = object()
+
+    async def proceed() -> object:
+        return marker
+
+    execution = ToolExecution("b", "id", {}, None, Tool())
+    assert await runtime.pre_execute_pipeline.run_pre_execute(execution, proceed) is not marker
+    await runtime.foreground_result("a")
+    assert runtime.succeeded == {"a"}
     # The same batch's snapshot remains closed even after the observed result.
-    assert await runtime.before_permission(Call())
+    assert await runtime.pre_execute_pipeline.run_pre_execute(execution, proceed) is not marker
     state = runtime.checkpoint_state()
     assert state == {"v": 1, "corrections": 0, "succeeded": ["a"]}
-    assert ReliabilityRuntime.restore(policy, state).succeeded == {"a"}
+    assert ReliabilityRuntime(policy).restore(state).succeeded == {"a"}
 
+
+@pytest.mark.asyncio
+async def test_invalid_text_feedback_is_canonical_and_hides_rejected_text() -> None:
+    from linch.evals import ScriptedProvider, TextTurn
+    from linch.sessions import InMemorySessionStore
+
+    agent = linch.Agent(
+        model="test",
+        provider=ScriptedProvider(
+            [TextTurn(text='<tool_call>{"secret": "raw"}</tool_call>'), TextTurn(text="done")]
+        ),
+        session_store=InMemorySessionStore(),
+    )
+    session = await agent.session()
+    events = [event async for event in session.run("hello")]
+
+    feedback = [
+        event for event in events if event.type == "user" and event.subtype == "notification"
+    ]
+    assert len(feedback) == 1
+    text = feedback[0].message.content[0].text
+    assert "[Linch]" in text
+    assert "nothing was executed" in text.lower()
+    assert "raw" not in str(session.full_history)
+
+
+@pytest.mark.asyncio
+async def test_native_rejection_retries_once_and_never_runs_sibling_tools() -> None:
+    import json
+    from collections.abc import AsyncIterator
+
+    from linch.events import ModelCallEvent, ReliabilityEvent, ResultEvent, event_to_dict
+    from linch.providers import BaseProvider
+    from linch.run_store import InMemoryRunStore
+    from linch.sessions import InMemorySessionStore
+    from linch.types import Usage
+
+    class Provider(BaseProvider):
+        id = "native-reliability"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def context_window(self, model: str) -> int:
+            return 100_000
+
+        async def stream(self, req: object) -> AsyncIterator[dict[str, object]]:
+            self.calls += 1
+            yield {"type": "message_start", "model": "test"}
+            if self.calls == 1:
+                yield {"type": "tool_use_start", "id": "bad", "name": "never"}
+                yield {
+                    "type": "tool_use_input_delta",
+                    "id": "bad",
+                    "json_delta": '{"secret":"raw"',
+                }
+                yield {"type": "tool_use_end", "id": "bad"}
+                yield {"type": "tool_use_start", "id": "sibling", "name": "never"}
+                yield {
+                    "type": "tool_use_input_delta",
+                    "id": "sibling",
+                    "json_delta": json.dumps({}),
+                }
+                yield {"type": "tool_use_end", "id": "sibling"}
+                stop_reason = "tool_use"
+            else:
+                yield {"type": "text_delta", "text": "done"}
+                stop_reason = "end_turn"
+            yield {"type": "message_end", "stop_reason": stop_reason, "usage": Usage()}
+
+    provider = Provider()
+    run_store = InMemoryRunStore()
+    agent = linch.Agent(
+        model="test",
+        provider=provider,
+        session_store=InMemorySessionStore(),
+        run_store=run_store,
+        reliability=linch.ReliabilityPolicy(max_correction_turns=1),
+        include_partial_messages=True,
+    )
+    session = await agent.session()
+    events = [event async for event in session.run("hello")]
+    run_id = next(event.run_id for event in events if event.type == "system")
+    rows = await run_store.load_events(run_id)
+
+    assert provider.calls == 2
+    assert not any(event.type.startswith("tool_call_") for event in events)
+    assert sum(isinstance(event, ReliabilityEvent) for event in events) == 1
+    assert next(event for event in events if isinstance(event, ResultEvent)).subtype == "success"
+    assert "raw" not in str(session.full_history)
+    assert "raw" not in str([event_to_dict(row.event) for row in rows])
+    assert (
+        sum(
+            isinstance(row.event, ModelCallEvent)
+            and row.event.record_kind == "receipt"
+            and row.event.record["kind"] == "primary"
+            for row in rows
+        )
+        == 2
+    )
+
+
+@pytest.mark.asyncio
+async def test_completion_gate_retries_after_real_tool_success() -> None:
+    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.events import ReliabilityEvent, ResultEvent
+    from linch.sessions import InMemorySessionStore
+    from linch.tools import ToolRegistry, tool
+
+    calls = 0
+
+    @tool
+    async def prepare() -> str:
+        nonlocal calls
+        calls += 1
+        return "prepared"
+
+    tools = ToolRegistry()
+    tools.register(prepare)
+    agent = linch.Agent(
+        model="test",
+        provider=ScriptedProvider(
+            [
+                TextTurn(text="premature"),
+                ToolUseTurn(tool_name="prepare", tool_input={}),
+                TextTurn(text="final"),
+            ]
+        ),
+        tools=tools,
+        permissions={"mode": "skip-dangerous"},
+        session_store=InMemorySessionStore(),
+        reliability=linch.ReliabilityPolicy(completion=linch.CompletionGate(("prepare",))),
+    )
+    agent.on_turn_stopping(lambda _event: TurnStoppingDecision("accept"))
+    session = await agent.session()
+    events = [event async for event in session.run("hello")]
+
+    assert calls == 1
+    assert sum(isinstance(event, ReliabilityEvent) for event in events) == 1
+    assert any(
+        event.type == "user" and "Completion requirements are missing" in str(event.message)
+        for event in events
+    )
+    assert next(event for event in events if isinstance(event, ResultEvent)).subtype == "success"
+
+
+@pytest.mark.asyncio
+async def test_prerequisite_blocks_same_batch_and_failed_predecessor() -> None:
+    from collections.abc import AsyncIterator
+
+    from linch.events import ToolCallEndEvent
+    from linch.providers import BaseProvider
+    from linch.sessions import InMemorySessionStore
+    from linch.tools import ToolRegistry, ToolResult, tool
+    from linch.types import Usage
+
+    calls: list[str] = []
+
+    @tool(name="first")
+    async def first() -> ToolResult:
+        calls.append("first")
+        return ToolResult(content="failed", is_error=True)
+
+    @tool(name="second")
+    async def second() -> str:
+        calls.append("second")
+        return "should not run"
+
+    class Provider(BaseProvider):
+        id = "same-batch-reliability"
+
+        def context_window(self, model: str) -> int:
+            return 100_000
+
+        async def stream(self, req: object) -> AsyncIterator[dict[str, object]]:
+            yield {"type": "message_start", "model": "test"}
+            if not any(
+                getattr(message, "role", None) == "user"
+                and any(getattr(block, "type", None) == "tool_result" for block in message.content)
+                for message in req.messages
+            ):
+                for tool_id, name in (("a", "first"), ("b", "second")):
+                    yield {"type": "tool_use_start", "id": tool_id, "name": name}
+                    yield {"type": "tool_use_input_delta", "id": tool_id, "json_delta": "{}"}
+                    yield {"type": "tool_use_end", "id": tool_id}
+                stop_reason = "tool_use"
+            else:
+                yield {"type": "text_delta", "text": "done"}
+                stop_reason = "end_turn"
+            yield {"type": "message_end", "stop_reason": stop_reason, "usage": Usage()}
+
+    tools = ToolRegistry()
+    tools.register(first)
+    tools.register(second)
+    agent = linch.Agent(
+        model="test",
+        provider=Provider(),
+        tools=tools,
+        permissions={"mode": "skip-dangerous"},
+        session_store=InMemorySessionStore(),
+        reliability=linch.ReliabilityPolicy(
+            prerequisites=(linch.ToolPrerequisite("second", ("first",)),)
+        ),
+    )
+    session = await agent.session()
+    events = [event async for event in session.run("hello")]
+    ends = [event for event in events if isinstance(event, ToolCallEndEvent)]
+
+    assert calls == ["first"]
+    assert len(ends) == 2
+    assert ends[0].is_error and ends[1].is_error
+
+
+@pytest.mark.asyncio
+async def test_completion_gate_vetoes_final_tool_before_terminal_ack() -> None:
+    from linch.evals import ScriptedProvider, ToolUseTurn
+    from linch.events import ReliabilityEvent, ResultEvent, ToolCallEndEvent
+    from linch.sessions import InMemorySessionStore
+    from linch.tools import ToolRegistry, tool
+
+    calls: list[str] = []
+
+    @tool
+    async def prepare() -> str:
+        calls.append("prepare")
+        return "ready"
+
+    @tool(name="emit_answer")
+    async def emit_answer() -> str:
+        calls.append("emit")
+        return "never executes"
+
+    tools = ToolRegistry()
+    tools.register(prepare)
+    tools.register(emit_answer)
+    agent = linch.Agent(
+        model="test",
+        provider=ScriptedProvider(
+            [
+                ToolUseTurn(tool_name="emit_answer", tool_input={}),
+                ToolUseTurn(tool_name="prepare", tool_input={}),
+                ToolUseTurn(tool_name="emit_answer", tool_input={}),
+            ]
+        ),
+        tools=tools,
+        permissions={"mode": "skip-dangerous"},
+        session_store=InMemorySessionStore(),
+        final_tool_name="emit_answer",
+        reliability=linch.ReliabilityPolicy(completion=linch.CompletionGate(("prepare",))),
+    )
+    session = await agent.session()
+    events = [event async for event in session.run("hello")]
+
+    assert calls == ["prepare"]
+    assert not any(
+        isinstance(event, ToolCallEndEvent) and event.tool_name == "emit_answer" for event in events
+    )
+    assert sum(isinstance(event, ReliabilityEvent) for event in events) == 1
+    assert next(event for event in events if isinstance(event, ResultEvent)).subtype == "success"
+
+
+@pytest.mark.asyncio
+async def test_background_ack_does_not_unlock_prerequisite() -> None:
+    import asyncio
+
+    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.events import ToolCallEndEvent
+    from linch.sessions import InMemorySessionStore
+    from linch.tools import ToolRegistry, tool
+
+    finished = asyncio.Event()
+    calls: list[str] = []
+
+    @tool
+    async def background() -> str:
+        calls.append("background")
+        finished.set()
+        return "background result"
+
+    @tool
+    async def dependent() -> str:
+        calls.append("dependent")
+        return "should not run"
+
+    tools = ToolRegistry()
+    tools.register(background)
+    tools.register(dependent)
+    agent = linch.Agent(
+        model="test",
+        provider=ScriptedProvider(
+            [
+                ToolUseTurn(tool_name="background", tool_input={"run_in_background": True}),
+                ToolUseTurn(tool_name="dependent", tool_input={}),
+                TextTurn(text="done"),
+            ]
+        ),
+        tools=tools,
+        permissions={"mode": "skip-dangerous"},
+        session_store=InMemorySessionStore(),
+        enable_background_tools=True,
+        reliability=linch.ReliabilityPolicy(
+            prerequisites=(linch.ToolPrerequisite("dependent", ("background",)),)
+        ),
+    )
+    session = await agent.session()
+    events = [event async for event in session.run("hello")]
+    await asyncio.wait_for(finished.wait(), timeout=1)
+
+    dependent_end = next(
+        event
+        for event in events
+        if isinstance(event, ToolCallEndEvent) and event.tool_name == "dependent"
+    )
+    assert calls == ["background"]
+    assert dependent_end.is_error
+
+
+@pytest.mark.asyncio
+async def test_two_agents_keep_reliability_counters_isolated() -> None:
+    import asyncio
+
+    from linch.evals import ScriptedProvider, TextTurn
+    from linch.events import ReliabilityEvent
+    from linch.sessions import InMemorySessionStore
+
+    policy = linch.ReliabilityPolicy(max_correction_turns=1)
+    agents = [
+        linch.Agent(
+            model="test",
+            provider=ScriptedProvider(
+                [TextTurn(text="<tool_call>bad</tool_call>"), TextTurn(text=tag)]
+            ),
+            session_store=InMemorySessionStore(),
+            reliability=policy,
+        )
+        for tag in ("a", "b")
+    ]
+    sessions = [await agent.session() for agent in agents]
+
+    async def collect(session: object) -> list[object]:
+        return [event async for event in session.run("hello")]  # type: ignore[attr-defined]
+
+    traces = await asyncio.gather(*(collect(session) for session in sessions))
+
+    assert [sum(isinstance(event, ReliabilityEvent) for event in trace) for trace in traces] == [
+        1,
+        1,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_native_rejection_resume_reuses_sanitized_receipt() -> None:
+    import json
+    from collections.abc import AsyncIterator
+
+    from linch.events import ReliabilityEvent, UserEvent
+    from linch.providers import BaseProvider
+    from linch.run_store import InMemoryRunStore
+    from linch.sessions import InMemorySessionStore
+    from linch.types import Usage
+
+    class Crash(BaseException):
+        pass
+
+    class SessionStore:
+        def __init__(self) -> None:
+            self.inner = InMemorySessionStore()
+            self.crash = True
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self.inner, name)
+
+        async def append_messages(self, session_id: str, messages: list[object]) -> object:
+            result = await self.inner.append_messages(session_id, messages)  # type: ignore[arg-type]
+            if self.crash and any("[Linch]" in str(message) for message in messages):
+                self.crash = False
+                raise Crash("feedback append")
+            return result
+
+    class Provider(BaseProvider):
+        id = "native-resume"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def context_window(self, model: str) -> int:
+            return 100_000
+
+        async def stream(self, req: object) -> AsyncIterator[dict[str, object]]:
+            self.calls += 1
+            yield {"type": "message_start", "model": "test"}
+            if self.calls == 1:
+                yield {"type": "tool_use_start", "id": "bad", "name": "never"}
+                yield {
+                    "type": "tool_use_input_delta",
+                    "id": "bad",
+                    "json_delta": json.dumps({"secret": "raw"})[:-1],
+                }
+                yield {"type": "tool_use_end", "id": "bad"}
+                stop_reason = "tool_use"
+            else:
+                yield {"type": "text_delta", "text": "resumed"}
+                stop_reason = "end_turn"
+            yield {"type": "message_end", "stop_reason": stop_reason, "usage": Usage()}
+
+    sessions = SessionStore()
+    runs = InMemoryRunStore()
+    provider = Provider()
+    agent = linch.Agent(
+        model="test",
+        provider=provider,
+        session_store=sessions,
+        run_store=runs,
+        reliability=linch.ReliabilityPolicy(max_correction_turns=1),
+    )
+    session = await agent.session(id="native-resume")
+    with pytest.raises(Crash):
+        _ = [event async for event in session.run("hello")]
+    run_id = next(iter(runs._runs))
+
+    resumed_agent = linch.Agent(
+        model="test",
+        provider=provider,
+        session_store=sessions,
+        run_store=runs,
+        reliability=linch.ReliabilityPolicy(max_correction_turns=1),
+    )
+    resumed = await resumed_agent.session(id="native-resume")
+    events = [event async for event in resumed.resume(run_id)]
+
+    assert provider.calls == 2
+    assert events[-1].type == "result" and events[-1].subtype == "success"
+    rows = await runs.load_events(run_id)
+    assert (
+        sum(
+            isinstance(row.event, UserEvent) and row.event.subtype == "notification" for row in rows
+        )
+        == 1
+    )
+    assert sum(isinstance(row.event, ReliabilityEvent) for row in rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_text_rejection_resume_replays_canonical_messages_once() -> None:
+    from collections.abc import AsyncIterator
+
+    from linch.events import AssistantEvent, ReliabilityEvent, UserEvent
+    from linch.providers import BaseProvider
+    from linch.run_store import InMemoryRunStore
+    from linch.sessions import InMemorySessionStore
+    from linch.types import Usage
+
+    class Crash(BaseException):
+        pass
+
+    class SessionStore:
+        def __init__(self) -> None:
+            self.inner = InMemorySessionStore()
+            self.crash = True
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self.inner, name)
+
+        async def append_messages(self, session_id: str, messages: list[object]) -> object:
+            result = await self.inner.append_messages(session_id, messages)  # type: ignore[arg-type]
+            if self.crash and any("[Linch]" in str(message) for message in messages):
+                self.crash = False
+                raise Crash("feedback append")
+            return result
+
+    class Provider(BaseProvider):
+        id = "text-resume"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def context_window(self, model: str) -> int:
+            return 100_000
+
+        async def stream(self, req: object) -> AsyncIterator[dict[str, object]]:
+            self.calls += 1
+            yield {"type": "message_start", "model": "test"}
+            yield {
+                "type": "text_delta",
+                "text": '<tool_call>{"secret":"raw"}</tool_call>' if self.calls == 1 else "resumed",
+            }
+            yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
+
+    sessions = SessionStore()
+    runs = InMemoryRunStore()
+    provider = Provider()
+    agent = linch.Agent(
+        model="test",
+        provider=provider,
+        session_store=sessions,
+        run_store=runs,
+        reliability=linch.ReliabilityPolicy(max_correction_turns=1),
+    )
+    session = await agent.session(id="text-resume")
+    with pytest.raises(Crash):
+        _ = [event async for event in session.run("hello")]
+    run_id = next(iter(runs._runs))
+    resumed_agent = linch.Agent(
+        model="test",
+        provider=provider,
+        session_store=sessions,
+        run_store=runs,
+        reliability=linch.ReliabilityPolicy(max_correction_turns=1),
+    )
+    resumed = await resumed_agent.session(id="text-resume")
+    events = [event async for event in resumed.resume(run_id)]
+
+    assert provider.calls == 2
+    assert events[-1].type == "result" and events[-1].subtype == "success"
+    assert "raw" not in str(resumed.full_history)
+    rows = await runs.load_events(run_id)
+    assert (
+        sum(
+            isinstance(row.event, AssistantEvent)
+            and "The provider response was rejected" in str(row.event.message)
+            for row in rows
+        )
+        == 1
+    )
+    assert (
+        sum(
+            isinstance(row.event, UserEvent) and row.event.subtype == "notification" for row in rows
+        )
+        == 1
+    )
+    assert sum(isinstance(row.event, ReliabilityEvent) for row in rows) == 1
+
+
+@pytest.mark.parametrize("policy", [None, linch.ReliabilityPolicy(retry_invalid_responses=False)])
+async def test_disabled_invalid_listener_preserves_partial_events(policy):
+    from linch.evals import ScriptedProvider, TextTurn
+    from linch.run_store import InMemoryRunStore
+    from linch.sessions import InMemorySessionStore
+
+    runs = InMemoryRunStore()
+    agent = linch.Agent(
+        model="test",
+        provider=ScriptedProvider([TextTurn(text="<tool_call>x</tool_call>")]),
+        session_store=InMemorySessionStore(),
+        run_store=runs,
+        reliability=policy,
+        include_partial_messages=True,
+    )
+    session = await agent.session()
+    events = [event async for event in session.run("go")]
+    rows = await runs.load_events(next(event.run_id for event in events if event.type == "system"))
+    assert [event_to_dict(event) for event in events if event.type == "partial_assistant"] == [
+        event_to_dict(row.event) for row in rows if row.event.type == "partial_assistant"
+    ]
+    assert not any(event.type == "reliability" for event in events)
+
+
+@pytest.mark.parametrize("invalid", [False, True])
+async def test_generic_continue_preserves_message_tuple(invalid):
+    from linch.evals import ScriptedProvider, TextTurn
+    from linch.sessions import InMemorySessionStore
+    from linch.types import Message, TextBlock
+
+    messages = (
+        Message(role="user", content=[TextBlock(text="first"), TextBlock(text="second")]),
+        Message(role="user", content=[TextBlock(text="third")]),
+    )
+    agent = linch.Agent(
+        model="test",
+        reliability=None,
+        provider=ScriptedProvider(
+            [TextTurn(text="" if invalid else "candidate"), TextTurn(text="done")]
+        ),
+        session_store=InMemorySessionStore(),
+    )
+
+    def listener(event):
+        return (
+            TurnStoppingDecision("continue", feedback=messages) if event.turn_index == 0 else None
+        )
+
+    agent.on_turn_stopping(listener)
+    session = await agent.session()
+    _ = [event async for event in session.run("go")]
+    assert list(session.full_history)[-3:-1] == list(messages)
+
+
+async def test_invalid_fail_surfaces_listener_error():
+    from linch.evals import ScriptedProvider, TextTurn
+    from linch.sessions import InMemorySessionStore
+
+    agent = linch.Agent(
+        model="test",
+        reliability=None,
+        provider=ScriptedProvider([TextTurn(text="")]),
+        session_store=InMemorySessionStore(),
+    )
+    agent.on_turn_stopping(
+        lambda event: TurnStoppingDecision("fail", error=LookupError("specific failure"))
+    )
+    events = [event async for event in (await agent.session()).run("go")]
+    assert any(
+        event.type == "error" and event.error["message"] == "specific failure" for event in events
+    )
+
+
+@pytest.mark.parametrize("invalid", [True, False])
+async def test_shared_budget_stops_after_two_corrections(invalid):
+    from linch.evals import ScriptedProvider, TextTurn
+    from linch.sessions import InMemorySessionStore
+    from linch.tools import tool
+    from linch.tools.registry import empty_tools
+
+    @tool
+    async def required() -> str:
+        return "ready"
+
+    agent = linch.Agent(
+        model="test",
+        tools=empty_tools(required),
+        provider=ScriptedProvider([TextTurn(text="" if invalid else "early")] * 3),
+        session_store=InMemorySessionStore(),
+        reliability=linch.ReliabilityPolicy(completion=linch.CompletionGate(("required",))),
+    )
+    events = [event async for event in (await agent.session()).run("go")]
+    corrections = [event for event in events if event.type == "reliability"]
+    assert [(event.action, event.correction_count) for event in corrections] == [
+        ("continue", 1),
+        ("continue", 2),
+        ("fail", 2),
+    ]
+    assert events[-1].type == "result" and events[-1].subtype == "error"
+
+
+@pytest.mark.parametrize(
+    "text,stop",
+    [
+        ("ordinary", "end_turn"),
+        ("Example: <tool_call>test</tool_call>", "end_turn"),
+        ("```\n<tool_call>test</tool_call>\n```", "end_turn"),
+        ("", "refusal"),
+        ("partial", "max_tokens"),
+    ],
+)
+async def test_valid_non_envelope_routes_have_no_reliability_effect(text, stop):
+    from linch.evals import ScriptedProvider, TextTurn
+    from linch.run_store import InMemoryRunStore
+    from linch.sessions import InMemorySessionStore
+
+    runs = InMemoryRunStore()
+    agent = linch.Agent(
+        model="test",
+        provider=ScriptedProvider([TextTurn(text=text, stop_reason=stop)]),
+        session_store=InMemorySessionStore(),
+        run_store=runs,
+    )
+    events = [event async for event in (await agent.session()).run("go")]
+    record = await runs.load_run(next(event.run_id for event in events if event.type == "system"))
+    assert not any(event.type == "reliability" for event in events)
+    assert "linch.reliability" not in record.checkpoint.extension_state
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {},
+        {"v": 2, "corrections": 0, "succeeded": []},
+        {"v": True, "corrections": 0, "succeeded": []},
+        {"v": 1, "corrections": True, "succeeded": []},
+        {"v": 1, "corrections": 3, "succeeded": []},
+        {"v": 1, "corrections": -1, "succeeded": []},
+        {"v": 1, "corrections": 0, "succeeded": ["unknown"]},
+        {"v": 1, "corrections": 0, "succeeded": ["b", "a"]},
+        {"v": 1, "corrections": 0, "succeeded": ["a", "a"]},
+    ],
+)
+def test_checkpoint_state_rejects_corruption(raw):
+    policy = linch.ReliabilityPolicy(completion=linch.CompletionGate(("a", "b")))
+    with pytest.raises(ValueError, match="checkpoint state"):
+        ReliabilityRuntime(policy).restore(raw)
+
+
+def test_canonical_policy_ignores_edge_order_and_rejects_duplicate_rules():
+    from linch.reliability import canonical_reliability_policy
+
+    first = linch.ReliabilityPolicy(prerequisites=(linch.ToolPrerequisite("b", ("a", "c")),))
+    second = linch.ReliabilityPolicy(
+        prerequisites=(linch.ToolPrerequisite("b", ("c",)), linch.ToolPrerequisite("b", ("a",)))
+    )
+    assert canonical_reliability_policy(first) == canonical_reliability_policy(second)
+    with pytest.raises(ValueError, match="duplicate"):
+        linch.ReliabilityPolicy(prerequisites=first.prerequisites * 2).validate(("a", "b", "c"))
+
+
+async def test_unused_evidence_and_disabled_listener_stay_empty():
+    runtime = ReliabilityRuntime(linch.ReliabilityPolicy(retry_invalid_responses=False))
+    await runtime.foreground_result("unreferenced")
+    assert runtime.checkpoint_state() == {}
+    assert runtime.pre_execute_pipeline is None
+
+
+async def test_force_final_cannot_bypass_completion():
+    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.sessions import InMemorySessionStore
+    from linch.tools import tool
+    from linch.tools.registry import empty_tools
+
+    @tool
+    async def repeat() -> str:
+        return "repeat"
+
+    @tool
+    async def required() -> str:
+        return "ready"
+
+    agent = linch.Agent(
+        model="test",
+        tools=empty_tools(repeat, required),
+        provider=ScriptedProvider(
+            [ToolUseTurn(tool_name="repeat", tool_input={})] + [TextTurn(text="early")] * 3
+        ),
+        session_store=InMemorySessionStore(),
+        permissions={"mode": "skip-dangerous"},
+        loop_guard={"max_identical_tool_calls": 1, "force_final_answer": True},
+        reliability=linch.ReliabilityPolicy(completion=linch.CompletionGate(("required",))),
+    )
+    events = [event async for event in (await agent.session()).run("go")]
+    assert any(event.type == "loop_guard" for event in events)
+    assert [event.correction_count for event in events if event.type == "reliability"] == [1, 2, 2]
+    assert events[-1].type == "result" and events[-1].subtype == "error"
+
+
+def test_host_control_message_keeps_system_reminder_wrapping():
+    from linch.loop.checkpoint import _primary_control_message
+    from linch.types import Message
+
+    control = _primary_control_message(
+        Message(role="assistant", content=[]), "[Linch] host feedback"
+    )
+    assert control.content[0].text == "<system-reminder>\n[Linch] host feedback\n</system-reminder>"

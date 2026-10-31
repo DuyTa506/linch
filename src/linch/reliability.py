@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from graphlib import CycleError, TopologicalSorter
 from typing import Any
 
 
@@ -22,63 +23,32 @@ class ReliabilityPolicy:
     prerequisites: tuple[ToolPrerequisite, ...] = ()
     completion: CompletionGate | None = None
 
-    def validate(
-        self,
-        tool_names: Any,
-        *,
-        final_tool_name: str | None = None,
-    ) -> None:
+    def validate(self, tool_names: Any, *, final_tool_name: str | None = None) -> None:
         if type(self.max_correction_turns) is not int or self.max_correction_turns < 0:
             raise ValueError("reliability.max_correction_turns must be a non-negative int")
         if type(self.retry_invalid_responses) is not bool:
             raise ValueError("reliability.retry_invalid_responses must be a bool")
-        names = {str(name) for name in tool_names}
         edges: dict[str, set[str]] = {}
-        for prerequisite in self.prerequisites:
-            if not isinstance(prerequisite, ToolPrerequisite):
-                raise ValueError("reliability.prerequisites must contain ToolPrerequisite values")
-            if prerequisite.tool_name not in names:
-                raise ValueError(f"unknown prerequisite tool {prerequisite.tool_name!r}")
-            seen = edges.setdefault(prerequisite.tool_name, set())
-            for required in prerequisite.requires_success:
-                if required not in names:
-                    raise ValueError(f"unknown prerequisite dependency {required!r}")
-                if required == prerequisite.tool_name:
-                    raise ValueError(f"tool {required!r} cannot depend on itself")
-                if required in seen:
-                    raise ValueError(
-                        f"duplicate prerequisite edge {prerequisite.tool_name!r}->{required!r}"
-                    )
-                seen.add(required)
-        completion = self.completion
-        if completion is not None:
-            if not isinstance(completion, CompletionGate):
-                raise ValueError("reliability.completion must be a CompletionGate or None")
-            seen_completion: set[str] = set()
-            for required in completion.required_successful_tools:
-                if required not in names:
-                    raise ValueError(f"unknown completion tool {required!r}")
-                if required in seen_completion:
-                    raise ValueError(f"duplicate completion tool {required!r}")
-                if final_tool_name is not None and required == final_tool_name:
-                    raise ValueError("the terminal final tool cannot be completion evidence")
-                seen_completion.add(required)
-        visiting: set[str] = set()
-        visited: set[str] = set()
-
-        def visit(node: str) -> None:
-            if node in visiting:
-                raise ValueError("reliability prerequisites contain a cycle")
-            if node in visited:
-                return
-            visiting.add(node)
-            for dependency in edges.get(node, ()):
-                visit(dependency)
-            visiting.remove(node)
-            visited.add(node)
-
-        for node in edges:
-            visit(node)
+        for rule in self.prerequisites:
+            seen = edges.setdefault(rule.tool_name, set())
+            if len(set(rule.requires_success)) != len(rule.requires_success) or seen.intersection(
+                rule.requires_success
+            ):
+                raise ValueError("duplicate prerequisite edge")
+            if rule.tool_name in rule.requires_success:
+                raise ValueError("tool cannot depend on itself")
+            seen.update(rule.requires_success)
+        required = self.completion.required_successful_tools if self.completion else ()
+        if len(set(required)) != len(required):
+            raise ValueError("duplicate completion tool")
+        if final_tool_name in required:
+            raise ValueError("the terminal final tool cannot be completion evidence")
+        if (set(edges) | self.referenced_tools) - set(tool_names):
+            raise ValueError("unknown reliability tool name")
+        try:
+            tuple(TopologicalSorter(edges).static_order())
+        except CycleError:
+            raise ValueError("reliability prerequisites contain a cycle") from None
 
     @property
     def referenced_tools(self) -> frozenset[str]:
@@ -91,21 +61,14 @@ class ReliabilityPolicy:
 def canonical_reliability_policy(policy: ReliabilityPolicy | None) -> dict[str, Any] | None:
     if policy is None:
         return None
+    edges: dict[str, set[str]] = {}
+    for item in policy.prerequisites:
+        edges.setdefault(item.tool_name, set()).update(item.requires_success)
     return {
         "max_correction_turns": policy.max_correction_turns,
         "retry_invalid_responses": policy.retry_invalid_responses,
-        "prerequisites": [
-            {
-                "tool_name": item.tool_name,
-                "requires_success": sorted(item.requires_success),
-            }
-            for item in sorted(policy.prerequisites, key=lambda value: value.tool_name)
-        ],
-        "completion": (
-            {
-                "required_successful_tools": sorted(policy.completion.required_successful_tools),
-            }
-            if policy.completion is not None
-            else None
-        ),
+        "prerequisites": {name: sorted(required) for name, required in sorted(edges.items())},
+        "completion": sorted(policy.completion.required_successful_tools)
+        if policy.completion
+        else None,
     }

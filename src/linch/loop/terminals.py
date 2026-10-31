@@ -26,15 +26,18 @@ from ..events import (
 )
 from ..session import Session
 from ..types import (
-    ContentBlock,
     Message,
     StopReason,
     TextBlock,
-    ToolResultBlock,
     ToolUseBlock,
     Usage,
 )
-from .checkpoint import _flush_events, _persist_event
+from .checkpoint import (
+    _flush_events,
+    _persist_event,
+    _primary_control_message,
+    _replayed_feedback_present,
+)
 from .request import final_text
 
 _FENCED_JSON_RE = re.compile(r"```(?:json)?\s*\n?(.*?)```", re.DOTALL | re.IGNORECASE)
@@ -335,7 +338,7 @@ async def _final_tool_retry_tail(
     run_id: str,
     tool_blocks: list[ToolUseBlock],
     final_id: str,
-    feedback: str,
+    feedback: tuple[Message, ...] | str = (),
     final_is_error: bool = True,
 ) -> AsyncIterator[Event]:
     """Bounce a final-tool answer back into the loop with *feedback*.
@@ -347,29 +350,20 @@ async def _final_tool_retry_tail(
     ``tool_result``).  So we answer every ``tool_use`` in the assistant turn —
     the terminal one carries the repair *feedback*, any others are marked not
     executed — which both satisfies pairing and delivers the instruction."""
-    content: list[ContentBlock] = []
-    for block in tool_blocks:
-        if block.id == final_id:
-            content.append(
-                ToolResultBlock(
-                    tool_use_id=block.id,
-                    content=feedback,
-                    is_error=final_is_error,
-                )
-            )
-        else:
-            content.append(
-                ToolResultBlock(
-                    tool_use_id=block.id,
-                    content="Tool not executed; revise and resubmit your final answer.",
-                    is_error=True,
-                )
-            )
-    message = Message(role="user", content=content)
-    await store_call(session, "session.append", session.append([message]))
-    event: Event = UserEvent(message=message)
-    await _persist_event(session, run_id, event)
-    yield event
+    paired = _primary_control_message(
+        Message(role="assistant", content=list(tool_blocks)),
+        feedback if isinstance(feedback, str) else "Final tool was not executed.",
+        final_id,
+        final_is_error,
+    )
+    messages = (paired, *(feedback if isinstance(feedback, tuple) else ()))
+    await _flush_events(session)
+    if not _replayed_feedback_present(session, messages):
+        await store_call(session, "session.append", session.append(list(messages)))
+    for index, message in enumerate(messages):
+        event: Event = UserEvent(message=message, subtype="notification" if index else "prompt")
+        await _persist_event(session, run_id, event)
+        yield event
 
 
 @dataclass(slots=True)

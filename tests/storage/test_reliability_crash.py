@@ -1,0 +1,277 @@
+"""Correction feedback and its checkpoint survive process loss as one logical turn."""
+
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+from test_model_call_journal import _close, _reopen, _stores
+from test_terminal_atomicity import _CrashWrites, _normalized, _ProcessDeath
+
+
+class CorrectionWrites(_CrashWrites):
+    async def _write(self, name: str, *args: Any, **kw: Any) -> Any:
+        hit = (
+            name == "append_messages"
+            and any("[Linch]" in str(message) for message in args[1])
+            and self.point == "feedback"
+        ) or (
+            name.startswith("save_checkpoint")
+            and args[1].phase == "turn_complete"
+            and self.point == "checkpoint"
+        )
+        original = self.point
+        self.point = name if hit else ""
+        self.armed = True
+        # Avoid the parent's guard-specific turn_complete counter.
+        if name.startswith("save_checkpoint"):
+            self.point = f"turn_complete:{self.turn_complete + 1}" if hit else ""
+        try:
+            return await super()._write(name, *args, **kw)
+        finally:
+            self.point = original
+
+
+class CorrectionProvider:
+    id = "correction-crash"
+
+    def __init__(self, case: str) -> None:
+        self.case, self.calls = case, 0
+
+    def context_window(self, model: str) -> int:
+        return 100_000
+
+    async def stream(self, request: Any) -> Any:
+        from linch.types import Usage
+
+        self.calls += 1
+        yield {"type": "message_start", "model": request.model}
+        if self.case == "native" and self.calls == 1:
+            yield {"type": "tool_use_start", "id": "bad", "name": "prepare"}
+            yield {"type": "tool_use_input_delta", "id": "bad", "json_delta": '{"secret":"raw"'}
+            yield {"type": "tool_use_end", "id": "bad"}
+            stop = "tool_use"
+        elif self.case in {"completion", "final_tool"} and self.calls == 2:
+            yield {"type": "tool_use_start", "id": "good", "name": "prepare"}
+            yield {"type": "tool_use_input_delta", "id": "good", "json_delta": "{}"}
+            yield {"type": "tool_use_end", "id": "good"}
+            stop = "tool_use"
+        elif self.case == "final_tool":
+            yield {"type": "tool_use_start", "id": "final", "name": "finish"}
+            yield {"type": "tool_use_input_delta", "id": "final", "json_delta": "{}"}
+            yield {"type": "tool_use_end", "id": "final"}
+            stop = "tool_use"
+        else:
+            text = (
+                '<tool_call>{"secret":"raw"}</tool_call>'
+                if self.case == "text" and self.calls == 1
+                else "answer"
+            )
+            yield {"type": "text_delta", "text": text}
+            stop = "end_turn"
+        yield {"type": "message_end", "stop_reason": stop, "usage": Usage(3, 2)}
+
+
+def correction_agent(sessions: Any, runs: Any, provider: Any) -> Any:
+    from linch import Agent, CompletionGate, ReliabilityPolicy
+    from linch.config import FeatureFlags
+    from linch.tools import tool
+    from linch.tools.registry import empty_tools
+
+    @tool
+    async def prepare() -> str:
+        return "prepared"
+
+    @tool
+    async def finish() -> str:
+        raise AssertionError("final tool must never execute")
+
+    return Agent(
+        model="test",
+        provider=provider,
+        session_store=sessions,
+        run_store=runs,
+        tools=empty_tools(prepare, finish),
+        final_tool_name="finish" if provider.case == "final_tool" else None,
+        permissions={"mode": "skip-dangerous"},
+        features=FeatureFlags(skills=False, subagents=False, mcp=False),
+        reliability=ReliabilityPolicy(
+            completion=CompletionGate(("prepare",))
+            if provider.case in {"completion", "final_tool"}
+            else None
+        ),
+    )
+
+
+@pytest.mark.parametrize("kind", ["memory", "postgres"])
+@pytest.mark.parametrize("after", [False, True], ids=["before", "after"])
+@pytest.mark.parametrize("point", ["feedback", "checkpoint"])
+@pytest.mark.parametrize("case", ["text", "native", "completion", "final_tool"])
+async def test_correction_crash_exact_trace(pg_dsn, kind, after, point, case):
+    from linch.events import PromptCacheAdvisoryEvent, event_to_dict
+
+    async def scenario(crash: bool):
+        sessions, runs = await _stores(kind, pg_dsn)
+        sw = CorrectionWrites(sessions, point if crash else "", after)
+        rw = CorrectionWrites(runs, point if crash else "", after)
+        sw.peer, rw.peer = rw, sw
+        provider = CorrectionProvider(case)
+        session = await correction_agent(sw, rw, provider).session()
+        run_id = ""
+        try:
+            try:
+                async for event in session.run("go"):
+                    if event.type == "system":
+                        run_id = event.run_id
+            except _ProcessDeath:
+                assert crash
+            else:
+                assert not crash, "correction crash boundary was not reached"
+            if crash:
+                sessions, runs = await _reopen(kind, pg_dsn, sessions, runs)
+                session = await correction_agent(sessions, runs, provider).session(id=session.id)
+                _ = [event async for event in session.resume(run_id)]
+            rows = await runs.load_events(run_id)
+            record = await runs.load_run(run_id)
+            assert record.status == "completed", [
+                event_to_dict(row.event)
+                for row in rows
+                if row.event.type in {"error", "reliability"}
+            ]
+            assert provider.calls == (3 if case in {"completion", "final_tool"} else 2)
+            assert record.checkpoint.extension_state["linch.reliability"]["corrections"] == 1
+            assert sum(row.event.type == "reliability" for row in rows) == 1
+            assert (
+                sum(
+                    row.event.type == "model_call" and row.event.record_kind == "receipt"
+                    for row in rows
+                )
+                == provider.calls
+            )
+            assert "raw" not in str(session.full_history)
+            return [
+                _normalized(event_to_dict(row.event))
+                for row in rows
+                if not isinstance(row.event, PromptCacheAdvisoryEvent)
+            ]
+        finally:
+            await _close(sessions, runs)
+
+    assert await scenario(True) == await scenario(False)
+
+
+@pytest.mark.parametrize("raw", [None, {"v": 2, "corrections": 0, "succeeded": []}])
+async def test_resume_poisoned_reliability_namespace_fails_closed(raw):
+    from linch.errors import ConfigError
+
+    sessions, runs = await _stores("memory", "")
+    provider = CorrectionProvider("text")
+    sw = CorrectionWrites(sessions, "feedback")
+    rw = CorrectionWrites(runs)
+    sw.peer, rw.peer = rw, sw
+    session = await correction_agent(sw, rw, provider).session()
+    run_id = ""
+    with pytest.raises(_ProcessDeath):
+        async for event in session.run("go"):
+            if event.type == "system":
+                run_id = event.run_id
+    record = await runs.load_run(run_id)
+    record.checkpoint.extension_state["linch.reliability"] = raw
+    await runs.save_checkpoint(run_id, record.checkpoint)
+    resumed = await correction_agent(sessions, runs, provider).session(id=session.id)
+    with pytest.raises((ConfigError, ValueError), match="checkpoint state"):
+        _ = [event async for event in resumed.resume(run_id)]
+    assert provider.calls == 1
+
+
+@pytest.mark.parametrize("crash", [False, True])
+@pytest.mark.parametrize("parallel", [False, True])
+async def test_resumed_batch_cannot_unlock_its_own_prerequisite(crash, parallel):
+    from linch import Agent, ReliabilityPolicy, ToolPrerequisite
+    from linch.tools import tool
+    from linch.tools.registry import empty_tools
+    from linch.types import Usage
+
+    calls = []
+
+    @tool(scope="read" if parallel else "write", parallel=parallel)
+    async def first() -> str:
+        assert any(
+            row.event.type == "tool_call_end" and row.event.tool_name == "second"
+            for row in await runs.load_events(session.active_run_id)
+        )
+        calls.append("first")
+        return "success"
+
+    @tool(scope="read" if parallel else "write", parallel=parallel)
+    async def second() -> str:
+        calls.append("second")
+        return "success"
+
+    class Provider(CorrectionProvider):
+        async def stream(self, request):
+            self.calls += 1
+            yield {"type": "message_start", "model": request.model}
+            if self.calls == 1:
+                for name in ("first", "second"):
+                    yield {"type": "tool_use_start", "id": name, "name": name}
+                    yield {"type": "tool_use_input_delta", "id": name, "json_delta": "{}"}
+                    yield {"type": "tool_use_end", "id": name}
+            else:
+                yield {"type": "text_delta", "text": "done"}
+            yield {
+                "type": "message_end",
+                "stop_reason": "tool_use" if self.calls == 1 else "end_turn",
+                "usage": Usage(),
+            }
+
+    class FirstResultCrash(_CrashWrites):
+        async def _write(self, name, *args, **kwargs):
+            if name == "save_checkpoint_with_events" and any(
+                event.type == "tool_call_end" and event.tool_name == "first" for event in args[2]
+            ):
+                self.point, self.armed, self.after = name, True, True
+            return await super()._write(name, *args, **kwargs)
+
+    sessions, runs = await _stores("memory", "")
+    provider = Provider("batch")
+
+    def agent(store):
+        return Agent(
+            model="test",
+            provider=provider,
+            session_store=sessions,
+            run_store=store,
+            tools=empty_tools(first, second),
+            permissions={"mode": "skip-dangerous"},
+            reliability=ReliabilityPolicy(prerequisites=(ToolPrerequisite("second", ("first",)),)),
+        )
+
+    session = await agent(FirstResultCrash(runs) if crash else runs).session()
+    run_id = ""
+    try:
+        async for event in session.run("go"):
+            if event.type == "system":
+                run_id = event.run_id
+    except _ProcessDeath:
+        assert crash
+        session = await agent(runs).session(id=session.id)
+        _ = [event async for event in session.resume(run_id)]
+    else:
+        assert not crash
+    assert calls == ["first"]
+    rows = await runs.load_events(run_id)
+    assert [row.event.tool_name for row in rows if row.event.type == "tool_call_end"] == [
+        "second",
+        "first",
+    ]
+    results = [
+        block.tool_use_id
+        for message in session.full_history
+        for block in message.content
+        if block.type == "tool_result"
+    ]
+    assert results == ["first", "second"]
+    assert (await runs.load_run(run_id)).checkpoint.extension_state["linch.reliability"][
+        "succeeded"
+    ] == ["first"]

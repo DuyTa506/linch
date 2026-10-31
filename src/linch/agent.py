@@ -15,8 +15,8 @@ from .config import FeatureFlags, SystemPromptConfig
 from .durability import DurabilityOptions
 from .errors import ConfigError
 from .execution import ExecutionBackend
-from .kernel import Context
-from .loop.turn_stopping import TurnStoppingDispatcher
+from .kernel import Context, Disposable
+from .loop.turn_stopping import TurnStoppingDispatcher, TurnStoppingListener
 from .openai_responses import OpenAIOptions, OpenAIReasoning
 from .permissions import BashRule, CanUseTool, PathRule, PermissionEngine, PermissionRule, ToolRule
 from .providers import BaseProvider, OpenAIResponsesProvider, OpenAIResponsesProviderOptions
@@ -656,9 +656,8 @@ class Agent:
         # primary connection in close()).
         self._extra_mcp_connections: list[Any] = []
 
-    def on_turn_stopping(self, listener: Any) -> Any:
-        """Register a run-finalization listener and return its disposable."""
-        return self._turn_stopping_dispatcher.register(listener)
+    def on_turn_stopping(self, listener: TurnStoppingListener) -> Disposable:
+        return self.context.effect(lambda: self._turn_stopping_dispatcher.register(listener))
 
     def _set_subagent_tool_registry(self, registry: ToolRegistry) -> None:
         """Install a worker-only tool catalog without changing parent tools.

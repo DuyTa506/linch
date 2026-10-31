@@ -13,13 +13,16 @@ from typing import Any
 
 from ..compaction import _reconcile_paid_compactions
 from ..errors import ConfigError
-from ..events import ErrorEvent, Event
+from ..events import AssistantEvent, ErrorEvent, Event, UserEvent
 from ..model_calls import _ModelCallLedger, _primary_request_fingerprint
-from ..types import ProviderRequest
+from ..types import Message, ProviderRequest, TextBlock
 from .checkpoint import (
+    _message_digest,
+    _primary_control_message,
     _queue_crashed_worker_notifications,
     _receipt_message_prefix,
 )
+from .turn_stopping import INVALID_RESPONSE_DIAGNOSTIC, TurnStopping, append_feedback
 
 
 @dataclass(slots=True)
@@ -56,6 +59,7 @@ class ResumeContext:
     emit_error_terminal: Callable[..., AsyncIterator[Event]]
     drain_auxiliary_usage: Callable[[], AsyncIterator[Event]]
     save_checkpoint: Callable[..., Awaitable[None]]
+    turn_stopping: Any
     state: ResumeState
 
 
@@ -75,8 +79,24 @@ async def recover_resume(ctx: ResumeContext) -> AsyncIterator[Event]:
 
     if ctx.checkpoint.phase in {"provider_pending", "assistant_appended"}:
         await _reconcile_active_primary(ctx)
+        async for event in _replay_primary_events(ctx):
+            yield event
         if ctx.state.terminal_kind == "rejected_native":
             assert ctx.state.terminal_event is not None
+            decision = await _resume_invalid_decision(ctx)
+            if decision.action == "continue":
+                async for event in append_feedback(ctx.session, ctx.run_id, decision):
+                    yield event
+            if decision.event is not None:
+                await ctx.persist_event(decision.event)
+                yield decision.event
+            if decision.action == "continue":
+                await ctx.save_checkpoint("turn_complete", turn_index=ctx.checkpoint.turn_index)
+                ctx.state.start_turn = ctx.checkpoint.turn_index + 1
+                return
+            if decision.action == "fail":
+                raise decision.error or ValueError("turn-stopping listener failed")
+            await ctx.persist_event(ctx.state.terminal_event)
             yield ctx.state.terminal_event
             async for event in ctx.emit_error_terminal():
                 yield event
@@ -105,6 +125,32 @@ async def recover_resume(ctx: ResumeContext) -> AsyncIterator[Event]:
         yield worker_event
     if ctx.checkpoint.background_workers:
         await ctx.save_checkpoint(ctx.checkpoint.phase, turn_index=ctx.checkpoint.turn_index)
+
+
+async def _replay_primary_events(ctx: ResumeContext) -> AsyncIterator[Event]:
+    projection = ctx.state.recovered_primary_projection
+    if ctx.state.terminal_kind != "invalid_text":
+        return
+    assert projection is not None
+    base = projection["full_history_base_count"]
+    history = list(ctx.session.full_history)
+    assistant = history[base]
+    control = history[base + 1]
+    for event in (
+        AssistantEvent(message=assistant, stop_reason=projection["assistant_stop_reason"]),
+        UserEvent(message=control, subtype="notification"),
+    ):
+        await ctx.persist_event(event)
+        yield event
+    decision = await _resume_invalid_decision(ctx)
+    if decision.event is not None:
+        await ctx.persist_event(decision.event)
+        yield decision.event
+
+
+async def _resume_invalid_decision(ctx: ResumeContext) -> Any:
+    candidate = TurnStopping(ctx.session, ctx.run_id, ctx.checkpoint.turn_index, "invalid_response")
+    return await ctx.turn_stopping.dispatch(candidate)
 
 
 async def _reconcile_active_primary(ctx: ResumeContext) -> None:
@@ -157,12 +203,35 @@ async def _reconcile_active_primary(ctx: ResumeContext) -> None:
             expected.append(projection["control_message_sha256"])
     else:
         expected = []
-    ctx.state.recovered_primary_prefix = _receipt_message_prefix(
-        list(ctx.session.full_history),
-        base_count=active_primary["full_history_base_count"],
-        base_fingerprint=active_primary["full_history_base_fingerprint"],
-        expected_digests=expected,
+    history = list(ctx.session.full_history)
+    base = active_primary["full_history_base_count"]
+    diagnostic = Message(role="assistant", content=[TextBlock(text=INVALID_RESPONSE_DIAGNOSTIC)])
+    rejected_text = projection is not None and projection["assistant_sha256"] == _message_digest(
+        diagnostic
     )
+    if ctx.checkpoint.phase == "assistant_appended" and len(history) > base + len(expected):
+        ctx.turn_stopping.replayed_feedback = tuple(history[base + len(expected) :])
+        history = history[: base + len(expected)]
+    ctx.state.recovered_primary_prefix = (
+        0
+        if receipt is not None and receipt.disposition == "rejected_native"
+        else _receipt_message_prefix(
+            history,
+            base_count=base,
+            base_fingerprint=active_primary["full_history_base_fingerprint"],
+            expected_digests=expected,
+        )
+    )
+    if rejected_text:
+        ctx.state.terminal_kind = "invalid_text"
+        assert projection is not None
+        control = _primary_control_message(diagnostic, projection["after_feedback"], wrap=False)
+        if _message_digest(control) != projection["control_message_sha256"]:
+            raise ConfigError("invalid response control digest differs")
+        missing = [diagnostic, control][ctx.state.recovered_primary_prefix :]
+        if missing:
+            await ctx.session.append(missing)
+        ctx.state.recovered_primary_prefix = 2
 
     if receipt is not None and receipt.disposition == "rejected_native":
         event = ErrorEvent(
@@ -172,9 +241,6 @@ async def _reconcile_active_primary(ctx: ResumeContext) -> None:
                 "retryable": False,
             }
         )
-        await ctx.persist_event(event)
-        # Event emission is kept in the async-generator caller because this
-        # reconciliation helper is intentionally not itself a yield phase.
         ctx.state.terminal_event = event
         ctx.state.terminal_kind = "rejected_native"
         return

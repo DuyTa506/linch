@@ -115,6 +115,7 @@ def _agent(session_store: Any, run_store: Any, provider: Any, **kw: Any) -> Any:
         features=FeatureFlags(skills=False, subagents=False, mcp=False),
         tools=empty_tools(),
         max_output_tokens=100,
+        reliability=None,
         **kw,
     )
 
@@ -631,7 +632,7 @@ async def test_paid_projection_and_consumption_reconcile_independently(
     saved = await runs.load_run(run_id)
     assert saved is not None and saved.checkpoint is not None
     checkpoint = saved.checkpoint
-    checkpoint.extension_state["linch.reliability"] = {"version": 1, "unrelated": "preserved"}
+    checkpoint.extension_state["host.unrelated"] = {"version": 1, "unrelated": "preserved"}
     checkpoint.extension_state["host.extension"] = {"owner": "host"}
     if consumed:
         from linch.events import UsageEvent
@@ -680,7 +681,7 @@ async def test_paid_projection_and_consumption_reconcile_independently(
             == expected_compaction_events
         )
         assert complete.checkpoint.extension_state["host.extension"] == {"owner": "host"}
-        assert complete.checkpoint.extension_state["linch.reliability"] == {
+        assert complete.checkpoint.extension_state["host.unrelated"] == {
             "version": 1,
             "unrelated": "preserved",
         }

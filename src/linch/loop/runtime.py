@@ -556,16 +556,29 @@ class RunRuntime:
         self._checkpoint_extension_state_fn: Callable[..., dict[str, Any]] | None = None
         self.lease_lost: LeaseLostError | None = None
         policy = getattr(self.agent, "reliability", None)
+        if policy is not None:
+            policy.validate(
+                (tool.name for tool in (session.tools_override or self.agent.tools).list()),
+                final_tool_name=opts.final_tool_name or self.agent.final_tool_name,
+            )
         self.reliability: ReliabilityRuntime | None = (
-            ReliabilityRuntime(policy) if policy is not None else None
+            ReliabilityRuntime(policy)
+            if policy is not None and (policy.retry_invalid_responses or policy.referenced_tools)
+            else None
         )
-        configured = getattr(self.agent, "_turn_stopping_dispatcher", None)
-        listeners = list(configured.snapshot()) if configured is not None else []
+        self.tool_callbacks = (
+            dict(
+                before_batch=self.reliability.begin_batch,
+                pre_execute_pipeline=self.reliability.pre_execute_pipeline,
+                on_foreground_result=self.reliability.foreground_result,
+            )
+            if self.reliability is not None and self.reliability.policy.referenced_tools
+            else {}
+        )
+        listeners = list(self.agent._turn_stopping_dispatcher.snapshot())
         if self.reliability is not None:
             listeners.insert(0, self.reliability.listener)
-        self.turn_stopping = (
-            TurnStoppingDispatcher(tuple(listeners))
-        )
+        self.turn_stopping = TurnStoppingDispatcher(tuple(listeners))
 
     async def _attempt(
         self, operation: str, awaitable: Callable[[], Awaitable[Any]], original: Exception
@@ -725,11 +738,12 @@ class RunRuntime:
             runtime.truncation_attempts = resume_checkpoint.truncation_attempts
             runtime.truncation_prefix = resume_checkpoint.truncation_prefix
             runtime.pending_truncation_feedback = resume_checkpoint.pending_truncation_feedback
+            has_reliability = "linch.reliability" in resume_checkpoint.extension_state
+            raw_reliability = resume_checkpoint.extension_state.get("linch.reliability")
+            if has_reliability and (runtime.reliability is None or raw_reliability is None):
+                raise ConfigError("invalid linch.reliability checkpoint state")
             if runtime.reliability is not None:
-                runtime.reliability = ReliabilityRuntime.restore(
-                    runtime.reliability.policy,
-                    resume_checkpoint.extension_state.get("linch.reliability"),
-                )
+                runtime.reliability.restore(raw_reliability)
             if resume_checkpoint.pending_alignment:
                 session.alignment_queue.extend(
                     alignment_entries_from_checkpoint(resume_checkpoint.pending_alignment)

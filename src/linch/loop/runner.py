@@ -110,7 +110,6 @@ from .terminals import (
     _stop_when_tail,
 )
 from .tool_batch import ToolBatchContext, run_tool_batch
-from .turn_stopping import TurnStopping, TurnStoppingDecision
 
 # Max BeforeFinalAnswer-induced retries honored per run before the answer is
 # accepted as-is. Keeps a perpetually-blocking final-answer hook from looping.
@@ -121,12 +120,6 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
     if _exact_model_input_enabled(session.agent):
         _require_model_input_snapshot_store(session.agent)
     await session.agent._ensure_provider_prepared()
-    policy = getattr(session.agent, "reliability", None)
-    if policy is not None:
-        policy.validate(
-            (tool.name for tool in (session.tools_override or session.agent.tools).list()),
-            final_tool_name=_effective_final_tool_name(session.agent, opts),
-        )
     store = session.agent.run_store
     run_record = (
         await store_call(
@@ -160,12 +153,6 @@ async def resume_loop(session: Session, run_id: str, opts: RunOptions) -> AsyncI
     if _exact_model_input_enabled(session.agent):
         _require_model_input_snapshot_store(session.agent)
     await session.agent._ensure_provider_prepared()
-    policy = getattr(session.agent, "reliability", None)
-    if policy is not None:
-        policy.validate(
-            (tool.name for tool in (session.tools_override or session.agent.tools).list()),
-            final_tool_name=_effective_final_tool_name(session.agent, opts),
-        )
     store = session.agent.run_store
     if store is None:
         raise RuntimeError("Agent has no run_store configured")
@@ -399,6 +386,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             dispatch_before_final_answer=_dispatch_before_final_answer,
             dispatch_stop=_dispatch_stop,
             usage_complete=lambda: ledger.usage_complete,
+            turn_stopping=_runtime.turn_stopping,
         )
         _finalization = RunFinalization(_fctx, _runtime)
 
@@ -456,29 +444,6 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         def _last_user_message_is_feedback(feedback: str) -> bool:
             return last_user_message_is_feedback(session, feedback)
 
-        async def _turn_stopping_decision(
-            *,
-            turn_index: int,
-            reason: Any,
-            assembly: Any,
-            tool_blocks: list[Any] | None = None,
-            final_block: Any = None,
-        ) -> TurnStoppingDecision:
-            if not _runtime.turn_stopping.active:
-                return TurnStoppingDecision("accept")
-            return await _runtime.turn_stopping.dispatch(
-                TurnStopping(
-                    session=session,
-                    run_id=run_id,
-                    turn_index=turn_index,
-                    reason=reason,
-                    assembly=assembly,
-                    tool_blocks=tuple(tool_blocks or ()),
-                    final_block=final_block,
-                    forced_final=_forced_final_turn,
-                )
-            )
-
         _drain_auxiliary_usage = _runtime.drain_auxiliary_usage
         _emit_primary_usage = _runtime.emit_primary_usage
 
@@ -516,6 +481,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             emit_error_terminal=_emit_error_terminal,
             drain_auxiliary_usage=_drain_auxiliary_usage,
             save_checkpoint=_save_checkpoint,
+            turn_stopping=_runtime.turn_stopping,
             state=_resume_state,
         )
         async for _resume_event in recover_resume(_resume_ctx):
@@ -798,7 +764,6 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 active_primary=active_primary,
                 budget=_budget,
                 force_final_pending=_force_final_pending,
-                reliability=_runtime.reliability,
                 turn_stopping=_runtime.turn_stopping,
             )
 
@@ -872,50 +837,6 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 tool_blocks = [b for b in assembly.message.content if isinstance(b, ToolUseBlock)]
                 final_block = next((b for b in tool_blocks if b.name == effective_final_tool), None)
                 if final_block is not None:
-                    stopping = await _turn_stopping_decision(
-                        turn_index=turn_index,
-                        reason="forced_final" if _forced_final_turn else "final_tool",
-                        assembly=assembly,
-                        tool_blocks=tool_blocks,
-                        final_block=final_block,
-                    )
-                    if stopping.action != "accept":
-                        feedback = "Turn-stopping listener requested another response."
-                        if stopping.feedback:
-                            feedback = " ".join(
-                                str(getattr(block, "text", block))
-                                for message in stopping.feedback
-                                for block in getattr(message, "content", ())
-                            ) or feedback
-                        if stopping.action == "fail":
-                            async for event in _final_tool_retry_tail(
-                                session,
-                                run_id=run_id,
-                                tool_blocks=tool_blocks,
-                                final_id=final_block.id,
-                                feedback=feedback,
-                            ):
-                                yield event
-                            if stopping.event is not None:
-                                await _persist_event(session, run_id, stopping.event)
-                                yield stopping.event
-                            async for event in _emit_error_terminal(final_text_value=feedback):
-                                yield event
-                            return
-                        async for event in _final_tool_retry_tail(
-                            session,
-                            run_id=run_id,
-                            tool_blocks=tool_blocks,
-                            final_id=final_block.id,
-                            feedback=feedback,
-                        ):
-                            yield event
-                        if stopping.event is not None:
-                            await _persist_event(session, run_id, stopping.event)
-                            yield stopping.event
-                        await _end_active_turn()
-                        await _save_checkpoint("turn_complete", turn_index=turn_index)
-                        continue
                     async for event in _finalize_final_tool_answer(
                         turn_index, tool_blocks, final_block
                     ):
@@ -956,38 +877,6 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                     await _end_active_turn()
                     await _save_checkpoint("turn_complete", turn_index=turn_index)
                     continue
-                stopping = await _turn_stopping_decision(
-                    turn_index=turn_index,
-                    reason="forced_final" if _forced_final_turn else "final_text",
-                    assembly=assembly,
-                )
-                if stopping.action != "accept":
-                    feedback = "Turn-stopping listener requested another response."
-                    if stopping.feedback:
-                        feedback = " ".join(
-                            str(getattr(block, "text", block))
-                            for message in stopping.feedback
-                            for block in getattr(message, "content", ())
-                        ) or feedback
-                    if stopping.action == "fail":
-                        if stopping.event is not None:
-                            await _persist_event(session, run_id, stopping.event)
-                            yield stopping.event
-                        async for event in _emit_error_terminal(final_text_value=feedback):
-                            yield event
-                        return
-                    async for event in _gate_retry_tail(
-                        session,
-                        run_id=run_id,
-                        feedback=feedback,
-                    ):
-                        yield event
-                    if stopping.event is not None:
-                        await _persist_event(session, run_id, stopping.event)
-                        yield stopping.event
-                    await _end_active_turn()
-                    await _save_checkpoint("turn_complete", turn_index=turn_index)
-                    continue
                 async for event in _finalize_text_answer(
                     turn_index, _assembly_with_truncation_prefix(assembly)
                 ):
@@ -1016,24 +905,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 dispatch_lifecycle=_dispatch_lifecycle,
                 emit_error_terminal=_emit_error_terminal,
                 force_final_pending=_force_final_pending,
-                reliability=(
-                    _runtime.reliability
-                    if _runtime.reliability is not None
-                    and _runtime.reliability.policy.referenced_tools
-                    else None
-                ),
-                before_permissions=(
-                    _runtime.reliability.before_permission
-                    if _runtime.reliability is not None
-                    and _runtime.reliability.policy.referenced_tools
-                    else None
-                ),
-                on_foreground_result=(
-                    _runtime.reliability.foreground_result
-                    if _runtime.reliability is not None
-                    and _runtime.reliability.policy.referenced_tools
-                    else None
-                ),
+                **_runtime.tool_callbacks,
             )
 
             async def _save_tool_checkpoint(

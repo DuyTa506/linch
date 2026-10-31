@@ -289,6 +289,7 @@ async def test_rejected_native_arguments_are_charged_but_never_durable(raw_input
     agent = Agent(
         model="offline-model",
         provider=Provider(),
+        reliability=None,
         session_store=InMemorySessionStore(),
         run_store=run_store,
         permissions={"mode": "skip-dangerous"},

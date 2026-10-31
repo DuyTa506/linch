@@ -35,6 +35,7 @@ from .terminals import (
     _success_result_tail,
     _validate_structured_output,
 )
+from .turn_stopping import TurnStopping, append_feedback
 
 
 @dataclass(slots=True)
@@ -61,6 +62,7 @@ class FinalizeCtx:
     dispatch_before_final_answer: Callable[..., Awaitable[Any]]
     dispatch_stop: Callable[..., Awaitable[Any]]
     usage_complete: Callable[[], bool]
+    turn_stopping: Any
 
 
 @dataclass(slots=True)
@@ -85,6 +87,35 @@ class RunFinalization:
     ctx: FinalizeCtx
     runtime: Any
     result: _AgentResult | None = None
+
+    async def _allow_candidate(
+        self, candidate: TurnStopping
+    ) -> tuple[bool | Exception, list[Event]]:
+        decision = await self.ctx.turn_stopping.dispatch(candidate)
+        if decision.action == "accept":
+            return True, []
+        events: list[Event] = []
+        if candidate.tool_blocks or decision.action == "continue":
+            stream = (
+                _final_tool_retry_tail(
+                    self.ctx.session,
+                    run_id=self.ctx.run_id,
+                    tool_blocks=list(candidate.tool_blocks),
+                    final_id=candidate.final_block.id if candidate.final_block else "",
+                    feedback=decision.feedback,
+                )
+                if candidate.tool_blocks
+                else append_feedback(self.ctx.session, self.ctx.run_id, decision)
+            )
+            events = [event async for event in stream]
+        if decision.event is not None:
+            await _persist_event(self.ctx.session, self.ctx.run_id, decision.event)
+            events.append(decision.event)
+        if decision.action == "fail":
+            return decision.error or ValueError("turn-stopping listener failed"), events
+        await self.ctx.end_active_turn()
+        await self.ctx.save_checkpoint("turn_complete", turn_index=candidate.turn_index)
+        return False, events
 
     async def emit_error(
         self,
@@ -115,6 +146,23 @@ class RunFinalization:
         *,
         forced_final_turn: bool,
     ) -> AsyncIterator[Event]:
+        allowed, events = await self._allow_candidate(
+            TurnStopping(
+                self.ctx.session,
+                self.ctx.run_id,
+                turn_index,
+                "forced_final" if forced_final_turn else "final_tool",
+                tool_blocks=tuple(tool_blocks),
+                final_block=final_block,
+                forced_final=forced_final_turn,
+            )
+        )
+        for event in events:
+            yield event
+        if isinstance(allowed, Exception):
+            raise allowed
+        if not allowed:
+            return
         self.runtime.sync_checkpoint_accounting()
         outcome = TerminalOutcome()
         async for event in finalize_final_tool_answer(
@@ -137,6 +185,22 @@ class RunFinalization:
         *,
         forced_final_turn: bool,
     ) -> AsyncIterator[Event]:
+        allowed, events = await self._allow_candidate(
+            TurnStopping(
+                self.ctx.session,
+                self.ctx.run_id,
+                turn_index,
+                "forced_final" if forced_final_turn else "final_text",
+                assembly,
+                forced_final=forced_final_turn,
+            )
+        )
+        for event in events:
+            yield event
+        if isinstance(allowed, Exception):
+            raise allowed
+        if not allowed:
+            return
         self.runtime.sync_checkpoint_accounting()
         outcome = TerminalOutcome()
         async for event in finalize_text_answer(
