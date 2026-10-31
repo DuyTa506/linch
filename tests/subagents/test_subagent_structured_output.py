@@ -5,7 +5,7 @@ from __future__ import annotations
 
 async def test_run_subagent_forwards_output_schema_run_options() -> None:
     from linch import Agent, OutputSchema, RunOptions
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.sessions import InMemorySessionStore
     from linch.subagents.default_agent import DEFAULT_AGENT
     from linch.subagents.runner import RunSubagentArgs, run_subagent
@@ -46,7 +46,7 @@ async def test_run_subagent_forwards_output_schema_run_options() -> None:
 
 async def test_run_subagent_forwards_final_tool_name_run_options() -> None:
     from linch import Agent, RunOptions
-    from linch.evals import ScriptedProvider, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, ToolUseTurn
     from linch.sessions import InMemorySessionStore
     from linch.subagents.default_agent import DEFAULT_AGENT
     from linch.subagents.runner import RunSubagentArgs, result_text_for_caller, run_subagent

@@ -32,7 +32,7 @@ def _agent(provider: Any, tools: Any) -> Any:
 
 
 async def test_slow_consumer_halts_the_producer() -> None:
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.tools import ToolRegistry, tool
 
     ran = {"count": 0}

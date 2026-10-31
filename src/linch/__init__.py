@@ -53,12 +53,6 @@ if TYPE_CHECKING:
         MailboxClaim,
         MailboxMessage,
     )
-    from .deep_agent import (
-        DEEP_AGENT_PROFILES,
-        DEEP_AGENT_SYSTEM_PROMPT,
-        DeepAgentProfile,
-        create_deep_agent,
-    )
     from .durability import DurabilityOptions, InboxDelivery
     from .errors import (
         AbortError,
@@ -73,31 +67,6 @@ if TYPE_CHECKING:
         SkillError,
         ToolExecutionError,
         ToolTimeoutError,
-    )
-    from .evals import (
-        CaseResult,
-        EvalBenchmarkResult,
-        EvalBenchmarkTarget,
-        EvalCase,
-        EvalResult,
-        EvalSuite,
-        EvalTargetResult,
-        ScriptedProvider,
-        TextTurn,
-        ToolUseTurn,
-        context_metadata_contains,
-        context_not_trimmed,
-        context_selected_tool,
-        cost_under,
-        load_eval_suite,
-        load_scripted_turns,
-        recovery_succeeded,
-        run_completed,
-        run_eval,
-        run_eval_benchmark,
-        schema_valid,
-        text_contains,
-        tool_called,
     )
     from .events import (
         AssistantEvent,
@@ -195,18 +164,6 @@ if TYPE_CHECKING:
         evaluate_loop_guard,
         normalize_loop_guard,
     )
-    from .loop_runner import (
-        FileLoopArtifactStore,
-        FileLoopLeaseStore,
-        InMemoryLoopLeaseStore,
-        LoopArtifactStore,
-        LoopLease,
-        LoopLeaseStore,
-        LoopRunner,
-        LoopSpec,
-        LoopTickResult,
-        LoopTrigger,
-    )
     from .mcp import (
         McpHttpServerConfig,
         McpServerConfig,
@@ -243,7 +200,6 @@ if TYPE_CHECKING:
     from .providers.retry import RetryOptions
     from .recovery import TruncationRecovery
     from .reliability import CompletionGate, ReliabilityPolicy, ToolPrerequisite
-    from .reports import RunReport, build_run_report, load_run_report
     from .run_store import (
         SCHEMA_VERSION as RUN_SCHEMA_VERSION,
     )
@@ -353,14 +309,6 @@ if TYPE_CHECKING:
         evaluate_verifiers,
         normalize_verifiers,
     )
-    from .workflow import (
-        StepOutcome,
-        WorkflowContext,
-        WorkflowError,
-        WorkflowJournal,
-        WorkflowSuspended,
-        WorkflowTimeoutError,
-    )
 
 # public name -> relative submodule that defines it (attribute name == public
 # name). Flattened into ``_LAZY`` below; ``_ALIASES`` covers the few names whose
@@ -391,12 +339,6 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
         "Mailbox",
         "MailboxClaim",
         "MailboxMessage",
-    ),
-    ".deep_agent": (
-        "DEEP_AGENT_PROFILES",
-        "DEEP_AGENT_SYSTEM_PROMPT",
-        "DeepAgentProfile",
-        "create_deep_agent",
     ),
     ".durability": ("DurabilityOptions", "InboxDelivery"),
     ".errors": (
@@ -459,31 +401,6 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
         "is_verification_event",
         "is_workflow_event",
     ),
-    ".evals": (
-        "CaseResult",
-        "EvalBenchmarkResult",
-        "EvalBenchmarkTarget",
-        "EvalCase",
-        "EvalResult",
-        "EvalSuite",
-        "EvalTargetResult",
-        "ScriptedProvider",
-        "TextTurn",
-        "ToolUseTurn",
-        "context_metadata_contains",
-        "context_not_trimmed",
-        "context_selected_tool",
-        "cost_under",
-        "load_eval_suite",
-        "load_scripted_turns",
-        "recovery_succeeded",
-        "run_completed",
-        "run_eval",
-        "run_eval_benchmark",
-        "schema_valid",
-        "text_contains",
-        "tool_called",
-    ),
     ".filesystem": (
         "CompositeFileBackend",
         "DiskFileBackend",
@@ -533,18 +450,6 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
         "evaluate_loop_guard",
         "normalize_loop_guard",
     ),
-    ".loop_runner": (
-        "FileLoopArtifactStore",
-        "FileLoopLeaseStore",
-        "InMemoryLoopLeaseStore",
-        "LoopArtifactStore",
-        "LoopLease",
-        "LoopLeaseStore",
-        "LoopRunner",
-        "LoopSpec",
-        "LoopTickResult",
-        "LoopTrigger",
-    ),
     ".mcp": (
         "McpHttpServerConfig",
         "McpServerConfig",
@@ -585,7 +490,6 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
         "ReliabilityPolicy",
         "ToolPrerequisite",
     ),
-    ".reports": ("RunReport", "build_run_report", "load_run_report"),
     ".run_store": (
         "InMemoryRunStore",
         "LeaseLostError",
@@ -692,14 +596,6 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
         "evaluate_verifiers",
         "normalize_verifiers",
     ),
-    ".workflow": (
-        "StepOutcome",
-        "WorkflowContext",
-        "WorkflowError",
-        "WorkflowJournal",
-        "WorkflowSuspended",
-        "WorkflowTimeoutError",
-    ),
 }
 
 # Public name -> (submodule, source attribute) where the exported name differs
@@ -760,13 +656,7 @@ __all__ = [
     "TruncationRecovery",
     "BudgetEvent",
     "is_budget_event",
-    "StepOutcome",
-    "WorkflowContext",
-    "WorkflowError",
     "WorkflowEvent",
-    "WorkflowJournal",
-    "WorkflowSuspended",
-    "WorkflowTimeoutError",
     "is_workflow_event",
     "ScheduleEvent",
     "ContextBudget",
@@ -780,9 +670,6 @@ __all__ = [
     "DefaultCompaction",
     "DetailedCompaction",
     "GENERAL_SUMMARY_PROMPT",
-    "DEEP_AGENT_PROFILES",
-    "DEEP_AGENT_SYSTEM_PROMPT",
-    "DeepAgentProfile",
     "FeatureFlags",
     "CompositeFileBackend",
     "DiskFileBackend",
@@ -922,7 +809,6 @@ __all__ = [
     "RetryOptions",
     "SGLangProvider",
     "SGLangProviderOptions",
-    "RunReport",
     "RUN_SCHEMA_VERSION",
     "RunCheckpoint",
     "RunContract",
@@ -941,7 +827,6 @@ __all__ = [
     "VLLMProvider",
     "VLLMProviderOptions",
     "apply_provider_capabilities",
-    "build_run_report",
     "build_run_contract",
     "run_contract_from_dict",
     "run_contract_from_meta",
@@ -954,16 +839,6 @@ __all__ = [
     "LoopGuard",
     "LoopGuardDecision",
     "LoopGuardEvent",
-    "LoopArtifactStore",
-    "LoopLease",
-    "LoopLeaseStore",
-    "LoopRunner",
-    "LoopSpec",
-    "LoopTickResult",
-    "LoopTrigger",
-    "FileLoopArtifactStore",
-    "FileLoopLeaseStore",
-    "InMemoryLoopLeaseStore",
     "Correlator",
     "ClaimableMailbox",
     "InMemoryMailbox",
@@ -987,7 +862,6 @@ __all__ = [
     "is_verification_event",
     "normalize_verifiers",
     "connect_mcp_servers",
-    "create_deep_agent",
     "workspace_tools",
     "ensure_run_contract_compatible",
     "get_version",
@@ -998,37 +872,11 @@ __all__ = [
     "is_loop_guard_event",
     "is_subagent_event",
     "list_provider_models",
-    "load_run_report",
     "render_subagent_markdown",
     "write_subagent_definition",
-    # Evaluation harness and permission-rule primitives are top-level so
-    # generated projects can depend only on the semver-governed public API.
     "BashRule",
-    "CaseResult",
-    "EvalBenchmarkResult",
-    "EvalBenchmarkTarget",
-    "EvalCase",
-    "EvalResult",
-    "EvalSuite",
-    "EvalTargetResult",
     "PathRule",
-    "ScriptedProvider",
-    "TextTurn",
     "ToolRule",
-    "ToolUseTurn",
-    "context_metadata_contains",
-    "context_not_trimmed",
-    "context_selected_tool",
-    "cost_under",
-    "load_eval_suite",
-    "load_scripted_turns",
-    "recovery_succeeded",
-    "run_completed",
-    "run_eval",
-    "run_eval_benchmark",
-    "schema_valid",
-    "text_contains",
-    "tool_called",
     # Session-store types (Phase 3.2): let canonical examples import the concrete
     # stores from the top-level package instead of the linch.sessions submodule.
     "InMemorySessionStore",

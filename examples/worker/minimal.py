@@ -17,7 +17,7 @@ import sys
 import asyncpg
 
 from linch import Agent, PostgresRunStore, empty_tools
-from linch.evals import ScriptedProvider, TextTurn
+from linch.ext.evals import ScriptedProvider, TextTurn
 from linch.worker import Worker, WorkerJob, enqueue_run, install
 
 

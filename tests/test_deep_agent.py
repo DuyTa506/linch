@@ -78,7 +78,8 @@ async def _collect_until(iterator: Any, event_type: str) -> list[Any]:
 
 
 def test_create_deep_agent_is_public_and_returns_agent(tmp_path: Path) -> None:
-    from linch import DEEP_AGENT_SYSTEM_PROMPT, Agent, create_deep_agent
+    from linch import Agent
+    from linch.ext.deep_agent import DEEP_AGENT_SYSTEM_PROMPT, create_deep_agent
 
     agent = create_deep_agent(
         model="gpt-5",
@@ -100,7 +101,7 @@ def test_deep_agent_preserves_original_agent_defaults(tmp_path: Path) -> None:
 
 
 def test_deep_agent_workspace_tools_include_tasks(tmp_path: Path) -> None:
-    from linch import create_deep_agent
+    from linch.ext.deep_agent import create_deep_agent
 
     agent = create_deep_agent(
         model="gpt-5",
@@ -115,7 +116,7 @@ def test_deep_agent_workspace_tools_include_tasks(tmp_path: Path) -> None:
 
 
 def test_deep_agent_is_a_package_with_prompt_and_subagents() -> None:
-    from linch.deep_agent import DEEP_AGENT_SUBAGENTS, DEEP_AGENT_SYSTEM_PROMPT
+    from linch.ext.deep_agent import DEEP_AGENT_SUBAGENTS, DEEP_AGENT_SYSTEM_PROMPT
 
     names = {agent.name for agent in DEEP_AGENT_SUBAGENTS}
 
@@ -126,7 +127,7 @@ def test_deep_agent_is_a_package_with_prompt_and_subagents() -> None:
 
 
 def test_deep_agent_custom_tools_are_copied_and_task_tools_added(tmp_path: Path) -> None:
-    from linch import create_deep_agent
+    from linch.ext.deep_agent import create_deep_agent
     from linch.tools.registry import empty_tools
 
     original = empty_tools(FakeTool("SearchDocs"))
@@ -145,7 +146,7 @@ def test_deep_agent_custom_tools_are_copied_and_task_tools_added(tmp_path: Path)
 
 
 def test_deep_agent_does_not_overwrite_custom_task_tool(tmp_path: Path) -> None:
-    from linch import create_deep_agent
+    from linch.ext.deep_agent import create_deep_agent
     from linch.tools.registry import empty_tools
 
     custom = FakeTool("TaskCreate")
@@ -161,8 +162,8 @@ def test_deep_agent_does_not_overwrite_custom_task_tool(tmp_path: Path) -> None:
 
 
 def test_deep_agent_merges_system_prompt_config(tmp_path: Path) -> None:
-    from linch import create_deep_agent
     from linch.config import SystemPromptConfig, SystemPromptSection
+    from linch.ext.deep_agent import create_deep_agent
 
     agent = create_deep_agent(
         model="gpt-5",
@@ -194,7 +195,7 @@ def test_deep_agent_merges_system_prompt_config(tmp_path: Path) -> None:
 
 
 async def test_deep_agent_loads_specialized_subagents(tmp_path: Path) -> None:
-    from linch import create_deep_agent
+    from linch.ext.deep_agent import create_deep_agent
     from linch.sessions import InMemorySessionStore
 
     agent = create_deep_agent(
@@ -213,7 +214,8 @@ async def test_deep_agent_loads_specialized_subagents(tmp_path: Path) -> None:
 
 
 def test_deep_agent_wires_file_memory_context_builder(tmp_path: Path) -> None:
-    from linch import FileMemoryContextBuilder, create_deep_agent
+    from linch import FileMemoryContextBuilder
+    from linch.ext.deep_agent import create_deep_agent
     from linch.hooks import ContextInjectionHook
 
     agent = create_deep_agent(
@@ -230,7 +232,8 @@ def test_deep_agent_wires_file_memory_context_builder(tmp_path: Path) -> None:
 
 
 async def test_deep_agent_file_memory_reads_run_scoped_index(tmp_path: Path) -> None:
-    from linch import RunOptions, ScopedFileBackend, StateFileBackend, create_deep_agent
+    from linch import RunOptions, ScopedFileBackend, StateFileBackend
+    from linch.ext.deep_agent import create_deep_agent
 
     class RecordingProvider(FakeProvider):
         async def stream(self, req):
@@ -255,7 +258,8 @@ async def test_deep_agent_file_memory_reads_run_scoped_index(tmp_path: Path) -> 
 
 
 async def test_deep_agent_explicit_postgres_stores(pg_dsn, tmp_path: Path) -> None:
-    from linch import CompositeFileBackend, PostgresRunStore, StateFileBackend, create_deep_agent
+    from linch import CompositeFileBackend, PostgresRunStore, StateFileBackend
+    from linch.ext.deep_agent import create_deep_agent
     from linch.filesystem.postgres import PostgresFileBackend
     from linch.sessions.postgres import PostgresSessionStore
 
@@ -276,7 +280,8 @@ async def test_deep_agent_explicit_postgres_stores(pg_dsn, tmp_path: Path) -> No
 
 
 def test_deep_agent_respects_explicit_stores_and_durable_false(tmp_path: Path) -> None:
-    from linch import InMemoryRunStore, create_deep_agent
+    from linch import InMemoryRunStore
+    from linch.ext.deep_agent import create_deep_agent
     from linch.sessions import InMemorySessionStore
 
     session_store = InMemorySessionStore()
@@ -306,7 +311,7 @@ def test_deep_agent_respects_explicit_stores_and_durable_false(tmp_path: Path) -
 
 
 def test_deep_agent_prompt_has_delegation_doctrine() -> None:
-    from linch.deep_agent import DEEP_AGENT_SYSTEM_PROMPT
+    from linch.ext.deep_agent import DEEP_AGENT_SYSTEM_PROMPT
 
     prompt = DEEP_AGENT_SYSTEM_PROMPT
     assert "Never delegate understanding" in prompt
@@ -318,7 +323,7 @@ def test_deep_agent_prompt_has_delegation_doctrine() -> None:
 
 
 def test_deep_agent_prompt_has_phase_orchestration() -> None:
-    from linch.deep_agent import DEEP_AGENT_SYSTEM_PROMPT
+    from linch.ext.deep_agent import DEEP_AGENT_SYSTEM_PROMPT
 
     prompt = DEEP_AGENT_SYSTEM_PROMPT.lower()
     assert "research" in prompt
@@ -327,14 +332,14 @@ def test_deep_agent_prompt_has_phase_orchestration() -> None:
 
 
 def test_deep_agent_planner_subagent_in_roster() -> None:
-    from linch.deep_agent import DEEP_AGENT_SUBAGENTS
+    from linch.ext.deep_agent import DEEP_AGENT_SUBAGENTS
 
     names = {a.name for a in DEEP_AGENT_SUBAGENTS}
     assert "planner" in names
 
 
 def test_deep_agent_planner_has_no_real_disk_write_tools() -> None:
-    from linch.deep_agent import DEEP_AGENT_SUBAGENTS
+    from linch.ext.deep_agent import DEEP_AGENT_SUBAGENTS
 
     planner = next(a for a in DEEP_AGENT_SUBAGENTS if a.name == "planner")
     tools = planner.frontmatter.tools or []
@@ -347,7 +352,7 @@ def test_deep_agent_planner_has_no_real_disk_write_tools() -> None:
 
 
 async def test_deep_agent_specialized_subagents_includes_planner(tmp_path: Path) -> None:
-    from linch import create_deep_agent
+    from linch.ext.deep_agent import create_deep_agent
     from linch.sessions import InMemorySessionStore
 
     agent = create_deep_agent(
@@ -364,7 +369,8 @@ async def test_deep_agent_specialized_subagents_includes_planner(tmp_path: Path)
 
 
 async def test_deep_agent_preserves_explicit_composite_filesystem(pg_dsn, tmp_path: Path) -> None:
-    from linch import CompositeFileBackend, PostgresRunStore, StateFileBackend, create_deep_agent
+    from linch import CompositeFileBackend, PostgresRunStore, StateFileBackend
+    from linch.ext.deep_agent import create_deep_agent
     from linch.filesystem.postgres import PostgresFileBackend
     from linch.sessions.postgres import PostgresSessionStore
 
@@ -385,7 +391,8 @@ async def test_deep_agent_preserves_explicit_composite_filesystem(pg_dsn, tmp_pa
 
 
 async def test_deep_agent_memories_persist_across_agents(pg_dsn, tmp_path: Path) -> None:
-    from linch import CompositeFileBackend, PostgresRunStore, StateFileBackend, create_deep_agent
+    from linch import CompositeFileBackend, PostgresRunStore, StateFileBackend
+    from linch.ext.deep_agent import create_deep_agent
     from linch.filesystem.postgres import PostgresFileBackend
     from linch.sessions.postgres import PostgresSessionStore
 
@@ -423,7 +430,7 @@ async def test_deep_agent_memories_persist_across_agents(pg_dsn, tmp_path: Path)
 
 
 async def test_deep_agent_durable_false_no_persistent_filesystem(tmp_path: Path) -> None:
-    from linch import create_deep_agent
+    from linch.ext.deep_agent import create_deep_agent
     from linch.filesystem.backend import CompositeFileBackend
 
     agent = create_deep_agent(
@@ -438,7 +445,7 @@ async def test_deep_agent_durable_false_no_persistent_filesystem(tmp_path: Path)
 
 
 async def test_deep_agent_explicit_filesystem_respected(tmp_path: Path) -> None:
-    from linch import create_deep_agent
+    from linch.ext.deep_agent import create_deep_agent
     from linch.filesystem.backend import StateFileBackend
 
     explicit_fs = StateFileBackend()
@@ -462,7 +469,7 @@ async def test_deep_agent_explicit_filesystem_respected(tmp_path: Path) -> None:
 
 
 def test_coordinator_mode_prompt_injected(tmp_path: Path) -> None:
-    from linch import create_deep_agent
+    from linch.ext.deep_agent import create_deep_agent
 
     agent = create_deep_agent(
         model="gpt-5",
@@ -486,7 +493,7 @@ def test_coordinator_mode_prompt_injected(tmp_path: Path) -> None:
 
 async def test_coordinator_mode_restricts_parent_tools(tmp_path: Path) -> None:
     """Coordinator parent lacks heavy tools; workers still get full access via SubagentTool."""
-    from linch import create_deep_agent
+    from linch.ext.deep_agent import create_deep_agent
     from linch.sessions import InMemorySessionStore
 
     agent = create_deep_agent(
@@ -513,7 +520,7 @@ async def test_coordinator_mode_restricts_parent_tools(tmp_path: Path) -> None:
 
 async def test_coordinator_worker_retains_heavy_tools(tmp_path: Path) -> None:
     """The coordinator's parent filter must not narrow an implementer child."""
-    from linch import create_deep_agent
+    from linch.ext.deep_agent import create_deep_agent
     from linch.sessions import InMemorySessionStore
     from linch.tools import ToolContext
 
@@ -568,7 +575,7 @@ async def test_coordinator_worker_receives_skill_tool(tmp_path: Path) -> None:
     """Skills and subagent-orchestration tools connect (in session()) after the
     worker registry is frozen (in the factory); workers must still see them,
     mirroring the existing MCP re-sync."""
-    from linch import create_deep_agent
+    from linch.ext.deep_agent import create_deep_agent
     from linch.sessions import InMemorySessionStore
     from linch.tools import ToolContext
 
@@ -626,7 +633,7 @@ async def test_coordinator_worker_receives_skill_tool(tmp_path: Path) -> None:
 
 async def test_coordinator_worker_preserves_custom_registry_semantics(tmp_path: Path) -> None:
     """A custom registry stays custom; coordinator mode must not add SWE defaults."""
-    from linch import create_deep_agent
+    from linch.ext.deep_agent import create_deep_agent
     from linch.sessions import InMemorySessionStore
     from linch.tools import ToolContext
     from linch.tools.registry import empty_tools
@@ -678,7 +685,7 @@ async def test_coordinator_worker_preserves_custom_registry_semantics(tmp_path: 
 
 
 async def test_coordinator_mode_task_stop_registered(tmp_path: Path) -> None:
-    from linch import create_deep_agent
+    from linch.ext.deep_agent import create_deep_agent
     from linch.sessions import InMemorySessionStore
 
     agent = create_deep_agent(
@@ -697,9 +704,9 @@ async def test_coordinator_mode_task_stop_registered(tmp_path: Path) -> None:
 def test_coordinator_mode_requires_subagents(tmp_path: Path) -> None:
     import pytest
 
-    from linch import create_deep_agent
     from linch.config import FeatureFlags
     from linch.errors import ConfigError
+    from linch.ext.deep_agent import create_deep_agent
 
     with pytest.raises(ConfigError, match="requires features.subagents=True"):
         create_deep_agent(
@@ -716,7 +723,7 @@ async def test_task_stop_cancels_background_worker(tmp_path: Path) -> None:
     """TaskStop cancels a running background worker task."""
     import asyncio
 
-    from linch import create_deep_agent
+    from linch.ext.deep_agent import create_deep_agent
     from linch.sessions import InMemorySessionStore
     from linch.subagents.types import AgentDefinition, AgentFrontmatter
     from linch.subagents.workers import WorkerHandle
@@ -776,7 +783,7 @@ async def test_task_stop_cancels_background_worker(tmp_path: Path) -> None:
 
 def test_non_coordinator_mode_preserves_full_tools(tmp_path: Path) -> None:
     """Normal deep agent retains Bash/Edit/Write."""
-    from linch import create_deep_agent
+    from linch.ext.deep_agent import create_deep_agent
 
     agent = create_deep_agent(
         model="gpt-5",
@@ -794,7 +801,8 @@ def test_non_coordinator_mode_preserves_full_tools(tmp_path: Path) -> None:
 
 
 async def test_deep_agent_can_resume_with_postgres_stores(pg_dsn, tmp_path: Path) -> None:
-    from linch import CompositeFileBackend, PostgresRunStore, StateFileBackend, create_deep_agent
+    from linch import CompositeFileBackend, PostgresRunStore, StateFileBackend
+    from linch.ext.deep_agent import create_deep_agent
     from linch.filesystem.postgres import PostgresFileBackend
     from linch.sessions.postgres import PostgresSessionStore
 
@@ -843,7 +851,7 @@ async def test_deep_agent_can_resume_with_postgres_stores(pg_dsn, tmp_path: Path
 
 
 def test_deep_agent_verifiers_are_wired_as_hook(tmp_path: Path) -> None:
-    from linch import create_deep_agent
+    from linch.ext.deep_agent import create_deep_agent
     from linch.hooks import FinalAnswerVerifierHook
 
     class _V:
@@ -866,7 +874,7 @@ def test_deep_agent_verifiers_are_wired_as_hook(tmp_path: Path) -> None:
 
 
 def test_deep_agent_no_verifiers_adds_no_verifier_hook(tmp_path: Path) -> None:
-    from linch import create_deep_agent
+    from linch.ext.deep_agent import create_deep_agent
     from linch.hooks import FinalAnswerVerifierHook
 
     agent = create_deep_agent(
@@ -880,8 +888,8 @@ def test_deep_agent_no_verifiers_adds_no_verifier_hook(tmp_path: Path) -> None:
 
 
 def test_deep_agent_forwards_budget_and_max_turns(tmp_path: Path) -> None:
-    from linch import create_deep_agent
     from linch.budget import RunBudget
+    from linch.ext.deep_agent import create_deep_agent
 
     budget = RunBudget(max_tokens=1000)
     agent = create_deep_agent(
@@ -898,7 +906,7 @@ def test_deep_agent_forwards_budget_and_max_turns(tmp_path: Path) -> None:
 
 
 def test_deep_agent_balanced_profile_has_safe_defaults(tmp_path: Path) -> None:
-    from linch import create_deep_agent
+    from linch.ext.deep_agent import create_deep_agent
 
     agent = create_deep_agent(
         model="gpt-5",
@@ -915,7 +923,7 @@ def test_deep_agent_balanced_profile_has_safe_defaults(tmp_path: Path) -> None:
 
 
 def test_deep_agent_unbounded_profile_requires_explicit_name(tmp_path: Path) -> None:
-    from linch import create_deep_agent
+    from linch.ext.deep_agent import create_deep_agent
 
     agent = create_deep_agent(
         model="gpt-5",
@@ -930,7 +938,7 @@ def test_deep_agent_unbounded_profile_requires_explicit_name(tmp_path: Path) -> 
 
 
 async def test_deep_agent_explicitly_enables_required_feature_profile(tmp_path: Path) -> None:
-    from linch import create_deep_agent
+    from linch.ext.deep_agent import create_deep_agent
     from linch.sessions import InMemorySessionStore
 
     agent = create_deep_agent(
@@ -952,7 +960,7 @@ async def test_deep_agent_explicitly_enables_required_feature_profile(tmp_path: 
 
 
 def test_deep_agent_loop_guard_on_by_default(tmp_path: Path) -> None:
-    from linch import create_deep_agent
+    from linch.ext.deep_agent import create_deep_agent
 
     agent = create_deep_agent(
         model="gpt-5",

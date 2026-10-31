@@ -31,14 +31,16 @@ from pathlib import Path
 
 from linch import (
     Agent,
+    RunOptions,
+)
+from linch.config import FeatureFlags, SystemPromptConfig
+from linch.ext.loop_runner import (
     FileLoopLeaseStore,
     LoopRunner,
     LoopSpec,
     LoopTickResult,
     LoopTrigger,
-    RunOptions,
 )
-from linch.config import FeatureFlags, SystemPromptConfig
 from linch.sessions import InMemorySessionStore
 from linch.tools.registry import empty_tools
 

@@ -37,7 +37,7 @@ def _tool_end(events: list[Any], name: str) -> Any:
 
 async def test_default_agent_installs_read_before_write_hook(tmp_path: Any) -> None:
     from linch import ReadBeforeWriteHook
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
 
     agent = _agent(ScriptedProvider([TextTurn("done")]), tmp_path)
 
@@ -46,7 +46,7 @@ async def test_default_agent_installs_read_before_write_hook(tmp_path: Any) -> N
 
 async def test_read_before_write_can_be_disabled(tmp_path: Any) -> None:
     from linch import ReadBeforeWriteHook
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
 
     agent = _agent(
         ScriptedProvider([TextTurn("done")]),
@@ -58,7 +58,7 @@ async def test_read_before_write_can_be_disabled(tmp_path: Any) -> None:
 
 
 async def test_workspace_edit_is_blocked_until_read(tmp_path: Any) -> None:
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
 
     target = tmp_path / "a.txt"
     target.write_text("hello", encoding="utf-8")
@@ -83,7 +83,7 @@ async def test_workspace_edit_is_blocked_until_read(tmp_path: Any) -> None:
 
 
 async def test_workspace_read_allows_later_edit(tmp_path: Any) -> None:
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
 
     target = tmp_path / "a.txt"
     target.write_text("hello", encoding="utf-8")
@@ -107,7 +107,7 @@ async def test_workspace_read_allows_later_edit(tmp_path: Any) -> None:
 
 
 async def test_virtual_edit_file_is_blocked_until_read_file(tmp_path: Any) -> None:
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.filesystem import StateFileBackend
 
     backend = StateFileBackend({"/note.txt": "alpha"})
@@ -130,7 +130,7 @@ async def test_virtual_edit_file_is_blocked_until_read_file(tmp_path: Any) -> No
 
 
 async def test_virtual_read_file_allows_later_edit_file(tmp_path: Any) -> None:
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.filesystem import StateFileBackend
 
     backend = StateFileBackend({"/note.txt": "alpha"})
@@ -154,7 +154,7 @@ async def test_virtual_read_file_allows_later_edit_file(tmp_path: Any) -> None:
 
 
 async def test_virtual_edit_file_opt_out_keeps_existing_behavior(tmp_path: Any) -> None:
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.filesystem import StateFileBackend
 
     backend = StateFileBackend({"/note.txt": "alpha"})
@@ -184,7 +184,7 @@ async def test_virtual_edit_file_opt_out_keeps_existing_behavior(tmp_path: Any) 
 
 async def test_cached_read_still_marks_file_as_read(tmp_path: Any) -> None:
     from linch import ToolCacheConfig
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
 
     target = tmp_path / "a.txt"
     target.write_text("hello", encoding="utf-8")
@@ -229,7 +229,7 @@ async def test_cached_read_still_marks_file_as_read(tmp_path: Any) -> None:
 async def test_write_file_then_edit_file_allowed(tmp_path: Any) -> None:
     # Finding #2: writing a virtual file marks it read, so write_file -> edit_file
     # (a previously-broken flow under the default-on hook) now succeeds.
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.filesystem import StateFileBackend
 
     backend = StateFileBackend()
@@ -256,7 +256,7 @@ async def test_write_file_then_edit_file_allowed(tmp_path: Any) -> None:
 
 async def test_workspace_write_new_file_is_allowed(tmp_path: Any) -> None:
     # Finding #1: creating a new file is never blocked (only overwrite is gated).
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
 
     provider = ScriptedProvider(
         [
@@ -283,7 +283,7 @@ def _overwrite_guarded_hook() -> Any:
 async def test_workspace_write_overwrite_blocked_when_opted_in(tmp_path: Any) -> None:
     # Finding #1 (data loss), opt-in: overwriting an existing, unread file is
     # blocked and the prior contents survive.
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
 
     target = tmp_path / "a.txt"
     target.write_text("hello", encoding="utf-8")
@@ -307,7 +307,7 @@ async def test_workspace_write_overwrite_blocked_when_opted_in(tmp_path: Any) ->
 
 async def test_workspace_write_overwrite_allowed_by_default(tmp_path: Any) -> None:
     # Default: whole-file overwrite is Write's purpose and is NOT gated (regen).
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
 
     target = tmp_path / "a.txt"
     target.write_text("hello", encoding="utf-8")
@@ -328,7 +328,7 @@ async def test_workspace_write_overwrite_allowed_by_default(tmp_path: Any) -> No
 
 async def test_workspace_write_then_edit_allowed(tmp_path: Any) -> None:
     # Writing a file marks it read, so a later Edit on it is allowed.
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
 
     provider = ScriptedProvider(
         [
@@ -353,7 +353,7 @@ async def test_workspace_write_then_edit_allowed(tmp_path: Any) -> None:
 
 async def test_virtual_write_file_overwrite_blocked_when_opted_in(tmp_path: Any) -> None:
     # Finding #1 for the virtual filesystem, opt-in.
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.filesystem import StateFileBackend
 
     backend = StateFileBackend({"/n.txt": "alpha"})
@@ -378,7 +378,7 @@ async def test_virtual_write_file_overwrite_blocked_when_opted_in(tmp_path: Any)
 
 async def test_windowed_read_file_does_not_grant_edit(tmp_path: Any) -> None:
     # Finding #6: a partial (windowed) read must not unlock edits to unseen regions.
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.filesystem import StateFileBackend
 
     backend = StateFileBackend({"/n.txt": "l1\nl2\nl3\n"})
@@ -405,7 +405,7 @@ async def test_windowed_read_file_does_not_grant_edit(tmp_path: Any) -> None:
 async def test_overwrite_gate_unresolvable_path_fails_closed(tmp_path: Any) -> None:
     # Finding #5: an unresolvable (cwd-escaping) path on the opt-in overwrite gate
     # blocks (fail-closed) rather than silently allowing it.
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
 
     provider = ScriptedProvider(
         [
@@ -427,7 +427,7 @@ async def test_overwrite_gate_unresolvable_path_fails_closed(tmp_path: Any) -> N
 async def test_unrelated_hook_named_rbw_does_not_suppress_default(tmp_path: Any) -> None:
     # Finding #7: a foreign hook whose name collides must not suppress the guard.
     from linch import ReadBeforeWriteHook
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
 
     class Impostor:
         name = "read_before_write"

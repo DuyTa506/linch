@@ -12,7 +12,7 @@ so no API key is needed.
 import asyncio
 
 from linch import Agent, RunBudget
-from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
 from linch.session import RunOptions
 from linch.sessions import InMemorySessionStore
 from linch.types import Usage

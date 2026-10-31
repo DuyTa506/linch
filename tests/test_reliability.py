@@ -137,7 +137,7 @@ async def test_batch_success_and_checkpoint_state() -> None:
 
 @pytest.mark.asyncio
 async def test_invalid_text_feedback_is_canonical_and_hides_rejected_text() -> None:
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.sessions import InMemorySessionStore
 
     agent = linch.Agent(
@@ -238,8 +238,8 @@ async def test_native_rejection_retries_once_and_never_runs_sibling_tools() -> N
 
 @pytest.mark.asyncio
 async def test_completion_gate_retries_after_real_tool_success() -> None:
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.events import ReliabilityEvent, ResultEvent
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.sessions import InMemorySessionStore
     from linch.tools import ToolRegistry, tool
 
@@ -349,8 +349,8 @@ async def test_prerequisite_blocks_same_batch_and_failed_predecessor() -> None:
 
 @pytest.mark.asyncio
 async def test_completion_gate_vetoes_final_tool_before_terminal_ack() -> None:
-    from linch.evals import ScriptedProvider, ToolUseTurn
     from linch.events import ReliabilityEvent, ResultEvent, ToolCallEndEvent
+    from linch.ext.evals import ScriptedProvider, ToolUseTurn
     from linch.sessions import InMemorySessionStore
     from linch.tools import ToolRegistry, tool
 
@@ -399,8 +399,8 @@ async def test_completion_gate_vetoes_final_tool_before_terminal_ack() -> None:
 async def test_background_ack_does_not_unlock_prerequisite() -> None:
     import asyncio
 
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.events import ToolCallEndEvent
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.sessions import InMemorySessionStore
     from linch.tools import ToolRegistry, tool
 
@@ -455,8 +455,8 @@ async def test_background_ack_does_not_unlock_prerequisite() -> None:
 async def test_two_agents_keep_reliability_counters_isolated() -> None:
     import asyncio
 
-    from linch.evals import ScriptedProvider, TextTurn
     from linch.events import ReliabilityEvent
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.sessions import InMemorySessionStore
 
     policy = linch.ReliabilityPolicy(max_correction_turns=1)
@@ -486,7 +486,7 @@ async def test_two_agents_keep_reliability_counters_isolated() -> None:
 
 @pytest.mark.parametrize("policy", [None, linch.ReliabilityPolicy(retry_invalid_responses=False)])
 async def test_disabled_invalid_listener_preserves_partial_events(policy):
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.run_store import InMemoryRunStore
     from linch.sessions import InMemorySessionStore
 
@@ -510,7 +510,7 @@ async def test_disabled_invalid_listener_preserves_partial_events(policy):
 
 @pytest.mark.parametrize("invalid", [False, True])
 async def test_generic_continue_preserves_message_tuple(invalid):
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.sessions import InMemorySessionStore
     from linch.types import Message, TextBlock
 
@@ -539,7 +539,7 @@ async def test_generic_continue_preserves_message_tuple(invalid):
 
 
 async def test_invalid_fail_surfaces_listener_error():
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.sessions import InMemorySessionStore
 
     agent = linch.Agent(
@@ -559,7 +559,7 @@ async def test_invalid_fail_surfaces_listener_error():
 
 @pytest.mark.parametrize("invalid", [True, False])
 async def test_shared_budget_stops_after_two_corrections(invalid):
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.sessions import InMemorySessionStore
     from linch.tools import tool
     from linch.tools.registry import empty_tools
@@ -596,7 +596,7 @@ async def test_shared_budget_stops_after_two_corrections(invalid):
     ],
 )
 async def test_valid_non_envelope_routes_have_no_reliability_effect(text, stop):
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.run_store import InMemoryRunStore
     from linch.sessions import InMemorySessionStore
 
@@ -654,7 +654,7 @@ async def test_unused_evidence_and_disabled_listener_stay_empty():
 
 
 async def test_force_final_cannot_bypass_completion():
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.sessions import InMemorySessionStore
     from linch.tools import tool
     from linch.tools.registry import empty_tools
@@ -695,7 +695,7 @@ def test_host_control_message_keeps_system_reminder_wrapping():
 
 
 async def test_inferred_terminal_tool_cannot_be_completion_evidence():
-    from linch.evals import ScriptedProvider, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, ToolUseTurn
     from linch.sessions import InMemorySessionStore
     from linch.tools import tool
     from linch.tools.registry import empty_tools
@@ -723,7 +723,7 @@ async def test_inferred_terminal_tool_cannot_be_completion_evidence():
 async def test_same_agent_concurrent_runs_keep_prerequisites_isolated():
     import asyncio
 
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.sessions import InMemorySessionStore
     from linch.tools import tool
     from linch.tools.registry import empty_tools
