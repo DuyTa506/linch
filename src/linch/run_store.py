@@ -694,9 +694,7 @@ class RunEventBatchStore(Protocol):
 
     Detected at runtime with ``getattr`` (a store implementing only ``RunStore``
     keeps working via per-event ``append_event``). Implementations assign and
-    persist events in input order; Postgres commits the batch atomically, while
-    the in-memory implementation delegates to ``append_event`` so subclasses
-    can customize recovery behavior.
+    persist events in input order as one all-or-nothing batch.
     """
 
     async def append_events(self, run_id: str, events: list[Event]) -> list[int]:
@@ -2010,9 +2008,13 @@ class InMemoryRunStore:
                 raise _lease_lost(lease.run_id, lease.epoch, epoch)
             self._lease_state[lease.run_id] = (None, None, lease.epoch + 1)
         finally:
-            self._held_leases.pop(lease.run_id, None)
-            self._lease_ttls.pop(lease.run_id, None)
-            self._lease_owners.pop(lease.run_id, None)
+            if (
+                self._held_leases.get(lease.run_id) == lease.epoch
+                and self._lease_owners.get(lease.run_id) == lease.owner
+            ):
+                self._held_leases.pop(lease.run_id, None)
+                self._lease_ttls.pop(lease.run_id, None)
+                self._lease_owners.pop(lease.run_id, None)
 
     def _check_lease(self, run_id: str) -> None:
         held = self._held_leases.get(run_id)
@@ -2131,7 +2133,7 @@ class InMemoryRunStore:
         return seq
 
     async def append_events(self, run_id: str, events: list[Event]) -> list[int]:
-        """Append events in order through ``append_event``.
+        """Atomically append events in input order.
 
         Args:
             run_id: Run whose event log should receive the events.
@@ -2145,15 +2147,15 @@ class InMemoryRunStore:
             KeyError: If a non-empty batch targets a missing run.
             LeaseLostError: If a non-empty batch uses a stale fencing lease.
             TypeError: If an event in a non-empty batch cannot be encoded.
-
-        The in-memory implementation intentionally delegates one event at a
-        time so subclasses can customize recovery behavior; it is not an
-        all-or-nothing batch boundary.
         """
 
-        # Delegate to append_event so subclass overrides (test doubles that drop a
-        # start event) are honored through the batch path.
-        return [await self.append_event(run_id, event) for event in events]
+        if not events:
+            return []
+        self._check_lease(run_id)
+        if run_id not in self._runs:
+            raise KeyError(f"run not found: {run_id}")
+        copies = [_copy_event(event) for event in events]
+        return [await self.append_event(run_id, event) for event in copies]
 
     async def load_events(self, run_id: str, *, after_seq: int = 0) -> list[StoredRunEvent]:
         """Load detached events after an exclusive sequence watermark.
