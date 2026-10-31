@@ -84,6 +84,12 @@ class _PhaseRecordingRunStore(InMemoryRunStore):
         super().__init__()
         self.saved_phases: list[str] = []
 
+    async def create_run(self, *args, **kwargs):
+        record = await super().create_run(*args, **kwargs)
+        if record.checkpoint is not None:
+            self.saved_phases.append(record.checkpoint.phase)
+        return record
+
     async def save_checkpoint(self, run_id, checkpoint, *, status="running"):
         self.saved_phases.append(checkpoint.phase)
         return await super().save_checkpoint(run_id, checkpoint, status=status)

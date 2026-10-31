@@ -18,6 +18,8 @@ from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapProp
 from pgqueuer import AsyncpgPoolDriver, DatabaseRetryEntrypointExecutor, Job, Queries, QueueManager
 
 from ..agent import Agent
+from ..events import ErrorEvent, ModelCallEvent, ResultEvent
+from ..model_calls import _ModelCallLedger
 from ..run_store import LeaseLostError, RunLease, RunLeaseConflictError, RunRecord
 from ..run_stores.postgres import PostgresRunStore
 from ..session import RunOptions, Session
@@ -237,7 +239,8 @@ class Worker:
         except BaseException:
             self._active_runs.discard(rid)
             raise
-        deadline = asyncio.get_running_loop().time() + self.lease_ttl_s
+        started = asyncio.get_running_loop().time()
+        deadline = started + self.lease_ttl_s
         run_task: asyncio.Task[None] | None = None
         heartbeat: asyncio.Task[None] | None = None
         token = None
@@ -269,9 +272,32 @@ class Worker:
                 if current is None or current.status not in _TERMINAL:
                     if isinstance(exc, _INFRASTRUCTURE):
                         raise
+                    ledger = _ModelCallLedger(rid)
+                    rows = await store.load_events(rid)
+                    await ledger.restore(
+                        [row.event for row in rows if isinstance(row.event, ModelCallEvent)]
+                    )
+                    if current is not None and current.checkpoint is not None:
+                        current.checkpoint.total_usage = ledger.total_usage
+                    error = {"name": type(exc).__name__, "message": str(exc), "retryable": False}
                     with suppress(LeaseLostError):
                         await store.mark_failed(
-                            rid, error={"type": type(exc).__name__, "message": str(exc)}
+                            rid,
+                            current.checkpoint if current is not None else None,
+                            error=error,
+                            events=[
+                                ErrorEvent(error=error),
+                                ResultEvent(
+                                    subtype="error",
+                                    stop_reason="error",
+                                    duration_ms=int(
+                                        (asyncio.get_running_loop().time() - started) * 1000
+                                    ),
+                                    total_usage=ledger.total_usage,
+                                    total_cost_usd=ledger.total_cost_usd,
+                                    usage_complete=ledger.usage_complete,
+                                ),
+                            ],
                         )
             finally:
                 if heartbeat is not None:

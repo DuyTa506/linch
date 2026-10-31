@@ -49,6 +49,21 @@ its callback when sharing a pool with other workloads.
 
 ## Atomic phase writes
 
+`create_run(session_id, *, id=None, meta=None, initial_checkpoint=None)` must
+commit the supplied initial checkpoint with a fresh running row or the fenced
+adoption of a pending row. The SDK always supplies a `started` checkpoint, so
+worker-owned running runs are resumable even before startup returns. The optional
+default supports direct store callers; it does not make manually created runs
+without a checkpoint resumable. Custom stores must accept the new keyword.
+
+Startup buffers its system, skills, hook, and prompt events until the atomic
+`user_appended` checkpoint (or a terminal write). Its initial checkpoint captures
+hook state before `AgentStart`, so replaying interrupted startup restores that
+baseline. A private history baseline distinguishes a prior identical user tail
+from this run's
+already committed prompt. Startup hooks must be repeatable across takeover;
+arbitrary external hook side effects do not have an exactly-once guarantee.
+
 Every `RunStore` implements
 `save_checkpoint_with_events(run_id, checkpoint, events, *, status="running")`.
 The loop uses it whenever a phase has pending events, committing those events

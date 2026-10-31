@@ -70,6 +70,7 @@ class _RecordingStore:
         self.inner = inner
         self.writes = []
         self.atomic_phases = []
+        self.checkpoint_phases = []
         self.event_batches = []
 
     def __getattr__(self, name):
@@ -82,6 +83,7 @@ class _RecordingStore:
 
     async def save_checkpoint(self, run_id, checkpoint, **kwargs):
         self.writes.append("checkpoint")
+        self.checkpoint_phases.append(checkpoint.phase)
         return await self.inner.save_checkpoint(run_id, checkpoint, **kwargs)
 
     async def mark_completed(self, run_id, checkpoint):
@@ -139,9 +141,9 @@ async def test_phase_atomic_run_reduces_writes_and_keeps_tool_guard_durable(pg_d
 
         assert "turn_complete" in store.atomic_phases
         assert "completed" in store.atomic_phases
+        assert "provider_pending" in store.checkpoint_phases
         assert {
             "user_appended",
-            "provider_pending",
             "tool_batch_pending",
         }.issubset(store.atomic_phases)
     finally:

@@ -220,8 +220,10 @@ async def test_pending_adoption_merges_metadata_and_retains_contract(
         "session-1",
         id=run_id,
         meta=run_meta_with_contract(contract, {"created": "after", "worker": "one"}),
+        initial_checkpoint=_checkpoint(),
     )
     assert adopted.status == "running"
+    assert adopted.checkpoint == _checkpoint()
     assert adopted.meta["created"] == "after"
     assert adopted.meta["worker"] == "one"
     assert adopted.meta["run_contract"] == run_meta_with_contract(contract)["run_contract"]
@@ -231,7 +233,7 @@ async def test_pending_adoption_rejects_different_session(store_case: _StoreCase
     run_id = f"conformance-pending-owner-{uuid4()}"
     await _seed_pending(store_case, run_id, "session-1", {})
     with pytest.raises(ValueError, match="belongs to session session-1"):
-        await store_case.store.create_run("session-2", id=run_id)
+        await store_case.store.create_run("session-2", id=run_id, initial_checkpoint=_checkpoint())
 
 
 async def test_pending_adoption_rejects_incompatible_contract_without_mutation(
@@ -253,6 +255,7 @@ async def test_pending_adoption_rejects_incompatible_contract_without_mutation(
             "session-1",
             id=run_id,
             meta=run_meta_with_contract(requested_contract, {"worker": "one"}),
+            initial_checkpoint=_checkpoint(),
         )
     loaded = await store_case.store.load_run(run_id)
     assert loaded is not None
@@ -280,7 +283,9 @@ async def test_pending_adoption_is_fenced_after_peer_claims_newer_epoch(
         await pool.execute("UPDATE runs SET lease_expires_at = 0 WHERE id = $1", run_id)
     await peer.claim(run_id, "owner-b", 30.0)  # type: ignore[attr-defined]
     with pytest.raises(LeaseLostError):
-        await store.create_run("session-1", id=run_id, meta={"worker": "stale"})
+        await store.create_run(
+            "session-1", id=run_id, meta={"worker": "stale"}, initial_checkpoint=_checkpoint()
+        )
     loaded = await store.load_run(run_id)
     assert loaded is not None
     assert loaded.status == "pending"
@@ -303,3 +308,34 @@ async def test_failed_terminal_encoding_failure_changes_neither_status_nor_log(s
         )
     assert await store.load_run(run_id) == before
     assert await store.load_events(run_id) == before_events
+
+
+async def test_create_run_atomically_detaches_initial_checkpoint(store_case):
+    store = store_case.store
+    rid = f"initial-{uuid4()}"
+    checkpoint = _checkpoint()
+    record = await store.create_run("s", id=rid, initial_checkpoint=checkpoint)
+    assert record.checkpoint == checkpoint
+    with pytest.raises(ValueError, match="already exists"):
+        await store.create_run("s", id=rid, initial_checkpoint=_checkpoint("collision"))
+    assert (await store.load_run(rid)).checkpoint == checkpoint
+    checkpoint.extension_state["nested"]["labels"].append("changed")
+    assert (await store.load_run(rid)).checkpoint.extension_state["nested"]["labels"] == ["a", "b"]
+    invalid = _checkpoint()
+    invalid.pending_tool_blocks = [object()]
+    with pytest.raises((TypeError, ValueError)):
+        await store.create_run("s", id=rid + "-invalid", initial_checkpoint=invalid)
+    assert await store.load_run(rid + "-invalid") is None
+
+
+async def test_invalid_initial_checkpoint_cannot_partially_adopt_pending(store_case):
+    rid = f"invalid-adoption-{uuid4()}"
+    store = store_case.store
+    await _seed_pending(store_case, rid, "s", {"queue": "original"})
+    before = await store.load_run(rid)
+    invalid = _checkpoint()
+    invalid.pending_tool_blocks = [object()]
+    with pytest.raises(TypeError):
+        await store.create_run("s", id=rid, meta={"new": "metadata"}, initial_checkpoint=invalid)
+    assert await store.load_run(rid) == before
+    assert await store.load_events(rid) == []
