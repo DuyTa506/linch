@@ -35,7 +35,7 @@ async def quiet(counts):
 
 
 def gated_factory(ids):
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
 
     state = SimpleNamespace(
         gates={rid: asyncio.Event() for rid in ids}, starts=[], active=0, peak=0
