@@ -119,6 +119,46 @@ async def test_two_process_workers_finish_once_without_duplicate_notes(tmp_path)
     assert point["invariant_errors"] and not any(point["invariant_errors"].values()), point
 
 
+@pytest.mark.parametrize("command,readers", [("network", 100), ("capacity", 1)])
+async def test_experiment_commands_keep_witness_readers_and_reach_high_rates(
+    monkeypatch, command, readers
+):
+    import importlib.util
+    from types import SimpleNamespace
+
+    script = Path(__file__).resolve().parents[2] / "scripts/load_test.py"
+    spec = importlib.util.spec_from_file_location("load_grid", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    seen = []
+
+    async def point(args):
+        seen.append(args)
+        return {"latency_ms": {"p99": 1}, "invariant_errors": {}}
+
+    monkeypatch.setattr(module, "run_point", point)
+    await module.experiments(
+        SimpleNamespace(command=command, readers=readers, rate=2, quick=False, output=None)
+    )
+    assert all(a.readers == readers for a in seen)
+    if command == "capacity":
+        assert max(a.rate for a in seen) >= 256
+
+
+@pytest.mark.parametrize("seconds,expected", [(None, False), (6.9, True), (7, True), (7.1, False)])
+def test_kill_recovery_gate_enforces_the_seven_second_deadline(seconds, expected):
+    import importlib.util
+
+    script = Path(__file__).resolve().parents[2] / "scripts/load_test.py"
+    spec = importlib.util.spec_from_file_location("load_recovery", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    recovery = {"seconds": seconds} if seconds is not None else None
+    assert module.recovered({"recovery": recovery}) is expected
+
+
 def test_initialization_repro_selects_durable_started_victim(monkeypatch):
     import importlib.util
     from types import SimpleNamespace
