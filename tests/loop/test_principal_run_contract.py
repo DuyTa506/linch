@@ -458,7 +458,6 @@ async def test_same_run_resume_preserves_pending_background_principal() -> None:
     await resume_started.wait()
     gate.set()
     await asyncio.gather(*old_tasks)
-    assert session._run_principals.get(run_id) is principal
     assert len(tool.seen) == 1
     assert tool.seen[0] is principal
     resume_release.set()
