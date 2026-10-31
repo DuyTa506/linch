@@ -50,6 +50,36 @@ class _BackgroundTasks(list[Any]):
 
 @dataclass(slots=True)
 class RunOptions:
+    """Override agent defaults for one run or resume operation.
+
+    Attributes:
+        stream_partials: Tri-state override where ``None`` preserves the agent default.
+        output_schema: Structured-output schema replacing the agent default when set.
+        tool_choice: Tool-choice policy replacing the agent default when set.
+        final_tool_name: Terminal tool whose input becomes the structured answer.
+        deps: Application dependency object visible to this run's tools.
+        budget: Spending cap shared with child runs in the subagent tree.
+        principal: Immutable identity used by permission evaluation.
+        profile: Versioned declarative defaults pinned by the run contract.
+
+    Args:
+        signal: Abort signal forwarded to the run loop.
+        max_output_tokens: Per-run output token cap.
+        temperature: Provider sampling temperature override.
+        stream_partials: Whether to emit partial assistant events.
+        images: Image blocks attached to the user prompt.
+        thinking: Provider thinking configuration override.
+        effort: Provider reasoning effort override.
+        output_schema: Structured-output schema override.
+        tool_choice: Tool-choice policy override.
+        final_tool_name: Tool whose call supplies the final structured answer.
+        deps: Per-run dependency object for tools.
+        budget: Per-run spending budget.
+        run_id: Pending run identifier to adopt when starting a queued run.
+        principal: Tenant, user, and role identity for authorization.
+        profile: Versioned profile supplying run-scoped defaults.
+    """
+
     signal: Any = None
     max_output_tokens: int | None = None
     temperature: float | None = None
@@ -98,6 +128,68 @@ class AlignmentEntry:
 
 @dataclass(slots=True)
 class Session:
+    """Hold one conversation and its durable append-only message log.
+
+    Args:
+        id: Stable session identifier.
+        created_at: Store-provided creation timestamp.
+        meta: JSON-compatible session metadata.
+        agent: Agent that owns this session's runtime services.
+        store: Session store used for durable message and metadata writes.
+        session_log: Append-only in-memory log backing the provider and audit views.
+        _extensions: Checkpointed JSON-only extension state.
+        _active: Whether a run is currently admitted.
+        _closed: Whether this session has completed teardown.
+        _lifecycle_state: Internal lifecycle state.
+        _close_task: In-flight session teardown task.
+        _idle: Event set after run and finalizer cleanup complete.
+        _telemetry_run: Run telemetry handle, when active.
+        active_run_id: Identifier of the currently admitted run.
+        _active_principal: Principal captured for the active run.
+        _profile_cleanup: Cleanup callback for the active profile scope.
+        _active_gen: Outer async generator driving the active run.
+        _active_inner: Underlying loop async iterator.
+        _active_started: Whether the outer run generator has started.
+        _event_journal: Buffered durable event journal for the active run.
+        _model_call_ledger: Receipt ledger for model calls in the active run.
+        _last_seq: Highest stored-message sequence observed.
+        _seq_cacheable: Whether sequence order permits snapshot caching.
+        _last_prompt_cache_model: Model used for the previous provider call.
+        _last_prompt_cache_tool_sig: Tool signature from the previous provider call.
+        alignment_queue: Steering messages waiting for a turn boundary.
+        interrupt_requested: Whether cooperative interruption was requested.
+        last_usage: Most recent provider usage record.
+        last_compaction_info: Metadata from the most recent compaction.
+        active_budget: Budget resolved for the active run.
+        inherited_budget: Budget inherited from a parent run.
+        compaction_retry_used_this_turn: Whether this turn consumed its compaction retry.
+        active_model: Model override selected during the active run.
+        fallback_index: Number of fallback models consumed.
+        pending_skill_overlay: Skill prompt overlay waiting to apply.
+        current_turn_allowed_tools: Tools allowed in the current turn.
+        current_turn_permission_decisions: Permission decisions for the current turn.
+        invoked_skills: Skills invoked in this session.
+        skills_loaded_emitted: Whether the skills-loaded event was emitted.
+        tools_override: Session-specific tool registry override.
+        system_blocks_override: Session-specific system blocks.
+        file_read_tracker: Files read by tools in this session.
+        _abort_controller: Abort controller for the active run.
+        run_deps: Dependencies resolved for the active run.
+        filesystem: Session virtual filesystem backend.
+        workers: Retained child-worker handles.
+        pending_child_events: Child events waiting for host delivery.
+        pending_notifications: Background-worker notifications waiting for delivery.
+        background_tasks: Detached tasks owned by the session.
+        mailbox_address: Optional inbox address for peer messages.
+        cwd_override: Session working-directory override.
+
+    Attributes:
+        active_run_id: Identifier of the currently admitted run, when any.
+        pending_notifications: In-process user messages waiting for the next turn.
+        background_tasks: Detached tool tasks owned by the session.
+        workers: Retained child-worker handles keyed by worker id.
+    """
+
     id: str
     created_at: str
     meta: dict[str, object]
@@ -204,16 +296,29 @@ class Session:
 
     @property
     def provider_view(self) -> Sequence[Message]:
-        """A read-only snapshot of the session-owned provider projection."""
+        """Return a read-only snapshot of the session-owned provider projection.
+
+        Returns:
+            Detached model-visible messages in provider order.
+        """
         return self.session_log.provider_view
 
     @property
     def full_history(self) -> Sequence[Message]:
-        """A read-only snapshot of the session's full audit history."""
+        """Return a read-only snapshot of the session's full audit history.
+
+        Returns:
+            Detached historical messages in append order.
+        """
         return self.session_log.full_history
 
     @property
     def message_count(self) -> int:
+        """Return the number of messages in the model-visible projection.
+
+        Returns:
+            Number of messages currently visible to the model.
+        """
         return self.session_log.visible_count
 
     def last_provider_message(self) -> Message | None:
@@ -221,10 +326,25 @@ class Session:
 
         Prefer this over ``session.provider_view[-1]``: it copies one message
         instead of snapshotting the whole conversation.
+
+        Returns:
+            The newest model-visible message, or ``None`` when the view is empty.
         """
         return self.session_log.last_visible()
 
     def run(self, prompt: str, opts: RunOptions | None = None) -> AsyncIterator[Event]:
+        """Start a new run and return its event stream.
+
+        Args:
+            prompt: User text that starts the run.
+            opts: Optional per-run overrides.
+
+        Returns:
+            An asynchronous iterator yielding typed run events.
+
+        Raises:
+            ConfigError: If the session or owning agent is closed, or a run is active.
+        """
         if self._lifecycle_state != _OPEN or self._closed:
             raise ConfigError("session is closed")
         if getattr(self.agent, "_lifecycle_state", _OPEN) != _OPEN:
@@ -247,6 +367,18 @@ class Session:
         return it
 
     def resume(self, run_id: str, opts: RunOptions | None = None) -> AsyncIterator[Event]:
+        """Resume a durable run and return its event stream.
+
+        Args:
+            run_id: Durable run identifier to resume.
+            opts: Optional per-run overrides, including a pinned profile.
+
+        Returns:
+            An asynchronous iterator yielding resumed run events.
+
+        Raises:
+            ConfigError: If the session is unavailable, already running, or has no run store.
+        """
         if self._lifecycle_state != _OPEN or self._closed:
             raise ConfigError("session is closed")
         if getattr(self.agent, "_lifecycle_state", _OPEN) != _OPEN:
@@ -333,6 +465,17 @@ class Session:
         images: list[dict[str, str]] | None = None,
         timeout_s: float | None = None,
     ) -> None:
+        """Queue steering text for the next boundary of an active run.
+
+        Args:
+            prompt: Non-empty user message to inject before the next provider call.
+            images: Optional image blocks to attach to the injected message.
+            timeout_s: Maximum wait for delivery; ``None`` waits without a deadline.
+
+        Raises:
+            ConfigError: If no run is active, the session is closed, the prompt is empty,
+                or delivery misses the deadline.
+        """
         if self._lifecycle_state != _OPEN:
             raise ConfigError("session is closed")
         if not self._active:
@@ -359,9 +502,11 @@ class Session:
             raise ConfigError("alignment timed out before it was applied") from None
 
     def interrupt(self) -> None:
+        """Request a cooperative stop at the next loop boundary."""
         self.interrupt_requested = True
 
     def abort(self) -> None:
+        """Abort the active run and cancel owned worker and background tasks."""
         self._abort_controller.abort()
         # Cancel any running background worker tasks so they don't write into
         # a dead session after the run ends.
@@ -499,12 +644,23 @@ class Session:
         await self._idle.wait()
 
     async def __aenter__(self) -> Session:
+        """Return this session for use in an async context manager.
+
+        Returns:
+            This live session.
+        """
         return self
 
     async def __aexit__(self, *exc: object) -> None:
+        """Force-release the session when leaving an async context manager.
+
+        Args:
+            exc: Exception details supplied by the context-manager protocol.
+        """
         await self.aclose(force=True)
 
     def mark_compaction_used(self) -> None:
+        """Mark the current turn as having consumed its compaction retry."""
         self.compaction_retry_used_this_turn = True
 
     async def notify(
@@ -519,6 +675,19 @@ class Session:
         The default path preserves the legacy in-process notification queue.
         With durable inbox enabled, the delivery is written to the optional
         session-store capability and deduplicated by its stable delivery id.
+
+        Args:
+            message: User-authored message to deliver at a turn boundary.
+            delivery_id: Stable id used for durable deduplication; generated when omitted.
+            source: Host-defined origin label for durable delivery metadata.
+            metadata: JSON-compatible delivery metadata.
+
+        Returns:
+            The stable delivery id assigned to the queued message.
+
+        Raises:
+            ConfigError: If the session is closed, the message is not a user message,
+                or durable inbox support is unavailable.
         """
         if self._lifecycle_state == _CLOSED or self._closed:
             raise ConfigError("session is closed")
@@ -551,6 +720,14 @@ class Session:
         return stable_id
 
     async def append(self, messages: list[Message]) -> None:
+        """Durably append messages, then update the in-memory session log.
+
+        Args:
+            messages: Ordered messages to append to both the store and log.
+
+        Raises:
+            ConfigError: If the session has been closed.
+        """
         # An admitted run may still need to durably append its terminal state
         # while the session is quiescing. Only the final CLOSED transition makes
         # history immutable through this live object.
@@ -573,6 +750,14 @@ class Session:
                     self._last_seq = max(self._last_seq, seq)
 
     async def update_meta(self, patch: dict[str, object]) -> None:
+        """Persist and merge a metadata patch.
+
+        Args:
+            patch: JSON-compatible metadata fields to update.
+
+        Raises:
+            ConfigError: If the session has been closed.
+        """
         if self._lifecycle_state == _CLOSED or self._closed:
             raise ConfigError("session is closed")
         updated = await self.store.update_meta(self.id, patch)
