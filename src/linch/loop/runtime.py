@@ -1059,12 +1059,8 @@ class RunRuntime:
         if self.run_record is None or store is None:
             return
         buf = self.session._event_journal
-        atomic_checkpoint = (
-            phase in {"started", "user_appended", "provider_pending", "turn_complete"}
-            and buf is not None
-            and buf.can_flush_with_checkpoint
-        )
-        if not atomic_checkpoint:
+        has_pending_events = buf is not None and bool(buf._pending)
+        if not has_pending_events:
             await _flush_events(self.session)
         completed_snapshot_id = (
             self.checkpoint.model_input_snapshot_id
@@ -1139,26 +1135,15 @@ class RunRuntime:
             self.checkpoint.tool_batch_event_after_seq = buf.last_seq if buf is not None else None
         elif phase not in ("permission_pending", "tool_executing", "tool_results_appended"):
             self.checkpoint.tool_batch_event_after_seq = None
-        candidate = (
-            replace(self.checkpoint, extension_state=dict(self.checkpoint.extension_state))
-            if atomic_checkpoint
-            else self.checkpoint
-        )
-
-        batched = False
-        if atomic_checkpoint:
+        if has_pending_events:
             assert buf is not None
-            batched = await buf.flush_with_checkpoint(candidate, status=status)
-        if not batched:
-            if atomic_checkpoint:
-                await _flush_events(self.session)
+            await buf.flush_with_checkpoint(self.checkpoint, status=status)
+        else:
             await store_call(
                 self.session,
                 "run.save_checkpoint",
-                store.save_checkpoint(self.run_id, candidate, status=status),
+                store.save_checkpoint(self.run_id, self.checkpoint, status=status),
             )
-        if atomic_checkpoint:
-            self.checkpoint.extension_state = candidate.extension_state
         if completed_snapshot_id is not None:
             await self.best_effort_snapshot_cleanup(
                 snapshot_id=completed_snapshot_id,

@@ -32,6 +32,12 @@ class _FaultStore:
         self._check(f"checkpoint:{checkpoint.phase}")
         return await self.store.save_checkpoint(run_id, checkpoint, **kw)
 
+    async def save_checkpoint_with_events(
+        self, run_id: str, checkpoint: Any, events: list[Any], **kw: Any
+    ) -> Any:
+        self._check(f"checkpoint:{checkpoint.phase}")
+        return await self.store.save_checkpoint_with_events(run_id, checkpoint, events, **kw)
+
     async def append_event(self, run_id: str, event: Any) -> int:
         kind = getattr(event, "record_kind", event.type)
         if kind == "projection" and event.record.get("projection_kind") == "compaction_source":
@@ -659,9 +665,14 @@ async def test_paid_projection_and_consumption_reconcile_independently(
         assert len(provider.calls) == 1
         assert events[-1].total_usage == Usage(22, 4)
         complete = await runs.load_run(run_id)
-        # Usage projections are durable journal markers now, so a marker that
-        # reached the store before the checkpoint crash is not emitted again.
-        assert sum(event.type == "usage" and event.source == "compaction" for event in events) == 0
+        # A combined checkpoint write rolls back its pending event prefix when
+        # the checkpoint boundary crashes; the next run then emits that
+        # projection once. A separately consumed marker remains suppressed.
+        expected_compaction_events = 0 if consumed else 1
+        assert (
+            sum(event.type == "usage" and event.source == "compaction" for event in events)
+            == expected_compaction_events
+        )
         assert complete.checkpoint.extension_state["host.extension"] == {"owner": "host"}
         assert complete.checkpoint.extension_state["linch.reliability"] == {
             "version": 1,

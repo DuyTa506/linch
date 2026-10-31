@@ -271,6 +271,15 @@ class RunStore(Protocol):
         status: str = "running",
     ) -> RunRecord: ...
 
+    async def save_checkpoint_with_events(
+        self,
+        run_id: str,
+        checkpoint: RunCheckpoint,
+        events: Sequence[Event],
+        *,
+        status: str = "running",
+    ) -> tuple[RunRecord, list[int]]: ...
+
     async def append_event(self, run_id: str, event: Event) -> int: ...
 
     async def load_events(self, run_id: str, *, after_seq: int = 0) -> list[StoredRunEvent]: ...
@@ -1363,6 +1372,31 @@ class InMemoryRunStore:
         rec.status = status  # type: ignore[assignment]
         rec.updated_at = now_iso()
         return _copy_record(rec)
+
+    async def save_checkpoint_with_events(
+        self,
+        run_id: str,
+        checkpoint: RunCheckpoint,
+        events: Sequence[Event],
+        *,
+        status: str = "running",
+    ) -> tuple[RunRecord, list[int]]:
+        """Atomically publish a checkpoint and its pending event prefix."""
+        self._check_lease(run_id)
+        rec = self._runs[run_id]
+        checkpoint_copy = _copy_checkpoint(checkpoint)
+        event_copies = [_copy_event(event) for event in events]
+        bucket = self._events.setdefault(run_id, [])
+        timestamp = now_iso()
+        seqs = list(range(len(bucket) + 1, len(bucket) + len(event_copies) + 1))
+        rec.checkpoint = checkpoint_copy
+        rec.status = status  # type: ignore[assignment]
+        rec.updated_at = timestamp
+        bucket.extend(
+            StoredRunEvent(seq=seq, appended_at=timestamp, event=event)
+            for seq, event in zip(seqs, event_copies, strict=True)
+        )
+        return _copy_record(rec), seqs
 
     async def append_event(self, run_id: str, event: Event) -> int:
         self._check_lease(run_id)

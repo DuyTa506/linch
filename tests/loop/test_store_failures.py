@@ -83,6 +83,16 @@ class _FailCheckpointStore:
             raise OSError("checkpoint write failed")
         return await self._inner.save_checkpoint(run_id, checkpoint, status=status)
 
+    async def save_checkpoint_with_events(
+        self, run_id: str, checkpoint: Any, events: list[Any], *, status: str = "running"
+    ) -> Any:
+        self.calls += 1
+        if self.calls == 1:
+            raise OSError("checkpoint write failed")
+        return await self._inner.save_checkpoint_with_events(
+            run_id, checkpoint, events, status=status
+        )
+
 
 class _FailEventStore:
     def __init__(self) -> None:
@@ -94,6 +104,11 @@ class _FailEventStore:
         return getattr(self._inner, name)
 
     async def append_events(self, run_id: str, events: list[Any]) -> list[int]:
+        raise OSError("event flush failed")
+
+    async def save_checkpoint_with_events(
+        self, run_id: str, checkpoint: Any, events: list[Any], *, status: str = "running"
+    ) -> Any:
         raise OSError("event flush failed")
 
 
@@ -108,6 +123,15 @@ class _FailCompletedStore:
 
     async def mark_completed(self, run_id: str, checkpoint: Any) -> Any:
         raise OSError("completion write failed")
+
+    async def save_checkpoint_with_events(
+        self, run_id: str, checkpoint: Any, events: list[Any], *, status: str = "running"
+    ) -> Any:
+        if status == "completed":
+            raise OSError("completion write failed")
+        return await self._inner.save_checkpoint_with_events(
+            run_id, checkpoint, events, status=status
+        )
 
 
 class _FailCreateStore:
@@ -135,6 +159,15 @@ class _RetryableCompletionError(RuntimeError):
 class _FailRetryableCompletedStore(_FailCompletedStore):
     async def mark_completed(self, run_id: str, checkpoint: Any) -> Any:
         raise _RetryableCompletionError("try again")
+
+    async def save_checkpoint_with_events(
+        self, run_id: str, checkpoint: Any, events: list[Any], *, status: str = "running"
+    ) -> Any:
+        if status == "completed":
+            raise _RetryableCompletionError("try again")
+        return await self._inner.save_checkpoint_with_events(
+            run_id, checkpoint, events, status=status
+        )
 
 
 class _FailSessionStore:
@@ -270,6 +303,15 @@ async def test_error_pair_is_durable_when_failed_status_becomes_visible(failure:
             if failure == "checkpoint":
                 raise OSError("checkpoint unavailable")
             return await super().save_checkpoint(run_id, checkpoint, status=status)
+
+        async def save_checkpoint_with_events(
+            self, run_id: str, checkpoint: Any, events: list[Any], *, status: str = "running"
+        ) -> Any:
+            if failure == "checkpoint":
+                raise OSError("checkpoint unavailable")
+            return await super().save_checkpoint_with_events(
+                run_id, checkpoint, events, status=status
+            )
 
         async def mark_failed(self, run_id: str, checkpoint: Any = None, error: Any = None) -> Any:
             record = await super().mark_failed(run_id, checkpoint, error=error)
@@ -524,6 +566,15 @@ async def test_abort_terminal_write_failure_persists_error_pair_before_failed_st
             if status == "aborted":
                 raise OSError("abort status failed")
             return await super().save_checkpoint(run_id, checkpoint, status=status)
+
+        async def save_checkpoint_with_events(
+            self, run_id: str, checkpoint: Any, events: list[Any], *, status: str = "running"
+        ) -> Any:
+            if status == "aborted":
+                raise OSError("abort status failed")
+            return await super().save_checkpoint_with_events(
+                run_id, checkpoint, events, status=status
+            )
 
         async def mark_failed(self, run_id: str, checkpoint: Any = None, error: Any = None) -> Any:
             self.failed_calls += 1

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Sequence
 from typing import Any
 from uuid import uuid4
 
@@ -310,36 +310,15 @@ class PostgresRunStore:
     async def append_event(self, run_id: str, event: Event) -> int:
         return (await self.append_events(run_id, [event]))[0]
 
-    @property
-    def save_checkpoint_with_events(
-        self,
-    ) -> Callable[..., Awaitable[tuple[RunRecord, list[int]]]] | None:
-        """Optional atomic capability, without bypassing custom write overrides.
-
-        A subclass overriding ordinary writes keeps the ordinary runtime path.
-        It can explicitly opt in by defining its own atomic capability.
-        """
-        for name in ("save_checkpoint", "append_event", "append_events", "mark_completed"):
-            implementation = getattr(getattr(self, name), "__func__", None)
-            if implementation is not getattr(PostgresRunStore, name):
-                return None
-        return self._save_checkpoint_with_events
-
-    async def _save_checkpoint_with_events(
+    async def save_checkpoint_with_events(
         self,
         run_id: str,
         checkpoint: RunCheckpoint,
-        events: list[Event],
+        events: Sequence[Event],
         *,
         status: str = "running",
-        prepare_checkpoint: Callable[[int], None] | None = None,
     ) -> tuple[RunRecord, list[int]]:
-        """Commit a phase's events and checkpoint under one lock and fence.
-
-        The synchronous callback binds checkpoint cursors to actual allocated
-        sequences before encoding. It must only prepare the candidate checkpoint;
-        callers publish their live watermarks after this transaction succeeds.
-        """
+        """Commit a phase's events and checkpoint under one lock and fence."""
         pool = await self._ensure()
         encoded = [json.dumps(_json_safe_stored_event(event), allow_nan=False) for event in events]
         async with pool.acquire() as conn:
@@ -363,8 +342,6 @@ class PostgresRunStore:
                             for seq, event_json in zip(seqs, encoded, strict=True)
                         ],
                     )
-                if prepare_checkpoint is not None:
-                    prepare_checkpoint(seqs[-1] if seqs else base)
                 payload = json.dumps(checkpoint_to_dict(checkpoint), allow_nan=False)
                 updated = await conn.fetchrow(
                     """
