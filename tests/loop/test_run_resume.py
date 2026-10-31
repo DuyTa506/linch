@@ -150,6 +150,70 @@ class _CheckpointCrashStore:
         return [await self.append_event(run_id, event) for event in events]
 
 
+class _TransientCheckpointStore:
+    """Inject one connection loss at the durable tool checkpoint boundary."""
+
+    def __init__(
+        self,
+        store: Any,
+        error_factory: Any = None,
+        *,
+        fail_after_commit: bool = False,
+    ) -> None:
+        self.store = store
+        self.error_factory = error_factory
+        self.fail_after_commit = fail_after_commit
+        self.fail_once = True
+        self.failure_seen = False
+        self.after_failure_calls: list[str] = []
+        self.checkpoint_phases: list[str] = []
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.store, name)
+
+    def _record_after_failure(self, name: str) -> None:
+        if self.failure_seen:
+            self.after_failure_calls.append(name)
+
+    async def save_checkpoint(self, run_id: str, checkpoint: Any, **kwargs: Any) -> Any:
+        self.checkpoint_phases.append(checkpoint.phase)
+        self._record_after_failure("save_checkpoint")
+        return await self.store.save_checkpoint(run_id, checkpoint, **kwargs)
+
+    async def save_checkpoint_with_events(
+        self, run_id: str, checkpoint: Any, events: list[Any], **kwargs: Any
+    ) -> Any:
+        self.checkpoint_phases.append(checkpoint.phase)
+        if self.fail_once and checkpoint.phase == "tool_batch_pending":
+            self.fail_once = False
+            self.failure_seen = True
+            import asyncpg
+
+            error = (
+                self.error_factory()
+                if self.error_factory is not None
+                else asyncpg.ConnectionDoesNotExistError("database connection lost")
+            )
+            if self.fail_after_commit:
+                await self.store.save_checkpoint_with_events(run_id, checkpoint, events, **kwargs)
+                raise error
+            raise error
+        self._record_after_failure("save_checkpoint_with_events")
+        return await self.store.save_checkpoint_with_events(run_id, checkpoint, events, **kwargs)
+
+    async def append_event(self, run_id: str, event: Any) -> int:
+        self._record_after_failure("append_event")
+        return await self.store.append_event(run_id, event)
+
+    async def append_events(self, run_id: str, events: list[Any]) -> list[int]:
+        self._record_after_failure("append_events")
+        return await self.store.append_events(run_id, events)
+
+    async def mark_failed(self, run_id: str, *args: Any, **kwargs: Any) -> Any:
+        self._record_after_failure("mark_failed")
+        return await self.store.mark_failed(run_id, *args, **kwargs)
+
+
 class PricedScriptProvider:
     """Like ScriptProvider but emits non-zero usage so cost accumulates.
 
@@ -410,6 +474,88 @@ async def test_resume_after_one_tool_completed_runs_only_missing_tool() -> None:
 
     assert counts == {"A": 1, "B": 1}
     assert [event.tool_name for event in events if event.type == "tool_call_end"] == ["B"]
+
+
+@pytest.mark.parametrize(
+    "error_kind",
+    ["connection_lost", "interface", "os_error", "connection_error", "wrapped"],
+)
+@pytest.mark.parametrize("fail_after_commit", [False, True], ids=["before-commit", "after-commit"])
+async def test_transient_checkpoint_store_error_stops_without_terminal_and_resumes(
+    error_kind: str, fail_after_commit: bool
+) -> None:
+    """A lost checkpoint connection leaves the run takeover-resumable."""
+    import asyncpg
+
+    from linch import ErrorEvent, ResultEvent
+
+    def error_factory() -> BaseException:
+        if error_kind == "connection_lost":
+            return asyncpg.ConnectionDoesNotExistError("database connection lost")
+        if error_kind == "interface":
+            return asyncpg.InterfaceError("database connection interface lost")
+        if error_kind == "os_error":
+            return OSError("database socket lost")
+        if error_kind == "connection_error":
+            return ConnectionError("database connection lost")
+        wrapped = RuntimeError("store wrapper")
+        wrapped.__cause__ = OSError("database socket lost")
+        return wrapped
+
+    session_store = _memory_session_store()
+    injected = _TransientCheckpointStore(
+        _memory_run_store(), error_factory, fail_after_commit=fail_after_commit
+    )
+    counts: dict[str, int] = {}
+    agent = _agent(
+        model="gpt-5",
+        provider=ScriptProvider(tool_names=["A"]),
+        tools=_registry(counts, "A"),
+        permissions={"mode": "skip-dangerous"},
+        session_store=session_store,
+        run_store=injected,
+        cwd=".",
+    )
+    session = await agent.session(id="s1")
+    first_events = await _collect(session.run("use tool"))
+    run_id = next(event.run_id for event in first_events if event.type == "system")
+
+    # A transient durable-store failure must stop before terminal persistence;
+    # the checkpoint itself is the replay boundary for the side effect.
+    assert injected.failure_seen
+    assert "tool_batch_pending" in injected.checkpoint_phases
+    assert not any(isinstance(event, (ErrorEvent, ResultEvent)) for event in first_events)
+    assert injected.after_failure_calls == []
+    record = await injected.load_run(run_id)
+    assert record is not None and record.status == "running"
+    assert counts == {}
+
+    restarted = _agent(
+        model="gpt-5",
+        provider=ScriptProvider(),
+        tools=_registry(counts, "A"),
+        permissions={"mode": "skip-dangerous"},
+        session_store=session_store,
+        run_store=injected,
+        cwd=".",
+    )
+    resumed = await restarted.session(id="s1")
+    resumed_events = await _collect(resumed.resume(run_id))
+
+    assert resumed_events[-1].type == "result"
+    assert counts == {"A": 1}
+    stored = await injected.load_events(run_id)
+    assert sum(isinstance(row.event, ErrorEvent) for row in stored) == 0
+    assert sum(isinstance(row.event, ResultEvent) for row in stored) == 1
+    assert sum(row.event.type == "tool_call_end" for row in stored) == 1
+    assert [row.seq for row in stored] == list(range(1, len(stored) + 1))
+    tool_result_blocks = [
+        block
+        for message in resumed.full_history
+        for block in message.content
+        if getattr(block, "type", None) == "tool_result"
+    ]
+    assert len(tool_result_blocks) == 1
 
 
 async def test_tool_batch_checkpoint_is_not_saved_after_each_tool_end() -> None:
