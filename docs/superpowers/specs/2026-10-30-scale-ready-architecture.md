@@ -332,6 +332,13 @@ work above stays ours). Docs paths are relative to that repo.
 Not adopted: vendoring Cordis, TypeScript declaration merging, HMR, plugin
 market, desktop/web UI, Remote/Typert gateway, JSONL file sessions.
 
+## Later optimization (owner 2026-10-31: note, do not chase now)
+
+- Broadcast LISTEN floor: after WP8 r8, per-run cost at 8 workers is still about 1.5x one worker, because Postgres opens an internal transaction per listening backend per notification. Options when needed: fewer listeners per database (one dispatcher per host feeding local workers), or short jittered polling instead of LISTEN.
+- Write commits per turn (about 18 after r8) and WAL flush waits set the single-database ceiling; batching more writes per turn is the next lever.
+- Worker CPU per run (about 35-40 ms for a 4-turn run; `_json_safe`, checkpoint save and telemetry wrappers show in the profile).
+- PgBouncer transaction mode: a separate direct connection for the queue LISTEN, only if a deployment needs the connection savings.
+
 ## Rules for every worker
 
 - Own git worktree and branch from `integration/3.0`; never commit to
