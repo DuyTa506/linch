@@ -707,12 +707,13 @@ class RunEventBatchStore(Protocol):
             events: Typed events to persist in order.
 
         Returns:
-            The assigned 1-based sequence numbers in input order.
+            The assigned 1-based sequence numbers in input order; an empty
+            batch returns ``[]`` without run lookup or lease fencing.
 
         Raises:
             KeyError: If a non-empty batch targets a missing run.
-            LeaseLostError: If this instance's fencing lease is stale.
-            TypeError: If an event cannot be encoded.
+            LeaseLostError: If a non-empty batch uses a stale fencing lease.
+            TypeError: If an event in a non-empty batch cannot be encoded.
         """
 
         ...
@@ -2137,12 +2138,13 @@ class InMemoryRunStore:
             events: Typed events to append in input order.
 
         Returns:
-            Sequence numbers returned for each input event, in the same order.
+            Sequence numbers returned for each input event, in the same order;
+            an empty batch returns ``[]`` without run lookup or lease fencing.
 
         Raises:
-            KeyError: If the run does not exist.
-            LeaseLostError: If this instance's fencing lease is stale.
-            TypeError: If an event cannot be encoded.
+            KeyError: If a non-empty batch targets a missing run.
+            LeaseLostError: If a non-empty batch uses a stale fencing lease.
+            TypeError: If an event in a non-empty batch cannot be encoded.
 
         The in-memory implementation intentionally delegates one event at a
         time so subclasses can customize recovery behavior; it is not an

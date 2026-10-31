@@ -506,12 +506,13 @@ class PostgresRunStore:
 
         Returns:
             Contiguous 1-based sequence numbers parallel to ``events``; an empty
-            input returns an empty list without a database write.
+            input returns an empty list without a database lookup or lease
+            fence check.
 
         Raises:
-            KeyError: If the run does not exist.
-            LeaseLostError: If this instance's fencing lease is stale.
-            TypeError: If an event cannot be encoded.
+            KeyError: If a non-empty batch targets a missing run.
+            LeaseLostError: If a non-empty batch uses a stale fencing lease.
+            TypeError: If an event in a non-empty batch cannot be encoded.
         """
 
         if not events:
@@ -959,7 +960,12 @@ class PostgresRunStore:
         )
 
     async def close(self) -> None:
-        """Close the store-owned pool and reset lazy initialization state."""
+        """Close the pool held by this store and reset lazy initialization.
+
+        Store-created pools and raw caller-supplied pools are closed and the
+        store can initialize again later. A worker-supplied ``_BorrowedPool``
+        handle is retained; its worker or host owns that pool's lifecycle.
+        """
 
         await close_pool(self, reset_initialized=True)
 
