@@ -34,6 +34,9 @@ class TextBlock:
 class ToolUseBlock:
     """Represent a model request to invoke a tool.
 
+    Attributes:
+        input: JSON-compatible arguments the provider supplied for the call.
+
     Args:
         id: Provider-assigned identifier for this tool call.
         name: Name of the tool to invoke.
@@ -72,6 +75,10 @@ class ToolResultBlock:
 class ThinkingBlock:
     """Represent provider reasoning content.
 
+    Attributes:
+        signature: Optional opaque provider signature associated with the
+            reasoning text.
+
     Args:
         thinking: Reasoning text emitted by the provider.
         signature: Optional provider signature associated with the reasoning.
@@ -86,6 +93,9 @@ class ThinkingBlock:
 @dataclass(slots=True)
 class RedactedThinkingBlock:
     """Represent provider reasoning content that was redacted.
+
+    Attributes:
+        data: Opaque provider payload retained for the redacted reasoning block.
 
     Args:
         data: Opaque redacted payload supplied by the provider.
@@ -218,6 +228,10 @@ class Message:
 @dataclass(slots=True)
 class Usage:
     """Track token usage reported for a provider call or run.
+
+    Attributes:
+        cache_read_tokens: Input tokens served from a provider prompt cache.
+        cache_creation_tokens: Input tokens written to a provider prompt cache.
 
     Args:
         input_tokens: Number of input tokens consumed.
