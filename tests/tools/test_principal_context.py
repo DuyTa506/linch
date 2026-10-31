@@ -62,7 +62,6 @@ def _scheduler_session(principal: Any = None) -> Any:
         store=None,
         active_run_id="run",
         _active_principal=principal,
-        _run_principals={"run": principal} if principal is not None else {},
         tools_override=None,
         current_turn_allowed_tools=None,
         current_turn_permission_decisions={},
@@ -352,11 +351,6 @@ def _bind_fake_run(session: Any, run_id: str, principal: Any) -> None:
     session._model_call_ledger = None
     session.active_run_id = run_id
     session._active_principal = principal
-    session._run_principals = getattr(session, "_run_principals", {})
-    session._principal_background_tasks = getattr(session, "_principal_background_tasks", {})
-    if principal is not None:
-        session._run_principals[run_id] = principal
-    session._principal_background_before = set()
     session._idle = asyncio.Event()
     session._idle.clear()
     session._reject_pending_alignment = lambda _exc: None
@@ -383,7 +377,6 @@ async def test_deferred_background_tool_keeps_origin_principal_after_next_run_be
             return ToolResult(content="done")
 
     session = _scheduler_session(old)
-    session._run_principals.clear()
     _bind_fake_run(session, "old-run", old)
     tool = _DeferredTool("Deferred", seen, scope="read", parallel=True)
     iterator = execute_tool_calls(
@@ -400,13 +393,51 @@ async def test_deferred_background_tool_keeps_origin_principal_after_next_run_be
     session._finish_run()
     session.active_run_id = "new-run"
     session._active_principal = new
-    session._run_principals["new-run"] = new
     gate.set()
     await asyncio.gather(*tasks)
     await asyncio.sleep(0)
 
     assert seen == [old]
-    assert session._run_principals == {"new-run": new}
+
+
+@pytest.mark.asyncio
+async def test_deferred_anonymous_tool_keeps_none_after_privileged_run_begins() -> None:
+    from linch import Principal
+    from linch.abort import AbortContext
+    from linch.scheduler import execute_tool_calls
+    from linch.tools import ToolResult
+    from linch.types import ToolUseBlock
+
+    privileged = Principal("tenant-b", "bob", {"admin"})
+    gate = asyncio.Event()
+    seen: list[Any] = []
+
+    class _DeferredTool(_ContextTool):
+        async def execute(self, input: dict[str, Any], ctx: Any) -> Any:
+            await gate.wait()
+            seen.append(ctx.principal)
+            return ToolResult(content="done")
+
+    session = _scheduler_session(None)
+    _bind_fake_run(session, "anonymous-run", None)
+    iterator = execute_tool_calls(
+        [ToolUseBlock(id="bg", name="Deferred", input={"run_in_background": True})],
+        _scheduler_agent(_DeferredTool("Deferred", seen, scope="read", parallel=True)),
+        session,
+        AbortContext(),
+    )
+    await iterator.__anext__()
+    await iterator.__anext__()
+    tasks = list(session.background_tasks)
+    await iterator.aclose()
+
+    session._finish_run()
+    session.active_run_id = "privileged-run"
+    session._active_principal = privileged
+    gate.set()
+    await asyncio.gather(*tasks)
+
+    assert seen == [None]
 
 
 @pytest.mark.asyncio
@@ -429,7 +460,6 @@ async def test_same_id_resume_retains_binding_until_deferred_task_finishes() -> 
             return ToolResult(content="done")
 
     session = _scheduler_session(old)
-    session._run_principals.clear()
     _bind_fake_run(session, "same-run", old)
     iterator = execute_tool_calls(
         [ToolUseBlock(id="bg", name="Deferred", input={"run_in_background": True})],
@@ -446,100 +476,24 @@ async def test_same_id_resume_retains_binding_until_deferred_task_finishes() -> 
     session._active = True
     session.active_run_id = "same-run"
     session._active_principal = resumed
-    session._principal_background_before = set(tasks)
-    session._finish_run()
     gate.set()
     await asyncio.gather(*tasks)
-    await asyncio.sleep(0)
 
     assert seen == [old]
-    assert session._run_principals == {}
+    session._finish_run()
 
 
-def test_principal_snapshot_resets_for_anonymous_run_and_retires_without_background_work() -> None:
+def test_principal_snapshot_resets_for_anonymous_run() -> None:
     from linch import Principal
 
     principal = Principal("tenant-a", "alice", {"reader"})
     session = _scheduler_session(principal)
-    session._run_principals.clear()
     _bind_fake_run(session, "run-with-principal", principal)
     session._finish_run()
 
     assert session._active_principal is None
     assert session.active_run_id is None
-    assert session._run_principals == {}
 
     _bind_fake_run(session, "anonymous", None)
     session._finish_run()
     assert session._active_principal is None
-    assert session._run_principals == {}
-
-
-@pytest.mark.asyncio
-async def test_old_principal_binding_does_not_accumulate_across_later_runs() -> None:
-    from linch import Principal
-
-    old = Principal("tenant-a", "alice", {"reader"})
-    gate = asyncio.Event()
-    old_task = asyncio.create_task(gate.wait())
-    session = _scheduler_session(old)
-    session._run_principals.clear()
-    session.background_tasks.append(old_task)
-    _bind_fake_run(session, "old-run", old)
-    session._finish_run()
-    assert session._run_principals == {"old-run": old}
-
-    for index in range(3):
-        _bind_fake_run(session, f"anonymous-{index}", None)
-        session._principal_background_before = {old_task}
-        session._finish_run()
-
-    assert session._run_principals == {"old-run": old}
-    old_task.cancel()
-    await asyncio.gather(old_task, return_exceptions=True)
-    await asyncio.sleep(0)
-    assert session._run_principals == {}
-
-
-@pytest.mark.asyncio
-async def test_queued_retirement_cannot_remove_a_resumed_runs_new_background_binding() -> None:
-    from linch import Principal
-
-    queued: list[Any] = []
-    defer_callbacks = True
-
-    class _DeferredCallbacksTask(asyncio.Task[bool]):
-        def add_done_callback(self, callback: Any, *, context: Any = None) -> None:
-            if defer_callbacks:
-                queued.append(callback)
-            else:
-                super().add_done_callback(callback, context=context)
-
-    principal = Principal("tenant", "user", frozenset({"reader"}))
-    session = _scheduler_session(principal)
-    session._run_principals.clear()
-    old_gate = asyncio.Event()
-    old_task = _DeferredCallbacksTask(old_gate.wait())
-    session.background_tasks.append(old_task)
-    _bind_fake_run(session, "same-run", principal)
-    session._finish_run()
-    assert len(queued) == 1
-    defer_callbacks = False
-    old_gate.set()
-    await old_task
-
-    _bind_fake_run(session, "same-run", principal)
-    session._finish_run()
-    _bind_fake_run(session, "same-run", principal)
-    new_gate = asyncio.Event()
-    new_task = asyncio.create_task(new_gate.wait())
-    session.background_tasks.append(new_task)
-    session._finish_run()
-    try:
-        queued.pop()(old_task)
-        assert session._run_principals.get("same-run") is principal
-    finally:
-        new_gate.set()
-        await new_task
-        await asyncio.sleep(0)
-    assert session._run_principals == {}
