@@ -1,28 +1,21 @@
-"""GeminiProvider — Google Gemini / Vertex AI provider for Linch.
+"""Google Gemini / Vertex AI via the optional ``google-genai`` SDK.
 
-Requires the optional ``[gemini]`` extra:
-    pip install 'linch[gemini]'
-
-Uses the ``google-generativeai`` SDK (``import google.generativeai as genai``).
-Vertex AI is supported via ``GeminiProviderOptions(project=..., location=...)``.
-
-Streaming tool-use uses a different delta format than OpenAI or Anthropic:
-each candidate part is either a ``text`` string or a ``function_call`` object.
-We emit Linch-canonical stream events for each part across all streamed
-chunks (deduplicating repeated function calls) so the loop processes Gemini
-identically to other providers.
+SDK objects stay inside this adapter; the loop receives normalized Linch events.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from dataclasses import dataclass, field
 from typing import Any
 
-from .._prompt_cache import gemini_cached_tokens
-from ..errors import AuthError, ContextLengthError, ProviderError, RateLimitError
+from .._client_lifecycle import loop_changed, running_loop
+from .._http_errors import retry_after_seconds
+from ..errors import AuthError, ContextLengthError, LinchError, ProviderError, RateLimitError
 from ..types import (
     Message,
     ModelId,
@@ -44,27 +37,14 @@ _KNOWN_CONTEXT: dict[str, int] = {
     "gemini-1.5-flash": 1_048_576,
 }
 
-_DEFAULT_CONTEXT = 1_048_576
-
-# Gemini finish_reason codes
-_FINISH_STOP = 1
-_FINISH_MAX_TOKENS = 2
-_FINISH_SAFETY = 3
-_FINISH_RECITATION = 4
-_FINISH_TOOL_USE = 5  # FUNCTION_CALL in some SDK versions
-
 
 @dataclass(slots=True)
 class GeminiProviderOptions:
-    """Configuration for GeminiProvider.
+    """SDK credentials and native ``GenerateContentConfig`` defaults.
 
-    Attributes:
-        api_key: Google AI Studio API key. When None the SDK uses
-            ``GOOGLE_API_KEY`` from the environment.
-        project: GCP project ID for Vertex AI. When set, the provider
-            uses ``vertexai.generativeai`` instead of ``google.generativeai``.
-        location: Vertex AI region (default ``us-central1``).
-        default_generation_config: Passed verbatim to ``GenerationConfig``.
+    ``api_key=None`` uses SDK environment discovery. Setting ``project`` selects
+    Vertex AI with application default credentials and the given ``location``.
+    ``default_generation_config`` accepts native options, including ``thinking_config``.
     """
 
     api_key: str | None = None
@@ -74,244 +54,264 @@ class GeminiProviderOptions:
 
 
 def _translate_messages(messages: list[Message]) -> list[dict[str, Any]]:
-    """Convert Linch Messages to Gemini ``contents`` list."""
+    """Convert history, replaying signed model parts retained in message metadata."""
     contents: list[dict[str, Any]] = []
     tool_names_by_id: dict[str, str] = {}
     for msg in messages:
-        # Gemini uses "model" for assistant role
         role = "model" if msg.role == "assistant" else "user"
         parts: list[dict[str, Any]] = []
         for block in msg.content:
             if isinstance(block, TextBlock) and block.text:
                 parts.append({"text": block.text})
             elif isinstance(block, ToolUseBlock):
-                # Tool call from model → function_call part
                 tool_names_by_id[block.id] = block.name
-                parts.append({"function_call": {"name": block.name, "args": block.input}})
+                parts.append(
+                    {"function_call": {"id": block.id, "name": block.name, "args": block.input}}
+                )
             elif isinstance(block, ToolResultBlock):
-                # Tool result → function_response part
                 content_text = (
                     block.content if isinstance(block.content, str) else json.dumps(block.content)
                 )
-                tool_name = tool_names_by_id.get(block.tool_use_id, block.tool_use_id)
                 parts.append(
                     {
                         "function_response": {
                             "id": block.tool_use_id,
-                            "name": tool_name,
+                            "name": tool_names_by_id.get(block.tool_use_id, block.tool_use_id),
                             "response": {"content": content_text, "is_error": block.is_error},
                         }
                     }
                 )
+        if role == "model" and msg.provider_metadata:
+            parts = msg.provider_metadata.get("gemini_parts", parts)
         if parts:
             contents.append({"role": role, "parts": parts})
     return contents
 
 
 def _translate_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Convert Linch tool dicts to Gemini function declarations."""
-    result = []
-    for tool in tools:
-        schema = dict(tool.get("input_schema", {}))
-        # Gemini uses "parameters" instead of "input_schema"
-        result.append(
-            {
-                "name": tool["name"],
-                "description": tool.get("description", ""),
-                "parameters": schema,
-            }
-        )
-    return result
+    return [
+        {
+            "name": t["name"],
+            "description": t.get("description", ""),
+            "parameters_json_schema": t.get("input_schema", {}),
+        }
+        for t in tools
+    ]
 
 
 def _translate_tool_choice(tool_choice: Any) -> dict[str, Any] | None:
-    """Map a Linch ``tool_choice`` to a Gemini ``function_calling_config``.
-
-    Returns ``None`` to leave Gemini at its default (AUTO) behavior — used when
-    the caller did not constrain tool choice. A dict ``{"name": ...}`` forces
-    that single function; ``"required"``/``"any"`` force some function; ``"none"``
-    forbids calls; ``"auto"`` lets the model decide.
-    """
     if tool_choice is None:
         return None
     if isinstance(tool_choice, dict):
         config: dict[str, Any] = {"mode": "ANY"}
-        name = tool_choice.get("name", "")
-        if name:
-            config["allowed_function_names"] = [name]
-        return {"function_calling_config": config}
-    mode = {"auto": "AUTO", "none": "NONE", "required": "ANY", "any": "ANY"}.get(
-        str(tool_choice), "AUTO"
+        if tool_choice.get("name"):
+            config["allowed_function_names"] = [tool_choice["name"]]
+    else:
+        config = {
+            "mode": {"auto": "AUTO", "none": "NONE", "required": "ANY", "any": "ANY"}.get(
+                str(tool_choice), "AUTO"
+            )
+        }
+    return {"function_calling_config": config}
+
+
+def _map_error(exc: Exception) -> LinchError:
+    from httpx import TransportError
+
+    code = getattr(exc, "code", None)
+    msg = str(exc).lower()
+    if code in (401, 403) or (
+        code in (None, 400)
+        and any(s in msg for s in ("api_key", "api key", "credentials", "permission"))
+    ):
+        return AuthError(f"Gemini auth error: {exc}")
+    if code == 429 or (code is None and any(s in msg for s in ("quota", "rate limit", "429"))):
+        return RateLimitError(
+            f"Gemini rate limit: {exc}", retry_after_seconds=retry_after_seconds(exc)
+        )
+    if code in (None, 400, 413) and (
+        "context" in msg
+        or "too long" in msg
+        or (
+            "token" in msg
+            and ("input" in msg or "prompt" in msg)
+            and any(s in msg for s in ("exceed", "maximum", "limit"))
+        )
+    ):
+        return ContextLengthError(f"Gemini context exceeded: {exc}")
+    return ProviderError(
+        f"Gemini request failed: {exc}",
+        status=code,
+        retryable=code == 408
+        or (isinstance(code, int) and code >= 500)
+        or isinstance(exc, (OSError, TransportError)),
     )
-    return {"function_calling_config": {"mode": mode}}
 
 
 class GeminiProvider(BaseProvider):
-    """Provider implementation for Google Gemini models.
-
-    Example::
-
-        from linch.providers.gemini import GeminiProvider, GeminiProviderOptions
-
-        provider = GeminiProvider(
-            GeminiProviderOptions(api_key="AIza...")
-        )
-        agent = Agent(model="gemini-2.5-pro", provider=provider, ...)
-    """
+    """Async Gemini provider; client configuration is isolated per instance."""
 
     id = "gemini"
 
     def __init__(self, options: GeminiProviderOptions | None = None) -> None:
         self._options = options or GeminiProviderOptions()
+        self._client: Any = None
+        self._client_loop: Any = None
 
     def context_window(self, model: ModelId) -> int:
-        return _KNOWN_CONTEXT.get(model, _DEFAULT_CONTEXT)
+        return _KNOWN_CONTEXT.get(model, 1_048_576)
 
     def capabilities(self, model: ModelId) -> ProviderCapabilities:
         return full_capabilities(self.context_window(model))
 
-    def _get_genai(self) -> Any:
-        try:
-            import google.generativeai as genai  # type: ignore[import]
-        except ModuleNotFoundError as exc:
-            raise ProviderError(
-                "The 'google-generativeai' package is required. "
-                "Install with: pip install 'linch[gemini]'"
-            ) from exc
-        if self._options.api_key is not None:
-            genai.configure(api_key=self._options.api_key)  # type: ignore[reportPrivateImportUsage]
-        return genai
+    def _get_client(self) -> Any:
+        if self._client is not None and loop_changed(self._client_loop):
+            self._client = None
+        if self._client is None:
+            try:
+                import google.genai as genai
+            except ImportError as exc:
+                raise ProviderError(
+                    "The 'google-genai' package is required. "
+                    "Install with: pip install 'linch[gemini]'"
+                ) from exc
+            kwargs: dict[str, Any] = {}
+            if self._options.project is not None:
+                kwargs.update(
+                    vertexai=True, project=self._options.project, location=self._options.location
+                )
+            elif self._options.api_key is not None:
+                kwargs["api_key"] = self._options.api_key
+            self._client = genai.Client(**kwargs)
+            self._client_loop = running_loop()
+        return self._client
+
+    async def aclose(self) -> None:
+        client, self._client = self._client, None
+        self._client_loop = None
+        if client is not None:
+            try:
+                await client.aio.aclose()
+            finally:
+                await asyncio.to_thread(client.close)
 
     def _build_generation_config(self, req: ProviderRequest) -> dict[str, Any]:
-        cfg: dict[str, Any] = dict(self._options.default_generation_config)
-        if req.max_output_tokens is not None:
-            cfg["max_output_tokens"] = req.max_output_tokens
+        cfg = dict(self._options.default_generation_config)
+        for key in ("max_output_tokens", "temperature", "stop_sequences"):
+            if (value := getattr(req, key)) is not None:
+                cfg[key] = value
+        if req.thinking is not None:
+            cfg["thinking_config"] = req.thinking
+            mode = req.thinking.get("type")
+            if mode in ("enabled", "disabled", "adaptive"):
+                budget = {"disabled": 0, "adaptive": -1}.get(
+                    mode, req.thinking.get("budget_tokens", -1)
+                )
+                cfg["thinking_config"] = {"thinking_budget": budget}
+                if (display := req.thinking.get("display")) is not None:
+                    cfg["thinking_config"]["include_thoughts"] = display != "omitted"
         if req.output_schema is not None:
-            cfg["response_mime_type"] = "application/json"
-            cfg["response_schema"] = req.output_schema.schema
+            cfg.pop("response_schema", None)
+            cfg.update(
+                response_mime_type="application/json", response_json_schema=req.output_schema.schema
+            )
         return cfg
 
     async def stream(self, req: ProviderRequest) -> AsyncIterator[dict[str, Any]]:
-        genai = self._get_genai()
-
-        # System instruction
-        system_text = (
-            "\n\n".join(b.text for b in req.system if hasattr(b, "text") and b.text)
-            if req.system
-            else None
-        )
-
-        # Tool declarations
-        tool_declarations = _translate_tools(req.tools) if req.tools else []
-
-        gen_config = self._build_generation_config(req)
-
         try:
-            model_kwargs: dict[str, Any] = {"model_name": req.model}
-            if system_text:
-                model_kwargs["system_instruction"] = system_text
-            if tool_declarations:
-                model_kwargs["tools"] = tool_declarations
-                # tool_choice only has meaning alongside tools; a
-                # function_calling_config with no tools is rejected by Gemini.
-                tool_config = _translate_tool_choice(req.tool_choice)
-                if tool_config is not None:
-                    model_kwargs["tool_config"] = tool_config
-            if gen_config:
-                model_kwargs["generation_config"] = gen_config
+            client = self._get_client()
+            from google.genai import types
 
-            model = genai.GenerativeModel(**model_kwargs)
-            contents = _translate_messages(req.messages)
+            cfg = self._build_generation_config(req)
+            cfg["system_instruction"] = "\n\n".join(b.text for b in req.system if b.text) or None
+            cfg["tools"] = (
+                [types.Tool(function_declarations=_translate_tools(req.tools))]
+                if req.tools
+                else None
+            )
+            cfg["tool_config"] = _translate_tool_choice(req.tool_choice) if req.tools else None
+            # Linch owns execution and retry accounting, rather than SDK tool dispatch.
+            cfg["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
+            config = types.GenerateContentConfig(**cfg)
+            contents = [types.Content(**c) for c in _translate_messages(req.messages)]
+        except LinchError:
+            raise
         except Exception as exc:
-            raise ProviderError(f"Gemini request build failed: {exc}") from exc
+            raise _map_error(exc) from exc
 
         yield {"type": "message_start", "model": req.model}
-
-        input_tokens = 0
-        output_tokens = 0
-        cache_read_tokens = 0
+        counts = {
+            "prompt_token_count": 0,
+            "candidates_token_count": 0,
+            "thoughts_token_count": 0,
+            "cached_content_token_count": 0,
+        }
         stop_reason: StopReason = "end_turn"
-        # Cross-chunk dedup: Gemini sends complete function calls (name + full
-        # args), not incremental arg deltas. If the SDK re-surfaces the same
-        # accumulated call in a later chunk, emitting it twice would make the
-        # loop assemble two ToolUseBlocks and the tool execute twice. Key by
-        # (name, canonical-json args) and emit each distinct call at most once.
-        seen_tool_calls: set[str] = set()
-
+        seen_tool_calls: dict[str, dict[str, Any]] = {}
+        model_parts: list[dict[str, Any]] = []
         try:
-            async for chunk in model.generate_content_async(contents, stream=True):
-                # Accumulate usage from each chunk
-                if hasattr(chunk, "usage_metadata"):
-                    um = chunk.usage_metadata
-                    if hasattr(um, "prompt_token_count") and um.prompt_token_count:
-                        input_tokens = um.prompt_token_count
-                    if hasattr(um, "candidates_token_count") and um.candidates_token_count:
-                        output_tokens = um.candidates_token_count
-                    cache_read_tokens = gemini_cached_tokens(um)
-
-                if not chunk.candidates:
-                    continue
-
-                candidate = chunk.candidates[0]
-                finish_reason = getattr(candidate, "finish_reason", 0)
-
-                # Map finish reason
-                if finish_reason == _FINISH_MAX_TOKENS:
-                    stop_reason = "max_tokens"
-                elif finish_reason in (_FINISH_TOOL_USE, 2):
-                    # finish_reason=2 can mean FUNCTION_CALL in some SDK versions
-                    # We detect tool use via parts inspection instead
-                    pass
-
-                if not hasattr(candidate, "content") or candidate.content is None:
-                    continue
-
-                for part in candidate.content.parts:
-                    fc = getattr(part, "function_call", None)
-                    text = getattr(part, "text", None)
-
-                    if fc is not None and getattr(fc, "name", None):
-                        # Tool call part
-                        tool_name = fc.name
-                        tool_input = dict(fc.args) if fc.args else {}
-                        dedup_key = json.dumps([tool_name, tool_input], sort_keys=True, default=str)
-                        if dedup_key in seen_tool_calls:
-                            stop_reason = "tool_use"
-                            continue
-                        seen_tool_calls.add(dedup_key)
-                        tool_id = f"gemini_{uuid.uuid4().hex[:8]}"
-                        yield {
-                            "type": "tool_use_start",
-                            "id": tool_id,
-                            "name": tool_name,
-                        }
-                        yield {
-                            "type": "tool_use_input_delta",
-                            "id": tool_id,
-                            "json_delta": json.dumps(tool_input),
-                        }
-                        yield {"type": "tool_use_end", "id": tool_id}
-                        stop_reason = "tool_use"
-                    elif text:
-                        yield {"type": "text_delta", "text": text}
-
+            raw_stream = await client.aio.models.generate_content_stream(
+                model=req.model, contents=contents, config=config
+            )
+            async with aclosing(raw_stream):
+                async for chunk in raw_stream:
+                    if chunk.usage_metadata is not None:
+                        for key in counts:
+                            if (value := getattr(chunk.usage_metadata, key, None)) is not None:
+                                counts[key] = value
+                    if not chunk.candidates:
+                        continue
+                    candidate = chunk.candidates[0]
+                    if candidate.finish_reason == types.FinishReason.MAX_TOKENS:
+                        stop_reason = "max_tokens"
+                    elif candidate.finish_reason in (
+                        types.FinishReason.SAFETY,
+                        types.FinishReason.RECITATION,
+                    ):
+                        stop_reason = "refusal"
+                    elif candidate.finish_reason == types.FinishReason.MALFORMED_FUNCTION_CALL:
+                        stop_reason = "error"
+                    for part in candidate.content.parts or [] if candidate.content else []:
+                        fc = part.function_call
+                        saved = part.model_dump(mode="json", exclude_none=True)
+                        if fc is not None and fc.name:
+                            tool_input = fc.args or {}
+                            key = fc.id or json.dumps([fc.name, tool_input], sort_keys=True)
+                            if key in seen_tool_calls:
+                                if part.thought_signature:
+                                    seen_tool_calls[key]["thought_signature"] = saved[
+                                        "thought_signature"
+                                    ]
+                                continue
+                            seen_tool_calls[key] = saved
+                            tool_id = fc.id or f"gemini_{uuid.uuid4().hex[:8]}"
+                            saved["function_call"]["id"] = tool_id
+                            model_parts.append(saved)
+                            yield {"type": "tool_use_start", "id": tool_id, "name": fc.name}
+                            yield {
+                                "type": "tool_use_input_delta",
+                                "id": tool_id,
+                                "json_delta": json.dumps(tool_input),
+                            }
+                            yield {"type": "tool_use_end", "id": tool_id}
+                        else:
+                            model_parts.append(saved)
+                            if part.text:
+                                yield {
+                                    "type": "thinking_delta" if part.thought else "text_delta",
+                                    "text": part.text,
+                                }
         except Exception as exc:
-            _msg = str(exc).lower()
-            if "api_key" in _msg or "credentials" in _msg or "permission" in _msg:
-                raise AuthError(f"Gemini auth error: {exc}") from exc
-            if "quota" in _msg or "rate" in _msg or "429" in _msg:
-                raise RateLimitError(f"Gemini rate limit: {exc}") from exc
-            if "context" in _msg or "too long" in _msg or "tokens" in _msg:
-                raise ContextLengthError(f"Gemini context exceeded: {exc}") from exc
-            raise ProviderError(f"Gemini stream error: {exc}", retryable=False) from exc
-
+            raise _map_error(exc) from exc
         yield {
             "type": "message_end",
-            "stop_reason": stop_reason,
+            "stop_reason": "tool_use" if seen_tool_calls else stop_reason,
             "usage": Usage(
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                cache_read_tokens=cache_read_tokens,
+                input_tokens=counts["prompt_token_count"],
+                output_tokens=counts["candidates_token_count"] + counts["thoughts_token_count"],
+                cache_read_tokens=counts["cached_content_token_count"],
             ),
-            "provider_metadata": None,
+            "provider_metadata": {"gemini_parts": model_parts}
+            if any("thought_signature" in p for p in model_parts)
+            else None,
         }

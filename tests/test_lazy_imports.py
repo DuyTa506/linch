@@ -39,8 +39,8 @@ def test_cold_import_does_not_pull_provider_sdks() -> None:
     out = _fresh_import(
         "import sys, linch\n"
         "_ = (linch.AnthropicProvider, linch.OpenAIChatCompletionsProvider, linch.GeminiProvider)\n"
-        # google.generativeai is the Gemini SDK; a bare 'google' namespace stub is benign.
-        "sdks = {'anthropic', 'openai', 'google.generativeai', 'asyncpg'}\n"
+        # google.genai is the Gemini SDK; a bare 'google' namespace stub is benign.
+        "sdks = {'anthropic', 'openai', 'google.genai', 'asyncpg'}\n"
         "offenders = sorted(m for m in sdks if m in sys.modules)\n"
         "print(offenders)\n"
     )

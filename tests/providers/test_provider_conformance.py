@@ -17,9 +17,9 @@ Two layers:
 
 from __future__ import annotations
 
-import sys
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -124,31 +124,22 @@ async def test_openai_compatible_builders_map_forced_tool_choice(cls: str) -> No
 async def test_gemini_stream_maps_forced_tool_choice_to_tool_config() -> None:
     from linch.providers.gemini import GeminiProvider
 
-    fake_candidate = MagicMock()
-    fake_candidate.content.parts = []
-    fake_candidate.finish_reason = 1  # STOP
+    sdk = pytest.importorskip("google.genai")
 
-    fake_chunk = MagicMock()
-    fake_chunk.candidates = [fake_candidate]
-    fake_chunk.usage_metadata.prompt_token_count = 1
-    fake_chunk.usage_metadata.candidates_token_count = 1
+    async def empty_stream() -> Any:
+        if False:
+            yield
 
-    async def _fake_stream(*args: Any, **kwargs: Any) -> Any:
-        yield fake_chunk
+    generate = AsyncMock(return_value=empty_stream())
+    fake_client = SimpleNamespace(
+        aio=SimpleNamespace(models=SimpleNamespace(generate_content_stream=generate))
+    )
+    with patch.object(sdk, "Client", return_value=fake_client):
+        _ = [e async for e in GeminiProvider().stream(_req_forcing("Weather"))]
 
-    fake_model = MagicMock()
-    fake_model.generate_content_async = MagicMock(return_value=_fake_stream())
-    fake_genai = MagicMock()
-    fake_genai.GenerativeModel.return_value = fake_model
-
-    with patch.dict(sys.modules, {"google.generativeai": fake_genai}):
-        provider = GeminiProvider()
-        _ = [e async for e in provider.stream(_req_forcing("Weather"))]
-
-    kwargs = fake_genai.GenerativeModel.call_args.kwargs
-    assert kwargs["tool_config"] == {
-        "function_calling_config": {"mode": "ANY", "allowed_function_names": ["Weather"]}
-    }
+    config = generate.call_args.kwargs["config"].tool_config.function_calling_config
+    assert config.mode == "ANY"
+    assert config.allowed_function_names == ["Weather"]
 
 
 async def test_gemini_tool_choice_mapping_modes() -> None:
@@ -166,23 +157,16 @@ async def test_gemini_tool_choice_mapping_modes() -> None:
 async def test_gemini_omits_tool_config_when_no_tools() -> None:
     from linch.providers.gemini import GeminiProvider
 
-    fake_candidate = MagicMock()
-    fake_candidate.content.parts = []
-    fake_candidate.finish_reason = 1
+    sdk = pytest.importorskip("google.genai")
 
-    fake_chunk = MagicMock()
-    fake_chunk.candidates = [fake_candidate]
-    fake_chunk.usage_metadata.prompt_token_count = 1
-    fake_chunk.usage_metadata.candidates_token_count = 1
+    async def empty_stream() -> Any:
+        if False:
+            yield
 
-    async def _fake_stream(*args: Any, **kwargs: Any) -> Any:
-        yield fake_chunk
-
-    fake_model = MagicMock()
-    fake_model.generate_content_async = MagicMock(return_value=_fake_stream())
-    fake_genai = MagicMock()
-    fake_genai.GenerativeModel.return_value = fake_model
-
+    generate = AsyncMock(return_value=empty_stream())
+    fake_client = SimpleNamespace(
+        aio=SimpleNamespace(models=SimpleNamespace(generate_content_stream=generate))
+    )
     req = ProviderRequest(
         model="m",
         system=[],
@@ -190,10 +174,10 @@ async def test_gemini_omits_tool_config_when_no_tools() -> None:
         messages=[Message(role="user", content=[TextBlock(text="hi")])],
         tool_choice="required",  # ignored: no tools to force
     )
-    with patch.dict(sys.modules, {"google.generativeai": fake_genai}):
+    with patch.object(sdk, "Client", return_value=fake_client):
         _ = [e async for e in GeminiProvider().stream(req)]
 
-    assert "tool_config" not in fake_genai.GenerativeModel.call_args.kwargs
+    assert generate.call_args.kwargs["config"].tool_config is None
 
 
 # ── transport closers (Anthropic + OpenAI Responses) ─────────────────────────
