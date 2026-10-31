@@ -22,6 +22,20 @@ from .types import Message, StopReason, Usage, message_from_dict, message_to_dic
 
 @dataclass(slots=True)
 class SystemEvent:
+    """Describe the session and tools at run initialization.
+
+    Args:
+        session_id: Session that owns the run.
+        run_id: Run identifier.
+        model: Model selected for the run.
+        tools: Names of tools offered to the model.
+        permission_mode: Permission policy active for the run.
+        cwd: Working directory used by the run.
+        type: Wire discriminator for the event.
+        subtype: System-event subtype.
+        trace_id: Optional trace identifier associated with the run.
+    """
+
     session_id: str
     run_id: str
     model: str
@@ -35,6 +49,14 @@ class SystemEvent:
 
 @dataclass(slots=True)
 class UserEvent:
+    """Record a user-authored or user-visible message event.
+
+    Args:
+        message: Message carried by the event.
+        type: Wire discriminator for the event.
+        subtype: Kind of user event represented.
+    """
+
     message: Message
     type: Literal["user"] = "user"
     subtype: Literal["prompt", "tool_result", "alignment", "notification"] = "prompt"
@@ -42,6 +64,14 @@ class UserEvent:
 
 @dataclass(slots=True)
 class AssistantEvent:
+    """Record a completed assistant response.
+
+    Args:
+        message: Assistant message returned by the provider.
+        stop_reason: Reason the provider stopped generating.
+        type: Wire discriminator for the event.
+    """
+
     message: Message
     stop_reason: StopReason
     type: Literal["assistant"] = "assistant"
@@ -49,12 +79,29 @@ class AssistantEvent:
 
 @dataclass(slots=True)
 class PartialAssistantEvent:
+    """Record a transient assistant delta while a response streams.
+
+    Args:
+        delta: Provider-normalized delta payload.
+        type: Wire discriminator for the event.
+    """
+
     delta: dict[str, Any]
     type: Literal["partial_assistant"] = "partial_assistant"
 
 
 @dataclass(slots=True)
 class ToolCallStartEvent:
+    """Record the start of one tool invocation.
+
+    Args:
+        tool_use_id: Identifier assigned to the tool call.
+        tool_name: Name of the tool being invoked.
+        input: JSON-compatible input supplied to the tool.
+        summary: Human-readable summary of the invocation.
+        type: Wire discriminator for the event.
+    """
+
     tool_use_id: str
     tool_name: str
     input: dict[str, Any]
@@ -64,6 +111,19 @@ class ToolCallStartEvent:
 
 @dataclass(slots=True)
 class ToolCallEndEvent:
+    """Record the completed result of one tool invocation.
+
+    Args:
+        tool_use_id: Identifier assigned to the tool call.
+        tool_name: Name of the invoked tool.
+        result: Textual result exposed for compatibility.
+        is_error: Whether the invocation failed.
+        duration_ms: Elapsed invocation time in milliseconds.
+        tool_result: Normalized structured result, when available.
+        type: Wire discriminator for the event.
+        tool_output: Canonical output, when the tool returned one.
+    """
+
     tool_use_id: str
     tool_name: str
     result: str = ""
@@ -79,8 +139,15 @@ class ToolProgressEvent:
     """Transient progress reported by an in-flight tool invocation.
 
     Progress is observational only: it is never added to provider history and
-    does not alter the final :class:`ToolResult`. ``data`` is an optional,
-    JSON-safe UI payload supplied by the tool.
+    does not alter the final :class:`ToolResult`. The optional ``data``
+    dictionary is passed to observers without validating its contents.
+
+    Args:
+        tool_use_id: Identifier assigned to the tool call.
+        tool_name: Name of the in-flight tool.
+        message: Human-readable progress message.
+        data: Optional progress payload passed to observers.
+        type: Wire discriminator for the event.
     """
 
     tool_use_id: str
@@ -92,6 +159,15 @@ class ToolProgressEvent:
 
 @dataclass(slots=True)
 class PermissionRequestItem:
+    """Describe one tool call awaiting permission.
+
+    Args:
+        tool_use_id: Identifier assigned to the pending tool call.
+        tool_name: Name of the tool requesting permission.
+        input: JSON-compatible input proposed for the tool.
+        summary: Human-readable summary shown to the approver.
+    """
+
     tool_use_id: str
     tool_name: str
     input: dict[str, Any]
@@ -100,12 +176,33 @@ class PermissionRequestItem:
 
 @dataclass(slots=True)
 class PermissionRequestEvent:
+    """Record a batch of tool calls awaiting permission.
+
+    Args:
+        requests: Pending tool-call descriptions.
+        type: Wire discriminator for the event.
+    """
+
     requests: list[PermissionRequestItem]
     type: Literal["permission_request"] = "permission_request"
 
 
 @dataclass(slots=True)
 class UsageEvent:
+    """Record per-call and cumulative token usage.
+
+    Args:
+        usage: Usage reported for the current provider call.
+        cumulative: Usage accumulated across the run.
+        type: Wire discriminator for the event.
+        cost_usd: Optional cost for the current call.
+        cumulative_cost_usd: Optional cost accumulated across the run.
+        source: Optional source label for the usage record.
+        call_id: Optional provider call identifier.
+        logical_call_id: Optional identifier shared across retries.
+        model: Optional model that produced the usage.
+    """
+
     usage: Usage
     cumulative: Usage
     type: Literal["usage"] = "usage"
@@ -122,7 +219,16 @@ class UsageEvent:
 
 @dataclass(frozen=True, slots=True)
 class ModelCallEvent:
-    """Versioned accounting journal envelope with an isolated JSON record."""
+    """Versioned accounting journal envelope with an isolated JSON record.
+
+    Args:
+        run_id: Run associated with the accounting record.
+        record_kind: Kind of accounting record.
+        record: JSON record containing the accounting payload.
+        budget_owner_id: Optional owner used for budget accounting.
+        schema_version: Wire schema version for the record.
+        type: Wire discriminator for the event.
+    """
 
     run_id: str
     record_kind: Literal["intent", "dispatch_started", "receipt", "abandoned", "projection"]
@@ -153,7 +259,16 @@ class ModelCallEvent:
 class BudgetEvent:
     """Emitted when a :class:`~linch.budget.RunBudget` crosses its warning
     ratio (``kind="warning"``, once per budget object) or is exhausted
-    (``kind="exceeded"``, after which the run stops with an error result)."""
+    (``kind="exceeded"``, after which the run stops with an error result).
+
+    Args:
+        kind: Budget transition represented by the event.
+        spent_tokens: Tokens spent when the event was emitted.
+        spent_usd: Cost spent when the event was emitted.
+        max_tokens: Configured token limit, if any.
+        max_cost_usd: Configured cost limit, if any.
+        type: Wire discriminator for the event.
+    """
 
     kind: Literal["warning", "exceeded"]
     spent_tokens: int
@@ -165,6 +280,22 @@ class BudgetEvent:
 
 @dataclass(slots=True)
 class ResultEvent:
+    """Record the terminal outcome of a run.
+
+    Args:
+        subtype: Terminal outcome category.
+        stop_reason: Reason the loop stopped.
+        total_usage: Usage accumulated across the run.
+        duration_ms: Run duration in milliseconds.
+        final_text: Optional final textual answer.
+        structured_output: Parsed structured answer, when available.
+        structured_error: Structured-output parsing or validation error.
+        total_cost_usd: Optional total run cost.
+        type: Wire discriminator for the event.
+        usage_complete: Whether usage accounting is complete.
+        trace_id: Optional trace identifier associated with the run.
+    """
+
     subtype: Literal["success", "error", "aborted", "interrupted"]
     stop_reason: StopReason
     total_usage: Usage
@@ -189,12 +320,30 @@ class ResultEvent:
 
 @dataclass(slots=True)
 class ErrorEvent:
+    """Record a terminal or recoverable error payload.
+
+    Args:
+        error: Structured error details.
+        type: Wire discriminator for the event.
+    """
+
     error: dict[str, Any]
     type: Literal["error"] = "error"
 
 
 @dataclass(slots=True)
 class CompactionEvent:
+    """Record a context-compaction operation.
+
+    Args:
+        messages_before: Message count before compaction.
+        messages_after: Message count after compaction.
+        tokens_before: Token estimate before compaction.
+        tokens_after: Token estimate after compaction.
+        strategy: Compaction strategy used.
+        type: Wire discriminator for the event.
+    """
+
     messages_before: int
     messages_after: int
     tokens_before: int
@@ -209,6 +358,12 @@ class ModelFallbackEvent:
 
     The swap is run-level: every subsequent turn uses ``to_model`` until the
     run ends or another overload escalates to the next fallback.
+
+    Args:
+        from_model: Model that became unavailable or overloaded.
+        to_model: Fallback model selected for subsequent turns.
+        reason: Optional reason for the fallback.
+        type: Wire discriminator for the event.
     """
 
     from_model: str
@@ -219,6 +374,17 @@ class ModelFallbackEvent:
 
 @dataclass(slots=True)
 class ContextBuildEvent:
+    """Record the context assembled for a provider request.
+
+    Args:
+        system_blocks: Number of system blocks selected.
+        messages: Number of conversation messages selected.
+        selected_tools: Tool names offered in the request.
+        budget: Context-budget accounting details.
+        metadata: Additional context-builder metadata.
+        type: Wire discriminator for the event.
+    """
+
     system_blocks: int
     messages: int
     selected_tools: list[str] | None
@@ -229,12 +395,29 @@ class ContextBuildEvent:
 
 @dataclass(slots=True)
 class SkillsLoadedEvent:
+    """Record the skills loaded for a request or session.
+
+    Args:
+        skills: Skill descriptors visible to the model.
+        type: Wire discriminator for the event.
+    """
+
     skills: list[dict[str, Any]]
     type: Literal["skills_loaded"] = "skills_loaded"
 
 
 @dataclass(slots=True)
 class SkillInvokedEvent:
+    """Record a skill invocation.
+
+    Args:
+        name: Invoked skill name.
+        args: Optional argument text supplied to the skill.
+        model_override: Optional model selected by the skill.
+        allowed_tools: Optional tool allowlist selected by the skill.
+        type: Wire discriminator for the event.
+    """
+
     name: str
     args: str | None = None
     model_override: str | None = None
@@ -244,6 +427,14 @@ class SkillInvokedEvent:
 
 @dataclass(slots=True)
 class SkillCompletedEvent:
+    """Record completion of a skill invocation.
+
+    Args:
+        name: Completed skill name.
+        is_error: Whether skill execution failed.
+        type: Wire discriminator for the event.
+    """
+
     name: str
     is_error: bool = False
     type: Literal["skill_completed"] = "skill_completed"
@@ -251,6 +442,17 @@ class SkillCompletedEvent:
 
 @dataclass(slots=True)
 class SubagentEvent:
+    """Wrap an event emitted by a subagent run.
+
+    Args:
+        parent_session_id: Session that spawned the subagent.
+        subagent_run_id: Run identifier of the subagent.
+        subagent_type: Subagent definition used for the run.
+        display_name: Human-readable subagent name.
+        event: Event emitted by the subagent.
+        type: Wire discriminator for the event.
+    """
+
     parent_session_id: str
     subagent_run_id: str
     subagent_type: str
@@ -261,7 +463,16 @@ class SubagentEvent:
 
 @dataclass(slots=True)
 class BackgroundWorkerEvent:
-    """Emitted when a background subagent worker is spawned or completes."""
+    """Record a background subagent worker state transition.
+
+    Args:
+        worker_id: Identifier assigned to the worker.
+        status: Worker state such as started, completed, failed, or aborted.
+        display_name: Human-readable worker name.
+        type: Wire discriminator for the event.
+    """
+
+    # The status string is intentionally open-ended for host-defined worker states.
 
     worker_id: str
     status: str  # "started" | "completed" | "failed" | "aborted" | "killed"
@@ -281,6 +492,12 @@ class LoopGuardEvent:
         action: What the loop did in response — ``"stop"`` (hard error
             termination) or ``"force_final"`` (one tools-disabled turn
             injected before stopping).
+
+    Args:
+        reason: Machine-readable trip condition.
+        detail: Human-readable trip description.
+        action: Loop action taken after the guard tripped.
+        type: Wire discriminator for the event.
     """
 
     reason: str
@@ -302,6 +519,13 @@ class VerificationEvent:
         feedback: The feedback or error message attached to the verdict.
         attempt: Retry attempts used so far in this run (1-based on the
             first retry; shared across all verifiers in the same run).
+
+    Args:
+        verifier: Name of the verifier that produced the action.
+        action: Verification action taken.
+        feedback: Feedback or error attached to the verdict.
+        attempt: Retry attempt count at emission time.
+        type: Wire discriminator for the event.
     """
 
     verifier: str
@@ -313,6 +537,16 @@ class VerificationEvent:
 
 @dataclass(slots=True)
 class HookEventRecord:
+    """Record a hook dispatch decision.
+
+    Args:
+        event: Lifecycle event name.
+        hook: Hook identifier.
+        action: Action returned by the hook.
+        reason: Optional explanation for the action.
+        type: Wire discriminator for the event.
+    """
+
     event: str
     hook: str
     action: str
@@ -322,11 +556,13 @@ class HookEventRecord:
 
 @dataclass(slots=True)
 class ScheduleEvent:
-    """Emitted when a :class:`~linch.Schedule` fires.
+    """Describe a schedule firing for event consumers.
 
-    The fired payload is also enqueued into ``session.pending_notifications`` and
-    surfaces as a ``UserEvent`` on the next turn (the same drain background
-    workers use). This event is the observability signal for the firing itself.
+    Args:
+        schedule_id: Schedule that fired.
+        status: Firing status.
+        payload: Payload associated with the firing.
+        type: Wire discriminator for the event.
     """
 
     schedule_id: str
@@ -361,8 +597,19 @@ class WorkflowEvent:
 
     The ``*_end`` and ``*_replayed`` records double as the resume journal:
     persisted to the run store, they let an unchanged ``wf.agent`` / ``wf.step``
-    call prefix replay cached results on resume.  A step's value is carried as
+    call prefix replay cached results on resume. A step's value is carried as
     JSON in ``result_text``.
+
+    Args:
+        kind: Workflow lifecycle kind.
+        title: Human-readable event title.
+        call_key: Stable key for the workflow call.
+        occurrence: Occurrence number for repeated calls.
+        subagent_type: Subagent type associated with the event.
+        result_text: Serialized step result, when present.
+        structured_output: Structured step result, when present.
+        structured_error: Error from structured result handling.
+        type: Wire discriminator for the event.
     """
 
     # Keep in lockstep with WORKFLOW_EVENT_KINDS above.
@@ -402,6 +649,11 @@ class PromptCacheAdvisoryEvent:
         reason: ``"tool_set_changed"`` (the tools leading the prefix changed) or
             ``"model_changed"`` (the cache is keyed per model).
         detail: Human-readable description of what changed and why it matters.
+
+    Args:
+        reason: Prefix-breaking change that invalidated the cache.
+        detail: Human-readable explanation of the change.
+        type: Wire discriminator for the event.
     """
 
     reason: Literal["tool_set_changed", "model_changed"]
@@ -411,6 +663,17 @@ class PromptCacheAdvisoryEvent:
 
 @dataclass(frozen=True, slots=True)
 class ReliabilityEvent:
+    """Record a reliability policy action during a run.
+
+    Args:
+        mechanism: Reliability mechanism that acted.
+        action: Action taken by the mechanism.
+        reason: Explanation for the action.
+        turn_index: Turn on which the action occurred.
+        correction_count: Number of corrections used so far.
+        type: Wire discriminator for the event.
+    """
+
     mechanism: str
     action: str
     reason: str
@@ -550,6 +813,10 @@ class IgnorableEvent:
     telemetry and forwarding carry it forward unchanged. An unknown event without
     the flag is still rejected — the flag is the producer's promise it is safe to
     skip. Ports dsh's "required-on-read unless ignorable" session-log rule.
+
+    Args:
+        original_type: Unknown wire type preserved by the sentinel.
+        raw: Original JSON event envelope.
     """
 
     original_type: str
@@ -564,7 +831,11 @@ class IgnorableEvent:
 
     @property
     def type(self) -> str:
-        """Return the original wire type for generic consumers such as reports."""
+        """Return the original wire type for generic consumers such as reports.
+
+        Returns:
+            The event's original wire discriminator.
+        """
 
         return self.original_type
 
@@ -603,102 +874,327 @@ Event: TypeAlias = (
 
 
 def is_system_event(e: Event) -> bool:
+    """Return whether an event is a system initialization event.
+
+    Args:
+        e: Event to inspect.
+
+    Returns:
+        Whether ``e.type`` identifies a system initialization event.
+    """
+
     return e.type == "system"  # type: ignore[comparison-overlap]
 
 
 def is_assistant_event(e: Event) -> bool:
+    """Return whether an event contains a completed assistant response.
+
+    Args:
+        e: Event to inspect.
+
+    Returns:
+        Whether ``e.type`` identifies a completed assistant response.
+    """
+
     return e.type == "assistant"  # type: ignore[comparison-overlap]
 
 
 def is_user_event(e: Event) -> bool:
+    """Return whether an event contains a user message.
+
+    Args:
+        e: Event to inspect.
+
+    Returns:
+        Whether ``e.type`` identifies a user message event.
+    """
+
     return e.type == "user"  # type: ignore[comparison-overlap]
 
 
 def is_partial_assistant_event(e: Event) -> bool:
+    """Return whether an event contains a streamed assistant delta.
+
+    Args:
+        e: Event to inspect.
+
+    Returns:
+        Whether ``e.type`` identifies a streamed assistant delta.
+    """
+
     return e.type == "partial_assistant"  # type: ignore[comparison-overlap]
 
 
 def is_tool_call_start_event(e: Event) -> bool:
+    """Return whether an event starts a tool call.
+
+    Args:
+        e: Event to inspect.
+
+    Returns:
+        Whether ``e.type`` identifies the start of a tool call.
+    """
+
     return e.type == "tool_call_start"  # type: ignore[comparison-overlap]
 
 
 def is_tool_call_end_event(e: Event) -> bool:
+    """Return whether an event ends a tool call.
+
+    Args:
+        e: Event to inspect.
+
+    Returns:
+        Whether ``e.type`` identifies the end of a tool call.
+    """
+
     return e.type == "tool_call_end"  # type: ignore[comparison-overlap]
 
 
 def is_tool_progress_event(e: Event) -> bool:
+    """Return whether an event reports tool progress.
+
+    Args:
+        e: Event to inspect.
+
+    Returns:
+        Whether ``e.type`` identifies tool progress.
+    """
+
     return e.type == "tool_progress"  # type: ignore[comparison-overlap]
 
 
 def is_permission_request_event(e: Event) -> bool:
+    """Return whether an event requests tool permission.
+
+    Args:
+        e: Event to inspect.
+
+    Returns:
+        Whether ``e.type`` identifies a permission request.
+    """
+
     return e.type == "permission_request"  # type: ignore[comparison-overlap]
 
 
 def is_usage_event(e: Event) -> bool:
+    """Return whether an event reports token usage.
+
+    Args:
+        e: Event to inspect.
+
+    Returns:
+        Whether ``e.type`` identifies a usage event.
+    """
+
     return e.type == "usage"  # type: ignore[comparison-overlap]
 
 
 def is_ignorable_event(e: Event) -> bool:
+    """Return whether an event is an unknown pass-through sentinel.
+
+    Args:
+        e: Event to inspect.
+
+    Returns:
+        Whether ``e`` is an :class:`IgnorableEvent` instance.
+    """
+
     return isinstance(e, IgnorableEvent)
 
 
 def is_model_call_event(e: Event) -> bool:
+    """Return whether an event records a model accounting operation.
+
+    Args:
+        e: Event to inspect.
+
+    Returns:
+        Whether ``e.type`` identifies a model accounting event.
+    """
+
     return e.type == "model_call"  # type: ignore[comparison-overlap]
 
 
 def is_budget_event(e: Event) -> bool:
+    """Return whether an event records a budget transition.
+
+    Args:
+        e: Event to inspect.
+
+    Returns:
+        Whether ``e.type`` identifies a budget transition.
+    """
+
     return e.type == "budget"  # type: ignore[comparison-overlap]
 
 
 def is_compaction_event(e: Event) -> bool:
+    """Return whether an event records context compaction.
+
+    Args:
+        e: Event to inspect.
+
+    Returns:
+        Whether ``e.type`` identifies context compaction.
+    """
+
     return e.type == "compaction"  # type: ignore[comparison-overlap]
 
 
 def is_context_build_event(e: Event) -> bool:
+    """Return whether an event records context assembly.
+
+    Args:
+        e: Event to inspect.
+
+    Returns:
+        Whether ``e.type`` identifies context assembly.
+    """
+
     return e.type == "context_build"  # type: ignore[comparison-overlap]
 
 
 def is_result_event(e: Event) -> bool:
+    """Return whether an event contains a terminal result.
+
+    Args:
+        e: Event to inspect.
+
+    Returns:
+        Whether ``e.type`` identifies a terminal result.
+    """
+
     return e.type == "result"  # type: ignore[comparison-overlap]
 
 
 def is_error_event(e: Event) -> bool:
+    """Return whether an event records an error.
+
+    Args:
+        e: Event to inspect.
+
+    Returns:
+        Whether ``e.type`` identifies an error event.
+    """
+
     return e.type == "error"  # type: ignore[comparison-overlap]
 
 
 def is_skills_loaded_event(e: Event) -> bool:
+    """Return whether an event lists loaded skills.
+
+    Args:
+        e: Event to inspect.
+
+    Returns:
+        Whether ``e.type`` identifies a loaded-skills event.
+    """
+
     return e.type == "skills_loaded"  # type: ignore[comparison-overlap]
 
 
 def is_skill_invoked_event(e: Event) -> bool:
+    """Return whether an event records a skill invocation.
+
+    Args:
+        e: Event to inspect.
+
+    Returns:
+        Whether ``e.type`` identifies a skill invocation.
+    """
+
     return e.type == "skill_invoked"  # type: ignore[comparison-overlap]
 
 
 def is_skill_completed_event(e: Event) -> bool:
+    """Return whether an event records skill completion.
+
+    Args:
+        e: Event to inspect.
+
+    Returns:
+        Whether ``e.type`` identifies skill completion.
+    """
+
     return e.type == "skill_completed"  # type: ignore[comparison-overlap]
 
 
 def is_subagent_event(e: Event) -> bool:
+    """Return whether an event was emitted by a subagent.
+
+    Args:
+        e: Event to inspect.
+
+    Returns:
+        Whether ``e.type`` identifies a subagent event.
+    """
+
     return e.type == "subagent_event"  # type: ignore[comparison-overlap]
 
 
 def is_loop_guard_event(e: Event) -> bool:
+    """Return whether an event records a loop-guard action.
+
+    Args:
+        e: Event to inspect.
+
+    Returns:
+        Whether ``e.type`` identifies a loop-guard action.
+    """
+
     return e.type == "loop_guard"  # type: ignore[comparison-overlap]
 
 
 def is_verification_event(e: Event) -> bool:
+    """Return whether an event records a verification action.
+
+    Args:
+        e: Event to inspect.
+
+    Returns:
+        Whether ``e.type`` identifies a verification action.
+    """
+
     return e.type == "verification"  # type: ignore[comparison-overlap]
 
 
 def is_hook_event(e: Event) -> bool:
+    """Return whether an event records hook dispatch.
+
+    Args:
+        e: Event to inspect.
+
+    Returns:
+        Whether ``e.type`` identifies hook dispatch.
+    """
+
     return e.type == "hook"  # type: ignore[comparison-overlap]
 
 
 def is_workflow_event(e: Event) -> bool:
+    """Return whether an event records workflow progress.
+
+    Args:
+        e: Event to inspect.
+
+    Returns:
+        Whether ``e.type`` identifies workflow progress.
+    """
+
     return e.type == "workflow"  # type: ignore[comparison-overlap]
 
 
 def usage_to_dict(usage: Usage) -> dict[str, int]:
+    """Serialize token usage to a compact mapping.
+
+    Args:
+        usage: Usage record to encode.
+
+    Returns:
+        Mapping of usage counters.
+    """
+
     return {
         "input_tokens": usage.input_tokens,
         "output_tokens": usage.output_tokens,
@@ -708,6 +1204,15 @@ def usage_to_dict(usage: Usage) -> dict[str, int]:
 
 
 def usage_from_dict(raw: dict[str, Any]) -> Usage:
+    """Deserialize token usage from a mapping.
+
+    Args:
+        raw: Mapping containing usage counters.
+
+    Returns:
+        Parsed usage record, defaulting missing counters to zero.
+    """
+
     return Usage(
         input_tokens=int(raw.get("input_tokens", 0) or 0),
         output_tokens=int(raw.get("output_tokens", 0) or 0),
@@ -735,6 +1240,15 @@ def _is_json_serializable(value: Any) -> bool:
 
 
 def citation_to_dict(citation: Citation) -> dict[str, Any]:
+    """Serialize a tool citation to a JSON-compatible mapping.
+
+    Args:
+        citation: Citation to encode.
+
+    Returns:
+        Citation mapping with JSON-safe metadata.
+    """
+
     return {
         "id": citation.id,
         "source": citation.source,
@@ -746,6 +1260,15 @@ def citation_to_dict(citation: Citation) -> dict[str, Any]:
 
 
 def citation_from_dict(raw: dict[str, Any]) -> Citation:
+    """Deserialize a citation mapping.
+
+    Args:
+        raw: Mapping containing citation fields.
+
+    Returns:
+        Parsed citation with defaults for missing optional fields.
+    """
+
     return Citation(
         id=str(raw.get("id", "")),
         source=str(raw.get("source", "")),
@@ -757,6 +1280,15 @@ def citation_from_dict(raw: dict[str, Any]) -> Citation:
 
 
 def tool_result_to_dict(result: ToolResult) -> dict[str, Any]:
+    """Serialize a tool result for event persistence.
+
+    Args:
+        result: Tool result to encode.
+
+    Returns:
+        Wire-shaped tool-result mapping.
+    """
+
     out: dict[str, Any] = {
         "content": result.content,
         "summary": result.summary,
@@ -774,6 +1306,15 @@ def tool_result_to_dict(result: ToolResult) -> dict[str, Any]:
 
 
 def tool_result_from_dict(raw: dict[str, Any]) -> ToolResult:
+    """Deserialize a persisted tool-result mapping.
+
+    Args:
+        raw: Mapping containing tool-result fields.
+
+    Returns:
+        Parsed tool result.
+    """
+
     citations = []
     for item in raw.get("citations", []):
         if isinstance(item, dict):
@@ -795,6 +1336,15 @@ def tool_result_from_dict(raw: dict[str, Any]) -> ToolResult:
 
 
 def tool_attachment_to_dict(attachment: ToolAttachment) -> dict[str, Any]:
+    """Serialize a tool attachment to its canonical mapping.
+
+    Args:
+        attachment: Attachment to encode.
+
+    Returns:
+        Wire-shaped attachment mapping.
+    """
+
     normalized = normalize_tool_output(ToolOutput(value=None, attachments=[attachment]))
     assert isinstance(normalized, ToolOutput)
     item = normalized.attachments[0]
@@ -807,6 +1357,15 @@ def tool_attachment_to_dict(attachment: ToolAttachment) -> dict[str, Any]:
 
 
 def tool_attachment_from_dict(raw: dict[str, Any]) -> ToolAttachment:
+    """Deserialize a canonical tool attachment mapping.
+
+    Args:
+        raw: Mapping containing attachment fields.
+
+    Returns:
+        Normalized tool attachment.
+    """
+
     attachment = ToolAttachment(
         reference=raw.get("reference"),
         name=raw.get("name"),
@@ -819,7 +1378,14 @@ def tool_attachment_from_dict(raw: dict[str, Any]) -> ToolAttachment:
 
 
 def tool_output_to_dict(output: CanonicalToolOutput) -> dict[str, Any]:
-    """Encode canonical tool output without lossy JSON coercion."""
+    """Encode canonical tool output without lossy JSON coercion.
+
+    Args:
+        output: Canonical tool output to encode.
+
+    Returns:
+        Wire-shaped success or error mapping.
+    """
 
     normalized = normalize_tool_output(output)
     common = {
@@ -838,7 +1404,18 @@ def tool_output_to_dict(output: CanonicalToolOutput) -> dict[str, Any]:
 
 
 def tool_output_from_dict(raw: dict[str, Any]) -> CanonicalToolOutput:
-    """Decode a canonical output, rejecting malformed attachments and values."""
+    """Decode a canonical output, rejecting malformed attachments and values.
+
+    Args:
+        raw: Mapping containing a canonical output kind and payload.
+
+    Returns:
+        Normalized canonical tool output.
+
+    Raises:
+        ValueError: If attachments, the error message, normalized values, or
+            output kind are malformed.
+    """
 
     raw_attachments = raw.get("attachments", [])
     if not isinstance(raw_attachments, list):
@@ -873,6 +1450,14 @@ def tool_output_from_dict(raw: dict[str, Any]) -> CanonicalToolOutput:
 
 
 def event_to_dict(event: Event) -> dict[str, Any]:
+    """Serialize a typed event to its wire representation.
+
+    Args:
+        event: Event to encode.
+
+    Returns:
+        Wire-shaped event mapping.
+    """
     if isinstance(event, IgnorableEvent):
         # Re-serialize verbatim so a pass-through event round-trips unchanged.
         return _copy_ignorable_event_envelope(event.raw, original_type=event.original_type)
@@ -1185,6 +1770,19 @@ def _usage_complete(raw: dict[str, Any]) -> bool:
 
 
 def event_from_dict(raw: dict[str, Any]) -> Event:
+    """Deserialize a wire mapping into a typed event.
+
+    Args:
+        raw: Event mapping containing a supported type discriminator.
+
+    Returns:
+        Parsed event instance.
+
+    Raises:
+        ValueError: If an unknown non-ignorable type or invalid discriminator is
+            encountered, or if an explicitly ignorable envelope is malformed.
+        RuntimeError: If a model-call record violates its accounting contract.
+    """
     if not isinstance(raw, dict):
         raise ValueError("event must be an object")
     typ = raw.get("type")
