@@ -11,17 +11,38 @@ from uuid import uuid4
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from pgqueuer import Queries
 
+from ..loop.contracts import _principal_contract
+from ..permissions import Principal
+from ..profiles import Profile
 from ..run_stores.postgres import PostgresRunStore
 from ..storage._pg import _BorrowedPool
 
 
 @dataclass(frozen=True, slots=True)
 class RunRequest:
+    """Describe one queued run and its optional pinned identity.
+
+    Args:
+        profile: Released definition whose identity reference is persisted.
+        principal: Tenant/user identity restored by the worker.
+    """
+
     session_id: str
     prompt: str
     run_id: str = field(default_factory=lambda: str(uuid4()))
     queue: str | None = None
     meta: dict[str, object] = field(default_factory=dict)
+    profile: Profile | None = None
+    principal: Principal | None = None
+
+
+def _request_refs(request: RunRequest) -> dict[str, object]:
+    refs: dict[str, object] = {}
+    if request.profile is not None:
+        refs["profile"] = request.profile._contract()
+    if request.principal is not None:
+        refs["principal"] = _principal_contract(request.principal)
+    return refs
 
 
 def _entrypoint(queue: str | None) -> str:
@@ -80,7 +101,7 @@ async def _enqueue(conn: Any, requests: Sequence[RunRequest], traceparent: str |
             conn,
             request.session_id,
             id=request.run_id,
-            meta=request.meta,
+            meta={**request.meta, **_request_refs(request)},
         )
         if row is not None:
             inserted[request.run_id] = request
@@ -96,6 +117,7 @@ async def _enqueue(conn: Any, requests: Sequence[RunRequest], traceparent: str |
                         "prompt": r.prompt,
                         "queue": r.queue,
                         "traceparent": traceparent,
+                        **_request_refs(r),
                     },
                     allow_nan=False,
                 ).encode()
@@ -127,7 +149,31 @@ async def enqueue_run(
     run_id: str | None = None,
     queue: str | None = None,
     meta: dict[str, object] | None = None,
+    profile: Profile | None = None,
+    principal: Principal | None = None,
 ) -> str:
-    """Create one pending run and one PgQueuer job in the same transaction."""
-    request = RunRequest(session_id, prompt, run_id or str(uuid4()), queue, meta or {})
+    """Create one pending run and one PgQueuer job in the same transaction.
+
+    Args:
+        pool: Host-owned pool shared by run storage and the queue.
+        session_id: Conversation receiving this run.
+        prompt: User input appended when the worker starts the run.
+        run_id: Optional idempotency key for repeated submissions.
+        queue: Named fleet queue, or the default queue when omitted.
+        meta: Host routing metadata retained on the run.
+        profile: Released definition whose identity reference is persisted.
+        principal: Authorization identity restored by the worker.
+
+    Returns:
+        The assigned run ID, including when it was already enqueued.
+    """
+    request = RunRequest(
+        session_id,
+        prompt,
+        run_id or str(uuid4()),
+        queue,
+        meta or {},
+        profile,
+        principal,
+    )
     return (await enqueue_runs(pool, [request]))[0]

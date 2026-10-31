@@ -56,6 +56,7 @@ from .contracts import (
     _effective_final_tool_name,
     _exact_model_input_enabled,
     _principal_from_contract,
+    _principal_from_value,
 )
 from .finalize import (
     FinalizeCtx,
@@ -119,16 +120,37 @@ from .tool_batch import ToolBatchContext, run_tool_batch
 _MAX_FINAL_ANSWER_REENTRIES = 1
 
 
+def _adopt_pending_identity(record: RunRecord, opts: RunOptions) -> RunOptions:
+    """Keep queued profile and principal references stable during adoption."""
+    stored_profile = record.meta.get("profile")
+    requested_profile = opts.profile._contract() if opts.profile is not None else None
+    if stored_profile != requested_profile:
+        raise ConfigError(f"Cannot adopt pending run {record.id}: profile reference mismatch")
+    raw_principal = record.meta.get("principal")
+    if raw_principal is None:
+        return opts
+    stored_principal = _principal_from_value(raw_principal)
+    if opts.principal is None:
+        return replace(opts, principal=stored_principal)
+    if opts.principal != stored_principal:
+        raise ConfigError(f"Cannot adopt pending run {record.id}: principal reference mismatch")
+    return opts
+
+
 async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIterator[Event]:
     opts = replace(opts)
     store = session.agent.run_store
-    if store is not None and opts.run_id is not None and opts.principal is None:
+    if store is not None and opts.run_id is not None:
         existing = await durable_call(session, "run.load_run", store.load_run(opts.run_id))
-        if existing is not None and "run_contract" in existing.meta:
-            stored = run_contract_from_meta(existing.meta)
-            principal = _principal_from_contract(stored)
-            if principal is not None:
-                opts = replace(opts, principal=principal)
+        if existing is not None:
+            if "run_contract" in existing.meta:
+                stored = run_contract_from_meta(existing.meta)
+                if opts.principal is None:
+                    principal = _principal_from_contract(stored)
+                    if principal is not None:
+                        opts = replace(opts, principal=principal)
+            elif existing.status == "pending":
+                opts = _adopt_pending_identity(existing, opts)
     if _exact_model_input_enabled(session.agent):
         _require_model_input_snapshot_store(session.agent)
     await session.agent._ensure_provider_prepared()
