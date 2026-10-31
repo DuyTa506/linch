@@ -180,6 +180,9 @@ to every factory. Per-job adapters add churn; unverified per-job pool handles
 also repeat schema initialization and advisory locking. Agent teardown preserves
 these shared adapters and leaves the host pool open. The host closes its real
 pool after workers have drained.
+For a dedicated stateless Linch pool, use `asyncpg.create_pool(..., reset=reset_connection)` with `async def reset_connection(conn): pass`.
+asyncpg retains internal transaction cleanup; Worker closes its LISTEN connection when its manager ends.
+This callback is unsafe for pools shared with application code that changes session state or registers listeners.
 
 A worker reconnects after transient database or listener failure, with local
 exponential jitter capped at two seconds. Each retry rebuilds the manager and

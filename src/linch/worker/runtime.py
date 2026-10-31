@@ -17,7 +17,10 @@ import asyncpg
 from opentelemetry import context as otel_context
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from pgqueuer import DatabaseRetryEntrypointExecutor, Job, Queries, QueueManager
+from pgqueuer.adapters.drivers.asyncpg import AsyncpgDriver
+from pgqueuer.domain.models import AnyEvent, TableChangedEvent
 from pgqueuer.errors import FailingListenerError
+from pgqueuer.ports.driver import NotifyCallback
 
 from ..agent import Agent
 from ..events import ErrorEvent, ModelCallEvent, ResultEvent
@@ -82,6 +85,41 @@ def _positive(value: float, name: str) -> float:
     return value
 
 
+@dataclass(frozen=True, slots=True)
+class _WakeCallback:
+    callback: NotifyCallback
+    completion_wakes: bool
+
+    def __call__(self, payload: str | bytes | bytearray) -> None:
+        if not self.completion_wakes:
+            try:
+                event = AnyEvent.model_validate_json(payload).root
+            except ValueError:
+                self.callback(payload)  # Preserve the upstream parser's diagnostics.
+                return
+            if isinstance(event, TableChangedEvent) and event.operation in ("delete", "truncate"):
+                return
+        self.callback(payload)
+
+
+class _WorkerDriver(AsyncpgDriver):
+    def __init__(self, connection: Any, completion_wakes: bool) -> None:
+        super().__init__(connection)
+        self.completion_wakes = completion_wakes
+
+    async def add_listener(self, channel: str, callback: NotifyCallback) -> None:
+        await super().add_listener(channel, _WakeCallback(callback, self.completion_wakes))
+
+    async def remove_listener(self, channel: str, callback: NotifyCallback) -> None:
+        await super().remove_listener(channel, _WakeCallback(callback, self.completion_wakes))
+
+
+class _WorkerQueueManager(QueueManager):
+    async def _effective_dequeue_timeout(self, dequeue_timeout: timedelta) -> timedelta:
+        # PgQueuer 1.6 private hook: deferred/retry/stale work uses Worker polling.
+        return dequeue_timeout
+
+
 class Worker:
     """A fleet member. The host owns its asyncpg pool and process lifecycle.
 
@@ -125,7 +163,9 @@ class Worker:
                 raise ValueError("concurrency_limit must be a non-negative integer")
 
     def _make_manager(self, connection: Any) -> QueueManager:
-        manager = QueueManager(Queries.from_asyncpg_connection(connection))
+        manager = _WorkerQueueManager(
+            Queries(_WorkerDriver(connection, completion_wakes=any(self._limits.values())))
+        )
         for queue, limit in self._limits.items():
             manager.entrypoint(
                 _entrypoint(queue),
@@ -135,7 +175,7 @@ class Worker:
             )(self._handle)
         manager.entrypoint(
             "linch.schedule",
-            concurrency_limit=1,
+            concurrency_limit=0,
             executor_factory=self._executor,
             on_failure="hold",
         )(self._fire)
