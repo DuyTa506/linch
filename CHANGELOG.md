@@ -7,6 +7,8 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
 
 ## Unreleased
 
+- Migrate Gemini and Vertex AI to `google-genai`, preserving streaming tools and structured output, with native thinking, signed-part replay, token accounting, typed errors and async transport cleanup.
+
 - Reconnect workers after transient database outages with bounded jitter, a fresh
   queue/LISTEN connection per manager cycle, and cancellation-safe callback drain.
 
