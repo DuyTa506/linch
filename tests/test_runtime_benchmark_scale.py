@@ -34,6 +34,19 @@ def test_postgres_scale_cases_skip_without_dsn(monkeypatch):
     assert benchmark.scale_case_skip_reason(case) == "AGENT_KIT_TEST_PG_DSN not set"
 
 
+def test_scale_schema_prefix_accepts_only_owned_schema_names():
+    benchmark = _load_script()
+    prefix = benchmark._new_scale_schema_prefix()
+    assert benchmark._owned_scale_schema(prefix + "case", prefix)
+    assert not benchmark._owned_scale_schema(prefix[:-1] + "other", prefix)
+    assert not benchmark._owned_scale_schema("linch_scale_deadbeef_case", prefix)
+    schema = benchmark._scale_schema_name(
+        prefix, benchmark.ScaleCase("scale_postgres_1000x4", "postgres", 1000, 4)
+    )
+    assert schema == f"{prefix}postgres_1000x4"
+    assert len(schema) <= 63
+
+
 def test_lean_profile_disables_repeated_payload_encoding(monkeypatch):
     monkeypatch.setenv("LINCH_SCALE_PROFILE_LEAN", "1")
     lean = _load_script()
@@ -52,8 +65,6 @@ def test_scale_metrics_separates_payload_bytes_and_sql_round_trips():
     metrics.session_payloads[0].append(11)
     metrics.sql_round_trips["run", 0] = 9
     metrics.transaction_commands["run", 0] = 3
-    metrics.pool_acquires["run", 0] = 3
-    metrics.pool_releases["run", 0] = 3
 
     writes, checkpoint = metrics.summaries(turns=1)
     assert writes["total"] == 0
@@ -65,18 +76,11 @@ def test_scale_metrics_separates_payload_bytes_and_sql_round_trips():
         "application_statements": 6,
         "transaction_commands": 3,
         "pool_reset_commands": 0,
-        "pool_acquires": 3,
-        "pool_releases": 3,
         "protocol_exchanges": 0,
         "protocol_exchanges_per_provider_turn": 0.0,
-        "protocol_by_method": {},
         "protocol_transaction_commands": 0,
         "protocol_failures": 0,
         "per_provider_turn": 9.0,
-        "definition": "round_trips counts supporting connection command/reset calls; "
-        "protocol_exchanges counts attempted asyncpg protocol cycles (query, prepare, "
-        "bind_execute, bind_execute_many, execute, and close_statement) after schema "
-        "setup; transaction and pool-reset categories are broken out",
     }
 
 
@@ -106,12 +110,9 @@ async def test_postgres_protocol_instrumentation_distinguishes_cold_cache_and_bo
         max_size=1,
         connection_class=benchmark._instrument_connection_class(metrics, "run"),
     )
-    wrapped = benchmark._CountingPool(
-        pool, metrics, "run", benchmark._instrument_connection_protocol
-    )
     try:
         metrics.reset_round_trip_metrics()
-        async with wrapped.acquire() as connection:
+        async with pool.acquire() as connection:
             await connection.fetchval("SELECT $1::integer", 1)
             cold_prepare = sum(
                 count
@@ -374,47 +375,48 @@ async def test_scale_subprocess_hard_deadline_reports_observed_work():
 
 
 @pytest.mark.asyncio
-async def test_postgres_timeout_drops_child_schema_after_create_before_close(
-    pg_dsn, tmp_path, monkeypatch
-):
+async def test_postgres_schema_prefix_sweep_drops_only_owned_names(pg_dsn):
     benchmark = _load_script()
     import asyncpg
 
-    created_marker = tmp_path / "created-schema"
-    monkeypatch.setenv("LINCH_SCALE_BLOCK_AFTER_CREATE", str(created_marker))
+    prefix = benchmark._new_scale_schema_prefix()
+    orphan_prefix = benchmark._new_scale_schema_prefix()
+    owned = [prefix + "first", prefix + "second"]
+    orphan = orphan_prefix + "orphan"
+    malformed = prefix + "bad-name"
+    unrelated = "linch_scale_deadbeef_unrelated"
+    names = [*owned, orphan, malformed, unrelated]
+    connection = await asyncpg.connect(pg_dsn)
+    try:
+        for name in names:
+            await connection.execute(f'CREATE SCHEMA "{name}"')
+    finally:
+        await connection.close()
 
-    async def scale_schemas(connection):
-        return {
-            row["nspname"]
-            for row in await connection.fetch(
-                "SELECT nspname FROM pg_namespace WHERE nspname LIKE 'linch_scale_%'"
-            )
+    try:
+        await benchmark._sweep_postgres_schemas(pg_dsn)
+        connection = await asyncpg.connect(pg_dsn)
+        try:
+            exists = {
+                name: await connection.fetchval(
+                    "SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1)", name
+                )
+                for name in names
+            }
+        finally:
+            await connection.close()
+        assert exists == {
+            **dict.fromkeys([*owned, orphan], False),
+            malformed: True,
+            unrelated: True,
         }
-
-    connection = await asyncpg.connect(pg_dsn)
-    try:
-        before = await scale_schemas(connection)
-        unrelated_schema = await connection.fetchval("SELECT current_schema()")
     finally:
-        await connection.close()
-
-    result = await benchmark.run_scale_subprocess(
-        benchmark.ScaleCase("timeout_postgres", "postgres", sessions=1, turns=4),
-        timeout_s=1.0,
-    )
-    assert result["timed_out"] is True
-    assert created_marker.read_text() == result["postgres_schema"]
-
-    connection = await asyncpg.connect(pg_dsn)
-    try:
-        after = await scale_schemas(connection)
-        unrelated_exists = await connection.fetchval(
-            "SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1)", unrelated_schema
-        )
-    finally:
-        await connection.close()
-    assert after == before
-    assert unrelated_exists is True
+        connection = await asyncpg.connect(pg_dsn)
+        try:
+            for name in [malformed, unrelated]:
+                await connection.execute(f'DROP SCHEMA IF EXISTS "{name}" CASCADE')
+        finally:
+            await connection.close()
 
 
 @pytest.mark.asyncio

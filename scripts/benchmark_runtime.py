@@ -427,7 +427,6 @@ def build_scale_cases() -> dict[str, ScaleCase]:
 
 
 def scale_case_skip_reason(case: ScaleCase) -> str | None:
-    """Return why an optional production-backend case cannot run locally."""
     if case.backend != "postgres":
         return None
     if not os.environ.get("AGENT_KIT_TEST_PG_DSN"):
@@ -439,128 +438,72 @@ def scale_case_skip_reason(case: ScaleCase) -> str | None:
     return None
 
 
-_SCALE_SCHEMA = re.compile(r"linch_scale_[0-9a-f]{32}\Z")
+_SCHEMA_PREFIX = re.compile(r"linch_scale_[0-9a-f]{32}_\Z")
+_SCHEMA_SUFFIX = re.compile(r"[a-z0-9_]+\Z")
+_SCHEMA_NAME = re.compile(r"linch_scale_[0-9a-f]{32}_[a-z0-9_]+\Z")
 
 
-def _new_scale_schema() -> str:
-    return f"linch_scale_{uuid4().hex}"
+def _new_scale_schema_prefix() -> str:
+    return f"linch_scale_{uuid4().hex}_"
 
 
-async def _drop_postgres_schema(raw_dsn: str, schema: str) -> None:
-    """Drop exactly one validated scale schema using the unscoped DSN."""
-    import asyncpg
+def _owned_scale_schema(name: str, prefix: str) -> bool:
+    return (
+        bool(_SCHEMA_PREFIX.fullmatch(prefix))
+        and name.startswith(prefix)
+        and bool(_SCHEMA_SUFFIX.fullmatch(name[len(prefix) :]))
+    )
 
-    if _SCALE_SCHEMA.fullmatch(schema) is None:
-        raise ValueError(f"invalid benchmark schema: {schema!r}")
+
+def _base_dsn(raw_dsn: str) -> str:
     parts = urlsplit(raw_dsn)
-    base_query = [
+    query = [
         (key, value)
         for key, value in parse_qsl(parts.query, keep_blank_values=True)
         if key != "search_path"
     ]
-    base_dsn = urlunsplit(parts._replace(query=urlencode(base_query)))
-    connection = await asyncpg.connect(base_dsn)
+    return urlunsplit(parts._replace(query=urlencode(query)))
+
+
+async def _sweep_postgres_schemas(raw_dsn: str, prefix: str | None = None) -> None:
+    import asyncpg
+
+    if prefix is not None and not _SCHEMA_PREFIX.fullmatch(prefix):
+        raise ValueError(f"invalid benchmark schema prefix: {prefix!r}")
+    connection = await asyncpg.connect(_base_dsn(raw_dsn))
     try:
-        await connection.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        names = await connection.fetch(
+            "SELECT nspname FROM pg_namespace WHERE nspname LIKE $1",
+            f"{prefix}%" if prefix is not None else "linch_scale_%",
+        )
+        for row in names:
+            name = str(row["nspname"])
+            if _SCHEMA_NAME.fullmatch(name) and (prefix is None or name.startswith(prefix)):
+                await connection.execute(f'DROP SCHEMA "{name}" CASCADE')
     finally:
         await connection.close()
 
 
-async def _fresh_postgres_dsn(
-    raw_dsn: str,
-    *,
-    schema: str | None = None,
-) -> tuple[str, Callable[[], Awaitable[None]], str]:
-    """Create an isolated schema for one scale child and return its DSN."""
+def _scale_schema_name(prefix: str, case: ScaleCase) -> str:
+    suffix = re.sub(r"[^a-z0-9_]+", "_", f"{case.backend}_{case.sessions}x{case.turns}".lower())
+    name = f"{prefix}{suffix}"
+    if not _owned_scale_schema(name, prefix) or len(name) > 63:
+        raise ValueError(f"invalid benchmark schema name: {name!r}")
+    return name
+
+
+async def _fresh_postgres_dsn(raw_dsn: str, prefix: str, case: ScaleCase) -> str:
     import asyncpg
 
-    parts = urlsplit(raw_dsn)
-    base_query = [(key, value) for key, value in parse_qsl(parts.query) if key != "search_path"]
-    base_dsn = urlunsplit(parts._replace(query=urlencode(base_query)))
-    schema = schema or _new_scale_schema()
-    if _SCALE_SCHEMA.fullmatch(schema) is None:
-        raise ValueError(f"invalid benchmark schema: {schema!r}")
-    connection = await asyncpg.connect(base_dsn)
-    created = False
+    schema = _scale_schema_name(prefix, case)
+    connection = await asyncpg.connect(_base_dsn(raw_dsn))
     try:
-        try:
-            await connection.execute(f'CREATE SCHEMA "{schema}"')
-            created = True
-            block_path = os.environ.get("LINCH_SCALE_BLOCK_AFTER_CREATE")
-            if block_path:
-                Path(block_path).write_text(schema)
-                while True:
-                    await asyncio.sleep(0.1)
-        finally:
-            await connection.close()
-    except BaseException as exc:
-        # A failed close after CREATE, or a cancellation during setup, must not
-        # leave a benchmark schema behind.  Preserve the original failure while
-        # annotating it if best-effort cleanup also fails.
-        if created:
-            try:
-                await _drop_postgres_schema(base_dsn, schema)
-            except BaseException as cleanup_exc:
-                exc.add_note(f"failed to clean up benchmark schema {schema}: {cleanup_exc!r}")
-        raise
-    query = [*base_query, ("search_path", schema)]
-    scoped_dsn = urlunsplit(parts._replace(query=urlencode(query)))
-
-    async def cleanup() -> None:
-        await _drop_postgres_schema(base_dsn, schema)
-
-    return scoped_dsn, cleanup, schema
-
-
-async def _close_postgres_benchmark_resources(
-    session_pool: Any | None,
-    run_pool: Any | None,
-    postgres_cleanup: Callable[[], Awaitable[None]] | None,
-) -> BaseException | None:
-    """Close benchmark pools and schema, retaining the first cleanup failure."""
-    first_error: BaseException | None = None
-    for pool in (run_pool, session_pool):
-        if pool is None:
-            continue
-        try:
-            await pool.close()
-        except BaseException as exc:
-            if first_error is None:
-                first_error = exc
-            try:
-                pool.terminate()
-            except BaseException:
-                pass
-    if postgres_cleanup is not None:
-        try:
-            await postgres_cleanup()
-        except BaseException as exc:
-            if first_error is None:
-                first_error = exc
-    return first_error
-
-
-def _write_scale_schema_marker(progress_path: Path | None, case: ScaleCase, schema: str) -> None:
-    """Publish the validated schema ID before any child resource can block."""
-    if progress_path is None:
-        return
-    marker = {
-        "name": case.name,
-        "backend": case.backend,
-        "sessions": case.sessions,
-        "turns": case.turns,
-        "postgres_schema": schema,
-        "pid": os.getpid(),
-        "completed": 0,
-        "failed": 0,
-        "errors": [],
-        "observed_provider_turns": 0,
-        "observed_tool_calls": 0,
-        "timed_out": False,
-    }
-    temporary = progress_path.with_suffix(".schema.tmp")
-    temporary.write_text(json.dumps(marker, allow_nan=False))
-    temporary.replace(progress_path)
+        await connection.execute(f'CREATE SCHEMA "{schema}"')
+    finally:
+        await connection.close()
+    parts = urlsplit(_base_dsn(raw_dsn))
+    query = [*parse_qsl(parts.query, keep_blank_values=True), ("search_path", schema)]
+    return urlunsplit(parts._replace(query=urlencode(query)))
 
 
 class ScaleProvider:
@@ -639,28 +582,22 @@ class ScaleStoreMetrics:
         self.sql_round_trips: Counter[tuple[str, int]] = Counter()
         self.transaction_commands: Counter[tuple[str, int]] = Counter()
         self.pool_reset_commands: Counter[tuple[str, int]] = Counter()
-        self.pool_acquires: Counter[tuple[str, int]] = Counter()
-        self.pool_releases: Counter[tuple[str, int]] = Counter()
         self.protocol_exchanges: Counter[tuple[str, int, str]] = Counter()
         self.protocol_transaction_commands: Counter[tuple[str, int]] = Counter()
         self.protocol_failures: Counter[tuple[str, int, str]] = Counter()
 
     def reset_round_trip_metrics(self) -> None:
-        self.sql_round_trips.clear()
-        self.transaction_commands.clear()
-        self.pool_reset_commands.clear()
-        self.pool_acquires.clear()
-        self.pool_releases.clear()
-        self.protocol_exchanges.clear()
-        self.protocol_transaction_commands.clear()
-        self.protocol_failures.clear()
+        for counter in (
+            self.sql_round_trips,
+            self.transaction_commands,
+            self.pool_reset_commands,
+            self.protocol_exchanges,
+            self.protocol_transaction_commands,
+            self.protocol_failures,
+        ):
+            counter.clear()
 
-    def record_protocol_exchange(
-        self,
-        store: str,
-        method: str,
-        query: object = None,
-    ) -> None:
+    def record_protocol_exchange(self, store: str, method: str, query: object = None) -> None:
         turn = self.turn.get()
         self.protocol_exchanges[store, turn, method] += 1
         if method == "query" and str(query or "").lstrip().upper().startswith(
@@ -694,15 +631,7 @@ class ScaleStoreMetrics:
 
         def byte_summary(values: dict[int, list[int]]) -> dict[str, Any]:
             by_turn = [
-                {
-                    "turn": turn,
-                    "count": len(sizes),
-                    "total": sum(sizes),
-                    "mean": statistics.mean(sizes),
-                    "min": min(sizes),
-                    "max": max(sizes),
-                }
-                for turn, sizes in sorted(values.items())
+                {"turn": turn, **sizes_summary(sizes)} for turn, sizes in sorted(values.items())
             ]
             total = sum(row["total"] for row in by_turn)
             return {
@@ -742,80 +671,33 @@ class ScaleStoreMetrics:
 
     def round_trip_summary(self, *, turns: int) -> dict[str, Any]:
         stores = sorted(
-            {store for store, _turn in self.sql_round_trips}
-            | {store for store, _turn, _method in self.protocol_exchanges}
+            {store for store, _ in self.sql_round_trips}
+            | {store for store, _, _ in self.protocol_exchanges}
         )
-        by_store: dict[str, dict[str, Any]] = {}
-        for store in stores:
-            statement_calls = sum(
-                count for (name, _turn), count in self.sql_round_trips.items() if name == store
-            )
-            transaction_commands = sum(
-                count for (name, _turn), count in self.transaction_commands.items() if name == store
-            )
-            pool_reset_commands = sum(
-                count for (name, _turn), count in self.pool_reset_commands.items() if name == store
-            )
-            acquires = sum(
-                count for (name, _turn), count in self.pool_acquires.items() if name == store
-            )
-            releases = sum(
-                count for (name, _turn), count in self.pool_releases.items() if name == store
-            )
-            protocol_by_method = {
-                method: sum(
-                    count
-                    for (name, _turn, row_method), count in self.protocol_exchanges.items()
-                    if name == store and row_method == method
-                )
-                for name, _turn, method in self.protocol_exchanges
-                if name == store
-            }
-            protocol_exchanges = sum(protocol_by_method.values())
-            protocol_transaction_commands = sum(
-                count
-                for (name, _turn), count in self.protocol_transaction_commands.items()
-                if name == store
-            )
-            protocol_failures = sum(
-                count
-                for (name, _turn, _method), count in self.protocol_failures.items()
-                if name == store
-            )
-            by_store[store] = {
-                # The supporting command counter includes one call for reset;
-                # its underlying reset query is counted independently by the
-                # protocol proxy, so this does not double-count that metric.
+
+        def total(counter: Counter[Any], store: str) -> int:
+            return sum(value for key, value in counter.items() if key[0] == store)
+
+        def summary(store: str) -> dict[str, Any]:
+            statement_calls = total(self.sql_round_trips, store)
+            txns = total(self.transaction_commands, store)
+            resets = total(self.pool_reset_commands, store)
+            protocol_txns = total(self.protocol_transaction_commands, store)
+            failures = total(self.protocol_failures, store)
+            protocol_total = total(self.protocol_exchanges, store)
+            return {
                 "round_trips": statement_calls,
-                "application_statements": statement_calls
-                - transaction_commands
-                - pool_reset_commands,
-                "transaction_commands": transaction_commands,
-                "pool_reset_commands": pool_reset_commands,
-                "pool_acquires": acquires,
-                "pool_releases": releases,
-                "protocol_exchanges": protocol_exchanges,
-                "protocol_exchanges_per_provider_turn": (
-                    protocol_exchanges / turns if turns else None
-                ),
-                "protocol_by_method": protocol_by_method,
-                "protocol_transaction_commands": protocol_transaction_commands,
-                "protocol_failures": protocol_failures,
+                "application_statements": statement_calls - txns - resets,
+                "transaction_commands": txns,
+                "pool_reset_commands": resets,
+                "protocol_exchanges": protocol_total,
+                "protocol_exchanges_per_provider_turn": protocol_total / turns if turns else None,
+                "protocol_transaction_commands": protocol_txns,
+                "protocol_failures": failures,
                 "per_provider_turn": statement_calls / turns if turns else None,
-                "definition": "round_trips counts supporting connection command/reset calls; "
-                "protocol_exchanges counts attempted asyncpg protocol cycles (query, prepare, "
-                "bind_execute, bind_execute_many, execute, and close_statement) after schema "
-                "setup; transaction and pool-reset categories are broken out",
             }
-        by_turn = []
-        for turn in sorted({turn for _store, turn in self.sql_round_trips}):
-            statement_calls = sum(
-                count
-                for (_store, row_turn), count in self.sql_round_trips.items()
-                if row_turn == turn
-            )
-            by_turn.append({"turn": turn, "round_trips": statement_calls})
-        return {"by_store": by_store, "by_turn": by_turn}
+
+        return {"by_store": {store: summary(store) for store in stores}}
 
 
 def _instrument_connection_protocol(
@@ -839,136 +721,59 @@ def _instrument_connection_protocol(
                 else (args[0] if method == "query" and args else None)
             )
             metrics.record_protocol_exchange(store, method, query)
+            if method in {"bind_execute", "bind_execute_many", "execute"}:
+                metrics.sql_round_trips[store, metrics.turn.get()] += 1
+            elif method == "query" and str(query or "").lstrip().upper().startswith(
+                ("BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT")
+            ):
+                metrics.sql_round_trips[store, metrics.turn.get()] += 1
+                metrics.transaction_commands[store, metrics.turn.get()] += 1
             try:
                 return await getattr(self.inner, method)(*args, **kwargs)
             except BaseException:
                 metrics.protocol_failures[store, metrics.turn.get(), method] += 1
                 raise
 
-        async def prepare(self, *args: Any, **kwargs: Any) -> Any:
-            return await self._call("prepare", *args, **kwargs)
-
-        async def bind_execute(self, *args: Any, **kwargs: Any) -> Any:
-            return await self._call("bind_execute", *args, **kwargs)
-
-        async def bind_execute_many(self, *args: Any, **kwargs: Any) -> Any:
-            return await self._call("bind_execute_many", *args, **kwargs)
-
-        async def execute(self, *args: Any, **kwargs: Any) -> Any:
-            return await self._call("execute", *args, **kwargs)
-
-        async def query(self, *args: Any, **kwargs: Any) -> Any:
-            return await self._call("query", *args, **kwargs)
-
-        async def close_statement(self, *args: Any, **kwargs: Any) -> Any:
-            return await self._call("close_statement", *args, **kwargs)
-
         def __getattr__(self, name: str) -> Any:
             return getattr(self.inner, name)
 
+    def wrapper(method: str) -> Callable[..., Awaitable[Any]]:
+        async def call(self: Any, *args: Any, **kwargs: Any) -> Any:
+            return await self._call(method, *args, **kwargs)
+
+        return call
+
+    for method in (
+        "prepare",
+        "bind_execute",
+        "bind_execute_many",
+        "execute",
+        "query",
+        "close_statement",
+    ):
+        setattr(ProtocolProxy, method, wrapper(method))
     connection._protocol = ProtocolProxy(protocol)
 
 
 def _instrument_connection_class(metrics: ScaleStoreMetrics, store: str) -> Any:
     import asyncpg
 
-    reset_depth: ContextVar[bool] = ContextVar(f"wp8_reset_{store}", default=False)
-
     class InstrumentedConnection(asyncpg.Connection):
-        def _record_command(self, *, transaction: bool = False) -> None:
-            turn = metrics.turn.get()
-            metrics.sql_round_trips[store, turn] += 1
-            if transaction:
-                metrics.transaction_commands[store, turn] += 1
-
-        async def execute(self, *args: Any, **kwargs: Any) -> Any:
-            if not reset_depth.get():
-                query = str(args[0] if args else kwargs.get("query", "")).lstrip().upper()
-                transaction = query.startswith(("BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT"))
-                self._record_command(transaction=transaction)
-            return await super().execute(*args, **kwargs)
-
-        async def executemany(self, *args: Any, **kwargs: Any) -> Any:
-            self._record_command()
-            return await super().executemany(*args, **kwargs)
-
-        async def fetch(self, *args: Any, **kwargs: Any) -> Any:
-            self._record_command()
-            return await super().fetch(*args, **kwargs)
-
-        async def fetchrow(self, *args: Any, **kwargs: Any) -> Any:
-            self._record_command()
-            return await super().fetchrow(*args, **kwargs)
-
-        async def fetchval(self, *args: Any, **kwargs: Any) -> Any:
-            self._record_command()
-            return await super().fetchval(*args, **kwargs)
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            _instrument_connection_protocol(self, metrics, store)
 
         async def reset(self, *args: Any, **kwargs: Any) -> Any:
-            token = reset_depth.set(True)
-            try:
-                turn = metrics.turn.get()
-                metrics.pool_reset_commands[store, turn] += 1
-                metrics.sql_round_trips[store, turn] += 1
-                return await super().reset(*args, **kwargs)
-            finally:
-                reset_depth.reset(token)
+            turn = metrics.turn.get()
+            metrics.pool_reset_commands[store, turn] += 1
+            metrics.sql_round_trips[store, turn] += 1
+            return await super().reset(*args, **kwargs)
 
     return InstrumentedConnection
 
 
-class _CountingAcquire:
-    def __init__(
-        self,
-        inner: Any,
-        metrics: ScaleStoreMetrics,
-        store: str,
-        instrument: Callable[[Any, ScaleStoreMetrics, str], None],
-    ) -> None:
-        self.inner, self.metrics, self.store, self.instrument = inner, metrics, store, instrument
-
-    async def __aenter__(self) -> Any:
-        connection = await self.inner.__aenter__()
-        # asyncpg exposes a PoolConnectionProxy from ``Pool.acquire()``.  The
-        # protocol is owned by its private underlying Connection, so install
-        # the benchmark-only proxy there while returning the normal public
-        # connection proxy to callers.
-        self.instrument(getattr(connection, "_con", connection), self.metrics, self.store)
-        turn = self.metrics.turn.get()
-        self.metrics.pool_acquires[self.store, turn] += 1
-        self.connection = connection
-        return connection
-
-    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> Any:
-        turn = self.metrics.turn.get()
-        self.metrics.pool_releases[self.store, turn] += 1
-        return await self.inner.__aexit__(exc_type, exc, tb)
-
-
-class _CountingPool:
-    def __init__(
-        self,
-        inner: Any,
-        metrics: ScaleStoreMetrics,
-        store: str,
-        instrument: Callable[[Any, ScaleStoreMetrics, str], None],
-    ) -> None:
-        self.inner, self.metrics, self.store, self.instrument = inner, metrics, store, instrument
-
-    def acquire(self, *args: Any, **kwargs: Any) -> _CountingAcquire:
-        return _CountingAcquire(
-            self.inner.acquire(*args, **kwargs), self.metrics, self.store, self.instrument
-        )
-
-    async def close(self) -> None:
-        await self.inner.close()
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self.inner, name)
-
-
 class MeasuredStore:
-    """Expose exactly the wrapped store's capabilities, avoiding internal double counts."""
+    """Benchmark-only accounting wrapper; it preserves the store API surface."""
 
     _mutations = {
         "session": {
@@ -990,6 +795,7 @@ class MeasuredStore:
         "run": {
             "create_run",
             "save_checkpoint",
+            "save_checkpoint_with_events",
             "append_event",
             "append_events",
             "mark_completed",
@@ -1004,56 +810,19 @@ class MeasuredStore:
         self.inner, self.name, self.metrics = inner, name, metrics
 
     def __getattr__(self, name: str) -> Any:
-        method = getattr(self.inner, name)  # Missing optional capabilities stay missing.
-        if name == "save_checkpoint_with_events":
-            # Postgres exposes this optional capability as ``None`` when a
-            # subclass overrides one of the primitive methods it requires.
-            # Preserve that sentinel (and any other non-callable value) so
-            # callers see exactly the wrapped store's capability surface.
-            if method is None or not callable(method):
-                return method
-
-            async def measured_atomic(*args: Any, **kwargs: Any) -> Any:
-                checkpoint = args[1] if len(args) > 1 else kwargs.get("checkpoint")
-                turn = self.metrics.turn.get()
-                if checkpoint is not None:
-                    turn = (
-                        -1
-                        if checkpoint.phase in {"started", "user_appended"}
-                        else checkpoint.turn_index
-                    )
-                    if checkpoint.phase == "provider_pending":
-                        self.metrics.turn.set(turn)
-                events = args[2] if len(args) > 2 else kwargs.get("events", [])
-                result = await method(*args, **kwargs)
-                self.metrics.writes[self.name, name, turn] += 1
-                if self.metrics.capture_payload_bytes:
-                    self.metrics.event_payloads[turn].extend(
-                        len(
-                            json.dumps(_json_safe_stored_event(event), allow_nan=False).encode(
-                                "utf-8"
-                            )
-                        )
-                        for event in events
-                    )
-                    persisted = result[0].checkpoint
-                    if persisted is not None:
-                        size = len(
-                            json.dumps(checkpoint_to_dict(persisted), allow_nan=False).encode(
-                                "utf-8"
-                            )
-                        )
-                        self.metrics.payloads[turn, persisted.phase].append(size)
-                return result
-
-            return measured_atomic
+        method = getattr(self.inner, name)
         if name not in self._mutations[self.name]:
             return method
 
         async def measured(*args: Any, **kwargs: Any) -> Any:
             checkpoint = None
             turn = self.metrics.turn.get()
-            if self.name == "run" and name in {"save_checkpoint", "mark_completed", "mark_failed"}:
+            if self.name == "run" and name in {
+                "save_checkpoint",
+                "save_checkpoint_with_events",
+                "mark_completed",
+                "mark_failed",
+            }:
                 checkpoint = args[1] if len(args) > 1 else kwargs.get("checkpoint")
                 if checkpoint is not None:
                     turn = (
@@ -1065,44 +834,41 @@ class MeasuredStore:
                         self.metrics.turn.set(turn)
             result = await method(*args, **kwargs)
             self.metrics.writes[self.name, name, turn] += 1
+            record = result[0] if name == "save_checkpoint_with_events" else result
             if (
-                self.metrics.capture_payload_bytes
-                and self.name == "session"
+                self.name == "session"
                 and name == "append_messages"
+                and self.metrics.capture_payload_bytes
             ):
                 messages = args[1] if len(args) > 1 else kwargs.get("messages", [])
                 self.metrics.session_payloads[turn].extend(
-                    len(json.dumps(message_to_dict(message), allow_nan=False).encode("utf-8"))
+                    len(json.dumps(message_to_dict(message), allow_nan=False).encode())
                     for message in messages
                 )
             if (
-                self.metrics.capture_payload_bytes
-                and self.name == "run"
-                and name
-                in {
-                    "append_event",
-                    "append_events",
-                }
+                self.name == "run"
+                and name in {"append_event", "append_events", "save_checkpoint_with_events"}
+                and self.metrics.capture_payload_bytes
             ):
-                events = args[1] if len(args) > 1 else kwargs.get("events", [])
-                if name == "append_event":
-                    events = [events]
+                if name == "save_checkpoint_with_events":
+                    events = args[2] if len(args) > 2 else kwargs.get("events", [])
+                else:
+                    events = args[1] if len(args) > 1 else kwargs.get("events", [])
+                    events = [events] if name == "append_event" else events
                 self.metrics.event_payloads[turn].extend(
-                    len(json.dumps(_json_safe_stored_event(event), allow_nan=False).encode("utf-8"))
+                    len(json.dumps(_json_safe_stored_event(event), allow_nan=False).encode())
                     for event in events
                 )
-            if (
-                self.metrics.capture_payload_bytes
-                and self.name == "run"
-                and name in {"save_checkpoint", "mark_completed", "mark_failed"}
-            ):
-                persisted = result.checkpoint
-                if persisted is None:
-                    return result
-                size = len(
-                    json.dumps(checkpoint_to_dict(persisted), allow_nan=False).encode("utf-8")
-                )
-                self.metrics.payloads[turn, persisted.phase].append(size)
+            if self.name == "run" and name in {
+                "save_checkpoint",
+                "save_checkpoint_with_events",
+                "mark_completed",
+                "mark_failed",
+            }:
+                persisted = getattr(record, "checkpoint", None)
+                if persisted is not None and self.metrics.capture_payload_bytes:
+                    size = len(json.dumps(checkpoint_to_dict(persisted), allow_nan=False).encode())
+                    self.metrics.payloads[turn, persisted.phase].append(size)
             return result
 
         return measured
@@ -1134,8 +900,6 @@ class LagSampler:
             self._capture()
 
     async def stop(self) -> dict[str, Any]:
-        # Capture synchronously before cancellation: a final blocking burst may
-        # finish the workload before the sleeping sampler gets another turn.
         self._capture()
         if self.task is not None:
             self.task.cancel()
@@ -1165,8 +929,6 @@ def _rss_current() -> int:
 def scale_rss_summary(
     *, baseline: int, initial_hwm: int, sampled_peak: int, final_hwm: int, sessions: int
 ) -> dict[str, Any]:
-    # A fresh child can inherit an import-time HWM above current RSS. Only a
-    # new HWM proves a workload peak; otherwise use observed /proc RSS samples.
     peak = max(sampled_peak, final_hwm if final_hwm > initial_hwm else baseline)
     growth = max(0, peak - baseline)
     return {
@@ -1188,35 +950,21 @@ async def run_scale_case(
     workdir: Path,
     *,
     progress_path: Path | None = None,
-    postgres_schema: str | None = None,
+    postgres_prefix: str | None = None,
 ) -> dict[str, Any]:
     if case.backend not in {"memory", "postgres"} or case.sessions < 1 or case.turns < 4:
         raise ValueError(
             "scale cases need memory or postgres, positive sessions, and at least 4 turns"
         )
-    skip_reason = scale_case_skip_reason(case)
-    if skip_reason is not None:
-        raise RuntimeError(skip_reason)
+    reason = scale_case_skip_reason(case)
+    if reason is not None:
+        raise RuntimeError(reason)
     baseline_rss, initial_hwm = _rss_current(), _rss_high_water()
-    workdir.mkdir(parents=True, exist_ok=True)
     metrics = ScaleStoreMetrics()
-    postgres_cleanup: Callable[[], Awaitable[None]] | None = None
-    if case.backend == "postgres":
-        schema = postgres_schema or _new_scale_schema()
-        if _SCALE_SCHEMA.fullmatch(schema) is None:
-            raise ValueError(f"invalid benchmark schema: {schema!r}")
-        postgres_schema = schema
     session_pool: Any | None = None
     run_pool: Any | None = None
-
-    async def cleanup_postgres() -> None:
-        nonlocal postgres_cleanup
-        cleanup_error = await _close_postgres_benchmark_resources(
-            session_pool, run_pool, postgres_cleanup
-        )
-        postgres_cleanup = None
-        if cleanup_error is not None:
-            raise cleanup_error
+    prefix = postgres_prefix
+    raw_dsn = os.environ.get("AGENT_KIT_TEST_PG_DSN")
 
     if case.backend == "memory":
         session_store: Any = InMemorySessionStore()
@@ -1226,77 +974,40 @@ async def run_scale_case(
 
         from linch.run_stores.postgres import PostgresRunStore
         from linch.sessions.postgres import PostgresSessionStore
-        from linch.storage import _pg as postgres_runtime
 
+        if prefix is None:
+            await _sweep_postgres_schemas(raw_dsn or "")
+            prefix = _new_scale_schema_prefix()
+        dsn = await _fresh_postgres_dsn(raw_dsn or "", prefix, case)
         try:
-            _write_scale_schema_marker(progress_path, case, schema)
-            dsn, postgres_cleanup, postgres_schema = await _fresh_postgres_dsn(
-                os.environ["AGENT_KIT_TEST_PG_DSN"], schema=schema
-            )
-            session_pool = await asyncpg.create_pool(
-                dsn,
-                min_size=1,
-                max_size=10,
-                connection_class=_instrument_connection_class(metrics, "session"),
-                **(
-                    {"reset": postgres_runtime._reset_connection}
-                    if getattr(postgres_runtime, "_reset_connection", None) is not None
-                    else {}
-                ),
-            )
-            run_pool = await asyncpg.create_pool(
-                dsn,
-                min_size=1,
-                max_size=10,
-                connection_class=_instrument_connection_class(metrics, "run"),
-                **(
-                    {"reset": postgres_runtime._reset_connection}
-                    if getattr(postgres_runtime, "_reset_connection", None) is not None
-                    else {}
-                ),
-            )
-            session_store = PostgresSessionStore(dsn, pool=session_pool)
-            run_store = PostgresRunStore(dsn, pool=run_pool)
-            # Initialize schema before timing, then instrument only workload calls.
-            await session_store._ensure()
-            await run_store._ensure()
-            metrics.reset_round_trip_metrics()
-            session_store._pool = _CountingPool(
-                session_pool, metrics, "session", _instrument_connection_protocol
-            )
-            run_store._pool = _CountingPool(
-                run_pool, metrics, "run", _instrument_connection_protocol
-            )
-        except BaseException as exc:
-            try:
-                await cleanup_postgres()
-            except BaseException as cleanup_exc:
-                exc.add_note(f"failed to clean up benchmark Postgres resources: {cleanup_exc!r}")
-            raise
+            from linch.storage import _pg as postgres_runtime
+        except ImportError:
+            postgres_runtime = None
+        reset = getattr(postgres_runtime, "_reset_connection", None)
+        common = {
+            "min_size": 1,
+            "max_size": 10,
+            "connection_class": _instrument_connection_class(metrics, "session"),
+        }
+        if reset is not None:
+            common["reset"] = reset
+        session_pool = await asyncpg.create_pool(dsn, **common)
+        run_kwargs = dict(common)
+        run_kwargs["connection_class"] = _instrument_connection_class(metrics, "run")
+        run_pool = await asyncpg.create_pool(dsn, **run_kwargs)
+        session_store = PostgresSessionStore(dsn, pool=session_pool)
+        run_store = PostgresRunStore(dsn, pool=run_pool)
+        await session_store._ensure()
+        await run_store._ensure()
+        metrics.reset_round_trip_metrics()
+
     active: dict[str, int] = {}
     overlaps: set[str] = set()
     tools = ToolRegistry()
     for name in ("rag_search", "sql_query", "save_note"):
         tools.register(ScaleTool(name, active, overlaps))
-    try:
-        agent = Agent(
-            model="gpt-5",
-            provider=ScaleProvider(turns=case.turns),
-            tools=tools,
-            cwd=os.environ.get("LINCH_SCALE_CWD", str(ROOT)),
-            session_store=MeasuredStore(session_store, "session", metrics),
-            run_store=MeasuredStore(run_store, "run", metrics),
-            permissions={"mode": "skip-dangerous"},
-            max_tool_concurrency=2,
-            max_turns=case.turns + 1,
-            result_offload=None,
-        )
-    except BaseException as exc:
-        try:
-            await cleanup_postgres()
-        except BaseException as cleanup_exc:
-            exc.add_note(f"failed to clean up benchmark Postgres resources: {cleanup_exc!r}")
-        raise
+    agent: Agent | None = None
+    sampler: LagSampler | None = None
     result: dict[str, Any] = {
         **asdict(case),
         "pid": os.getpid(),
@@ -1306,7 +1017,6 @@ async def run_scale_case(
         "observed_provider_turns": 0,
         "observed_tool_calls": 0,
         "timed_out": False,
-        "postgres_schema": postgres_schema,
     }
     latencies: list[float] = []
     started = time.perf_counter()
@@ -1315,30 +1025,23 @@ async def run_scale_case(
     def progress(*, force: bool = False) -> None:
         nonlocal last_progress
         now = time.perf_counter()
-        if progress_path is not None and (force or now - last_progress >= 0.25):
-            partial = {**result, "elapsed_s": now - started}
-            partial["store_writes"], partial["checkpoint_bytes"] = metrics.summaries(
-                turns=result["observed_provider_turns"]
-            )
-            partial["store_bytes"] = {
-                "checkpoint": partial["checkpoint_bytes"],
-                "events": partial["checkpoint_bytes"]["event_bytes"],
-                "session_append": partial["checkpoint_bytes"]["session_append_bytes"],
-            }
-            partial["store_round_trips"] = metrics.round_trip_summary(
-                turns=result["observed_provider_turns"]
-            )
-            temporary = progress_path.with_suffix(".tmp")
-            temporary.write_text(json.dumps(partial, allow_nan=False))
-            temporary.replace(progress_path)
-            last_progress = now
+        if progress_path is None or (not force and now - last_progress < 0.25):
+            return
+        partial = {**result, "elapsed_s": now - started}
+        partial["store_writes"], partial["checkpoint_bytes"] = metrics.summaries(
+            turns=result["observed_provider_turns"]
+        )
+        path = progress_path.with_suffix(".tmp")
+        path.write_text(json.dumps(partial, allow_nan=False))
+        path.replace(progress_path)
+        last_progress = now
 
     async def run_one() -> None:
         metrics.turn.set(-1)
         began = time.perf_counter()
         turns, calls, results = 0, Counter(), []
         try:
-            session = await agent.session()
+            session = await agent.session()  # type: ignore[union-attr]
             async for event in session.run("offline scale benchmark"):
                 if isinstance(event, AssistantEvent):
                     turns += 1
@@ -1353,11 +1056,8 @@ async def run_scale_case(
                 elif isinstance(event, ResultEvent):
                     results.append(event)
                 progress()
-            if turns != case.turns or calls != {
-                "rag_search": case.turns - 2,
-                "sql_query": 1,
-                "save_note": 1,
-            }:
+            expected = {"rag_search": case.turns - 2, "sql_query": 1, "save_note": 1}
+            if turns != case.turns or calls != expected:
                 raise AssertionError(f"wrong workload: turns={turns}, tools={dict(calls)}")
             if (
                 len(results) != 1
@@ -1374,15 +1074,26 @@ async def run_scale_case(
                 result["errors"].append(f"{type(exc).__name__}: {exc}")
         progress()
 
-    sampler = LagSampler()
     try:
+        agent = Agent(
+            model="gpt-5",
+            provider=ScaleProvider(turns=case.turns),
+            tools=tools,
+            session_store=MeasuredStore(session_store, "session", metrics),
+            run_store=MeasuredStore(run_store, "run", metrics),
+            permissions={"mode": "skip-dangerous"},
+            max_tool_concurrency=2,
+            max_turns=case.turns + 1,
+            result_offload=None,
+        )
+        sampler = LagSampler()
         await sampler.start()
         progress(force=True)
         started = time.perf_counter()
-        # All session/run admission tasks are queued before any starts running.
         await asyncio.gather(*(run_one() for _ in range(case.sessions)))
         elapsed = time.perf_counter() - started
         lag = await sampler.stop()
+        sampler = None
         final_hwm = _rss_high_water()
         result.update(
             correct=result["completed"] == case.sessions and result["failed"] == 0,
@@ -1399,7 +1110,7 @@ async def run_scale_case(
             rss=scale_rss_summary(
                 baseline=baseline_rss,
                 initial_hwm=initial_hwm,
-                sampled_peak=sampler.peak_rss,
+                sampled_peak=sampler.peak_rss if sampler else 0,
                 final_hwm=final_hwm,
                 sessions=case.sessions,
             ),
@@ -1418,32 +1129,26 @@ async def run_scale_case(
         progress(force=True)
         return result
     finally:
-        close_error: BaseException | None = None
-        try:
+        if sampler is not None:
             await sampler.stop()
-        except BaseException as exc:
-            close_error = exc
-        try:
+        if agent is not None:
             await agent.close()
-        except BaseException as exc:
-            close_error = exc
-        try:
-            await cleanup_postgres()
-        except BaseException as cleanup_exc:
-            if close_error is None:
-                close_error = cleanup_exc
-            else:
-                close_error.add_note(
-                    f"failed to clean up benchmark Postgres resources: {cleanup_exc!r}"
-                )
-        if close_error is not None:
-            raise close_error
+        if prefix and raw_dsn:
+            try:
+                await _sweep_postgres_schemas(raw_dsn, prefix)
+            except Exception:
+                if case.backend == "postgres":
+                    raise
 
 
 async def run_scale_subprocess(case: ScaleCase, *, timeout_s: float = 600) -> dict[str, Any]:
+    raw_dsn = os.environ.get("AGENT_KIT_TEST_PG_DSN")
+    prefix = None
+    if case.backend == "postgres" and raw_dsn:
+        await _sweep_postgres_schemas(raw_dsn)
+        prefix = _new_scale_schema_prefix()
     with tempfile.TemporaryDirectory(prefix="linch-scale-") as raw:
         progress = Path(raw) / "progress.json"
-        postgres_schema = _new_scale_schema() if case.backend == "postgres" else None
         command = [
             sys.executable,
             str(Path(__file__).resolve()),
@@ -1452,18 +1157,14 @@ async def run_scale_subprocess(case: ScaleCase, *, timeout_s: float = 600) -> di
             "--scale-progress",
             str(progress),
         ]
-        if postgres_schema is not None:
-            command.extend(["--scale-schema", postgres_schema])
+        if prefix:
+            command.extend(["--scale-prefix", prefix])
         started = time.perf_counter()
         timed_out = False
-        child_cleanup_error: BaseException | None = None
-        # File-backed output and timer-driven, nonblocking poll avoid depending
-        # on asyncio child-transport / cross-thread wakeups during termination.
         stdout_path, stderr_path = Path(raw) / "stdout", Path(raw) / "stderr"
-        process: Any | None = None
         with stdout_path.open("wb") as output, stderr_path.open("wb") as errors:
+            process = subprocess.Popen(command, stdout=output, stderr=errors)
             try:
-                process = subprocess.Popen(command, stdout=output, stderr=errors)
                 deadline = started + timeout_s
                 while process.poll() is None:
                     remaining = deadline - time.perf_counter()
@@ -1471,56 +1172,47 @@ async def run_scale_subprocess(case: ScaleCase, *, timeout_s: float = 600) -> di
                         timed_out = True
                         break
                     await asyncio.sleep(min(0.01, remaining))
-            except asyncio.CancelledError:
-                raise
             finally:
-                if process is not None and process.poll() is None:
+                if process.poll() is None:
                     process.kill()
-                    # Bounded reap also runs when the parent task is cancelled.
                     process.wait(timeout=5)
-                raw_dsn = os.environ.get("AGENT_KIT_TEST_PG_DSN")
-                if postgres_schema is not None and raw_dsn:
-                    try:
-                        await asyncio.shield(_drop_postgres_schema(raw_dsn, postgres_schema))
-                    except BaseException as exc:
-                        child_cleanup_error = exc
-        if process is None:
-            raise RuntimeError("scale child did not start")
-        stdout, stderr = stdout_path.read_bytes(), stderr_path.read_bytes()
-        if not timed_out and process.returncode == 0:
-            result = json.loads(stdout)
-        else:
-            result = {
-                **asdict(case),
-                "completed": 0,
-                "failed": 0,
-                "errors": [],
-                "observed_provider_turns": 0,
-                "observed_tool_calls": 0,
-                "timed_out": False,
-            }
-            if progress.exists():
-                result.update(json.loads(progress.read_text()))
-            message = (
-                f"timeout after {timeout_s}s"
-                if timed_out
-                else f"child exited {process.returncode}: {stderr.decode(errors='replace')[-2000:]}"
+        try:
+            stdout, stderr = stdout_path.read_bytes(), stderr_path.read_bytes()
+            if not timed_out and process.returncode == 0:
+                result = json.loads(stdout)
+            else:
+                result = (
+                    json.loads(progress.read_text())
+                    if progress.exists()
+                    else {
+                        **asdict(case),
+                        "completed": 0,
+                        "failed": 0,
+                        "errors": [],
+                        "observed_provider_turns": 0,
+                        "observed_tool_calls": 0,
+                    }
+                )
+                message = (
+                    f"timeout after {timeout_s}s"
+                    if timed_out
+                    else (
+                        f"child exited {process.returncode}: "
+                        f"{stderr.decode(errors='replace')[-2000:]}"
+                    )
+                )
+                result.update(correct=False, timed_out=timed_out)
+                result["errors"].append(message)
+            result.update(
+                child_command=command,
+                child_wall_s=time.perf_counter() - started,
+                timeout_s=timeout_s,
+                pid=process.pid,
             )
-            result.update(correct=False, timed_out=timed_out)
-            result["errors"].append(message)
-        if child_cleanup_error is not None:
-            result["correct"] = False
-            result["errors"].append(
-                f"parent schema cleanup failed: {type(child_cleanup_error).__name__}: "
-                f"{child_cleanup_error}"
-            )
-        result.update(
-            child_command=command,
-            child_wall_s=time.perf_counter() - started,
-            timeout_s=timeout_s,
-            pid=process.pid,
-        )
-        return result
+            return result
+        finally:
+            if raw_dsn and prefix:
+                await asyncio.shield(_sweep_postgres_schemas(raw_dsn, prefix))
 
 
 def _scale_machine() -> dict[str, Any]:
@@ -1540,7 +1232,7 @@ async def _scale_main(args: argparse.Namespace, parser: argparse.ArgumentParser)
             case,
             progress.parent / "stores",
             progress_path=progress,
-            postgres_schema=args.scale_schema,
+            postgres_prefix=args.scale_prefix,
         )
         print(json.dumps(result, allow_nan=False))
         return 0
@@ -1555,8 +1247,8 @@ async def _scale_main(args: argparse.Namespace, parser: argparse.ArgumentParser)
         reason = scale_case_skip_reason(case)
         if reason is not None:
             results.append({**asdict(case), "skipped": True, "skip_reason": reason})
-            continue
-        results.append(await run_scale_subprocess(case, timeout_s=args.scale_timeout))
+        else:
+            results.append(await run_scale_subprocess(case, timeout_s=args.scale_timeout))
     if args.json:
         print(
             json.dumps(
@@ -1576,12 +1268,12 @@ async def _scale_main(args: argparse.Namespace, parser: argparse.ArgumentParser)
         for result in results:
             if result.get("skipped"):
                 print(f"{result['name']}: skipped ({result['skip_reason']})")
-                continue
-            print(
-                f"{result['name']}: {result['completed']}/{result['sessions']} completed, "
-                f"correct={result['correct']}, timeout={result['timed_out']}"
-            )
-            print(json.dumps(result, sort_keys=True, allow_nan=False))
+            else:
+                print(
+                    f"{result['name']}: {result['completed']}/{result['sessions']} completed, "
+                    f"correct={result['correct']}, timeout={result['timed_out']}"
+                )
+                print(json.dumps(result, sort_keys=True, allow_nan=False))
     return 0 if all(result.get("skipped", False) or result["correct"] for result in results) else 1
 
 
@@ -1641,7 +1333,7 @@ def build_parser(case_names: Sequence[str]) -> argparse.ArgumentParser:
     )
     parser.add_argument("--scale-child", help=argparse.SUPPRESS)
     parser.add_argument("--scale-progress", help=argparse.SUPPRESS)
-    parser.add_argument("--scale-schema", help=argparse.SUPPRESS)
+    parser.add_argument("--scale-prefix", help=argparse.SUPPRESS)
     return parser
 
 

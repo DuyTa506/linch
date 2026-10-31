@@ -206,12 +206,12 @@ zero; the four provider-view reads needed for request construction remain.
 See the [WP8 measurements](../superpowers/measurements/2026-10-31-hot-path.md)
 for scale results.
 
-Checkpoint recovery also uses journal-backed model-call and loop-guard
-watermarks instead of copying their growing receipt/call-count maps into every
-checkpoint. Private loop-guard delta facts carry the recovery tail and require
-the wire-version-3 codec; they are never yielded by the run iterator. They do
-occupy durable event sequence numbers, so persisted reconnect cursors can
-advance differently from the yielded event stream.
+Checkpoint recovery uses the journal-backed model-call watermark, not a receipt
+snapshot. Loop-guard counts and the failure streak remain in the checkpoint,
+keyed by fixed-size 64-bit BLAKE2b digests of permission decision keys (about
+25 bytes per distinct call). On a cold resume, a `tool_results_appended`
+checkpoint leaves completed results pending guard evaluation; resume evaluates
+them without rerunning tools. No private guard journal is persisted or emitted.
 
 ## Reader inventory
 
