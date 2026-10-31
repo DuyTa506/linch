@@ -16,7 +16,7 @@ from opentelemetry import propagate, trace
 
 def _agent_for(context, *, provider=None):
     from linch import Agent, FeatureFlags, InMemorySessionStore
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
 
     return Agent(
         model="test-model",
@@ -132,7 +132,7 @@ def test_offline_subprocess_does_not_import_sdk():
         import sys
 
         from linch import Agent, FeatureFlags, InMemorySessionStore
-        from linch.evals import ScriptedProvider, TextTurn
+        from linch.ext.evals import ScriptedProvider, TextTurn
 
 
         async def main():

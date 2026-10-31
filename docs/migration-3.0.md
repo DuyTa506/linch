@@ -20,6 +20,13 @@ schemas. `linch.RUN_SCHEMA_VERSION` reflects the shared private wire version.
   in the current run. Text `<tool_call>` rescue is dropped: whole-text envelopes
   request a native resend and never execute tools. Reliability policy is part
   of the resume contract; changed policies require a new run.
+- **D16 extension split:** Workflow, evals, deep-agent, reports, loop runner, and
+  scaffolding imports moved from `linch.*`/top-level exports to explicit
+  `linch.ext.*` paths. The old top-level names are removed; import each feature
+  from its extension package instead.
+- **D16 workflow entry point:** `Agent.run_workflow(...)` is removed. Import
+  `run_workflow` from `linch.ext.workflow` and call
+  `await run_workflow(agent, fn, ...)` with the same options.
 
 Each item below records a removal or consolidation in the legacy sweep.
 Private helper names are listed for maintainers; supported application imports

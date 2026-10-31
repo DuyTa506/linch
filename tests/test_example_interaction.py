@@ -17,7 +17,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
 
 _EXAMPLES = Path(__file__).resolve().parents[1] / "examples" / "core"
 
@@ -129,7 +129,7 @@ async def test_ask_user_timeout_declines_instead_of_hanging() -> None:
 
 async def test_ask_user_plugin_unmount_restores_previous_tool() -> None:
     from linch import Agent, AskUserPlugin
-    from linch.evals import ScriptedProvider
+    from linch.ext.evals import ScriptedProvider
     from linch.tools import AskUserTool
     from linch.tools.registry import empty_tools
 

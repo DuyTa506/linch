@@ -23,7 +23,7 @@ Homepage = "https://github.com/DuyTa506/linch"
 Repository = "https://github.com/DuyTa506/linch"
 
 [project.scripts]
-linch = "linch.cli:main"
+linch = "linch.ext.scaffold:main"
 
 [project.optional-dependencies]
 # mcp 2.0 renamed the streamable-HTTP transport, moved headers onto a
@@ -36,9 +36,9 @@ anthropic = [
   "anthropic>=0.30.0",
 ]
 gemini = [
-  "google-generativeai>=0.8.0",
+  "google-genai>=1.0",
 ]
-worker = ["pgqueuer[asyncpg]>=1.6"]
+worker = ["pgqueuer[asyncpg]>=1.6,<1.7"]
 postgres = [
   "asyncpg>=0.32",
 ]

@@ -11,7 +11,7 @@ BashRulePattern: TypeAlias = BashPattern | list[BashPattern]
 
 
 class ToolRule:
-    __slots__ = ("kind", "tool", "arg", "decision")
+    __slots__ = ("kind", "tool", "arg", "decision", "role", "unless_role")
 
     decision: RuleDecision
 
@@ -20,15 +20,20 @@ class ToolRule:
         tool: str,
         decision: RuleDecision,
         arg: str | None = None,
+        *,
+        role: str | None = None,
+        unless_role: str | None = None,
     ) -> None:
         self.kind = "tool"
         self.tool = tool
         self.arg = arg
         self.decision = _validate_decision(decision)
+        self.role = _validate_role(role, "role")
+        self.unless_role = _validate_role(unless_role, "unless_role")
 
 
 class PathRule:
-    __slots__ = ("kind", "tools", "paths", "decision")
+    __slots__ = ("kind", "tools", "paths", "decision", "role", "unless_role")
 
     decision: RuleDecision
 
@@ -37,15 +42,20 @@ class PathRule:
         paths: list[str],
         decision: RuleDecision,
         tools: list[str] | None = None,
+        *,
+        role: str | None = None,
+        unless_role: str | None = None,
     ) -> None:
         self.kind = "path"
         self.tools = tools
         self.paths = paths
         self.decision = _validate_decision(decision)
+        self.role = _validate_role(role, "role")
+        self.unless_role = _validate_role(unless_role, "unless_role")
 
 
 class BashRule:
-    __slots__ = ("kind", "pattern", "decision")
+    __slots__ = ("kind", "pattern", "decision", "role", "unless_role")
 
     pattern: BashRulePattern
     decision: RuleDecision
@@ -56,6 +66,8 @@ class BashRule:
         decision: RuleDecision = "ask",
         *,
         patterns: list[BashPattern] | tuple[BashPattern, ...] | None = None,
+        role: str | None = None,
+        unless_role: str | None = None,
     ) -> None:
         if pattern is not None and patterns is not None:
             raise ValueError("BashRule accepts either pattern or patterns, not both")
@@ -70,6 +82,8 @@ class BashRule:
         self.kind = "bash"
         self.pattern = resolved_pattern
         self.decision = _validate_decision(decision)
+        self.role = _validate_role(role, "role")
+        self.unless_role = _validate_role(unless_role, "unless_role")
 
 
 PermissionRule = ToolRule | PathRule | BashRule
@@ -314,6 +328,16 @@ def _validate_decision(decision: str) -> RuleDecision:
     if decision in {"allow", "deny", "ask", "passthrough"}:
         return cast(RuleDecision, decision)
     raise ValueError(f"invalid rule decision: {decision!r}")
+
+
+def _validate_role(role: str | None, name: str) -> str | None:
+    if role is None:
+        return None
+    if not isinstance(role, str):
+        raise TypeError(f"{name} must be a string")
+    if not role.strip():
+        raise ValueError(f"{name} must be a non-empty string")
+    return role
 
 
 def _composite_operator_length(input_str: str, index: int) -> int:

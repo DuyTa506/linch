@@ -8,7 +8,7 @@ from typing import Any
 async def test_tool_progress_is_not_persisted() -> None:
     from linch import Agent
     from linch.config import FeatureFlags
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.run_store import InMemoryRunStore
     from linch.sessions import InMemorySessionStore
     from linch.tools import ToolContext, ToolRegistry, ToolResult

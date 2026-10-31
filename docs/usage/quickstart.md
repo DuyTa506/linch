@@ -38,7 +38,7 @@ import asyncio
 
 from linch import Agent
 from linch.config import FeatureFlags
-from linch.evals import ScriptedProvider, TextTurn
+from linch.ext.evals import ScriptedProvider, TextTurn
 from linch.sessions import InMemorySessionStore
 
 

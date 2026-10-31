@@ -13,7 +13,7 @@ import json
 from pathlib import Path
 
 from linch import RunOptions
-from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
 
 _RECIPE = Path(__file__).resolve().parents[1] / "examples" / "recipes" / "research_desk.py"
 

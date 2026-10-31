@@ -48,7 +48,7 @@ async def running(*workers):
 
 def make_agent(job, provider=None, context=None):
     from linch import Agent, empty_tools
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
 
     return Agent(
         model="m",
@@ -165,7 +165,7 @@ async def test_failed_run_is_result_not_queue_retry(pool):
 async def test_two_workers_obey_fleet_limits_and_lease_exclusion(pool):
     from pgqueuer import Queries
 
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.worker import Worker, enqueue_run
 
     active = 0
@@ -269,7 +269,7 @@ async def test_lease_heartbeat_renews_then_cancels_on_loss(pool):
 
 
 async def test_named_queues_have_independent_fleet_limits(pool):
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.worker import Worker, enqueue_run
 
     entered = asyncio.Event()
@@ -365,7 +365,7 @@ async def test_lease_loss_during_failure_recording_retries_nonterminal_run(pool)
 
 
 async def test_failed_model_run_is_acknowledged_without_retry(pool):
-    from linch.evals import ScriptedProvider
+    from linch.ext.evals import ScriptedProvider
     from linch.worker import Worker, enqueue_run
 
     calls = 0

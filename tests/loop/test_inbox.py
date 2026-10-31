@@ -30,6 +30,28 @@ class _Session:
         self.appended.extend(messages)
 
 
+class _FailInboxAppendStore:
+    def __init__(self) -> None:
+        from linch.sessions import InMemorySessionStore
+
+        self._inner = InMemorySessionStore()
+        self.failed = False
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._inner, name)
+
+    async def append_messages(self, session_id: str, messages: list[object]) -> object:
+        is_inbox = any(
+            getattr(block, "text", None) == "inbox-message"
+            for message in messages
+            for block in getattr(message, "content", ())
+        )
+        if is_inbox and not self.failed:
+            self.failed = True
+            raise OSError("inbox append connection lost")
+        return await self._inner.append_messages(session_id, messages)
+
+
 @pytest.mark.asyncio
 async def test_inbox_preserves_producer_order_and_message_event_persistence() -> None:
     from linch.events import UserEvent
@@ -140,7 +162,7 @@ async def test_inbox_closes_active_producer_when_consumer_stops() -> None:
 @pytest.mark.asyncio
 async def test_session_run_closes_inbox_producer_when_consumer_closes() -> None:
     from linch import Agent
-    from linch.evals import ScriptedProvider
+    from linch.ext.evals import ScriptedProvider
     from linch.types import Message, TextBlock
 
     agent = Agent(model="m", provider=ScriptedProvider([]), result_offload=None)
@@ -191,3 +213,44 @@ async def test_inbox_supports_iterators_without_aclose() -> None:
 
     events = [event async for event in drain_inbox(session, "run")]
     assert events[0].message.content[0].text == "plain iterator"
+
+
+@pytest.mark.asyncio
+async def test_inbox_append_store_outage_leaves_run_retryable_before_provider() -> None:
+    from linch import Agent
+    from linch.events import ErrorEvent, ResultEvent, UserEvent
+    from linch.ext.evals import ScriptedProvider, TextTurn
+    from linch.run_store import InMemoryRunStore
+    from linch.session import RunOptions
+    from linch.types import Message, TextBlock
+
+    provider = ScriptedProvider([TextTurn(text="provider ran")])
+    agent = Agent(
+        model="m",
+        provider=provider,
+        session_store=_FailInboxAppendStore(),
+        run_store=InMemoryRunStore(),
+        result_offload=None,
+    )
+    session = await agent.session(id="inbox-outage")
+
+    async def producer(_session: object, _run_id: str):
+        yield Message(role="user", content=[TextBlock(text="inbox-message")])
+
+    agent.context.inbox(producer)
+    run_id = "inbox-outage-run"
+    first = [event async for event in session.run("prompt", RunOptions(run_id=run_id))]
+
+    assert not any(isinstance(event, (ErrorEvent, ResultEvent)) for event in first)
+    assert provider._index == 0
+    record = await agent.run_store.load_run(run_id)
+    assert record is not None and record.status == "running"
+
+    resumed = [event async for event in session.resume(run_id)]
+    assert provider._index == 1
+    assert any(
+        isinstance(event, UserEvent) and event.message.content[0].text == "inbox-message"
+        for event in resumed
+    )
+    assert resumed[-1].type == "result" and resumed[-1].subtype == "success"
+    await agent.close()

@@ -196,13 +196,15 @@ class Context:
     def inbox(self, producer: Callable[[Any, str], Any]) -> Disposable:
         """Register an inbox producer owned by this context.
 
+        Delivery targets the resolved agent's inbox in registration order, but
+        the registering context owns cleanup. The loop logs message items as
+        notification events and persists already-logged event items without
+        another history append. It awaits an iterator's optional ``aclose()``
+        on completion, failure, or consumer closure.
+
         Args:
-            producer: Callable receiving a session and run identifier and
-                returning an async iterator. ``Message`` values are appended to
-                the session and emitted as notification ``UserEvent`` values;
-                already-logged ``Event`` values are only persisted/yielded by
-                the loop. Producers run in registration order, and the target
-                agent context owns their registrations and cleanup.
+            producer: Callable receiving a session and run identifier, returning
+                an async iterator of messages or already-logged events.
 
         Returns:
             A disposer that removes exactly this producer registration.

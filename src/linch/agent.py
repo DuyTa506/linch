@@ -664,13 +664,12 @@ class Agent:
     async def use(self, plugin: Plugin, config: Any = None) -> Disposable:
         """Mount a plugin and await its initial activation or rollback.
 
-        Required services may be absent; the mount remains dormant until they
-        resolve. Each activation receives a fresh child context, and removal of
-        a requirement awaits plugin cleanup before returning. A failed setup or
-        audit is fully rolled back, including all owned asynchronous cleanup,
-        before this method raises. A failed mount has no returned handle, so its
-        unfinished cleanup is retried by agent teardown; cleanup after a
-        successful mount is retried through the returned disposer or teardown.
+        The mount stays dormant until required services resolve; each activation
+        uses a fresh child context, and requirement removal awaits cleanup.
+        Setup or audit failures propagate only after activation-scope rollback,
+        including owned asynchronous cleanup, has been awaited. If cleanup fails,
+        unfinished work stays owned for retry by agent teardown; successful
+        mounts also expose retryable cleanup through the returned disposer.
 
         Args:
             plugin: Duck-typed plugin implementation to mount.
@@ -1504,46 +1503,6 @@ class Agent:
             before_seq=before_seq,
             id=id,
             meta=meta,
-        )
-
-    async def run_workflow(
-        self,
-        fn: Any,
-        *,
-        budget: Any = None,
-        run_id: str | None = None,
-        max_concurrency: int = 4,
-        max_agent_concurrency: int = 0,
-        on_event: Any = None,
-        step_timeout_ms: float | None = None,
-        deadline_ms: float | None = None,
-        journal_snapshot_every: int = 0,
-        signal: Any = None,
-        resume: dict[str, Any] | None = None,
-    ) -> Any:
-        """Run a deterministic workflow function and return its value.
-
-        *fn* is ``async def flow(wf: WorkflowContext) -> Any``.  See
-        :mod:`linch.workflow` for the ``wf`` primitives (``agent``, ``step``,
-        ``interrupt``, ``parallel``, ``settled``, ``pipeline``, ``phase``,
-        ``budget``) and the journal/resume semantics behind *run_id*.  *resume*
-        answers ``wf.interrupt`` calls left pending by an earlier suspend.
-        """
-        from .workflow.engine import run_workflow as _run_workflow
-
-        return await _run_workflow(
-            self,
-            fn,
-            budget=budget,
-            run_id=run_id,
-            max_concurrency=max_concurrency,
-            max_agent_concurrency=max_agent_concurrency,
-            on_event=on_event,
-            step_timeout_ms=step_timeout_ms,
-            deadline_ms=deadline_ms,
-            journal_snapshot_every=journal_snapshot_every,
-            signal=signal,
-            resume=resume,
         )
 
     async def release_session(self, session_or_id: Session | str, force: bool = False) -> None:

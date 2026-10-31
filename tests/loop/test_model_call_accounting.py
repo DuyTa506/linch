@@ -834,7 +834,7 @@ async def test_resume_merges_journal_after_receipt_backed_checkpoint_without_dou
 def test_run_report_propagates_incomplete_usage_lower_bound() -> None:
     """The report must retain the terminal lower-bound marker verbatim."""
     from linch.events import ResultEvent
-    from linch.reports import build_run_report
+    from linch.ext.reports import build_run_report
     from linch.types import Usage
 
     report = build_run_report(

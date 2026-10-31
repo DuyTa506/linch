@@ -11,7 +11,7 @@ import pytest
 
 def _agent(**kwargs: Any) -> Any:
     from linch import Agent
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
 
     kwargs.setdefault("provider", ScriptedProvider([TextTurn(text="done")] * 20))
     return Agent(model="m", **kwargs)

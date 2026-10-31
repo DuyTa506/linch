@@ -10,7 +10,7 @@ from test_dispatch import make_agent, running, wait_for
 
 async def test_two_transient_renew_failures_then_success_complete_the_run(pool, monkeypatch):
     from linch import PostgresRunStore
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.worker import Worker, enqueue_run
 
     renewed = asyncio.Event()
@@ -53,7 +53,7 @@ async def test_two_transient_renew_failures_then_success_complete_the_run(pool, 
 
 async def test_lease_lost_cancels_run_without_terminal_status_and_preserves_job(pool, monkeypatch):
     from linch import LeaseLostError, PostgresRunStore
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.worker import Worker, enqueue_run
 
     entered = asyncio.Event()
@@ -93,7 +93,7 @@ async def test_lease_lost_cancels_run_without_terminal_status_and_preserves_job(
 
 async def test_expired_lease_without_takeover_retries_and_resumes_checkpoint(pool, monkeypatch):
     from linch import PostgresRunStore
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.worker import Worker, enqueue_run
 
     first_epoch = None
@@ -300,7 +300,7 @@ async def test_cancellation_during_cleanup_preserves_nonterminal_dispatch(pool, 
 
     async def nonterminal(execution, store, record, payload):
         from linch import Agent, empty_tools
-        from linch.evals import ScriptedProvider
+        from linch.ext.evals import ScriptedProvider
         from linch.sessions import InMemorySessionStore
 
         execution.agent = Agent(

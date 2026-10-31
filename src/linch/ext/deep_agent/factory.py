@@ -4,21 +4,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from ..agent import Agent
-from ..budget import RunBudget
-from ..config import FeatureFlags, SystemPromptConfig, SystemPromptSection
-from ..context import FileMemoryContextBuilder
-from ..errors import ConfigError
-from ..hooks import ContextInjectionHook
-from ..tools.registry import workspace_tools
-from ..tools.tasks import TaskCreateTool, TaskGetTool, TaskListTool, TaskUpdateTool
+from ...agent import Agent
+from ...budget import RunBudget
+from ...config import FeatureFlags, SystemPromptConfig, SystemPromptSection
+from ...context import FileMemoryContextBuilder
+from ...errors import ConfigError
+from ...hooks import ContextInjectionHook
+from ...tools.registry import workspace_tools
+from ...tools.tasks import TaskCreateTool, TaskGetTool, TaskListTool, TaskUpdateTool
 from .prompts import COORDINATOR_SYSTEM_PROMPT, DEEP_AGENT_SYSTEM_PROMPT
 from .subagents import DEEP_AGENT_SUBAGENTS
 
 if TYPE_CHECKING:
-    from ..run_store import RunStore
-    from ..sessions import SessionStore
-    from ..tools import ToolRegistry
+    from ...run_store import RunStore
+    from ...sessions import SessionStore
+    from ...tools import ToolRegistry
 
 # Tools removed from the coordinator parent so it cannot do heavy work itself.
 # Workers still receive full access via build_child_tools in the runner.
@@ -213,7 +213,7 @@ def create_deep_agent(
     prompt_config = _merge_deep_agent_prompt(
         system_prompt_config, system_prompt, coordinator=coordinator
     )
-    from ..hooks import normalize_hooks as _normalize_hooks
+    from ...hooks import normalize_hooks as _normalize_hooks
 
     hooks = _normalize_hooks(agent_kwargs.pop("hooks", None))
     if features.filesystem:
@@ -227,7 +227,7 @@ def create_deep_agent(
         cast(Any, memory_hook).resume_policy_config = {"path": "/memories/MEMORY.md", "lines": 200}
         hooks.append(memory_hook)
     if verifiers is not None:
-        from ..hooks import FinalAnswerVerifierHook
+        from ...hooks import FinalAnswerVerifierHook
 
         hooks.append(FinalAnswerVerifierHook(verifiers, max_retries=max_verification_retries))
     agent_kwargs.setdefault("enable_worker_tools", True)

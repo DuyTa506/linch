@@ -37,7 +37,7 @@ def _texts(message: Any) -> str:
 
 
 async def test_concurrent_agents_do_not_cross_talk() -> None:
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
 
     # Three agents, each scripted to emit a distinct final answer.
     agents = []
@@ -63,7 +63,7 @@ async def test_concurrent_agents_do_not_cross_talk() -> None:
 
 
 async def test_close_drains_own_workers_without_touching_other_agent() -> None:
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.tools import ToolRegistry, tool
 
     def _hanging_agent() -> tuple[Any, asyncio.Event]:

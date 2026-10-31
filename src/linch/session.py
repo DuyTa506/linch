@@ -16,6 +16,7 @@ from .types import InvokedSkillRecord, Message, SkillOverlay, Usage
 
 if TYPE_CHECKING:
     from .agent import Agent
+    from .permissions import Principal
     from .tools import ToolRegistry
 
 
@@ -80,6 +81,9 @@ class RunOptions:
     run_id: str | None = None
     """Adopt this pending run ID when starting a queued run."""
 
+    principal: Principal | None = None
+    """Immutable tenant/user/role identity for this run's authorization."""
+
 
 @dataclass(slots=True)
 class AlignmentEntry:
@@ -107,6 +111,7 @@ class Session:
     """Set only when the run iterator and all of its finalizers are finished."""
     _telemetry_run: Any = field(default=None, repr=False)
     active_run_id: str | None = None
+    _active_principal: Principal | None = field(default=None, repr=False)
     _active_gen: Any = None
     """The async generator driving the in-flight ``run``/``resume`` iterator.
     Captured so a forced ``aclose`` can finalize an abandoned run generator
@@ -289,6 +294,7 @@ class Session:
 
     def _finish_run(self) -> None:
         """Release the single-run admission token and publish true idleness."""
+        self._active_principal = None
         self._active_gen = None
         self._active_inner = None
         self._active_started = False

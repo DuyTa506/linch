@@ -6,6 +6,7 @@ from .engine import (
     PermissionDecision,
     PermissionEngine,
 )
+from .principal import Principal
 from .rules import BashRule, PathRule, PermissionRule, ToolRule
 from .ruleset import PermissionLayer, PermissionRuleSet
 
@@ -21,5 +22,6 @@ __all__ = [
     "PermissionLayer",
     "PermissionRule",
     "PermissionRuleSet",
+    "Principal",
     "ToolRule",
 ]

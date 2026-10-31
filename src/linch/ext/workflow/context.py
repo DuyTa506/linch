@@ -12,17 +12,17 @@ from contextvars import ContextVar
 from typing import Any, cast
 from uuid import uuid4
 
-from ..abort import throw_if_aborted
-from ..errors import (
+from ...abort import throw_if_aborted
+from ...errors import (
     AbortError,
     ConfigError,
     WorkflowError,
     WorkflowSuspended,
     WorkflowTimeoutError,
 )
-from ..events import Event, WorkflowEvent
-from ..providers.retry import RetryOptions, with_retry
-from ..session import RunOptions
+from ...events import Event, WorkflowEvent
+from ...providers.retry import RetryOptions, with_retry
+from ...session import RunOptions
 from .journal import WorkflowJournal, WorkflowJournalRecord, call_key, interrupt_key, step_key
 
 # Which WorkflowContexts the current task is already inside a ``parallel``
@@ -220,8 +220,8 @@ class WorkflowContext:
             WorkflowError: If the child run failed or was aborted.
             WorkflowTimeoutError: If the child exceeded its timeout.
         """
-        from ..subagents.default_agent import DEFAULT_AGENT
-        from ..subagents.runner import RunSubagentArgs, result_text_for_caller, run_subagent
+        from ...subagents.default_agent import DEFAULT_AGENT
+        from ...subagents.runner import RunSubagentArgs, result_text_for_caller, run_subagent
 
         definition = None
         if name is None:
@@ -682,8 +682,8 @@ def workflow_checkpoint(workflow_name: str, phase: str) -> Any:
     Returns:
         A fresh ``RunCheckpoint`` with an empty ``extension_state``.
     """
-    from ..run_store import RunCheckpoint
-    from ..types import Usage
+    from ...run_store import RunCheckpoint
+    from ...types import Usage
 
     return RunCheckpoint(
         phase=cast(Any, phase),
@@ -764,6 +764,8 @@ def _fingerprint_value(value: Any) -> Any:
         return {str(k): _fingerprint_value(v) for k, v in sorted(value.items(), key=str)}
     if isinstance(value, (list, tuple)):
         return [_fingerprint_value(v) for v in value]
+    if isinstance(value, frozenset) and all(isinstance(item, str) for item in value):
+        return sorted(value)
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return f"{value.__class__.__module__}.{value.__class__.__qualname__}:{value!r}"

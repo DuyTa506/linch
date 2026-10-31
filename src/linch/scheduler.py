@@ -5,7 +5,7 @@ import copy
 import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal, cast
 from uuid import uuid4
 from xml.sax.saxutils import escape
@@ -32,7 +32,7 @@ from .hooks import (
     PostToolUseFailureContext,
     PreToolUseContext,
 )
-from .permissions import PendingToolCall, PermissionDecision
+from .permissions import PendingToolCall, PermissionDecision, Principal
 from .permissions.keys import permission_decision_key as _permission_key
 from .providers.retry import RetryOptions, _delay_for_error
 from .tools import (
@@ -68,6 +68,7 @@ class ResolvedCall:
     summary: str
     is_immediate_error: bool
     immediate_error_reason: str | None = None
+    principal: Principal | None = field(default=None, repr=False)
 
 
 @dataclass(slots=True)
@@ -518,6 +519,7 @@ async def _execute_one(
         # Stable across resume: run_id is reused by resume_loop and call.id comes
         # from the persisted provider_view, so a re-executed tool sees the same key.
         idempotency_key=f"{execution_run_id}:{call.id}",
+        _principal=call.principal,
     )
     try:
         return await _execute_tool_attempts(
@@ -574,6 +576,7 @@ def _dispatch_execute(
             # permission would redirect the approved call to another workspace.
             "execution",
             "idempotency_key",
+            "principal",
         )
     }
     execution = ToolExecution(
@@ -1215,6 +1218,7 @@ def _evaluate_permissions(
                 tool=tool_obj,
                 input=call.input,
                 cwd=_effective_cwd(session, agent),
+                principal=call.principal,
             )
         )
         if initial.decision != "ask":
@@ -1266,6 +1270,7 @@ async def _resolve_ask_decisions(
                     tool=call.tool,
                     input=call.input,
                     cwd=_effective_cwd(session, agent),
+                    principal=call.principal,
                 ),
                 signal,
             )
@@ -1586,6 +1591,19 @@ async def execute_tool_calls(
     turn_index: int | None = None,
     on_permissions_resolved: Callable[[], Awaitable[None]] | None = None,
 ) -> AsyncIterator[Event]:
+    """Execute a provider batch and yield its lifecycle events.
+
+    Args:
+        blocks: Provider-emitted tool calls to validate and execute.
+        agent: Agent configuration and tool registry owner.
+        session: Session carrying run-scoped state and notifications.
+        signal: Abort signal checked during permission and tool execution.
+        turn_index: Optional provider-turn index for hooks and telemetry.
+        on_permissions_resolved: Optional durability callback before execution.
+
+    Yields:
+        Tool lifecycle, permission, progress, and skill events.
+    """
     if not blocks:
         return
 
@@ -1593,6 +1611,10 @@ async def execute_tool_calls(
 
     effective_tools = getattr(session, "tools_override", None) or agent.tools
     resolved = [_resolve_call(b, effective_tools, agent.cwd) for b in blocks]
+    principal = getattr(session, "_active_principal", None)
+    if principal is not None:
+        for call in resolved:
+            call.principal = principal
     _enforce_turn_tool_availability(resolved, session)
     hook_dispatcher = HookDispatcher(_scheduler_hooks(agent))
 
