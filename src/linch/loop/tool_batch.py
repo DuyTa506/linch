@@ -24,7 +24,6 @@ from ..events import (
 )
 from ..hooks import ToolUseStartContext, ToolUseStopContext
 from ..loop_guard import evaluate_loop_guard
-from ..run_store import durable_call
 from ..scheduler import execute_tool_calls
 from ..types import (
     AssistantAssembly,
@@ -203,7 +202,7 @@ async def run_tool_batch(ctx: ToolBatchContext) -> AsyncIterator[Event]:
         replaying_results_checkpoint or _last_message_has_tool_results(session, tool_blocks)
     )
     if not already_appended:
-        await durable_call(session, "session.append", session.append([result_message]))
+        await session.append([result_message])
 
     if ctx.observe_results is not None and background_calls is not None:
         ctx.observe_results(
@@ -262,7 +261,7 @@ async def _append_recovery_hint(
         f"- {hint}" for hint in recovery_hints.values()
     )
     hint_message = Message(role="user", content=[TextBlock(text=hint_text)])
-    await durable_call(ctx.session, "session.append", ctx.session.append([hint_message]))
+    await ctx.session.append([hint_message])
     hint_event: Event = UserEvent(message=hint_message, subtype="notification")
     await ctx.persist_event(hint_event)
     return hint_event
@@ -286,7 +285,7 @@ async def _inject_force_final_reminder(ctx: ToolBatchContext) -> Event:
         )
     )
     if not already_appended:
-        await durable_call(ctx.session, "session.append", ctx.session.append([reminder_message]))
+        await ctx.session.append([reminder_message])
     ctx.force_final_pending = True
     event: Event = UserEvent(message=reminder_message, subtype="notification")
     await ctx.persist_event(event)
