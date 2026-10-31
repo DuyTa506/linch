@@ -21,6 +21,7 @@ from ..agent import Agent
 from ..run_store import LeaseLostError, RunLease, RunLeaseConflictError, RunRecord
 from ..run_stores.postgres import PostgresRunStore
 from ..session import RunOptions, Session
+from ..sessions.postgres import PostgresSessionStore
 from .dispatch import _BorrowedPool, _entrypoint, install
 
 _TERMINAL = frozenset({"completed", "failed", "aborted"})
@@ -44,6 +45,7 @@ class WorkerJob:
     run: RunRecord
     run_store: PostgresRunStore
     pool: Any
+    session_store: PostgresSessionStore
     queue: str | None = None
 
 
@@ -84,7 +86,9 @@ class Worker:
         poll_interval_s: float = 1,
         retry_delay_s: float = 1,
     ) -> None:
-        self._pool = pool
+        self._pool = pool if isinstance(pool, _BorrowedPool) else _BorrowedPool(pool)
+        self._run_store = PostgresRunStore("", pool=self._pool)
+        self._session_store = PostgresSessionStore("", pool=self._pool)
         self.agent_factory = agent_factory
         self.worker_id = worker_id or str(uuid4())
         self.lease_ttl_s = _positive(lease_ttl_s, "lease_ttl_s")
@@ -92,7 +96,7 @@ class Worker:
         self.poll_interval_s = _positive(poll_interval_s, "poll_interval_s")
         self.retry_delay_s = _positive(retry_delay_s, "retry_delay_s")
         self._active_runs: set[str] = set()
-        self._manager = QueueManager(Queries(AsyncpgPoolDriver(pool)))
+        self._manager = QueueManager(Queries(AsyncpgPoolDriver(cast(Any, pool))))
         limits = dict(queues) if queues is not None else {"default": 0}
         if not limits:
             raise ValueError("at least one queue is required")
@@ -122,6 +126,8 @@ class Worker:
     async def run(self) -> None:
         """Process jobs until ``stop``; initialize the schema if necessary."""
         await install(self._pool)
+        await self._run_store._ensure()
+        await self._session_store._ensure()
         await self._manager.run(
             heartbeat_timeout=timedelta(seconds=self.stall_timeout_s),
             dequeue_timeout=timedelta(seconds=self.poll_interval_s),
@@ -169,10 +175,12 @@ class Worker:
         payload: dict[str, Any],
     ) -> None:
         execution.agent = await self.agent_factory(
-            WorkerJob(record, store, _BorrowedPool(self._pool), payload.get("queue"))
+            WorkerJob(record, store, self._pool, self._session_store, payload.get("queue"))
         )
         if execution.agent.run_store is not store:
             raise ValueError("agent factory must use WorkerJob.run_store")
+        if execution.agent.session_store is not self._session_store:
+            raise ValueError("agent factory must use WorkerJob.session_store")
         execution.session = await execution.agent.session(id=record.session_id)
         options = RunOptions(run_id=record.id)
         iterator = (
@@ -202,8 +210,7 @@ class Worker:
 
     async def _check_finished_job(self, job: Job) -> None:
         rid = json.loads(job.payload or b"{}")["run_id"]
-        async with PostgresRunStore("", pool=_BorrowedPool(self._pool)) as store:
-            await self._require_terminal(store, rid)
+        await self._require_terminal(self._run_store, rid)
 
     async def _require_terminal(self, store: PostgresRunStore, rid: str) -> None:
         current = await store.load_run(rid)
@@ -214,7 +221,7 @@ class Worker:
     async def _run_job(self, job: Job, execution: _Execution) -> None:
         payload = json.loads(job.payload or b"{}")
         rid, sid = payload["run_id"], payload["session_id"]
-        store = PostgresRunStore("", pool=_BorrowedPool(self._pool))
+        store = self._run_store
         record = await store.load_run(rid)
         if record is None:
             raise KeyError(f"run not found: {rid}")
@@ -290,8 +297,6 @@ class Worker:
             try:
                 if execution.agent is not None:
                     await execution.agent.close()
-                else:
-                    await store.close()
             finally:
                 self._active_runs.discard(rid)
                 if token is not None:

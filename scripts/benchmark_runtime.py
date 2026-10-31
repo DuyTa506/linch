@@ -718,7 +718,9 @@ def _instrument_connection_protocol(
             query = (
                 args[1]
                 if method == "prepare" and len(args) > 1
-                else (args[0] if method == "query" and args else None)
+                else args[0]
+                if method == "query" and args
+                else getattr(kwargs.get("state", args[0] if args else None), "query", None)
             )
             metrics.record_protocol_exchange(store, method, query)
             if method in {"bind_execute", "bind_execute_many", "execute"}:

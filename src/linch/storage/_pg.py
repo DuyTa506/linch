@@ -11,6 +11,7 @@ Install::
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -18,6 +19,21 @@ from .._wire import WIRE_VERSION, require_wire_version
 
 # All store types share metadata DDL, so lock before inspecting or creating it.
 _SCHEMA_LOCK_KEY = 0x4C494E4348534348
+
+
+class _BorrowedPool:
+    """Host-owned pool with schema verification for a fixed database/search_path."""
+
+    def __init__(self, pool: Any) -> None:
+        self._pool = pool
+        self._init_lock = asyncio.Lock()
+        self._verified: set[tuple[Any, ...]] = set()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._pool, name)
+
+    async def close(self) -> None:
+        pass
 
 
 async def _reset_connection(_connection: Any) -> None:
@@ -55,9 +71,14 @@ async def ensure_pool(
     """
     if store._initialized:
         return store._pool
-    async with store._init_lock:
+    borrowed = store._pool if isinstance(store._pool, _BorrowedPool) else None
+    contract = (schema_key, WIRE_VERSION, schema, tables, tuple((required_columns or {}).items()))
+    async with borrowed._init_lock if borrowed is not None else store._init_lock:
         if store._initialized:
             return store._pool
+        if borrowed is not None and contract in borrowed._verified:
+            store._initialized = True
+            return borrowed
         asyncpg = import_asyncpg()
         if store._pool is None:
             store._pool = await asyncpg.create_pool(
@@ -114,16 +135,22 @@ async def ensure_pool(
                         WIRE_VERSION,
                     )
         except Exception:
+            if borrowed is not None:
+                raise
             pool, store._pool = store._pool, None
             if pool is not None or not allow_missing_pool_on_error:
                 await cast(Any, pool).close()
             raise
+        if borrowed is not None:
+            borrowed._verified.add(contract)
         store._initialized = True
     return store._pool
 
 
 async def close_pool(store: Any, *, reset_initialized: bool = False) -> None:
-    """Close even supplied pools, retaining each adapter's reset policy."""
+    """Close supplied raw pools; borrowed worker handles retain initialized stores."""
+    if isinstance(store._pool, _BorrowedPool):
+        return
     if store._pool is not None:
         await store._pool.close()
         store._pool = None
