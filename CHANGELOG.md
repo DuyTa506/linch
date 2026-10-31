@@ -7,6 +7,16 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
 
 ## Unreleased
 
+- Bound checkpoint recovery state with journal watermarks and private deltas;
+  the 50-turn benchmark reduces checkpoint bytes from 122,852.76 to 8,451.10
+  per turn (-93.1%). Reuse an exact incremental audit-history digest while
+  retaining detached projection getters.
+- Batch pending events with phase checkpoints through an optional Postgres
+  capability, preserving durable-before-tool ordering. At 200 sessions × 4
+  turns, store calls fall from 16.5 to 15.0 per turn and measured protocol
+  cycles from 94.879 to 88.883. See the
+  [hot-path measurements](docs/superpowers/measurements/2026-10-31-hot-path.md).
+
 - Add `RunOptions.run_id` to start or adopt a pending run through the ordinary session API.
 
 - Retry nonterminal worker exits after ownership loss or cancellation. Retry
