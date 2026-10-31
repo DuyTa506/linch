@@ -1,15 +1,4 @@
-"""``Context`` — the per-agent service container and extension surface.
-
-Ported from Cordis' ``Context`` (deepseek-harness/vendor/cordis/src/context.ts).
-A :class:`Context` owns a service registry, a shared :class:`~linch.kernel.events.EventBus`,
-and an :class:`~linch.kernel.effects.EffectScope`. Services are read either as
-``ctx.<name>`` (a declared dependency — raises if absent) or ``ctx.get(name)``
-(optional). ``register``/``on``/``effect`` are reversible: their teardown is owned
-by this context's scope, so disposing the context unwinds exactly its own
-contributions. ``scope()`` returns a child that shares the bus but overlays its
-own services and scope — the per-agent isolation that lets N agents share one
-process without global state.
-"""
+"""Per-agent service container with shared events and reversible child scopes."""
 
 from __future__ import annotations
 
@@ -27,8 +16,6 @@ _PLUGIN_SCOPE: ContextVar[Any] = ContextVar("linch_plugin_scope", default=None)
 
 
 class Context:
-    """A service container with a typed event bus and reversible registrations."""
-
     def __init__(
         self,
         *,
@@ -39,48 +26,36 @@ class Context:
         self.label = label
         self.events: EventBus = _bus if _bus is not None else EventBus()
         self._scope = EffectScope()
+        self._teardown = Disposable(self._dispose)
+        self._before_dispose: Disposable | None = None
         self._services: dict[str, Any] = {}
         self._parent = _parent
         self._children: list[Context] = []
         self._plugin_exports: dict[str, tuple[Context, Context]] = {}
+        self._inbox: list[tuple[object, Callable[[Any, str], Any]]] | None = None
 
     def register(self, key: str, service: Any) -> Disposable:
-        """Install *service* under *key* in this scope; returns a disposer.
-
-        Raises :class:`ConfigError` if *key* is already registered in this scope
-        (a child may still shadow a parent's service under the same key).
-        """
-        self._scope.ensure_active()
-        active_scope = _PLUGIN_SCOPE.get()
-        if active_scope is not None and not self._within(active_scope):
-            raise ConfigError("plugin setup may only register services in its activation scope")
+        """Install a service and return its disposer; reject duplicate claims."""
+        self._ensure_active()
         if key in self._services:
             raise ConfigError(f"service {key!r} already registered in this scope")
         if key in self._plugin_exports:
             raise ConfigError(f"service {key!r} is already provided by a plugin")
 
         def _install() -> Callable[[], Any]:
-            removed = False
-            notified = False
             notification: Disposable | None = None
             self._services[key] = service
 
-            async def _remove() -> None:
-                nonlocal notified, notification, removed
-                if not removed:
+            def _remove() -> Any:
+                nonlocal notification
+                if notification is None:
                     if key not in self._services or self._services[key] is not service:
                         return
                     del self._services[key]
-                    removed = True
-                if notified:
-                    return
-                if notification is None:
                     if not self.events.has_listeners("context/service"):
-                        notified = True
                         return
                     notification = self.events._notification("context/service", self, key)
-                await notification.dispose()
-                notified = True
+                return notification.dispose()
 
             return _remove
 
@@ -119,29 +94,36 @@ class Context:
         """Register an event listener owned by this scope (disposed with it)."""
         # Validate first: registering on the bus before a closed-scope failure
         # would leak an unowned listener.
-        self._scope.ensure_active()
+        self._ensure_active()
         disposer = self.events.on(name, listener, prepend=prepend)
         self._scope.add(disposer)
         return disposer
 
     def effect(self, fn: Callable[[], Any]) -> Disposable:
         """Register a reversible effect owned by this scope."""
+        self._ensure_active()
         return self._scope.effect(fn)
 
-    def scope(self, label: str = "scope") -> Context:
-        """Return a child context sharing the bus but isolating services/teardown.
+    def inbox(self, producer: Callable[[Any, str], Any]) -> Disposable:
+        self._ensure_active()
+        target = getattr(self.get("agent"), "context", self)
+        bucket = target._inbox = target._inbox or []
+        entry = (object(), producer)
+        bucket.append(entry)
+        return self._scope.add(Disposable(lambda: bucket.remove(entry)))
 
-        Child registrations are invisible to the parent and are unwound when the
-        child (or the parent) is disposed.
-        """
-        self._scope.ensure_active()
-        active_scope = _PLUGIN_SCOPE.get()
-        if active_scope is not None and not self._within(active_scope):
-            raise ConfigError("plugin setup may only create scopes in its activation scope")
+    def scope(self, label: str = "scope") -> Context:
+        """Return a child sharing the bus with isolated services and teardown."""
+        self._ensure_active()
         child = Context(label=label, _bus=self.events, _parent=self)
         self._children.append(child)
-        self._scope.add(Disposable(child.dispose))
+        self._scope.add(child._teardown)
         return child
+
+    def _ensure_active(self) -> None:
+        self._scope.ensure_active()
+        if (active_scope := _PLUGIN_SCOPE.get()) is not None and not self._within(active_scope):
+            raise ConfigError("plugin setup may only register effects in its activation scope")
 
     def _within(self, ancestor: Context) -> bool:
         current: Context | None = self
@@ -152,8 +134,7 @@ class Context:
         return False
 
     def _plugin_services(self) -> list[tuple[str, Context]]:
-        services = list(self._services.items())
-        result: list[tuple[str, Context]] = [(key, self) for key, _service in services]
+        result: list[tuple[str, Context]] = [(key, self) for key in self._services]
         for child in self._children:
             result.extend(child._plugin_services())
         return result
@@ -177,11 +158,13 @@ class Context:
             return self.events._notification("context/service", self, key)
         return None
 
-    async def dispose(self) -> None:
-        """Unwind every registration, listener, and child scope owned here."""
+    async def _dispose(self) -> None:
+        self._scope._closed = True
+        if self._before_dispose is not None:
+            await self._before_dispose.dispose()
         await self._scope.dispose()
         if self._parent is not None:
-            try:
-                self._parent._children.remove(self)
-            except ValueError:
-                pass
+            self._parent._children.remove(self)
+
+    async def dispose(self) -> None:
+        await self._teardown.dispose()

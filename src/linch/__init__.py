@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     # skipped at runtime (TYPE_CHECKING is False), so `import linch` stays lazy —
     # the runtime resolution path is `__getattr__` below. Keep it in sync with
     # `_EXPORTS`/`_ALIASES`; drift surfaces as pyright/ruff errors.
-    from .agent import Agent
+    from .agent import Agent, plugins
     from .budget import RunBudget
     from .compaction import (
         GENERAL_SUMMARY_PROMPT,
@@ -366,7 +366,7 @@ if TYPE_CHECKING:
 # name). Flattened into ``_LAZY`` below; ``_ALIASES`` covers the few names whose
 # source attribute differs from the exported name.
 _EXPORTS: dict[str, tuple[str, ...]] = {
-    ".agent": ("Agent",),
+    ".agent": ("Agent", "plugins"),
     ".budget": ("RunBudget",),
     ".compaction": (
         "GENERAL_SUMMARY_PROMPT",
@@ -745,6 +745,7 @@ __all__ = [
     "Context",
     "Disposable",
     "Plugin",
+    "plugins",
     "IgnorableEvent",
     "is_ignorable_event",
     "ToolExecution",

@@ -63,6 +63,14 @@ def test_plugin_is_public() -> None:
     assert hasattr(Plugin, "setup")
 
 
+def test_builtin_plugin_catalog_is_public_and_stateless() -> None:
+    from linch import plugins
+
+    assert "plugins" in linch.__all__
+    assert plugins.mailbox is not plugins.mailbox
+    assert plugins.ask_user is not plugins.ask_user
+
+
 def test_resume_rejection_error_is_public() -> None:
     from linch import LinchError, RunNotResumableError
 

@@ -170,8 +170,17 @@ async def test_frozen_resume_defers_new_durable_inbox_delivery_to_next_turn() ->
         hooks=[_DynamicRequestHook("frozen")],
     )
     session = await restarted.session(id="session-1")
+    producer_calls = 0
+
+    async def inbox_producer(_session: Any, _run_id: str):
+        nonlocal producer_calls
+        producer_calls += 1
+        yield notification
+
+    restarted.context.inbox(inbox_producer)
     resumed = [event async for event in session.resume(run_id)]
 
+    assert producer_calls == 0
     assert not any(event.type == "user" and event.subtype == "notification" for event in resumed)
     assert all(
         "arrived after crash"
@@ -182,6 +191,7 @@ async def test_frozen_resume_defers_new_durable_inbox_delivery_to_next_turn() ->
     )
 
     next_turn = [event async for event in session.run("continue")]
+    assert producer_calls == 1
     assert any(
         event.type == "user" and event.subtype == "notification" and event.message == notification
         for event in next_turn
