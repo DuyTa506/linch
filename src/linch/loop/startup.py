@@ -62,6 +62,15 @@ def _prompt_message(ctx: RunStartupContext, prompt: str, images: Any) -> Any:
 async def _emit_prompt_block(ctx: RunStartupContext, block_reason: str) -> AsyncIterator[Event]:
     """Emit the pre-loop terminal path for a blocked user prompt."""
     runtime = ctx.runtime
+    startup = ctx.checkpoint.extension_state.get("linch.startup")
+    if not (startup and startup.get("blocked_error_emitted")):
+        event: Event = ErrorEvent(
+            error={"name": "HookBlockedPrompt", "message": block_reason, "retryable": False}
+        )
+        await _persist_event(runtime.session, runtime.run_id, event)
+        if startup is not None:
+            startup["blocked_error_emitted"] = True
+        yield event
     runtime.sync_checkpoint_accounting()
     duration_ms = int((time.time() - runtime.started) * 1000)
     blocked_result = _AgentResult(
@@ -72,11 +81,6 @@ async def _emit_prompt_block(ctx: RunStartupContext, block_reason: str) -> Async
         total_usage=runtime.total,
         duration_ms=duration_ms,
     )
-    event: Event = ErrorEvent(
-        error={"name": "HookBlockedPrompt", "message": block_reason, "retryable": False}
-    )
-    await _persist_event(runtime.session, runtime.run_id, event)
-    yield event
     ctx.checkpoint.extension_state.pop("linch.startup", None)
     async for event in _error_result_tail(
         runtime.session,
