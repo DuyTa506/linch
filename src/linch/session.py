@@ -103,6 +103,8 @@ class Session:
     """The single append-only log behind the session-owned provider view and
     audit history. Ephemeral per-request context is assembled outside this log.
     Compaction is recorded as a projection, never an untracked mutation."""
+    _extensions: dict[str, Any] = field(default_factory=dict, repr=False)
+    """JSON-only extension state captured in the run checkpoint."""
     _active: bool = False
     _closed: bool = False
     _lifecycle_state: str = _OPEN

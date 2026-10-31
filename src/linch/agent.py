@@ -529,7 +529,7 @@ class Agent:
         # Linch is an SDK, not an implicit coding harness.  A bare Agent gets
         # no shell/filesystem authority; applications opt in with their own
         # registry or ``workspace_tools()``/a higher-level preset.
-        self.tools = tools if tools is not None else ToolRegistry()
+        self.tools = tools.copy() if tools is not None else ToolRegistry()
         if self.execution_backend is not None:
             from .tools.builtin import BashTool
 
@@ -618,6 +618,8 @@ class Agent:
         if self.execution_backend is not None:
             self.context.register("execution", self.execution_backend)
         self.context.register("agent", self)
+        self.tool_search = Disposable()
+        self._tool_search_mounted = False
 
     def _initialize_extension_state(
         self,
@@ -1314,6 +1316,11 @@ class Agent:
         # before shared stores are released.
         async with self._session_lock:
             self._require_open()
+            if not self._tool_search_mounted and not self.tool_search.disposed:
+                from .tools.search import ToolSearchPlugin
+
+                self.tool_search = await self.use(ToolSearchPlugin())
+                self._tool_search_mounted = True
             if self.features.mcp:
                 await self.connect_mcp()
             if self.features.skills:
