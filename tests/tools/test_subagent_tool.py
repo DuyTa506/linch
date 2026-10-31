@@ -81,7 +81,7 @@ def _make_ctx(session: Any) -> Any:
 
 
 async def _make_agent_and_session(tmp_path: Any) -> tuple[Any, Any]:
-    from linch import create_deep_agent
+    from linch.ext.deep_agent import create_deep_agent
     from linch.sessions import InMemorySessionStore
 
     agent = create_deep_agent(
@@ -182,7 +182,7 @@ async def test_subagent_tool_result_includes_worker_id(tmp_path: Any) -> None:
 
 
 async def test_subagent_tool_returns_structured_output_as_json_text(tmp_path: Any) -> None:
-    from linch import create_deep_agent
+    from linch.ext.deep_agent import create_deep_agent
     from linch.sessions import InMemorySessionStore
 
     agent = create_deep_agent(
@@ -388,7 +388,7 @@ async def test_background_worker_notification_escapes_worker_output(tmp_path: An
     import asyncio
     import xml.etree.ElementTree as ET
 
-    from linch import create_deep_agent
+    from linch.ext.deep_agent import create_deep_agent
     from linch.sessions import InMemorySessionStore
 
     class _XmlTextProvider:
@@ -441,7 +441,7 @@ async def test_stopped_background_worker_remains_addressable(tmp_path: Any) -> N
     """
     import asyncio
 
-    from linch import create_deep_agent
+    from linch.ext.deep_agent import create_deep_agent
     from linch.sessions import InMemorySessionStore
 
     started = asyncio.Event()

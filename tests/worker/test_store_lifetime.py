@@ -300,7 +300,7 @@ async def test_invalid_factory_teardown_preserves_the_other_worker_store(pool, w
     closed = []
 
     async def factory(job):
-        from linch.evals import ScriptedProvider, TextTurn
+        from linch.ext.evals import ScriptedProvider, TextTurn
 
         class Provider(ScriptedProvider):
             async def close(self):

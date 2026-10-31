@@ -33,7 +33,7 @@ def text_contains(substring: str) -> Callable[..., bool | None]:
 
 def tool_called(tool_name: str) -> Callable[..., bool | None]:
     """Pass when a ``ToolCallStartEvent`` with *tool_name* appears in events."""
-    from ..events import ToolCallStartEvent
+    from ...events import ToolCallStartEvent
 
     def _score(events: list | None = None, **_: Any) -> bool:
         return any(
@@ -91,7 +91,7 @@ def cost_under(budget_usd: float) -> Callable[..., bool | None]:
 
 def context_selected_tool(tool_name: str) -> Callable[..., bool | None]:
     """Pass when any context build selected *tool_name* for the provider turn."""
-    from ..events import ContextBuildEvent
+    from ...events import ContextBuildEvent
 
     def _score(events: list | None = None, **_: Any) -> bool | None:
         builds = [e for e in (events or []) if isinstance(e, ContextBuildEvent)]
@@ -108,7 +108,7 @@ def context_selected_tool(tool_name: str) -> Callable[..., bool | None]:
 
 def context_not_trimmed() -> Callable[..., bool | None]:
     """Pass when context builds exist and none report ``budget.trimmed=True``."""
-    from ..events import ContextBuildEvent
+    from ...events import ContextBuildEvent
 
     def _score(events: list | None = None, **_: Any) -> bool | None:
         builds = [e for e in (events or []) if isinstance(e, ContextBuildEvent)]
@@ -125,7 +125,7 @@ def context_metadata_contains(key: str, expected: Any = None) -> Callable[..., b
 
     If *expected* is not ``None``, the metadata value must equal it.
     """
-    from ..events import ContextBuildEvent
+    from ...events import ContextBuildEvent
 
     def _score(events: list | None = None, **_: Any) -> bool | None:
         builds = [e for e in (events or []) if isinstance(e, ContextBuildEvent)]
@@ -147,7 +147,7 @@ def recovery_succeeded(tool_name: str | None = None) -> Callable[..., bool | Non
 
     When *tool_name* is provided, both calls must be for that tool.
     """
-    from ..events import ToolCallEndEvent
+    from ...events import ToolCallEndEvent
 
     def _score(events: list | None = None, **_: Any) -> bool | None:
         saw_failure = False

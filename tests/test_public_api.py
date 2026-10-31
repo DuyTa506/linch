@@ -9,12 +9,14 @@ in CI rather than in an embedder's pinned import:
 - every public (non-underscore) *attribute* of the package — submodules aside —
   is declared in `__all__`, so nothing leaks into the surface undeclared.
 
-Submodule names (`linch.agent`, `linch.tools`, …) are import artifacts, not part
-of the contract: embedders import from the top-level `linch` namespace only.
+Core submodule names (`linch.agent`, `linch.tools`, …) are import artifacts, not
+part of the contract; optional features are imported explicitly from
+`linch.ext.*`.
 """
 
 from __future__ import annotations
 
+import ast
 import importlib
 import subprocess
 import sys
@@ -53,7 +55,27 @@ PROMOTED_EVAL_NAMES = frozenset(
         "tool_called",
     }
 )
-PROMOTED_PERMISSION_NAMES = frozenset({"BashRule", "PathRule", "ToolRule"})
+PROMOTED_PERMISSION_NAMES = frozenset({"BashRule", "PathRule", "Principal", "ToolRule"})
+
+
+def _imported_modules(path: Path, node: ast.Import | ast.ImportFrom, source_root: Path) -> set[str]:
+    if isinstance(node, ast.Import):
+        return {alias.name for alias in node.names}
+    if not isinstance(node, ast.ImportFrom):
+        return set()
+    package_parts = ("linch",) + path.relative_to(source_root).parent.parts
+    package = ".".join(package_parts)
+    if node.level:
+        prefix = "." * node.level + (node.module or "")
+        try:
+            module = importlib.util.resolve_name(prefix, package)
+        except ImportError:
+            return set()
+    else:
+        module = node.module
+    if module is None:
+        return set()
+    return {module, *(f"{module}.{alias.name}" for alias in node.names)}
 
 
 def test_plugin_is_public() -> None:
@@ -107,29 +129,83 @@ assert 'linch.run_stores.postgres' in sys.modules
     assert completed.returncode == 0, completed.stderr
 
 
-def test_studio_prerequisite_names_are_promoted() -> None:
-    evals = importlib.import_module("linch.evals")
+def test_extension_names_are_explicit() -> None:
+    evals = importlib.import_module("linch.ext.evals")
     permissions = importlib.import_module("linch.permissions")
 
     assert set(evals.__all__) == PROMOTED_EVAL_NAMES
-    expected = PROMOTED_EVAL_NAMES | PROMOTED_PERMISSION_NAMES
-    assert expected <= set(linch.__all__)
-    for name in PROMOTED_EVAL_NAMES:
-        assert getattr(linch, name) is getattr(evals, name)
+    assert PROMOTED_EVAL_NAMES.isdisjoint(linch.__all__)
     for name in PROMOTED_PERMISSION_NAMES:
         assert getattr(linch, name) is getattr(permissions, name)
 
 
-def test_studio_prerequisite_modules_remain_lazy() -> None:
+def test_extensions_are_explicit_and_removed_from_kernel_surface() -> None:
+    from linch.ext.deep_agent import create_deep_agent
+    from linch.ext.evals import EvalCase, ScriptedProvider
+    from linch.ext.loop_runner import LoopRunner
+    from linch.ext.reports import RunReport
+    from linch.ext.scaffold import main as scaffold_main
+    from linch.ext.workflow import run_workflow
+
+    assert all(callable(value) for value in (create_deep_agent, ScriptedProvider, LoopRunner))
+    assert EvalCase.__module__.startswith("linch.ext.evals")
+    assert RunReport.__module__ == "linch.ext.reports"
+    assert callable(scaffold_main)
+    assert callable(run_workflow)
+    removed = {
+        "create_deep_agent",
+        "EvalCase",
+        "ScriptedProvider",
+        "LoopRunner",
+        "RunReport",
+        "run_workflow",
+    }
+    assert removed.isdisjoint(linch.__all__)
+    assert all(not hasattr(linch, name) for name in removed)
+
+
+def test_kernel_has_no_imports_from_extensions() -> None:
+    source_root = Path(__file__).resolve().parents[1] / "src" / "linch"
+    violations: list[str] = []
+    for path in source_root.rglob("*.py"):
+        if "ext" in path.relative_to(source_root).parts:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            for module in _imported_modules(path, node, source_root):
+                if module == "linch.ext" or module.startswith("linch.ext."):
+                    violations.append(f"{path}:{node.lineno}: import {module}")
+    assert violations == []
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "source", "expected"),
+    [
+        ("agent.py", "from .ext import run_workflow", "linch.ext"),
+        ("loop/runner.py", "from .. import ext", "linch.ext"),
+        ("__init__.py", "from linch import ext", "linch.ext"),
+    ],
+)
+def test_imported_modules_resolve_extension_boundaries(
+    relative_path: str, source: str, expected: str
+) -> None:
+    source_root = Path("/virtual/src/linch")
+    path = source_root / relative_path
+    node = next(node for node in ast.walk(ast.parse(source)) if isinstance(node, ast.ImportFrom))
+
+    assert expected in _imported_modules(path, node, source_root)
+
+
+def test_extension_modules_are_explicit() -> None:
     root = Path(__file__).resolve().parents[1]
     script = f"""
 import sys
 sys.path.insert(0, {str(root / "src")!r})
 import linch
-assert "linch.evals" not in sys.modules
+assert "linch.ext.evals" not in sys.modules
 assert "linch.permissions" not in sys.modules
-_ = linch.EvalCase
-assert "linch.evals" in sys.modules
+from linch.ext.evals import EvalCase
+assert "linch.ext.evals" in sys.modules
 assert "linch.permissions" not in sys.modules
 _ = linch.ToolRule
 assert "linch.permissions" in sys.modules
@@ -203,8 +279,8 @@ def test_no_undeclared_public_attributes() -> None:
     assert leaked == [], f"public attributes missing from __all__: {leaked}"
 
 
-def test_external_consumer_fixture_uses_only_top_level_api() -> None:
-    """A consumer module must not need private Linch submodule paths."""
+def test_external_consumer_fixture_uses_core_and_extension_api() -> None:
+    """A consumer module uses core and extension public paths explicitly."""
 
     fixture = Path(__file__).parent / "fixtures" / "public_consumer.py"
     script = f"""
@@ -264,3 +340,28 @@ def test_custom_observer_surface_is_removed() -> None:
     assert not any(hasattr(linch, name) for name in removed)
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("linch.observability")
+
+
+def test_rag_names_are_public() -> None:
+    from linch import (
+        RagConnector,
+        RetrievedChunk,
+        register_grounding_check,
+        register_rag_connector,
+    )
+
+    assert {
+        "RagConnector",
+        "RetrievedChunk",
+        "register_grounding_check",
+        "register_rag_connector",
+    } <= set(linch.__all__)
+    assert all(
+        callable(value)
+        for value in (
+            RagConnector,
+            RetrievedChunk,
+            register_grounding_check,
+            register_rag_connector,
+        )
+    )

@@ -9,17 +9,18 @@ import pytest
 from linch import (
     Agent,
     ConfigError,
-    FileLoopArtifactStore,
+    OutputSchema,
+    RunOptions,
+)
+from linch.ext.evals import ScriptedProvider, TextTurn
+from linch.ext.loop_runner import (
     FileLoopLeaseStore,
     InMemoryLoopLeaseStore,
     LoopRunner,
     LoopSpec,
     LoopTickResult,
     LoopTrigger,
-    OutputSchema,
-    RunOptions,
 )
-from linch.evals import ScriptedProvider, TextTurn
 from linch.sessions import InMemorySessionStore
 
 
@@ -295,24 +296,36 @@ async def test_agent_run_errors_still_write_log_and_report(tmp_path) -> None:
     assert report_json["status"] == "error"
 
 
-def test_loop_types_are_exported() -> None:
+def test_loop_types_are_explicit_extension_exports() -> None:
     import linch
+    from linch.ext.loop_runner import (
+        FileLoopArtifactStore,
+        FileLoopLeaseStore,
+        LoopArtifactStore,
+        LoopLease,
+        LoopLeaseStore,
+        LoopRunner,
+        LoopSpec,
+        LoopTickResult,
+        LoopTrigger,
+    )
 
-    for name in [
-        "LoopSpec",
-        "LoopTrigger",
-        "LoopTickResult",
-        "LoopArtifactStore",
-        "LoopLease",
-        "LoopLeaseStore",
-        "FileLoopArtifactStore",
-        "FileLoopLeaseStore",
-        "InMemoryLoopLeaseStore",
-        "LoopRunner",
-    ]:
-        assert hasattr(linch, name)
-        assert name in linch.__all__
-
+    assert all(
+        value.__module__ == "linch.ext.loop_runner"
+        for value in (
+            LoopSpec,
+            LoopTrigger,
+            LoopTickResult,
+            LoopArtifactStore,
+            LoopLease,
+            LoopLeaseStore,
+            FileLoopArtifactStore,
+            FileLoopLeaseStore,
+            InMemoryLoopLeaseStore,
+            LoopRunner,
+        )
+    )
+    assert all(not hasattr(linch, name) for name in ("LoopSpec", "LoopRunner"))
     assert FileLoopArtifactStore(root="domains") is not None
 
 

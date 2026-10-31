@@ -17,7 +17,7 @@ async def _settle() -> None:
 
 def _agent(*, context: Context | None = None) -> Any:
     from linch import Agent
-    from linch.evals import ScriptedProvider
+    from linch.ext.evals import ScriptedProvider
 
     return Agent(
         model="m",

@@ -4,7 +4,6 @@ import pytest
 
 
 def test_build_run_report_summarizes_events():
-    from linch import build_run_report
     from linch.events import (
         ContextBuildEvent,
         LoopGuardEvent,
@@ -16,6 +15,7 @@ def test_build_run_report_summarizes_events():
         ToolCallStartEvent,
         UsageEvent,
     )
+    from linch.ext.reports import build_run_report
     from linch.tools import ToolResult
     from linch.types import Usage
 
@@ -116,8 +116,8 @@ def test_build_run_report_summarizes_events():
 def test_float_tool_duration_is_counted_not_dropped():
     # Regression: a float duration_ms (e.g. from a custom provider/tool) must be
     # coerced into the summary aggregates, not silently dropped to 0.
-    from linch import build_run_report
     from linch.events import ToolCallEndEvent, ToolCallStartEvent
+    from linch.ext.reports import build_run_report
     from linch.tools import ToolResult
 
     events = [
@@ -139,8 +139,8 @@ def test_float_tool_duration_is_counted_not_dropped():
 
 
 def test_run_report_ranks_top_slowest_tools_deterministically():
-    from linch import build_run_report
     from linch.events import ToolCallEndEvent, ToolCallStartEvent
+    from linch.ext.reports import build_run_report
 
     calls = [
         ("fast", "Read", 10),
@@ -182,8 +182,8 @@ def test_run_report_ranks_top_slowest_tools_deterministically():
 
 
 def test_run_report_summarizes_failed_tools_by_name_and_event_order():
-    from linch import build_run_report
     from linch.events import ToolCallEndEvent, ToolCallStartEvent
+    from linch.ext.reports import build_run_report
     from linch.tools import ToolResult
 
     events = [
@@ -251,8 +251,8 @@ def test_run_report_summarizes_failed_tools_by_name_and_event_order():
     ],
 )
 def test_context_utilization_maps_to_pressure_labels(budget, pressure):
-    from linch import build_run_report
     from linch.events import ContextBuildEvent
+    from linch.ext.reports import build_run_report
 
     report = build_run_report(
         [
@@ -270,8 +270,8 @@ def test_context_utilization_maps_to_pressure_labels(budget, pressure):
 
 
 def test_context_pressure_uses_raw_utilization_before_rounding():
-    from linch import build_run_report
     from linch.events import ContextBuildEvent
+    from linch.ext.reports import build_run_report
 
     report = build_run_report(
         [
@@ -293,8 +293,8 @@ def test_non_finite_budget_value_does_not_crash_report_building():
     # Regression: report building is a non-throwing read model. A NaN/Infinity
     # numeric field (json.loads accepts these, so they survive a persisted-event
     # round-trip) must be dropped, not int()-coerced into a ValueError/OverflowError.
-    from linch import build_run_report
     from linch.events import ContextBuildEvent, ResultEvent
+    from linch.ext.reports import build_run_report
     from linch.types import Usage
 
     events = [
@@ -322,8 +322,8 @@ def test_non_finite_budget_value_does_not_crash_report_building():
 
 
 def test_report_diagnostics_ignore_missing_and_non_finite_values():
-    from linch import build_run_report
     from linch.events import ToolCallEndEvent
+    from linch.ext.reports import build_run_report
 
     events = [
         ToolCallEndEvent(
@@ -367,13 +367,13 @@ def test_report_diagnostics_ignore_missing_and_non_finite_values():
 
 
 def test_build_run_report_includes_long_run_context_and_recovery_signals():
-    from linch import build_run_report
     from linch.events import (
         ContextBuildEvent,
         ResultEvent,
         ToolCallEndEvent,
         ToolCallStartEvent,
     )
+    from linch.ext.reports import build_run_report
     from linch.tools import ToolResult
     from linch.types import Usage
 
@@ -446,7 +446,6 @@ def test_build_run_report_includes_long_run_context_and_recovery_signals():
 
 
 def test_build_run_report_exposes_recovery_and_efficiency_counters():
-    from linch import build_run_report
     from linch.events import (
         CompactionEvent,
         HookEventRecord,
@@ -455,6 +454,7 @@ def test_build_run_report_exposes_recovery_and_efficiency_counters():
         ToolCallEndEvent,
         VerificationEvent,
     )
+    from linch.ext.reports import build_run_report
     from linch.tools import ToolResult
     from linch.types import Usage
 
@@ -541,8 +541,9 @@ def test_build_run_report_exposes_recovery_and_efficiency_counters():
 
 @pytest.mark.asyncio
 async def test_load_run_report_from_run_store():
-    from linch import InMemoryRunStore, load_run_report
+    from linch import InMemoryRunStore
     from linch.events import ResultEvent, SystemEvent
+    from linch.ext.reports import load_run_report
     from linch.run_store import RunCheckpoint
     from linch.types import Usage
 

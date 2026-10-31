@@ -1,4 +1,4 @@
-"""linch.evals — evaluation harness for agent loops.
+"""linch.ext.evals — evaluation harness for agent loops.
 
 Provides:
 - ``ScriptedProvider`` / ``TextTurn`` / ``ToolUseTurn`` — deterministic provider

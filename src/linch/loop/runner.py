@@ -7,6 +7,7 @@ from __future__ import annotations
 import time
 from collections.abc import AsyncIterator
 from contextlib import aclosing
+from dataclasses import replace
 from typing import Any
 from uuid import uuid4
 
@@ -53,6 +54,7 @@ from .contracts import (
     _build_run_contract,
     _effective_final_tool_name,
     _exact_model_input_enabled,
+    _principal_from_contract,
 )
 from .finalize import (
     FinalizeCtx,
@@ -117,10 +119,18 @@ _MAX_FINAL_ANSWER_REENTRIES = 1
 
 
 async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIterator[Event]:
+    opts = replace(opts)
+    store = session.agent.run_store
+    if store is not None and opts.run_id is not None and opts.principal is None:
+        existing = await store_call(session, "run.load_run", store.load_run(opts.run_id))
+        if existing is not None and "run_contract" in existing.meta:
+            stored = run_contract_from_meta(existing.meta)
+            principal = _principal_from_contract(stored)
+            if principal is not None:
+                opts = replace(opts, principal=principal)
     if _exact_model_input_enabled(session.agent):
         _require_model_input_snapshot_store(session.agent)
     await session.agent._ensure_provider_prepared()
-    store = session.agent.run_store
     run_id = opts.run_id or str(uuid4())
     session.active_run_id = run_id
     session.run_deps = opts.deps if opts.deps is not None else getattr(session.agent, "deps", None)
@@ -178,6 +188,7 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
 
 
 async def resume_loop(session: Session, run_id: str, opts: RunOptions) -> AsyncIterator[Event]:
+    opts = replace(opts)
     if _exact_model_input_enabled(session.agent):
         _require_model_input_snapshot_store(session.agent)
     await session.agent._ensure_provider_prepared()
@@ -194,9 +205,12 @@ async def resume_loop(session: Session, run_id: str, opts: RunOptions) -> AsyncI
     checkpoint = run_record.checkpoint
     if checkpoint is None:
         raise RunNotResumableError(run_id, run_record.status)
-    requested_contract = _build_run_contract(session, checkpoint.prompt, opts)
     try:
         stored_contract = run_contract_from_meta(run_record.meta)
+        principal = _principal_from_contract(stored_contract)
+        if opts.principal is None and principal is not None:
+            opts = replace(opts, principal=principal)
+        requested_contract = _build_run_contract(session, checkpoint.prompt, opts)
         ensure_run_contract_compatible(
             stored_contract,
             requested_contract,

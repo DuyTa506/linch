@@ -12,12 +12,14 @@ import asyncio
 from linch import (
     Agent,
     EvalBenchmarkTarget,
-    EvalCase,
     EvalSuite,
     InMemorySessionStore,
+    empty_tools,
+)
+from linch.ext.evals import (
+    EvalCase,
     ScriptedProvider,
     TextTurn,
-    empty_tools,
     run_eval_benchmark,
     text_contains,
 )

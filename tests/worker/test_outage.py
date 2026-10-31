@@ -248,7 +248,7 @@ async def test_three_second_database_outage_restores_dispatch_and_listen(
     outage_database, stop_during_outage
 ):
     from linch import ErrorEvent, ResultEvent
-    from linch.evals import ScriptedProvider, TextTurn
+    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.worker import Worker, enqueue_run
 
     admin, name, pool = outage_database
@@ -316,6 +316,8 @@ async def test_three_second_database_outage_restores_dispatch_and_listen(
             ),
             15,
         )
+        assert await pool.fetchval("SELECT count(*) FROM runs WHERE status='failed'") == 0
+        assert await pool.fetchval("SELECT status='completed' FROM runs WHERE id=$1", rid)
         after = worker._manager
         assert after is not before
         assert after.queries.driver._connection.get_server_pid() != before_pid

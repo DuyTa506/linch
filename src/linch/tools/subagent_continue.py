@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import uuid4
 
+from ..session import RunOptions
 from .base import ToolContext, ToolResult, ToolScope
 
 SUBAGENT_CONTINUE_TOOL_NAME = "SubagentContinue"
@@ -116,6 +117,7 @@ class SubagentContinueTool:
                 subagent_run_id=subagent_run_id,
                 signal=ctx.signal,
                 emit=emit_fn,
+                run_options=RunOptions(principal=ctx.principal),
             )
         )
         result_text = result_text_for_caller(result)

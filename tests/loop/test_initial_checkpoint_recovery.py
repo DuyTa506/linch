@@ -612,13 +612,17 @@ async def test_blocked_prompt_marks_skills_seen_only_after_terminal_commit(termi
     try:
         session = await agent.session(id="s")
         events = [event async for event in session.run("hello", RunOptions(run_id="blocked"))]
-        assert events[-1].type == "result"
         if terminal_failure:
+            # A transient terminal-store loss may have emitted the blocked
+            # ErrorEvent, but it must not append a durable ResultEvent.
+            assert any(event.type == "error" for event in events)
+            assert not any(event.type == "result" for event in events)
             assert not session.skills_loaded_emitted
             rows = await store.load_events("blocked")
             assert [row.event.type for row in rows] == ["system", "skills_loaded"]
             assert (await store.load_run("blocked")).status == "running"
         else:
+            assert events[-1].type == "result"
             assert session.skills_loaded_emitted
             assert (
                 "linch.startup" not in (await store.load_run("blocked")).checkpoint.extension_state

@@ -48,6 +48,7 @@ from ..run_store import (
     ModelInputSnapshotError,
     RunCheckpoint,
     RunRecord,
+    _StoreUnavailableError,
     decode_model_input_snapshot,
 )
 from ..session import Session
@@ -584,6 +585,7 @@ class RunRuntime:
             require_model_input_snapshot_store(agent) if runtime.exact_model_input else None
         )
         session.active_run_id = run_id
+        session._active_principal = opts.principal
         initial_event_seq = 0
         if resume_checkpoint is not None and agent.run_store is not None:
             runtime.stored_events = await store_call(
@@ -959,6 +961,8 @@ class RunRuntime:
     ) -> AsyncIterator[Event]:
         """Persist the typed error pair before making failed status visible."""
         await cancel_background_workers(self.session)
+        if isinstance(self.lease_lost, _StoreUnavailableError):
+            return
         original = self.lease_lost or exc
         error = _error_payload(original)
         duration_ms = int((time.time() - self.started) * 1000)
@@ -986,6 +990,8 @@ class RunRuntime:
                 original,
             )
         await self.persist_failed(error, original=original)
+        if isinstance(self.lease_lost, _StoreUnavailableError):
+            return
         if self.lease_lost is not None:
             error = _error_payload(self.lease_lost)
             error["retryable"] = False

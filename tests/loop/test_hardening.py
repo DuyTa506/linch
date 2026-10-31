@@ -176,7 +176,7 @@ def test_context_registry_selection_cannot_widen_turn_allowlist() -> None:
 
 
 def test_deep_agent_verification_profile_has_no_unrestricted_shell() -> None:
-    from linch.deep_agent import DEEP_AGENT_SUBAGENTS
+    from linch.ext.deep_agent import DEEP_AGENT_SUBAGENTS
 
     verification = next(agent for agent in DEEP_AGENT_SUBAGENTS if agent.name == "verification")
     assert "Bash" not in (verification.frontmatter.tools or [])

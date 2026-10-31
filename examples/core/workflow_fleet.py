@@ -1,6 +1,6 @@
 """Workflow engine — a deterministic "fleet loop" over subagents.
 
-``agent.run_workflow(fn)`` runs a plain async function that orchestrates
+``run_workflow(agent, fn)`` runs a plain async function that orchestrates
 subagents deterministically:
 
 - ``await wf.agent(prompt)``      — run a subagent, get its final text
@@ -24,7 +24,8 @@ from collections.abc import AsyncIterator
 from typing import Any
 from uuid import uuid4
 
-from linch import Agent, PostgresRunStore, RunBudget, WorkflowError
+from linch import Agent, PostgresRunStore, RunBudget
+from linch.ext.workflow import WorkflowError, run_workflow
 from linch.sessions import InMemorySessionStore
 from linch.types import Usage
 
@@ -86,7 +87,8 @@ async def fan_out_demo() -> None:
         return {"findings": deepened, "tokens_spent": wf.budget.spent_tokens}
 
     try:
-        result = await agent.run_workflow(
+        result = await run_workflow(
+            agent,
             research,
             budget=budget,
             on_event=lambda e: e.type == "workflow" and print(f"  [{e.kind}] {e.title}"),
@@ -109,7 +111,7 @@ async def resume_demo(dsn: str) -> None:
     crashing = TextProvider(fail_on_call=3)
     agent1 = make_agent(crashing, run_store=PostgresRunStore(dsn))
     try:
-        await agent1.run_workflow(flow, run_id=run_id)
+        await run_workflow(agent1, flow, run_id=run_id)
     except WorkflowError as exc:
         print(f"  first attempt failed on call 3: {exc}")
     finally:
@@ -118,7 +120,8 @@ async def resume_demo(dsn: str) -> None:
     healthy = TextProvider()
     agent2 = make_agent(healthy, run_store=PostgresRunStore(dsn))
     try:
-        result = await agent2.run_workflow(
+        result = await run_workflow(
+            agent2,
             flow,
             run_id=run_id,
             on_event=lambda e: (
