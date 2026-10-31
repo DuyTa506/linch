@@ -49,6 +49,55 @@ later on this page.
 choice for a pure domain agent that should never touch the filesystem or shell.
 `workspace_tools(exclude=..., extra=...)` starts from the standard SWE set
 (`Read`, `Write`, `Edit`, `Bash`, `Glob`, `Grep`) and adds or removes from there.
+`Agent` copies the registry passed to its constructor. Register tools added later
+on `agent.tools` so request discovery sees them; mutating the original registry
+does not change an existing agent.
+
+### Tool search for large catalogs
+
+Agents mount `ToolSearchPlugin(max_tools=30, max_skills=50)` automatically when
+the first session is created. Catalogs at or below those limits keep the normal
+request shape: no `tool_search` tool is added and the provider request is
+unchanged. Above a limit, tools without a truthy duck-typed `always_load`
+attribute are deferred. The `tool_search` description contains deferred names,
+without their schemas, so the initial prompt stays small.
+
+```python
+from linch import Agent, ToolSearchPlugin
+
+agent = Agent(model="gpt-5", provider=provider, tools=registry)
+
+# Opt out before the first session to restore the unfiltered catalog.
+await agent.tool_search.dispose()
+
+# Or choose different thresholds explicitly.
+mount = await agent.use(ToolSearchPlugin(max_tools=100, max_skills=20))
+```
+
+Search with `select:name_a,name_b` for exact names, or with ordinary keywords.
+Keyword matches score tokens over each tool's name and description. A search
+returns the matching schemas and makes those tools available in the next request
+for the rest of the session. Mark a small, essential tool with
+`always_load = True` to keep it in every deferred request. A call to a deferred
+tool is rejected with an instruction to search first; once loaded, the normal
+validation, hooks, and permission checks still apply.
+
+An explicit skill or context tool restriction must include `tool_search` if its
+large catalog needs discovery. Search preserves those restrictions.
+
+When more than 50 model-invokable skills are present, the system reminder keeps
+names and descriptions deferred in the same way. `Skill` remains available and
+loads a selected skill body only after the model invokes it. Loaded tool and
+skill names are kept in the session's durable `linch.tool_search` metadata, so
+they survive resume and later runs. The metadata stores bounded names rather
+than replaying search-result text because result offloading, middleware, and
+compaction can change that text.
+
+The resolver check runs before tool validation, hooks, and permissions. It only
+reads the provider's raw name and input; a nonempty veto becomes a clear tool
+error and does not authorize or execute the deferred tool. If the provider emits
+a deferred terminal tool, the turn-stopping path logs the same search-first
+feedback before asking for the next request.
 
 ### FunctionTool
 
