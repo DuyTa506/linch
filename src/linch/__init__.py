@@ -198,6 +198,7 @@ if TYPE_CHECKING:
         list_provider_models,
     )
     from .providers.retry import RetryOptions
+    from .rag import RagConnector, RetrievedChunk, register_grounding_check, register_rag_connector
     from .recovery import TruncationRecovery
     from .reliability import CompletionGate, ReliabilityPolicy, ToolPrerequisite
     from .run_store import (
@@ -484,6 +485,12 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
         "list_provider_models",
     ),
     ".providers.retry": ("RetryOptions",),
+    ".rag": (
+        "RagConnector",
+        "RetrievedChunk",
+        "register_grounding_check",
+        "register_rag_connector",
+    ),
     ".recovery": ("TruncationRecovery",),
     ".reliability": (
         "CompletionGate",
@@ -625,6 +632,10 @@ def __dir__() -> list[str]:
 
 
 __all__ = [
+    "RagConnector",
+    "RetrievedChunk",
+    "register_grounding_check",
+    "register_rag_connector",
     "AbortError",
     "AskUserHandler",
     "AskUserOption",
