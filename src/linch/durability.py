@@ -69,6 +69,18 @@ class DurabilityOptions:
     Defaults deliberately preserve Linch 2.x behavior.  ``strict_v1`` is a
     named, versioned profile so a future release cannot silently broaden what
     callers opted into.
+
+    Args:
+        durable_inbox: Whether inbound messages are deduplicated durably by
+            delivery ID.
+        exact_model_input: Whether pending provider requests are snapshotted
+            for exact replay after a crash.
+        delivery_lease_s: Lease duration, in seconds, for an inbox delivery.
+
+    Attributes:
+        durable_inbox: Whether durable inbox deduplication is enabled.
+        exact_model_input: Whether exact pending-request replay is enabled.
+        delivery_lease_s: Lease duration, in seconds, for an inbox delivery.
     """
 
     durable_inbox: bool = False
@@ -89,12 +101,32 @@ class DurabilityOptions:
 
     @classmethod
     def strict_v1(cls) -> DurabilityOptions:
+        """Return the versioned profile with all strict capabilities enabled.
+
+        Returns:
+            A ``DurabilityOptions`` instance enabling durable inbox handling
+            and exact model-input replay.
+        """
         return cls(durable_inbox=True, exact_model_input=True)
 
 
 @dataclass(frozen=True, slots=True)
 class InboxDelivery:
-    """A stable, deduplicated message destined for a session's next turn."""
+    """A stable, deduplicated message destined for a session's next turn.
+
+    Args:
+        delivery_id: Non-empty stable identifier used for deduplication.
+        message: User-role message to enqueue for the session.
+        source: Non-empty source label identifying the sender or integration.
+        metadata: JSON-compatible metadata stored with the delivery.
+
+    Attributes:
+        delivery_id: Stable identifier used for deduplication.
+        message: Detached user-role message queued for the session.
+        source: Source label identifying the sender or integration.
+        metadata: Detached JSON-compatible metadata for the delivery.
+        digest: Integrity hash covering the message, source, and metadata.
+    """
 
     delivery_id: str
     message: Message
@@ -128,7 +160,19 @@ class InboxDelivery:
 
 
 def encode_inbox_delivery(delivery: InboxDelivery) -> tuple[str, str, str]:
-    """Return canonical message, source and metadata fields for store backends."""
+    """Return canonical fields for persisting an inbox delivery.
+
+    Args:
+        delivery: Delivery whose message, source, and metadata should be
+            encoded and integrity-checked.
+
+    Returns:
+        A tuple containing canonical message JSON, source, and metadata JSON.
+
+    Raises:
+        ConfigError: If the delivery was mutated after construction or its
+            fields are not strictly JSON-serializable.
+    """
 
     message_json = _strict_json(message_to_dict(delivery.message), label="InboxDelivery.message")
     metadata_json = _strict_json(delivery.metadata, label="InboxDelivery.metadata")
@@ -153,6 +197,24 @@ def _delivery_envelope(message_json: str, source: str, metadata_json: str) -> by
 
 
 def decode_inbox_message(payload: str) -> Message:
+    """Decode a stored inbox message from its JSON payload.
+
+    Args:
+        payload: JSON object containing a serialized user message.
+
+    Returns:
+        The reconstructed message from the payload. The decoder preserves the
+        role value accepted by the message codec and does not enforce
+        ``role="user"``.
+
+    Raises:
+        ConfigError: If the decoded JSON value is not an object.
+        json.JSONDecodeError: If ``payload`` is not valid JSON.
+        KeyError: If required message or content-block fields are missing.
+        TypeError: If a message or content-block field has an incompatible
+            shape.
+        ValueError: If the payload contains an unknown content-block type.
+    """
     raw: Any = json.loads(payload)
     if not isinstance(raw, dict):  # pragma: no cover - store corruption guard
         raise ConfigError("stored inbox message is not a JSON object")

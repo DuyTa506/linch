@@ -23,6 +23,19 @@ _ToolDecision = Literal["allow", "deny", "ask"]
 
 @dataclass(slots=True)
 class PermissionDecision:
+    """Represent the policy outcome for one pending tool call.
+
+    Args:
+        decision: Whether the call is allowed, denied, or needs approval.
+        reason: Optional human-readable explanation for the outcome.
+        precomputed_result: Optional result supplied by a pre-execution hook.
+
+    Attributes:
+        decision: The policy outcome.
+        reason: The explanation shown to callers or the model.
+        precomputed_result: A result that can replace execution when present.
+    """
+
     decision: _ToolDecision
     reason: str | None = None
     # Set by a PreToolUse hook that short-circuits execution (e.g. a cache hit):
@@ -33,6 +46,23 @@ class PermissionDecision:
 
 @dataclass(slots=True)
 class PendingToolCall:
+    """Carry the tool invocation context through permission evaluation.
+
+    Args:
+        tool_use_id: Provider-issued identifier for the invocation.
+        tool: Duck-typed tool object being evaluated.
+        input: Model-supplied tool arguments.
+        cwd: Effective working directory for path-aware rules.
+        principal: Optional identity used by role-aware rules.
+
+    Attributes:
+        tool_use_id: Provider-issued invocation identifier.
+        tool: The tool object under evaluation.
+        input: The validated model input mapping.
+        cwd: The effective working directory, when supplied.
+        principal: The caller identity, when supplied.
+    """
+
     tool_use_id: str
     tool: Any
     input: dict[str, Any]
@@ -42,6 +72,25 @@ class PendingToolCall:
 
 @dataclass(slots=True)
 class CanUseToolRequest:
+    """Describe an approval request sent to a host callback.
+
+    Args:
+        tool_name: Name of the tool awaiting approval.
+        tool_use_id: Provider-issued identifier for the invocation.
+        input: Model-supplied tool arguments.
+        summary: Human-readable description of the invocation.
+        mode: Permission mode that produced the request.
+        principal: Optional identity associated with the run.
+
+    Attributes:
+        tool_name: Name of the tool awaiting approval.
+        tool_use_id: Provider-issued invocation identifier.
+        input: The model-supplied arguments.
+        summary: Human-readable invocation summary.
+        mode: Active permission mode.
+        principal: The caller identity, when supplied.
+    """
+
     tool_name: str
     tool_use_id: str
     input: dict[str, Any]
@@ -52,6 +101,17 @@ class CanUseToolRequest:
 
 @dataclass(slots=True)
 class CanUseToolResponse:
+    """Carry an approval callback's allow/deny decision and optional message.
+
+    Args:
+        behavior: Callback response behavior, typically ``"allow"`` or ``"deny"``.
+        message: Optional explanation accompanying a denial.
+
+    Attributes:
+        behavior: The callback's requested behavior.
+        message: The optional denial explanation.
+    """
+
     behavior: str
     message: str | None = None
 
@@ -63,6 +123,23 @@ _TASK_TOOL_NAMES = frozenset({"TaskCreate", "TaskList", "TaskGet", "TaskUpdate"}
 
 
 class PermissionEngine:
+    """Evaluate and resolve ordered permission rules for tool calls.
+
+    Args:
+        mode: Baseline permission mode used when no rule matches.
+        rules: Ordered flat rules evaluated after any layered rule set.
+        can_use_tool: Optional callback used to resolve an ``ask`` decision.
+        project_root: Root used to resolve relative path patterns.
+        rule_set: Optional layered policy source evaluated before flat rules.
+
+    Attributes:
+        mode: Baseline permission mode.
+        rules: Ordered flat permission rules.
+        can_use_tool: Optional host approval callback.
+        project_root: Root used for path matching.
+        rule_set: Optional layered permission policy.
+    """
+
     def __init__(
         self,
         *,
@@ -72,6 +149,15 @@ class PermissionEngine:
         project_root: str = "",
         rule_set: Any = None,
     ) -> None:
+        """Configure permission evaluation for one agent or run.
+
+        Args:
+            mode: Baseline permission mode used when no rule matches.
+            rules: Ordered flat rules evaluated after any layered rule set.
+            can_use_tool: Optional callback used to resolve an ``ask`` decision.
+            project_root: Root used to resolve relative path patterns.
+            rule_set: Optional layered policy source evaluated before flat rules.
+        """
         self.mode = mode
         self.rules: list[PermissionRule] = list(rules or [])
         self.can_use_tool = can_use_tool
@@ -81,6 +167,14 @@ class PermissionEngine:
         self.rule_set = rule_set
 
     def evaluate(self, call: PendingToolCall) -> PermissionDecision:
+        """Evaluate a pending call without invoking an approval callback.
+
+        Args:
+            call: Pending tool invocation to validate against the configured policy.
+
+        Returns:
+            The allow, deny, or ask decision for the call.
+        """
         invalid_reason = _validate_pending_call(call)
         if invalid_reason is not None:
             return PermissionDecision(decision="deny", reason=invalid_reason)
@@ -100,6 +194,19 @@ class PermissionEngine:
         return _mode_default(call.tool, self.mode)
 
     async def resolve(self, call: PendingToolCall, signal: Any) -> PermissionDecision:
+        """Resolve an evaluated call, including any host approval request.
+
+        Args:
+            call: Pending tool invocation to evaluate and, if needed, approve.
+            signal: Abort signal used while waiting for the approval callback.
+
+        Returns:
+            The final allow or deny decision, or an unchanged non-ask decision.
+
+        Raises:
+            AbortError: If the approval wait is aborted by ``signal``.
+            asyncio.CancelledError: If the surrounding task is cancelled.
+        """
         initial = self.evaluate(call)
         if initial.decision != "ask":
             return initial

@@ -17,6 +17,29 @@ from .dispatch import RunRequest, _enqueue, _entrypoint, _traceparent
 
 @dataclass(frozen=True, slots=True)
 class ScheduleDefinition:
+    """Describe a durable UTC schedule and its next deferred fire.
+
+    Args:
+        id: Stable schedule identifier.
+        session_id: Session receiving each materialized run.
+        payload: Prompt or payload submitted for each fire.
+        next_fire: UTC timestamp of the next scheduled occurrence.
+        cron: Optional five-field cron expression.
+        interval_s: Optional positive interval in seconds.
+        enabled: Whether future occurrences remain enabled.
+        queue: Optional worker queue for materialized runs.
+
+    Attributes:
+        id: Stable schedule identifier.
+        session_id: Target session identifier.
+        payload: Repeated run payload.
+        next_fire: Next occurrence timestamp.
+        cron: Cron expression, when configured.
+        interval_s: Interval in seconds, when configured.
+        enabled: Future-fire enablement flag.
+        queue: Optional worker queue.
+    """
+
     id: str
     session_id: str
     payload: str
@@ -80,7 +103,24 @@ async def create_schedule(
     id: str | None = None,
     after: datetime | None = None,
 ) -> ScheduleDefinition:
-    """Persist a definition and its first deferred fire atomically. Cron is UTC."""
+    """Persist a definition and its first deferred fire atomically. Cron is UTC.
+
+    Args:
+        pool: Host-owned asyncpg pool used for the schedule transaction.
+        session_id: Session receiving each materialized run.
+        payload: Prompt or payload submitted for each fire.
+        cron: Optional valid five-field UTC cron expression.
+        interval_s: Optional positive interval in seconds.
+        queue: Optional worker queue for materialized runs.
+        id: Optional caller-supplied schedule identifier.
+        after: Optional timezone-aware timestamp from which to calculate the first fire.
+
+    Returns:
+        The persisted schedule definition with its first fire timestamp.
+
+    Raises:
+        ValueError: If cron/interval settings are invalid or both are supplied.
+    """
     _entrypoint(queue)
     fire = _next(cron, interval_s, after or datetime.now(UTC))
     sid = id or str(uuid4())
@@ -106,7 +146,15 @@ async def create_schedule(
 
 
 async def list_schedules(pool: Any, *, session_id: str) -> list[ScheduleDefinition]:
-    """List a session's enabled and cancelled definitions."""
+    """List a session's enabled and cancelled definitions.
+
+    Args:
+        pool: Host-owned asyncpg pool used to query schedules.
+        session_id: Session whose schedule definitions should be listed.
+
+    Returns:
+        Schedule definitions ordered by stable identifier.
+    """
     rows = await pool.fetch(
         "SELECT * FROM linch_worker_schedules WHERE session_id=$1 ORDER BY id", session_id
     )
@@ -114,7 +162,16 @@ async def list_schedules(pool: Any, *, session_id: str) -> list[ScheduleDefiniti
 
 
 async def cancel_schedule(pool: Any, id: str, *, session_id: str) -> bool:
-    """Disable future fires. An already materialized run remains queued."""
+    """Disable future fires while leaving already materialized runs queued.
+
+    Args:
+        pool: Host-owned asyncpg pool used to update the schedule.
+        id: Schedule identifier to disable.
+        session_id: Session that owns the schedule.
+
+    Returns:
+        ``True`` when an enabled schedule was disabled; otherwise ``False``.
+    """
     return bool(
         await pool.fetchval(
             """

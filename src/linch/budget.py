@@ -31,6 +31,18 @@ if TYPE_CHECKING:
 class RunBudget:
     """Spending cap for a run (and its subagent tree).
 
+    Args:
+        max_tokens: Maximum total tokens that may be charged, or ``None`` for
+            no token limit.
+        max_cost_usd: Maximum accumulated USD cost, or ``None`` for no cost
+            limit.
+        warn_ratio: Fraction of either configured limit that triggers the
+            one-time warning.
+        spent_tokens: Tokens already charged when constructing the budget.
+        spent_usd: USD already charged when constructing the budget.
+        _warn_emitted: Whether the warning has already been emitted. This
+            internal field is exposed by the generated dataclass constructor.
+
     Attributes:
         max_tokens: Cap on total tokens (all four ``Usage`` buckets summed),
             or ``None`` for no token limit.
@@ -62,7 +74,15 @@ class RunBudget:
     _expected_spent_usd: float = field(default=0.0, init=False, repr=False, compare=False)
 
     def charge(self, usage: Usage, cost_usd: float | None) -> None:
-        """Record one turn's spending. ``None`` cost (unknown model) charges 0."""
+        """Record one turn's spending.
+
+        Unknown-model usage with ``cost_usd=None`` still contributes tokens but
+        contributes zero dollars.
+
+        Args:
+            usage: Token usage to add to the budget.
+            cost_usd: Resolved USD cost, or ``None`` when the model is unknown.
+        """
         self.spent_tokens += (
             usage.input_tokens
             + usage.output_tokens
@@ -183,18 +203,36 @@ class RunBudget:
 
     @property
     def remaining_tokens(self) -> int | None:
+        """Return the remaining token allowance, or ``None`` when no limit exists.
+
+        Returns:
+            Remaining tokens before the configured token limit is reached, or
+            ``None`` if no token limit is configured.
+        """
         if self.max_tokens is None:
             return None
         return max(0, self.max_tokens - self.spent_tokens)
 
     @property
     def remaining_usd(self) -> float | None:
+        """Return the remaining USD allowance, or ``None`` when no limit exists.
+
+        Returns:
+            Remaining USD before the configured cost limit is reached, or
+            ``None`` if no cost limit is configured.
+        """
         if self.max_cost_usd is None:
             return None
         return max(0.0, self.max_cost_usd - self.spent_usd)
 
     @property
     def exceeded(self) -> bool:
+        """Whether any configured spending limit has been reached.
+
+        Returns:
+            ``True`` when token or USD spending is at or above its configured
+            limit; otherwise ``False``.
+        """
         if self.max_tokens is not None and self.spent_tokens >= self.max_tokens:
             return True
         if self.max_cost_usd is not None and self.spent_usd >= self.max_cost_usd:
@@ -206,6 +244,10 @@ class RunBudget:
         ``warn_ratio`` of any configured limit.
 
         Shared budgets warn once across the whole agent tree, not once per run.
+
+        Returns:
+            ``True`` for the first call at or above the warning threshold, and
+            ``False`` before the threshold or after the warning was emitted.
         """
         if self._warn_emitted:
             return False

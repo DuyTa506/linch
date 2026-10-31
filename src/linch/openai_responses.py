@@ -31,6 +31,20 @@ OpenAIReasoningSummary = Literal["auto", "concise", "detailed"]
 
 @dataclass(slots=True)
 class OpenAIOptions:
+    """Connection options for the OpenAI Responses API client.
+
+    Args:
+        api_key: API key passed to the OpenAI client, or ``None`` to use the
+            client's environment-based lookup.
+        base_url: Optional API-compatible endpoint URL.
+        default_headers: Optional headers added to every client request.
+
+    Attributes:
+        api_key: API key passed to the OpenAI client, if configured.
+        base_url: API-compatible endpoint URL, if configured.
+        default_headers: Headers added to every client request, if configured.
+    """
+
     api_key: str | None = None
     base_url: str | None = None
     default_headers: dict[str, str] | None = None
@@ -38,6 +52,26 @@ class OpenAIOptions:
 
 @dataclass(slots=True)
 class OpenAIReasoning:
+    """Reasoning controls applied to OpenAI Responses API requests.
+
+    Args:
+        effort: Reasoning effort requested from the model, or ``None`` to use
+            the provider default.
+        summary: Reasoning-summary detail requested from the model, or ``None``
+            to omit the setting.
+        previous_response_id: Response-chaining policy: ``"auto"`` continues
+            from the latest response ID, while ``"disabled"`` sends no prior
+            response ID.
+        encrypted_content: Whether to request encrypted reasoning content in
+            the response.
+
+    Attributes:
+        effort: Configured reasoning effort, if any.
+        summary: Configured reasoning-summary detail, if any.
+        previous_response_id: Response-chaining policy for the request.
+        encrypted_content: Whether encrypted reasoning content is requested.
+    """
+
     effort: OpenAIReasoningEffort | None = None
     summary: OpenAIReasoningSummary | None = None
     previous_response_id: Literal["auto", "disabled"] = "auto"

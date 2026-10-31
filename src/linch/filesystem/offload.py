@@ -44,6 +44,15 @@ class OffloadConfig:
         skip_tools: Tool names never offloaded.  The filesystem tools
             themselves are always skipped so reading a large file back does not
             re-offload it.
+
+    Args:
+        enabled: Whether automatic offloading is active.
+        threshold_tokens: Explicit token threshold, or ``None`` to resolve it
+            from the model context window.
+        threshold_fraction: Context-window fraction used when no explicit threshold is set.
+        preview_lines: Number of leading lines retained in the inline preview.
+        path_prefix: Virtual directory under which offloaded results are stored.
+        skip_tools: Tool names whose results must never be offloaded.
     """
 
     enabled: bool = True
@@ -62,7 +71,19 @@ _CHARS_PER_TOKEN = 4
 
 
 def estimate_tokens(text: str, estimator: Any = None, model: str | None = None) -> int:
-    """Estimate token count for *text*, using *estimator* when available."""
+    """Estimate the token count for text.
+
+    A supplied estimator is attempted first; failures fall back to the
+    conservative character-count estimate used by the offload path.
+
+    Args:
+        text: Text whose approximate token count should be computed.
+        estimator: Optional callable compatible with the agent token-estimator hook.
+        model: Optional model identifier passed to ``estimator``.
+
+    Returns:
+        Estimated number of tokens.
+    """
     if callable(estimator):
         try:
             # Agent token estimators take (messages, model); wrap the string in
@@ -100,6 +121,18 @@ async def maybe_offload(
     filesystem tools' own output, or content already under the threshold.  On
     any backend write failure the original result is returned unchanged so a
     storage hiccup never breaks the run.
+
+    Args:
+        result: Tool result whose string content may be stored externally.
+        tool_name: Name used to apply skip rules and construct the offload path.
+        call_id: Stable tool-call identifier included in the generated filename.
+        backend: Virtual filesystem receiving oversized content.
+        config: Offload policy and preview settings.
+        token_estimator: Optional custom estimator used before the fallback estimate.
+        model: Optional model identifier passed to ``token_estimator``.
+
+    Returns:
+        The original result, with content and metadata updated when offloading succeeds.
     """
     if not config.enabled or result.is_error or tool_name in config.skip_tools:
         return result

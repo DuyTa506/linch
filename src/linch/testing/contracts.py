@@ -17,7 +17,15 @@ T = TypeVar("T")
 async def assert_file_backend_contract(
     factory: Callable[[], FileBackend | Awaitable[FileBackend]],
 ) -> None:
-    """Assert the core behavioral contract for a ``FileBackend`` implementation."""
+    """Assert the core behavioral contract for a ``FileBackend`` implementation.
+
+    Args:
+        factory: Zero-argument callable returning a fresh backend, either
+            directly or through an awaitable.
+
+    Raises:
+        AssertionError: If the backend violates the file contract.
+    """
 
     backend = await _call_factory(factory)
     try:
@@ -60,7 +68,15 @@ async def assert_file_backend_contract(
 async def assert_isolation_backend_contract(
     factory: Callable[[], IsolationBackend | Awaitable[IsolationBackend]],
 ) -> None:
-    """Assert the core behavioral contract for an ``IsolationBackend`` implementation."""
+    """Assert the core behavioral contract for an ``IsolationBackend`` implementation.
+
+    Args:
+        factory: Zero-argument callable returning a fresh backend, either
+            directly or through an awaitable.
+
+    Raises:
+        AssertionError: If the backend violates the isolation contract.
+    """
 
     backend = await _call_factory(factory)
     first: str | None = None
@@ -102,6 +118,14 @@ async def assert_mailbox_contract(
     ``factory`` must return a fresh, empty mailbox. The check is designed for
     pytest suites in adapter packages: ``await assert_mailbox_contract(lambda:
     MyMailbox(...))``.
+
+    Args:
+        factory: Zero-argument callable returning a fresh mailbox, either
+            directly or through an awaitable.
+
+    Raises:
+        AssertionError: If the mailbox violates delivery or lifecycle
+            guarantees.
     """
 
     box = await _call_factory(factory)
@@ -164,6 +188,20 @@ async def assert_tool_contract(
     The helper validates the metadata and callable shape Linch's registry and
     scheduler depend on, executes one known-good call, and returns the
     ``ToolResult`` so adapter tests can make tool-specific assertions.
+
+    Args:
+        tool: Tool implementation to validate and execute.
+        valid_input: Input payload that the tool must accept.
+        ctx: Optional execution context; a minimal contract context is used
+            when omitted.
+        invalid_input: Optional payload that the tool must reject.
+
+    Returns:
+        The result returned by executing ``tool`` with ``valid_input``.
+
+    Raises:
+        AssertionError: If metadata, validation, execution, or result shape
+            violates the tool contract.
     """
 
     assert _non_empty_str(getattr(tool, "name", None)), "tool.name must be a non-empty string"
@@ -245,6 +283,10 @@ async def assert_provider_contract(
         factory: Zero-arg callable (sync or async) returning the provider.
         model: A model id the provider recognizes, used for the window/capability
             probes.
+
+    Raises:
+        AssertionError: If the provider violates the lifecycle or declarative
+            contract.
     """
     provider = await _call_factory(factory)
     try:

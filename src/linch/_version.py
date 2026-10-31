@@ -9,7 +9,12 @@ _UNKNOWN_VERSION = "unknown"
 
 
 def get_version() -> str:
-    """Return the installed package version, falling back to pyproject.toml."""
+    """Return the installed package version, falling back to ``pyproject.toml``.
+
+    Returns:
+        Installed distribution version, the version declared in the local
+        project file, or ``"unknown"`` when neither is available.
+    """
     try:
         return metadata.version(_PACKAGE_NAME)
     except metadata.PackageNotFoundError:
