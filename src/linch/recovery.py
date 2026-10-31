@@ -27,6 +27,11 @@ _DEFAULT_TRUNCATION_FEEDBACK = (
 class TruncationRecovery:
     """Opt-in recovery for responses truncated by the output-token limit.
 
+    Args:
+        max_attempts: Maximum number of continuation turns to spend recovering
+            one truncated answer.
+        feedback: User-turn text injected to ask the model to continue.
+
     Attributes:
         max_attempts: Maximum number of continuation turns to spend recovering a
             truncated answer within a single run. Once exhausted, the truncated
