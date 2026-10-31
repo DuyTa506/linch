@@ -30,12 +30,20 @@ TERMINAL = "('completed','failed','aborted')"
 
 
 async def pool_for(a: argparse.Namespace, *, direct: bool = False, name: str = "audit") -> Any:
-    return await asyncpg.create_pool(
-        a.dsn if direct else a.proxy_dsn,
+    settings = {"application_name": name}
+    if direct or not getattr(a, "pgbouncer", False):
+        settings["search_path"] = a.schema
+    options: dict[str, Any] = dict(
         min_size=2,
         max_size=a.pool_size,
         command_timeout=10,
-        server_settings={"search_path": a.schema, "application_name": name},
+        server_settings=settings,
+    )
+    if getattr(a, "pgbouncer", False) and not direct:
+        options["statement_cache_size"] = 0
+    return await asyncpg.create_pool(
+        a.dsn if direct else a.proxy_dsn,
+        **options,
     )
 
 
@@ -263,6 +271,31 @@ def free_port() -> int:
         return sock.getsockname()[1]
 
 
+def pgbouncer_config(
+    schema: str, port: int, logfile: str, pidfile: str, authfile: str, user: str
+) -> str:
+    database = (
+        f"postgres = host=127.0.0.1 port=55432 dbname=postgres user={user} "
+        f'''connect_query='SET search_path TO "{schema}",public' '''.rstrip()
+    )
+    return f"""[databases]
+{database}
+
+[pgbouncer]
+listen_addr = 127.0.0.1
+listen_port = {port}
+unix_socket_dir =
+pool_mode = transaction
+auth_type = trust
+auth_file = {authfile}
+ignore_startup_parameters = search_path,application_name
+max_client_conn = 512
+default_pool_size = 64
+logfile = {logfile}
+pidfile = {pidfile}
+"""
+
+
 async def stop_process(proc: Any, timeout: float) -> None:
     if proc.returncode is not None:
         return
@@ -354,6 +387,36 @@ async def run_point(a: argparse.Namespace) -> dict[str, Any]:
         a.proxy_dsn = a.dsn
         if not a.direct:
             api, port = free_port(), free_port()
+            upstream_port = 55432
+            if a.pgbouncer:
+                a.pg_user = "load_" + uuid4().hex[:16]
+                await admin.execute(f'CREATE ROLE "{a.pg_user}" LOGIN SUPERUSER')
+                await admin.execute(
+                    f'ALTER ROLE "{a.pg_user}" SET search_path TO "{a.schema}",public'
+                )
+                upstream_port = free_port()
+                authfile = Path(a.logs) / "pgbouncer.users"
+                authfile.write_text(f'"{a.pg_user}" ""\n')
+                config = Path(a.logs) / "pgbouncer.ini"
+                config.write_text(
+                    pgbouncer_config(
+                        a.schema,
+                        upstream_port,
+                        str(Path(a.logs) / "pgbouncer.log"),
+                        str(Path(a.logs) / "pgbouncer.pid"),
+                        str(authfile),
+                        a.pg_user,
+                    )
+                )
+                await spawn("pgbouncer", ["/usr/sbin/pgbouncer", str(config)])
+                for _ in range(50):
+                    try:
+                        _reader, writer = await asyncio.open_connection("127.0.0.1", upstream_port)
+                        writer.close()
+                        await writer.wait_closed()
+                        break
+                    except OSError:
+                        await asyncio.sleep(0.1)
             await spawn("proxy", ["toxiproxy-server", "-host", "127.0.0.1", "-port", str(api)])
             for _ in range(50):
                 try:
@@ -361,7 +424,11 @@ async def run_point(a: argparse.Namespace) -> dict[str, Any]:
                     break
                 except OSError:
                     await asyncio.sleep(0.1)
-            proxy = dict(name="pg", listen=f"127.0.0.1:{port}", upstream="127.0.0.1:55432")
+            proxy = dict(
+                name="pg",
+                listen=f"127.0.0.1:{port}",
+                upstream=f"127.0.0.1:{upstream_port}",
+            )
             await http(api, "/proxies", proxy)
             for direction in ("upstream", "downstream"):
                 toxic: dict[str, Any] = dict(name=direction, type="latency", stream=direction)
@@ -369,7 +436,9 @@ async def run_point(a: argparse.Namespace) -> dict[str, Any]:
                 toxic["attributes"] = dict(latency=delay, jitter=0)
                 await http(api, "/proxies/pg/toxics", toxic)
             parsed = urlsplit(a.dsn)
-            address = f"{parsed.username or 'postgres'}@127.0.0.1:{port}"
+            address = (
+                f"{getattr(a, 'pg_user', None) or parsed.username or 'postgres'}@127.0.0.1:{port}"
+            )
             a.proxy_dsn = parsed._replace(netloc=address).geturl()
         pool = await pool_for(a, direct=True)
         await install(pool)
@@ -400,7 +469,7 @@ async def run_point(a: argparse.Namespace) -> dict[str, Any]:
                 tracked = [
                     (name, psutil.Process(p.pid))
                     for name, p in processes.items()
-                    if p.returncode is None and name != "api"
+                    if p.returncode is None
                 ]
                 if root:
                     tracked += [("postgres", p) for p in [root, *root.children(recursive=True)]]
@@ -443,7 +512,7 @@ async def run_point(a: argparse.Namespace) -> dict[str, Any]:
                 if enqueued and not remaining:
                     break
             await asyncio.sleep(0.25)
-        children = [p for name, p in processes.items() if name != "proxy"]
+        children = [p for name, p in processes.items() if name not in {"proxy", "pgbouncer"}]
         await asyncio.gather(*(stop_process(p, a.drain_timeout) for p in children))
         result = await summarize(pool, a)
         if done_chaos:
@@ -458,7 +527,11 @@ async def run_point(a: argparse.Namespace) -> dict[str, Any]:
             chaos["recovery"] = dict(recovery) if recovery else None
         result.update({key: getattr(a, key) for key in ("workers", "rate", "rtt", "logs")})
         checks = result["invariant_errors"]
-        ignored = ("proxy", chaos.get("lease_owner") if a.chaos == "kill" else None)
+        ignored = (
+            "proxy",
+            "pgbouncer",
+            chaos.get("lease_owner") if a.chaos == "kill" else None,
+        )
         codes = [p.returncode for n, p in processes.items() if n not in ignored]
         checks["processes"] = sum(code != 0 for code in codes)
         checks["chaos"] = int(a.chaos != "none" and not done_chaos)
@@ -500,6 +573,8 @@ async def run_point(a: argparse.Namespace) -> dict[str, Any]:
             pool.terminate()
         try:
             await admin.execute(f'DROP SCHEMA IF EXISTS "{a.schema}" CASCADE')
+            if getattr(a, "pg_user", None):
+                await admin.execute(f'DROP ROLE IF EXISTS "{a.pg_user}"')
         finally:
             await asyncio.wait_for(admin.close(), 10)
 
@@ -577,6 +652,7 @@ def main() -> None:
     p.add_argument("--dsn", default="postgresql://postgres@127.0.0.1:55432/postgres")
     p.add_argument("--chaos", choices=("none", "kill", "blip", "drain"), default="none")
     p.add_argument("--direct", action="store_true")
+    p.add_argument("--pgbouncer", action="store_true")
     p.add_argument("--quick", action="store_true")
     p.add_argument("--output")
     a = p.parse_args()
@@ -586,6 +662,8 @@ def main() -> None:
         raise SystemExit("rate, duration, workers must be positive; pool-size >=2")
     if a.direct and a.chaos == "blip":
         raise SystemExit("blip requires Toxiproxy")
+    if a.direct and a.pgbouncer:
+        raise SystemExit("pgbouncer requires Toxiproxy")
     report = asyncio.run(experiments(a))
     text = json.dumps(report, indent=2)
     if a.output:
