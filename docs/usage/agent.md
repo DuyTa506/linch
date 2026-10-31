@@ -29,11 +29,11 @@ Declare tool ordering and completion requirements when your application needs
 them:
 
 ```python
-from linch import Agent, CompletionGate, ReliabilityPolicy, ToolPrerequisite
+from linch import Agent, CompletionGate, ReliabilityPolicy, ToolPrerequisite, empty_tools
 
 agent = Agent(
     model="gpt-5",
-    tools=[lookup_customer, update_customer],
+    tools=empty_tools(lookup_customer, update_customer),
     reliability=ReliabilityPolicy(
         prerequisites=(ToolPrerequisite("update_customer", ("lookup_customer",)),),
         completion=CompletionGate(("update_customer",)),
@@ -87,10 +87,10 @@ workers, flushes stores, and closes hooks that expose `close`/`aclose`.
 
 Each Agent also owns one per-agent `Context` scope. It contains the agent's
 service registrations, event bus, tool pipeline, and effective execution world;
-it is not process-global state. Pass `context=` to supply a scope to the Agent;
-the Agent disposes that supplied scope on close. If a host needs to retain a
-parent scope, pass a child from `parent.scope(...)`. Closing the agent disposes
-the scope after quiescing active work. Disposal is retryable: if a custom
+it is not process-global state. Pass `context=` to supply a parent/host scope;
+the Agent creates and owns a child scope and disposes only that child on close.
+The supplied parent remains available to the host. Closing the agent disposes
+its child scope after quiescing active work. Disposal is retryable: if a custom
 teardown fails, a later `await agent.close()` retries only unfinished cleanup.
 
 ### Releasing a single session
@@ -199,7 +199,8 @@ load, Linch seeds a fresh log from the stored historical and visible snapshots.
 
 ```python
 import os
-from linch import InMemorySessionStore, PostgresSessionStore
+from linch import InMemorySessionStore
+from linch.sessions.postgres import PostgresSessionStore
 
 # Ephemeral (tests, single-request workers)
 store = InMemorySessionStore()
@@ -210,19 +211,22 @@ store = PostgresSessionStore(os.environ["LINCH_POSTGRES_DSN"])
 agent = Agent(model="gpt-5", session_store=store)
 ```
 
-`SessionStore` is a protocol, so a host app can implement its own backend
-(Redis, Postgres, …) by satisfying the same interface. For durable *run*
+`SessionStore` is a protocol, so a host app can implement its own backend by
+satisfying the same interface. The built-in durable adapter is Postgres; the
+in-memory adapter is for tests and development. For durable *run*
 checkpoints (resume across process restarts, durable HITL approvals) also pass a
 `run_store=PostgresRunStore(dsn)` — see [workflows.md](./workflows.md) and
 [deep-agent.md](./deep-agent.md).
 
 ### Incremental durability
 
-`DurabilityOptions` enables durability without changing the default 2.x path:
+`DurabilityOptions` enables optional durability without changing the default
+agent behavior:
 
 ```python
 import os
-from linch import Agent, DurabilityOptions, PostgresRunStore, PostgresSessionStore
+from linch import Agent, DurabilityOptions, PostgresRunStore
+from linch.sessions.postgres import PostgresSessionStore
 
 dsn = os.environ["LINCH_POSTGRES_DSN"]
 
@@ -251,7 +255,7 @@ the SDK verifies integrity but encryption and access control belong to the host.
 `FeatureFlags` turns off subsystems you don't use so they never connect during
 `session()`. This trims startup work and the system prompt.
 
-In Linch 2.0 the SDK-safe defaults are all `False`: a bare `Agent` does not
+In Linch 3.0 the SDK-safe defaults are all `False`: a bare `Agent` does not
 discover project skills/subagents, connect to ambient MCP, or enable a virtual
 filesystem. This is intentional resource trust isolation, not a coding-agent
 configuration. Opt in only for a trusted project or use an explicit preset:
