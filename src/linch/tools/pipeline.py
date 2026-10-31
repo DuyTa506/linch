@@ -65,6 +65,16 @@ class ToolPipeline:
     def __init__(self) -> None:
         self._bus = EventBus()
 
+    def fork(self) -> ToolPipeline:
+        """Snapshot listeners for a run without sharing registration ownership.
+
+        Returns:
+            An independent pipeline with the same ordered listener functions.
+        """
+        pipeline = ToolPipeline()
+        pipeline._bus = self._bus.fork()
+        return pipeline
+
     def on_pre_execute(self, listener: Any) -> Disposable:
         return self._bus.on(PRE_EXECUTE, listener)
 

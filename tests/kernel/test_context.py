@@ -16,6 +16,25 @@ class _Svc:
 
 
 @pytest.mark.asyncio
+async def test_isolated_scope_keeps_local_listeners_and_relays_parent_service_changes() -> None:
+    root = Context()
+    child = root.scope("run", isolate_events=True)
+    seen = []
+    child.on("request", lambda value: seen.append(value))
+    root.events.emit("request", "other-run")
+    child.events.emit("request", "this-run")
+    assert seen == ["this-run"]
+
+    removed = asyncio.Event()
+    child.on("context/service", lambda ctx, key: removed.set() if ctx.get(key) is None else None)
+    registration = root.register("dependency", object())
+    await registration.dispose()
+    assert removed.is_set()
+    await child.dispose()
+    assert not root.events.has_listeners("context/service")
+
+
+@pytest.mark.asyncio
 async def test_register_and_declared_access() -> None:
     ctx = Context()
     svc = _Svc("shell")

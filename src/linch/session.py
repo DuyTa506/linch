@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
@@ -116,6 +116,7 @@ class Session:
     _telemetry_run: Any = field(default=None, repr=False)
     active_run_id: str | None = None
     _active_principal: Principal | None = field(default=None, repr=False)
+    _profile_cleanup: Callable[[], Awaitable[None] | None] | None = field(default=None, repr=False)
     _active_gen: Any = None
     """The async generator driving the in-flight ``run``/``resume`` iterator.
     Captured so a forced ``aclose`` can finalize an abandoned run generator
@@ -449,6 +450,10 @@ class Session:
         self._lifecycle_state = _CLOSED
         self._closed = True
         self.agent._unregister_session(self.id, self)
+        if self._profile_cleanup is not None:
+            cleanup, self._profile_cleanup = self._profile_cleanup, None
+            if pending := cleanup():
+                await pending
 
     async def _finalize_active_run(self) -> None:
         """Abort an admitted run and wait until its complete unwind is observable.

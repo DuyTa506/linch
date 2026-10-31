@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import math
@@ -13,7 +14,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from .errors import ConfigError
-from .kernel import EventBus, Plugin
+from .kernel import Plugin
 from .run_store import _decode_output_schema, _json_safe, canonical_json
 
 if TYPE_CHECKING:
@@ -126,15 +127,12 @@ class Profile:
             A new profile containing the composed configuration.
         """
         values = {
-            item.name: (
-                getattr(self, item.name)
-                if getattr(other, item.name) is None
-                else getattr(other, item.name)
-            )
-            for item in fields(self)
+            item.name: getattr(other, item.name)
+            for item in fields(other)
+            if getattr(other, item.name) is not None
         }
         values["plugins"] = {**self.plugins, **other.plugins}
-        return Profile(**values)
+        return replace(self, **values)
 
     def resolve(self) -> dict[str, Any]:
         """Return a detached, JSON-safe view of the composed configuration.
@@ -157,16 +155,6 @@ class Profile:
         return {"id": self.id, "version": self.version, "content_hash": f"sha256:{digest}"}
 
 
-def _copy_bus(original: EventBus, *, skip_services: bool = False) -> EventBus:
-    bus = EventBus()
-    for name, listeners in original._listeners.items():
-        if skip_services and name == "context/service":
-            continue
-        for listener in listeners:
-            bus.on(name, listener)
-    return bus
-
-
 @asynccontextmanager
 async def _profile_scope(session: Session, profile: Profile) -> AsyncIterator[None]:
     from .budget import RunBudget
@@ -179,17 +167,10 @@ async def _profile_scope(session: Session, profile: Profile) -> AsyncIterator[No
     parent = session.agent
     await parent._ensure_provider_prepared()
     agent = copy(parent)
-    context = parent.context.scope(f"profile:{profile.id}@{profile.version}")
-    context.events = _copy_bus(parent.context.events, skip_services=True)
+    context = parent.context.scope(f"profile:{profile.id}@{profile.version}", isolate_events=True)
     agent.context = context
     original_tools, original_system = session.tools_override, session.system_blocks_override
     try:
-
-        async def service_changed(changed: Any, key: str) -> None:
-            if context._within(changed) and context.events.has_listeners("context/service"):
-                await context.events._notification("context/service", changed, key).dispose()
-
-        context.effect(lambda: parent.context.events.on("context/service", service_changed))
         # Copy configuration surfaces; provider, stores and host services retain
         # their existing ownership. This is the same Agent and loop implementation.
         agent.tools = (original_tools if original_tools is not None else parent.tools).copy()
@@ -198,8 +179,7 @@ async def _profile_scope(session: Session, profile: Profile) -> AsyncIterator[No
         agent.permission_engine = copy(parent.permission_engine)
         agent.permission_engine.rules = deepcopy(parent.permission_engine.rules)
         agent.permission_engine.rule_set = deepcopy(parent.permission_engine.rule_set)
-        agent.tool_pipeline = copy(parent.tool_pipeline)
-        agent.tool_pipeline._bus = _copy_bus(parent.tool_pipeline._bus)
+        agent.tool_pipeline = parent.tool_pipeline.fork()
         agent._turn_stopping_dispatcher = TurnStoppingDispatcher(
             parent._turn_stopping_dispatcher.snapshot()
         )
@@ -215,19 +195,14 @@ async def _profile_scope(session: Session, profile: Profile) -> AsyncIterator[No
         restricted = agent.tools.subset(include=eligible, exclude=set(profile.tool_deny or ()))
         denied = {tool.name for tool in agent.tools.list()} - {t.name for t in restricted.list()}
         if denied:
-            layers: list[PermissionLayer] = list(
-                getattr(agent.permission_engine.rule_set, "layers", ())
-            )
-            layers.append(
-                PermissionLayer("profile", [ToolRule(name, "deny") for name in sorted(denied)])
-            )
+            engine = agent.permission_engine
+            inherited_rules = engine.rule_set
             agent.permission_engine.rule_set = PermissionRuleSet(
-                layers,
-                project_root=getattr(
-                    agent.permission_engine.rule_set,
-                    "project_root",
-                    agent.permission_engine.project_root,
-                ),
+                [
+                    *getattr(inherited_rules, "layers", ()),
+                    PermissionLayer("profile", [ToolRule(name, "deny") for name in sorted(denied)]),
+                ],
+                project_root=getattr(inherited_rules, "project_root", engine.project_root),
             )
         session.tools_override = agent.tools = restricted
         if profile.system_prompt is not None:
@@ -254,13 +229,30 @@ async def _profile_scope(session: Session, profile: Profile) -> AsyncIterator[No
     finally:
         session.agent = parent
         session.tools_override, session.system_blocks_override = original_tools, original_system
-        # Retained children and detached tools still use this run's services.
-        # The parent Context owns their scope until Agent.close quiesces them.
         pending = [
             *session.background_tasks,
             *(getattr(h, "task", None) for h in session.workers.values()),
         ]
-        if not any(child.agent is agent for child in parent._sessions.values()) and not any(
-            task is not None and not task.done() for task in pending
-        ):
+        cleanup: asyncio.Task[None] | None = None
+
+        def release(_task: Any = None) -> asyncio.Task[None] | None:
+            nonlocal cleanup
+            children = [child for child in parent._sessions.values() if child.agent is agent]
+            for child in children:
+                child._profile_cleanup = release
+            if cleanup is None and not children and all(t is None or t.done() for t in pending):
+                from .session import _consume_task_exception
+
+                cleanup = asyncio.create_task(context.dispose())
+                cleanup.add_done_callback(_consume_task_exception)
+            return cleanup
+
+        children = [child for child in parent._sessions.values() if child.agent is agent]
+        if children or any(task is not None and not task.done() for task in pending):
+            for task in pending:
+                if task is not None:
+                    task.add_done_callback(release)
+            for child in children:
+                child._profile_cleanup = release
+        else:
             await context.dispose()
