@@ -13,6 +13,7 @@ from .._version import get_version
 from ..compaction import _builtin_compaction_config, _skill_listing_fingerprint
 from ..errors import ConfigError
 from ..model_calls import _accounting_contract
+from ..permissions import Principal
 from ..reliability import canonical_reliability_policy
 from ..run_store import MODEL_INPUT_CODEC_VERSION, build_run_contract
 from ..session import RunOptions, Session
@@ -56,7 +57,44 @@ def _permission_rule_contract(rule: Any) -> dict[str, Any]:
     for name in ("tool", "arg", "tools", "paths", "pattern"):
         if hasattr(rule, name):
             out[name] = getattr(rule, name)
+    for name in ("role", "unless_role"):
+        value = getattr(rule, name, None)
+        if value is not None:
+            out[name] = value
     return out
+
+
+def _principal_contract(principal: Principal | None) -> dict[str, Any] | None:
+    if principal is None:
+        return None
+    if not isinstance(principal, Principal):
+        raise ConfigError("run principal must be a Principal")
+    return {
+        "tenant": principal.tenant,
+        "user": principal.user,
+        "roles": sorted(principal.roles),
+    }
+
+
+def _principal_from_contract(contract: Any) -> Principal | None:
+    payload = getattr(contract, "payload", None)
+    if not isinstance(payload, dict):
+        raise ConfigError("stored run contract has an invalid principal shape")
+    options = payload.get("run_options", {})
+    if not isinstance(options, dict):
+        raise ConfigError("stored run contract has an invalid principal shape")
+    if "principal" not in options:
+        return None
+    raw = options["principal"]
+    if not isinstance(raw, dict) or set(raw) != {"tenant", "user", "roles"}:
+        raise ConfigError("stored run contract has an invalid principal shape")
+    roles = raw["roles"]
+    if not isinstance(roles, list) or not all(isinstance(role, str) for role in roles):
+        raise ConfigError("stored run contract has an invalid principal shape")
+    try:
+        return Principal(tenant=raw["tenant"], user=raw["user"], roles=frozenset(roles))
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"stored run contract has an invalid principal: {exc}") from None
 
 
 def _permission_policy_contract(agent: Any) -> dict[str, Any]:
@@ -352,6 +390,21 @@ def _build_run_contract(session: Session, prompt: str, opts: RunOptions) -> Any:
                 else {}
             ),
         }
+    run_options = {
+        "max_output_tokens": opts.max_output_tokens or agent.max_output_tokens,
+        "temperature": opts.temperature,
+        "stream_partials": (
+            agent.include_partial_messages if opts.stream_partials is None else opts.stream_partials
+        ),
+        "thinking": opts.thinking,
+        "effort": opts.effort,
+        "tool_choice": opts.tool_choice or agent.tool_choice,
+        "cache_ttl": agent.cache_ttl,
+        "max_retries": agent.max_retries,
+    }
+    principal_contract = _principal_contract(opts.principal)
+    if principal_contract is not None:
+        run_options["principal"] = principal_contract
     return build_run_contract(
         primary_model=agent.model,
         fallback_models=getattr(agent, "fallback_models", None),
@@ -360,20 +413,7 @@ def _build_run_contract(session: Session, prompt: str, opts: RunOptions) -> Any:
         input_payload={"prompt": prompt, "images": opts.images},
         output_schema=opts.output_schema or getattr(agent, "output_schema", None),
         final_tool_name=_effective_final_tool_name(agent, opts),
-        run_options={
-            "max_output_tokens": opts.max_output_tokens or agent.max_output_tokens,
-            "temperature": opts.temperature,
-            "stream_partials": (
-                agent.include_partial_messages
-                if opts.stream_partials is None
-                else opts.stream_partials
-            ),
-            "thinking": opts.thinking,
-            "effort": opts.effort,
-            "tool_choice": opts.tool_choice or agent.tool_choice,
-            "cache_ttl": agent.cache_ttl,
-            "max_retries": agent.max_retries,
-        },
+        run_options=run_options,
         budget=budget,
         policies=policies,
     )

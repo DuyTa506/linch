@@ -4,6 +4,7 @@ from html import escape
 from typing import Any
 from uuid import uuid4
 
+from ..session import RunOptions
 from .base import ToolContext, ToolResult, ToolScope
 
 SUBAGENT_TOOL_NAME = "Subagent"
@@ -238,6 +239,7 @@ class SubagentTool:
             signal=ctx.signal,
             emit=emit_fn,
             retain=self._retain_subagents,
+            run_options=RunOptions(principal=ctx.principal),
         )
 
         if run_in_background:

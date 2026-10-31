@@ -53,7 +53,7 @@ PROMOTED_EVAL_NAMES = frozenset(
         "tool_called",
     }
 )
-PROMOTED_PERMISSION_NAMES = frozenset({"BashRule", "PathRule", "ToolRule"})
+PROMOTED_PERMISSION_NAMES = frozenset({"BashRule", "PathRule", "Principal", "ToolRule"})
 
 
 def test_resume_rejection_error_is_public() -> None:

@@ -366,6 +366,65 @@ call is not auto-approved and no callback resolves it, the loop emits a
 checkpoint and replayed on resume, so a durable HITL flow does not re-prompt for
 a decision the user already made.
 
+### Per-run principals and role rules
+
+The host authenticates the caller and supplies a frozen `Principal` for each
+run. Its tenant, user, and immutable role set are available to permission rules
+and to tools as the read-only `ctx.principal` property.
+
+```python
+from linch import Agent, Principal, RunOptions, ToolRule
+
+principal = Principal(
+    tenant="acme",
+    user="alice",
+    roles=frozenset({"editor"}),
+)
+agent = Agent(
+    ...,
+    permissions={
+        "mode": "acceptEdits",
+        "rules": [
+            ToolRule("Write", "deny", unless_role="editor"),
+            ToolRule("Bash", "deny", role="contractor"),
+        ],
+    },
+)
+session = await agent.session()
+async for event in session.run("Update the report", RunOptions(principal=principal)):
+    ...
+```
+
+`ToolRule`, `PathRule`, and `BashRule` accept keyword-only `role` and
+`unless_role` conditions. `role="editor"` applies the rule only when that role
+is present; `unless_role="editor"` applies it only when the role is absent.
+If both are supplied, both conditions must hold. Conditions narrow when a rule
+matches; existing first-match ordering, layered deny overrides, and mode defaults
+still apply. Use a `deny` with `unless_role` to require a role. With
+`principal=None`, conditions see an empty role set; rules without role conditions
+retain their existing behavior.
+
+Tools can use the tenant to scope application queries:
+
+```python
+@tool
+async def customer(customer_id: str, ctx: ToolContext) -> dict:
+    if ctx.principal is None:
+        raise ValueError("An authenticated principal is required")
+    return await ctx.deps.customers.get(
+        tenant=ctx.principal.tenant, customer_id=customer_id
+    )
+```
+
+For durable runs, the fingerprinted `RunContract` in run metadata records the
+principal's tenant, user, and sorted roles, alongside role conditions in the
+permission policy. Resume and worker takeover restore the stored principal when
+the resume options omit it. An explicitly different tenant, user, or role set,
+or a changed role rule, fails the contract check before tool execution. Start a
+new run to change identity. Tools that spawn or continue subagents pass the same
+principal to their children. Approval callbacks also receive it as
+`request.principal`; approval routing remains the host's responsibility.
+
 To transform or intercept tool calls and results programmatically (rather than
 just allow/deny), use the `PreToolUse` / `PostToolUse` chokepoints and
 `ToolMiddlewareHook` documented in [Hooks](./hooks.md).
