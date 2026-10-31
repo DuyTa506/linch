@@ -481,7 +481,7 @@ class Agent:
         if reliability is not None and not isinstance(reliability, ReliabilityPolicy):
             raise ConfigError("reliability must be ReliabilityPolicy or None")
         self.reliability = reliability
-        self._turn_stopping_listeners: list[Any] = []
+        self._turn_stopping_dispatcher = TurnStoppingDispatcher()
 
         inherited_execution = context.get("execution") if context is not None else None
         execution_source = (
@@ -658,9 +658,7 @@ class Agent:
 
     def on_turn_stopping(self, listener: Any) -> Any:
         """Register a run-finalization listener and return its disposable."""
-        dispatcher = TurnStoppingDispatcher(self._turn_stopping_listeners)
-        self._turn_stopping_listeners = dispatcher._listeners
-        return dispatcher.register(listener)
+        return self._turn_stopping_dispatcher.register(listener)
 
     def _set_subagent_tool_registry(self, registry: ToolRegistry) -> None:
         """Install a worker-only tool catalog without changing parent tools.
