@@ -6,6 +6,7 @@ import json
 import math
 import time
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -271,6 +272,15 @@ class RunStore(Protocol):
         status: str = "running",
     ) -> RunRecord: ...
 
+    async def save_checkpoint_with_events(
+        self,
+        run_id: str,
+        checkpoint: RunCheckpoint,
+        events: Sequence[Event],
+        *,
+        status: str = "running",
+    ) -> tuple[RunRecord, list[int]]: ...
+
     async def append_event(self, run_id: str, event: Event) -> int: ...
 
     async def load_events(self, run_id: str, *, after_seq: int = 0) -> list[StoredRunEvent]: ...
@@ -308,7 +318,7 @@ class ModelInputSnapshotStore(Protocol):
 
     async def load(self, snapshot_id: str) -> ModelInputSnapshot | None: ...
 
-    async def delete(self, snapshot_id: str) -> None: ...
+    async def delete(self, snapshot_id: str, *, run_id: str) -> None: ...
 
     async def prune(self, run_id: str, keep_ids: Sequence[str] = ()) -> int: ...
 
@@ -1170,14 +1180,15 @@ def _copy_checkpoint(checkpoint: RunCheckpoint | None) -> RunCheckpoint | None:
 
 
 def _copy_record(record: RunRecord) -> RunRecord:
+    # In-memory writes already normalize these fields; only detach the returned snapshot.
     return RunRecord(
         id=record.id,
         session_id=record.session_id,
         status=record.status,
         created_at=record.created_at,
         updated_at=record.updated_at,
-        checkpoint=_copy_checkpoint(record.checkpoint),
-        meta=_safe_meta(record.meta),
+        checkpoint=deepcopy(record.checkpoint),
+        meta=deepcopy(record.meta),
     )
 
 
@@ -1364,6 +1375,31 @@ class InMemoryRunStore:
         rec.updated_at = now_iso()
         return _copy_record(rec)
 
+    async def save_checkpoint_with_events(
+        self,
+        run_id: str,
+        checkpoint: RunCheckpoint,
+        events: Sequence[Event],
+        *,
+        status: str = "running",
+    ) -> tuple[RunRecord, list[int]]:
+        """Atomically publish a checkpoint and its pending event prefix."""
+        self._check_lease(run_id)
+        rec = self._runs[run_id]
+        checkpoint_copy = _copy_checkpoint(checkpoint)
+        event_copies = [_copy_event(event) for event in events]
+        bucket = self._events.setdefault(run_id, [])
+        timestamp = now_iso()
+        seqs = list(range(len(bucket) + 1, len(bucket) + len(event_copies) + 1))
+        rec.checkpoint = checkpoint_copy
+        rec.status = status  # type: ignore[assignment]
+        rec.updated_at = timestamp
+        bucket.extend(
+            StoredRunEvent(seq=seq, appended_at=timestamp, event=event)
+            for seq, event in zip(seqs, event_copies, strict=True)
+        )
+        return _copy_record(rec), seqs
+
     async def append_event(self, run_id: str, event: Event) -> int:
         self._check_lease(run_id)
         if run_id not in self._runs:
@@ -1402,10 +1438,11 @@ class InMemoryRunStore:
         snapshot = self._model_input_snapshots.get(snapshot_id)
         return _validate_model_input_snapshot(snapshot) if snapshot is not None else None
 
-    async def delete(self, snapshot_id: str) -> None:
+    async def delete(self, snapshot_id: str, *, run_id: str) -> None:
+        self._check_lease(run_id)
         snapshot = self._model_input_snapshots.get(snapshot_id)
-        if snapshot is not None:
-            self._check_lease(snapshot.run_id)
+        if snapshot is not None and snapshot.run_id != run_id:
+            return
         self._model_input_snapshots.pop(snapshot_id, None)
 
     async def prune(self, run_id: str, keep_ids: Sequence[str] = ()) -> int:

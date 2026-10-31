@@ -256,7 +256,7 @@ async def test_resumed_run_keeps_run_identity_and_current_parent(otel):
         "run.load_run",
         "run.load_events",
         "run.save_checkpoint",
-        "run.mark_completed",
+        "run.save_checkpoint_with_events",
         "session.append",
     } <= ops
     assert len(exporter.get_finished_spans()) == 4  # store calls are metrics only

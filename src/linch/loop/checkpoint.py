@@ -6,7 +6,7 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from html import escape
-from typing import Any, cast
+from typing import Any
 
 from .._telemetry import store_call
 from .._wire import WIRE_VERSION, require_wire_version
@@ -16,6 +16,7 @@ from ..events import (
     Event,
     ToolCallEndEvent,
     ToolCallStartEvent,
+    UsageEvent,
 )
 from ..model_calls import _context_fingerprint, _model_call_fingerprint
 from ..run_store import RunCheckpoint, _require_tool_recovery_cursor
@@ -44,46 +45,45 @@ _ACTIVE_PRIMARY_FIELDS = {
 
 def _model_call_runtime_from_extension(
     extension_state: dict[str, Any],
-) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    """Decode the runner-owned accounting envelope, not the ledger snapshot.
-
-    The ledger validates its own nested snapshot during ``restore``.  Keeping
-    the outer validation here makes it impossible to accidentally feed the
-    active-primary binding or unrelated extension state into that API.
-    """
+) -> tuple[dict[str, Any] | None, int | None]:
+    """Decode the compact journal-backed accounting envelope."""
     raw = extension_state.get(_MODEL_CALL_RUNTIME_NAMESPACE)
     if raw is None:
         return None, None
     if not isinstance(raw, dict):
         require_wire_version(None)
     require_wire_version(raw.get("version"))
-    if set(raw) != {"version", "ledger", "active_primary"}:
+    if set(raw) != {"version", "format", "ledger", "active_primary", "journal_count"}:
         raise ConfigError("invalid model-call checkpoint runtime envelope")
-    if not isinstance(raw["ledger"], dict):
+    if raw["format"] != "journal-v1" or raw["ledger"] is not None:
+        raise ConfigError("invalid model-call checkpoint runtime envelope")
+    if type(raw["journal_count"]) is not int or raw["journal_count"] < 0:
         raise ConfigError("invalid model-call checkpoint runtime envelope")
     active = raw["active_primary"]
     if active is not None:
         _validate_active_primary_binding(active)
-    return deepcopy(raw["ledger"]), deepcopy(active)
+    return deepcopy(active), raw["journal_count"]
 
 
 def _model_call_runtime_to_extension(
     extension_state: dict[str, Any],
     *,
-    ledger_snapshot: dict[str, Any],
     active_primary: dict[str, Any] | None,
+    journal_count: int = 0,
 ) -> None:
-    """Merge the versioned accounting runtime envelope into extension state."""
+    """Write the compact, journal-backed accounting envelope into state."""
     if not isinstance(extension_state, dict):
         raise ConfigError("RunCheckpoint.extension_state must be a dict")
-    if not isinstance(ledger_snapshot, dict):
-        raise ConfigError("invalid model-call ledger snapshot")
     if active_primary is not None:
         _validate_active_primary_binding(active_primary)
+    if type(journal_count) is not int or journal_count < 0:
+        raise ConfigError("invalid model-call journal count")
     extension_state[_MODEL_CALL_RUNTIME_NAMESPACE] = {
         "version": _MODEL_CALL_RUNTIME_VERSION,
-        "ledger": deepcopy(ledger_snapshot),
+        "format": "journal-v1",
+        "ledger": None,
         "active_primary": deepcopy(active_primary),
+        "journal_count": journal_count,
     }
 
 
@@ -194,6 +194,33 @@ class RunEventBuffer:
     async def append(self, event: Event) -> None:
         if self.store is not None:
             self._pending.append(event)
+
+    async def flush_with_checkpoint(
+        self,
+        checkpoint: RunCheckpoint,
+        *,
+        status: str = "running",
+    ) -> None:
+        """Commit a pending prefix with its checkpoint."""
+        if not self._pending:
+            return
+        pending, self._pending = self._pending, []
+        try:
+            _, seqs = await store_call(
+                self.session,
+                "run.save_checkpoint_with_events",
+                self.store.save_checkpoint_with_events(
+                    self.run_id,
+                    checkpoint,
+                    pending,
+                    status=status,
+                ),
+            )
+        except BaseException:
+            self._pending = pending + self._pending
+            raise
+        if seqs:
+            self._last_seq = max(self._last_seq, *seqs)
 
     async def flush(self) -> int:
         if self.store is None or not self._pending:
@@ -315,6 +342,13 @@ async def _queue_crashed_worker_notifications(
     return events
 
 
+def _loop_guard_is_active(guard: Any) -> bool:
+    return guard is not None and (
+        getattr(guard, "max_identical_tool_calls", 0) > 0
+        or getattr(guard, "max_consecutive_failures", 0) > 0
+    )
+
+
 def _loop_guard_state_to_dict(state: Any) -> dict[str, object] | None:
     if state is None:
         return None
@@ -329,15 +363,43 @@ def _loop_guard_state_from_dict(raw: dict[str, object] | None) -> Any:
         return None
     from ..loop_guard import LoopGuardState
 
-    call_counts_raw = raw.get("call_counts", {})
+    call_counts_raw = raw.get("call_counts")
+    failures = raw.get("consecutive_failures")
+    if (
+        set(raw) != {"call_counts", "consecutive_failures"}
+        or not isinstance(call_counts_raw, dict)
+        or type(failures) is not int
+        or failures < 0
+        or any(
+            type(key) is not str
+            or len(key) != 16
+            or key != key.lower()
+            or any(char not in "0123456789abcdef" for char in key)
+            or type(value) is not int
+            or value < 0
+            for key, value in call_counts_raw.items()
+        )
+    ):
+        raise ConfigError("invalid loop-guard checkpoint state")
     return LoopGuardState(
-        call_counts=(
-            {str(k): int(v) for k, v in call_counts_raw.items()}
-            if isinstance(call_counts_raw, dict)
-            else {}
-        ),
-        consecutive_failures=int(cast(Any, raw.get("consecutive_failures", 0) or 0)),
+        call_counts=dict(call_counts_raw),
+        consecutive_failures=failures,
     )
+
+
+def _consumed_auxiliary_receipt_ids_from_events(rows: list[Any]) -> tuple[str, ...]:
+    """Extract and validate the durable usage-projection watermark."""
+    ids: list[str] = []
+    for row in rows:
+        event = getattr(row, "event", None)
+        if not isinstance(event, UsageEvent) or event.source != "compaction":
+            continue
+        if not isinstance(event.call_id, str) or not event.call_id.strip():
+            raise ConfigError("compaction usage event lacks a receipt call ID")
+        ids.append(event.call_id)
+    if len(set(ids)) != len(ids):
+        raise ConfigError("duplicate compaction usage event receipt IDs")
+    return tuple(ids)
 
 
 def _skill_overlay_to_dict(overlay: Any) -> dict[str, object] | None:

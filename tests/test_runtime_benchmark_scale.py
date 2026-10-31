@@ -20,8 +20,140 @@ def test_scale_suite_is_explicit_and_separate_from_default_cases(tmp_path):
         ("memory", 200, 4),
         ("memory", 1000, 4),
         ("memory", 1, 50),
+        ("postgres", 200, 4),
+        ("postgres", 1000, 4),
+        ("postgres", 1, 50),
     }
     assert not set(cases).intersection(benchmark.build_cases(tmp_path))
+
+
+def test_postgres_scale_cases_skip_without_dsn(monkeypatch):
+    benchmark = _load_script()
+    monkeypatch.delenv("AGENT_KIT_TEST_PG_DSN", raising=False)
+    case = benchmark.ScaleCase("scale_postgres_1x50", "postgres", 1, 50)
+    assert benchmark.scale_case_skip_reason(case) == "AGENT_KIT_TEST_PG_DSN not set"
+
+
+def test_scale_schema_prefix_accepts_only_owned_schema_names():
+    benchmark = _load_script()
+    prefix = benchmark._new_scale_schema_prefix()
+    assert benchmark._owned_scale_schema(prefix + "case", prefix)
+    assert not benchmark._owned_scale_schema(prefix[:-1] + "other", prefix)
+    assert not benchmark._owned_scale_schema("linch_scale_deadbeef_case", prefix)
+    schema = benchmark._scale_schema_name(
+        prefix, benchmark.ScaleCase("scale_postgres_1000x4", "postgres", 1000, 4)
+    )
+    assert schema == f"{prefix}postgres_1000x4"
+    assert len(schema) <= 63
+
+
+def test_lean_profile_disables_repeated_payload_encoding(monkeypatch):
+    monkeypatch.setenv("LINCH_SCALE_PROFILE_LEAN", "1")
+    lean = _load_script()
+    assert lean.ScaleStoreMetrics().capture_payload_bytes is False
+
+    monkeypatch.delenv("LINCH_SCALE_PROFILE_LEAN")
+    instrumented = _load_script()
+    assert instrumented.ScaleStoreMetrics().capture_payload_bytes is True
+
+
+def test_scale_metrics_separates_payload_bytes_and_sql_round_trips():
+    benchmark = _load_script()
+    metrics = benchmark.ScaleStoreMetrics()
+    metrics.payloads[0, "provider_pending"].append(17)
+    metrics.event_payloads[0].extend((5, 7))
+    metrics.session_payloads[0].append(11)
+    metrics.sql_round_trips["run", 0] = 9
+    metrics.transaction_commands["run", 0] = 3
+
+    writes, checkpoint = metrics.summaries(turns=1)
+    assert writes["total"] == 0
+    assert checkpoint["total"] == 17
+    assert checkpoint["event_bytes"]["per_provider_turn"] == 12
+    assert checkpoint["session_append_bytes"]["per_provider_turn"] == 11
+    assert metrics.round_trip_summary(turns=1)["by_store"]["run"] == {
+        "round_trips": 9,
+        "application_statements": 6,
+        "transaction_commands": 3,
+        "pool_reset_commands": 0,
+        "protocol_exchanges": 0,
+        "protocol_exchanges_per_provider_turn": 0.0,
+        "protocol_transaction_commands": 0,
+        "protocol_failures": 0,
+        "per_provider_turn": 9.0,
+    }
+
+
+def test_scale_metrics_counts_reset_calls_in_supporting_round_trips():
+    benchmark = _load_script()
+    metrics = benchmark.ScaleStoreMetrics()
+    metrics.sql_round_trips["run", 0] = 4
+    metrics.transaction_commands["run", 0] = 2
+    metrics.pool_reset_commands["run", 0] = 1
+
+    summary = metrics.round_trip_summary(turns=1)["by_store"]["run"]
+    assert summary["round_trips"] == 4
+    assert summary["application_statements"] == 1
+    assert summary["transaction_commands"] == 2
+    assert summary["pool_reset_commands"] == 1
+
+
+@pytest.mark.asyncio
+async def test_postgres_protocol_instrumentation_distinguishes_cold_cache_and_boundaries(pg_dsn):
+    benchmark = _load_script()
+    import asyncpg
+
+    metrics = benchmark.ScaleStoreMetrics()
+    pool = await asyncpg.create_pool(
+        pg_dsn,
+        min_size=1,
+        max_size=1,
+        connection_class=benchmark._instrument_connection_class(metrics, "run"),
+    )
+    try:
+        metrics.reset_round_trip_metrics()
+        async with pool.acquire() as connection:
+            await connection.fetchval("SELECT $1::integer", 1)
+            cold_prepare = sum(
+                count
+                for (store, _turn, method), count in metrics.protocol_exchanges.items()
+                if store == "run" and method == "prepare"
+            )
+            cold_bind = sum(
+                count
+                for (store, _turn, method), count in metrics.protocol_exchanges.items()
+                if store == "run" and method == "bind_execute"
+            )
+            await connection.fetchval("SELECT $1::integer", 2)
+            warm_prepare = sum(
+                count
+                for (store, _turn, method), count in metrics.protocol_exchanges.items()
+                if store == "run" and method == "prepare"
+            )
+            warm_bind = sum(
+                count
+                for (store, _turn, method), count in metrics.protocol_exchanges.items()
+                if store == "run" and method == "bind_execute"
+            )
+            assert cold_prepare >= 1
+            assert cold_bind >= 1
+            assert warm_prepare == cold_prepare
+            assert warm_bind >= cold_bind + 1
+            async with connection.transaction():
+                await connection.fetchval("SELECT $1::integer", 3)
+            await connection.executemany("SELECT $1::integer", [(4,), (5,)])
+        assert sum(metrics.protocol_transaction_commands.values()) >= 2
+        assert sum(metrics.pool_reset_commands.values()) == 1
+        assert (
+            sum(
+                count
+                for (store, _turn, method), count in metrics.protocol_exchanges.items()
+                if store == "run" and method == "bind_execute_many"
+            )
+            >= 1
+        )
+    finally:
+        await pool.close()
 
 
 @pytest.mark.asyncio
@@ -71,7 +203,7 @@ async def test_scale_smoke_uses_one_shared_store_and_validates_five_runs(tmp_pat
     assert result["runs_per_second"] > 0
     assert result["store_writes"]["by_store"]["session"]["create"] == 5
     assert result["store_writes"]["by_store"]["run"]["create_run"] == 5
-    assert result["store_writes"]["by_store"]["run"]["mark_completed"] == 5
+    assert result["store_writes"]["by_store"]["run"]["save_checkpoint_with_events"] >= 5
     assert result["store_writes"]["total"] == sum(
         row["total"] for row in result["store_writes"]["by_turn"]
     )
@@ -110,7 +242,7 @@ async def test_measured_store_preserves_capabilities_and_counts_terminal_payload
         )
         snapshot = await store.save(run.id, 1, request)
         assert (await store.load(snapshot.id)).id == snapshot.id
-        await store.delete(snapshot.id)
+        await store.delete(snapshot.id, run_id=run.id)
         assert await store.prune(run.id) == 0
         await store.mark_completed(run.id, checkpoint)
         raw = await connection.fetchval("SELECT checkpoint FROM runs WHERE id = $1", run.id)
@@ -143,6 +275,62 @@ async def test_measured_store_preserves_capabilities_and_counts_terminal_payload
     assert payloads["by_phase"]["completed"]["total"] == terminal_bytes
     assert payloads["by_phase"]["failed"]["total"] == 2 * failed_bytes
     assert not hasattr(benchmark.MeasuredStore(object(), "run", metrics), "append_events")
+
+
+@pytest.mark.asyncio
+async def test_measured_store_wraps_atomic_checkpoint_capability_and_final_payload():
+    benchmark = _load_script()
+    from types import SimpleNamespace
+
+    from linch import RunCheckpoint
+    from linch.events import ToolCallEndEvent
+    from linch.types import Usage
+
+    checkpoint = RunCheckpoint("provider_pending", "before", 3, Usage())
+    event = ToolCallEndEvent(tool_use_id="fixed-call", tool_name="read")
+    calls: list[tuple[str, RunCheckpoint, list[object], str]] = []
+
+    class AtomicStore:
+        async def save_checkpoint_with_events(
+            self,
+            run_id,
+            candidate,
+            events,
+            *,
+            status="running",
+        ):
+            calls.append((run_id, candidate, events, status))
+            candidate.prompt = "prepared"
+            return SimpleNamespace(checkpoint=candidate), [17]
+
+    metrics = benchmark.ScaleStoreMetrics()
+    store = benchmark.MeasuredStore(AtomicStore(), "run", metrics)
+
+    result = await store.save_checkpoint_with_events("run-id", checkpoint, [event])
+
+    assert result[1] == [17]
+    assert calls == [("run-id", checkpoint, [event], "running")]
+    assert metrics.writes["run", "save_checkpoint_with_events", 3] == 1
+    expected_checkpoint_bytes = len(
+        json.dumps(benchmark.checkpoint_to_dict(result[0].checkpoint), allow_nan=False).encode(
+            "utf-8"
+        )
+    )
+    assert metrics.payloads[3, "provider_pending"] == [expected_checkpoint_bytes]
+    expected_event_bytes = len(
+        json.dumps(benchmark._json_safe_stored_event(event), allow_nan=False).encode("utf-8")
+    )
+    assert metrics.event_payloads[3] == [expected_event_bytes]
+
+
+def test_measured_store_exposes_required_atomic_capability():
+    benchmark = _load_script()
+    from linch import InMemoryRunStore
+
+    metrics = benchmark.ScaleStoreMetrics()
+    assert callable(
+        benchmark.MeasuredStore(InMemoryRunStore(), "run", metrics).save_checkpoint_with_events
+    )
 
 
 @pytest.mark.asyncio
@@ -184,6 +372,51 @@ async def test_scale_subprocess_hard_deadline_reports_observed_work():
     assert result["correct"] is False
     assert result["completed"] == 0
     assert "timeout" in result["errors"][0].lower()
+
+
+@pytest.mark.asyncio
+async def test_postgres_schema_prefix_sweep_drops_only_owned_names(pg_dsn):
+    benchmark = _load_script()
+    import asyncpg
+
+    prefix = benchmark._new_scale_schema_prefix()
+    orphan_prefix = benchmark._new_scale_schema_prefix()
+    owned = [prefix + "first", prefix + "second"]
+    orphan = orphan_prefix + "orphan"
+    malformed = prefix + "bad-name"
+    unrelated = "linch_scale_deadbeef_unrelated"
+    names = [*owned, orphan, malformed, unrelated]
+    connection = await asyncpg.connect(pg_dsn)
+    try:
+        for name in names:
+            await connection.execute(f'CREATE SCHEMA "{name}"')
+    finally:
+        await connection.close()
+
+    try:
+        await benchmark._sweep_postgres_schemas(pg_dsn)
+        connection = await asyncpg.connect(pg_dsn)
+        try:
+            exists = {
+                name: await connection.fetchval(
+                    "SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1)", name
+                )
+                for name in names
+            }
+        finally:
+            await connection.close()
+        assert exists == {
+            **dict.fromkeys([*owned, orphan], False),
+            malformed: True,
+            unrelated: True,
+        }
+    finally:
+        connection = await asyncpg.connect(pg_dsn)
+        try:
+            for name in [malformed, unrelated]:
+                await connection.execute(f'DROP SCHEMA IF EXISTS "{name}" CASCADE')
+        finally:
+            await connection.close()
 
 
 @pytest.mark.asyncio

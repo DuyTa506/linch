@@ -44,7 +44,6 @@ from ..types import (
 from .checkpoint import (
     _alignment_entries_from_checkpoint,
     _flush_events,
-    _loop_guard_state_from_dict,
     _message_digest,
     _persist_event,
     _primary_control_message,
@@ -230,7 +229,6 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         checkpoint_extension_state=_checkpoint_extension_state,
         effective_final_tool_name=_effective_final_tool_name,
         loop_guard_state_factory=LoopGuardState,
-        loop_guard_state_from_dict=_loop_guard_state_from_dict,
         skill_overlay_from_dict=_skill_overlay_from_dict,
         alignment_entries_from_checkpoint=_alignment_entries_from_checkpoint,
     )
@@ -454,17 +452,13 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             _final_result = _runtime.terminal_result
 
         start_turn = checkpoint.turn_index
-        if resume_checkpoint is not None and checkpoint.phase in {
-            "tool_results_appended",
-            "turn_complete",
-        }:
+        if resume_checkpoint is not None and checkpoint.phase == "turn_complete":
             start_turn = checkpoint.turn_index + 1
 
         _resume_state = ResumeState(
             start_turn=(
                 checkpoint.turn_index + 1
-                if resume_checkpoint is not None
-                and checkpoint.phase in {"tool_results_appended", "turn_complete"}
+                if resume_checkpoint is not None and checkpoint.phase == "turn_complete"
                 else checkpoint.turn_index
             )
         )
@@ -643,6 +637,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 hook_dispatcher.active
                 and not frozen_pending_resume
                 and not (_recovered_primary_projection is not None and turn_index == start_turn)
+                and not (resumed_assistant and checkpoint.phase == "tool_results_appended")
             ):
                 (
                     req,
@@ -896,6 +891,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 assembly=assembly,
                 checkpoint=checkpoint,
                 resume_checkpoint=resume_checkpoint,
+                stored_events=_runtime.stored_events,
                 guard=_guard,
                 guard_state=_guard_state,
                 save_checkpoint=_save_checkpoint,

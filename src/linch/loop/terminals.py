@@ -96,6 +96,19 @@ def _last_assistant_text(session: Session) -> str | None:
     return None
 
 
+async def _complete_with_pending_events(session: Session, run_id: str, checkpoint: Any) -> None:
+    """Write through a successful terminal and its pending result together."""
+    store = session.agent.run_store
+    assert store is not None
+    buf = session._event_journal
+    if buf is not None and buf._pending:
+        checkpoint.phase = "completed"
+        await buf.flush_with_checkpoint(checkpoint, status="completed")
+        return
+    await _flush_events(session)
+    await store_call(session, "run.mark_completed", store.mark_completed(run_id, checkpoint))
+
+
 async def _budget_exhausted_tail(
     session: Session,
     *,
@@ -185,8 +198,7 @@ async def _stop_when_tail(
     store = agent.run_store
     if run_record is not None and store is not None:
         checkpoint.total_usage = total
-        await _flush_events(session)
-        await store_call(session, "run.mark_completed", store.mark_completed(run_id, checkpoint))
+        await _complete_with_pending_events(session, run_id, checkpoint)
     yield event
 
 
@@ -269,8 +281,7 @@ async def _success_result_tail(
     store = agent.run_store
     if run_record is not None and store is not None:
         checkpoint.total_usage = total
-        await _flush_events(session)
-        await store_call(session, "run.mark_completed", store.mark_completed(run_id, checkpoint))
+        await _complete_with_pending_events(session, run_id, checkpoint)
     yield event
 
 

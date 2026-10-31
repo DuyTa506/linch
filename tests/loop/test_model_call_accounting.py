@@ -668,7 +668,6 @@ async def test_resume_rejects_an_unproven_legacy_offset_alongside_new_receipts()
     extension_state: dict[str, Any] = {}
     _model_call_runtime_to_extension(
         extension_state,
-        ledger_snapshot=ledger.snapshot(),
         active_primary=None,
     )
     await run_store.save_checkpoint(
@@ -781,16 +780,16 @@ async def test_resume_merges_journal_after_receipt_backed_checkpoint_without_dou
         await ledger.settle(receipt)
 
     await settle("checkpoint-receipt", 1)
-    checkpoint_snapshot = ledger.snapshot()
     checkpoint_event_count = len(durable_after_checkpoint)
+    await run_store.append_events(run.id, durable_after_checkpoint[:checkpoint_event_count])
     await settle("journal-receipt", 2)
     await run_store.append_events(run.id, durable_after_checkpoint[checkpoint_event_count:])
 
     extension_state: dict[str, Any] = {}
     _model_call_runtime_to_extension(
         extension_state,
-        ledger_snapshot=checkpoint_snapshot,
         active_primary=None,
+        journal_count=checkpoint_event_count,
     )
     await run_store.save_checkpoint(
         run.id,
@@ -963,6 +962,7 @@ async def test_rejected_forced_compaction_yields_its_paid_usage_once(with_ladder
         == 1
     )
     saved = await runs.load_run(run_id)
-    assert saved.checkpoint.extension_state["linch.model_calls.v1"]["ledger"][
-        "consumed_auxiliary_receipt_ids"
-    ] == [usage.call_id]
+    accounting = saved.checkpoint.extension_state["linch.model_calls.v1"]
+    assert accounting["format"] == "journal-v1"
+    assert accounting["ledger"] is None
+    assert accounting["journal_count"] == sum(isinstance(row.event, ModelCallEvent) for row in rows)

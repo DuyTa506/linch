@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, NoReturn
 from uuid import uuid4
 
 from ..events import Event, _stored_event_from_dict
@@ -22,7 +22,7 @@ from ..run_store import (
     RunLeaseConflictError,
     RunRecord,
     StoredRunEvent,
-    _append_run_error,
+    _json_safe,
     _json_safe_stored_event,
     _safe_meta,
     _validate_lease_ttl,
@@ -48,7 +48,8 @@ CREATE TABLE IF NOT EXISTS runs (
     meta TEXT NOT NULL DEFAULT '{}',
     lease_owner TEXT,
     lease_epoch BIGINT NOT NULL DEFAULT 0,
-    lease_expires_at DOUBLE PRECISION
+    lease_expires_at DOUBLE PRECISION,
+    last_event_seq BIGINT NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS run_events (
@@ -122,6 +123,7 @@ class PostgresRunStore:
         self._initialized = False
         self._init_lock = asyncio.Lock()
         self._held_leases: dict[str, int] = {}
+        self._lease_owners: dict[str, str] = {}
         self._lease_ttls: dict[str, float] = {}
 
     async def _ensure(self) -> Any:
@@ -131,6 +133,7 @@ class PostgresRunStore:
             _import_asyncpg,
             schema_key="runs",
             tables=("runs", "run_events", "model_input_snapshots"),
+            required_columns={"runs": ("last_event_seq",)},
             advisory_lock_key=_SCHEMA_LOCK_KEY,
             allow_missing_pool_on_error=True,
         )
@@ -146,31 +149,35 @@ class PostgresRunStore:
         rid = id or str(uuid4())
         safe_meta = _safe_meta(meta)
         async with pool.acquire() as conn:
+            ts = now_iso()
+            row = await conn.fetchrow(
+                """
+                INSERT INTO runs
+                    (id, session_id, status, created_at, updated_at, checkpoint, meta)
+                VALUES ($1, $2, 'running', $3, $3, NULL, $4)
+                ON CONFLICT (id) DO NOTHING
+                RETURNING id, session_id, status, created_at, updated_at, checkpoint, meta
+                """,
+                rid,
+                session_id,
+                ts,
+                json.dumps(safe_meta, allow_nan=False),
+            )
+            if row is not None:
+                return _row_record(row)
+
+            # Adoption of a caller-created pending row is the conflict path.
+            # It needs a row lock while validating session/contract ownership;
+            # normal run creation above remains one autocommit statement.
             async with conn.transaction():
-                ts = now_iso()
                 row = await conn.fetchrow(
-                    """
-                    INSERT INTO runs
-                        (id, session_id, status, created_at, updated_at, checkpoint, meta)
-                    VALUES ($1, $2, 'running', $3, $3, NULL, $4)
-                    ON CONFLICT (id) DO NOTHING
-                    RETURNING id, session_id, status, created_at, updated_at, checkpoint, meta
-                    """,
+                    "SELECT id, session_id, status, created_at, updated_at, checkpoint, meta, "
+                    "lease_epoch, lease_owner, lease_expires_at "
+                    "FROM runs WHERE id = $1 FOR UPDATE",
                     rid,
-                    session_id,
-                    ts,
-                    json.dumps(safe_meta, allow_nan=False),
                 )
                 if row is None:
-                    row = await conn.fetchrow(
-                        "SELECT id, session_id, status, created_at, updated_at, checkpoint, meta, "
-                        "lease_epoch, lease_owner, lease_expires_at "
-                        "FROM runs WHERE id = $1 FOR UPDATE",
-                        rid,
-                    )
-                else:
-                    return _row_record(row)
-                assert row is not None
+                    raise KeyError(f"run not found: {rid}")
                 if row["status"] != "pending":
                     raise ValueError(f"run {rid} already exists")
                 if str(row["session_id"]) != session_id:
@@ -257,27 +264,40 @@ class PostgresRunStore:
             )
         return _row_record(row) if row is not None else None
 
-    async def _locked_run(self, conn: Any, run_id: str) -> Any:
-        row = await conn.fetchrow(
-            """
-            SELECT id, session_id, status, created_at, updated_at, checkpoint, meta,
-                   COALESCE(lease_epoch, 0) AS lease_epoch,
-                   lease_owner, lease_expires_at
-            FROM runs WHERE id = $1 FOR UPDATE
-            """,
-            run_id,
-        )
-        if row is None:
-            raise KeyError(f"run not found: {run_id}")
-        return row
-
     def _assert_fence(self, run_id: str, row: Any) -> None:
         held = self._held_leases.get(run_id)
-        if held is not None and int(row["lease_epoch"] or 0) != held:
+        owner = self._lease_owners.get(run_id)
+        if held is not None and (
+            int(row["lease_epoch"] or 0) != held or row["lease_owner"] != owner
+        ):
             raise LeaseLostError(
                 f"lease lost for run {run_id}: held epoch {held}, "
                 f"stored epoch {int(row['lease_epoch'] or 0)}"
             )
+
+    def _fence_values(self, run_id: str) -> tuple[str | None, int]:
+        epoch = self._held_leases.get(run_id)
+        if epoch is None:
+            return None, 0
+        owner = self._lease_owners.get(run_id)
+        if owner is None:
+            raise LeaseLostError(f"lease lost for run {run_id}")
+        return owner, epoch
+
+    async def _classify_write_failure(self, conn: Any, run_id: str) -> NoReturn:
+        row = await conn.fetchrow(
+            "SELECT id, lease_owner, lease_epoch FROM runs WHERE id = $1",
+            run_id,
+        )
+        if row is None:
+            raise KeyError(f"run not found: {run_id}")
+        held = self._held_leases.get(run_id)
+        if held is not None:
+            raise LeaseLostError(
+                f"lease lost for run {run_id}: held epoch {held}, "
+                f"stored epoch {int(row['lease_epoch'] or 0)}"
+            )
+        raise KeyError(f"run write was not applied: {run_id}")
 
     async def save_checkpoint(
         self,
@@ -286,57 +306,92 @@ class PostgresRunStore:
         *,
         status: str = "running",
     ) -> RunRecord:
-        pool = await self._ensure()
-        payload = json.dumps(checkpoint_to_dict(checkpoint), allow_nan=False)
-        async with pool.acquire() as conn:
-            async with conn.transaction():
-                row = await self._locked_run(conn, run_id)
-                self._assert_fence(run_id, row)
-                ts = now_iso()
-                updated = await conn.fetchrow(
-                    """
-                    UPDATE runs SET updated_at = $1, status = $2, checkpoint = $3
-                    WHERE id = $4
-                    RETURNING id, session_id, status, created_at, updated_at, checkpoint, meta
-                    """,
-                    ts,
-                    status,
-                    payload,
-                    run_id,
-                )
-                assert updated is not None
-                return _row_record(updated)
+        record, _ = await self.save_checkpoint_with_events(run_id, checkpoint, (), status=status)
+        return record
 
     async def append_event(self, run_id: str, event: Event) -> int:
         return (await self.append_events(run_id, [event]))[0]
 
+    async def _write_event_rows(
+        self,
+        run_id: str,
+        args: tuple[object, ...],
+        *,
+        update: str,
+        event_arg: str,
+        fence: str,
+        returning: str,
+        result: str,
+    ) -> tuple[Any, list[int]]:
+        sql = f"""
+            WITH updated AS (
+                UPDATE runs SET {update} WHERE id = $1 AND ({fence})
+                RETURNING id, {returning}
+            ), inserted AS (
+                INSERT INTO run_events (run_id, seq, appended_at, event)
+                SELECT updated.id, updated.first_seq + ordinality, $2, event_json
+                FROM updated CROSS JOIN unnest({event_arg}::text[])
+                    WITH ORDINALITY AS events(event_json, ordinality)
+                RETURNING seq
+            )
+            SELECT {result}COALESCE((SELECT array_agg(seq ORDER BY seq) FROM inserted),
+                                    ARRAY[]::BIGINT[]) AS allocated_seqs
+            FROM updated
+        """
+        pool = await self._ensure()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(sql, *args)
+            if row is None:
+                await self._classify_write_failure(conn, run_id)
+        return row, [int(seq) for seq in row["allocated_seqs"]]
+
+    async def save_checkpoint_with_events(
+        self,
+        run_id: str,
+        checkpoint: RunCheckpoint,
+        events: Sequence[Event],
+        *,
+        status: str = "running",
+    ) -> tuple[RunRecord, list[int]]:
+        """Commit a phase's events and checkpoint in one fenced statement."""
+        encoded = [json.dumps(_json_safe_stored_event(event), allow_nan=False) for event in events]
+        payload = json.dumps(checkpoint_to_dict(checkpoint), allow_nan=False)
+        owner, epoch = self._fence_values(run_id)
+        row, seqs = await self._write_event_rows(
+            run_id,
+            (run_id, now_iso(), status, payload, len(encoded), encoded, owner, epoch),
+            update=(
+                "updated_at = $2, status = $3, checkpoint = $4, "
+                "last_event_seq = last_event_seq + $5"
+            ),
+            event_arg="$6",
+            fence="$7::text IS NULL OR (lease_owner = $7 AND COALESCE(lease_epoch, 0) = $8)",
+            returning=(
+                "session_id, status, created_at, updated_at, checkpoint, meta, "
+                "last_event_seq - $5 AS first_seq"
+            ),
+            result=(
+                "updated.id, updated.session_id, updated.status, updated.created_at, "
+                "updated.updated_at, updated.checkpoint, updated.meta,"
+            ),
+        )
+        return _row_record(row), seqs
+
     async def append_events(self, run_id: str, events: list[Event]) -> list[int]:
         if not events:
             return []
-        pool = await self._ensure()
         encoded = [json.dumps(_json_safe_stored_event(event), allow_nan=False) for event in events]
-        async with pool.acquire() as conn:
-            async with conn.transaction():
-                row = await self._locked_run(conn, run_id)
-                self._assert_fence(run_id, row)
-                base = int(
-                    await conn.fetchval(
-                        "SELECT COALESCE(MAX(seq), 0) FROM run_events WHERE run_id = $1",
-                        run_id,
-                    )
-                    or 0
-                )
-                seqs = [base + index for index in range(1, len(events) + 1)]
-                ts = now_iso()
-                await conn.executemany(
-                    "INSERT INTO run_events (run_id, seq, appended_at, event) "
-                    "VALUES ($1, $2, $3, $4)",
-                    [
-                        (run_id, seq, ts, event_json)
-                        for seq, event_json in zip(seqs, encoded, strict=True)
-                    ],
-                )
-                return seqs
+        owner, epoch = self._fence_values(run_id)
+        _, seqs = await self._write_event_rows(
+            run_id,
+            (run_id, now_iso(), len(encoded), encoded, owner, epoch),
+            update="updated_at = $2, last_event_seq = last_event_seq + $3",
+            event_arg="$4",
+            fence="$5::text IS NULL OR (lease_owner = $5 AND COALESCE(lease_epoch, 0) = $6)",
+            returning="last_event_seq - $3 AS first_seq",
+            result="",
+        )
+        return seqs
 
     async def load_events(self, run_id: str, *, after_seq: int = 0) -> list[StoredRunEvent]:
         pool = await self._ensure()
@@ -376,75 +431,99 @@ class PostgresRunStore:
         if checkpoint is not None:
             checkpoint.phase = "failed"
             checkpoint_json = json.dumps(checkpoint_to_dict(checkpoint), allow_nan=False)
+        error_json = (
+            json.dumps(_json_safe(error, strict=False), allow_nan=False)
+            if error is not None
+            else None
+        )
+        ts = now_iso()
+        owner, epoch = self._fence_values(run_id)
         async with pool.acquire() as conn:
-            async with conn.transaction():
-                row = await self._locked_run(conn, run_id)
-                self._assert_fence(run_id, row)
-                meta_raw = row["meta"]
-                meta = _safe_meta(json.loads(meta_raw) if isinstance(meta_raw, str) else meta_raw)
-                if error is not None:
-                    _append_run_error(meta, error)
-                ts = now_iso()
-                updated = await conn.fetchrow(
-                    """
-                    UPDATE runs
-                    SET updated_at = $1, status = 'failed',
-                        checkpoint = COALESCE($2, checkpoint), meta = $3
-                    WHERE id = $4
-                    RETURNING id, session_id, status, created_at, updated_at, checkpoint, meta
-                    """,
-                    ts,
-                    checkpoint_json,
-                    json.dumps(meta, allow_nan=False),
-                    run_id,
-                )
-                assert updated is not None
-                return _row_record(updated)
+            updated = await conn.fetchrow(
+                """
+                UPDATE runs
+                SET updated_at = $1,
+                    status = 'failed',
+                    checkpoint = COALESCE($2, checkpoint),
+                    meta = CASE
+                        WHEN $3::jsonb IS NULL THEN meta
+                        WHEN jsonb_typeof(meta::jsonb -> 'errors') = 'array'
+                         AND NOT EXISTS (
+                             SELECT 1
+                             FROM jsonb_array_elements(meta::jsonb -> 'errors') AS error_item
+                             WHERE jsonb_typeof(error_item) <> 'object'
+                         )
+                        THEN jsonb_set(
+                            meta::jsonb,
+                            '{errors}',
+                            (meta::jsonb -> 'errors') || jsonb_build_array($3::jsonb)
+                        )::text
+                        ELSE jsonb_set(
+                            meta::jsonb,
+                            '{errors}',
+                            jsonb_build_array($3::jsonb)
+                        )::text
+                    END
+                WHERE id = $4
+                  AND ($5::text IS NULL OR
+                       (lease_owner = $5 AND COALESCE(lease_epoch, 0) = $6))
+                RETURNING id, session_id, status, created_at, updated_at, checkpoint, meta
+                """,
+                ts,
+                checkpoint_json,
+                error_json,
+                run_id,
+                owner,
+                epoch,
+            )
+            if updated is None:
+                await self._classify_write_failure(conn, run_id)
+        return _row_record(updated)
 
     async def claim(self, run_id: str, owner: str, ttl_s: float) -> RunLease:
         ttl_s = _validate_lease_ttl(ttl_s)
         pool = await self._ensure()
         async with pool.acquire() as conn:
-            async with conn.transaction():
-                # The conditional UPDATE is the ownership decision.  A live
-                # lease by the same owner is idempotently refreshed; any other
-                # live owner leaves the row untouched and returns no row.
-                row = await conn.fetchrow(
-                    """
-                    UPDATE runs
-                    SET lease_owner = $2,
-                        lease_epoch = CASE
-                            WHEN lease_owner = $2 AND lease_expires_at >
-                                EXTRACT(EPOCH FROM clock_timestamp())::double precision
-                                THEN COALESCE(lease_epoch, 0)
-                            ELSE COALESCE(lease_epoch, 0) + 1
-                        END,
-                        lease_expires_at =
+            # The conditional UPDATE is the ownership decision.  A live lease
+            # by the same owner is idempotently refreshed; any other live owner
+            # leaves the row untouched and returns no row.
+            row = await conn.fetchrow(
+                """
+                UPDATE runs
+                SET lease_owner = $2,
+                    lease_epoch = CASE
+                        WHEN lease_owner = $2 AND lease_expires_at >
                             EXTRACT(EPOCH FROM clock_timestamp())::double precision
-                            + $3::double precision
-                    WHERE id = $1
-                      AND (
-                          lease_owner IS NULL
-                          OR lease_expires_at IS NULL
-                          OR lease_expires_at <=
-                              EXTRACT(EPOCH FROM clock_timestamp())::double precision
-                          OR lease_owner = $2
-                      )
-                    RETURNING COALESCE(lease_epoch, 0) AS lease_epoch, lease_expires_at
-                    """,
-                    run_id,
-                    owner,
-                    ttl_s,
-                )
-                if row is None:
-                    exists = await conn.fetchval("SELECT 1 FROM runs WHERE id = $1", run_id)
-                    if exists is None:
-                        raise KeyError(f"run not found: {run_id}")
-                    raise RunLeaseConflictError(f"run {run_id} is leased by another owner")
-                lease = _lease_from_row(row, run_id, owner)
+                            THEN COALESCE(lease_epoch, 0)
+                        ELSE COALESCE(lease_epoch, 0) + 1
+                    END,
+                    lease_expires_at =
+                        EXTRACT(EPOCH FROM clock_timestamp())::double precision
+                        + $3::double precision
+                WHERE id = $1
+                  AND (
+                      lease_owner IS NULL
+                      OR lease_expires_at IS NULL
+                      OR lease_expires_at <=
+                          EXTRACT(EPOCH FROM clock_timestamp())::double precision
+                      OR lease_owner = $2
+                  )
+                RETURNING COALESCE(lease_epoch, 0) AS lease_epoch, lease_expires_at
+                """,
+                run_id,
+                owner,
+                ttl_s,
+            )
+            if row is None:
+                exists = await conn.fetchval("SELECT 1 FROM runs WHERE id = $1", run_id)
+                if exists is None:
+                    raise KeyError(f"run not found: {run_id}")
+                raise RunLeaseConflictError(f"run {run_id} is leased by another owner")
+            lease = _lease_from_row(row, run_id, owner)
         # Publish ownership after all awaited context exits, so transaction
         # failure or cancellation cannot record an uncommitted epoch.
         self._held_leases[run_id] = lease.epoch
+        self._lease_owners[run_id] = owner
         self._lease_ttls[run_id] = float(ttl_s)
         return lease
 
@@ -501,6 +580,7 @@ class PostgresRunStore:
                 raise LeaseLostError(f"lease lost for run {lease.run_id}")
         finally:
             self._held_leases.pop(lease.run_id, None)
+            self._lease_owners.pop(lease.run_id, None)
             self._lease_ttls.pop(lease.run_id, None)
 
     async def save(
@@ -511,25 +591,36 @@ class PostgresRunStore:
     ) -> ModelInputSnapshot:
         snapshot = create_model_input_snapshot(run_id, provider_attempt, request)
         pool = await self._ensure()
+        owner, epoch = self._fence_values(run_id)
         async with pool.acquire() as conn:
-            async with conn.transaction():
-                row = await self._locked_run(conn, run_id)
-                self._assert_fence(run_id, row)
-                await conn.execute(
-                    """
-                    INSERT INTO model_input_snapshots
-                        (id, run_id, provider_attempt, codec_version, request_json,
-                         integrity_hash, created_at)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7)
-                    """,
-                    snapshot.id,
-                    snapshot.run_id,
-                    snapshot.provider_attempt,
-                    snapshot.codec_version,
-                    snapshot.request_json,
-                    snapshot.integrity_hash,
-                    snapshot.created_at,
+            row = await conn.fetchrow(
+                """
+                WITH fenced AS (
+                    UPDATE runs
+                    SET updated_at = updated_at
+                    WHERE id = $2
+                      AND ($8::text IS NULL OR
+                           (lease_owner = $8 AND COALESCE(lease_epoch, 0) = $9))
+                    RETURNING id
                 )
+                INSERT INTO model_input_snapshots
+                    (id, run_id, provider_attempt, codec_version, request_json,
+                     integrity_hash, created_at)
+                SELECT $1, $2, $3, $4, $5, $6, $7 FROM fenced
+                RETURNING id
+                """,
+                snapshot.id,
+                snapshot.run_id,
+                snapshot.provider_attempt,
+                snapshot.codec_version,
+                snapshot.request_json,
+                snapshot.integrity_hash,
+                snapshot.created_at,
+                owner,
+                epoch,
+            )
+            if row is None:
+                await self._classify_write_failure(conn, run_id)
         return snapshot
 
     async def load(self, snapshot_id: str) -> ModelInputSnapshot | None:
@@ -556,43 +647,51 @@ class PostgresRunStore:
         )
         return _validate_model_input_snapshot(snapshot)
 
-    async def delete(self, snapshot_id: str) -> None:
+    async def _delete_snapshots(
+        self,
+        run_id: str,
+        values: tuple[object, ...],
+        predicate: str,
+    ) -> int:
         pool = await self._ensure()
+        owner, epoch = self._fence_values(run_id)
         async with pool.acquire() as conn:
-            async with conn.transaction():
-                snapshot = await conn.fetchrow(
-                    "SELECT run_id FROM model_input_snapshots WHERE id = $1",
-                    snapshot_id,
+            row = await conn.fetchrow(
+                f"""
+                WITH fenced AS (
+                    UPDATE runs
+                    SET updated_at = updated_at
+                    WHERE id = $1
+                      AND ($3::text IS NULL OR (lease_owner = $3 AND
+                           COALESCE(lease_epoch, 0) = $4))
+                    RETURNING id
+                ), deleted AS (
+                    DELETE FROM model_input_snapshots AS snapshots
+                    USING fenced
+                    WHERE snapshots.run_id = $1 AND {predicate}
+                    RETURNING snapshots.id
                 )
-                if snapshot is None:
-                    return
-                run = await self._locked_run(conn, str(snapshot["run_id"]))
-                self._assert_fence(str(snapshot["run_id"]), run)
-                await conn.execute("DELETE FROM model_input_snapshots WHERE id = $1", snapshot_id)
+                SELECT (SELECT id FROM fenced) AS fenced_id,
+                       (SELECT count(*) FROM deleted) AS deleted_count
+                """,
+                run_id,
+                *values,
+                owner,
+                epoch,
+            )
+            if row is None or row["fenced_id"] is None:
+                await self._classify_write_failure(conn, run_id)
+        return int(row["deleted_count"] or 0)
+
+    async def delete(self, snapshot_id: str, *, run_id: str) -> None:
+        await self._delete_snapshots(run_id, (snapshot_id,), "snapshots.id = $2")
 
     async def prune(self, run_id: str, keep_ids: Sequence[str] = ()) -> int:
-        pool = await self._ensure()
-        keep = tuple(str(item) for item in keep_ids)
-        async with pool.acquire() as conn:
-            async with conn.transaction():
-                run = await self._locked_run(conn, run_id)
-                self._assert_fence(run_id, run)
-                if keep:
-                    placeholders = ", ".join(f"${index}" for index in range(2, len(keep) + 2))
-                    result = await conn.execute(
-                        f"DELETE FROM model_input_snapshots WHERE run_id = $1 "
-                        f"AND id NOT IN ({placeholders})",
-                        run_id,
-                        *keep,
-                    )
-                else:
-                    result = await conn.execute(
-                        "DELETE FROM model_input_snapshots WHERE run_id = $1", run_id
-                    )
-        try:
-            return int(str(result).split()[-1])
-        except (ValueError, IndexError):
-            return 0
+        return await self._delete_snapshots(
+            run_id,
+            (list(str(item) for item in keep_ids),),
+            "snapshots.id <> ALL($2::text[])",
+        )
 
     async def close(self) -> None:
         await close_pool(self, reset_initialized=True)

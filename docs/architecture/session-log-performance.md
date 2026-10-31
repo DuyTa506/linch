@@ -181,6 +181,38 @@ memory profile when
 `max_idle_sessions` is unset. No compatible faster cache was demonstrated, so
 the detached `deepcopy` projections remain the source-compatible choice.
 
+## Incremental audit fingerprint (WP8)
+
+The cached `_full` and `_derived` projections remain eager folds of log writes:
+append adds the owned message to each selected view, and a projection entry
+replaces the provider view. Getters still return detached deep copies. WP8
+reduces redundant reads rather than changing that contract or adding a second
+serialized snapshot cache.
+
+The private audit fingerprint is a lazy SHA-256 fold of the exact canonical
+JSON array previously hashed from `full_history`. It caches the hash prefix
+without the closing bracket and the count of historical messages already
+folded. A read serializes only the unprocessed historical tail, then closes a
+copy of the hash to produce the same digest. Repeated reads without appends
+need no message serialization. Provider-only messages and projection entries
+do not change the audit digest.
+
+Serialization stays lazy so appending arbitrary metadata does not acquire a
+new JSON-encoding requirement. A failed tail fold leaves the valid cached
+prefix and cursor unchanged. Primary model-call binding uses this digest and
+`history_count` instead of copying and re-fingerprinting the whole audit view.
+The focused two-provider-turn probe reduces whole-history reads from two to
+zero; the four provider-view reads needed for request construction remain.
+See the [WP8 measurements](../superpowers/measurements/2026-10-31-hot-path.md)
+for scale results.
+
+Checkpoint recovery uses the journal-backed model-call watermark, not a receipt
+snapshot. Loop-guard counts and the failure streak remain in the checkpoint,
+keyed by fixed-size 64-bit BLAKE2b digests of permission decision keys (about
+25 bytes per distinct call). On a cold resume, a `tool_results_appended`
+checkpoint leaves completed results pending guard evaluation; resume evaluates
+them without rerunning tools. No private guard journal is persisted or emitted.
+
 ## Reader inventory
 
 Runtime readers of `SessionLog` projections are grouped below. Readers that
@@ -195,7 +227,10 @@ objects.
 * `src/linch/loop/request.py` scans `provider_view` for skill reminders and
   copies it into `ProviderRequest.messages`.
 * `src/linch/loop/runner.py` copies `provider_view` for durable provider
-  snapshots and passes `full_history` into checkpoint/recovery fingerprints.
+  snapshots.
+* `src/linch/loop/runtime.py` binds primary model calls with `history_count`
+  and the private incremental audit digest; it no longer reads `full_history`
+  for that binding.
 * `src/linch/loop/terminals.py` scans a detached reversed `provider_view` for
   the last assistant text.
 * `src/linch/compaction.py` copies projections for micro/paid compaction,
@@ -210,7 +245,8 @@ objects.
 These files read related but already-derived durable snapshots rather than
 `SessionLog` getters: `src/linch/agent.py` restores a
 `ProviderViewSnapshot`, `src/linch/sessions/store.py` serializes one, and
-`src/linch/model_calls.py` receives a detached `full_history` argument.
+`src/linch/model_calls.py` receives the audit count and digest for primary
+binding.
 Field names and explanatory comments in `src/linch/loop/checkpoint.py`,
 `src/linch/coordination/send_message.py`, and `src/linch/scheduler.py` are not
 runtime getter reads.

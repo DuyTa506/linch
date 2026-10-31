@@ -39,8 +39,10 @@ remain the names in `linch.__all__`.
 - **P03:** `RunOptions.allow_legacy_resume` and contractless resume are removed; start a new run with a current execution contract.
 - **Resume:** Terminal runs and runs without checkpoints raise `RunNotResumableError` with `run_id` and `status`; start a new run.
 - **P04:** Cursorless assistant-boundary tool recovery is removed; tool recovery requires a valid `tool_batch_event_after_seq` cursor.
+- **WP8:** Runtime checkpoints use private model-call journal watermarks and bounded loop-guard digests; old receipt snapshots and pre-3.0 guard shapes are rejected, so start a new run.
 - **P07:** Pre-3.0 permission readers and the null `updated_input` wire marker are removed; non-null persisted input rewrites and live approval rewrites remain rejected.
 - **P09:** Automatic SQLite/Postgres schema upgrades are removed; built-in database stores create complete version-3 schemas and reject old, missing, or unknown schema metadata on existing databases.
+- **WP8 Postgres:** Fresh run/session schemas require their durable event/message sequence counters; old shapes are rejected before DDL. `ModelInputSnapshotStore.delete` now requires `run_id` so cleanup can be fenced in one statement.
 - **P10:** Legacy scalar/malformed failure-history preservation is removed; failure writes append only to a valid current list of error objects, replacing malformed history.
 - **Workflow journals:** Old call-key algorithm readers and `fingerprint_version` branches are removed; durable workflow metadata requires `schema_version=3`, and incompatible runs must start anew.
 - **P08:** `ToolActivation`, `ToolSurfaceReaderGuard`, `tool_activations`, and their discovery codecs/projection plumbing are removed; unknown message-block types and unknown tool-result fields fail closed, while ordinary message-copy isolation remains intact.
@@ -257,5 +259,7 @@ for worker topology and schedules.
 - **D11:** `examples/observability/custom_observer.py` is removed; use the console/OTLP exporter example.
 
 ## Pending run adoption
+
+- **WP8:** Loop-guard checkpoint call-count keys are now 64-bit BLAKE2b digests of the permission decision key; pre-3.0 guard checkpoints are rejected.
 
 - `RunStore.create_run(session_id, id=existing_id)` adopts only a same-session `pending` run, merges metadata and checks existing contract compatibility; other existing IDs raise `ValueError`. Queue submission remains idempotent through `enqueue_run`.

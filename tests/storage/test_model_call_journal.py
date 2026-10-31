@@ -32,6 +32,12 @@ class _FaultStore:
         self._check(f"checkpoint:{checkpoint.phase}")
         return await self.store.save_checkpoint(run_id, checkpoint, **kw)
 
+    async def save_checkpoint_with_events(
+        self, run_id: str, checkpoint: Any, events: list[Any], **kw: Any
+    ) -> Any:
+        self._check(f"checkpoint:{checkpoint.phase}")
+        return await self.store.save_checkpoint_with_events(run_id, checkpoint, events, **kw)
+
     async def append_event(self, run_id: str, event: Any) -> int:
         kind = getattr(event, "record_kind", event.type)
         if kind == "projection" and event.record.get("projection_kind") == "compaction_source":
@@ -621,17 +627,33 @@ async def test_paid_projection_and_consumption_reconcile_independently(
     checkpoint.extension_state["linch.reliability"] = {"version": 1, "unrelated": "preserved"}
     checkpoint.extension_state["host.extension"] = {"owner": "host"}
     if consumed:
+        from linch.events import UsageEvent
+        from linch.loop.checkpoint import _model_call_runtime_to_extension
+
         ledger = _ModelCallLedger(run_id)
-        await ledger.restore(
-            None,
-            [row.event for row in await runs.load_events(run_id) if row.event.type == "model_call"],
+        rows = await runs.load_events(run_id)
+        model_events = [row.event for row in rows if row.event.type == "model_call"]
+        await ledger.restore(model_events)
+        for receipt in ledger.consume_auxiliary_receipts():
+            if receipt.usage is not None:
+                await runs.append_event(
+                    run_id,
+                    UsageEvent(
+                        usage=receipt.usage,
+                        cumulative=ledger.total_usage,
+                        cost_usd=receipt.cost_usd,
+                        cumulative_cost_usd=ledger.total_cost_usd,
+                        source="compaction",
+                        call_id=receipt.delivery_attempt_id,
+                        logical_call_id=receipt.logical_call_id,
+                        model=receipt.actual_model,
+                    ),
+                )
+        _model_call_runtime_to_extension(
+            checkpoint.extension_state,
+            active_primary=None,
+            journal_count=len(model_events),
         )
-        ledger.consume_auxiliary_receipts()
-        checkpoint.extension_state["linch.model_calls.v1"] = {
-            "version": 3,
-            "ledger": ledger.snapshot(),
-            "active_primary": None,
-        }
         checkpoint.total_usage = ledger.total_usage
     await runs.save_checkpoint(run_id, checkpoint)
     sessions, runs = await _reopen(kind, pg_dsn, sessions, runs)
@@ -642,9 +664,14 @@ async def test_paid_projection_and_consumption_reconcile_independently(
         assert len(provider.calls) == 1
         assert events[-1].total_usage == Usage(22, 4)
         complete = await runs.load_run(run_id)
-        assert sum(
-            event.type == "usage" and event.source == "compaction" for event in events
-        ) == int(not consumed)
+        # A combined checkpoint write rolls back its pending event prefix when
+        # the checkpoint boundary crashes; the next run then emits that
+        # projection once. A separately consumed marker remains suppressed.
+        expected_compaction_events = 0 if consumed else 1
+        assert (
+            sum(event.type == "usage" and event.source == "compaction" for event in events)
+            == expected_compaction_events
+        )
         assert complete.checkpoint.extension_state["host.extension"] == {"owner": "host"}
         assert complete.checkpoint.extension_state["linch.reliability"] == {
             "version": 1,
@@ -767,7 +794,12 @@ async def test_conflicting_paid_projection_for_one_receipt_fails_closed() -> Non
     )
     from linch.types import Usage
 
-    ledger = _ModelCallLedger("run")
+    journal: list[Any] = []
+
+    async def persist(event: Any) -> None:
+        journal.append(event)
+
+    ledger = _ModelCallLedger("run", persist=persist)
     intent = ModelCallIntent(
         "operation", "delivery", None, "compaction", "run", 0, "model", "request", "default"
     )
@@ -828,7 +860,7 @@ async def test_conflicting_paid_projection_for_one_receipt_fails_closed() -> Non
     await ledger.settle(receipt)
     first = _projection_record(**values)
     no_source = _ModelCallLedger("run")
-    await no_source.restore(ledger.snapshot(), [])
+    await no_source.restore([event for event in journal if event.record_kind != "projection"])
     with pytest.raises(_ModelCallError, match="physical source"):
         await no_source.record_projection(first)
     await ledger.record_projection(first)
@@ -1083,7 +1115,6 @@ async def test_repeated_paid_projection_preserves_later_skill_reminder_order(
         session, agent, signal, strategy, auxiliary_caller=caller, logical_call_id="first"
     )
     _re_inject_skill_context(session)
-    first_snapshot = ledger.snapshot()
     await session.append([Message(role="user", content=[TextBlock(text="before later skill")])])
     session.invoked_skills.append(
         InvokedSkillRecord(name="later", substituted_body="later skill body", invoked_at=1.0)
@@ -1115,20 +1146,38 @@ async def test_repeated_paid_projection_preserves_later_skill_reminder_order(
         prompt="go",
         turn_index=0,
         total_usage=Usage(11, 2),
-        extension_state={
-            "linch.model_calls.v1": {
-                "version": 3,
-                "ledger": first_snapshot,
-                "active_primary": None,
-            },
-        },
+        extension_state={},
     )
+    from linch.loop.checkpoint import _model_call_runtime_to_extension
+
+    rows = await runs.load_events("run")
+    model_events = [row.event for row in rows if row.event.type == "model_call"]
     if consumed_before_projection:
+        from linch.events import UsageEvent
+
         consumed = _ModelCallLedger("run")
-        await consumed.restore(None, [row.event for row in await runs.load_events("run")])
-        consumed.consume_auxiliary_receipts()
-        checkpoint.extension_state["linch.model_calls.v1"]["ledger"] = consumed.snapshot()
+        await consumed.restore(model_events)
+        for receipt in consumed.consume_auxiliary_receipts():
+            if receipt.usage is not None:
+                await runs.append_event(
+                    "run",
+                    UsageEvent(
+                        usage=receipt.usage,
+                        cumulative=consumed.total_usage,
+                        cost_usd=receipt.cost_usd,
+                        cumulative_cost_usd=consumed.total_cost_usd,
+                        source="compaction",
+                        call_id=receipt.delivery_attempt_id,
+                        logical_call_id=receipt.logical_call_id,
+                        model=receipt.actual_model,
+                    ),
+                )
         checkpoint.total_usage = consumed.total_usage
+    _model_call_runtime_to_extension(
+        checkpoint.extension_state,
+        active_primary=None,
+        journal_count=len(model_events),
+    )
     await runs.save_checkpoint("run", checkpoint)
     if cache_present:
         await sessions.save_provider_snapshot(
@@ -1232,7 +1281,7 @@ async def test_compaction_source_recipe_is_bound_to_the_pending_delivery() -> No
         await ledger.record_projection(_projection_record(**values))
     values["request_fingerprint"] = "request"
     restored = _ModelCallLedger("run")
-    await restored.restore(ledger.snapshot(), journal)
+    await restored.restore(journal)
     assert restored.projections("compaction_source") == [source]
     assert restored.total_usage.input_tokens == restored.total_usage.output_tokens == 0
 

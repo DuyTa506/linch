@@ -321,6 +321,38 @@ async def test_guard_force_final_answer():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("force_final", "expected_action", "expected_subtype"),
+    [(False, "stop", "error"), (True, "force_final", "success")],
+)
+async def test_nondurable_guard_still_enforces_stop_or_force_final(
+    force_final, expected_action, expected_subtype
+):
+    from linch.events import LoopGuardEvent, ResultEvent
+    from linch.loop_guard import LoopGuard
+
+    provider = LoopingProvider(tool_input={"same": True})
+    agent = _make_agent(
+        provider,
+        loop_guard=LoopGuard(
+            max_identical_tool_calls=2,
+            max_consecutive_failures=0,
+            force_final_answer=force_final,
+        ),
+    )
+    session = await agent.session()
+    events = await _collect(session)
+
+    guard_events = [event for event in events if isinstance(event, LoopGuardEvent)]
+    result_events = [event for event in events if isinstance(event, ResultEvent)]
+    repeated = [event for event in guard_events if event.reason == "repeated_tool_call"]
+
+    assert len(repeated) == 1
+    assert repeated[0].action == expected_action
+    assert result_events[-1].subtype == expected_subtype
+
+
+@pytest.mark.asyncio
 async def test_guard_disabled_via_none():
     """loop_guard=None disables all guard checks; loop runs until max_turns."""
     from linch.events import LoopGuardEvent
@@ -487,4 +519,42 @@ def test_loop_guard_and_permission_keys_preserve_exact_ascii_escaped_bytes() -> 
     assert permission_decision_key("Search", proposed).encode() == expected.encode()
     state = LoopGuardState()
     evaluate_loop_guard(LoopGuard(), state, [_make_tool_block("Search", proposed)], [])
-    assert state.call_counts == {expected: 1}
+    import hashlib
+
+    digest = hashlib.blake2b(expected.encode(), digest_size=8).hexdigest()
+    assert state.call_counts == {digest: 1}
+
+
+def test_loop_guard_checkpoint_persists_digest_keys_without_inputs() -> None:
+    from linch.loop.checkpoint import _loop_guard_state_to_dict
+    from linch.loop_guard.guard import LoopGuard, LoopGuardState, evaluate_loop_guard
+    from linch.run_store import RunCheckpoint, checkpoint_to_dict
+    from linch.types import Usage
+
+    block = _make_tool_block("Search", {"query": "sensitive payload"})
+    state = LoopGuardState()
+    evaluate_loop_guard(LoopGuard(), state, [block], [])
+    snapshot = _loop_guard_state_to_dict(state)
+    checkpoint = RunCheckpoint("turn_complete", "go", 0, Usage(), loop_guard_state=snapshot)
+    encoded = checkpoint_to_dict(checkpoint)
+
+    key = next(iter(snapshot["call_counts"]))
+    assert len(key) == 16
+    assert key in encoded["loop_guard_state"]["call_counts"]
+    assert "sensitive payload" not in str(encoded["loop_guard_state"])
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {"call_counts": {"Search:{}": 1}, "consecutive_failures": 0},
+        {"call_counts": {"not-a-digest": 1}, "consecutive_failures": 0},
+        {"call_counts": {"0123456789abcdef": True}, "consecutive_failures": 0},
+    ],
+)
+def test_loop_guard_checkpoint_rejects_non_digest_state(raw) -> None:
+    from linch.errors import ConfigError
+    from linch.loop.checkpoint import _loop_guard_state_from_dict
+
+    with pytest.raises(ConfigError):
+        _loop_guard_state_from_dict(raw)

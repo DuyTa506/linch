@@ -7,6 +7,17 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
 
 ## Unreleased
 
+- Bound checkpoint recovery state with journal watermarks and fixed-size
+  BLAKE2b loop-guard digests; remove the private guard-delta journal while
+  retaining detached projection getters and the incremental history digest.
+- Require combined checkpoint/event writes when a phase has pending events,
+  preserving durable-before-side-effect ordering. Postgres writes now use
+  fenced autocommit statements with last-sequence allocation, and store-owned
+  pools use a clean asyncpg reset callback. The hot-path loop also avoids
+  duplicate checkpoint serialization traversals. A D15 msgspec checkpoint
+  prototype measured below 1% on the scale cases and was dropped. See the
+  [hot-path measurements](docs/superpowers/measurements/2026-10-31-hot-path.md).
+
 - Add `RunOptions.run_id` to start or adopt a pending run through the ordinary session API.
 
 - Retry nonterminal worker exits after ownership loss or cancellation. Retry

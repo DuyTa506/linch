@@ -56,7 +56,10 @@ from .checkpoint import (
     RunEventBuffer,
     _alignment_queue_to_dicts,
     _background_workers_to_dict,
+    _consumed_auxiliary_receipt_ids_from_events,
     _flush_events,
+    _loop_guard_is_active,
+    _loop_guard_state_from_dict,
     _loop_guard_state_to_dict,
     _model_call_runtime_from_extension,
     _model_call_runtime_to_extension,
@@ -595,7 +598,6 @@ class RunRuntime:
         checkpoint_extension_state: Callable[..., dict[str, Any]],
         effective_final_tool_name: Callable[..., str | None],
         loop_guard_state_factory: Callable[[], Any],
-        loop_guard_state_from_dict: Callable[[Any], Any],
         skill_overlay_from_dict: Callable[[Any], Any],
         alignment_entries_from_checkpoint: Callable[[Any], list[Any]],
         model_call_runtime_from_extension: Callable[..., Any] = _model_call_runtime_from_extension,
@@ -686,7 +688,9 @@ class RunRuntime:
         session.active_budget = runtime.budget
         runtime.effective_final_tool = effective_final_tool_name(agent, opts)
         runtime.guard = getattr(agent, "loop_guard", None)
-        runtime.guard_state = loop_guard_state_factory() if runtime.guard is not None else None
+        runtime.guard_state = (
+            loop_guard_state_factory() if _loop_guard_is_active(runtime.guard) else None
+        )
         runtime.truncation_recovery = getattr(agent, "truncation_recovery", None)
         runtime.checkpoint = resume_checkpoint or RunCheckpoint(
             phase="started",
@@ -695,10 +699,10 @@ class RunRuntime:
             total_usage=runtime.total,
         )
         if resume_checkpoint is not None:
-            if runtime.guard is not None:
-                runtime.guard_state = loop_guard_state_from_dict(resume_checkpoint.loop_guard_state)
-                if runtime.guard_state is None:
-                    runtime.guard_state = loop_guard_state_factory()
+            if _loop_guard_is_active(runtime.guard):
+                restored = _loop_guard_state_from_dict(resume_checkpoint.loop_guard_state)
+                if restored is not None:
+                    runtime.guard_state = restored
             runtime.force_final_pending = resume_checkpoint.force_final_pending
             session.pending_skill_overlay = skill_overlay_from_dict(
                 resume_checkpoint.pending_skill_overlay
@@ -718,12 +722,13 @@ class RunRuntime:
                 "permission_pending",
                 "tool_batch_pending",
                 "tool_executing",
+                "tool_results_appended",
             }:
                 runtime.align_defer_turn = resume_checkpoint.turn_index
 
         runtime._checkpointable_hooks_fn = checkpointable_hooks
         runtime._checkpoint_extension_state_fn = checkpoint_extension_state
-        ledger_state, runtime.active_primary = model_call_runtime_from_extension(
+        runtime.active_primary, journal_count = model_call_runtime_from_extension(
             runtime.checkpoint.extension_state
         )
         model_call_events = [
@@ -731,29 +736,56 @@ class RunRuntime:
             for row in runtime.stored_events
             if isinstance(getattr(row, "event", None), ModelCallEvent)
         ]
+        consumed_auxiliary_receipt_ids = _consumed_auxiliary_receipt_ids_from_events(
+            runtime.stored_events
+        )
         runtime.ledger = _ModelCallLedger(
             run_id,
             budget=runtime.budget,
             persist=runtime.persist_model_call if agent.run_store is not None else None,
         )
         session._model_call_ledger = runtime.ledger
-        if resume_checkpoint is not None and resume_checkpoint.total_usage != Usage():
-            if ledger_state is None:
-                raise ConfigError(
-                    "Cannot resume checkpoint with nonzero aggregate usage without "
-                    "receipt provenance"
+        if model_call_events or journal_count or consumed_auxiliary_receipt_ids:
+            try:
+                await runtime.ledger.restore(
+                    model_call_events,
+                    consumed_auxiliary_receipt_ids=consumed_auxiliary_receipt_ids,
                 )
-            checkpoint_ledger = _ModelCallLedger(run_id)
-            await checkpoint_ledger.restore(ledger_state, [])
-            if resume_checkpoint.total_usage != checkpoint_ledger.total_usage:
-                raise ConfigError(
-                    "Cannot resume checkpoint with nonzero aggregate usage without "
-                    "receipt provenance"
-                )
-        if ledger_state is not None or model_call_events:
-            await runtime.ledger.restore(ledger_state, model_call_events)
+            except _ModelCallError as exc:
+                if consumed_auxiliary_receipt_ids:
+                    raise ConfigError("invalid durable compaction usage projection") from exc
+                raise
+            if resume_checkpoint is not None:
+                expected = resume_checkpoint.total_usage
+                actual = runtime.ledger.total_usage
+                if any(
+                    getattr(actual, field) < getattr(expected, field)
+                    for field in (
+                        "input_tokens",
+                        "output_tokens",
+                        "cache_read_tokens",
+                        "cache_creation_tokens",
+                    )
+                ):
+                    raise ConfigError(
+                        "Cannot resume checkpoint with nonzero aggregate usage without "
+                        "receipt provenance"
+                    )
             runtime.total = runtime.ledger.total_usage
             runtime.running_cost = runtime.ledger.total_cost_usd
+        elif resume_checkpoint is not None and resume_checkpoint.total_usage != Usage():
+            raise ConfigError(
+                "Cannot resume checkpoint with nonzero aggregate usage without receipt provenance"
+            )
+        if journal_count is not None and len(model_call_events) < journal_count:
+            raise ConfigError("model-call journal is missing records referenced by checkpoint")
+        if runtime.active_primary is not None and resume_checkpoint is not None:
+            delivery_id = runtime.active_primary["delivery_attempt_id"]
+            if (
+                resume_checkpoint.phase == "assistant_appended"
+                and runtime.ledger.intent_for(delivery_id) is None
+            ):
+                raise ConfigError("active primary journal is missing its intent")
         return runtime
 
     async def persist_model_call(self, event: ModelCallEvent) -> None:
@@ -766,12 +798,10 @@ class RunRuntime:
 
     def sync_checkpoint_accounting(self) -> None:
         self.sync_ledger_totals()
-        if not isinstance(self.checkpoint.extension_state, dict):
-            raise ConfigError("RunCheckpoint.extension_state must be a dict")
         _model_call_runtime_to_extension(
             self.checkpoint.extension_state,
-            ledger_snapshot=self.ledger.snapshot(),
             active_primary=self.active_primary,
+            journal_count=len(self.ledger._journal),
         )
         self.checkpoint.total_usage = self.total
 
@@ -986,7 +1016,9 @@ class RunRuntime:
         if snapshot_id is not None:
             try:
                 await store_call(
-                    self.session, "run.delete", self.model_input_store.delete(snapshot_id)
+                    self.session,
+                    "run.delete",
+                    self.model_input_store.delete(snapshot_id, run_id=self.run_id),
                 )
             except LeaseLostError:
                 raise
@@ -1024,7 +1056,10 @@ class RunRuntime:
         store = self.agent.run_store
         if self.run_record is None or store is None:
             return
-        await _flush_events(self.session)
+        buf = self.session._event_journal
+        has_pending_events = buf is not None and bool(buf._pending)
+        if not has_pending_events:
+            await _flush_events(self.session)
         completed_snapshot_id = (
             self.checkpoint.model_input_snapshot_id
             if self.exact_model_input
@@ -1087,7 +1122,6 @@ class RunRuntime:
             for key in self.checkpointable_hooks:
                 self.checkpoint.extension_state.pop(key, None)
             self.checkpoint.extension_state.update(hook_state)
-        buf = self.session._event_journal
         if phase == "tool_batch_pending" or (
             phase == "assistant_appended"
             and self.checkpoint.assistant_message is not None
@@ -1099,11 +1133,15 @@ class RunRuntime:
             self.checkpoint.tool_batch_event_after_seq = buf.last_seq if buf is not None else None
         elif phase not in ("permission_pending", "tool_executing", "tool_results_appended"):
             self.checkpoint.tool_batch_event_after_seq = None
-        await store_call(
-            self.session,
-            "run.save_checkpoint",
-            store.save_checkpoint(self.run_id, self.checkpoint, status=status),
-        )
+        if has_pending_events:
+            assert buf is not None
+            await buf.flush_with_checkpoint(self.checkpoint, status=status)
+        else:
+            await store_call(
+                self.session,
+                "run.save_checkpoint",
+                store.save_checkpoint(self.run_id, self.checkpoint, status=status),
+            )
         if completed_snapshot_id is not None:
             await self.best_effort_snapshot_cleanup(
                 snapshot_id=completed_snapshot_id,
@@ -1143,7 +1181,8 @@ class RunRuntime:
         self.active_primary = _primary_active_binding(
             intent,
             snapshot_id=self.checkpoint.model_input_snapshot_id,
-            full_history=self.session.full_history,
+            full_history_count=self.session.session_log.history_count,
+            full_history_fingerprint=self.session.session_log._history_fingerprint(),
         )
         await self.save_checkpoint("provider_pending", turn_index=intent.turn_index)
 
