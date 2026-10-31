@@ -764,6 +764,8 @@ def _fingerprint_value(value: Any) -> Any:
         return {str(k): _fingerprint_value(v) for k, v in sorted(value.items(), key=str)}
     if isinstance(value, (list, tuple)):
         return [_fingerprint_value(v) for v in value]
+    if isinstance(value, frozenset) and all(isinstance(item, str) for item in value):
+        return sorted(value)
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return f"{value.__class__.__module__}.{value.__class__.__qualname__}:{value!r}"
