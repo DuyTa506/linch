@@ -6,6 +6,7 @@ import json
 import math
 import time
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -1179,14 +1180,15 @@ def _copy_checkpoint(checkpoint: RunCheckpoint | None) -> RunCheckpoint | None:
 
 
 def _copy_record(record: RunRecord) -> RunRecord:
+    # In-memory writes already normalize these fields; only detach the returned snapshot.
     return RunRecord(
         id=record.id,
         session_id=record.session_id,
         status=record.status,
         created_at=record.created_at,
         updated_at=record.updated_at,
-        checkpoint=_copy_checkpoint(record.checkpoint),
-        meta=_safe_meta(record.meta),
+        checkpoint=deepcopy(record.checkpoint),
+        meta=deepcopy(record.meta),
     )
 
 
