@@ -45,10 +45,7 @@ async def pool_for(a: argparse.Namespace, *, direct: bool = False, name: str = "
     )
     if getattr(a, "pgbouncer", False) and not direct:
         options["statement_cache_size"] = 0
-    return await asyncpg.create_pool(
-        dsn,
-        **options,
-    )
+    return await asyncpg.create_pool(dsn, **options)
 
 
 class TimedProvider(BaseProvider):
@@ -286,6 +283,7 @@ unix_socket_dir =
 pool_mode = transaction
 auth_type = trust
 auth_file = {authfile}
+stats_users = api
 ignore_startup_parameters = search_path
 max_client_conn = 512
 default_pool_size = 64
@@ -311,6 +309,10 @@ async def pg_stats(pool: Any) -> Any:
         (SELECT wal_bytes::float FROM pg_stat_wal) wal
         FROM pg_stat_database WHERE datname=current_database()""")
     return dict(row), time.monotonic()
+
+
+def recovered(chaos: dict[str, Any]) -> bool:
+    return chaos.get("recovery") is not None and chaos["recovery"]["seconds"] <= 7
 
 
 async def summarize(pool: Any, a: argparse.Namespace) -> dict[str, Any]:
@@ -518,11 +520,14 @@ async def run_point(a: argparse.Namespace) -> dict[str, Any]:
                 chaos["lease_owner"],
                 chaos["injected_at"],
             )
-            query = """SELECT epoch,at::text FROM load_claims WHERE run_id=$1
-                AND epoch>$2 ORDER BY at LIMIT 1"""
-            recovery = await pool.fetchrow(query, chaos["id"], chaos["lease_epoch"])
+            query = """SELECT epoch,at::text,extract(epoch FROM at)::float-$3 seconds
+                FROM load_claims WHERE run_id=$1 AND epoch>$2 ORDER BY at LIMIT 1"""
+            recovery = await pool.fetchrow(
+                query, chaos["id"], chaos["lease_epoch"], chaos["injected_at"]
+            )
             chaos["recovery"] = dict(recovery) if recovery else None
-        result.update({key: getattr(a, key) for key in ("workers", "rate", "rtt", "logs")})
+        keys = "workers rate rtt logs pool_size readers concurrency poll_interval pgbouncer".split()
+        result.update({key: getattr(a, key) for key in keys})
         checks = result["invariant_errors"]
         ignored = (
             "proxy",
@@ -532,7 +537,8 @@ async def run_point(a: argparse.Namespace) -> dict[str, Any]:
         codes = [p.returncode for n, p in processes.items() if n not in ignored]
         checks["processes"] = sum(code != 0 for code in codes)
         checks["chaos"] = int(a.chaos != "none" and not done_chaos)
-        checks["recovery"] = int(a.chaos == "kill" and not chaos.get("recovery"))
+        checks["recovery"] = int(a.chaos == "kill" and not recovered(chaos))
+        checks["failed_runs"] = result["failed"]
         checks["drain_claims"] = chaos.get("claims_after_signal", 0) if a.chaos == "drain" else 0
         result["chaos"] = chaos
         result["cpu_pct"] = {k: v / a.duration * 100 for k, v in cpu.items()}
@@ -595,8 +601,8 @@ async def experiments(a: argparse.Namespace) -> dict[str, Any]:
     elif a.command == "capacity":
         for m in (1, 2, 4, 8):
             rate, stable, base = a.rate, None, None
-            for _ in range(6):
-                result = await point(workers=m, rate=rate, rtt=1, readers=a.readers if base else 0)
+            for _ in range(9):
+                result = await point(workers=m, rate=rate, rtt=1)
                 latency = result["latency_ms"]["p99"]
                 base = base or latency
                 bad = (
@@ -612,9 +618,7 @@ async def experiments(a: argparse.Namespace) -> dict[str, Any]:
                 brackets[str(m)] = {"last_stable": stable, "first_bad": None}
     elif a.command == "network":
         for rtt in (0, 1, 2):
-            await point(workers=4, rtt=rtt, readers=0)
-            if rtt == 1 and a.readers:
-                await point(workers=4, rtt=rtt)
+            await point(workers=4, rtt=rtt)
     else:
         for mode in ("kill", "blip", "drain"):
             await point(workers=4, rtt=1, chaos=mode)
