@@ -96,13 +96,13 @@ async def test_expired_lease_without_takeover_retries_and_resumes_checkpoint(poo
     from linch.evals import ScriptedProvider, TextTurn
     from linch.worker import Worker, enqueue_run
 
-    first_store = None
+    first_epoch = None
     first_stopped = asyncio.Event()
     resumed = []
     real_renew = PostgresRunStore.renew
 
     async def renew(store, lease):
-        if store is first_store:
+        if lease.epoch == first_epoch:
             raise ConnectionError("renewal unavailable for a full TTL")
         return await real_renew(store, lease)
 
@@ -117,10 +117,10 @@ async def test_expired_lease_without_takeover_retries_and_resumes_checkpoint(poo
                 first_stopped.set()
 
     async def factory(job):
-        nonlocal first_store
+        nonlocal first_epoch
         resumed.append(job.run.checkpoint.phase if job.run.checkpoint else None)
-        if first_store is None:
-            first_store = job.run_store
+        if first_epoch is None:
+            first_epoch = job.run_store._held_leases[job.run.id]
             return make_agent(job, WaitingProvider([TextTurn("unused")]))
         return make_agent(job)
 

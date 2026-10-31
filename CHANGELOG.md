@@ -12,6 +12,10 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
   run-local state, and `ReliabilityEvent`. `reliability=None` opts out. Text
   tool-call envelopes request a native resend; text rescue is dropped.
 
+- Reuse worker-owned run and session stores across jobs, verifying schemas once
+  per borrowed pool. Factories must use both `job.run_store` and
+  `job.session_store`; agent teardown preserves their initialized handles.
+
 - Commit terminal status and pending events atomically, preserving guard-tail
   replay across crashes and cancellation.
 
