@@ -160,13 +160,18 @@ database I/O asynchronously.
 
 ## Failure semantics
 
-During an active resumable run, transient connection failures in session/run
-store operations interrupt the attempt without terminal events or a failed status. The loop stops
+During an active resumable run, transient connection failures reaching the loop's
+recovery boundary interrupt the attempt without terminal events or a failed status. The loop stops
 background work and skips buffered writes and snapshot cleanup, preserving the
 last durable checkpoint for worker retry or lease takeover. This covers asyncpg
 connection/interface and availability errors, `OSError` (including connection
 and timeout errors), and explicit causes wrapped by a store. Provider/tool
 errors and agents without a run store keep their ordinary failure behavior.
+
+The store calls inside `Session.notify` (durable inbox), `Session.append`, and
+`Session.update_meta` use the same transient-error classification during an
+active durable run. Their immediate caller receives the recovery exception;
+hook and tool adapters retain their own exception handling.
 
 After a run has been created, a non-transient session-store or run-store write
 failure ends the iterator with an `ErrorEvent` carrying the exception's class name and

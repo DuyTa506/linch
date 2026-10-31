@@ -885,7 +885,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                         raise ConfigError(
                             "primary control message differs from its acceptance projection"
                         )
-                    await durable_call(session, "session.append", session.append([control]))
+                    await session.append([control])
                     event = UserEvent(message=control)
                     await _persist_event(session, run_id, event)
                     yield event

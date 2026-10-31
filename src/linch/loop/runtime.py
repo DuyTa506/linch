@@ -234,7 +234,7 @@ async def drain_pending_notifications(session: Session, run_id: str) -> AsyncIte
     to_drain = list(notifications)
     notifications.clear()
     for note in to_drain:
-        await durable_call(session, "session.append", session.append([note]))
+        await session.append([note])
         event: Event = UserEvent(message=note, subtype="notification")
         await _persist_event(session, run_id, event)
         yield event
@@ -248,7 +248,7 @@ async def drain_inbox(session: Session, run_id: str) -> AsyncIterator[Event]:
         try:
             async for item in iterator:
                 if isinstance(item, Message):
-                    await durable_call(session, "session.append", session.append([item]))
+                    await session.append([item])
                     event: Event = UserEvent(message=item, subtype="notification")
                 else:
                     event = item
@@ -297,7 +297,7 @@ async def drain_alignment(
                     entry.future.set_exception(ConfigError(block_reason))
                 continue
             user_message = build_user_message(prompt, images)
-            await durable_call(session, "session.append", session.append([user_message]))
+            await session.append([user_message])
             event: Event = UserEvent(message=user_message, subtype="alignment")
             await _persist_event(session, run_id, event)
             if not entry.future.done():

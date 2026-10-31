@@ -7,19 +7,30 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
 
 ## 3.0.0 (unreleased)
 
-- Headless agent kernel with Postgres durable runs, lease/epoch fencing,
-  checkpoints before guarded side effects, and event replay by sequence.
-- Optional PgQueuer worker fleet with enqueueing, graceful drain, and recovery
-  after worker death and transient database outages.
-- Default response reliability on the turn-stopping seam, with optional tool
-  prerequisites and completion gates.
-- Direct OpenTelemetry traces and metrics; the host owns SDK/exporter setup.
-- Explicit `linch.ext` imports for workflows, evals, deep agents, reports,
-  loop runners, and scaffolding; Gemini/Vertex AI use `google-genai`.
-- Per-run `Principal`, role-based permission rules, and resume identity checks.
-- RAG connector registration and a grounding check for `[doc:<id>]` citations.
-- Python 3.11+, wire generation 3, Postgres-only durability, and scoped file
-  memory. See [Migrating to 3.0](docs/migration-3.0.md) for replacement imports.
+### Breaking and new features
+
+- **Kernel and plugins.** `Context`, reversible `Disposable`, typed lifecycle bus, and `Plugin` mounts through `agent.use()` are now the extension foundation; see [the kernel guide](docs/architecture/kernel.md#plugins).
+- **Versioned profiles.** `Profile` and `RunOptions(profile=...)` select immutable per-run roles, plugin rows, tool restrictions, budgets, schemas, and resume-pinned content; see [domain profiles](docs/usage/profiles.md).
+- **Deferred tool search.** `ToolSearchPlugin` keeps small catalogs byte-identical and defers large tool/skill schemas until `tool_search` loads them; see [tool search](docs/usage/tools.md#tool-search-for-large-catalogs).
+- **Lifecycle catalog and tracing.** Typed lifecycle points have a generated producer/consumer catalog, and `trace_id` follows events, logs, tools, jobs, and subagents; see [events](docs/architecture/events.md#typed-lifecycle-catalog).
+- **Per-run identity and RBAC.** `Principal(tenant, user, roles)` is carried through `RunOptions`, permission rules, tool context, and the durable run contract; see [role rules](docs/usage/tools.md#per-run-principals-and-role-rules).
+- **RAG and grounding.** `RagConnector` returns sourced chunks and optional final-answer grounding enforces `[doc:<id>]` citations; see [context and memory](docs/usage/context-and-memory.md#sourced-retrieval-and-grounding).
+- **Durable run ownership.** Postgres runs use lease epochs, fenced writes, checkpoints before side effects, and reconnect-by-sequence event streams; see [run stores](docs/usage/run-stores.md).
+- **Worker fleet runtime.** Optional `linch.worker` uses PgQueuer for dispatch, leases, retries, graceful drain, cron, and takeover after worker/database failures; see [production scale-out](docs/usage/production.md#scale-out).
+- **File-backed memory.** Scoped `MEMORY.md` indexes are loaded through the filesystem backend; semantic recall is an optional host plugin rather than a core memory store; see [file memory](docs/usage/context-and-memory.md#file-memory).
+- **OpenTelemetry instrumentation.** Core uses `opentelemetry-api` at run/turn/provider/tool/compaction boundaries; hosts own SDK/exporter setup and message-content capture policy; see [traces and metrics](docs/usage/events.md#opentelemetry-traces-and-metrics).
+- **Explicit extension namespace.** Workflows, evals, deep-agent presets, reports, loop runners, and the scaffold CLI live under `linch.ext.*`; see [the extension boundary](docs/architecture/overview.md#extensions).
+- **Neutral agent defaults and tool protocols.** Bare agents have no domain tools or discovery features by default; `workspace_tools()`, duck-typed tools, reversible registry handles, hooks, and explicit plugin mounts make trust boundaries opt-in; see [tools](docs/usage/tools.md).
+- **Reliability and finalization.** Default response reliability, prerequisites, completion gates, and the serial `turn-stopping` seam make malformed or incomplete responses observable and recoverable; see [reliability](docs/usage/agent.md#tool-and-response-reliability).
+- **Unified execution world.** Shell and filesystem access use coherent `ExecutionBackend` transports with durable policy identity; see [execution backends](docs/usage/extending.md#executionbackend--one-shell--filesystem-world).
+- **Append-only session state.** `SessionLog` is the durable source for detached `provider_view`/`full_history` projections; per-request RAG/context remains ephemeral; see [session invariants](docs/architecture/invariants.md).
+- **Canonical tool output and durable delivery.** JSON Schema tool results, progress/attachments, durable inbox notifications, and exact pending model-input snapshots are available through the Postgres capabilities; see [events](docs/usage/events.md).
+- **Accounting and compaction.** Model-call receipts settle cumulative primary/compaction usage before budget admission, with fail-closed unknown usage and durable built-in compaction replay; see [accounting and compaction migration](docs/migration-3.0.md#accounting-and-compaction).
+- **Wire and runtime floor.** Python 3.11+ and wire generation 3 are required; pre-3.0 persisted data and legacy readers are rejected; see [Migrating to 3.0](docs/migration-3.0.md).
+- **Provider and dependency changes.** Gemini/Vertex AI use `google-genai`, durable state is Postgres plus InMemory for tests/dev, and SQLite stores are removed; see [provider setup](docs/usage/providers.md) and [run stores](docs/usage/run-stores.md).
+
+See [Migrating to 3.0](docs/migration-3.0.md) for replacement imports,
+removed compatibility paths, and required durable-state changes.
 
 ### Development entries
 

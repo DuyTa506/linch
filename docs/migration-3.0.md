@@ -60,19 +60,22 @@ become `session_id`, `run_id`, `turn_index`, `tool_use_id`, and `tool_name`.
 
 ## Explicit extension imports
 
+Old package names in the first column are relative to the former top-level
+`linch` package; only the replacement imports are available in 3.0.
+
 | Old package or root exports | Replacement import |
 |---|---|
-| `linch.workflow`; root workflow context/journal/result/error helpers | `from linch.ext.workflow import WorkflowContext, WorkflowJournal, StepOutcome, WorkflowError, WorkflowSuspended, WorkflowTimeoutError, call_key, interrupt_key, step_key, run_workflow` |
+| `workflow`; root workflow context/journal/result/error helpers | `from linch.ext.workflow import WorkflowContext, WorkflowJournal, StepOutcome, WorkflowError, WorkflowSuspended, WorkflowTimeoutError, call_key, interrupt_key, step_key, run_workflow` |
 | `Agent.run_workflow(fn, ...)` | `await run_workflow(agent, fn, ...)` from `linch.ext.workflow` |
-| `linch.evals`; root harness exports | `from linch.ext.evals import EvalCase, CaseResult, EvalResult, run_eval` |
+| `evals`; root harness exports | `from linch.ext.evals import EvalCase, CaseResult, EvalResult, run_eval` |
 | Root eval suite/benchmark exports | `from linch.ext.evals import EvalSuite, EvalBenchmarkTarget, EvalTargetResult, EvalBenchmarkResult, load_eval_suite, load_scripted_turns, run_eval_benchmark` |
 | Root scripted-provider exports | `from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn` |
 | Root eval scorers (except removed `memory_recalled`) | `from linch.ext.evals import text_contains, tool_called, schema_valid, cost_under, context_selected_tool, context_not_trimmed, context_metadata_contains, recovery_succeeded, run_completed` |
-| `linch.deep_agent`; root preset/profile/prompt exports | `from linch.ext.deep_agent import create_deep_agent, DeepAgentProfile, DEEP_AGENT_PROFILES, DEEP_AGENT_SYSTEM_PROMPT, DEEP_AGENT_SUBAGENTS` |
-| `linch.reports`; root report helpers | `from linch.ext.reports import RunReport, build_run_report, load_run_report` |
-| `linch.loop_runner`; root loop spec/runner exports | `from linch.ext.loop_runner import LoopSpec, LoopTrigger, LoopTickResult, LoopRunner` |
+| `deep_agent`; root preset/profile/prompt exports | `from linch.ext.deep_agent import create_deep_agent, DeepAgentProfile, DEEP_AGENT_PROFILES, DEEP_AGENT_SYSTEM_PROMPT, DEEP_AGENT_SUBAGENTS` |
+| `reports`; root report helpers | `from linch.ext.reports import RunReport, build_run_report, load_run_report` |
+| `loop_runner`; root loop spec/runner exports | `from linch.ext.loop_runner import LoopSpec, LoopTrigger, LoopTickResult, LoopRunner` |
 | Root loop artifact/lease exports | `from linch.ext.loop_runner import LoopArtifactStore, LoopLease, LoopLeaseStore, FileLoopArtifactStore, FileLoopLeaseStore, InMemoryLoopLeaseStore` |
-| `linch.cli` / console target `linch.cli:main` | `from linch.ext.scaffold import main`; console target `linch.ext.scaffold:main`; the `linch` command remains |
+| `cli` / its `main` console entrypoint | `from linch.ext.scaffold import main`; console target `linch.ext.scaffold:main`; the `linch` command remains |
 
 For example:
 
@@ -164,7 +167,7 @@ See [Scale out](usage/production.md#scale-out).
 
 ## File memory
 
-The `linch.memory` package is removed. Use filesystem files: an index at
+The former `memory` package is removed. Use filesystem files: an index at
 `/memories/MEMORY.md`, bounded to 200 lines, and one file per fact. Scope the
 backend with `ScopedFileBackend` in `RunOptions(deps=...)`.
 
@@ -197,7 +200,7 @@ recipe. File-memory index loading happens at most once per run.
 
 ## OpenTelemetry
 
-The custom `linch.observability` package and `[otel]` extra are removed.
+The custom `observability` package and `[otel]` extra are removed.
 `opentelemetry-api` is a core dependency. Hosts install/configure
 `opentelemetry-sdk` and an exporter; `Agent(context=...)` accepts scoped tracer
 and meter services.

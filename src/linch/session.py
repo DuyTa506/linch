@@ -9,6 +9,7 @@ from uuid import uuid4
 from .abort import AbortContext
 from .errors import ConfigError
 from .events import Event
+from .run_store import durable_call
 from .session_log import SessionLog
 from .sessions import SessionStore
 from .tools import FileReadTracker
@@ -539,13 +540,17 @@ class Session:
             )
         from .durability import InboxDelivery
 
-        await cast(Any, enqueue)(
-            self.id,
-            InboxDelivery(
-                delivery_id=stable_id,
-                message=message,
-                source=source,
-                metadata=dict(metadata or {}),
+        await durable_call(
+            self,
+            "session.enqueue_inbox",
+            cast(Any, enqueue)(
+                self.id,
+                InboxDelivery(
+                    delivery_id=stable_id,
+                    message=message,
+                    source=source,
+                    metadata=dict(metadata or {}),
+                ),
             ),
         )
         return stable_id
@@ -556,7 +561,11 @@ class Session:
         # history immutable through this live object.
         if self._lifecycle_state == _CLOSED or self._closed:
             raise ConfigError("session is closed")
-        stored = await self.store.append_messages(self.id, messages)
+        stored = await durable_call(
+            self,
+            "session.append",
+            self.store.append_messages(self.id, messages),
+        )
         self._track_seqs(stored)
         self.session_log.append_many(messages)
 
@@ -575,7 +584,11 @@ class Session:
     async def update_meta(self, patch: dict[str, object]) -> None:
         if self._lifecycle_state == _CLOSED or self._closed:
             raise ConfigError("session is closed")
-        updated = await self.store.update_meta(self.id, patch)
+        updated = await durable_call(
+            self,
+            "session.update_meta",
+            self.store.update_meta(self.id, patch),
+        )
         self.meta.update(updated.meta)
 
 

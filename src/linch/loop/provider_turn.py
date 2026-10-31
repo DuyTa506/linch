@@ -29,7 +29,7 @@ from ..model_calls import (
     _ModelCallLedger,
     _projection_record,
 )
-from ..run_store import LeaseLostError, durable_call
+from ..run_store import LeaseLostError
 from ..types import AssistantAssembly, Message, ProviderRequest, Usage
 from .checkpoint import _message_digest, _primary_control_message
 from .feedback import correct_invalid_response
@@ -431,7 +431,7 @@ async def run_provider_turn(ctx: ProviderTurnContext) -> AsyncIterator[Event]:
                 yield event
             return
         await ctx.end_provider_call(stop_reason=assembly.stop_reason, usage=_provider_usage)
-        await durable_call(session, "session.append", session.append([assembly.message]))
+        await session.append([assembly.message])
         ctx.force_final_pending = False
         await ctx.save_checkpoint(
             "assistant_appended",

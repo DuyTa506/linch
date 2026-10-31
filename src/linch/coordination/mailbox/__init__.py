@@ -71,15 +71,11 @@ async def _mailbox_producer(
     try:
         for claimed in claims:
             message = claimed.message
-            await durable_call(
-                session,
-                "session.enqueue_inbox",
-                session.notify(
-                    render_peer_message(message),
-                    delivery_id=f"mailbox:{message.id}",
-                    source="mailbox",
-                    metadata={"message_id": message.id, "recipient": message.recipient},
-                ),
+            await session.notify(
+                render_peer_message(message),
+                delivery_id=f"mailbox:{message.id}",
+                source="mailbox",
+                metadata={"message_id": message.id, "recipient": message.recipient},
             )
             await cast(Any, ack)([claimed])
             delivered += 1

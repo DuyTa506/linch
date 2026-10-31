@@ -13,6 +13,9 @@ development and breaks compatibility with 2.x. See the
 | Area | Implementation |
 |---|---|
 | Runtime | `Agent`, `Session`, typed event streams, tool scheduling, context compaction, and run budgets |
+| Plugins | [`agent.use(plugin, config)`](docs/architecture/kernel.md#plugins) mounts scoped plugins with dependency activation and reversible disposal |
+| Profiles | [Versioned domain profiles](docs/usage/profiles.md) compose configuration and pin each run's profile for resume |
+| Tool search | [Deferred tool and skill discovery](docs/usage/tools.md#tool-search-for-large-catalogs) loads schemas when needed above configurable thresholds |
 | Durable runs | Postgres session/run stores, leases with epoch fencing, checkpoints before guarded side effects, and event replay by sequence |
 | Worker fleet | Optional `linch.worker`: PgQueuer dispatch, lease renewal, recovery after worker death or transient database outages, and graceful drain |
 | Reliability | Default bounded response correction, optional tool prerequisites and completion gates, and a serial turn-stopping seam |
@@ -21,6 +24,7 @@ development and breaks compatibility with 2.x. See the
 | Providers | OpenAI Responses/Chat Completions, Anthropic, Gemini/Vertex AI through `google-genai`, DeepSeek, llama.cpp, and compatible endpoints |
 | Extensions | Explicit `linch.ext` packages for workflows, evals, deep agents, reports, loop runners, and scaffolding; hooks, MCP, skills, and subagents |
 | Telemetry | Direct OpenTelemetry traces and metrics; the host configures the SDK and exporter |
+| Lifecycle | [Typed lifecycle catalog and trace IDs](docs/architecture/events.md#typed-lifecycle-catalog) connect hooks, kernel seams, events, and host logs |
 
 Postgres is the durable backend. InMemory stores are for tests and development.
 Read-scoped tools can run in parallel. An input-aware `parallel` predicate also
