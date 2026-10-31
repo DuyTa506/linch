@@ -32,11 +32,24 @@ class TraceIdFilter(logging.Filter):
     """
 
     def __init__(self, fallback: str | None = None) -> None:
+        """Initialize a filter with an optional final correlation fallback.
+
+        Args:
+            fallback: Correlation value used when no record, active span, or
+                run ID provides a trace ID.
+        """
         super().__init__()
         self._fallback = fallback
 
     def filter(self, record: logging.LogRecord) -> bool:
-        """Populate ``record.trace_id`` while allowing the record through."""
+        """Populate ``record.trace_id`` while allowing the record through.
+
+        Args:
+            record: Log record to enrich with trace-correlation metadata.
+
+        Returns:
+            ``True`` so the record continues through the logging pipeline.
+        """
         if getattr(record, "trace_id", None):
             return True
         trace_id = span_trace_id(trace.get_current_span())

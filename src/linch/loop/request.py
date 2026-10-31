@@ -159,6 +159,13 @@ def apply_provider_capabilities(req: ProviderRequest, caps: Any) -> ProviderRequ
       :func:`run_loop` line ~452, so the host's intent is preserved.
     * ``parallel_tool_calls`` is informational and has no ``req`` field yet.
 
+    Args:
+        req: Provider request whose optional fields should be downgraded.
+        caps: Provider capability object exposing the supported request flags.
+
+    Returns:
+        The same request object after unsupported options have been cleared.
+
     Modifies *req* in place and returns it.
     """
     if not caps.prompt_cache:
