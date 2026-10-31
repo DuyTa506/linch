@@ -18,6 +18,7 @@ Each item below records a removal or consolidation in the legacy sweep.
 Private helper names are listed for maintainers; supported application imports
 remain the names in `linch.__all__`.
 
+- **Run startup:** custom `RunStore.create_run` implementations must accept `initial_checkpoint` and persist it atomically with creation or pending adoption; the SDK no longer creates a running run without a checkpoint.
 - **Python / K16:** Python 3.10 support and the CLI scaffold's `tomllib` import/line-scan fallbacks are removed; use Python 3.11+ and valid TOML.
 - **A01:** `Session(provider_view=..., full_history=...)` is removed; pass `session_log=SessionLog.seed(historical=..., visible=...)`.
 - **A02:** `SessionLog.derive_messages()` is removed; read `provider_view`.

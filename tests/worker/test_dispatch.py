@@ -153,6 +153,13 @@ async def test_failed_run_is_result_not_queue_retry(pool):
         await wait_for(lambda: pool.fetchval("SELECT count(*)=0 FROM pgqueuer"))
     assert calls == 1
     assert await pool.fetchval("SELECT status FROM runs WHERE id=$1", rid) == "failed"
+    from linch import PostgresRunStore
+
+    rows = await PostgresRunStore("", pool=pool).load_events(rid)
+    assert [row.seq for row in rows] == [1, 2]
+    assert [row.event.type for row in rows] == ["error", "result"]
+    assert rows[-1].event.subtype == "error"
+    assert rows[-1].event.stop_reason == "error"
 
 
 async def test_two_workers_obey_fleet_limits_and_lease_exclusion(pool):

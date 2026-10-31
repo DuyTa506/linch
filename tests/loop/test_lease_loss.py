@@ -394,7 +394,14 @@ async def test_early_close_flush_lease_loss_cancels_background_and_reports_stop(
 
     first, second = lease_stores
     state = _Takeover(first, second, "manual-takeover")
-    stop = _StopCounter()
+
+    class Stop(_StopCounter):
+        def on_before_provider_call(self, ctx):
+            from linch import HookResult
+
+            return HookResult.continue_()
+
+    stop = Stop()
     agent = Agent(
         model="lease-model",
         provider=cast(Any, _TextProvider()),
@@ -421,10 +428,12 @@ async def test_early_close_flush_lease_loss_cancels_background_and_reports_stop(
     await started.wait()
     iterator = session.run("hello")
     try:
-        event = await anext(iterator)
-        assert event.type == "system"
-        # The first event is buffered.  Only iterator teardown now attempts
-        # the stale holder's actual fenced write.
+        async for event in iterator:
+            if event.type == "hook":
+                break
+        assert event.type == "hook"
+        # Startup is already atomic; this provider hook is buffered after it.
+        # Teardown attempts a stale holder's actual fenced observational write.
         await state.take_over()
         await iterator.aclose()
         await iterator.aclose()

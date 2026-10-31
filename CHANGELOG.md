@@ -7,6 +7,13 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
 
 ## Unreleased
 
+- Reconnect workers after transient database outages with bounded jitter, a fresh
+  queue/LISTEN connection per manager cycle, and cancellation-safe callback drain.
+
+- Create the initial startup checkpoint atomically with run adoption, recover
+  startup events and append the prompt once across worker takeover, and commit
+  worker setup failures with an atomic error/result tail and journal totals.
+
 - Reuse worker-owned run and session stores across jobs, verifying schemas once
   per borrowed pool. Factories must use both `job.run_store` and
   `job.session_store`; agent teardown preserves their initialized handles.

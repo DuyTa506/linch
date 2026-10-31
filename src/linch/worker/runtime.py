@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import random
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import aclosing, suppress
 from dataclasses import dataclass
@@ -15,9 +16,12 @@ from uuid import uuid4
 import asyncpg
 from opentelemetry import context as otel_context
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
-from pgqueuer import AsyncpgPoolDriver, DatabaseRetryEntrypointExecutor, Job, Queries, QueueManager
+from pgqueuer import DatabaseRetryEntrypointExecutor, Job, Queries, QueueManager
+from pgqueuer.errors import FailingListenerError
 
 from ..agent import Agent
+from ..events import ErrorEvent, ModelCallEvent, ResultEvent
+from ..model_calls import _ModelCallLedger
 from ..run_store import LeaseLostError, RunLease, RunLeaseConflictError, RunRecord
 from ..run_stores.postgres import PostgresRunStore
 from ..session import RunOptions, Session
@@ -31,6 +35,18 @@ _INFRASTRUCTURE = (
     OSError,
     TimeoutError,
     RunLeaseConflictError,
+)
+
+_RECONNECT = (
+    asyncpg.PostgresConnectionError,
+    asyncpg.AdminShutdownError,
+    asyncpg.CrashShutdownError,
+    asyncpg.CannotConnectNowError,
+    asyncpg.TooManyConnectionsError,
+    asyncpg.InterfaceError,
+    OSError,
+    TimeoutError,
+    FailingListenerError,
 )
 
 
@@ -87,6 +103,8 @@ class Worker:
         retry_delay_s: float = 1,
     ) -> None:
         self._pool = pool if isinstance(pool, _BorrowedPool) else _BorrowedPool(pool)
+        if self._pool.get_max_size() < 2:
+            raise ValueError("worker pool must allow at least two connections")
         self._run_store = PostgresRunStore("", pool=self._pool)
         self._session_store = PostgresSessionStore("", pool=self._pool)
         self.agent_factory = agent_factory
@@ -96,23 +114,32 @@ class Worker:
         self.poll_interval_s = _positive(poll_interval_s, "poll_interval_s")
         self.retry_delay_s = _positive(retry_delay_s, "retry_delay_s")
         self._active_runs: set[str] = set()
-        self._manager = QueueManager(Queries(AsyncpgPoolDriver(cast(Any, pool))))
-        limits = dict(queues) if queues is not None else {"default": 0}
-        if not limits:
+        self._stop = asyncio.Event()
+        self._manager: QueueManager | None = None
+        self._limits = dict(queues) if queues is not None else {"default": 0}
+        if not self._limits:
             raise ValueError("at least one queue is required")
-        for queue, limit in limits.items():
-            self._manager.entrypoint(
+        for queue, limit in self._limits.items():
+            _entrypoint(queue)
+            if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
+                raise ValueError("concurrency_limit must be a non-negative integer")
+
+    def _make_manager(self, connection: Any) -> QueueManager:
+        manager = QueueManager(Queries.from_asyncpg_connection(connection))
+        for queue, limit in self._limits.items():
+            manager.entrypoint(
                 _entrypoint(queue),
                 concurrency_limit=limit,
                 executor_factory=self._executor,
                 on_failure="hold",
             )(self._handle)
-        self._manager.entrypoint(
+        manager.entrypoint(
             "linch.schedule",
             concurrency_limit=1,
             executor_factory=self._executor,
             on_failure="hold",
         )(self._fire)
+        return manager
 
     def _executor(self, parameters: Any) -> DatabaseRetryEntrypointExecutor:
         return DatabaseRetryEntrypointExecutor(
@@ -121,19 +148,63 @@ class Worker:
 
     def stop(self) -> None:
         """Stop dequeueing; ``run()`` returns after active jobs finish."""
-        self._manager.shutdown.set()
+        self._stop.set()
+        if self._manager is not None:
+            self._manager.shutdown.set()
 
     async def run(self) -> None:
-        """Process jobs until ``stop``; initialize the schema if necessary."""
-        await install(self._pool)
-        await self._run_store._ensure()
-        await self._session_store._ensure()
-        await self._manager.run(
-            heartbeat_timeout=timedelta(seconds=self.stall_timeout_s),
-            dequeue_timeout=timedelta(seconds=self.poll_interval_s),
-            batch_size=1,
-            log_aggregation_interval=timedelta(0),
-        )
+        """Process jobs until stopped, reconnecting after infrastructure loss."""
+        serving = asyncio.create_task(self._serve())
+        try:
+            await asyncio.shield(serving)
+        except asyncio.CancelledError:
+            self.stop()
+            while not serving.done():
+                with suppress(asyncio.CancelledError, Exception):
+                    await asyncio.shield(serving)
+            serving.exception()  # Retrieve drain failures; preserve host cancellation.
+            raise
+
+    async def _serve(self) -> None:
+        ready, ceiling, rng = False, 0.1, random.Random()
+        while not self._stop.is_set():
+            try:
+                async with asyncio.timeout(2):
+                    if not ready:
+                        await install(self._pool)
+                        await self._run_store._ensure()
+                        await self._session_store._ensure()
+                        ready = True
+                    if self._stop.is_set():
+                        return
+                async with self._pool.acquire(timeout=2) as connection:
+                    try:
+                        if self._stop.is_set():
+                            return
+                        manager = self._make_manager(connection)
+                        self._manager = manager
+                        await manager.run(
+                            heartbeat_timeout=timedelta(seconds=self.stall_timeout_s),
+                            dequeue_timeout=timedelta(seconds=self.poll_interval_s),
+                            batch_size=1,
+                            log_aggregation_interval=timedelta(0),
+                            shutdown_on_listener_failure=True,
+                        )
+                    finally:
+                        # Drain before closing: old failure buffers cannot revive
+                        # on a fresh connection and hold a nonterminal job.
+                        with suppress(asyncpg.InterfaceError):
+                            await connection.close()
+            except asyncpg.ObjectNotInPrerequisiteStateError as exc:
+                if getattr(exc, "severity", None) != "FATAL":
+                    raise
+            except _RECONNECT:
+                pass
+            finally:
+                self._manager = None
+            with suppress(TimeoutError):
+                await asyncio.wait_for(self._stop.wait(), rng.uniform(ceiling / 2, ceiling))
+            ceiling = min(2, ceiling * 2)
 
     async def _heartbeat(
         self,
@@ -237,7 +308,8 @@ class Worker:
         except BaseException:
             self._active_runs.discard(rid)
             raise
-        deadline = asyncio.get_running_loop().time() + self.lease_ttl_s
+        started = asyncio.get_running_loop().time()
+        deadline = started + self.lease_ttl_s
         run_task: asyncio.Task[None] | None = None
         heartbeat: asyncio.Task[None] | None = None
         token = None
@@ -269,9 +341,32 @@ class Worker:
                 if current is None or current.status not in _TERMINAL:
                     if isinstance(exc, _INFRASTRUCTURE):
                         raise
+                    ledger = _ModelCallLedger(rid)
+                    rows = await store.load_events(rid)
+                    await ledger.restore(
+                        [row.event for row in rows if isinstance(row.event, ModelCallEvent)]
+                    )
+                    if current is not None and current.checkpoint is not None:
+                        current.checkpoint.total_usage = ledger.total_usage
+                    error = {"name": type(exc).__name__, "message": str(exc), "retryable": False}
                     with suppress(LeaseLostError):
                         await store.mark_failed(
-                            rid, error={"type": type(exc).__name__, "message": str(exc)}
+                            rid,
+                            current.checkpoint if current is not None else None,
+                            error=error,
+                            events=[
+                                ErrorEvent(error=error),
+                                ResultEvent(
+                                    subtype="error",
+                                    stop_reason="error",
+                                    duration_ms=int(
+                                        (asyncio.get_running_loop().time() - started) * 1000
+                                    ),
+                                    total_usage=ledger.total_usage,
+                                    total_cost_usd=ledger.total_cost_usd,
+                                    usage_complete=ledger.usage_complete,
+                                ),
+                            ],
                         )
             finally:
                 if heartbeat is not None:

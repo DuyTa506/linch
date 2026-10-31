@@ -463,9 +463,21 @@ async def test_startup_failure_closing_after_terminal_event_still_dispatches_sto
     session = await agent.session(id="startup-close")
     iterator = session.run("hello")
 
-    events = [await anext(iterator) for _ in range(events_to_consume)]
-    assert events[0].type == "error"
-    await iterator.aclose()
+    try:
+        async for event in iterator:
+            if event.type == "error":
+                break
+        else:
+            pytest.fail("the injected checkpoint failure must emit an error")
+        events = [event, *[await anext(iterator) for _ in range(events_to_consume - 1)]]
+        assert events[0].type == "error"
+        assert events[0].error["name"] == "OSError"
+        assert "checkpoint write failed" in events[0].error["message"]
+        if events_to_consume == 2:
+            assert events[1].type == "result"
+    finally:
+        await iterator.aclose()
+        await agent.close()
 
     assert stop.calls == 1
 

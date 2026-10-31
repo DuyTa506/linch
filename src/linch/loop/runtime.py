@@ -692,11 +692,15 @@ class RunRuntime:
             loop_guard_state_factory() if _loop_guard_is_active(runtime.guard) else None
         )
         runtime.truncation_recovery = getattr(agent, "truncation_recovery", None)
-        runtime.checkpoint = resume_checkpoint or RunCheckpoint(
-            phase="started",
-            prompt=prompt,
-            turn_index=0,
-            total_usage=runtime.total,
+        runtime.checkpoint = (
+            resume_checkpoint
+            or (run_record.checkpoint if run_record else None)
+            or RunCheckpoint(
+                phase="started",
+                prompt=prompt,
+                turn_index=0,
+                total_usage=runtime.total,
+            )
         )
         if resume_checkpoint is not None:
             if _loop_guard_is_active(runtime.guard):
@@ -790,7 +794,12 @@ class RunRuntime:
 
     async def persist_model_call(self, event: ModelCallEvent) -> None:
         await _persist_event(self.session, self.run_id, event)
-        await _flush_events(self.session)
+        buf = self.session._event_journal
+        if self.checkpoint.phase == "started" and buf is not None:
+            # Preserve startup progress without snapshotting a partially run hook.
+            await buf.flush_with_checkpoint(self.checkpoint)
+        else:
+            await _flush_events(self.session)
 
     def sync_ledger_totals(self) -> None:
         self.total = self.ledger.total_usage

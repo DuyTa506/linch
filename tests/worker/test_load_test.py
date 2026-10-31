@@ -73,3 +73,50 @@ async def test_two_process_workers_finish_once_without_duplicate_notes(tmp_path)
     assert point["runs"] > 0
     assert point["completed"] == point["terminal"] == point["runs"], point
     assert point["invariant_errors"] and not any(point["invariant_errors"].values()), point
+
+
+def test_initialization_repro_selects_durable_started_victim(monkeypatch):
+    import importlib.util
+    from types import SimpleNamespace
+
+    script = Path(__file__).resolve().parents[2] / "scripts/repro_worker_initialization.py"
+    spec = importlib.util.spec_from_file_location("initialization_repro", script)
+    assert spec is not None and spec.loader is not None
+    repro = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(repro)
+    captured = []
+    victim = {"id": "initializing", "lease_owner": "worker-a", "lease_epoch": 1}
+
+    class Pool:
+        async def fetchrow(self, query, *args, **kwargs):
+            captured.append((query, args, kwargs))
+            return victim
+
+    query = (
+        "SELECT id,lease_owner,lease_epoch FROM runs "
+        "WHERE status='running' AND lease_owner IS NOT NULL LIMIT 1"
+    )
+
+    async def summarize(pool, args):
+        return {}
+
+    def main():
+        async def probe():
+            pool = Pool()
+            assert await pool.fetchrow(query, "arg", timeout=3) is victim
+            await pool.fetchrow("SELECT unrelated", "other")
+
+        asyncio.run(probe())
+
+    monkeypatch.setitem(sys.modules, "asyncpg", SimpleNamespace(Pool=Pool))
+    monkeypatch.setitem(sys.modules, "load_test", SimpleNamespace(main=main, summarize=summarize))
+    monkeypatch.setattr(sys, "argv", [str(script), "--inside", "point", "--chaos", "kill"])
+    assert repro.controller() == 0
+    assert captured == [
+        (
+            query.replace(" LIMIT 1", " AND checkpoint::jsonb->>'phase'='started' LIMIT 1"),
+            ("arg",),
+            {"timeout": 3},
+        ),
+        ("SELECT unrelated", ("other",), {}),
+    ]
