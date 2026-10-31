@@ -13,6 +13,8 @@ spending is capped (budgets).
   in [tools.md](./tools.md).
 - Cross-cutting extension (middleware, RAG, verifiers) is unified
   under [hooks.md](./hooks.md).
+- Versioned per-run roles and configuration use `RunOptions(profile=...)`;
+  see [domain profiles](./profiles.md) for layering and durable resume.
 
 ## Tool and response reliability
 
