@@ -23,8 +23,22 @@ class RunRequest:
     """Describe one queued run and its optional pinned identity.
 
     Args:
+        session_id: Conversation receiving the queued prompt.
+        prompt: User input appended when the worker starts the run.
+        run_id: Stable idempotency key for the queued run.
+        queue: Named fleet queue, or the default queue when omitted.
+        meta: Host routing metadata retained on the run.
         profile: Released definition whose identity reference is persisted.
         principal: Tenant/user identity restored by the worker.
+
+    Attributes:
+        session_id: Conversation receiving the prompt.
+        prompt: User input for the run.
+        run_id: Permanent deduplication identifier.
+        queue: Target worker queue.
+        meta: Host-supplied routing metadata.
+        profile: Pinned profile definition, when selected.
+        principal: Pinned authorization identity, when selected.
     """
 
     session_id: str
@@ -62,6 +76,9 @@ async def install(pool: Any) -> None:
 
     Run once at host startup. Existing PgQueuer schemas must already be current;
     migrations are host-owned. Safe for concurrent process startup.
+
+    Args:
+        pool: Host-owned asyncpg pool used to initialize Linch and PgQueuer schemas.
     """
     pool = pool if isinstance(pool, _BorrowedPool) else _BorrowedPool(pool)
     async with PostgresRunStore("", pool=pool):
@@ -135,6 +152,13 @@ async def enqueue_runs(pool: Any, requests: Sequence[RunRequest]) -> list[str]:
 
     Existing run IDs are permanent no-ops, even after their job has been acked.
     Call :func:`install` first. The pool remains owned by the host.
+
+    Args:
+        pool: Host-owned pool shared by run storage and the queue.
+        requests: Run requests to insert in one transaction and queue batch.
+
+    Returns:
+        Run IDs in the same order as ``requests``.
     """
     async with pool.acquire() as conn:
         async with conn.transaction():
