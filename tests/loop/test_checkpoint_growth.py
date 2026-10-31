@@ -10,7 +10,7 @@ def test_journal_checkpoint_envelope_does_not_require_a_receipt_snapshot() -> No
 
     extension: dict[str, object] = {}
 
-    _model_call_runtime_to_extension(extension, ledger_snapshot=None, active_primary=None)
+    _model_call_runtime_to_extension(extension, active_primary=None)
 
     assert extension["linch.model_calls.v1"] == {
         "version": 3,
@@ -37,7 +37,6 @@ def test_journal_checkpoint_bytes_stay_flat_as_fifty_turns_accumulate() -> None:
         )
         _model_call_runtime_to_extension(
             checkpoint.extension_state,
-            ledger_snapshot=None,
             active_primary=None,
             journal_count=turn + 1,
         )
@@ -61,11 +60,3 @@ def test_old_snapshot_runtime_envelope_is_rejected() -> None:
                 }
             }
         )
-
-
-def test_journal_writer_rejects_a_receipt_snapshot() -> None:
-    from linch.errors import ConfigError
-    from linch.loop.checkpoint import _model_call_runtime_to_extension
-
-    with pytest.raises(ConfigError, match="cannot include a ledger snapshot"):
-        _model_call_runtime_to_extension({}, ledger_snapshot={}, active_primary=None)

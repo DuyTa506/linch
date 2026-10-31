@@ -214,7 +214,7 @@ async def test_stale_writes_are_fenced_without_mutating_persisted_state(lease_st
         first.append_events(run_id, [_event(), _event()]),
         first.mark_failed(run_id, _checkpoint("bad"), {"message": "stale"}),
         first.save(run_id, 2, request),
-        first.delete(snapshot.id),
+        first.delete(snapshot.id, run_id=run_id),
         first.prune(run_id),
     )
     for operation in stale_ops:

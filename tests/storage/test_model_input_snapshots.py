@@ -199,7 +199,7 @@ async def _exercise_snapshot_store(store: InMemoryRunStore | PostgresRunStore) -
     assert await store.prune("run-1", keep_ids=(second.id,)) == 1
     assert await store.load(first.id) is None
     assert await store.load(second.id) == second
-    await store.delete(second.id)
+    await store.delete(second.id, run_id="run-1")
     assert await store.load(second.id) is None
 
     with pytest.raises(KeyError, match="run not found"):

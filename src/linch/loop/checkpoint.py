@@ -68,15 +68,12 @@ def _model_call_runtime_from_extension(
 def _model_call_runtime_to_extension(
     extension_state: dict[str, Any],
     *,
-    ledger_snapshot: dict[str, Any] | None,
     active_primary: dict[str, Any] | None,
     journal_count: int = 0,
 ) -> None:
     """Write the compact, journal-backed accounting envelope into state."""
     if not isinstance(extension_state, dict):
         raise ConfigError("RunCheckpoint.extension_state must be a dict")
-    if ledger_snapshot is not None:
-        raise ConfigError("journal-v1 runtime envelope cannot include a ledger snapshot")
     if active_primary is not None:
         _validate_active_primary_binding(active_primary)
     if type(journal_count) is not int or journal_count < 0:

@@ -601,7 +601,6 @@ class _ModelCallLedger:
         self._started: set[str] = set()
         self._abandoned: set[str] = set()
         self._receipts: dict[str, ModelCallReceipt] = {}
-        self._observed: dict[str, ModelCallReceipt] = {}
         self._consumed_auxiliary_receipt_ids: set[str] = set()
         self._journal: list[ModelCallEvent] = []
         self._projections: dict[str, dict[str, Any]] = {}
@@ -622,10 +621,6 @@ class _ModelCallLedger:
     @property
     def usage_complete(self) -> bool:
         return not self._has_unknown_usage
-
-    def _journal_count(self) -> int:
-        """Number of model-call journal records durably observed by this ledger."""
-        return len(self._journal)
 
     def _healthy(self) -> None:
         if self._persistence_failed:
@@ -737,7 +732,6 @@ class _ModelCallLedger:
                     self._budget._charge_receipt(delivery_id, owned.usage, owned.cost_usd)
                 elif owned.usage_status == "unknown":
                     self._budget._register_unresolved_delivery(delivery_id)
-            self._observed[delivery_id] = owned
             self._total_usage, self._total_cost_usd = next_usage, next_cost
             self._has_unknown_usage |= owned.usage_status == "unknown"
             await self._write("receipt", receipt_to_dict(owned))
@@ -831,31 +825,8 @@ class _ModelCallLedger:
             result.append(receipt_from_dict(receipt_to_dict(receipt)))
         return result
 
-    def snapshot(self) -> dict[str, Any]:
-        # Expose one shared owner from the first checkpoint onward. Delaying
-        # binding until begin/snapshot keeps a newly constructed resume ledger's
-        # fresh budget eligible to adopt the checkpoint owner in restore().
-        self._bind_budget()
-        result = {
-            "version": _VERSION,
-            "budget_owner_id": self._budget_owner_id,
-            "settled_delivery_ids": sorted(self._receipts),
-            "receipts": [receipt_to_dict(value) for value in self._receipts.values()],
-            "total_usage": _usage_dict(self._total_usage),
-            "known_cost_usd": self._total_cost_usd,
-            "has_unknown_usage": self._has_unknown_usage,
-            "pending_intents": [intent_to_dict(value) for value in self._intents.values()],
-            "consumed_auxiliary_receipt_ids": sorted(self._consumed_auxiliary_receipt_ids),
-            "started_delivery_ids": sorted(self._started),
-            "abandoned_delivery_ids": sorted(self._abandoned),
-        }
-        if self._persistence_failed:
-            result["persistence_failed"] = True
-        return result
-
     async def restore(
         self,
-        state: Mapping[str, Any] | None,
         journal: Sequence[ModelCallEvent],
         *,
         consumed_auxiliary_receipt_ids: Sequence[str] = (),
@@ -863,8 +834,6 @@ class _ModelCallLedger:
         async with self._lock:
             self._healthy()
             recovery = _LedgerRecovery(self.run_id, self._budget_owner_id)
-            if state is not None:
-                recovery.load_snapshot(state)
             recovery.prepare_source_replay(journal)
             for event in journal:
                 recovery.apply(event)
@@ -890,7 +859,6 @@ class _ModelCallLedger:
                 self._budget._restore_unresolved_deliveries(unknown, fresh=mode == "fresh_adopted")
             self._budget_owner_id = recovery.owner_id
             self._receipts = recovery.receipts
-            self._observed = dict(recovery.receipts)
             self._intents = {
                 key: value for key, value in recovery.intents.items() if key not in self._receipts
             }
@@ -987,82 +955,6 @@ class _LedgerRecovery:
     def _run(self, run_id: str) -> None:
         if run_id != self.run_id:
             raise _ModelCallError("identity_mismatch", "accounting state belongs to another run")
-
-    def _ids(self, value: Any) -> set[str]:
-        if not isinstance(value, list):
-            raise _invalid("delivery IDs must be a list")
-        for item in value:
-            _string(item, "delivery_attempt_id")
-        if len(set(value)) != len(value):
-            raise _invalid("duplicate delivery IDs in accounting state")
-        return set(value)
-
-    def _list(self, value: Any) -> list[Any]:
-        if not isinstance(value, list):
-            raise _invalid("accounting records must be a list")
-        return value
-
-    def load_snapshot(self, state: Mapping[str, Any]) -> None:
-        required = {
-            "budget_owner_id",
-            "settled_delivery_ids",
-            "receipts",
-            "total_usage",
-            "known_cost_usd",
-            "has_unknown_usage",
-            "pending_intents",
-            "consumed_auxiliary_receipt_ids",
-        }
-        optional = {"started_delivery_ids", "abandoned_delivery_ids", "persistence_failed"}
-        if not isinstance(state, Mapping):
-            require_wire_version(None)
-        require_wire_version(state.get("version"))
-        if not required <= state.keys():
-            raise _invalid("accounting snapshot is missing required fields")
-        if set(state) - required - optional - {"version"}:
-            raise _invalid("accounting snapshot has unknown fields")
-        if state.get("persistence_failed", False) is not False:
-            raise _ModelCallError("persistence_failed", "cannot resume failed journal durability")
-        self._owner(_string(state["budget_owner_id"], "budget_owner_id"))
-        for raw in self._list(state["receipts"]):
-            receipt = receipt_from_dict(raw)
-            _require_dispatched_receipt(receipt)
-            self._run(receipt.run_id)
-            if receipt.delivery_attempt_id in self.receipts:
-                raise _invalid("duplicate receipt in accounting snapshot")
-            self.receipts[receipt.delivery_attempt_id] = receipt
-        if self._ids(state["settled_delivery_ids"]) != self.receipts.keys():
-            raise _invalid("settled IDs do not match snapshot receipts")
-        for raw in self._list(state["pending_intents"]):
-            intent = intent_from_dict(raw)
-            self._run(intent.run_id)
-            delivery_id = intent.delivery_attempt_id
-            if delivery_id in self.intents or delivery_id in self.receipts:
-                raise _invalid("duplicate pending delivery in accounting snapshot")
-            self.intents[delivery_id] = intent
-        self.started = self._ids(state.get("started_delivery_ids", []))
-        self.abandoned = self._ids(state.get("abandoned_delivery_ids", []))
-        if not self.started <= self.intents.keys() or not self.abandoned <= self.intents.keys():
-            raise _invalid("dispatch or abandonment marker lacks its pending intent")
-        self.consumed = self._ids(state["consumed_auxiliary_receipt_ids"])
-        if not self.consumed <= self.receipts.keys() or any(
-            self.receipts[key].kind != "compaction" for key in self.consumed
-        ):
-            raise _invalid("consumed auxiliary IDs must reference compaction receipts")
-        usage, cost = _totals(list(self.receipts.values()))
-        if usage != _usage_from_dict(state["total_usage"]) or cost != _cost(
-            state["known_cost_usd"]
-        ):
-            raise _invalid("snapshot totals disagree with its receipts")
-        unknown = any(value.usage_status == "unknown" for value in self.receipts.values())
-        unknown |= bool(self.abandoned & self.started)
-        flag = state["has_unknown_usage"]
-        if (
-            type(flag) is not bool
-            or (unknown and not flag)
-            or (flag and not unknown and not self.started)
-        ):
-            raise _invalid("snapshot unknown-usage flag disagrees with its records")
 
     def apply(self, event: ModelCallEvent) -> None:
         from .events import ModelCallEvent

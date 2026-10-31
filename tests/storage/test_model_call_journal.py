@@ -633,7 +633,7 @@ async def test_paid_projection_and_consumption_reconcile_independently(
         ledger = _ModelCallLedger(run_id)
         rows = await runs.load_events(run_id)
         model_events = [row.event for row in rows if row.event.type == "model_call"]
-        await ledger.restore(None, model_events)
+        await ledger.restore(model_events)
         for receipt in ledger.consume_auxiliary_receipts():
             if receipt.usage is not None:
                 await runs.append_event(
@@ -651,7 +651,6 @@ async def test_paid_projection_and_consumption_reconcile_independently(
                 )
         _model_call_runtime_to_extension(
             checkpoint.extension_state,
-            ledger_snapshot=None,
             active_primary=None,
             journal_count=len(model_events),
         )
@@ -795,7 +794,12 @@ async def test_conflicting_paid_projection_for_one_receipt_fails_closed() -> Non
     )
     from linch.types import Usage
 
-    ledger = _ModelCallLedger("run")
+    journal: list[Any] = []
+
+    async def persist(event: Any) -> None:
+        journal.append(event)
+
+    ledger = _ModelCallLedger("run", persist=persist)
     intent = ModelCallIntent(
         "operation", "delivery", None, "compaction", "run", 0, "model", "request", "default"
     )
@@ -856,7 +860,7 @@ async def test_conflicting_paid_projection_for_one_receipt_fails_closed() -> Non
     await ledger.settle(receipt)
     first = _projection_record(**values)
     no_source = _ModelCallLedger("run")
-    await no_source.restore(ledger.snapshot(), [])
+    await no_source.restore([event for event in journal if event.record_kind != "projection"])
     with pytest.raises(_ModelCallError, match="physical source"):
         await no_source.record_projection(first)
     await ledger.record_projection(first)
@@ -1152,7 +1156,7 @@ async def test_repeated_paid_projection_preserves_later_skill_reminder_order(
         from linch.events import UsageEvent
 
         consumed = _ModelCallLedger("run")
-        await consumed.restore(None, model_events)
+        await consumed.restore(model_events)
         for receipt in consumed.consume_auxiliary_receipts():
             if receipt.usage is not None:
                 await runs.append_event(
@@ -1171,7 +1175,6 @@ async def test_repeated_paid_projection_preserves_later_skill_reminder_order(
         checkpoint.total_usage = consumed.total_usage
     _model_call_runtime_to_extension(
         checkpoint.extension_state,
-        ledger_snapshot=None,
         active_primary=None,
         journal_count=len(model_events),
     )
@@ -1278,7 +1281,7 @@ async def test_compaction_source_recipe_is_bound_to_the_pending_delivery() -> No
         await ledger.record_projection(_projection_record(**values))
     values["request_fingerprint"] = "request"
     restored = _ModelCallLedger("run")
-    await restored.restore(ledger.snapshot(), journal)
+    await restored.restore(journal)
     assert restored.projections("compaction_source") == [source]
     assert restored.total_usage.input_tokens == restored.total_usage.output_tokens == 0
 

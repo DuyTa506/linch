@@ -28,17 +28,37 @@ Close stores with `await store.close()` when their host shuts down.
 Postgres session store. A supplied pool follows the store's lifecycle; closing
 the store closes that pool.
 
+Store-owned pools use asyncpg 0.32's `reset=` hook. The driver performs its
+internal rollback/cancellation cleanup on release, and the Linch callback
+omits the extra session-reset SQL round trip. Hosts that supply a pool should
+use the same callback when they want the same hot-path behavior:
+
+```python
+async def reset_connection(_connection):
+    return None
+
+pool = await asyncpg.create_pool(dsn, reset=reset_connection)
+runs = PostgresRunStore(dsn, pool=pool)
+```
+
+The callback runs after asyncpg's internal cleanup; it must not replace that
+cleanup with a connection subclass. The no-op form also omits asyncpg's
+additional `SET`/GUC, advisory-lock, cursor, and `LISTEN` reset SQL. Use a
+dedicated pool for Linch, or add the host's required session-state cleanup to
+its callback when sharing a pool with other workloads.
+
 ## Atomic phase writes
 
 Every `RunStore` implements
 `save_checkpoint_with_events(run_id, checkpoint, events, *, status="running")`.
 The loop uses it whenever a phase has pending events, committing those events
-and its checkpoint in one transaction before a guarded tool runs. It returns
+and its checkpoint in one fenced statement before a guarded tool runs. It returns
 `(run_record, event_seqs)`.
 
-Within the transaction, the store locks the run, checks its lease fence, and
-allocates the events' actual durable sequences. Encoding, writing, or fencing
-failure rolls back the entire transaction; the loop retains its pending events.
+The statement fences the run and atomically advances its sequence counter,
+then inserts the events through a data-modifying CTE. Encoding, writing, or
+fencing failure changes neither the checkpoint nor the events; the loop
+retains its pending events.
 
 ## Optional leases and fencing
 
@@ -75,7 +95,7 @@ instance's most recent claim and requires its matching live lease.
 
 Each instance remembers the epoch it claimed for each run. Checkpoint saves,
 event appends (including batches), status updates, and model-input snapshot
-writes check that epoch in the same transaction as the write. If another worker
+writes check that epoch in the same statement as the write. If another worker
 claims an expired lease, the epoch increases and the previous holder's next
 write raises `LeaseLostError`. The failed write changes no persisted state.
 Expiry alone permits takeover; writes are fenced by epoch, not by a local
@@ -106,8 +126,9 @@ databases and start new runs. There is no automatic schema upgrade or legacy
 resume option. Persisted envelopes likewise require wire version 3; see the
 [3.0 migration guide](../migration-3.0.md).
 
-Postgres transactions serialize per-run event sequence allocation across store
-instances. Asyncpg performs database I/O asynchronously.
+The run-row counters serialize per-run event sequence allocation across store
+instances without a `MAX(seq)` or `FOR UPDATE` hot-path read. Asyncpg performs
+database I/O asynchronously.
 
 ## Failure semantics
 

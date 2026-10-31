@@ -76,6 +76,16 @@ async def test_postgres_fresh_and_current_schema_reopens(pg_schema, module, name
                 == 3
             )
             assert all([await conn.fetchval("SELECT to_regclass($1)", table) for table in tables])
+            if key == "runs":
+                assert await conn.fetchval(
+                    "SELECT EXISTS (SELECT 1 FROM information_schema.columns "
+                    "WHERE table_name = 'runs' AND column_name = 'last_event_seq')"
+                )
+            if key == "sessions":
+                assert await conn.fetchval(
+                    "SELECT EXISTS (SELECT 1 FROM information_schema.columns "
+                    "WHERE table_name = 'sessions' AND column_name = 'last_message_seq')"
+                )
         finally:
             await store.close()
 
@@ -168,3 +178,24 @@ async def test_postgres_rejects_present_null_metadata_without_owned_tables(pg_sc
         await store.close()
     assert await conn.fetchval("SELECT version FROM linch_schema_meta WHERE store = 'runs'") is None
     assert not await conn.fetchval("SELECT to_regclass('runs') IS NOT NULL")
+
+
+async def test_postgres_rejects_current_metadata_with_old_counter_shape(pg_schema):
+    from linch.run_stores.postgres import PostgresRunStore
+
+    dsn, conn = pg_schema
+    await conn.execute(
+        "CREATE TABLE runs (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, status TEXT NOT NULL, "
+        "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, checkpoint TEXT, meta TEXT NOT NULL)"
+    )
+    await conn.execute(
+        "CREATE TABLE linch_schema_meta (store TEXT PRIMARY KEY, version INTEGER NOT NULL)"
+    )
+    await conn.execute("INSERT INTO linch_schema_meta VALUES ('runs', 3)")
+    store = PostgresRunStore(dsn)
+    try:
+        with pytest.raises(UnsupportedWireVersionError, match="start a new run"):
+            await store._ensure()
+    finally:
+        await store.close()
+    assert not await conn.fetchval("SELECT to_regclass('run_events') IS NOT NULL")

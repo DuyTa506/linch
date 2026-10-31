@@ -241,7 +241,7 @@ async def test_measured_store_preserves_capabilities_and_counts_terminal_payload
         )
         snapshot = await store.save(run.id, 1, request)
         assert (await store.load(snapshot.id)).id == snapshot.id
-        await store.delete(snapshot.id)
+        await store.delete(snapshot.id, run_id=run.id)
         assert await store.prune(run.id) == 0
         await store.mark_completed(run.id, checkpoint)
         raw = await connection.fetchval("SELECT checkpoint FROM runs WHERE id = $1", run.id)

@@ -891,6 +891,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 assembly=assembly,
                 checkpoint=checkpoint,
                 resume_checkpoint=resume_checkpoint,
+                stored_events=_runtime.stored_events,
                 guard=_guard,
                 guard_state=_guard_state,
                 save_checkpoint=_save_checkpoint,

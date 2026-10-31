@@ -258,94 +258,7 @@ async def test_caller_usage_mutation_cannot_change_owned_spend() -> None:
     await ledger.settle(receipt)
     receipt.usage.output_tokens = 800
     assert ledger.total_usage.output_tokens == 22
-    assert ledger.snapshot()["receipts"][0]["usage"]["output_tokens"] == 22
-
-
-async def test_snapshot_and_total_usage_are_detached() -> None:
-    ledger = await _settled()
-    snapshot = ledger.snapshot()
-    snapshot["receipts"][0]["usage"]["input_tokens"] = 999
-    snapshot["total_usage"]["output_tokens"] = 999
-    snapshot["settled_delivery_ids"].clear()
-    ledger.total_usage.input_tokens = 999
-    assert ledger.total_usage.input_tokens == 111
-    assert ledger.snapshot()["total_usage"]["output_tokens"] == 22
-    assert ledger.snapshot()["settled_delivery_ids"] == ["delivery-fixture"]
-
-
-async def test_same_budget_owner_resume_does_not_charge_again() -> None:
-    from linch.budget import RunBudget
-    from linch.model_calls import _ModelCallLedger
-
-    budget = RunBudget(max_tokens=1000)
-    original = await _settled(budget=budget)
-    resumed = _ModelCallLedger("run-fixture", budget=budget)
-    await resumed.restore(original.snapshot(), [])
-    assert budget.spent_tokens == 133
-    assert resumed.total_usage.input_tokens == 111
-
-
-async def test_fresh_zero_budget_adopts_owner_and_restores_spend_once() -> None:
-    from linch.budget import RunBudget
-    from linch.model_calls import _ModelCallLedger
-
-    snapshot = (await _settled()).snapshot()
-    budget = RunBudget(max_tokens=1000)
-    ledger = _ModelCallLedger("run-fixture", budget=budget)
-    await ledger.restore(snapshot, [])
-    await ledger.restore(snapshot, [])
-    assert budget.spent_tokens == 133
-    assert ledger.snapshot()["budget_owner_id"] == snapshot["budget_owner_id"]
-
-
-async def test_fresh_nonzero_or_mismatched_capped_budget_owner_fails_closed() -> None:
-    from linch.budget import RunBudget
-    from linch.errors import ConfigError
-    from linch.model_calls import _ModelCallLedger
-
-    snapshot = (await _settled()).snapshot()
-    nonzero = RunBudget(max_tokens=1000, spent_tokens=1)
-    with pytest.raises(ConfigError):
-        await _ModelCallLedger("run-fixture", budget=nonzero).restore(snapshot, [])
-    other = RunBudget(max_tokens=1000)
-    await _settled(budget=other)
-    with pytest.raises(ConfigError):
-        await _ModelCallLedger("run-fixture", budget=other).restore(snapshot, [])
-
-
-async def test_same_owner_missing_ids_or_inconsistent_counters_fail_closed() -> None:
-    from linch.budget import RunBudget
-    from linch.errors import ConfigError
-    from linch.model_calls import _ModelCallLedger
-
-    budget = RunBudget(max_tokens=1000)
-    ledger = await _settled(budget=budget)
-    snapshot = ledger.snapshot()
-    budget.spent_tokens = 0
-    with pytest.raises(ConfigError):
-        await _ModelCallLedger("run-fixture", budget=budget).restore(snapshot, [])
-    budget.spent_tokens = 133
-    budget._charged_delivery_ids.clear()
-    with pytest.raises(ConfigError):
-        await _ModelCallLedger("run-fixture", budget=budget).restore(snapshot, [])
-
-
-async def test_same_owner_accepts_extra_live_sibling_charges() -> None:
-    from linch.budget import RunBudget
-    from linch.model_calls import _ModelCallLedger
-
-    budget = RunBudget(max_tokens=1000)
-    ledger = await _settled(budget=budget)
-    snapshot = ledger.snapshot()
-    intent, receipt = _records()
-    intent = replace(intent, run_id="sibling", delivery_attempt_id="sibling-delivery")
-    receipt = replace(receipt, run_id="sibling", delivery_attempt_id="sibling-delivery")
-    sibling = _ModelCallLedger("sibling", budget=budget)
-    await sibling.begin(intent)
-    await sibling.mark_dispatch_started(intent)
-    await sibling.settle(receipt)
-    await _ModelCallLedger("run-fixture", budget=budget).restore(snapshot, [])
-    assert budget.spent_tokens == 266
+    assert ledger.receipts()[0].usage.output_tokens == 22
 
 
 async def test_journal_write_failure_retains_observed_spend_and_blocks_continuation() -> None:
@@ -372,7 +285,7 @@ async def test_journal_write_failure_retains_observed_spend_and_blocks_continuat
     with pytest.raises(_ModelCallError):
         await ledger.settle(receipt)
     assert ledger.total_usage.input_tokens == 111
-    assert ledger.snapshot()["settled_delivery_ids"] == []
+    assert ledger.receipts() == []
     with pytest.raises(_ModelCallError):
         ledger.assert_may_start()
     with pytest.raises(_ModelCallError):
@@ -407,11 +320,16 @@ async def test_intent_only_recovery_is_not_dispatched_and_does_not_fence_budget(
     from linch.model_calls import _ModelCallLedger
 
     intent, _ = _records()
-    ledger = _ModelCallLedger(intent.run_id)
+    journal = []
+
+    async def persist(event: Any) -> None:
+        journal.append(event)
+
+    ledger = _ModelCallLedger(intent.run_id, persist=persist)
     await ledger.begin(intent)
     budget = RunBudget(max_tokens=1000)
     restored = _ModelCallLedger(intent.run_id, budget=budget)
-    await restored.restore(ledger.snapshot(), [])
+    await restored.restore(journal)
     restored.assert_may_start()
     assert restored.usage_complete is True
     await restored.abandon(intent, reason="pre-dispatch cancellation")
@@ -424,17 +342,22 @@ async def test_started_recovery_is_unknown_and_fences_fresh_capped_budget() -> N
     from linch.model_calls import _ModelCallError, _ModelCallLedger
 
     intent, _ = _records()
-    ledger = _ModelCallLedger(intent.run_id)
+    journal = []
+
+    async def persist(event: Any) -> None:
+        journal.append(event)
+
+    ledger = _ModelCallLedger(intent.run_id, persist=persist)
     await ledger.begin(intent)
     await ledger.mark_dispatch_started(intent)
     restored = _ModelCallLedger(intent.run_id, budget=RunBudget(max_tokens=1000))
-    await restored.restore(ledger.snapshot(), [])
+    await restored.restore(journal)
     assert restored.usage_complete is False
     with pytest.raises(_ModelCallError):
         restored.assert_may_start()
 
 
-async def test_journal_ahead_checkpoint_reconciles_by_delivery_without_repricing() -> None:
+async def test_complete_journal_reconciles_by_delivery_without_repricing() -> None:
     from linch.budget import RunBudget
     from linch.model_calls import _ModelCallLedger
 
@@ -446,17 +369,16 @@ async def test_journal_ahead_checkpoint_reconciles_by_delivery_without_repricing
     intent, receipt = _records()
     original = _ModelCallLedger(intent.run_id, persist=persist)
     await original.begin(intent)
-    checkpoint = original.snapshot()
     await original.mark_dispatch_started(intent)
     await original.settle(receipt)
     budget = RunBudget(max_tokens=1000)
     restored = _ModelCallLedger(intent.run_id, budget=budget)
-    await restored.restore(checkpoint, journal)
+    await restored.restore(journal)
     assert restored.total_usage.input_tokens == 111
     assert restored.total_cost_usd == 0.00035875
     assert restored.usage_complete is True
     assert budget.spent_tokens == 133
-    await restored.restore(restored.snapshot(), journal)
+    await restored.restore(journal)
     assert budget.spent_tokens == 133
 
 
@@ -478,19 +400,20 @@ async def test_unknown_pricing_keeps_known_cost_sum_partial() -> None:
     assert ledger.usage_complete is True
 
 
-async def test_corrupt_snapshot_and_conflicting_journal_fail_closed() -> None:
+async def test_conflicting_journal_receipt_fails_closed() -> None:
     from linch.events import ModelCallEvent
     from linch.model_calls import _ModelCallError, _ModelCallLedger, receipt_to_dict
 
-    original = await _settled()
-    snapshot = original.snapshot()
-    snapshot["total_usage"]["input_tokens"] = 0
-    with pytest.raises(_ModelCallError):
-        await _ModelCallLedger("run-fixture").restore(snapshot, [])
+    journal = []
+
+    async def persist(event: Any) -> None:
+        journal.append(event)
+
+    await _settled(persist=persist)
     _, conflicting = _records(cost_usd=0.5)
     event = ModelCallEvent("run-fixture", "receipt", receipt_to_dict(conflicting))
     with pytest.raises(_ModelCallError):
-        await _ModelCallLedger("run-fixture").restore(original.snapshot(), [event])
+        await _ModelCallLedger("run-fixture").restore([*journal, event])
 
 
 async def test_model_call_event_codec_is_strict_and_detached() -> None:
@@ -606,6 +529,11 @@ async def test_reported_rejection_is_charged_and_unknown_receipt_is_not_zero() -
     from linch.budget import RunBudget
     from linch.model_calls import _ModelCallError, _ModelCallLedger
 
+    journal = []
+
+    async def persist(event: Any) -> None:
+        journal.append(event)
+
     intent, receipt = _records(
         disposition="rejected",
         rejection_reason="empty output",
@@ -613,7 +541,7 @@ async def test_reported_rejection_is_charged_and_unknown_receipt_is_not_zero() -
         accepted_text_sha256=None,
     )
     budget = RunBudget(max_tokens=1000)
-    ledger = _ModelCallLedger(intent.run_id, budget=budget)
+    ledger = _ModelCallLedger(intent.run_id, budget=budget, persist=persist)
     await ledger.begin(intent)
     await ledger.mark_dispatch_started(intent)
     await ledger.settle(receipt)
@@ -637,7 +565,7 @@ async def test_reported_rejection_is_charged_and_unknown_receipt_is_not_zero() -
     with pytest.raises(_ModelCallError):
         ledger.assert_may_start()
     fresh = _ModelCallLedger(intent.run_id, budget=RunBudget(max_tokens=1000))
-    await fresh.restore(ledger.snapshot(), [])
+    await fresh.restore(journal)
     assert fresh.usage_complete is False
 
 
@@ -660,9 +588,14 @@ async def test_public_charge_remains_compatible_after_receipt_ownership() -> Non
     from linch.types import Usage
 
     budget = RunBudget(max_tokens=1000)
-    ledger = await _settled(budget=budget)
+    journal = []
+
+    async def persist(event: Any) -> None:
+        journal.append(event)
+
+    await _settled(budget=budget, persist=persist)
     budget.charge(Usage(10, 2, 3, 4), 0.1)
-    await _ModelCallLedger("run-fixture", budget=budget).restore(ledger.snapshot(), [])
+    await _ModelCallLedger("run-fixture", budget=budget).restore(journal)
     assert budget.spent_tokens == 152
     assert budget.spent_usd == pytest.approx(0.10035875)
 
@@ -699,7 +632,7 @@ async def test_event_only_started_recovery_fences_budget() -> None:
     await ledger.begin(intent)
     await ledger.mark_dispatch_started(intent)
     restored = _ModelCallLedger(intent.run_id, budget=RunBudget(max_cost_usd=1.0))
-    await restored.restore(None, journal)
+    await restored.restore(journal)
     assert restored.usage_complete is False
     with pytest.raises(_ModelCallError):
         restored.assert_may_start()
@@ -726,7 +659,7 @@ async def test_dispatch_after_abandonment_in_journal_fails_closed() -> None:
         ModelCallEvent(intent.run_id, "dispatch_started", raw),
     ]
     with pytest.raises(_ModelCallError):
-        await _ModelCallLedger(intent.run_id).restore(None, journal)
+        await _ModelCallLedger(intent.run_id).restore(journal)
 
 
 async def test_owner_restore_requires_shared_unknown_fence() -> None:
@@ -736,13 +669,18 @@ async def test_owner_restore_requires_shared_unknown_fence() -> None:
 
     intent, _ = _records()
     budget = RunBudget(max_tokens=1000)
-    ledger = _ModelCallLedger(intent.run_id, budget=budget)
+    journal = []
+
+    async def persist(event: Any) -> None:
+        journal.append(event)
+
+    ledger = _ModelCallLedger(intent.run_id, budget=budget, persist=persist)
     await ledger.begin(intent)
     await ledger.mark_dispatch_started(intent)
     await ledger.abandon(intent, reason="cancelled")
     budget._unknown_delivery_ids.clear()
     with pytest.raises(ConfigError):
-        await _ModelCallLedger(intent.run_id, budget=budget).restore(ledger.snapshot(), [])
+        await _ModelCallLedger(intent.run_id, budget=budget).restore(journal)
 
 
 @pytest.mark.parametrize("stage", ["intent", "dispatch_started"])
@@ -797,7 +735,7 @@ async def test_abandoned_snapshot_overlapping_full_journal_replays_idempotently(
     await ledger.mark_dispatch_started(intent)
     await ledger.abandon(intent, reason="cancelled")
     restored = _ModelCallLedger(intent.run_id, budget=RunBudget(max_tokens=1000))
-    await restored.restore(ledger.snapshot(), journal)
+    await restored.restore(journal)
     assert restored.usage_complete is False
     with pytest.raises(_ModelCallError):
         restored.assert_may_start()
@@ -831,7 +769,7 @@ async def test_corrupt_journal_cumulative_cost_is_validated_before_budget_restor
         )
     budget = RunBudget(max_cost_usd=1.0)
     with pytest.raises(_ModelCallError):
-        await _ModelCallLedger(intent.run_id, budget=budget).restore(None, journal)
+        await _ModelCallLedger(intent.run_id, budget=budget).restore(journal)
     assert budget.spent_tokens == 0
     assert budget.spent_usd == 0.0
 
@@ -856,16 +794,15 @@ async def test_started_delivery_cannot_settle_as_not_dispatched() -> None:
     with pytest.raises(_ModelCallError) as error:
         await ledger.settle(receipt)
     assert error.value.code == "invalid_state"
-    assert ledger.snapshot()["settled_delivery_ids"] == []
-    assert ledger.snapshot()["started_delivery_ids"] == [intent.delivery_attempt_id]
+    assert ledger.receipts() == []
+    assert ledger.intent_for(intent.delivery_attempt_id) == intent
     await ledger.abandon(intent, reason="dispatched delivery has no reported usage")
     with pytest.raises(_ModelCallError):
         _ModelCallLedger("sibling", budget=budget).assert_may_start()
     assert ledger.usage_complete is False
 
 
-@pytest.mark.parametrize("source", ["journal", "snapshot", "snapshot_and_journal"])
-async def test_recovery_rejects_not_dispatched_receipt_for_started_delivery(source: str) -> None:
+async def test_recovery_rejects_not_dispatched_receipt_for_started_delivery() -> None:
     from linch.budget import RunBudget
     from linch.events import ModelCallEvent
     from linch.model_calls import (
@@ -890,21 +827,16 @@ async def test_recovery_rejects_not_dispatched_receipt_for_started_delivery(sour
         ModelCallEvent(intent.run_id, "dispatch_started", raw_intent),
         ModelCallEvent(intent.run_id, "receipt", receipt_to_dict(receipt)),
     ]
-    state = None
-    if source != "journal":
-        state = _ModelCallLedger(intent.run_id).snapshot()
-        state["receipts"] = [receipt_to_dict(receipt)]
-        state["settled_delivery_ids"] = [intent.delivery_attempt_id]
     budget = RunBudget(max_tokens=1000)
     restored = _ModelCallLedger(intent.run_id, budget=budget)
     with pytest.raises(_ModelCallError):
-        await restored.restore(state, journal if source != "snapshot" else [])
+        await restored.restore(journal)
     assert budget.spent_tokens == 0
     assert budget._budget_owner_id is None
 
 
 @pytest.mark.parametrize("restore_budget", ["same_owner", "fresh_zero"])
-async def test_budgeted_checkpoint_before_first_intent_reconciles_later_journal(
+async def test_budgeted_complete_journal_reconciles_once(
     restore_budget: str,
 ) -> None:
     from linch.budget import RunBudget
@@ -918,39 +850,18 @@ async def test_budgeted_checkpoint_before_first_intent_reconciles_later_journal(
     intent, receipt = _records()
     budget = RunBudget(max_tokens=1000)
     ledger = _ModelCallLedger(intent.run_id, budget=budget, persist=persist)
-    checkpoint = ledger.snapshot()
     await ledger.begin(intent)
     await ledger.mark_dispatch_started(intent)
     await ledger.settle(receipt)
     resumed_budget = budget if restore_budget == "same_owner" else RunBudget(max_tokens=1000)
     restored = _ModelCallLedger(intent.run_id, budget=resumed_budget)
-    await restored.restore(checkpoint, journal)
+    await restored.restore(journal)
     assert restored.total_usage.input_tokens == 111
     assert restored.total_usage.output_tokens == 22
     assert resumed_budget.spent_tokens == 133
-    assert restored.snapshot()["budget_owner_id"] == checkpoint["budget_owner_id"]
-    assert all(event.budget_owner_id == checkpoint["budget_owner_id"] for event in journal)
-
-
-async def test_predispatch_shared_budget_snapshots_keep_one_owner() -> None:
-    from linch.budget import RunBudget
-    from linch.model_calls import _ModelCallLedger
-
-    budget = RunBudget(max_tokens=1000)
-    intent, receipt = _records()
-    first = _ModelCallLedger(intent.run_id, budget=budget)
-    sibling = _ModelCallLedger("sibling", budget=budget)
-    first_checkpoint = first.snapshot()
-    sibling_checkpoint = sibling.snapshot()
-    await first.begin(intent)
-    await first.mark_dispatch_started(intent)
-    await first.settle(receipt)
-    restored_sibling = _ModelCallLedger("sibling", budget=budget)
-    await restored_sibling.restore(sibling_checkpoint, [])
-    restored_sibling.assert_may_start()
-    assert budget.spent_tokens == 133
-    assert sibling_checkpoint["budget_owner_id"] == first_checkpoint["budget_owner_id"]
-    assert restored_sibling.snapshot()["budget_owner_id"] == first_checkpoint["budget_owner_id"]
+    owner_id = journal[0].budget_owner_id
+    assert owner_id is not None
+    assert all(event.budget_owner_id == owner_id for event in journal)
 
 
 def _source_projection_for(intent: Any) -> dict[str, Any]:
@@ -979,11 +890,9 @@ def _source_projection_for(intent: Any) -> dict[str, Any]:
 
 
 @pytest.mark.parametrize("phase", ["started", "settled", "abandoned", "not_dispatched"])
-@pytest.mark.parametrize("with_checkpoint", [False, True])
 @pytest.mark.parametrize("repeat_intent", [False, True])
 async def test_restore_rejects_first_source_after_delivery_phase(
     phase: str,
-    with_checkpoint: bool,
     repeat_intent: bool,
 ) -> None:
     """A replayed intent never resets a dispatched or closed delivery's source boundary."""
@@ -1005,43 +914,15 @@ async def test_restore_rejects_first_source_after_delivery_phase(
         await original.settle(receipt)
     elif phase in {"abandoned", "not_dispatched"}:
         await original.abandon(intent, reason="interrupted")
-    snapshot = original.snapshot() if with_checkpoint else None
     if repeat_intent:
         journal.append(ModelCallEvent(intent.run_id, "intent", intent_to_dict(intent)))
     journal.append(ModelCallEvent(intent.run_id, "projection", _source_projection_for(intent)))
     budget = RunBudget(max_tokens=1000)
     restored = _ModelCallLedger(intent.run_id, budget=budget)
     with pytest.raises(_ModelCallError, match="source.*before dispatch|source.*delivery phase"):
-        await restored.restore(snapshot, journal)
+        await restored.restore(journal)
     assert budget.spent_tokens == 0
     assert restored.total_usage.input_tokens == restored.total_usage.output_tokens == 0
-
-
-@pytest.mark.parametrize("phase", ["started", "settled", "abandoned", "not_dispatched"])
-@pytest.mark.parametrize("repeat_intent", [False, True])
-async def test_started_checkpoint_cannot_admit_a_new_source_from_unproven_suffix(
-    phase: str,
-    repeat_intent: bool,
-) -> None:
-    """A checkpoint's later phase needs real forward replay proof, not a repeated intent."""
-    from linch.events import ModelCallEvent
-    from linch.model_calls import _ModelCallError, _ModelCallLedger, intent_to_dict
-
-    intent, receipt = _records(source_context_fingerprint="b" * 64)
-    original = _ModelCallLedger(intent.run_id)
-    await original.begin(intent)
-    if phase != "not_dispatched":
-        await original.mark_dispatch_started(intent)
-    if phase == "settled":
-        await original.settle(receipt)
-    elif phase in {"abandoned", "not_dispatched"}:
-        await original.abandon(intent, reason="interrupted")
-    suffix = (
-        [ModelCallEvent(intent.run_id, "intent", intent_to_dict(intent))] if repeat_intent else []
-    )
-    suffix.append(ModelCallEvent(intent.run_id, "projection", _source_projection_for(intent)))
-    with pytest.raises(_ModelCallError, match="source.*before dispatch|source.*delivery phase"):
-        await _ModelCallLedger(intent.run_id).restore(original.snapshot(), suffix)
 
 
 @pytest.mark.parametrize(
@@ -1082,7 +963,6 @@ async def test_restore_preserves_proven_source_order_against_later_checkpoint(
         await original.settle(receipt)
     elif phase == "abandoned":
         await original.abandon(intent, reason="interrupted")
-    snapshot = original.snapshot()
     journal.extend(
         [
             ModelCallEvent(intent.run_id, "intent", intent_to_dict(intent)),
@@ -1091,11 +971,11 @@ async def test_restore_preserves_proven_source_order_against_later_checkpoint(
     )
     budget = original_budget if budget_mode == "same" else RunBudget(max_tokens=1000)
     restored = _ModelCallLedger(intent.run_id, budget=budget)
-    await restored.restore(snapshot, journal)
+    await restored.restore(journal)
     assert restored.projections("compaction_source") == [source]
     assert budget.spent_tokens == (133 if phase == "settled" else 0)
     assert restored.total_usage.input_tokens == (111 if phase == "settled" else 0)
-    await restored.restore(restored.snapshot(), journal)
+    await restored.restore(journal)
     assert budget.spent_tokens == (133 if phase == "settled" else 0)
 
 
