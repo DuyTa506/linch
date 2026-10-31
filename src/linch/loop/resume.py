@@ -206,8 +206,10 @@ async def _reconcile_active_primary(ctx: ResumeContext) -> None:
     history = list(ctx.session.full_history)
     base = active_primary["full_history_base_count"]
     diagnostic = Message(role="assistant", content=[TextBlock(text=INVALID_RESPONSE_DIAGNOSTIC)])
-    rejected_text = projection is not None and projection["assistant_sha256"] == _message_digest(
-        diagnostic
+    rejected_text = (
+        projection is not None
+        and projection["after_action"] == "continue"
+        and projection["assistant_sha256"] == _message_digest(diagnostic)
     )
     if ctx.checkpoint.phase == "assistant_appended" and len(history) > base + len(expected):
         ctx.turn_stopping.replayed_feedback = tuple(history[base + len(expected) :])
@@ -223,15 +225,14 @@ async def _reconcile_active_primary(ctx: ResumeContext) -> None:
         )
     )
     if rejected_text:
-        ctx.state.terminal_kind = "invalid_text"
         assert projection is not None
         control = _primary_control_message(diagnostic, projection["after_feedback"], wrap=False)
-        if _message_digest(control) != projection["control_message_sha256"]:
-            raise ConfigError("invalid response control digest differs")
-        missing = [diagnostic, control][ctx.state.recovered_primary_prefix :]
-        if missing:
-            await ctx.session.append(missing)
-        ctx.state.recovered_primary_prefix = 2
+        if _message_digest(control) == projection["control_message_sha256"]:
+            ctx.state.terminal_kind = "invalid_text"
+            missing = [diagnostic, control][ctx.state.recovered_primary_prefix :]
+            if missing:
+                await ctx.session.append(missing)
+            ctx.state.recovered_primary_prefix = 2
 
     if receipt is not None and receipt.disposition == "rejected_native":
         event = ErrorEvent(

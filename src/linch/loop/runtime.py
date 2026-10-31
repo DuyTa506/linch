@@ -556,11 +556,6 @@ class RunRuntime:
         self._checkpoint_extension_state_fn: Callable[..., dict[str, Any]] | None = None
         self.lease_lost: LeaseLostError | None = None
         policy = getattr(self.agent, "reliability", None)
-        if policy is not None:
-            policy.validate(
-                (tool.name for tool in (session.tools_override or self.agent.tools).list()),
-                final_tool_name=opts.final_tool_name or self.agent.final_tool_name,
-            )
         self.reliability: ReliabilityRuntime | None = (
             ReliabilityRuntime(policy)
             if policy is not None and (policy.retry_invalid_responses or policy.referenced_tools)
@@ -637,6 +632,12 @@ class RunRuntime:
             resume_checkpoint=resume_checkpoint,
         )
         agent = runtime.agent
+        runtime.effective_final_tool = effective_final_tool_name(agent, opts)
+        if (policy := getattr(agent, "reliability", None)) is not None:
+            policy.validate(
+                (tool.name for tool in (session.tools_override or agent.tools).list()),
+                final_tool_name=runtime.effective_final_tool,
+            )
         runtime.exact_model_input = exact_model_input_enabled(agent)
         runtime.model_input_store = (
             require_model_input_snapshot_store(agent) if runtime.exact_model_input else None
@@ -712,7 +713,6 @@ class RunRuntime:
             or getattr(agent, "budget", None)
         )
         session.active_budget = runtime.budget
-        runtime.effective_final_tool = effective_final_tool_name(agent, opts)
         runtime.guard = getattr(agent, "loop_guard", None)
         runtime.guard_state = (
             loop_guard_state_factory() if _loop_guard_is_active(runtime.guard) else None

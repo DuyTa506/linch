@@ -17,14 +17,15 @@ class CorrectionWrites(_CrashWrites):
             and self.point == "feedback"
         ) or (
             name.startswith("save_checkpoint")
-            and args[1].phase == "turn_complete"
-            and self.point == "checkpoint"
+            and args[1].phase
+            == ("assistant_appended" if self.point == "assistant" else "turn_complete")
+            and self.point in {"checkpoint", "assistant"}
         )
         original = self.point
         self.point = name if hit else ""
         self.armed = True
         # Avoid the parent's guard-specific turn_complete counter.
-        if name.startswith("save_checkpoint"):
+        if name.startswith("save_checkpoint") and args[1].phase == "turn_complete":
             self.point = f"turn_complete:{self.turn_complete + 1}" if hit else ""
         try:
             return await super()._write(name, *args, **kw)
@@ -96,9 +97,10 @@ def correction_agent(sessions: Any, runs: Any, provider: Any) -> Any:
         permissions={"mode": "skip-dangerous"},
         features=FeatureFlags(skills=False, subagents=False, mcp=False),
         reliability=ReliabilityPolicy(
+            max_correction_turns=1,
             completion=CompletionGate(("prepare",))
             if provider.case in {"completion", "final_tool"}
-            else None
+            else None,
         ),
     )
 
@@ -130,7 +132,8 @@ async def test_correction_crash_exact_trace(pg_dsn, kind, after, point, case):
             if crash:
                 sessions, runs = await _reopen(kind, pg_dsn, sessions, runs)
                 session = await correction_agent(sessions, runs, provider).session(id=session.id)
-                _ = [event async for event in session.resume(run_id)]
+                events = [event async for event in session.resume(run_id)]
+                assert events[-1].type == "result" and events[-1].subtype == "success"
             rows = await runs.load_events(run_id)
             record = await runs.load_run(run_id)
             assert record.status == "completed", [
@@ -141,6 +144,17 @@ async def test_correction_crash_exact_trace(pg_dsn, kind, after, point, case):
             assert provider.calls == (3 if case in {"completion", "final_tool"} else 2)
             assert record.checkpoint.extension_state["linch.reliability"]["corrections"] == 1
             assert sum(row.event.type == "reliability" for row in rows) == 1
+            assert (
+                sum(
+                    row.event.type == "user" and row.event.subtype == "notification" for row in rows
+                )
+                == 1
+            )
+            assert sum(
+                row.event.type == "assistant"
+                and "The provider response was rejected" in str(row.event.message)
+                for row in rows
+            ) == (case == "text")
             assert (
                 sum(
                     row.event.type == "model_call" and row.event.record_kind == "receipt"
@@ -275,3 +289,49 @@ async def test_resumed_batch_cannot_unlock_its_own_prerequisite(crash, parallel)
     assert (await runs.load_run(run_id)).checkpoint.extension_state["linch.reliability"][
         "succeeded"
     ] == ["first"]
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("after", [False, True])
+@pytest.mark.parametrize("hooked", [False, True])
+async def test_literal_diagnostic_resumes_as_ordinary_answer(enabled, after, hooked):
+    from linch import Agent, HookResult, ReliabilityPolicy
+    from linch.evals import ScriptedProvider, TextTurn
+    from linch.loop.turn_stopping import INVALID_RESPONSE_DIAGNOSTIC
+
+    class Host:
+        resume_policy_id = "test.literal-diagnostic"
+        resume_policy_config = {"hooked": hooked}
+
+        def on_after_provider_call(self, ctx):
+            return (
+                HookResult.force_continue("host feedback")
+                if hooked and ctx.turn_index == 0
+                else None
+            )
+
+    sessions, runs = await _stores("memory", "")
+    provider = ScriptedProvider([TextTurn(INVALID_RESPONSE_DIAGNOSTIC), TextTurn("done")])
+
+    def agent(store):
+        return Agent(
+            model="test",
+            provider=provider,
+            session_store=sessions,
+            run_store=store,
+            hooks=[Host()],
+            reliability=ReliabilityPolicy() if enabled else None,
+        )
+
+    session = await agent(CorrectionWrites(runs, "assistant", after)).session()
+    run_id = ""
+    with pytest.raises(_ProcessDeath):
+        async for event in session.run("go"):
+            if event.type == "system":
+                run_id = event.run_id
+    resumed = await agent(runs).session(id=session.id)
+    events = [event async for event in resumed.resume(run_id)]
+    assert events[-1].subtype == "success"
+    assert events[-1].final_text == ("done" if hooked else INVALID_RESPONSE_DIAGNOSTIC)
+    assert provider._index == (2 if hooked else 1)
+    assert not any(row.event.type == "reliability" for row in await runs.load_events(run_id))

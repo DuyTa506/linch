@@ -1328,7 +1328,8 @@ async def _run_serial_batch(
                 yield progress
             outcome = running.task.result()
             eligible = (
-                not call.is_immediate_error
+                on_foreground_result is not None
+                and not call.is_immediate_error
                 and call.id not in middleware_errors
                 and decision.decision == "allow"
                 and not input.get("run_in_background")
@@ -1435,7 +1436,8 @@ async def _run_parallel_batch(
             outcome = execution.task.result()
             input = _effective_input(call, decision)
             eligible = (
-                not call.is_immediate_error
+                on_foreground_result is not None
+                and not call.is_immediate_error
                 and call.id not in middleware_errors
                 and decision.decision == "allow"
                 and not input.get("run_in_background")
