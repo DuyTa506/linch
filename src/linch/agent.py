@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import platform
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -67,6 +67,35 @@ class _PermissionConfig:
 class _RuntimeLimits:
     max_tool_concurrency: int
     tool_timeout_ms: float | None
+
+
+class _AskUserPlugin:
+    name = "ask_user"
+    version = "1"
+    provides: Iterable[str] = ()
+    requires: Iterable[str] = ("agent",)
+
+    def setup(self, ctx: Context, config: Any = None) -> Disposable:
+        from .tools.ask_user import AskUserTool
+
+        return ctx.agent.tools.replace(AskUserTool(config))
+
+
+class _BuiltinPlugins:
+    __slots__ = ()
+
+    @property
+    def mailbox(self) -> Plugin:
+        from .coordination.mailbox import MailboxPlugin
+
+        return MailboxPlugin()
+
+    @property
+    def ask_user(self) -> Plugin:
+        return _AskUserPlugin()
+
+
+plugins = _BuiltinPlugins()
 
 
 def _resolve_system_prompt(
@@ -420,7 +449,6 @@ class Agent:
         loop_guard: Any = _UNSET,
         filesystem: Any = None,
         result_offload: Any = _DEFAULT_OFFLOAD,
-        mailbox: Any = None,
         hooks: Any = None,
         read_before_write: Any = False,
         tool_cache: Any = None,
@@ -433,7 +461,6 @@ class Agent:
         execution_backend: ExecutionBackend | None = None,
         context: Context | None = None,
         tool_pipeline: ToolPipeline | None = None,
-        ask_user: Any = None,
         reliability: ReliabilityPolicy | None = _DEFAULT_RELIABILITY_POLICY,
     ) -> None:
         system_prompt = _resolve_system_prompt(system_prompt, system_prompt_config)
@@ -537,10 +564,6 @@ class Agent:
 
             if self.tools.get("Bash") is not None:
                 self.tools.replace(BashTool(execution=self.execution_backend))
-        if ask_user is not None:
-            from .tools.ask_user import AskUserTool
-
-            self.tools.replace(AskUserTool(ask_user))
         self.permission_engine = PermissionEngine(
             mode=permissions_config.mode,
             rules=permissions_config.rules,
@@ -620,7 +643,6 @@ class Agent:
         if self.reliability is not None and self.reliability.prerequisites:
             self.context.effect(lambda: PrerequisiteHook(self).install(self))
         self._configure_filesystem(filesystem, result_offload)
-        self._configure_mailbox(mailbox)
         self.context.register("tool_pipeline", self.tool_pipeline)
         if self.execution_backend is not None:
             self.context.register("execution", self.execution_backend)
@@ -663,13 +685,16 @@ class Agent:
     def on_turn_stopping(self, listener: TurnStoppingListener) -> Disposable:
         return self.context.effect(lambda: self._turn_stopping_dispatcher.register(listener))
 
+    @property
+    def mailbox(self) -> Any:
+        return self.context.get("mailbox")
+
     async def use(self, plugin: Plugin, config: Any = None) -> Disposable:
-        """Mount a duck-typed plugin into this agent's Context."""
         if self._lifecycle_state != _OPEN:
             raise RuntimeError("agent is closed")
-        from .kernel.plugins import mount_plugin
+        from .kernel.plugins import _PluginMount
 
-        return await mount_plugin(self.context, plugin, config)
+        return await _PluginMount(self.context, plugin, config).start()
 
     def _set_subagent_tool_registry(self, registry: ToolRegistry) -> None:
         """Install a worker-only tool catalog without changing parent tools.
@@ -677,8 +702,8 @@ class Agent:
         This private seam is used by coordinator mode.  The caller-supplied
         registry is copied so later parent registration (Subagent,
         SubagentContinue, TaskStop) cannot leak orchestration tools into child
-        sessions.  Tools configured by ``Agent.__init__`` — virtual filesystem,
-        mailbox, schedule, AskUser, and similar additions — are merged into the
+        sessions.  Tools configured by ``Agent.__init__`` and mounted plugins
+        are merged into the
         worker catalog before the first child can run.
         """
 
@@ -762,28 +787,6 @@ class Agent:
                 self.tools.register(t)
             except Exception:
                 pass  # already registered (e.g. caller added them manually)
-        self._refresh_system_blocks()
-
-    def _configure_mailbox(self, mailbox: Any) -> None:
-        """Register the peer-messaging tool when a mailbox is provided.
-
-        Opt-in: with ``mailbox=None`` no tool is added and no drain runs, so the
-        loop stays byte-identical. Workers share this same ``Agent`` object, so
-        ``self.mailbox`` is reachable from every session in the agent tree.
-        """
-        self.mailbox: Any = mailbox
-        if mailbox is None:
-            return
-
-        from .coordination.send_message import SendMessageTool
-
-        get_session = lambda sid: self._sessions.get(sid)  # noqa: E731
-        try:
-            self.tools.register(
-                cast("Tool", SendMessageTool(mailbox=mailbox, get_session=get_session))
-            )
-        except ConfigError:
-            pass  # already registered (e.g. caller added it manually)
         self._refresh_system_blocks()
 
     def _filesystem_active(self) -> bool:

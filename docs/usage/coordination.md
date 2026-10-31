@@ -26,14 +26,15 @@ isolation backend, a Redis mailbox), see [Extending](./extending.md).
 
 The core subagent model is parent→child: a worker runs once and returns a
 conclusion. `linch.coordination.mailbox` adds the other half — **peers that address
-each other** and exchange messages across turns. Opt in with `Agent(mailbox=...)`
-and the `send_message` tool registers:
+each other** and exchange messages across turns. Opt in with the built-in plugin
+catalog and the `send_message` tool registers:
 
 ```python
-from linch import Agent, InMemoryMailbox
+from linch import Agent, InMemoryMailbox, plugins
 
 box = InMemoryMailbox()
-agent = Agent(model="gpt-5", mailbox=box)   # registers send_message
+agent = Agent(model="gpt-5")
+await agent.use(plugins.mailbox, box)   # registers send_message and inbox
 ```
 
 Two mechanisms:
@@ -77,6 +78,11 @@ Host adapters supporting durable inbox mode use the optional `ClaimableMailbox` 
 of destructive drain: claim → enqueue by `mailbox:<message-id>` → acknowledge.
 A crash before enqueue permits reclaim; a crash after enqueue is deduplicated by
 the session inbox receipt. Legacy `send()`/`drain()` behavior remains unchanged.
+
+The generic Context inbox seam distinguishes uncommitted `Message` values from
+already history-committed `Event` values. Register producers on the agent's
+context through a plugin-owned `ctx.inbox(...)`; the loop consumes them in
+registration order at the same next-turn boundary as notifications.
 
 **When to reach for it:** long-lived teammates that negotiate (plan approval,
 graceful shutdown) or self-organize. For one-shot delegation, plain

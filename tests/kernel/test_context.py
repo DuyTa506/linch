@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import gc
+import weakref
 
 import pytest
 
@@ -165,6 +167,44 @@ async def test_context_hides_services_while_disposal_is_running() -> None:
     assert ctx.get("svc") is None
     release.set()
     await disposing
+
+
+@pytest.mark.asyncio
+async def test_context_inbox_registrations_are_ordered_and_reversible() -> None:
+    ctx = Context()
+
+    async def first(_session: object, _run_id: str):
+        if False:
+            yield None
+
+    async def second(_session: object, _run_id: str):
+        if False:
+            yield None
+
+    first_handle = ctx.inbox(first)
+    _second_handle = ctx.inbox(second)
+    assert [producer for _token, producer in ctx._inbox or []] == [first, second]
+
+    await first_handle.dispose()
+    await first_handle.dispose()
+    assert [producer for _token, producer in ctx._inbox or []] == [second]
+
+    await ctx.dispose()
+    assert ctx._inbox == []
+
+
+@pytest.mark.asyncio
+async def test_disposed_child_context_is_released_before_parent_disposal() -> None:
+    parent = Context()
+    child = parent.scope("temporary")
+    reference = weakref.ref(child)
+
+    await child.dispose()
+    del child
+    gc.collect()
+
+    assert reference() is None
+    await parent.dispose()
 
 
 @pytest.mark.asyncio

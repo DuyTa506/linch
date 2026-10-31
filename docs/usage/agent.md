@@ -87,11 +87,32 @@ workers, flushes stores, and closes hooks that expose `close`/`aclose`.
 
 Each Agent also owns one per-agent `Context` scope. It contains the agent's
 service registrations, event bus, tool pipeline, and effective execution world;
-it is not process-global state. Pass `context=` to supply a scope to the Agent;
-the Agent disposes that supplied scope on close. If a host needs to retain a
-parent scope, pass a child from `parent.scope(...)`. Closing the agent disposes
-the scope after quiescing active work. Disposal is retryable: if a custom
+it is not process-global state. Pass `context=` to supply a parent scope; the
+Agent creates and owns a child scope, leaving the supplied context alive. If a
+host needs to retain a parent scope, pass a child from `parent.scope(...)`.
+Closing the agent disposes its child scope after quiescing active work. Disposal
+is retryable: if a custom
 teardown fails, a later `await agent.close()` retries only unfinished cleanup.
+
+### Optional plugins
+
+Plugins are mounted asynchronously and can be dormant while their required
+services are absent. Setup is synchronous and returns a `Disposable`; removal
+awaits cleanup and a later service registration eventually activates a fresh
+scope (registration emits synchronously, reconciliation is async):
+
+```python
+from linch import Agent, plugins
+
+agent = Agent(model="gpt-5")
+mount = await agent.use(plugins.ask_user, ask_user_handler)
+await mount.dispose()  # idempotently removes the tool
+```
+
+The built-in catalog is immutable and stateless. Mailbox coordination uses the
+same API: `await agent.use(plugins.mailbox, mailbox)`. Plugin-provided services
+are published only after setup passes the `provides` audit, and failed cleanup
+remains retryable through the returned handle or `agent.close()`.
 
 ### Releasing a single session
 

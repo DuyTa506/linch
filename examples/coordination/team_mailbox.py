@@ -7,7 +7,8 @@ Run:
 The core SDK gives you parent→child subagents (a worker runs once and returns a
 conclusion). The *coordination* mailbox (``linch.coordination.mailbox``) adds the
 other half: peers that address each other directly and exchange messages across turns —
-the substrate under any multi-agent *team*. Opt in with ``Agent(mailbox=...)``; with
+the substrate under any multi-agent *team*. Opt in with
+``await agent.use(plugins.mailbox, box)``; with
 no mailbox the ``send_message`` tool is absent and no inbox drain runs (byte-identical).
 
 Two mechanisms, shown end to end:
@@ -30,7 +31,7 @@ import asyncio
 import os
 from typing import Any
 
-from linch import Agent, Correlator, InMemoryMailbox, MailboxMessage, empty_tools
+from linch import Agent, Correlator, InMemoryMailbox, MailboxMessage, empty_tools, plugins
 from linch.config import FeatureFlags, SystemPromptConfig
 from linch.sessions import InMemorySessionStore
 
@@ -38,7 +39,9 @@ LEAD_SYSTEM = "You are the team lead. Delegate work to teammates with the send_m
 WORKER_SYSTEM = "You are a teammate. You receive assignments as <peer-message> and act on them."
 
 
-def build_team(*, provider: Any = None, model: str | None = None) -> tuple[Agent, InMemoryMailbox]:
+async def build_team(
+    *, provider: Any = None, model: str | None = None
+) -> tuple[Agent, InMemoryMailbox]:
     """Build one agent backed by a shared in-process mailbox.
 
     Lead and worker are two *sessions* of the same agent, each given a distinct
@@ -55,15 +58,14 @@ def build_team(*, provider: Any = None, model: str | None = None) -> tuple[Agent
         model=model or "team-demo",
         # Only send_message is needed; empty_tools() drops the default
         # Bash/Write/Edit/Read (no shell/file access on the real cwd).
-        # mailbox= then auto-registers the send_message tool.
         tools=empty_tools(),
-        mailbox=box,
         system_prompt_config=SystemPromptConfig(replace_defaults=True, append=LEAD_SYSTEM),
         features=FeatureFlags(skills=False, subagents=False, mcp=False),
         session_store=InMemorySessionStore(),
         permissions={"mode": "skip-dangerous"},
         **kwargs,
     )
+    await agent.use(plugins.mailbox, box)
     return agent, box
 
 
@@ -116,7 +118,7 @@ async def main() -> None:
     provider = OpenAIChatCompletionsProvider(
         OpenAIChatProviderOptions(api_key=api_key, base_url=base_url)
     )
-    agent, box = build_team(provider=provider, model="gpt-4o-mini")
+    agent, box = await build_team(provider=provider, model="gpt-4o-mini")
 
     lead = await agent.session()
     lead.mailbox_address = "lead"
