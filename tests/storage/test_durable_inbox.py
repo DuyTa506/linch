@@ -104,6 +104,66 @@ async def test_commit_returns_non_inbox_messages_newer_than_cursor(inbox_store) 
     assert [row.message.content[0].text for row in rows] == ["direct"]  # type: ignore[union-attr]
 
 
+@pytest.mark.parametrize(
+    ("payload", "error"),
+    [
+        ("{", ValueError),
+        ("[]", ConfigError),
+        ('{"role":"user","content":[{"type":"unknown"}]}', ValueError),
+    ],
+)
+@pytest.mark.parametrize("after_seq", [0, 100])
+async def test_inbox_decode_failure_leaves_batch_pending(
+    inbox_store, payload, error, after_seq
+) -> None:
+    store = inbox_store
+    session = await store.create()
+    await store.enqueue_inbox(session.id, InboxDelivery("first", _message("first")))
+    await store.enqueue_inbox(session.id, InboxDelivery("second", _message("second")))
+    if isinstance(store, InMemorySessionStore):
+        store._inbox[session.id]["second"].message_json = payload
+    else:
+        pool = await store._ensure()
+        await pool.execute(
+            "UPDATE session_inbox SET message = $1 WHERE session_id = $2 AND delivery_id = $3",
+            payload,
+            session.id,
+            "second",
+        )
+
+    with pytest.raises(error):
+        await store.commit_inbox(session.id, after_seq=after_seq)
+
+    if isinstance(store, InMemorySessionStore):
+        message_count = len(store._messages[session.id])
+        pending_count = sum(row.message_seq is None for row in store._inbox[session.id].values())
+    else:
+        message_count = await pool.fetchval(
+            "SELECT count(*) FROM messages WHERE session_id = $1", session.id
+        )
+        pending_count = await pool.fetchval(
+            "SELECT count(*) FROM session_inbox WHERE session_id = $1 AND message_seq IS NULL",
+            session.id,
+        )
+    assert (message_count, pending_count) == (0, 2)
+
+
+@pytest.mark.parametrize("replay", [False, True])
+async def test_inbox_results_are_detached(inbox_store, replay) -> None:
+    store = inbox_store
+    session = await store.create()
+    await store.enqueue_inbox(session.id, InboxDelivery("first", _message("before")))
+    if replay:
+        await store.commit_inbox(session.id, after_seq=0)
+    rows = await store.commit_inbox(session.id, after_seq=0)
+    rows[0].seq = 99
+    rows[0].message.content[0].text = "caller mutation"
+    reloaded = await store.load_messages(session.id)
+    assert reloaded[0].seq == 1
+    assert reloaded[0].message == _message("before")
+    assert (await store.commit_inbox(session.id, after_seq=0))[0].message == _message("before")
+
+
 async def test_store_inbox_unknown_session_and_cursor_validation(inbox_store) -> None:
     store = inbox_store
     with pytest.raises(KeyError):

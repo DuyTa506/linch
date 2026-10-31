@@ -146,6 +146,41 @@ async def test_run_store_event_sequence_is_monotonic_under_concurrent_appends(
     assert await store.append_event(other_run_id, _event("independent")) == 1
 
 
+async def test_event_batch_encoding_failure_is_atomic(store_case) -> None:
+    store = store_case.store
+    run_id = f"batch-encoding-{uuid4()}"
+    await store.create_run("session", id=run_id)
+    await store.append_event(run_id, _event("before"))
+    before = await store.load_events(run_id)
+    with pytest.raises(ValueError):
+        await store.append_events(run_id, [_event("valid prefix"), object()])
+    assert await store.load_events(run_id) == before
+    assert await store.append_event(run_id, _event("after")) == 2
+
+
+@pytest.mark.parametrize("staleness", ["epoch", "owner"])
+async def test_stale_release_preserves_current_local_lease(store_case, staleness) -> None:
+    from dataclasses import replace
+
+    from linch.run_store import LeaseLostError
+
+    store = store_case.store
+    run_id = f"stale-release-{uuid4()}"
+    await store.create_run("session", id=run_id)
+    old = await store.claim(run_id, "owner", 30.0)
+    if staleness == "epoch":
+        await store.release(old)
+        current = await store.claim(run_id, "owner", 30.0)
+    else:
+        current = old
+        old = replace(old, owner="other-owner")
+    with pytest.raises(LeaseLostError):
+        await store.release(old)
+    assert await store.renew(current) is not None
+    assert await store.append_event(run_id, _event("current owner")) == 1
+    await store.release(current)
+
+
 async def test_run_store_concurrent_claim_has_one_winner(store_case: _StoreCase) -> None:
     import asyncio
 
