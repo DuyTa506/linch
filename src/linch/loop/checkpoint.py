@@ -8,7 +8,6 @@ from copy import deepcopy
 from html import escape
 from typing import Any
 
-from .._telemetry import store_call
 from .._wire import WIRE_VERSION, require_wire_version
 from ..errors import ConfigError
 from ..events import (
@@ -19,7 +18,7 @@ from ..events import (
     UsageEvent,
 )
 from ..model_calls import _context_fingerprint, _model_call_fingerprint
-from ..run_store import RunCheckpoint, _require_tool_recovery_cursor
+from ..run_store import RunCheckpoint, _require_tool_recovery_cursor, durable_call
 from ..session import Session
 from ..types import (
     Message,
@@ -223,7 +222,7 @@ class RunEventBuffer:
                     self.run_id, checkpoint, pending, status=status
                 )
             )
-            _, seqs = await store_call(self.session, f"run.{operation}", write)
+            _, seqs = await durable_call(self.session, f"run.{operation}", write)
         except BaseException:
             self._pending = pending + self._pending
             self._atomic_write_failed = True
@@ -240,7 +239,7 @@ class RunEventBuffer:
         appender = getattr(self.store, "append_events", None)
         if appender is not None:
             try:
-                seqs = await store_call(
+                seqs = await durable_call(
                     self.session, "run.append_events", appender(self.run_id, pending)
                 )
             except BaseException:
@@ -250,7 +249,7 @@ class RunEventBuffer:
             seqs = []
             for index, event in enumerate(pending):
                 try:
-                    seq = await store_call(
+                    seq = await durable_call(
                         self.session,
                         "run.append_event",
                         self.store.append_event(self.run_id, event),
@@ -274,7 +273,7 @@ async def _persist_event(session: Session, run_id: str, event: Event) -> None:
         return
     store = session.agent.run_store
     if store is not None:
-        await store_call(session, "run.append_event", store.append_event(run_id, event))
+        await durable_call(session, "run.append_event", store.append_event(run_id, event))
 
 
 async def _flush_events(session: Session) -> None:
@@ -558,7 +557,7 @@ async def _recover_completed_tool_results(
     recovered = dict(completed)
     started: dict[str, ToolCallStartEvent] = {}
     ended: set[str] = set()
-    for stored in await store_call(
+    for stored in await durable_call(
         session, "run.load_events", store.load_events(run_id, after_seq=after_seq)
     ):
         event = stored.event

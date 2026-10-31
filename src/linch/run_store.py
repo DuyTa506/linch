@@ -5,17 +5,18 @@ import hashlib
 import json
 import math
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, Protocol, cast
+from typing import Any, Literal, Protocol, TypeVar, cast
 from uuid import UUID, uuid4
 
 from ._json import walk_json
+from ._telemetry import store_call
 from ._wire import WIRE_VERSION, require_wire_version
 from .events import (
     IGNORABLE_MAX_DEPTH,
@@ -191,6 +192,36 @@ def _is_transient_store_error(error: BaseException) -> bool:
             return True
         current = current.__cause__
     return False
+
+
+_T = TypeVar("_T")
+
+
+async def durable_call(session: Any, op: str, awaitable: Awaitable[_T]) -> _T:
+    """Measure a durable operation and preserve active runs on transient failure.
+
+    Args:
+        session: Session whose configured run store and active run govern recovery.
+        op: Measurement label; it does not affect failure classification.
+        awaitable: Durable operation to execute, excluding run creation.
+
+    Returns:
+        The operation's result without modification.
+
+    Raises:
+        _StoreUnavailableError: A transient store failure interrupts an active durable run.
+    """
+    try:
+        return await store_call(session, op, awaitable)
+    except Exception as exc:
+        if (
+            session is not None
+            and getattr(session.agent, "run_store", None) is not None
+            and getattr(session, "active_run_id", None) is not None
+        ):
+            if not isinstance(exc, _StoreUnavailableError) and _is_transient_store_error(exc):
+                raise _StoreUnavailableError(f"transient store failure during {op}") from exc
+        raise
 
 
 class RunLeaseStore(Protocol):
