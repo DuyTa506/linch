@@ -561,15 +561,8 @@ class RunRuntime:
             if policy is not None and (policy.retry_invalid_responses or policy.referenced_tools)
             else None
         )
-        self.tool_callbacks = (
-            dict(
-                before_batch=self.reliability.begin_batch,
-                pre_execute_pipeline=self.reliability.pre_execute_pipeline,
-                on_foreground_result=self.reliability.foreground_result,
-            )
-            if self.reliability is not None and self.reliability.policy.referenced_tools
-            else {}
-        )
+        self.run_registration = None
+        self.replayed_feedback: tuple[Message, ...] = ()
         listeners = list(self.agent._turn_stopping_dispatcher.snapshot())
         if self.reliability is not None:
             listeners.insert(0, self.reliability.listener)
@@ -738,12 +731,10 @@ class RunRuntime:
             runtime.truncation_attempts = resume_checkpoint.truncation_attempts
             runtime.truncation_prefix = resume_checkpoint.truncation_prefix
             runtime.pending_truncation_feedback = resume_checkpoint.pending_truncation_feedback
-            has_reliability = "linch.reliability" in resume_checkpoint.extension_state
-            raw_reliability = resume_checkpoint.extension_state.get("linch.reliability")
-            if has_reliability and (runtime.reliability is None or raw_reliability is None):
-                raise ConfigError("invalid linch.reliability checkpoint state")
-            if runtime.reliability is not None:
-                runtime.reliability.restore(raw_reliability)
+            if "linch.reliability" in resume_checkpoint.extension_state:
+                if runtime.reliability is None:
+                    raise ConfigError("invalid linch.reliability checkpoint state")
+                runtime.reliability.restore(resume_checkpoint.extension_state["linch.reliability"])
             if resume_checkpoint.pending_alignment:
                 session.alignment_queue.extend(
                     alignment_entries_from_checkpoint(resume_checkpoint.pending_alignment)
@@ -819,6 +810,14 @@ class RunRuntime:
             ):
                 raise ConfigError("active primary journal is missing its intent")
         return runtime
+
+    def bind_run(self) -> None:
+        if self.reliability is not None and self.reliability.policy.prerequisites:
+            self.run_registration = self.reliability.bind(self.agent, self.run_id)
+
+    async def unbind_run(self) -> None:
+        if self.run_registration is not None:
+            await self.run_registration.dispose()
 
     async def persist_model_call(self, event: ModelCallEvent) -> None:
         await _persist_event(self.session, self.run_id, event)

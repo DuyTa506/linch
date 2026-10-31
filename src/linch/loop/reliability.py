@@ -4,9 +4,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..events import ReliabilityEvent
+from ..hooks import HookResult
+from ..kernel import Disposable
 from ..reliability import ReliabilityPolicy
-from ..tools.pipeline import ToolExecution, ToolPipeline
-from ..types import Message, TextBlock
+from ..types import Message, TextBlock, ToolResultBlock, ToolUseBlock
 from .turn_stopping import TurnStopping, TurnStoppingDecision
 
 
@@ -15,36 +16,22 @@ class ReliabilityRuntime:
     policy: ReliabilityPolicy
     corrections: int = 0
     succeeded: set[str] = field(default_factory=set)
-    _batch_snapshot: frozenset[str] = frozenset()
-    pre_execute_pipeline: ToolPipeline | None = field(default=None, init=False)
 
-    def __post_init__(self) -> None:
-        if self.policy.prerequisites:
-            self.pre_execute_pipeline = ToolPipeline()
-            self.pre_execute_pipeline.on_pre_execute(self._pre_execute)
+    def bind(self, agent: Any, run_id: str) -> Disposable:
+        runs = agent.context.get("reliability_runs")
+        runs[run_id] = self
+        return Disposable(lambda: runs.pop(run_id) if runs.get(run_id) is self else None)
 
-    def begin_batch(self) -> None:
-        self._batch_snapshot = frozenset(self.succeeded)
-
-    async def _pre_execute(self, execution: ToolExecution, proceed: Any) -> Any:
-        missing = sorted(
-            {
-                name
-                for item in self.policy.prerequisites
-                if item.tool_name == execution.tool_name
-                for name in item.requires_success
-            }
-            - self._batch_snapshot
+    def observe_results(
+        self, blocks: list[ToolUseBlock], results: dict[str, ToolResultBlock]
+    ) -> None:
+        self.succeeded.update(
+            block.name
+            for block in blocks
+            if block.name in self.policy.referenced_tools
+            and not block.input.get("run_in_background")
+            and not results[block.id].is_error
         )
-        return (
-            "Prerequisite not satisfied: " + ", ".join(missing) + ". The tool was not executed."
-            if missing
-            else await proceed()
-        )
-
-    async def foreground_result(self, name: str) -> None:
-        if name in self.policy.referenced_tools:
-            self.succeeded.add(name)
 
     async def listener(self, event: TurnStopping) -> TurnStoppingDecision | None:
         gate = self.policy.completion
@@ -86,8 +73,6 @@ class ReliabilityRuntime:
         )
 
     def restore(self, raw: Any) -> ReliabilityRuntime:
-        if raw is None:
-            return self
         invalid = "invalid linch.reliability checkpoint state"
         if not isinstance(raw, dict) or set(raw) != {"v", "corrections", "succeeded"}:
             raise ValueError(invalid)
@@ -106,3 +91,35 @@ class ReliabilityRuntime:
         self.corrections = raw["corrections"]
         self.succeeded = set(succeeded)
         return self
+
+
+class PrerequisiteHook:
+    def __init__(self, agent: Any) -> None:
+        self.context = agent.context
+        self.runs: dict[str, ReliabilityRuntime] = {}
+        agent.context.register("reliability_runs", self.runs)
+
+    def on_pre_tool_use(self, ctx: Any) -> HookResult | None:
+        runtime = self.runs.get(ctx.run_id)
+        if runtime is None or ctx.session.agent.context is not self.context:
+            return None
+        missing = sorted(
+            {
+                name
+                for item in runtime.policy.prerequisites
+                if item.tool_name == ctx.tool_name
+                for name in item.requires_success
+            }
+            - runtime.succeeded
+        )
+        return (
+            HookResult.block(
+                "Prerequisite not satisfied: " + ", ".join(missing) + ". The tool was not executed."
+            )
+            if missing
+            else None
+        )
+
+    def install(self, agent: Any) -> Disposable:
+        agent.hooks.insert(0, self)
+        return Disposable(lambda: agent.hooks.remove(self) if self in agent.hooks else None)

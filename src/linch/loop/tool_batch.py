@@ -63,9 +63,7 @@ class ToolBatchContext:
     persist_event: Callable[[Event], Awaitable[None]]
     dispatch_lifecycle: Callable[..., Awaitable[None]]
     emit_error_terminal: Callable[..., AsyncIterator[Event]]
-    pre_execute_pipeline: Any = None
-    on_foreground_result: Callable[[str], Awaitable[None]] | None = None
-    before_batch: Callable[[], None] | None = None
+    observe_results: Callable[[list[ToolUseBlock], dict[str, ToolResultBlock]], None] | None = None
     force_final_pending: bool = False
     terminal: bool = False
 
@@ -103,9 +101,6 @@ async def run_tool_batch(ctx: ToolBatchContext) -> AsyncIterator[Event]:
             completed_tool_results=completed_tool_results,
         )
 
-    if ctx.before_batch is not None:
-        ctx.before_batch()
-
     async def checkpoint_tool_executing() -> None:
         """Persist the resolved permission decisions before any tool starts."""
         await ctx.save_checkpoint(
@@ -124,19 +119,13 @@ async def run_tool_batch(ctx: ToolBatchContext) -> AsyncIterator[Event]:
         ctx.signal,
         turn_index=ctx.turn_index,
         on_permissions_resolved=checkpoint_tool_executing,
-        pre_execute_pipeline=ctx.pre_execute_pipeline,
-        on_foreground_result=ctx.on_foreground_result,
     ):
         # Progress is intentionally transient.  Recovery-critical start/end
         # events are persisted and flushed before crossing the yield boundary.
         if not isinstance(event, ToolProgressEvent):
             await ctx.persist_event(event)
         if isinstance(event, (ToolCallStartEvent, ToolCallEndEvent)):
-            if isinstance(event, ToolCallEndEvent) and ctx.on_foreground_result is not None:
-                completed_tool_results[event.tool_use_id] = _tool_result_block_from_end(event)
-                await checkpoint_tool_executing()
-            else:
-                await ctx.flush_events()
+            await ctx.flush_events()
         if isinstance(event, PermissionRequestEvent):
             await ctx.save_checkpoint(
                 "permission_pending",
@@ -202,6 +191,8 @@ async def run_tool_batch(ctx: ToolBatchContext) -> AsyncIterator[Event]:
     if not already_appended:
         await store_call(session, "session.append", session.append([result_message]))
 
+    if ctx.observe_results is not None:
+        ctx.observe_results(tool_blocks, completed_tool_results)
     await ctx.save_checkpoint(
         "tool_results_appended",
         turn_index=ctx.turn_index,
