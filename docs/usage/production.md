@@ -153,7 +153,6 @@ per worker for LISTEN and enough additional connections for queries and runs.
 
 ```python
 from linch import Agent, empty_tools
-from linch.sessions.postgres import PostgresSessionStore
 from linch.worker import Worker, WorkerJob, enqueue_run, install
 
 await install(pool)  # once at process startup; serializes concurrent installers
@@ -164,7 +163,7 @@ async def agent_factory(job: WorkerJob) -> Agent:
     provider = await provider_for_tenant(job.run.meta["tenant_id"])
     return Agent(
         model="your-model", provider=provider, tools=empty_tools(),
-        session_store=PostgresSessionStore("", pool=job.pool),
+        session_store=job.session_store,
         run_store=job.run_store,
     )
 
@@ -175,11 +174,19 @@ await worker.run()
 
 The factory is async and returns a **fresh agent per job**. The host chooses the
 tenant, provider, tools, policy and dependencies; reuse exactly `job.run_store`
-so every write carries the claimed fencing epoch. Use `job.pool` for job-scoped
-stores: it borrows the shared pool, so the worker can close the agent and stores
-after the run without closing the host's pool. The host closes its real pool
-after workers have drained. Serialize different runs targeting the same session
-at the API boundary; the run lease does not serialize distinct runs in one session.
+and `job.session_store`. The worker owns these adapters for its whole lifetime,
+verifies their schemas before dequeueing, and supplies the same borrowed `job.pool`
+to every factory. Per-job adapters add churn; unverified per-job pool handles
+also repeat schema initialization and advisory locking. Agent teardown preserves
+these shared adapters and leaves the host pool open. The host closes its real
+pool after workers have drained.
+
+The borrowed pool caches successful schema verification for its fixed database
+and search path. Additional stores on `job.pool` reuse that verification without
+schema SQL. Keep its database, role, and search path stable; after changing them
+or changing a schema, create a new pool/worker to verify again. Serialize different
+runs targeting the same session at the API boundary; the run lease does not
+serialize distinct runs in one session.
 
 `enqueue_run` creates a `pending` run and its job in one transaction with
 `dedupe_key="run:<run_id>"`. A caller-supplied run ID makes repeated submissions

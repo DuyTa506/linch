@@ -117,7 +117,6 @@ CREATE TRIGGER load_write AFTER INSERT ON run_events FOR EACH ROW EXECUTE FUNCTI
 
 async def child(a: argparse.Namespace) -> None:
     from linch import Agent, PostgresRunStore
-    from linch.sessions.postgres import PostgresSessionStore
     from linch.worker import Worker, enqueue_run
 
     pool = await pool_for(a, name=a.identity)
@@ -146,7 +145,7 @@ async def child(a: argparse.Namespace) -> None:
             tools=tools(job.pool, a),
             permissions={"mode": "skip-dangerous"},
             run_store=job.run_store,
-            session_store=PostgresSessionStore("", pool=job.pool),
+            session_store=job.session_store,
         )
 
     worker = None

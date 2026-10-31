@@ -569,9 +569,13 @@ class PostgresRunStore:
             if row is None:
                 raise LeaseLostError(f"lease lost for run {lease.run_id}")
         finally:
-            self._held_leases.pop(lease.run_id, None)
-            self._lease_owners.pop(lease.run_id, None)
-            self._lease_ttls.pop(lease.run_id, None)
+            if (
+                self._held_leases.get(lease.run_id) == lease.epoch
+                and self._lease_owners.get(lease.run_id) == lease.owner
+            ):
+                self._held_leases.pop(lease.run_id, None)
+                self._lease_owners.pop(lease.run_id, None)
+                self._lease_ttls.pop(lease.run_id, None)
 
     async def save(
         self,

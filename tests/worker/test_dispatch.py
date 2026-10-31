@@ -49,12 +49,11 @@ async def running(*workers):
 def make_agent(job, provider=None, context=None):
     from linch import Agent, empty_tools
     from linch.evals import ScriptedProvider, TextTurn
-    from linch.sessions.postgres import PostgresSessionStore
 
     return Agent(
         model="m",
         provider=provider or ScriptedProvider([TextTurn("done")]),
-        session_store=PostgresSessionStore("", pool=job.pool),
+        session_store=job.session_store,
         run_store=job.run_store,
         tools=empty_tools(),
         context=context,
