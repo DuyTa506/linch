@@ -28,12 +28,34 @@ from .types import HookResult
 
 
 class ContextInjectionHook:
+    """Adapt a context builder to the hook lifecycle.
+
+    Args:
+        builder: Context builder or builder sequence used for each turn.
+    """
+
     name = "context_builder"
 
     def __init__(self, builder: Any) -> None:
+        """Create an adapter around a context builder.
+
+        Args:
+            builder: Context builder configuration.
+        """
+
         self.builder = normalize_context_builder(builder)
 
     async def build_context(self, session: Any, turn_index: int) -> ContextBuildResult | None:
+        """Build bounded context for a session turn.
+
+        Args:
+            session: Session whose provider context is being assembled.
+            turn_index: Turn number being assembled.
+
+        Returns:
+            Context build result, or ``None`` when no builder is configured.
+        """
+
         if self.builder is None:
             return None
         agent = session.agent
@@ -54,6 +76,12 @@ class ContextInjectionHook:
         )
 
     async def on_agent_stop(self, ctx: AgentStopContext) -> None:
+        """Run the builder's optional terminal cleanup hook.
+
+        Args:
+            ctx: Agent-stop lifecycle context.
+        """
+
         cleanup = getattr(self.builder, "on_agent_stop", None)
         if cleanup is not None:
             result = cleanup(ctx)
@@ -62,12 +90,34 @@ class ContextInjectionHook:
 
 
 class ToolMiddlewareHook:
+    """Adapt tool middleware objects to pre/post tool hooks.
+
+    Args:
+        middleware: Middleware object or sequence to invoke in order.
+    """
+
     name = "tool_middleware"
 
     def __init__(self, middleware: Any) -> None:
+        """Create an adapter around tool middleware.
+
+        Args:
+            middleware: Middleware configuration.
+        """
+
         self.middleware = normalize_middleware(middleware)
 
     async def on_pre_tool_use(self, ctx: PreToolUseContext) -> HookResult | None:
+        """Validate or rewrite tool input before execution.
+
+        Args:
+            ctx: Pre-tool lifecycle context.
+
+        Returns:
+            A hook result when input changes or execution is blocked; otherwise
+            ``None``.
+        """
+
         current = ToolCallMiddlewareInput(
             tool_use_id=ctx.tool_use_id,
             tool_name=ctx.tool_name,
@@ -112,6 +162,19 @@ class ToolMiddlewareHook:
         return None
 
     async def on_post_tool_use(self, ctx: PostToolUseContext) -> HookResult | None:
+        """Validate or rewrite the legacy result after execution.
+
+        Canonical-only ``ctx.tool_output`` values are not processed by this
+        legacy middleware adapter.
+
+        Args:
+            ctx: Post-tool lifecycle context.
+
+        Returns:
+            A hook result when the result changes or middleware fails; otherwise
+            ``None``.
+        """
+
         current = ctx.result
         if current is None:
             return None
@@ -161,9 +224,23 @@ class ToolMiddlewareHook:
 
 
 class FinalAnswerVerifierHook:
+    """Adapt final-answer verifiers to the pre-final-answer hook.
+
+    Args:
+        verifiers: Verifier object or sequence evaluated in order.
+        max_retries: Maximum verification retries allowed per run.
+    """
+
     name = "verifiers"
 
     def __init__(self, verifiers: Any, *, max_retries: int = 2) -> None:
+        """Create a bounded final-answer verifier adapter.
+
+        Args:
+            verifiers: Verifier configuration.
+            max_retries: Maximum retries allowed for each run.
+        """
+
         from ..verification import normalize_verifiers
 
         self.verifiers = normalize_verifiers(verifiers)
@@ -171,6 +248,16 @@ class FinalAnswerVerifierHook:
         self.attempts_by_run: dict[str, int] = {}
 
     async def on_before_final_answer(self, ctx: BeforeFinalAnswerContext) -> HookResult | None:
+        """Evaluate verifiers before returning a candidate answer.
+
+        Args:
+            ctx: Candidate final-answer context.
+
+        Returns:
+            A retry, stop, or exhausted-result hook decision; ``None`` when all
+            verifiers pass.
+        """
+
         if not self.verifiers:
             return None
         from ..events import VerificationEvent
@@ -229,18 +316,46 @@ class FinalAnswerVerifierHook:
         return None
 
     def on_agent_stop(self, ctx: Any) -> None:
+        """Drop retry counters when a run reaches any terminal path.
+
+        Args:
+            ctx: Agent-stop context containing the run identifier.
+        """
+
         # Drop per-run retry state on every terminal path (incl. max_turns,
         # budget, abort, error) so this per-agent hook can't leak run ids.
         self.attempts_by_run.pop(ctx.run_id, None)
 
 
 class StopPredicateHook:
+    """Stop a run when a host predicate returns true.
+
+    Args:
+        predicate: Callable receiving the current session.
+    """
+
     name = "stop_when"
 
     def __init__(self, predicate: Any) -> None:
+        """Create a predicate-backed stop hook.
+
+        Args:
+            predicate: Callable evaluated before each provider call.
+        """
+
         self.predicate = predicate
 
     def on_before_provider_call(self, ctx: BeforeProviderCallContext) -> HookResult | None:
+        """Evaluate the stop predicate before a provider request.
+
+        Args:
+            ctx: Before-provider-call lifecycle context.
+
+        Returns:
+            A successful stop result when the predicate is true; otherwise
+            ``None``.
+        """
+
         try:
             if self.predicate(ctx.session):
                 return HookResult.stop("stop_when", metadata={"subtype": "success"})

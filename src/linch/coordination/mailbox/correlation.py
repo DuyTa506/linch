@@ -22,7 +22,11 @@ class Correlator:
         self._responses: dict[str, MailboxMessage] = {}
 
     def open(self, request_id: str) -> None:
-        """Register an outstanding request awaiting a response."""
+        """Register an outstanding request awaiting a response.
+
+        Args:
+            request_id: Identifier that a response must echo in ``in_reply_to``.
+        """
         if request_id not in self._responses:
             self._pending.setdefault(request_id, None)
 
@@ -32,6 +36,12 @@ class Correlator:
         Returns ``True`` only on the first match for a request; a response with
         no ``in_reply_to``, for an unknown/closed request, or a duplicate
         returns ``False`` (first response wins).
+
+        Args:
+            response: Message whose ``in_reply_to`` identifies the request.
+
+        Returns:
+            Whether this response resolved an open request for the first time.
         """
         request_id = response.in_reply_to
         if request_id is None or request_id not in self._pending:
@@ -41,11 +51,31 @@ class Correlator:
         return True
 
     def is_resolved(self, request_id: str) -> bool:
+        """Return whether the first matching response has been recorded.
+
+        Args:
+            request_id: Request identifier to inspect.
+
+        Returns:
+            ``True`` after :meth:`resolve` accepts a response for this request.
+        """
         return request_id in self._responses
 
     def response(self, request_id: str) -> MailboxMessage | None:
+        """Return the first response recorded for a request, if any.
+
+        Args:
+            request_id: Request identifier to inspect.
+
+        Returns:
+            The accepted response message, or ``None`` while unresolved.
+        """
         return self._responses.get(request_id)
 
     def pending(self) -> list[str]:
-        """Request ids still awaiting a response, in registration order."""
+        """Return request ids still awaiting a response in registration order.
+
+        Returns:
+            Pending request identifiers in the order they were opened.
+        """
         return list(self._pending)

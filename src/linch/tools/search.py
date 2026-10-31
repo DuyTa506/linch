@@ -37,6 +37,15 @@ class ToolSearchPlugin:
     requires: Iterable[str] = ("agent",)
 
     def __init__(self, max_tools: int = 30, max_skills: int = 50) -> None:
+        """Create a discovery plugin with catalog-size thresholds.
+
+        Args:
+            max_tools: Largest offered tool count that keeps all schemas inline.
+            max_skills: Largest model-invokable skill count that keeps the full listing.
+
+        Raises:
+            ValueError: If a threshold is not a non-negative integer.
+        """
         for value in (max_tools, max_skills):
             if type(value) is not int or value < 0:
                 raise ValueError("tool search thresholds must be non-negative integers")
@@ -107,7 +116,8 @@ class _SearchCatalog:
             registry: Tools admitted by context selection and skill restrictions.
 
         Returns:
-            The inline tools plus discovery when either threshold is exceeded.
+            Tools admitted by the supplied request, optionally including the
+            discovery tool and tracking deferred names.
         """
         if not self.active:
             session._extensions.pop(_KEY, None)
@@ -243,6 +253,15 @@ class _SearchTool:
         return {"query": query.strip()}
 
     def summarize(self, input: dict[str, Any]) -> str:
+        """Summarize a deferred-catalog search.
+
+        Args:
+            input: Validated search request.
+
+        Returns:
+            Human-readable search summary.
+        """
+
         return f"tool_search({input['query']})"
 
     async def execute(self, input: dict[str, Any], ctx: ToolContext) -> ToolResult:

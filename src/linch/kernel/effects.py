@@ -28,20 +28,39 @@ class Disposable:
     shielded teardown attempt. Successful cleanup is final; failed cleanup is
     reported to every waiter and can be retried. This is what every ``register``/
     ``on``/``effect`` hands back so a contribution can be reversed.
+
+    Args:
+        fn: Optional synchronous or asynchronous cleanup callback.
     """
 
     __slots__ = ("_fn", "_disposed", "_task")
 
     def __init__(self, fn: DisposerFn | None = None) -> None:
+        """Create a teardown handle around an optional cleanup callback.
+
+        Args:
+            fn: Synchronous or asynchronous callback run when disposal begins.
+        """
         self._fn = fn
         self._disposed = False
         self._task: asyncio.Task[None] | None = None
 
     @property
     def disposed(self) -> bool:
+        """Whether cleanup has completed successfully.
+
+        Returns:
+            ``True`` after the cleanup callback returns successfully.
+        """
         return self._disposed
 
     async def dispose(self) -> None:
+        """Run cleanup once, coalescing concurrent callers and preserving failures.
+
+        Raises:
+            BaseException: The cleanup failure from the current attempt; a failed
+                handle remains retryable.
+        """
         if self._disposed:
             return
 
@@ -74,6 +93,11 @@ class Disposable:
             self._fn = None  # let captured state be collected after success
 
     def __call__(self) -> Awaitable[None]:
+        """Return the awaitable for :meth:`dispose`.
+
+        Returns:
+            Awaitable that completes when cleanup succeeds or raises its failure.
+        """
         return self.dispose()
 
 

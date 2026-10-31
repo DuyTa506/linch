@@ -19,6 +19,11 @@ class Context:
 
     Child contexts share the event bus but keep service registrations isolated;
     lookups fall back to parent contexts.
+
+    Args:
+        label: Human-readable scope label.
+        _bus: Internal event bus reused by a parent or isolated child.
+        _parent: Internal parent whose services are visible as fallbacks.
     """
 
     def __init__(

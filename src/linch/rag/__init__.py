@@ -19,6 +19,20 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True, slots=True)
 class RetrievedChunk:
+    """Represent one sourced chunk returned by a RAG connector.
+
+    Args:
+        id: Stable identifier used in grounding citations.
+        source: Human-readable source locator or title.
+        text: Retrieved text supplied to the model.
+        score: Connector relevance score.
+        metadata: Connector-defined JSON-compatible metadata.
+
+    Attributes:
+        id: Must be non-empty and exclude ``]``, carriage returns, and newlines
+            when registered with Linch so citation markers remain parseable.
+    """
+
     id: str
     source: str
     text: str
@@ -27,9 +41,20 @@ class RetrievedChunk:
 
 
 class RagConnector(Protocol):
-    async def retrieve(
-        self, query: str, *, k: int, principal: Any = None
-    ) -> list[RetrievedChunk]: ...
+    """Define async retrieval of sourced chunks for one request."""
+
+    async def retrieve(self, query: str, *, k: int, principal: Any = None) -> list[RetrievedChunk]:
+        """Retrieve at most ``k`` chunks for a query and principal.
+
+        Args:
+            query: User prompt or rewritten retrieval query.
+            k: Maximum number of chunks to return.
+            principal: Run identity used to scope retrieval, when supplied.
+
+        Returns:
+            Retrieved chunks with stable ids, sources, text, scores, and metadata.
+        """
+        ...
 
 
 class _Retrieval(ContextInjectionHook):
@@ -113,7 +138,20 @@ def _install(agent: Agent, hook: Any, service: Disposable) -> Disposable:
 def register_rag_connector(
     agent: Agent, connector: RagConnector, *, k: int = 5, principal: Any = None
 ) -> Disposable:
-    """Install one request-scoped connector; principal is passed through unchanged."""
+    """Install one request-scoped connector for the agent.
+
+    Args:
+        agent: Agent whose context and hooks receive the connector.
+        connector: Host implementation of the retrieval protocol.
+        k: Positive maximum number of chunks requested per turn.
+        principal: Run identity passed through to ``connector.retrieve``.
+
+    Returns:
+        A disposer that removes the connector hook and context service.
+
+    Raises:
+        ValueError: If ``k`` is not a positive integer.
+    """
     if type(k) is not int or k <= 0:
         raise ValueError("k must be a positive int")
     hook = _Retrieval(agent, connector, k, principal)
@@ -189,7 +227,15 @@ def _strings(value: Any) -> list[str]:
 
 
 def register_grounding_check(agent: Agent, *, required: bool = True) -> Disposable:
-    """Require citations to the latest retrieved ids, with a separate per-run correction bound."""
+    """Install a check that enforces citations when grounding is required.
+
+    Args:
+        agent: Agent whose turn-stopping dispatcher receives the check.
+        required: Whether to enforce a citation from the latest retrieved ids.
+
+    Returns:
+        A disposer that removes the grounding listener and context service.
+    """
     hook = _Grounding(agent, required)
     service = agent.context.register("rag_grounding", hook)
     listener = agent.on_turn_stopping(hook)

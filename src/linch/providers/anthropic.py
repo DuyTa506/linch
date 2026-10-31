@@ -56,6 +56,22 @@ AnthropicAPIMode = Literal["auto", "native", "compatible"]
 
 @dataclass(slots=True)
 class AnthropicProviderOptions:
+    """Configure the Anthropic Messages adapter.
+
+    Args:
+        api_key: Optional credential passed to the Anthropic client.
+        base_url: Optional endpoint override for a proxy or compatible service.
+        default_headers: Headers added to every client request.
+        thinking: Native thinking configuration; ``None`` preserves provider defaults.
+        api_mode: Whether to choose native, compatible, or automatic wire behavior.
+        effort: Optional provider reasoning effort hint.
+
+    Attributes:
+        api_mode: ``auto`` uses native mode for the direct Anthropic endpoint
+            and the compatible fallback for unknown proxies.
+        thinking: Optional native thinking configuration passed to the Messages API.
+    """
+
     api_key: str | None = None
     base_url: str | None = None
     default_headers: dict[str, str] | None = None
@@ -74,17 +90,44 @@ class AnthropicProviderOptions:
 
 
 class AnthropicProvider(BaseProvider):
+    """Stream normalized responses from Anthropic's Messages API.
+
+    Args:
+        options: Optional credentials, endpoint, and wire-mode settings.
+    """
+
     id = "anthropic"
 
     def __init__(self, options: AnthropicProviderOptions | None = None) -> None:
+        """Create an Anthropic provider with optional client configuration.
+
+        Args:
+            options: Credentials, endpoint, and wire-mode settings for the client.
+        """
         self._options = options or AnthropicProviderOptions()
         self._client: Any | None = None
         self._client_loop: Any | None = None
 
     def context_window(self, model: ModelId) -> int:
+        """Return Anthropic's configured context capacity for a model.
+
+        Args:
+            model: Anthropic model identifier.
+
+        Returns:
+            The known model capacity, or the adapter fallback for unknown models.
+        """
         return _KNOWN_CONTEXT.get(model, 200_000)
 
     def capabilities(self, model: ModelId) -> ProviderCapabilities:
+        """Return capabilities for the selected Anthropic model.
+
+        Args:
+            model: Anthropic model identifier.
+
+        Returns:
+            Capability flags including whether structured output uses a terminal tool.
+        """
         return full_capabilities(
             self.context_window(model),
             structured_output_terminal_tool=_effective_api_mode(self._options) == "compatible",
@@ -117,6 +160,7 @@ class AnthropicProvider(BaseProvider):
         return self._client
 
     async def aclose(self) -> None:
+        """Close the owned Anthropic client when one has been created."""
         client = self._client
         self._client = None
         self._client_loop = None
@@ -125,6 +169,22 @@ class AnthropicProvider(BaseProvider):
         await aclose_client(client)
 
     async def stream(self, req: ProviderRequest) -> AsyncIterator[dict[str, object]]:
+        """Yield normalized events for one Anthropic request.
+
+        Args:
+            req: Request to send through the Anthropic Messages API.
+
+        Returns:
+            An async iterator of normalized message, thinking, tool, and usage events.
+
+        Raises:
+            AbortError: If the request is aborted while streaming.
+            AuthError: If Anthropic rejects the configured credentials.
+            ContextLengthError: If the request exceeds the provider context limit.
+            RateLimitError: If Anthropic rate-limits the request.
+            ProviderError: If the optional dependency is missing or another provider
+                error cannot be classified more specifically.
+        """
         client = await self._get_client()
         payload = _build_payload(req, self._options)
 

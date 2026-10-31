@@ -374,6 +374,71 @@ def _build_tool_protocol_lines(
 
 
 class Agent:
+    """Own long-lived provider, tool, policy, context, and session configuration.
+
+    An agent can create many independent sessions. Its child :class:`Context` owns
+    registrations and is disposed with the agent; a supplied context is treated as
+    a host parent and is never disposed by this object.
+
+    Args:
+        provider: Provider implementation, or a provider inferred from options.
+        model: Model identifier used for provider calls.
+        openai: Optional OpenAI client options.
+        reasoning: Optional OpenAI reasoning configuration.
+        openai_api_key: API key used when constructing an inferred OpenAI provider.
+        openai_base_url: Base URL used when constructing an inferred OpenAI provider.
+        tools: Initial tool registry copied into the agent.
+        permissions: Permission engine or declarative permission configuration.
+        session_store: Session persistence backend.
+        max_idle_sessions: Optional bound on cached idle sessions.
+        run_store: Durable run/checkpoint backend.
+        durability: Durable inbox and related persistence options.
+        cwd: Working directory used by execution and path permissions.
+        system_prompt: Additional user instructions.
+        system_prompt_config: Structured system-prompt placement and replacement options.
+        max_retries: Maximum provider retries per call.
+        max_output_tokens: Default provider output-token cap.
+        include_partial_messages: Whether to emit partial assistant messages.
+        max_turns: Maximum turns allowed in a run.
+        max_tool_concurrency: Maximum concurrent tool executions.
+        limiter: Host-supplied provider concurrency limiter.
+        max_provider_concurrency: Convenience provider concurrency cap.
+        tool_batching_strategy: Tool batching policy, ``"greedy"`` or ``"maximal"``.
+        tool_timeout_ms: Default tool timeout in milliseconds.
+        tool_retry: Optional tool retry configuration.
+        cache_ttl: Provider prompt-cache lifetime hint.
+        config_dir: Relative configuration directory under ``cwd``.
+        mcp_servers: MCP server configurations connected on demand.
+        compaction: Strategy used when context must be compacted.
+        compaction_ladder: Optional LLM-free compaction recovery settings.
+        truncation_recovery: Optional output-truncation recovery strategy.
+        token_estimator: Host token-estimation callable.
+        fallback_models: Ordered alternate models for retryable overloads.
+        budget: Default spending budget for runs.
+        features: Feature flags selecting optional subsystems.
+        deps: Application dependencies passed to tools.
+        output_schema: Default structured-output schema.
+        structured_output_retries: Maximum structured-output correction attempts.
+        tool_choice: Default tool-choice policy.
+        final_tool_name: Default terminal tool for structured answers.
+        loop_guard: Loop-guard configuration; the sentinel keeps the default guard.
+        filesystem: Session filesystem backend.
+        result_offload: Result offload configuration or its default sentinel.
+        hooks: Hook implementations installed on the agent.
+        read_before_write: Read-before-write hook configuration.
+        tool_cache: Optional read-tool cache configuration.
+        extra_subagents: Additional subagent definitions.
+        enable_worker_tools: Whether worker-management tools are available.
+        retain_subagents: Whether child sessions remain attached after a run.
+        enable_background_subagents: Whether background subagent execution is enabled.
+        enable_task_stop: Whether task-stop controls are available.
+        enable_background_tools: Whether tools may run in the background.
+        execution_backend: Unified shell/filesystem execution world.
+        context: Optional host context used as the parent scope.
+        tool_pipeline: Optional per-agent tool execution pipeline.
+        reliability: Reliability policy, or ``None`` to disable it.
+    """
+
     def __init__(
         self,
         *,
@@ -434,6 +499,70 @@ class Agent:
         tool_pipeline: ToolPipeline | None = None,
         reliability: ReliabilityPolicy | None = _DEFAULT_RELIABILITY_POLICY,
     ) -> None:
+        """Initialize a reusable agent and its per-agent service scope.
+
+        Args:
+            provider: Provider implementation, or a provider inferred from options.
+            model: Model identifier used for provider calls.
+            openai: Optional OpenAI client options.
+            reasoning: Optional OpenAI reasoning configuration.
+            openai_api_key: API key for an inferred OpenAI provider.
+            openai_base_url: Base URL for an inferred OpenAI provider.
+            tools: Initial tool registry copied into the agent.
+            permissions: Permission engine or declarative permission configuration.
+            session_store: Session persistence backend.
+            max_idle_sessions: Optional bound on cached idle sessions.
+            run_store: Durable run/checkpoint backend.
+            durability: Durable inbox and persistence options.
+            cwd: Working directory for execution and path permissions.
+            system_prompt: Additional user instructions.
+            system_prompt_config: Structured system-prompt options.
+            max_retries: Maximum provider retries per call.
+            max_output_tokens: Default provider output-token cap.
+            include_partial_messages: Whether to emit partial assistant messages.
+            max_turns: Maximum turns allowed in a run.
+            max_tool_concurrency: Maximum concurrent tool executions.
+            limiter: Host-supplied provider concurrency limiter.
+            max_provider_concurrency: Convenience provider concurrency cap.
+            tool_batching_strategy: Tool batching policy.
+            tool_timeout_ms: Default tool timeout in milliseconds.
+            tool_retry: Optional tool retry configuration.
+            cache_ttl: Provider prompt-cache lifetime hint.
+            config_dir: Relative configuration directory under ``cwd``.
+            mcp_servers: MCP server configurations connected on demand.
+            compaction: Strategy used when context must be compacted.
+            compaction_ladder: Optional LLM-free compaction recovery settings.
+            truncation_recovery: Optional output-truncation recovery strategy.
+            token_estimator: Host token-estimation callable.
+            fallback_models: Ordered alternate models for retryable overloads.
+            budget: Default spending budget for runs.
+            features: Feature flags selecting optional subsystems.
+            deps: Application dependencies passed to tools.
+            output_schema: Default structured-output schema.
+            structured_output_retries: Structured-output correction attempts.
+            tool_choice: Default tool-choice policy.
+            final_tool_name: Default terminal tool for structured answers.
+            loop_guard: Loop-guard configuration or its default sentinel.
+            filesystem: Session filesystem backend.
+            result_offload: Result offload configuration or default sentinel.
+            hooks: Hook implementations installed on the agent.
+            read_before_write: Read-before-write hook configuration.
+            tool_cache: Optional read-tool cache configuration.
+            extra_subagents: Additional subagent definitions.
+            enable_worker_tools: Whether worker-management tools are available.
+            retain_subagents: Whether child sessions remain attached after a run.
+            enable_background_subagents: Whether background subagents are enabled.
+            enable_task_stop: Whether task-stop controls are available.
+            enable_background_tools: Whether tools may run in the background.
+            execution_backend: Unified shell/filesystem execution world.
+            context: Optional host context used as the parent scope.
+            tool_pipeline: Optional per-agent tool execution pipeline.
+            reliability: Reliability policy, or ``None`` to disable it.
+
+        Raises:
+            ConfigError: If model, concurrency, durability, or subsystem configuration
+                is invalid.
+        """
         system_prompt = _resolve_system_prompt(system_prompt, system_prompt_config)
         if tool_batching_strategy not in ("greedy", "maximal"):
             raise ConfigError('tool_batching_strategy must be "greedy" or "maximal"')
@@ -656,11 +785,23 @@ class Agent:
         self._extra_mcp_connections: list[Any] = []
 
     def on_turn_stopping(self, listener: TurnStoppingListener) -> Disposable:
+        """Register a serial listener that may accept, continue, or fail a turn.
+
+        Args:
+            listener: Callable receiving the turn-stopping event.
+
+        Returns:
+            A disposer that unregisters this listener.
+        """
         return self.context.effect(lambda: self._turn_stopping_dispatcher.register(listener))
 
     @property
     def mailbox(self) -> Any:
-        """Return the mounted mailbox service, or ``None`` when unavailable."""
+        """Return the mounted mailbox service, or ``None`` when unavailable.
+
+        Returns:
+            The context-resolved mailbox service.
+        """
         return self.context.get("mailbox")
 
     async def use(self, plugin: Plugin, config: Any = None) -> Disposable:
@@ -795,6 +936,11 @@ class Agent:
 
     @property
     def system_blocks(self) -> list[SystemBlock]:
+        """Return cached system-prompt blocks for the current tool catalog.
+
+        Returns:
+            Provider-ready system blocks, rebuilt when prompt inputs change.
+        """
         tool_names = sorted(tool.name for tool in self.tools.list())
         tool_sections = self.tools.system_prompt_sections(active_names=tool_names)
         signature = self._system_blocks_signature(tool_names, tool_sections)
@@ -877,18 +1023,38 @@ class Agent:
 
     @property
     def session_store(self) -> SessionStore | None:
+        """Return the configured session store, if one has been supplied.
+
+        Returns:
+            The session persistence backend or ``None`` before lazy store creation.
+        """
         return self._store
 
     @session_store.setter
     def session_store(self, value: SessionStore | None) -> None:
+        """Replace the session store used for subsequently opened sessions.
+
+        Args:
+            value: New session persistence backend, or ``None`` to clear it.
+        """
         self._store = value
 
     @property
     def hooks(self) -> list[Any]:
+        """Return the active hook list.
+
+        Returns:
+            Hook objects currently applied to runs.
+        """
         return self._hooks
 
     @hooks.setter
     def hooks(self, value: Any) -> None:
+        """Replace active hooks while retaining removed hooks for teardown.
+
+        Args:
+            value: Hook object or iterable normalized into the active list.
+        """
         from .hooks import normalize_hooks
 
         new_hooks = normalize_hooks(value)
@@ -898,6 +1064,11 @@ class Agent:
         self._hooks = new_hooks
 
     def context_window(self) -> int:
+        """Return the provider-reported context capacity for the configured model.
+
+        Returns:
+            Maximum context tokens accepted by the provider.
+        """
         return self.provider.context_window(self.model)
 
     async def _ensure_provider_prepared(self) -> None:
@@ -949,10 +1120,20 @@ class Agent:
 
     @property
     def provider(self) -> BaseProvider:
+        """Return the active model provider.
+
+        Returns:
+            Provider implementation used by runs.
+        """
         return self._provider
 
     @provider.setter
     def provider(self, value: BaseProvider) -> None:
+        """Replace the provider and reset its one-time preparation state.
+
+        Args:
+            value: Provider implementation to use for future calls.
+        """
         self._provider = value
         self._reset_provider_prepared()
 
@@ -1077,6 +1258,12 @@ class Agent:
         recomputes and respects the given *tool_names* so that a
         tool-filtered subagent gets a protocol block matching its actual
         toolset.
+
+        Args:
+            tool_names: Tool names to describe in the recomputed prompt.
+
+        Returns:
+            Fresh system-prompt blocks for the requested tool set.
         """
         # Temporarily override _cached_system_blocks to avoid polluting the
         # agent-level cache; build with the requested names and return.
@@ -1090,6 +1277,7 @@ class Agent:
         return self._build_system_blocks(tool_names, tool_sections=tool_sections)
 
     async def connect_skills(self) -> None:
+        """Load configured skills and register the skill tool once."""
         if self._skills_loaded:
             return
         if self._skills_connect is not None:
@@ -1152,6 +1340,7 @@ class Agent:
             raise
 
     async def connect_subagents(self) -> None:
+        """Load configured subagent definitions and register subagent tools once."""
         if self._subagents_loaded:
             return
         if self._subagents_connect is not None:
@@ -1229,7 +1418,7 @@ class Agent:
             raise
 
     async def reload_subagents(self) -> None:
-        """Reload disk-backed subagents and refresh subagent orchestration tools."""
+        """Reload disk-backed subagents and refresh orchestration tools."""
 
         self.tools.unregister("Subagent")
         self.tools.unregister("SubagentContinue")
@@ -1248,6 +1437,7 @@ class Agent:
         return f"Agent #{cur + 1}"
 
     async def connect_mcp(self) -> None:
+        """Connect configured MCP servers once and register their tools."""
         if not self._mcp_servers:
             return
         if self._mcp_connection is not None:
@@ -1293,7 +1483,11 @@ class Agent:
     async def add_mcp_servers(self, servers: dict[str, Any]) -> Any:
         """Connect additional MCP servers during a run; their tools appear next turn.
 
-        Returns the new :class:`McpConnection`, also tracked for ``close()``.
+        Args:
+            servers: MCP server configurations to connect.
+
+        Returns:
+            The new connection, also tracked for ``close()``.
         """
         from .mcp import connect_mcp_servers
 
@@ -1305,6 +1499,18 @@ class Agent:
     async def session(
         self, id: str | None = None, meta: dict[str, object] | None = None
     ) -> Session:
+        """Open or reattach one live conversation session.
+
+        Args:
+            id: Existing session identifier to reattach, or ``None`` for a new id.
+            meta: Initial JSON-compatible metadata for a newly created session.
+
+        Returns:
+            The live session registered on this agent.
+
+        Raises:
+            ConfigError: If the agent is closed or closing, or a live session is closing.
+        """
         from .session import Session
         from .session_log import SessionLog
 
@@ -1501,6 +1707,15 @@ class Agent:
         ``before_seq`` is an exclusive boundary.  The store-level helper owns
         lineage metadata, assistant/tool pairing validation, and atomic custom
         id handling; this method intentionally remains a thin lifecycle seam.
+
+        Args:
+            source_or_id: Source session instance or identifier.
+            before_seq: Exclusive stored-message sequence boundary.
+            id: Optional identifier for the forked session.
+            meta: Optional metadata for the forked session.
+
+        Returns:
+            The newly created independent session.
         """
         from .sessions.fork import fork_session as _fork_session
 

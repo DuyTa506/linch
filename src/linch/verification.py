@@ -32,6 +32,11 @@ class Verdict:
             ``"stop"`` (fail the run with an error result).
         feedback: Guidance injected into the conversation on retry.
         reason: Short machine-readable tag for observability.
+
+    Args:
+        action: Decision returned by the verifier.
+        feedback: Guidance injected when the decision requests a retry.
+        reason: Machine-readable explanation for the decision.
     """
 
     action: VerdictAction = "pass"
@@ -41,7 +46,21 @@ class Verdict:
 
 @dataclass(slots=True)
 class VerificationContext:
-    """Snapshot of the would-be-final answer handed to each verifier."""
+    """Snapshot of the would-be-final answer handed to each verifier.
+
+    Attributes:
+        attempt: Retry count shared by verifiers for the current run.
+        session: Live session reference provided for read-only inspection by
+            convention.
+
+    Args:
+        final_text: Text answer that would otherwise be returned.
+        structured_output: Parsed structured answer, when available.
+        structured_error: Structured-output parsing or validation error.
+        turn_index: Turn being evaluated.
+        attempt: Verification retries already used in this run.
+        session: Live session associated with the run.
+    """
 
     final_text: str | None
     structured_output: dict[str, Any] | None
@@ -55,16 +74,43 @@ class VerificationContext:
 
 @runtime_checkable
 class Verifier(Protocol):
-    """Duck-typed verification gate.  ``verify`` may be sync or async."""
+    """Define a duck-typed gate for validating a would-be-final answer.
+
+    Implementations may return a :class:`Verdict` directly or awaitably. The
+    loop evaluates verifiers in registration order and continues on verifier
+    exceptions.
+
+    Attributes:
+        name: Stable name used in verification events and diagnostics.
+    """
 
     name: str
 
     def verify(self, ctx: VerificationContext) -> Any:  # Verdict | Awaitable[Verdict]
+        """Evaluate the candidate answer and return a verdict.
+
+        Args:
+            ctx: Snapshot of the candidate answer and run state.
+
+        Returns:
+            A :class:`Verdict` or an awaitable resolving to one.
+        """
+
         ...
 
 
 def normalize_verifiers(value: Any) -> list[Any]:
-    """Normalize verifier input to a list, validating shape."""
+    """Normalize verifier input to a list, validating shape.
+
+    Args:
+        value: A verifier, list or tuple of verifiers, or ``None``.
+
+    Returns:
+        Verifier objects in registration order.
+
+    Raises:
+        ConfigError: If an item lacks a callable ``verify`` method.
+    """
     if value is None:
         return []
     items = list(value) if isinstance(value, (list, tuple)) else [value]
@@ -80,11 +126,18 @@ def normalize_verifiers(value: Any) -> list[Any]:
 
 
 async def evaluate_verifiers(verifiers: list[Any], ctx: VerificationContext) -> tuple[str, Verdict]:
-    """Evaluate *verifiers* in order; return the first non-pass verdict.
+    """Evaluate verifiers in order and return the first non-pass verdict.
 
     Returns ``(verifier_name, verdict)``; ``("", Verdict())`` when every
     verifier passes.  A verifier that raises is treated as passing — a faulty
     verifier never crashes a run (mirrors the observer contract).
+
+    Args:
+        verifiers: Verifiers to evaluate in registration order.
+        ctx: Candidate answer and run state supplied to each verifier.
+
+    Returns:
+        The first non-pass verdict and its name, or an empty name with a pass.
     """
     for verifier in verifiers:
         name = str(getattr(verifier, "name", verifier.__class__.__name__))
@@ -108,6 +161,12 @@ class ScorerVerifier:
     are meaningful here — event-based scorers (``tool_called``, the context
     scorers) receive no events in a live run; write a custom Verifier for
     those instead.
+
+    Args:
+        scorer: Eval scorer callable receiving output and event context.
+        feedback: Feedback supplied when the scorer rejects the output.
+        name: Optional name used in diagnostics and events.
+        on_fail: Action to take when the scorer returns ``False``.
     """
 
     def __init__(
@@ -118,12 +177,31 @@ class ScorerVerifier:
         name: str | None = None,
         on_fail: Literal["retry", "stop"] = "retry",
     ) -> None:
+        """Create a verifier backed by an evaluation scorer.
+
+        Args:
+            scorer: Eval scorer callable receiving output and event context.
+            feedback: Feedback supplied when the scorer rejects the output.
+            name: Optional name used in diagnostics and events.
+            on_fail: Action to take when the scorer returns ``False``.
+        """
+
         self.scorer = scorer
         self.feedback = feedback
         self.on_fail: Literal["retry", "stop"] = on_fail
         self.name = name or str(getattr(scorer, "__name__", "scorer"))
 
     def verify(self, ctx: VerificationContext) -> Verdict:
+        """Evaluate the wrapped scorer against a candidate answer.
+
+        Args:
+            ctx: Candidate answer and run state.
+
+        Returns:
+            A retry or stop verdict when the scorer rejects the output;
+            otherwise a passing verdict.
+        """
+
         try:
             outcome = self.scorer(output=ctx.final_text or "", events=None, result_event=None)
         except Exception:
