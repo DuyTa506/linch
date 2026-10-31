@@ -51,10 +51,14 @@ def _prompt_message(ctx: RunStartupContext, prompt: str, images: Any) -> Any:
     message = build_user_message(prompt, images)
     agent = ctx.runtime.agent
     session = ctx.runtime.session
-    if agent.skill_listing_text and not session.tools_override:
+    listing = agent.skill_listing_text
+    catalog = agent.context.get("request_catalog")
+    if catalog is not None:
+        listing = catalog.skill_listing(session, listing)
+    if listing and not session.tools_override:
         from ..skills.system_reminder import wrap_in_system_reminder
 
-        reminder = wrap_in_system_reminder(agent.skill_listing_text)
+        reminder = wrap_in_system_reminder(listing)
         message.content.insert(0, TextBlock(text=reminder))
     return message
 

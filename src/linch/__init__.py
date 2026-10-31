@@ -287,6 +287,7 @@ if TYPE_CHECKING:
     from .tools.isolation import IsolationBackend, TempDirIsolation
     from .tools.pipeline import ToolExecution, ToolPipeline
     from .tools.registry import empty_tools, workspace_tools
+    from .tools.search import ToolSearchPlugin
     from .tools.wrappers import metrics_wrapper, timeout_wrapper
     from .types import (
         ContentBlock,
@@ -556,6 +557,7 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
         "assert_provider_contract",
         "assert_tool_contract",
     ),
+    ".tools.search": ("ToolSearchPlugin",),
     ".tools": (
         "AskUserHandler",
         "AskUserOption",
@@ -658,6 +660,7 @@ __all__ = [
     "Plugin",
     "MailboxPlugin",
     "AskUserPlugin",
+    "ToolSearchPlugin",
     "IgnorableEvent",
     "is_ignorable_event",
     "ToolExecution",

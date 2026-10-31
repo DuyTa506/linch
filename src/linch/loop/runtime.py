@@ -673,6 +673,7 @@ class RunRuntime:
             )
         )
         if resume_checkpoint is not None:
+            session._extensions = dict(resume_checkpoint.extension_state.get("linch.session", {}))
             if _loop_guard_is_active(runtime.guard):
                 restored = _loop_guard_state_from_dict(resume_checkpoint.loop_guard_state)
                 if restored is not None:
@@ -1104,6 +1105,12 @@ class RunRuntime:
         self.checkpoint.pending_alignment = _alignment_queue_to_dicts(self.session)
         if not isinstance(self.checkpoint.extension_state, dict):
             raise ConfigError("RunCheckpoint.extension_state must be a dict")
+        if self.session._extensions:
+            self.checkpoint.extension_state["linch.session"] = json.loads(
+                json.dumps(self.session._extensions, allow_nan=False)
+            )
+        else:
+            self.checkpoint.extension_state.pop("linch.session", None)
         if self.session.active_model is not None or self.session.fallback_index:
             self.checkpoint.extension_state["linch.core"] = {
                 "active_model": self.session.active_model,
