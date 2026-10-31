@@ -15,7 +15,8 @@ their documented behavior. Import supported names from the top-level package:
 from linch import Agent, ModelCallEvent, RunBudget, ToolContext, tool
 ```
 
-Submodule import paths and underscore-prefixed names are private implementation
+Extensions use explicit `linch.ext.*` imports and are absent from `linch.__all__`.
+Other submodule paths and underscore-prefixed names are private implementation
 details and may change without a public compatibility guarantee.
 `tests/test_public_api.py` checks that every declared export resolves, exports
 are unique, and undeclared public attributes do not leak onto the package.
