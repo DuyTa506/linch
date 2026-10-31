@@ -42,11 +42,21 @@ class CorrectionWrites(_CrashWrites):
 
 class ToolEndCrash(_CrashWrites):
     target_tool = "first"
+    at_pending = False
 
     async def _write(self, name, *args, **kwargs):
-        if name == "append_events" and any(
-            event.type == "tool_call_end" and event.tool_name == self.target_tool
-            for event in args[1]
+        if (
+            not self.at_pending
+            and name == "append_events"
+            and any(
+                event.type == "tool_call_end" and event.tool_name == self.target_tool
+                for event in args[1]
+            )
+        ) or (
+            self.at_pending
+            and name.startswith("save_checkpoint")
+            and args[1].phase == "tool_batch_pending"
+            and args[1].completed_tool_results
         ):
             self.point, self.armed, self.after = name, True, True
         return await super()._write(name, *args, **kwargs)
@@ -378,7 +388,7 @@ async def test_literal_diagnostic_resumes_as_ordinary_answer(enabled, after, hoo
 
 
 @pytest.mark.parametrize("kind", ["memory", "postgres"])
-@pytest.mark.parametrize("crash", [False, True])
+@pytest.mark.parametrize("crash", [0, 1, 2])
 async def test_hook_created_background_ack_never_unlocks_dependency(pg_dsn, kind, crash):
     from linch import Agent, HookResult, ReliabilityPolicy, ToolPrerequisite
     from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
@@ -444,9 +454,23 @@ async def test_hook_created_background_ack_never_unlocks_dependency(pg_dsn, kind
                     run_id = event.run_id
         except _ProcessDeath:
             assert crash
+            batch_cursor = (await runs.load_run(run_id)).checkpoint.tool_batch_event_after_seq
             sessions, runs = await _reopen(kind, pg_dsn, sessions, runs)
-            session = await agent(runs).session(id=session.id)
-            _ = [event async for event in session.resume(run_id)]
+            repeat = ToolEndCrash(runs)
+            repeat.at_pending = True
+            session = await agent(repeat if crash == 2 else runs).session(id=session.id)
+            try:
+                _ = [event async for event in session.resume(run_id)]
+            except _ProcessDeath:
+                assert crash == 2
+                pending = (await runs.load_run(run_id)).checkpoint
+                assert pending.completed_tool_results["launch"].is_error is False
+                assert pending.tool_batch_event_after_seq == batch_cursor
+                sessions, runs = await _reopen(kind, pg_dsn, sessions, runs)
+                session = await agent(runs).session(id=session.id)
+                _ = [event async for event in session.resume(run_id)]
+            else:
+                assert crash != 2
         else:
             assert not crash
         assert calls == ["launch"]
