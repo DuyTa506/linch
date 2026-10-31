@@ -28,6 +28,32 @@ Close stores with `await store.close()` when their host shuts down.
 Postgres session store. A supplied pool follows the store's lifecycle; closing
 the store closes that pool.
 
+## Optional atomic phase writes
+
+`PostgresRunStore` exposes an optional callable
+`save_checkpoint_with_events(run_id, checkpoint, events, *, status="running",
+prepare_checkpoint=None)`. The loop uses it when a phase already has pending
+events, committing those events and its checkpoint in one transaction before
+a guarded tool runs. It returns `(run_record, event_seqs)`; the required
+`RunStore` protocol and top-level exports are unchanged. Stores without this
+capability use the ordinary event-flush and checkpoint-save path.
+
+Within the transaction, the store locks the run, checks its lease fence, and
+allocates the events' actual durable sequences. The optional synchronous
+`prepare_checkpoint(last_seq)` callback runs before checkpoint encoding; its
+argument is the last allocated sequence, or the existing last sequence when
+`events` is empty. It must prepare only the candidate checkpoint. Callers
+publish live cursors and watermarks after success. Callback, encoding, write,
+or fencing failure rolls back the entire transaction; the loop retains its
+pending events and does not advance committed recovery watermarks.
+
+A Postgres subclass that overrides `save_checkpoint`, `append_event`,
+`append_events`, or `mark_completed` falls back to ordinary writes unless it
+explicitly supplies its own atomic capability. An adapter that forwards an
+inner store through `__getattr__` must likewise wrap this method explicitly to
+opt in; a forwarded inner bound method is not used. An opted-in implementation
+must preserve the same atomicity, sequence allocation, and fencing contract.
+
 ## Optional leases and fencing
 
 All three built-in stores implement the optional `RunLeaseStore` capability.
@@ -147,7 +173,9 @@ for row in await runs.load_events(run_id, after_seq=cursor):
 Rows arrive in ascending sequence order and `after_seq` is exclusive. Persist
 the cursor after delivery; clients can deduplicate by `(run_id, seq)` when a
 disconnect makes acknowledgment uncertain. The event log contains persisted
-events; it does not provide partial-text persistence.
+events, including private recovery facts that are never yielded by the run
+iterator; those facts still consume sequence numbers and require the matching
+wire-version-3 codec. It does not provide partial-text persistence.
 
 ## Backend conformance
 
