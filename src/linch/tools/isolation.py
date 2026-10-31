@@ -33,9 +33,24 @@ class IsolationBackend(Protocol):
     distinct ``acquire`` calls return distinct, independently-writable paths.
     """
 
-    async def acquire(self) -> str: ...
+    async def acquire(self) -> str:
+        """Allocate an independent working directory.
 
-    async def release(self, cwd: str, *, keep: bool = False) -> None: ...
+        Returns:
+            Fresh path that can be written independently from other branches.
+        """
+
+        ...
+
+    async def release(self, cwd: str, *, keep: bool = False) -> None:
+        """Release an acquired working directory.
+
+        Args:
+            cwd: Path returned by :meth:`acquire`.
+            keep: Whether to preserve the directory for inspection or merging.
+        """
+
+        ...
 
 
 class TempDirIsolation:
@@ -45,13 +60,30 @@ class TempDirIsolation:
     directory (edits to the copy never touch the source). ``root`` chooses the
     parent directory for scratch dirs (default: the system temp dir). Blocking
     filesystem work runs in a thread so the loop never blocks.
+
+    Args:
+        source: Optional directory copied into each scratch directory.
+        root: Optional parent directory for scratch directories.
     """
 
     def __init__(self, *, source: str | None = None, root: str | None = None) -> None:
+        """Configure scratch-directory isolation.
+
+        Args:
+            source: Optional directory copied into each acquired directory.
+            root: Optional parent directory for acquired directories.
+        """
+
         self._source = str(Path(source).resolve()) if source else None
         self._root = str(Path(root).resolve()) if root else None
 
     async def acquire(self) -> str:
+        """Create and optionally seed a scratch directory.
+
+        Returns:
+            Path to a fresh isolated directory.
+        """
+
         return await run_blocking(self._acquire_sync)
 
     def _acquire_sync(self) -> str:
@@ -63,6 +95,13 @@ class TempDirIsolation:
         return path
 
     async def release(self, cwd: str, *, keep: bool = False) -> None:
+        """Remove an acquired scratch directory unless retention is requested.
+
+        Args:
+            cwd: Directory returned by :meth:`acquire`.
+            keep: Whether to leave the directory in place.
+        """
+
         if keep:
             return
         await run_blocking(shutil.rmtree, cwd, ignore_errors=True)

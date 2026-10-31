@@ -44,6 +44,15 @@ class ToolExecution:
     ``signal`` and ``metadata`` are extension seams. ``tool``, ``input``, and
     ``ctx`` describe the already-authorized call; scheduler dispatch fails
     closed if a listener changes them.
+
+    Args:
+        tool_name: Registered tool name.
+        tool_use_id: Provider identifier for the call.
+        input: Validated tool input.
+        ctx: Runtime tool context.
+        tool: Resolved tool object, when available.
+        signal: Optional cancellation signal.
+        metadata: Extension metadata carried through the pipeline.
     """
 
     tool_name: str
@@ -56,7 +65,11 @@ class ToolExecution:
 
 
 class ToolPipeline:
-    """A per-agent seam of composable ``tools/*`` waterfalls over the kernel bus."""
+    """Provide per-agent composable ``tools/*`` waterfalls over the kernel bus.
+
+    The pipeline owns listener registration and can be forked for a run-local
+    snapshot without sharing disposer ownership.
+    """
 
     __slots__ = ("_bus",)
 
@@ -64,6 +77,8 @@ class ToolPipeline:
     resume_policy_version = "1"
 
     def __init__(self) -> None:
+        """Create an empty tool pipeline."""
+
         self._bus = EventBus()
 
     def fork(self) -> ToolPipeline:
@@ -77,6 +92,15 @@ class ToolPipeline:
         return pipeline
 
     def on_pre_execute(self, listener: Any) -> Disposable:
+        """Register a pre-execution listener.
+
+        Args:
+            listener: Waterfall listener that receives execution and ``next``.
+
+        Returns:
+            Disposable that removes this registration.
+        """
+
         return self._bus.on(PRE_EXECUTE, listener)
 
     def on_execute(self, wrapper: Any) -> Disposable:
@@ -85,17 +109,42 @@ class ToolPipeline:
         Wrappers registered later run *inside* earlier ones (the first registered
         is outermost), so a metrics wrapper registered before a timeout wrapper
         times the timeout too.
+
+        Args:
+            wrapper: Around-execution listener receiving execution and ``next``.
+
+        Returns:
+            Disposable that removes this registration.
         """
         return self._bus.on(EXECUTE, wrapper)
 
     def on_post_execute(self, listener: Any) -> Disposable:
+        """Register a post-execution listener.
+
+        Args:
+            listener: Waterfall listener that receives execution, result, and ``next``.
+
+        Returns:
+            Disposable that removes this registration.
+        """
+
         return self._bus.on(POST_EXECUTE, listener)
 
     def has_execute_listeners(self) -> bool:
+        """Return whether an execute-phase wrapper is registered.
+
+        Returns:
+            Whether the execute waterfall has listeners.
+        """
+
         return self._bus.has_listeners(EXECUTE)
 
     def has_listeners(self) -> bool:
-        """Whether any pipeline phase has an active listener."""
+        """Return whether any pipeline phase has an active listener.
+
+        Returns:
+            Whether pre, execute, or post dispatch has listeners.
+        """
         return any(self._bus.has_listeners(phase) for phase in (PRE_EXECUTE, EXECUTE, POST_EXECUTE))
 
     @property
@@ -107,6 +156,9 @@ class ToolPipeline:
         ``resume_policy_config``. Requiring the host-owned id fails closed for
         anonymous closures whose behavior cannot otherwise be compared across
         processes.
+
+        Returns:
+            Stable listener identities grouped by lifecycle point.
         """
         return {
             point.name: [
@@ -127,6 +179,13 @@ class ToolPipeline:
         receive that value (or the executed result); ``await next()``
         accepts/delegates it, while the value returned by a listener is the
         authoritative replacement.
+
+        Args:
+            execution: Execution record for the tool call.
+            terminal: Callable that runs the authorized tool body.
+
+        Returns:
+            Final result after all enabled pipeline phases.
         """
 
         async def _execute() -> Any:
@@ -154,7 +213,15 @@ class ToolPipeline:
         return await self.run_post_execute(execution, result, _accept_result)
 
     async def run_execute(self, execution: ToolExecution, terminal: Terminal) -> Any:
-        """Run the ``tools/execute`` waterfall with *terminal* as the tool body."""
+        """Run the execute waterfall with ``terminal`` as the tool body.
+
+        Args:
+            execution: Execution record for the tool call.
+            terminal: Callable that runs the authorized tool body.
+
+        Returns:
+            Result returned by the execute waterfall.
+        """
         return await self._bus.waterfall(EXECUTE, execution, next=terminal)
 
     async def run_pre_execute(self, execution: ToolExecution, terminal: Terminal) -> Any:
@@ -163,12 +230,30 @@ class ToolPipeline:
         Whatever *terminal* returns is the only value :meth:`run` reads as
         "proceed to dispatch"; a listener that substitutes its own value
         vetoes dispatch and supplies the result instead.
+
+        Args:
+            execution: Execution record for the tool call.
+            terminal: Continuation representing permission to execute.
+
+        Returns:
+            Proceed sentinel or pre-execution replacement result.
         """
         return await self._bus.waterfall(PRE_EXECUTE, execution, next=terminal)
 
     async def run_post_execute(
         self, execution: ToolExecution, result: Any, terminal: Terminal
     ) -> Any:
+        """Run the post-execution waterfall.
+
+        Args:
+            execution: Execution record for the tool call.
+            result: Candidate result produced by execution.
+            terminal: Continuation accepting the candidate result.
+
+        Returns:
+            Final result after post listeners run.
+        """
+
         return await self._bus.waterfall(POST_EXECUTE, execution, result, next=terminal)
 
 
