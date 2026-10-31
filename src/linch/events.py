@@ -30,6 +30,7 @@ class SystemEvent:
     cwd: str
     type: Literal["system"] = "system"
     subtype: Literal["init"] = "init"
+    trace_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -183,6 +184,7 @@ class ResultEvent:
     some turns have known pricing."""
     type: Literal["result"] = "result"
     usage_complete: bool = True
+    trace_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -892,7 +894,7 @@ def event_to_dict(event: Event) -> dict[str, Any]:
             "schema_version": event.schema_version,
         }
     if isinstance(event, SystemEvent):
-        return {
+        out = {
             "type": event.type,
             "subtype": event.subtype,
             "session_id": event.session_id,
@@ -902,6 +904,9 @@ def event_to_dict(event: Event) -> dict[str, Any]:
             "permission_mode": event.permission_mode,
             "cwd": event.cwd,
         }
+        if event.trace_id is not None:
+            out["trace_id"] = event.trace_id
+        return out
     if isinstance(event, UserEvent):
         return {
             "type": event.type,
@@ -1032,6 +1037,8 @@ def event_to_dict(event: Event) -> dict[str, Any]:
             d["total_cost_usd"] = event.total_cost_usd
         if not event.usage_complete:
             d["usage_complete"] = False
+        if event.trace_id is not None:
+            d["trace_id"] = event.trace_id
         return d
     if isinstance(event, ErrorEvent):
         return {"type": event.type, "error": event.error}
@@ -1203,6 +1210,7 @@ def event_from_dict(raw: dict[str, Any]) -> Event:
             permission_mode=str(raw.get("permission_mode", "")),
             cwd=str(raw.get("cwd", "")),
             subtype="init",
+            trace_id=raw.get("trace_id") if isinstance(raw.get("trace_id"), str) else None,
         )
     if typ == "user":
         subtype = _required_discriminator(raw, "subtype", _USER_EVENT_SUBTYPES, "prompt")
@@ -1335,6 +1343,7 @@ def event_from_dict(raw: dict[str, Any]) -> Event:
             structured_error=str(se_raw) if isinstance(se_raw, str) else None,
             total_cost_usd=float(_total_cost) if isinstance(_total_cost, (int, float)) else None,
             usage_complete=_usage_complete(raw),
+            trace_id=raw.get("trace_id") if isinstance(raw.get("trace_id"), str) else None,
         )
     if typ == "error":
         return ErrorEvent(error=dict(raw.get("error", {})))

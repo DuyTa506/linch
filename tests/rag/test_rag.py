@@ -242,7 +242,7 @@ async def test_disposal_is_identity_safe_and_restores_baseline():
             {
                 key: value
                 for key, value in event_to_dict(event).items()
-                if key not in {"session_id", "run_id", "duration_ms", "timestamp", "id"}
+                if key not in {"session_id", "run_id", "trace_id", "duration_ms", "timestamp", "id"}
             }
             for event in events
         ]

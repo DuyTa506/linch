@@ -159,6 +159,7 @@ def _normalized(value: Any) -> Any:
             and key
             in {
                 "run_id",
+                "trace_id",
                 "session_id",
                 "model_call_id",
                 "duration_ms",

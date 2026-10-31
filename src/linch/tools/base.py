@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeAlias, cast
 from jsonschema import Draft202012Validator
 
 from .._json import walk_json
+from .._tracing import trace_id_for
 
 if TYPE_CHECKING:
     from ..permissions import Principal
@@ -80,7 +81,16 @@ class ToolContext:
     reaching back through the Agent or global state. ``None`` on the legacy
     default path. Kept last for positional-constructor compatibility."""
 
+    _trace_id: str | None = field(init=False, default=None, repr=False)
     _principal: Principal | None = field(default=None, kw_only=True, repr=False)
+
+    def __post_init__(self) -> None:
+        self._trace_id = trace_id_for(self.run_id)
+
+    @property
+    def trace_id(self) -> str | None:
+        """Return the immutable trace correlation value for this tool call."""
+        return self._trace_id
 
     @property
     def principal(self) -> Principal | None:

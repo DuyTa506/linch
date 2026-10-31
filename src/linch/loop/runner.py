@@ -12,7 +12,8 @@ from typing import Any
 from uuid import uuid4
 
 from .. import lifecycle
-from .._telemetry import store_call, trace_run
+from .._telemetry import start_run_span, store_call, trace_run
+from .._tracing import span_trace_id, trace_id_for
 from .._wire import UnsupportedWireVersionError
 from ..errors import AbortError, ConfigError, RunNotResumableError
 from ..events import Event, ResultEvent, UserEvent
@@ -131,46 +132,59 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
         _require_model_input_snapshot_store(session.agent)
     await session.agent._ensure_provider_prepared()
     run_id = opts.run_id or str(uuid4())
+    run_span = start_run_span(session, prompt, run_id)
     session.active_run_id = run_id
     session.run_deps = opts.deps if opts.deps is not None else getattr(session.agent, "deps", None)
-    run_record = (
-        await store_call(
-            session,
-            "run.create_run",
-            store.create_run(
-                session.id,
-                id=run_id,
-                meta=run_meta_with_contract(_build_run_contract(session, prompt, opts)),
-                initial_checkpoint=RunCheckpoint(
-                    phase="started",
-                    prompt=prompt,
-                    turn_index=0,
-                    total_usage=Usage(),
-                    extension_state={
-                        **_checkpoint_extension_state(
-                            _checkpointable_hooks(list(session.agent.hooks or [])), session, run_id
-                        ),
-                        "linch.startup": {
-                            "preparation_required": any(
-                                callable(getattr(hook, name, None))
-                                for hook in session.agent.hooks or ()
-                                for name in (
-                                    "on_hook",
-                                    "on_agent_start",
-                                    "on_user_prompt_submit",
-                                    "on_event_emit",
-                                )
+    try:
+        run_record = (
+            await store_call(
+                session,
+                "run.create_run",
+                store.create_run(
+                    session.id,
+                    id=run_id,
+                    meta=run_meta_with_contract(
+                        _build_run_contract(session, prompt, opts),
+                        meta={"trace_id": span_trace_id(run_span) or trace_id_for(run_id)},
+                    ),
+                    initial_checkpoint=RunCheckpoint(
+                        phase="started",
+                        prompt=prompt,
+                        turn_index=0,
+                        total_usage=Usage(),
+                        extension_state={
+                            **_checkpoint_extension_state(
+                                _checkpointable_hooks(list(session.agent.hooks or [])),
+                                session,
+                                run_id,
                             ),
-                            "history_count": session.session_log.history_count,
-                            "history_fingerprint": session.session_log._history_fingerprint(),
+                            "linch.startup": {
+                                "preparation_required": any(
+                                    callable(getattr(hook, name, None))
+                                    for hook in session.agent.hooks or ()
+                                    for name in (
+                                        "on_hook",
+                                        "on_agent_start",
+                                        "on_user_prompt_submit",
+                                        "on_event_emit",
+                                    )
+                                ),
+                                "history_count": session.session_log.history_count,
+                                "history_fingerprint": session.session_log._history_fingerprint(),
+                            },
                         },
-                    },
+                    ),
                 ),
-            ),
+            )
+            if store is not None
+            else None
         )
-        if store is not None
-        else None
-    )
+    except BaseException as exc:
+        from .._telemetry import set_error
+
+        set_error(run_span, exc)
+        run_span.end()
+        raise
     run_id = run_record.id if run_record is not None else run_id
     async with aclosing(
         _run_loop_impl(
@@ -180,6 +194,7 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
             run_id=run_id,
             run_record=run_record,
             resume_checkpoint=None,
+            _trace_span=run_span,
         )
     ) as iterator:
         async for event in iterator:
@@ -231,6 +246,7 @@ async def resume_loop(session: Session, run_id: str, opts: RunOptions) -> AsyncI
         raise
     except (RunContractMismatchError, TypeError, ValueError) as exc:
         raise ConfigError(f"Cannot safely resume run {run_id}: {exc}") from None
+    run_span = start_run_span(session, checkpoint.prompt, run_record.id, resumed=True)
     async with aclosing(
         _run_loop_impl(
             session,
@@ -239,6 +255,7 @@ async def resume_loop(session: Session, run_id: str, opts: RunOptions) -> AsyncI
             run_id=run_record.id,
             run_record=run_record,
             resume_checkpoint=checkpoint,
+            _trace_span=run_span,
         )
     ) as iterator:
         async for event in iterator:
