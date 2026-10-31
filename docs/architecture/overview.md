@@ -2,95 +2,147 @@
 
 > Part of the [Linch architecture guide](./README.md).
 
-The framework is a harness of pluggable subsystems composed around a single event-driven loop. The caller only interacts with `Agent` (config) and `Session` (state); everything else is internal machinery wired together inside `run_loop`.
+Linch 3.0 is a headless, async agent kernel. It is embedded in a host service;
+the host owns HTTP, authentication, tenant routing, and the OpenTelemetry SDK.
+Linch owns the provider-agnostic run loop, tool execution, permissions,
+session projections, durable run state, and extension seams. There is no UI in
+the kernel.
+
+The supported Python surface is `linch.__all__`. `linch.ext.*` packages are
+explicit extensions and are not imported by the core package. `linch.worker` is
+also explicit because it loads the optional PgQueuer runtime.
+
+## Runtime shape
+
+For an embedded single-process use, the host creates an `Agent`, obtains a
+`Session`, and consumes the typed event stream from `Session.run()` or
+`Session.resume()`. For a fleet, API processes enqueue runs and worker
+processes execute them. Postgres is the durable source of truth for sessions,
+runs, checkpoints, leases, and sequenced run events.
 
 ```mermaid
-graph TD
-    subgraph Host["Host Application"]
-        Caller["Caller"]
+flowchart LR
+    subgraph Host["Host service"]
+        API["HTTP/API process"]
+        OTel["OpenTelemetry SDK/exporter"]
+        Deps["RunOptions(deps=...)\ntenant services"]
     end
 
-    subgraph Core["Linch Core"]
-        Agent["Agent\nmodel · provider · tools\npermissions · loop_guard\nhooks · deps"]
-        Session["Session\nsession_log (→ provider_view · full_history)\nrun_deps · active_run_id"]
-        RunLoop["run_loop()"]
-
-        subgraph Pipeline["Turn Pipeline"]
-            SK["_re_inject_skill_context()"]
-            CB["ContextInjectionHook\nRAG · budget · tool select"]
-            BTR["_build_turn_request()\n+ capability downgrade"]
-            PERM["PermissionEngine\nrule eval · loop pause"]
-            SCHED["Scheduler\nparallel · serialize · resource lock"]
-            LG["LoopGuard\nloop detection"]
-        end
-
-        subgraph Providers["Providers"]
-            OAR["OpenAIResponsesProvider"]
-            OAC["OpenAIChatCompletionsProvider"]
-            ANT["AnthropicProvider"]
-            GEM["GeminiProvider"]
-            LLM["LlamaCppProvider"]
-        end
-
-        subgraph Storage["Storage"]
-            SS["SessionStore\nInMemory · Postgres"]
-            RS["RunStore\nInMemory · Postgres"]
-        end
-
-        subgraph Knowledge["Knowledge"]
-            MEM["File memory\nFileMemoryContextBuilder\n/memories/MEMORY.md"]
-        end
-
-        subgraph Filesystem["Filesystem"]
-            FS["FileBackend\nState · Disk · Postgres · Composite"]
-            OFF["OffloadConfig\nthreshold · preview · prefix"]
-        end
-
-        subgraph Extensions["Extensions"]
-            MCP["MCP Servers"]
-            SKILLS["Skills\n.linch/skills/"]
-            SUBA["Subagents\n.linch/agents.yaml"]
-        end
+    subgraph Dispatch["Optional linch.worker"]
+        Queue["PgQueuer"]
+        Worker["Worker\nclaim / renew / release"]
     end
 
-    Caller -->|"Agent(config)"| Agent
-    Agent -->|"session()"| Session
-    Session -->|"run(prompt)"| RunLoop
-    RunLoop --> SK
-    SK --> CB
-    CB --> BTR
-    BTR --> OAR & OAC & ANT & GEM & LLM
-    RunLoop --> PERM
-    PERM --> SCHED
-    SCHED --> LG
-    RunLoop -.->|"AsyncIterator[Event]"| Caller
-    Session <-->|"persist / load"| SS
-    RunLoop <-->|"checkpoint / resume"| RS
-    CB <-->|"read index once per run"| MEM
-    Agent <--> MCP & SKILLS & SUBA
-    SCHED <-->|"offload / read"| FS
-    OFF -.->|"config"| SCHED
+    subgraph Kernel["Linch headless kernel"]
+        Agent["Agent\nContext + registries"]
+        Session["Session\nappend-only SessionLog"]
+        Loop["loop/runner.py\nturn phases"]
+        Guard["turn_stopping\nreliability listeners"]
+        Scheduler["scheduler.py\npermission + tool execution"]
+        Provider["providers/*\nnormalized provider stream"]
+    end
+
+    subgraph Durable["Postgres source of truth"]
+        Sessions["PostgresSessionStore"]
+        Runs["PostgresRunStore\nruns + leases + checkpoints"]
+        Events["run_events\n(run_id, seq)"]
+    end
+
+    API -->|"enqueue_run"| Queue
+    Queue --> Worker
+    Worker -->|"RunLease(epoch)"| Runs
+    Worker --> Agent
+    API -->|"embedded run"| Agent
+    Agent --> Session --> Loop
+    Loop --> Provider
+    Loop --> Scheduler
+    Loop --> Guard
+    Scheduler --> Deps
+    Session <-->|"messages / snapshots"| Sessions
+    Loop <-->|"checkpoint before side effects"| Runs
+    Runs --> Events
+    Events -->|"load_events(after_seq=...)"| API
+    Agent -.->|"tracer + meter resolved from Context"| OTel
 ```
 
-## Design rationale
+## Boundaries and invariants
 
-- **One loop, pluggable subsystems.** All orchestration lives in `run_loop`; every
-  subsystem (provider, store, memory, filesystem, permissions) is a duck-typed
-  protocol wired in by reference. There is exactly one place control flow happens, and
-  each subsystem is swappable without touching the loop.
-- **The caller's surface is just `Agent` + `Session`.** `Agent` is immutable config,
-  `Session` is mutable state; everything else is internal. A small public surface keeps
-  the SDK embeddable and lets internals change without breaking callers (the supported
-  surface is exactly `linch.__all__`).
-- **Async-first, no blocking I/O in the core.** The whole loop is `async`, so a host
-  app can run many agents concurrently and stream events without threads.
-- **No process-global mutable state.** Each `Agent` builds its own registry, sessions,
-  permission engine, and extension state — so N agents run in one process (multi-tenant)
-  with no cross-talk.
-- **Provider-agnostic by contract.** The loop only knows the `BaseProvider` interface;
-  per-provider quirks are isolated behind `capabilities()` + a request downgrade, so the
-  same agent code runs on OpenAI, Anthropic, Gemini, or a local model.
+- `Agent` is configuration and scoped services. `Session` is conversation and
+  run state. `SessionLog` is the append-only source for the session-owned
+  `provider_view` and `full_history` projections; request-scoped context is
+  assembled into `ProviderRequest` and is not appended to the log.
+- The run loop is async. Provider and store adapters are async protocols, and
+  blocking synchronous tool functions are moved off the event loop by the
+  `FunctionTool` adapter.
+- A leased run has at most one live worker owner. `RunLease.epoch` is a fencing token.
+  `claim()` increments the epoch when ownership changes; `renew()` keeps the
+  same epoch; a write with a stale epoch raises `LeaseLostError`.
+- The loop writes a checkpoint before an external operation whose result must
+  be recoverable. `provider_pending` is saved before a provider stream, and
+  `tool_batch_pending`/`tool_executing` are saved before tool execution. Stores
+  can commit pending run events and the checkpoint together through
+  `save_checkpoint_with_events()`.
+- Durable run events have a per-run sequence. A reader reconnects with
+  `PostgresRunStore.load_events(run_id, after_seq=...)`; notifications are
+  wakeups, not the source of truth.
+- Durable database state is Postgres. `InMemorySessionStore` and
+  `InMemoryRunStore` are process-local implementations for tests and
+  development. Linch 3.0 does not add SQLite stores or legacy readers.
+- OpenTelemetry is the observability API. Without a host-configured SDK, the
+  API is a no-op. Tracers and meters are resolved through the agent's
+  `Context`, so hosts and tests can provide scoped providers without mutable
+  process-global Linch state.
+- `Agent` defaults to `ReliabilityPolicy()`; its listener runs on the
+  `loop/turn_stopping.py` dispatcher and can request bounded correction turns
+  for invalid provider responses. Pass `reliability=None` to disable it.
 
----
+## Host wiring
+
+The durable stores have separate import paths because Postgres is optional:
+
+```python
+from linch import Agent, PostgresRunStore
+from linch.sessions.postgres import PostgresSessionStore
+
+dsn = "postgresql://user:password@localhost/linch"
+agent = Agent(
+    model="your-model",
+    session_store=PostgresSessionStore(dsn),
+    run_store=PostgresRunStore(dsn),
+)
+```
+
+Install the Postgres extra before constructing those stores. For a fleet,
+install `linch[worker]` and import the worker runtime explicitly:
+
+```python
+from linch.worker import Worker, enqueue_run, install
+
+await install(pool)
+run_id = await enqueue_run(pool, session_id, prompt, queue="default")
+worker = Worker(pool, agent_factory, queues={"default": 8})
+await worker.run()
+```
+
+`agent_factory` receives a `WorkerJob`; it must reuse `job.run_store` and
+`job.session_store`. `Worker` claims the run lease, renews it while the run is
+active, resumes a checkpoint after a takeover, and acknowledges a queue job
+only after the run is terminal. It reconnects after transient Postgres or
+listener failures and leaves nonterminal jobs retryable.
+
+## Extensions
+
+The kernel stays small. Workflow, evaluation, deep-agent presets, reports,
+the recurring loop runner, and the scaffolding console are under explicit
+`linch.ext.*` modules:
+
+- `linch.ext.workflow` — journaled deterministic workflows;
+- `linch.ext.evals` — scripted providers, cases, and scorers;
+- `linch.ext.deep_agent` — coordinator/worker presets;
+- `linch.ext.reports` — run-report helpers;
+- `linch.ext.loop_runner` — host-driven recurring loops; and
+- `linch.ext.scaffold` — the `linch` project-scaffolding console entry point.
+
+These modules may use the kernel, but importing `linch` does not import them.
 
 Back to the [architecture index](./README.md).

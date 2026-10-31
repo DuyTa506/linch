@@ -5,7 +5,23 @@ Notable changes to `linch`. Versioning follows the contract in
 and persisted formats share a wire generation separate from the package version,
 reflected by `linch.RUN_SCHEMA_VERSION`.
 
-## Unreleased
+## 3.0.0 (unreleased)
+
+- Headless agent kernel with Postgres durable runs, lease/epoch fencing,
+  checkpoints before guarded side effects, and event replay by sequence.
+- Optional PgQueuer worker fleet with enqueueing, graceful drain, and recovery
+  after worker death and transient database outages.
+- Default response reliability on the turn-stopping seam, with optional tool
+  prerequisites and completion gates.
+- Direct OpenTelemetry traces and metrics; the host owns SDK/exporter setup.
+- Explicit `linch.ext` imports for workflows, evals, deep agents, reports,
+  loop runners, and scaffolding; Gemini/Vertex AI use `google-genai`.
+- Per-run `Principal`, role-based permission rules, and resume identity checks.
+- RAG connector registration and a grounding check for `[doc:<id>]` citations.
+- Python 3.11+, wire generation 3, Postgres-only durability, and scoped file
+  memory. See [Migrating to 3.0](docs/migration-3.0.md) for replacement imports.
+
+### Development entries
 
 - Interrupt resumable runs on transient durable-store connection failures without
   writing a failed terminal; worker retry or lease takeover resumes the checkpoint.
@@ -391,7 +407,7 @@ upgrade checklist.
   2.x API.
 
   This lands in a PATCH because no name in `linch.__all__` changed — see
-  [docs/versioning.md](docs/versioning.md#optional-extra-dependencies-are-not-covered),
+  [docs/versioning.md](docs/versioning.md#dependencies-and-reproducible-builds),
   which does not cover an extra's dependency floor. **If you are held on mcp 1.x,
   pin `linch<=1.2.0`.** Nothing else here requires action: your server config is
   unchanged, and `McpServerConfig.headers` still works — it now rides on the

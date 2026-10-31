@@ -22,7 +22,8 @@ safe).
 
 ```python
 import os
-from linch import Agent, PostgresRunStore, PostgresSessionStore
+from linch import Agent, PostgresRunStore
+from linch.sessions.postgres import PostgresSessionStore
 
 dsn = os.environ["LINCH_POSTGRES_DSN"]
 

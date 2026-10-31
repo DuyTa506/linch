@@ -13,10 +13,11 @@ Install the Postgres backend with `pip install 'linch[postgres]'`. Importing
 `PostgresRunStore` does not import asyncpg; constructing it checks the optional
 dependency and gives an install hint when it is missing. Connections and tables
 are initialized on first use. The existing `[postgres]` extra covers session,
-memory, and run stores.
+virtual-file, and run stores.
 
 ```python
-from linch import Agent, PostgresRunStore, PostgresSessionStore
+from linch import Agent, PostgresRunStore
+from linch.sessions.postgres import PostgresSessionStore
 
 runs = PostgresRunStore("postgresql://user:password@localhost/linch")
 sessions = PostgresSessionStore("postgresql://user:password@localhost/linch")
@@ -85,10 +86,9 @@ retains its pending events.
 
 ## Optional leases and fencing
 
-All three built-in stores implement the optional `RunLeaseStore` capability.
-The required `RunStore` protocol stays unchanged, so existing custom stores
-continue to work. Hosts can detect lease support with `getattr(store, "claim",
-None)`.
+Both built-in stores implement the optional `RunLeaseStore` capability.
+Custom stores may omit leasing when the host manages run ownership itself.
+Hosts can detect lease support with `getattr(store, "claim", None)`.
 
 ```python
 from linch import RunLeaseConflictError

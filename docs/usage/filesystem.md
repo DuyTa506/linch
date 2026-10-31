@@ -17,7 +17,7 @@ When a tool returns a large payload, the scheduler writes the full result to a
 preview and a path reference. The model pulls back only the slice it needs via
 `read_file`, instead of carrying the entire dump in every subsequent provider
 call. The full original content is never lost — it stays in the backend and on
-`ToolCallEndEvent.tool_result` for observers; only the copy that enters
+`ToolCallEndEvent.tool_result` for event consumers; only the copy that enters
 conversation history is trimmed. For how this hooks into the tool execution
 chokepoint, see [./tools.md](./tools.md).
 
@@ -25,7 +25,7 @@ chokepoint, see [./tools.md](./tools.md).
 
 ## Explicit opt-in
 
-Filesystem tools and large-result offloading are opt-in in Linch 2.0. A bare
+Filesystem tools and large-result offloading are opt-in in Linch 3.0. A bare
 `Agent()` has no virtual filesystem tools, no offload backend, and does not
 trust project-local files. Enable the subsystem explicitly with
 `FeatureFlags(filesystem=True)` and choose a backend or let active sessions
@@ -61,7 +61,8 @@ agent = Agent(
 
 # Ephemeral scratch + persistent /memories/ across sessions
 import os
-from linch import CompositeFileBackend, PostgresFileBackend, StateFileBackend
+from linch import CompositeFileBackend, StateFileBackend
+from linch.filesystem.postgres import PostgresFileBackend
 agent = Agent(
     ...,
     features=FeatureFlags(filesystem=True),

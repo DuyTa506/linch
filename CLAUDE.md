@@ -5,8 +5,8 @@ linked docs when a task touches a specific subsystem.
 
 ## What this is
 
-**Linch** is an async-first, event-driven, provider-agnostic Python SDK for
-embedding a software-engineering agent loop inside other applications. Core
+**Linch 3.0** is a headless, async Python agent kernel for embedding
+domain-neutral agent loops, with durable Postgres runs and optional workers. Core
 flow:
 
 ```text
@@ -19,7 +19,7 @@ under `tests/`; examples under `examples/`; docs under `docs/`.
 ## Commands
 
 ```bash
-pip install -e '.[dev,mcp,anthropic,gemini]'   # dev install
+pip install -e '.[dev,postgres,worker,mcp,anthropic,gemini]'   # dev install
 pytest                                          # all tests
 pytest tests/test_budget.py::test_name          # one test
 ruff check . && ruff format --check .           # lint + format check
@@ -95,9 +95,9 @@ These hold for *every* change, regardless of subsystem:
 - **Defaults are chosen on merit, with numbers** — a feature may be on by
   default; an off feature must not tax the hot path (measure with
   `scripts/benchmark_runtime.py --scale`).
-- **Public API is exactly `linch.__all__`** — import from the top-level package;
-  submodule paths and underscore names are private. `tests/test_public_api.py`
-  guards this surface; changing it is allowed in 3.0, silently drifting is not.
+- **Kernel public API is exactly `linch.__all__`** — import from the top-level package;
+  extensions use explicit `linch.ext.*` imports; other submodule paths are private.
+  `tests/test_public_api.py` guards this surface; changing it is allowed in 3.0, silently drifting is not.
 - **Only read work runs in parallel** — write/exec tools stay serialized; a
   subagent runs in parallel only when every tool it can use is read-scoped.
 - **Durable before side effects** — a checkpoint guarding a tool call is

@@ -107,9 +107,9 @@ double-release (abort + normal completion) cannot raise.
 ## `Mailbox` — peer-to-peer messages between agents
 
 The mailbox is the substrate for inter-agent messaging. `InMemoryMailbox` is the
-only built-in implementation, with process-lifetime state; implement the protocol
-for a durable or cross-process inbox (Postgres, Redis, a queue). Mailboxes move to
-`linch.ext` in WP10.
+only built-in implementation, with process-lifetime state. Implement the
+protocol for a durable or cross-process inbox in host-owned infrastructure;
+mailbox adapters are outside the core SDK.
 
 ```python
 from dataclasses import dataclass, field
@@ -411,5 +411,5 @@ fake async client in unit tests.
 
 - [Tools](./tools.md) — `Tool`, `ExecutionBackend`, `FileBackend` seams.
 - [Context & memory](./context-and-memory.md) — `ContextBuilder`, file memory, and scoped backends.
-- [Hooks](./hooks.md) — the single dispatch layer the lifecycle/verifier/observer adapters ride on.
+- [Hooks](./hooks.md) — the single dispatch layer for lifecycle and policy adapters.
 - [Versioning](../versioning.md) — what a protocol change means for semver.
