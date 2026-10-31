@@ -31,17 +31,40 @@ from .backend import _slice_lines, normalize_path
 
 
 class DiskFileBackend:
-    """A virtual filesystem mapped onto a real directory subtree."""
+    """Map the virtual filesystem onto a real directory subtree.
+
+    All file operations run through the repository's bounded blocking-I/O
+    helper, and every resolved path must remain below :attr:`root`.
+
+    Args:
+        root: Directory used as the backend's confinement root. It is resolved
+            and created during construction.
+
+    Attributes:
+        root: Absolute path of the directory that stores virtual files.
+    """
 
     resume_policy_id = "linch.filesystem.disk"
     resume_policy_version = "1"
 
     def __init__(self, root: str | Path = ".linch/offload") -> None:
+        """Create a disk-backed virtual filesystem.
+
+        Args:
+            root: Directory used as the backend's confinement root. It is created
+                if it does not already exist.
+        """
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
 
     @property
     def resume_policy_config(self) -> dict[str, str]:
+        """Return the durable identity of this backend's root.
+
+        Returns:
+            A mapping containing the resolved root path used in resume-policy
+            fingerprints.
+        """
         return {"root": str(self.root)}
 
     def _real_path(self, path: str) -> Path:
@@ -58,6 +81,21 @@ class DiskFileBackend:
         return target
 
     async def read(self, path: str, *, offset: int = 0, limit: int | None = None) -> str:
+        """Read a confined file, optionally returning a line window.
+
+        Args:
+            path: Slash-rooted virtual path below :attr:`root`.
+            offset: 1-indexed line to start at; ``0`` and ``1`` start at the first line.
+            limit: Maximum number of lines; non-positive or ``None`` reads to the end.
+
+        Returns:
+            The selected file contents.
+
+        Raises:
+            FileNotFoundError: If ``path`` is not a regular file.
+            ValueError: If ``path`` contains traversal segments or resolves outside
+                :attr:`root`.
+        """
         target = self._real_path(path)
 
         def _read() -> str:
@@ -69,6 +107,16 @@ class DiskFileBackend:
         return _slice_lines(text, offset, limit)
 
     async def write(self, path: str, content: str) -> None:
+        """Create or overwrite a confined file.
+
+        Args:
+            path: Slash-rooted virtual path below :attr:`root`.
+            content: Complete text to write.
+
+        Raises:
+            ValueError: If ``path`` contains traversal segments or resolves outside
+                :attr:`root`.
+        """
         target = self._real_path(path)
 
         def _write() -> None:
@@ -78,6 +126,18 @@ class DiskFileBackend:
         await run_blocking(_write)
 
     async def ls(self, prefix: str = "") -> list[str]:
+        """List regular files below the root, optionally by prefix.
+
+        Args:
+            prefix: Virtual path prefix used to filter the recursive listing.
+
+        Returns:
+            Sorted slash-rooted virtual paths for regular files matching ``prefix``.
+
+        Raises:
+            ValueError: If ``prefix`` is not a valid virtual path.
+        """
+
         def _ls() -> list[str]:
             out: list[str] = []
             for p in self.root.rglob("*"):
@@ -92,6 +152,22 @@ class DiskFileBackend:
         return sorted(p for p in paths if p == pfx or p.startswith(pfx.rstrip("/") + "/"))
 
     async def edit(self, path: str, old: str, new: str, *, replace_all: bool = False) -> int:
+        """Replace exact text in a confined file.
+
+        Args:
+            path: Slash-rooted virtual path below :attr:`root`.
+            old: Exact text to find.
+            new: Replacement text.
+            replace_all: Whether to replace every occurrence instead of requiring a unique match.
+
+        Returns:
+            Number of replacements made.
+
+        Raises:
+            FileNotFoundError: If ``path`` is not a regular file.
+            ValueError: If ``path`` is unsafe, ``old`` is absent, or ``old`` is
+                not unique while ``replace_all`` is false.
+        """
         target = self._real_path(path)
 
         def _edit() -> int:
@@ -113,10 +189,31 @@ class DiskFileBackend:
         return await run_blocking(_edit)
 
     async def exists(self, path: str) -> bool:
+        """Check whether a confined regular file exists.
+
+        Args:
+            path: Slash-rooted virtual path below :attr:`root`.
+
+        Returns:
+            ``True`` when the resolved path is a regular file; otherwise ``False``.
+
+        Raises:
+            ValueError: If ``path`` contains traversal segments or resolves outside
+                :attr:`root`.
+        """
         target = self._real_path(path)
         return await run_blocking(target.is_file)
 
     async def delete(self, path: str) -> None:
+        """Delete a confined regular file if present.
+
+        Args:
+            path: Slash-rooted virtual path below :attr:`root`.
+
+        Raises:
+            ValueError: If ``path`` contains traversal segments or resolves outside
+                :attr:`root`.
+        """
         target = self._real_path(path)
 
         def _delete() -> None:
