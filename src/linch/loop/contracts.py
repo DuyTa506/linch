@@ -13,6 +13,7 @@ from .._version import get_version
 from ..compaction import _builtin_compaction_config, _skill_listing_fingerprint
 from ..errors import ConfigError
 from ..model_calls import _accounting_contract
+from ..reliability import canonical_reliability_policy
 from ..run_store import MODEL_INPUT_CODEC_VERSION, build_run_contract
 from ..session import RunOptions, Session
 
@@ -338,6 +339,7 @@ def _build_run_contract(session: Session, prompt: str, opts: RunOptions) -> Any:
         "compaction": getattr(getattr(agent, "compaction", None), "id", None),
         "compaction_ladder": ladder,
         "truncation_recovery": truncation,
+        "reliability": canonical_reliability_policy(getattr(agent, "reliability", None)),
     }
     durability = getattr(agent, "durability", None)
     if getattr(durability, "durable_inbox", False) or _exact_model_input_enabled(agent):

@@ -142,24 +142,31 @@ def _receipt_message_prefix(
     return len(suffix)
 
 
-def _primary_control_message(message: Message, feedback: str | None) -> Message:
+def _primary_control_message(
+    message: Message,
+    feedback: str | None,
+    final_id: str | None = None,
+    final_is_error: bool = True,
+    wrap: bool = True,
+) -> Message:
     """The existing AfterProviderCall continue tail, derived without inference."""
     from ..skills.system_reminder import wrap_in_system_reminder
 
     tools = [block for block in message.content if isinstance(block, ToolUseBlock)]
     if not tools:
-        return Message(
-            role="user", content=[TextBlock(text=wrap_in_system_reminder(feedback or ""))]
-        )
+        text = feedback or ""
+        if wrap:
+            text = wrap_in_system_reminder(text)
+        return Message(role="user", content=[TextBlock(text=text)])
     return Message(
         role="user",
         content=[
             ToolResultBlock(
                 tool_use_id=block.id,
                 content=(feedback or "Provider hook requested another turn.")
-                if index == 0
+                if (block.id == final_id if final_id else index == 0)
                 else "Tool not executed; revise and resubmit your final answer.",
-                is_error=True,
+                is_error=final_is_error if block.id == final_id else True,
             )
             for index, block in enumerate(tools)
         ],
@@ -476,6 +483,26 @@ def _interrupted_tool_result_block(event: ToolCallStartEvent) -> ToolResultBlock
 
 def _message_matches(left: Message, right: Message) -> bool:
     return message_to_dict(left) == message_to_dict(right)
+
+
+def _replayed_feedback_present(
+    session: Session,
+    messages: tuple[Message, ...],
+    after_tool_ids: set[str] | None = None,
+) -> bool:
+    """Find an ordered suffix, optionally scanning back to a replayed batch's results."""
+    history = session.session_log._derived
+    for end in range(len(history), len(messages) - 1, -1):
+        if all(
+            _message_matches(a, b)
+            for a, b in zip(history[end - len(messages) : end], messages, strict=True)
+        ):
+            return True
+        if after_tool_ids is None or after_tool_ids == {
+            b.tool_use_id for b in history[end - 1].content if isinstance(b, ToolResultBlock)
+        }:
+            break
+    return False
 
 
 def _last_message_matches(session: Session, message: Message) -> bool:

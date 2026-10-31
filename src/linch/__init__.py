@@ -114,6 +114,7 @@ if TYPE_CHECKING:
         PartialAssistantEvent,
         PermissionRequestEvent,
         PromptCacheAdvisoryEvent,
+        ReliabilityEvent,
         ResultEvent,
         ScheduleEvent,
         SkillCompletedEvent,
@@ -241,6 +242,7 @@ if TYPE_CHECKING:
     )
     from .providers.retry import RetryOptions
     from .recovery import TruncationRecovery
+    from .reliability import CompletionGate, ReliabilityPolicy, ToolPrerequisite
     from .reports import RunReport, build_run_report, load_run_report
     from .run_store import (
         SCHEMA_VERSION as RUN_SCHEMA_VERSION,
@@ -432,6 +434,7 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
         "PartialAssistantEvent",
         "PermissionRequestEvent",
         "PromptCacheAdvisoryEvent",
+        "ReliabilityEvent",
         "ResultEvent",
         "ScheduleEvent",
         "SkillCompletedEvent",
@@ -577,6 +580,11 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
     ),
     ".providers.retry": ("RetryOptions",),
     ".recovery": ("TruncationRecovery",),
+    ".reliability": (
+        "CompletionGate",
+        "ReliabilityPolicy",
+        "ToolPrerequisite",
+    ),
     ".reports": ("RunReport", "build_run_report", "load_run_report"),
     ".run_store": (
         "InMemoryRunStore",
@@ -729,6 +737,10 @@ __all__ = [
     "AskUserResponse",
     "AskUserTool",
     "Agent",
+    "ToolPrerequisite",
+    "CompletionGate",
+    "ReliabilityPolicy",
+    "ReliabilityEvent",
     "LinchError",
     "Context",
     "Disposable",

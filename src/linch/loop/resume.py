@@ -15,11 +15,15 @@ from ..compaction import _reconcile_paid_compactions
 from ..errors import ConfigError
 from ..events import ErrorEvent, Event
 from ..model_calls import _ModelCallLedger, _primary_request_fingerprint
-from ..types import ProviderRequest
+from ..types import Message, ProviderRequest, TextBlock
 from .checkpoint import (
+    _message_digest,
+    _primary_control_message,
     _queue_crashed_worker_notifications,
     _receipt_message_prefix,
 )
+from .feedback import append_feedback
+from .turn_stopping import INVALID_RESPONSE_DIAGNOSTIC, TurnStopping
 
 
 @dataclass(slots=True)
@@ -34,6 +38,8 @@ class ResumeState:
     terminal_kind: str | None = None
     terminal_feedback: str | None = None
     terminal: bool = False
+    replayed_feedback: tuple[Message, ...] = ()
+    invalid_feedback: tuple[Message, ...] = ()
 
 
 @dataclass(slots=True)
@@ -56,6 +62,7 @@ class ResumeContext:
     emit_error_terminal: Callable[..., AsyncIterator[Event]]
     drain_auxiliary_usage: Callable[[], AsyncIterator[Event]]
     save_checkpoint: Callable[..., Awaitable[None]]
+    turn_stopping: Any
     state: ResumeState
 
 
@@ -75,8 +82,24 @@ async def recover_resume(ctx: ResumeContext) -> AsyncIterator[Event]:
 
     if ctx.checkpoint.phase in {"provider_pending", "assistant_appended"}:
         await _reconcile_active_primary(ctx)
-        if ctx.state.terminal_kind == "rejected_native":
+        if ctx.state.terminal_kind in {"invalid_text", "rejected_native"}:
+            decision = await ctx.turn_stopping.dispatch(
+                TurnStopping(ctx.session, ctx.run_id, ctx.checkpoint.turn_index, "invalid_response")
+            )
+            async for event in append_feedback(
+                ctx.session,
+                ctx.run_id,
+                ctx.state.invalid_feedback or decision.feedback,
+                boundary=ctx.active_primary,
+                decision=decision,
+            ):
+                yield event
+            if decision.action == "continue":
+                await ctx.save_checkpoint("turn_complete", turn_index=ctx.checkpoint.turn_index)
+                ctx.state.start_turn = ctx.checkpoint.turn_index + 1
+                return
             assert ctx.state.terminal_event is not None
+            await ctx.persist_event(ctx.state.terminal_event)
             yield ctx.state.terminal_event
             async for event in ctx.emit_error_terminal():
                 yield event
@@ -157,27 +180,36 @@ async def _reconcile_active_primary(ctx: ResumeContext) -> None:
             expected.append(projection["control_message_sha256"])
     else:
         expected = []
-    ctx.state.recovered_primary_prefix = _receipt_message_prefix(
-        list(ctx.session.full_history),
-        base_count=active_primary["full_history_base_count"],
-        base_fingerprint=active_primary["full_history_base_fingerprint"],
-        expected_digests=expected,
-    )
-
     if receipt is not None and receipt.disposition == "rejected_native":
-        event = ErrorEvent(
+        ctx.state.terminal_event = ErrorEvent(
             error={
                 "name": "ProviderError",
                 "message": "provider response contained malformed native tool arguments",
                 "retryable": False,
             }
         )
-        await ctx.persist_event(event)
-        # Event emission is kept in the async-generator caller because this
-        # reconciliation helper is intentionally not itself a yield phase.
-        ctx.state.terminal_event = event
         ctx.state.terminal_kind = "rejected_native"
         return
+    if projection is not None and projection["after_action"] == "continue":
+        diagnostic = Message(
+            role="assistant", content=[TextBlock(text=INVALID_RESPONSE_DIAGNOSTIC)]
+        )
+        control = _primary_control_message(diagnostic, projection["after_feedback"], wrap=False)
+        if expected == [_message_digest(diagnostic), _message_digest(control)]:
+            ctx.state.terminal_kind = "invalid_text"
+            ctx.state.invalid_feedback = (diagnostic, control)
+            return
+    history = list(ctx.session.full_history)
+    base = active_primary["full_history_base_count"]
+    if ctx.checkpoint.phase == "assistant_appended" and len(history) > base + len(expected):
+        ctx.state.replayed_feedback = tuple(history[base + len(expected) :])
+        history = history[: base + len(expected)]
+    ctx.state.recovered_primary_prefix = _receipt_message_prefix(
+        history,
+        base_count=base,
+        base_fingerprint=active_primary["full_history_base_fingerprint"],
+        expected_digests=expected,
+    )
     if projection is not None and projection["after_action"] == "stop":
         ctx.state.terminal_kind = "stopped"
         ctx.state.terminal_feedback = projection["after_feedback"]
