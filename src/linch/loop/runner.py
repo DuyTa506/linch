@@ -120,6 +120,12 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
     if _exact_model_input_enabled(session.agent):
         _require_model_input_snapshot_store(session.agent)
     await session.agent._ensure_provider_prepared()
+    policy = getattr(session.agent, "reliability", None)
+    if policy is not None:
+        policy.validate(
+            (tool.name for tool in (session.tools_override or session.agent.tools).list()),
+            final_tool_name=_effective_final_tool_name(session.agent, opts),
+        )
     store = session.agent.run_store
     run_record = (
         await store_call(
@@ -153,6 +159,12 @@ async def resume_loop(session: Session, run_id: str, opts: RunOptions) -> AsyncI
     if _exact_model_input_enabled(session.agent):
         _require_model_input_snapshot_store(session.agent)
     await session.agent._ensure_provider_prepared()
+    policy = getattr(session.agent, "reliability", None)
+    if policy is not None:
+        policy.validate(
+            (tool.name for tool in (session.tools_override or session.agent.tools).list()),
+            final_tool_name=_effective_final_tool_name(session.agent, opts),
+        )
     store = session.agent.run_store
     if store is None:
         raise RuntimeError("Agent has no run_store configured")

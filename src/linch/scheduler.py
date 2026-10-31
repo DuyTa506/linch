@@ -1293,6 +1293,10 @@ async def _run_serial_batch(
     hook_dispatcher: HookDispatcher,
     middleware_errors: dict[str, str],
     turn_index: int | None,
+    on_foreground_result: Callable[
+        [ResolvedCall, PermissionDecision, ToolCallEndEvent], Awaitable[None]
+    ]
+    | None = None,
 ) -> AsyncIterator[Event]:
     """Run a serial (one-call-at-a-time) batch, yielding skill + start/end events."""
     for call, _idx, decision in batch["calls"]:
@@ -1352,7 +1356,7 @@ async def _run_serial_batch(
             if not running.task.done():
                 running.task.cancel()
                 await asyncio.gather(running.task, return_exceptions=True)
-        yield ToolCallEndEvent(
+        end_event = ToolCallEndEvent(
             tool_use_id=call.id,
             tool_name=_tool_name(call),
             result=str(outcome.block.content),
@@ -1361,6 +1365,15 @@ async def _run_serial_batch(
             tool_result=outcome.tool_result,
             tool_output=outcome.tool_output,
         )
+        if (
+            on_foreground_result is not None
+            and not call.is_immediate_error
+            and middleware_errors.get(call.id) is None
+            and decision.decision == "allow"
+            and not end_event.is_error
+        ):
+            await on_foreground_result(call, decision, end_event)
+        yield end_event
         if skill_name is not None:
             yield SkillCompletedEvent(name=skill_name, is_error=outcome.block.is_error)
 
@@ -1374,6 +1387,10 @@ async def _run_parallel_batch(
     hook_dispatcher: HookDispatcher,
     middleware_errors: dict[str, str],
     turn_index: int | None,
+    on_foreground_result: Callable[
+        [ResolvedCall, PermissionDecision, ToolCallEndEvent], Awaitable[None]
+    ]
+    | None = None,
 ) -> AsyncIterator[Event]:
     """Run a parallel batch: emit all starts, gather concurrently, then all ends.
 
@@ -1431,7 +1448,7 @@ async def _run_parallel_batch(
             )
             for hook_event in hook_events:
                 yield hook_event
-            yield ToolCallEndEvent(
+            end_event = ToolCallEndEvent(
                 tool_use_id=call.id,
                 tool_name=_tool_name(call),
                 result=str(outcome.block.content),
@@ -1440,6 +1457,15 @@ async def _run_parallel_batch(
                 tool_result=outcome.tool_result,
                 tool_output=outcome.tool_output,
             )
+            if (
+                on_foreground_result is not None
+                and not call.is_immediate_error
+                and middleware_errors.get(call.id) is None
+                and decision.decision == "allow"
+                and not end_event.is_error
+            ):
+                await on_foreground_result(call, decision, end_event)
+            yield end_event
             emitted_ids.add(call.id)
             sn = skill_names.get(call.id)
             if sn is not None:
@@ -1585,6 +1611,11 @@ async def execute_tool_calls(
     *,
     turn_index: int | None = None,
     on_permissions_resolved: Callable[[], Awaitable[None]] | None = None,
+    before_permissions: Callable[[ResolvedCall], Awaitable[str | None]] | None = None,
+    on_foreground_result: Callable[
+        [ResolvedCall, PermissionDecision, ToolCallEndEvent], Awaitable[None]
+    ]
+    | None = None,
 ) -> AsyncIterator[Event]:
     if not blocks:
         return
@@ -1627,6 +1658,14 @@ async def execute_tool_calls(
                 middleware_errors[call.id] = blocked_reason
             elif precomputed_result is not None:
                 precomputed_results[call.id] = precomputed_result
+
+    if before_permissions is not None:
+        for call in resolved:
+            if call.is_immediate_error or call.id in middleware_errors:
+                continue
+            reason = await before_permissions(call)
+            if reason is not None:
+                middleware_errors[call.id] = reason
 
     # Final permission evaluation binds to the canonical, post-hook input.
     decisions, ask_indices = _evaluate_permissions(
@@ -1740,6 +1779,7 @@ async def execute_tool_calls(
             hook_dispatcher=hook_dispatcher,
             middleware_errors=middleware_errors,
             turn_index=turn_index,
+            on_foreground_result=on_foreground_result,
         )
         try:
             async for event in lane_events:
