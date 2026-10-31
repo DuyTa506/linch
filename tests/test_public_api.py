@@ -323,3 +323,28 @@ def test_custom_observer_surface_is_removed() -> None:
     assert not any(hasattr(linch, name) for name in removed)
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("linch.observability")
+
+
+def test_rag_names_are_public() -> None:
+    from linch import (
+        RagConnector,
+        RetrievedChunk,
+        register_grounding_check,
+        register_rag_connector,
+    )
+
+    assert {
+        "RagConnector",
+        "RetrievedChunk",
+        "register_grounding_check",
+        "register_rag_connector",
+    } <= set(linch.__all__)
+    assert all(
+        callable(value)
+        for value in (
+            RagConnector,
+            RetrievedChunk,
+            register_grounding_check,
+            register_rag_connector,
+        )
+    )
