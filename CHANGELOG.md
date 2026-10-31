@@ -7,6 +7,11 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
 
 ## Unreleased
 
+- Add default, provider-independent response reliability with a shared bounded
+  correction budget, optional tool prerequisites and completion gates, durable
+  run-local state, and `ReliabilityEvent`. `reliability=None` opts out. Text
+  tool-call envelopes request a native resend; text rescue is dropped.
+
 - Commit terminal status and pending events atomically, preserving guard-tail
   replay across crashes and cancellation.
 

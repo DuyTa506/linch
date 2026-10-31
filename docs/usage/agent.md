@@ -14,6 +14,51 @@ spending is capped (budgets).
 - Cross-cutting extension (middleware, RAG, verifiers) is unified
   under [hooks.md](./hooks.md).
 
+## Tool and response reliability
+
+`Agent` uses `ReliabilityPolicy()` by default for every provider. An empty
+`end_turn`, a whole-text `<tool_call>...</tool_call>` envelope, or malformed
+native tool arguments receives a logged Linch diagnostic asking the model to
+resend. No tool in a rejected native batch runs. The default allows two
+correction turns across the entire run; exhaustion ends with an error result.
+Transport and structural stream errors retain their provider-error behavior.
+Ordinary answers, refusals and truncated output keep their existing behavior.
+Text envelopes are never executed; prose and fenced examples remain plain text.
+
+Declare tool ordering and completion requirements when your application needs
+them:
+
+```python
+from linch import Agent, CompletionGate, ReliabilityPolicy, ToolPrerequisite
+
+agent = Agent(
+    model="gpt-5",
+    tools=[lookup_customer, update_customer],
+    reliability=ReliabilityPolicy(
+        prerequisites=(ToolPrerequisite("update_customer", ("lookup_customer",)),),
+        completion=CompletionGate(("update_customer",)),
+    ),
+)
+```
+
+Use the tools' registered canonical names. Requirements are validated after
+tools load, before the first provider call. A prerequisite must have succeeded
+in an earlier batch of the same run. Calls in one batch cannot unlock each
+other. Only successful foreground results after hooks count; errors, denials,
+interruptions and background acknowledgements do not count. A final-answer tool
+cannot serve as completion evidence. The completion gate checks every final
+route, including a loop-guard forced answer, and shares the correction budget.
+Explicit host early-success stops through `StopPredicateHook` take precedence.
+
+Set `retry_invalid_responses=False` to disable response corrections while
+retaining configured prerequisites and completion requirements. Set
+`max_correction_turns=0` to fail immediately when a correction is needed, or
+`reliability=None` to disable the subsystem entirely. A clean run adds no
+reliability events, feedback or provider calls. Intervention emits
+`ReliabilityEvent`; correction counts and referenced successful tools survive
+resume, and changing the policy rejects resume. State belongs to each run and
+is not inherited by subagents.
+
 ---
 
 ## Agent vs Session lifecycle

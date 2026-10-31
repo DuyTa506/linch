@@ -34,25 +34,43 @@
 
 **Interfaces:** Frozen/slotted API exactly as specified. `TurnStopping` candidates carry reason, turn, assembly/final-tool information; ordered registration returns Disposable; outcomes accept/continue(messages)/fail(error). Reliability is a listener and pre-execute effect. `linch.reliability` contains exactly v/corrections/succeeded when nonempty.
 
-- [ ] Write and run failing policy/default/None, validation, codec and contract tests.
-- [ ] Implement minimal public types, validation and run-local state/contract binding; run targeted tests.
-- [ ] Write and run failing seam route/equivalence and response correction tests, including malformed sibling batch, empty/envelope, unaffected prose/refusal/truncation.
-- [ ] Implement seam and bounded correction listener, reuse existing structural replay-tail proof; run targeted tests.
-- [ ] Write and run failing prerequisite/snapshot/final-hook success/background/completion/force-final/isolation tests.
-- [ ] Implement pre-permission pre-execute and normalized foreground-result observation with no reliability branches in scheduler; run targeted tests.
-- [ ] Write and run memory/Postgres before/after feedback-append/checkpoint crash matrix; fix until event traces and correction counts agree.
-- [ ] Commit logical passing increments with the required trailer. Stop and report if a spec decision proves incorrect.
+- [x] Write and run failing policy/default/None, validation, codec and contract tests.
+- [x] Implement minimal public types, validation and run-local state/contract binding; run targeted tests.
+- [x] Write and run failing seam route/equivalence and response correction tests, including malformed sibling batch, empty/envelope, unaffected prose/refusal/truncation.
+- [x] Implement seam and bounded correction listener, reuse existing structural replay-tail proof; run targeted tests.
+- [x] Write and run failing prerequisite/snapshot/final-hook success/background/completion/force-final/isolation tests.
+- [x] Implement pre-permission pre-execute and normalized foreground-result observation with no reliability branches in scheduler; run targeted tests.
+- [x] Write and run memory/Postgres before/after feedback-append/checkpoint crash matrix; fix until event traces and correction counts agree.
+- [x] Commit logical passing increments with the required trailer. Stop and report if a spec decision proves incorrect.
 
 ### Task 2: Measure, document, and verify
 
 **Files:** `docs/usage/agent.md`, `docs/migration-3.0.md`, `CHANGELOG.md`, WP7 measurement report.
 
-- [ ] Measure memory/Postgres 200x4 base/default/None, one interleaved pair each under `flock /tmp/wp8-cpu.lock`; report all metrics and <=~2% clean-path comparison.
-- [ ] Document new default, None opt-out, prerequisites/completion, bounded retries and dropped rescue.
-- [ ] Review full branch against final requirements and budget; resolve concrete findings.
-- [ ] Run full pytest with supplied Postgres DSN, ruff check/format, pyright with specified interpreter.
-- [ ] Commit docs and measurements after gates, verify clean worktree; final report <250 words with decisions, sizes, benchmark pair, crash matrix, gates and deviations.
+- [x] Measure memory/Postgres 200x4 base/default/None, one interleaved pair each under `flock /tmp/wp8-cpu.lock`; report all metrics and <=~2% clean-path comparison.
+- [x] Document new default, None opt-out, prerequisites/completion, bounded retries and dropped rescue.
+- [x] Review full branch against final requirements and budget; resolve concrete findings.
+- [x] Run full pytest with supplied Postgres DSN, ruff check/format, pyright with specified interpreter.
+- [x] Commit docs and measurements after gates, verify clean worktree; final report <250 words with decisions, sizes, benchmark pair, crash matrix, gates and deviations.
 
 ## Initial evidence
 
 Baseline pytest: 2,039 passed, 223 skipped, one failure in `tests/tools/test_execution_backend.py::test_local_backend_nonzero_returncode` (timeout, before WP7 changes). Read-only loop and independent durability analyses found no required architecture change. Replay should append a canonical correction message and commit counter/events at the existing turn-complete checkpoint; never persist an increment independently before its feedback.
+
+The baseline subprocess test passes outside the sandbox (1 passed). Local
+Postgres and subprocess gates need the escalated execution context.
+
+Ruling: invalid text may use a fixed assistant diagnostic plus canonical user
+feedback in one atomic `session.append`. The existing `primary_append`
+projection records their digests and feedback; resume reconstructs the fixed
+diagnostic and proves the ordered suffix. This preserves strict envelope
+privacy without new pending state or codecs. The rejected-native receipt
+already provides its sanitized rejection fact. A concern based on feedback-only
+projections was investigated and retracted; no architecture change is needed.
+The requested correction crash matrix covers feedback append and checkpoint,
+not the pre-existing accepted-receipt-before-projection boundary.
+
+Ruling: the seam covers the enumerated model-response final routes. Explicit
+host `StopPredicateHook` early-success decisions precede provider execution and
+retain their documented authority; no synthetic model-final candidate is added
+for them. The usage section records this configuration interaction.
