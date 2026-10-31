@@ -10,6 +10,10 @@ from test_terminal_atomicity import _CrashWrites, _normalized, _ProcessDeath
 
 
 class CorrectionWrites(_CrashWrites):
+    def __init__(self, *args, nth=1):
+        super().__init__(*args)
+        self.nth, self.hits = nth, 0
+
     async def _write(self, name: str, *args: Any, **kw: Any) -> Any:
         hit = (
             name == "append_messages"
@@ -21,6 +25,9 @@ class CorrectionWrites(_CrashWrites):
             == ("assistant_appended" if self.point == "assistant" else "turn_complete")
             and self.point in {"checkpoint", "assistant"}
         )
+        if hit:
+            self.hits += 1
+            hit = self.hits == self.nth
         original = self.point
         self.point = name if hit else ""
         self.armed = True
@@ -31,6 +38,18 @@ class CorrectionWrites(_CrashWrites):
             return await super()._write(name, *args, **kw)
         finally:
             self.point = original
+
+
+class ToolEndCrash(_CrashWrites):
+    target_tool = "first"
+
+    async def _write(self, name, *args, **kwargs):
+        if name == "append_events" and any(
+            event.type == "tool_call_end" and event.tool_name == self.target_tool
+            for event in args[1]
+        ):
+            self.point, self.armed, self.after = name, True, True
+        return await super()._write(name, *args, **kwargs)
 
 
 class CorrectionProvider:
@@ -47,7 +66,8 @@ class CorrectionProvider:
 
         self.calls += 1
         yield {"type": "message_start", "model": request.model}
-        if self.case == "native" and self.calls == 1:
+        invalid = self.calls <= (2 if self.case.endswith("_twice") else 1)
+        if self.case.startswith("native") and invalid:
             yield {"type": "tool_use_start", "id": "bad", "name": "prepare"}
             yield {"type": "tool_use_input_delta", "id": "bad", "json_delta": '{"secret":"raw"'}
             yield {"type": "tool_use_end", "id": "bad"}
@@ -65,7 +85,7 @@ class CorrectionProvider:
         else:
             text = (
                 '<tool_call>{"secret":"raw"}</tool_call>'
-                if self.case == "text" and self.calls == 1
+                if self.case.startswith("text") and invalid
                 else "answer"
             )
             yield {"type": "text_delta", "text": text}
@@ -97,7 +117,7 @@ def correction_agent(sessions: Any, runs: Any, provider: Any) -> Any:
         permissions={"mode": "skip-dangerous"},
         features=FeatureFlags(skills=False, subagents=False, mcp=False),
         reliability=ReliabilityPolicy(
-            max_correction_turns=1,
+            max_correction_turns=2 if provider.case.endswith("_twice") else 1,
             completion=CompletionGate(("prepare",))
             if provider.case in {"completion", "final_tool"}
             else None,
@@ -108,14 +128,18 @@ def correction_agent(sessions: Any, runs: Any, provider: Any) -> Any:
 @pytest.mark.parametrize("kind", ["memory", "postgres"])
 @pytest.mark.parametrize("after", [False, True], ids=["before", "after"])
 @pytest.mark.parametrize("point", ["feedback", "checkpoint"])
-@pytest.mark.parametrize("case", ["text", "native", "completion", "final_tool"])
+@pytest.mark.parametrize(
+    "case", ["text", "native", "completion", "final_tool", "text_twice", "native_twice"]
+)
 async def test_correction_crash_exact_trace(pg_dsn, kind, after, point, case):
     from linch.events import PromptCacheAdvisoryEvent, event_to_dict
 
+    corrections = 2 if case.endswith("_twice") else 1
+
     async def scenario(crash: bool):
         sessions, runs = await _stores(kind, pg_dsn)
-        sw = CorrectionWrites(sessions, point if crash else "", after)
-        rw = CorrectionWrites(runs, point if crash else "", after)
+        sw = CorrectionWrites(sessions, point if crash else "", after, nth=corrections)
+        rw = CorrectionWrites(runs, point if crash else "", after, nth=corrections)
         sw.peer, rw.peer = rw, sw
         provider = CorrectionProvider(case)
         session = await correction_agent(sw, rw, provider).session()
@@ -141,20 +165,24 @@ async def test_correction_crash_exact_trace(pg_dsn, kind, after, point, case):
                 for row in rows
                 if row.event.type in {"error", "reliability"}
             ]
-            assert provider.calls == (3 if case in {"completion", "final_tool"} else 2)
-            assert record.checkpoint.extension_state["linch.reliability"]["corrections"] == 1
-            assert sum(row.event.type == "reliability" for row in rows) == 1
+            assert provider.calls == (
+                3 if case in {"completion", "final_tool"} else corrections + 1
+            )
+            assert (
+                record.checkpoint.extension_state["linch.reliability"]["corrections"] == corrections
+            )
+            assert sum(row.event.type == "reliability" for row in rows) == corrections
             assert (
                 sum(
                     row.event.type == "user" and row.event.subtype == "notification" for row in rows
                 )
-                == 1
+                == corrections
             )
             assert sum(
                 row.event.type == "assistant"
                 and "The provider response was rejected" in str(row.event.message)
                 for row in rows
-            ) == (case == "text")
+            ) == (corrections if case.startswith("text") else 0)
             assert (
                 sum(
                     row.event.type == "model_call" and row.event.record_kind == "receipt"
@@ -162,6 +190,20 @@ async def test_correction_crash_exact_trace(pg_dsn, kind, after, point, case):
                 )
                 == provider.calls
             )
+            if case.startswith(("text", "native")):
+                assert (
+                    sum(
+                        message.role == "user"
+                        and "The provider response was invalid" in str(message)
+                        for message in session.full_history
+                    )
+                    == corrections
+                )
+                assert sum(
+                    message.role == "assistant"
+                    and "The provider response was rejected" in str(message)
+                    for message in session.full_history
+                ) == (corrections if case.startswith("text") else 0)
             assert "raw" not in str(session.full_history)
             return [
                 _normalized(event_to_dict(row.event))
@@ -236,14 +278,6 @@ async def test_resumed_batch_cannot_unlock_its_own_prerequisite(pg_dsn, kind, cr
                 "usage": Usage(),
             }
 
-    class FirstResultCrash(_CrashWrites):
-        async def _write(self, name, *args, **kwargs):
-            if name == "append_events" and any(
-                event.type == "tool_call_end" and event.tool_name == "first" for event in args[1]
-            ):
-                self.point, self.armed, self.after = name, True, True
-            return await super()._write(name, *args, **kwargs)
-
     sessions, runs = await _stores(kind, pg_dsn)
     provider = Provider("batch")
 
@@ -258,7 +292,7 @@ async def test_resumed_batch_cannot_unlock_its_own_prerequisite(pg_dsn, kind, cr
             reliability=ReliabilityPolicy(prerequisites=(ToolPrerequisite("second", ("first",)),)),
         )
 
-    session = await agent(FirstResultCrash(runs) if crash else runs).session()
+    session = await agent(ToolEndCrash(runs) if crash else runs).session()
     run_id = ""
     try:
         async for event in session.run("go"):
@@ -341,3 +375,100 @@ async def test_literal_diagnostic_resumes_as_ordinary_answer(enabled, after, hoo
     assert events[-1].final_text == ("done" if hooked else INVALID_RESPONSE_DIAGNOSTIC)
     assert provider._index == (2 if hooked else 1)
     assert not any(row.event.type == "reliability" for row in await runs.load_events(run_id))
+
+
+@pytest.mark.parametrize("kind", ["memory", "postgres"])
+@pytest.mark.parametrize("crash", [False, True])
+async def test_hook_created_background_ack_never_unlocks_dependency(pg_dsn, kind, crash):
+    from linch import Agent, HookResult, ReliabilityPolicy, ToolPrerequisite
+    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch.tools import tool
+    from linch.tools.registry import empty_tools
+
+    calls = []
+
+    @tool(name="Subagent")
+    async def launch(run_in_background: bool = False) -> str:
+        assert run_in_background
+        calls.append("launch")
+        return "Background worker launched"
+
+    @tool
+    async def dependent() -> str:
+        calls.append("dependent")
+        return "must not execute"
+
+    class Mutate:
+        resume_policy_id = "test.background-input"
+        resume_policy_config = {}
+
+        def on_pre_tool_use(self, ctx):
+            return (
+                HookResult.mutate(input={"run_in_background": True})
+                if ctx.tool_name == "Subagent"
+                else None
+            )
+
+    sessions, runs = await _stores(kind, pg_dsn)
+    provider = ScriptedProvider(
+        [
+            ToolUseTurn("Subagent", {}, "launch"),
+            ToolUseTurn("dependent", {}, "dependent"),
+            TextTurn("done"),
+        ]
+    )
+
+    def agent(store):
+        return Agent(
+            model="test",
+            provider=provider,
+            session_store=sessions,
+            run_store=store,
+            tools=empty_tools(launch, dependent),
+            hooks=[Mutate()],
+            enable_background_tools=False,
+            permissions={"mode": "skip-dangerous"},
+            reliability=ReliabilityPolicy(
+                prerequisites=(ToolPrerequisite("dependent", ("Subagent",)),)
+            ),
+        )
+
+    fault = ToolEndCrash(runs)
+    fault.target_tool = "Subagent"
+    session = await agent(fault if crash else runs).session()
+    run_id = ""
+    try:
+        try:
+            async for event in session.run("go"):
+                if event.type == "system":
+                    run_id = event.run_id
+        except _ProcessDeath:
+            assert crash
+            sessions, runs = await _reopen(kind, pg_dsn, sessions, runs)
+            session = await agent(runs).session(id=session.id)
+            _ = [event async for event in session.resume(run_id)]
+        else:
+            assert not crash
+        assert calls == ["launch"]
+        record = await runs.load_run(run_id)
+        assert "linch.reliability" not in record.checkpoint.extension_state
+        rows = await runs.load_events(run_id)
+        assert next(row.event for row in rows if row.event.type == "tool_call_start").input == {
+            "run_in_background": True
+        }
+        assert (
+            next(
+                block
+                for message in session.full_history
+                for block in message.content
+                if block.type == "tool_use" and block.id == "launch"
+            ).input
+            == {}
+        )
+        assert next(
+            row.event
+            for row in rows
+            if row.event.type == "tool_call_end" and row.event.tool_name == "dependent"
+        ).is_error
+    finally:
+        await _close(sessions, runs)
