@@ -6,13 +6,13 @@ Run:
 
 The AskUser tool lets the model pause and ask the *user* a multiple-choice
 question mid-run instead of guessing. You register it with
-``await agent.use(plugins.ask_user, handler)``; the handler renders the question
+``await agent.use(AskUserPlugin(), handler)``; the handler renders the question
 however your app likes
 (CLI prompt, web modal, Slack buttons) and returns the user's choice. The model
 receives the answer as the tool result and continues.
 
 What this example shows:
-  - ``await agent.use(plugins.ask_user, handler)`` registers the AskUser tool.
+  - ``await agent.use(AskUserPlugin(), handler)`` registers the AskUser tool.
   - The handler returns an ``AskUserResponse`` (or a plain dict the SDK coerces).
   - **Fail-closed**: a handler that returns ``None`` / ``{}`` (e.g. the user
     dismissed the dialog) is treated as *declined*, never as silent consent.
@@ -31,7 +31,7 @@ import asyncio
 import os
 from typing import Any
 
-from linch import Agent, plugins
+from linch import Agent, AskUserPlugin
 from linch.config import FeatureFlags, SystemPromptConfig
 from linch.sessions import InMemorySessionStore
 from linch.tools import AskUserRequest, AskUserResponse, AskUserTool
@@ -79,7 +79,7 @@ async def build_ask_user_agent(
     Pass ``provider`` + ``model`` (e.g. a ``ScriptedProvider``) to drive it
     deterministically. ``timeout_s`` registers the tool with an unanswered-prompt
     deadline — when set we register ``AskUserTool`` directly instead of via the
-    ``plugins.ask_user`` mount, which is the only difference.
+    ``AskUserPlugin()`` mount, which is the only difference.
     """
     kwargs: dict[str, Any] = {}
     if provider is not None:
@@ -99,7 +99,7 @@ async def build_ask_user_agent(
         **kwargs,
     )
     if timeout_s is None:
-        await agent.use(plugins.ask_user, handler)
+        await agent.use(AskUserPlugin(), handler)
     return agent
 
 

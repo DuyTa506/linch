@@ -8,7 +8,7 @@ The core SDK gives you parent→child subagents (a worker runs once and returns 
 conclusion). The *coordination* mailbox (``linch.coordination.mailbox``) adds the
 other half: peers that address each other directly and exchange messages across turns —
 the substrate under any multi-agent *team*. Opt in with
-``await agent.use(plugins.mailbox, box)``; with
+``await agent.use(MailboxPlugin(), box)``; with
 no mailbox the ``send_message`` tool is absent and no inbox drain runs (byte-identical).
 
 Two mechanisms, shown end to end:
@@ -31,7 +31,7 @@ import asyncio
 import os
 from typing import Any
 
-from linch import Agent, Correlator, InMemoryMailbox, MailboxMessage, empty_tools, plugins
+from linch import Agent, Correlator, InMemoryMailbox, MailboxMessage, MailboxPlugin, empty_tools
 from linch.config import FeatureFlags, SystemPromptConfig
 from linch.sessions import InMemorySessionStore
 
@@ -65,7 +65,7 @@ async def build_team(
         permissions={"mode": "skip-dangerous"},
         **kwargs,
     )
-    await agent.use(plugins.mailbox, box)
+    await agent.use(MailboxPlugin(), box)
     return agent, box
 
 

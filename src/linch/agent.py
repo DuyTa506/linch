@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import platform
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -67,35 +67,6 @@ class _PermissionConfig:
 class _RuntimeLimits:
     max_tool_concurrency: int
     tool_timeout_ms: float | None
-
-
-class _AskUserPlugin:
-    name = "ask_user"
-    version = "1"
-    provides: Iterable[str] = ()
-    requires: Iterable[str] = ("agent",)
-
-    def setup(self, ctx: Context, config: Any = None) -> Disposable:
-        from .tools.ask_user import AskUserTool
-
-        return ctx.agent.tools.replace(AskUserTool(config))
-
-
-class _BuiltinPlugins:
-    __slots__ = ()
-
-    @property
-    def mailbox(self) -> Plugin:
-        from .coordination.mailbox import MailboxPlugin
-
-        return MailboxPlugin()
-
-    @property
-    def ask_user(self) -> Plugin:
-        return _AskUserPlugin()
-
-
-plugins = _BuiltinPlugins()
 
 
 def _resolve_system_prompt(
@@ -687,9 +658,34 @@ class Agent:
 
     @property
     def mailbox(self) -> Any:
+        """Return the mounted mailbox service, or ``None`` when unavailable."""
         return self.context.get("mailbox")
 
     async def use(self, plugin: Plugin, config: Any = None) -> Disposable:
+        """Mount a plugin and await its initial activation or rollback.
+
+        Required services may be absent; the mount remains dormant until they
+        resolve. Each activation receives a fresh child context, and removal of
+        a requirement awaits plugin cleanup before returning. A failed setup or
+        audit is fully rolled back, including all owned asynchronous cleanup,
+        before this method raises. A failed mount has no returned handle, so its
+        unfinished cleanup is retried by agent teardown; cleanup after a
+        successful mount is retried through the returned disposer or teardown.
+
+        Args:
+            plugin: Duck-typed plugin implementation to mount.
+            config: Optional plugin-specific configuration passed to setup.
+
+        Returns:
+            An idempotent disposer that unmounts the plugin and its active scope.
+
+        Raises:
+            ConfigError: If setup returns an invalid disposer, violates the
+                service audit, or a dependency cycle/duplicate provision is
+                detected.
+            RuntimeError: If this agent is closing or already closed.
+            BaseException: Any setup or awaited cleanup failure from the plugin.
+        """
         if self._lifecycle_state != _OPEN:
             raise RuntimeError("agent is closed")
         from .kernel.plugins import _PluginMount

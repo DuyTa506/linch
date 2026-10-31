@@ -224,8 +224,8 @@ attempting a legacy database upgrade.
 
 ## Coordination scope
 
-- `Agent(mailbox=...)` is removed; mount `await agent.use(plugins.mailbox, mailbox)`.
-- `Agent(ask_user=...)` is removed; mount `await agent.use(plugins.ask_user, handler)`.
+- `Agent(mailbox=...)` is removed; mount `await agent.use(MailboxPlugin(), mailbox)`.
+- `Agent(ask_user=...)` is removed; mount `await agent.use(AskUserPlugin(), handler)`.
 - `Schedule` is removed; define schedules through `linch.worker`.
 - `ScheduleOccurrence` is removed; worker schedule fires use queue payloads.
 - `ScheduleStore` is removed; use the worker Postgres schedule-definition table.

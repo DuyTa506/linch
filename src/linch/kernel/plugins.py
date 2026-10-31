@@ -6,17 +6,37 @@ from typing import Any, Protocol
 
 from linch.errors import ConfigError
 
-from .context import _PLUGIN_SCOPE, Context
+from .context import Context
 from .effects import CleanupError, Disposable, EffectScope
 
 
 class Plugin(Protocol):
+    """Describe a duck-typed plugin that can be mounted on an agent.
+
+    Attributes:
+        name: Stable human-readable plugin identifier used in diagnostics.
+        version: Plugin version reported by the plugin implementation.
+        provides: Service keys the plugin may register during setup.
+        requires: Service keys that must resolve before setup can activate.
+    """
+
     name: str
     version: str
     provides: Iterable[str]
     requires: Iterable[str]
 
-    def setup(self, ctx: Context, config: Any = None) -> Disposable: ...
+    def setup(self, ctx: Context, config: Any = None) -> Disposable:
+        """Configure the plugin in its fresh activation context.
+
+        Args:
+            ctx: Child context owned by this plugin activation.
+            config: Optional caller-supplied plugin configuration.
+
+        Returns:
+            A disposer for cleanup not represented by context effects.
+        """
+
+        ...
 
 
 _MISSING = object()
@@ -112,11 +132,7 @@ class _PluginMount:
                 pending.extend(getattr(exported[0], "_plugin_requires", ()))
         scope = self.host.scope(f"plugin:{self.plugin.name}")
         try:
-            token = _PLUGIN_SCOPE.set(scope)
-            try:
-                result = self.plugin.setup(scope, self.config)
-            finally:
-                _PLUGIN_SCOPE.reset(token)
+            result = scope.setup_plugin(self.plugin.setup, self.config)
             if not isinstance(result, Disposable):
                 raise ConfigError(f"plugin {self.plugin.name!r} setup() must return a Disposable")
             scope.effect(lambda: result)

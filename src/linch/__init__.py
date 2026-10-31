@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     # skipped at runtime (TYPE_CHECKING is False), so `import linch` stays lazy —
     # the runtime resolution path is `__getattr__` below. Keep it in sync with
     # `_EXPORTS`/`_ALIASES`; drift surfaces as pyright/ruff errors.
-    from .agent import Agent, plugins
+    from .agent import Agent
     from .budget import RunBudget
     from .compaction import (
         GENERAL_SUMMARY_PROMPT,
@@ -52,6 +52,7 @@ if TYPE_CHECKING:
         Mailbox,
         MailboxClaim,
         MailboxMessage,
+        MailboxPlugin,
     )
     from .deep_agent import (
         DEEP_AGENT_PROFILES,
@@ -306,6 +307,7 @@ if TYPE_CHECKING:
     from .tools import (
         AskUserHandler,
         AskUserOption,
+        AskUserPlugin,
         AskUserQuestion,
         AskUserRequest,
         AskUserResponse,
@@ -366,7 +368,7 @@ if TYPE_CHECKING:
 # name). Flattened into ``_LAZY`` below; ``_ALIASES`` covers the few names whose
 # source attribute differs from the exported name.
 _EXPORTS: dict[str, tuple[str, ...]] = {
-    ".agent": ("Agent", "plugins"),
+    ".agent": ("Agent",),
     ".budget": ("RunBudget",),
     ".compaction": (
         "GENERAL_SUMMARY_PROMPT",
@@ -391,6 +393,7 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
         "Mailbox",
         "MailboxClaim",
         "MailboxMessage",
+        "MailboxPlugin",
     ),
     ".deep_agent": (
         "DEEP_AGENT_PROFILES",
@@ -645,6 +648,7 @@ _EXPORTS: dict[str, tuple[str, ...]] = {
     ".tools": (
         "AskUserHandler",
         "AskUserOption",
+        "AskUserPlugin",
         "AskUserQuestion",
         "AskUserRequest",
         "AskUserResponse",
@@ -745,7 +749,8 @@ __all__ = [
     "Context",
     "Disposable",
     "Plugin",
-    "plugins",
+    "MailboxPlugin",
+    "AskUserPlugin",
     "IgnorableEvent",
     "is_ignorable_event",
     "ToolExecution",

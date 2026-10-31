@@ -15,12 +15,24 @@ from .correlation import Correlator
 
 
 class MailboxPlugin:
+    """Provide mailbox service, inbox delivery, and the send-message tool."""
+
     name = "mailbox"
     version = "1"
     provides: Iterable[str] = ("mailbox",)
     requires: Iterable[str] = ("agent",)
 
     def setup(self, ctx: Context, config: Any = None) -> Disposable:
+        """Install mailbox-backed messaging for one agent activation.
+
+        Args:
+            ctx: Plugin activation context containing the owning agent.
+            config: Mailbox implementation used for delivery and sending.
+
+        Returns:
+            A disposer for plugin-specific cleanup; context effects own the
+            service, inbox producer, and optional tool registration.
+        """
         agent = ctx.agent
         ctx.register("mailbox", config)
         ctx.inbox(partial(_mailbox_producer, config))
@@ -103,6 +115,7 @@ def render_peer_message(message: Any) -> Message:
 
 
 __all__ = [
+    "MailboxPlugin",
     "Correlator",
     "ClaimableMailbox",
     "InMemoryMailbox",
