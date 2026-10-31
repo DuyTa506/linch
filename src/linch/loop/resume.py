@@ -90,7 +90,7 @@ async def recover_resume(ctx: ResumeContext) -> AsyncIterator[Event]:
                 ctx.session,
                 ctx.run_id,
                 ctx.state.invalid_feedback or decision.feedback,
-                prefix=ctx.state.recovered_primary_prefix,
+                boundary=ctx.active_primary,
                 decision=decision,
             ):
                 yield event
@@ -180,46 +180,36 @@ async def _reconcile_active_primary(ctx: ResumeContext) -> None:
             expected.append(projection["control_message_sha256"])
     else:
         expected = []
-    history = list(ctx.session.full_history)
-    base = active_primary["full_history_base_count"]
-    diagnostic = Message(role="assistant", content=[TextBlock(text=INVALID_RESPONSE_DIAGNOSTIC)])
-    rejected_text = (
-        projection is not None
-        and projection["after_action"] == "continue"
-        and projection["assistant_sha256"] == _message_digest(diagnostic)
-    )
-    if ctx.checkpoint.phase == "assistant_appended" and len(history) > base + len(expected):
-        ctx.state.replayed_feedback = tuple(history[base + len(expected) :])
-        history = history[: base + len(expected)]
-    ctx.state.recovered_primary_prefix = (
-        0
-        if receipt is not None and receipt.disposition == "rejected_native"
-        else _receipt_message_prefix(
-            history,
-            base_count=base,
-            base_fingerprint=active_primary["full_history_base_fingerprint"],
-            expected_digests=expected,
-        )
-    )
-    if rejected_text:
-        assert projection is not None
-        control = _primary_control_message(diagnostic, projection["after_feedback"], wrap=False)
-        if _message_digest(control) == projection["control_message_sha256"]:
-            ctx.state.terminal_kind = "invalid_text"
-            ctx.state.invalid_feedback = (diagnostic, control)
-            return
-
     if receipt is not None and receipt.disposition == "rejected_native":
-        event = ErrorEvent(
+        ctx.state.terminal_event = ErrorEvent(
             error={
                 "name": "ProviderError",
                 "message": "provider response contained malformed native tool arguments",
                 "retryable": False,
             }
         )
-        ctx.state.terminal_event = event
         ctx.state.terminal_kind = "rejected_native"
         return
+    if projection is not None and projection["after_action"] == "continue":
+        diagnostic = Message(
+            role="assistant", content=[TextBlock(text=INVALID_RESPONSE_DIAGNOSTIC)]
+        )
+        control = _primary_control_message(diagnostic, projection["after_feedback"], wrap=False)
+        if expected == [_message_digest(diagnostic), _message_digest(control)]:
+            ctx.state.terminal_kind = "invalid_text"
+            ctx.state.invalid_feedback = (diagnostic, control)
+            return
+    history = list(ctx.session.full_history)
+    base = active_primary["full_history_base_count"]
+    if ctx.checkpoint.phase == "assistant_appended" and len(history) > base + len(expected):
+        ctx.state.replayed_feedback = tuple(history[base + len(expected) :])
+        history = history[: base + len(expected)]
+    ctx.state.recovered_primary_prefix = _receipt_message_prefix(
+        history,
+        base_count=base,
+        base_fingerprint=active_primary["full_history_base_fingerprint"],
+        expected_digests=expected,
+    )
     if projection is not None and projection["after_action"] == "stop":
         ctx.state.terminal_kind = "stopped"
         ctx.state.terminal_feedback = projection["after_feedback"]

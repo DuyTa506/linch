@@ -89,6 +89,17 @@ async def run_tool_batch(ctx: ToolBatchContext) -> AsyncIterator[Event]:
         if resuming_turn
         else {}
     )
+    background_calls = (
+        {
+            (row.event.tool_use_id, row.event.tool_name)
+            for row in ctx.stored_events
+            if row.seq > (ctx.checkpoint.tool_batch_event_after_seq or 0)
+            and isinstance(row.event, ToolCallStartEvent)
+            and row.event.input.get("run_in_background")
+        }
+        if ctx.observe_results is not None
+        else None
+    )
     recovery_hints: dict[str, str] = {}
     missing_tool_blocks = [block for block in tool_blocks if block.id not in completed_tool_results]
     if not (replaying_results_checkpoint and not missing_tool_blocks):
@@ -137,6 +148,8 @@ async def run_tool_batch(ctx: ToolBatchContext) -> AsyncIterator[Event]:
                 status="waiting_permission",
             )
         elif isinstance(event, ToolCallStartEvent):
+            if background_calls is not None and event.input.get("run_in_background"):
+                background_calls.add((event.tool_use_id, event.tool_name))
             # A started-but-unfinished tool is recovered as interrupted from
             # the durable event log if a consumer crashes at the yield below.
             completed_tool_results.setdefault(
@@ -191,8 +204,11 @@ async def run_tool_batch(ctx: ToolBatchContext) -> AsyncIterator[Event]:
     if not already_appended:
         await store_call(session, "session.append", session.append([result_message]))
 
-    if ctx.observe_results is not None:
-        ctx.observe_results(tool_blocks, completed_tool_results)
+    if ctx.observe_results is not None and background_calls is not None:
+        ctx.observe_results(
+            [block for block in tool_blocks if (block.id, block.name) not in background_calls],
+            completed_tool_results,
+        )
     await ctx.save_checkpoint(
         "tool_results_appended",
         turn_index=ctx.turn_index,

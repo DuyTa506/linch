@@ -52,17 +52,12 @@ class ReliabilityRuntime:
             + ". Nothing was executed; continue with the required tools."
         )
         action = "fail" if exhausted else "continue"
+        reason = "correction_budget_exhausted" if exhausted else mechanism
         return TurnStoppingDecision(
             action,
             feedback=() if exhausted else (Message(role="user", content=[TextBlock(text=text)]),),
             error=ValueError("reliability correction budget exhausted") if exhausted else None,
-            event=ReliabilityEvent(
-                mechanism,
-                action,
-                "correction_budget_exhausted" if exhausted else mechanism,
-                event.turn_index,
-                self.corrections,
-            ),
+            event=ReliabilityEvent(mechanism, action, reason, event.turn_index, self.corrections),
         )
 
     def checkpoint_state(self) -> dict[str, Any]:
@@ -103,22 +98,16 @@ class PrerequisiteHook:
         runtime = self.runs.get(ctx.run_id)
         if runtime is None or ctx.session.agent.context is not self.context:
             return None
-        missing = sorted(
-            {
-                name
-                for item in runtime.policy.prerequisites
-                if item.tool_name == ctx.tool_name
-                for name in item.requires_success
-            }
-            - runtime.succeeded
-        )
-        return (
-            HookResult.block(
-                "Prerequisite not satisfied: " + ", ".join(missing) + ". The tool was not executed."
+        missing: set[str] = set()
+        for rule in runtime.policy.prerequisites:
+            if rule.tool_name == ctx.tool_name:
+                missing.update(set(rule.requires_success) - runtime.succeeded)
+        if missing:
+            names = ", ".join(sorted(missing))
+            return HookResult.block(
+                f"Prerequisite not satisfied: {names}. The tool was not executed."
             )
-            if missing
-            else None
-        )
+        return None
 
     def install(self, agent: Any) -> Disposable:
         agent.hooks.insert(0, self)
