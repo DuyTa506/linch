@@ -42,8 +42,9 @@ Two mechanisms:
 **Message bus.** A session with a `mailbox_address` receives its inbox at the top of
 each turn (through the same next-turn notification seam). One agent addresses a peer with
 `send_message(to=..., content=..., type=...)`; the peer picks it up on its next
-run as a `<peer-message>` `UserEvent`. Spawned workers are auto-addressed by their
-`display_name` when the agent has a mailbox.
+run as a `<peer-message>` `UserEvent`. Spawned workers use a unique mailbox address
+when the agent has a mailbox: the worker ID exposed by the Subagent tool, or the
+child session ID for direct runner calls. Display names are labels only.
 
 ```python
 lead = await agent.session();   lead.mailbox_address = "lead"

@@ -113,6 +113,41 @@ async def test_exhausted_budget_stops_child_run() -> None:
     assert any(e.type == "budget" and e.kind == "exceeded" for e in nested)
 
 
+async def test_continued_worker_charges_current_run_budget() -> None:
+    from linch import RunBudget, RunOptions
+    from linch.types import Usage
+
+    usage = Usage(input_tokens=10, output_tokens=0)
+    provider = ScriptedProvider(
+        [
+            ToolUseTurn("Subagent", {"description": "d", "prompt": "p"}, usage=usage),
+            TextTurn("child-1", usage=usage),
+            TextTurn("parent-1", usage=usage),
+            ToolUseTurn("SubagentContinue", {"to": "Agent #1", "message": "more"}, usage=usage),
+            TextTurn("child-2", usage=Usage(input_tokens=500, output_tokens=0)),
+            TextTurn("parent-2", usage=usage),
+        ]
+    )
+    agent = _make_agent(
+        provider,
+        retain_subagents=True,
+        enable_worker_tools=True,
+    )
+    parent = await agent.session()
+    first_budget = RunBudget(max_tokens=10_000)
+    second_budget = RunBudget(max_tokens=10_000)
+
+    async for _ in parent.run("one", RunOptions(budget=first_budget)):
+        pass
+    first_spent = first_budget.spent_tokens
+    async for _ in parent.run("two", RunOptions(budget=second_budget)):
+        pass
+
+    assert first_budget.spent_tokens == first_spent
+    assert second_budget.spent_tokens == 520
+    await agent.close()
+
+
 def test_budget_event_round_trips_event_dict() -> None:
     from linch.events import BudgetEvent, event_from_dict, event_to_dict
 
