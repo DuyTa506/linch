@@ -1,8 +1,9 @@
 # Profile runs as configuration overlays
 
-Status: **proposal for the architecture owner's phase 2 review**. Phase 1 changes
-only the four kernel/constructor defects (82-1, 82-2, 82-3, 87-3). None of the
-overlay behavior below is implemented by this document.
+Status: **accepted and implemented; final validation in progress**. Phase 2
+replaces copied Agent configuration with explicit run bindings and captures
+configuration across foreground work, detached tasks, and child sessions. The
+phase 1 kernel/constructor fixes (82-1, 82-2, 82-3, 87-3) remain in place.
 
 The owner decision is to remove the shallow Agent copy in `_profile_scope`.
 `session.agent` always identifies the real Agent, including child sessions,
@@ -205,10 +206,12 @@ cleanup comparisons `profiles.py:247,257` (**13 sites**).
 
 ## One owner and one configuration accessor
 
-Add a private, slotted `_ProfileRunOverlay` in `profiles.py`. It contains the
-real owning Agent, the pinned Profile reference, a child Context, and only the
-run configuration surfaces listed below. It has no session registry, session
-lock, provider lifecycle, store lifecycle, or `close()` implementation.
+The implementation represents the overlay with two private slotted records in
+`profiles.py`: `_RunConfig` holds the explicit configuration surface and real
+owner reference; `_RunBinding` holds the pinned Profile reference, child Context,
+run identity, shared budget, and retain/cleanup ownership. Together they provide
+the overlay described here. Neither record owns a session registry, session
+lock, provider lifecycle, store lifecycle, or Agent `close()` implementation.
 
 Use one private accessor, `_effective_run_config(session, run_id)`, for
 Agent-derived run configuration. Its result is a narrow configuration surface,
@@ -233,8 +236,10 @@ or forking registries/listeners. A profile run uses its overlay. The internal
 configuration interface lists its supported fields; do not add arbitrary
 `__getattr__` forwarding to an Agent. Normalize the existing override precedence
 at the run boundary rather than reimplementing it in each consumer.
-Keep the ordinary run's live Agent registry behavior, including mid-run MCP
-attachment. Profile tool views retain their existing composition boundary;
+An ordinary binding uses a narrow live config view that resolves its Session
+tool/system-block overrides at this boundary and delegates only known remaining
+fields to the real Agent. Consumers use that effective view directly. Keep the
+ordinary run's live Agent registry behavior, including mid-run MCP attachment. Profile tool views retain their existing composition boundary;
 host loading/preparation finishes before composition, and later host-global
 mutations do not silently widen an already-admitted profile view.
 
@@ -318,12 +323,13 @@ act twice. Run data remains keyed by session/run, never by the Agent alone.
 ### Inbox and mailbox ownership
 
 Keep the host inbox bucket on the real Agent Context. Give each overlay its
-own bucket. `Context.inbox()` targets the Context of the resolved `run_config`
-capability (falling back to the resolved Agent for standalone/existing Context
-use), while the registering activation scope owns the disposer. This is
-necessary because plugin activation scopes are children of their mounting
-Context; storing producers only on the activation's private bucket would make
-them invisible to the current boundary drain.
+own bucket. `ctx.run_config.inbox(producer)` explicitly targets the configuration
+Context and returns a disposer owned by the registering activation's
+`ctx.effect`. `Context.inbox()` retains its existing Agent-bucket semantics; the
+kernel has no profile selection policy. Explicit registration is necessary
+because plugin activation scopes are children of their mounting Context; storing
+producers only on an activation's private bucket would make them invisible to
+the current boundary drain.
 
 At a run boundary, snapshot and drain the Agent bucket in its registration
 order, then the overlay bucket in its registration order. Do not traverse every
@@ -459,6 +465,43 @@ Changes outside WP C's present source ownership require coordination before
 phase 2 begins, particularly scheduler and plugin/tool call sites owned by D.
 
 No new runtime engine, scheduler parallelism rule, storage schema, public
-Agent facade, or mutable process-wide registry is proposed. Phase 1 stops at
-this committed design. Findings 87-1, 87-2, 73-6, and 78-1 remain deliberately
-unfixed until the architecture owner reviews the overlay and lifecycle design.
+Agent facade, or mutable process-wide registry is introduced. The approved
+implementation covers findings 87-1, 87-2, 73-6, and 78-1 with the regressions
+listed above.
+
+
+## Lifecycle implementation and regression coverage
+
+`EffectScope` tracks disposers in an insertion-ordered dictionary keyed by
+identity. Successful disposal removes a handle in O(1); teardown still walks
+registrations in reverse order and preserves failed handles for retry (82-2).
+
+For 74-1, terminal `ResultEvent` delivery completes the captured outer
+`EVENT_EMIT` hook, inner generator cleanup, and profile foreground release before
+yielding the result. Admission is released even when teardown fails; the failed
+binding and parent effect remain retryable. Session lifecycle tests cover
+break-after-result and concurrent Agent close. Profile tests additionally cover
+teardown failure, a subsequent ordinary run, final close, and same-id readmission
+after cleanup retry. Closing a child retries its zero-retain nested run bindings
+before releasing the child Session seed, so nested cleanup cannot await its own
+parent release.
+
+For 74-5, alignment timing out before append begins is cancelled and cannot
+mutate the log later. Once append starts, alignment waits for its truthful
+completion instead of reporting an uncommitted timeout. Alignment tests cover
+both a slow hook before append and a held append crossing the deadline.
+
+For 74-7, retained profile children retain the real Agent and allow ordinary
+`fork_session(child)`; that ordinary fork remains independent. For the profile
+portion of 74-2, failed child creation/registration and foreground retained-child
+cancellation release the child and its seed. Detached background workers retain
+their existing addressable-worker behavior. Detached task scheduling acquires
+its retain synchronously and has a done-callback fallback for cancellation before
+the wrapper's first step, closing unstarted work and releasing exactly once.
+
+Profile regressions cover retained continuation, an explicitly nested Profile
+with parent service fallback and intersected restrictions, run A background work
+reading A's configuration while the same Session runs B, reserved setup identity,
+setup rollback, early iterator close, outer event hooks, and bounded effect
+ownership after successful cleanup. ToolSearch and RAG shadowing tests preserve
+strict owner identity and avoid duplicate effective-service hooks/guards.
