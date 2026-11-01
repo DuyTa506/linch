@@ -69,7 +69,8 @@ class PathRule:
     Args:
         paths: Glob patterns evaluated against the resolved target path.
         decision: Policy outcome when a path match is found.
-        tools: Tool names to which the path patterns apply; defaults to file-editing tools.
+        tools: Tool names to which the path patterns apply; defaults to workspace and
+            virtual filesystem write tools.
         role: Optional role required for the rule to apply.
         unless_role: Optional role whose presence disables the rule.
 
@@ -100,7 +101,8 @@ class PathRule:
         Args:
             paths: Glob patterns evaluated against the resolved target path.
             decision: Policy outcome when a path match is found.
-            tools: Tool names to which the path patterns apply; defaults to file-editing tools.
+            tools: Tool names to which the path patterns apply; defaults to workspace and
+                virtual filesystem write tools.
             role: Optional role required for the rule to apply.
             unless_role: Optional role whose presence disables the rule.
 
@@ -228,7 +230,7 @@ def match_path_rule(
     Returns:
         Whether the resolved target matches one of the rule patterns.
     """
-    tools = rule.tools or ["Write", "Edit"]
+    tools = rule.tools or ["Write", "Edit", "write_file", "edit_file"]
     if call_name not in tools:
         return False
     work_dir = cwd or project_root
@@ -396,6 +398,16 @@ def _path_input_for_tool(tool: str, input: dict[str, Any], cwd: str) -> str | No
         val = input.get("path")
         if isinstance(val, str) and val.strip() != "":
             return val
+        return cwd
+    if tool in ("read_file", "write_file", "edit_file"):
+        val = input.get("path")
+        if isinstance(val, str) and val.strip() != "":
+            return val.lstrip("/")
+        return None
+    if tool == "ls":
+        val = input.get("prefix")
+        if isinstance(val, str) and val.strip() != "":
+            return val.lstrip("/")
         return cwd
     return None
 
