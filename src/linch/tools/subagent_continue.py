@@ -112,6 +112,7 @@ class SubagentContinueTool:
             ContinueSubagentArgs(
                 parent_session=session,
                 parent_agent=session.agent,
+                parent_run_id=ctx.run_id,
                 handle=handle,
                 message=message,
                 subagent_run_id=subagent_run_id,

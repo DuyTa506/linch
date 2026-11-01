@@ -386,3 +386,56 @@ async def test_context_length_recovery_replaces_retrieved_ids_and_audit(answer, 
     assert any("[doc:b]" in block.text for block in provider.requests[-1].system)
     assert all(query == "original question" for query, _, _ in connector.calls)
     await agent.close()
+
+
+@pytest.mark.parametrize("profiled", [False, True])
+async def test_empty_profile_preserves_host_retrieval_and_grounding(profiled):
+    from linch import Profile, RunOptions, register_grounding_check, register_rag_connector
+
+    provider, connector = Provider(["unsupported"]), Connector(("d1",))
+    agent = make_agent(provider, reliability=None)
+    register_rag_connector(agent, connector)
+    register_grounding_check(agent)
+    session = await agent.session()
+    opts = RunOptions(profile=Profile("empty", "1")) if profiled else None
+    events = [event async for event in session.run("question", opts)]
+    assert connector.calls == [("question", 5, None)]
+    assert any("[doc:d1]" in block.text for block in provider.requests[0].system)
+    assert events[-1].subtype != "success"
+    assert session.agent is agent
+    await agent.close()
+
+
+async def test_profile_connector_shadows_host_without_duplicate_retrieval():
+    from linch import Profile, RunOptions, register_rag_connector
+    from linch.kernel import Disposable
+
+    host, local = Connector(("host",)), Connector(("local",))
+
+    class LocalRag:
+        name, version = "local-rag", "1"
+        provides = ("rag_connector",)
+        requires = ("run_config",)
+
+        def setup(self, ctx, config=None):
+            from linch.rag import _register_rag_connector
+
+            ctx.effect(lambda: _register_rag_connector(ctx.run_config, ctx, local))
+            return Disposable()
+
+    provider = Provider(["answer [doc:local]"])
+    agent = make_agent(provider)
+    register_rag_connector(agent, host)
+    session = await agent.session()
+    events = [
+        event
+        async for event in session.run(
+            "question", RunOptions(profile=Profile("local", "1", plugins={"rag": (LocalRag(), {})}))
+        )
+    ]
+    assert host.calls == []
+    assert len(local.calls) == 1
+    assert events[-1].subtype == "success"
+    assert any("[doc:local]" in block.text for block in provider.requests[0].system)
+    assert agent.context.get("rag_connector").connector is host
+    await agent.close()

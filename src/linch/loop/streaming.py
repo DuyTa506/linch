@@ -130,6 +130,7 @@ async def maybe_compact_resilient(
     model: str | None = None,
     auxiliary_caller: _AccountedAuxiliaryCaller | None = None,
     logical_call_id: str | None = None,
+    config: Any = None,
 ) -> bool:
     """Run proactive (pre-limit) compaction with the same transient-failure
     backoff the turn loop gets, then degrade gracefully instead of crashing.
@@ -153,6 +154,11 @@ async def maybe_compact_resilient(
                 model=model,
                 auxiliary_caller=auxiliary_caller,
                 logical_call_id=logical_call_id,
+                **(
+                    {"_run_config": config}
+                    if config is not None and config._values is not None
+                    else {}
+                ),
             )
         except ProviderError as exc:
             if not getattr(exc, "retryable", False):
@@ -208,6 +214,7 @@ async def _stream_turn_with_recovery(
     request_prepared: bool = False,
     auxiliary_caller: _AccountedAuxiliaryCaller | None = None,
     compaction_logical_call_id: str | None = None,
+    config: Any = None,
 ) -> AsyncIterator[Any]:
     """Recover provider turns with a per-turn retry or a per-run ladder budget.
 
@@ -248,13 +255,20 @@ async def _stream_turn_with_recovery(
                 model=req.model,
                 auxiliary_caller=auxiliary_caller,
                 logical_call_id=compaction_logical_call_id,
+                **(
+                    {"_run_config": config}
+                    if config is not None and config._values is not None
+                    else {}
+                ),
             )
         if ladder is not None:
             reset_read_tracker_after_compaction(session, agent)
-        _re_inject_skill_context(session)
+        _re_inject_skill_context(session, config=config)
         # The runner snapshots the final provider view while suspended here.
         yield build_compaction_event(session)
-        context_result = await _build_context_result(session, turn_index)
+        context_result = await _build_context_result(
+            session, turn_index, **({"config": config} if config is not None else {})
+        )
         if context_result is not None:
             yield ContextBuildEvent(
                 system_blocks=len(context_result.system_blocks),
@@ -267,6 +281,7 @@ async def _stream_turn_with_recovery(
             session,
             opts,
             context=context_result,
+            config=config,
             model_override=req.model,
         )
 

@@ -59,6 +59,7 @@ class ContextBuildTurn:
     model: str
     tools: Any
     token_estimator: Any = None
+    _run_config: Any = None
 
 
 @dataclass(slots=True)

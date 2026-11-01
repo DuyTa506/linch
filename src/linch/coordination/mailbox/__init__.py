@@ -37,11 +37,13 @@ class MailboxPlugin:
         """
         agent = ctx.agent
         ctx.register("mailbox", config)
-        ctx.inbox(partial(_mailbox_producer, config))
-        if agent.tools.get("send_message") is None:
+        ctx.effect(lambda: ctx.run_config.inbox(partial(_mailbox_producer, config)))
+        if ctx.run_config.tools.get("send_message") is None:
             from ..send_message import SendMessageTool
 
-            ctx.effect(lambda: agent.tools.register(SendMessageTool(config, agent._sessions.get)))
+            ctx.effect(
+                lambda: ctx.run_config.tools.register(SendMessageTool(config, agent._sessions.get))
+            )
         return Disposable()
 
 

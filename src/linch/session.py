@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
-from dataclasses import dataclass, field
+from collections.abc import AsyncIterator, Sequence
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
@@ -213,7 +213,8 @@ class Session:
     _telemetry_run: Any = field(default=None, repr=False)
     active_run_id: str | None = None
     _active_principal: Principal | None = field(default=None, repr=False)
-    _profile_cleanup: Callable[[], Awaitable[None] | None] | None = field(default=None, repr=False)
+    _run_bindings: dict[str, Any] = field(default_factory=dict, repr=False)
+    _config_seed: Any = field(default=None, repr=False)
     _active_gen: Any = None
     """The async generator driving the in-flight ``run``/``resume`` iterator.
     Captured so a forced ``aclose`` can finalize an abandoned run generator
@@ -362,8 +363,10 @@ class Session:
 
         from .loop import run_loop
 
-        options = opts or RunOptions()
-        inner = run_loop(self, prompt, options)
+        options = replace(
+            opts or RunOptions(), run_id=(opts.run_id if opts else None) or str(uuid4())
+        )
+        inner = run_loop(self, prompt, options, _adopt_run_id=bool(opts and opts.run_id))
         self._active_inner = inner
         it = self._iterate(inner, "", options)
         self._active_gen = it
@@ -398,7 +401,7 @@ class Session:
 
         from .loop import resume_loop
 
-        options = opts or RunOptions()
+        options = replace(opts or RunOptions(), run_id=run_id)
         inner = resume_loop(self, run_id, options)
         self._active_inner = inner
         it = self._iterate(inner, run_id, options)
@@ -443,13 +446,13 @@ class Session:
 
         scope = None
         try:
-            if opts.profile is not None:
-                from .profiles import _profile_scope
+            from .profiles import _profile_scope
 
-                pending_scope = _profile_scope(self, opts.profile)
-                await pending_scope.__aenter__()
-                scope = pending_scope
-            hooks = HookDispatcher(getattr(self.agent, "hooks", None))
+            assert opts.run_id is not None
+            pending_scope = _profile_scope(self, opts.profile, opts.run_id)
+            config = await pending_scope.__aenter__()
+            scope = pending_scope
+            hooks = HookDispatcher(config.hooks)
             async for event in inner:
                 if isinstance(event, ResultEvent):
                     # Async generators are not automatically closed when a
@@ -655,13 +658,18 @@ class Session:
             # and retryable on the next parent aclose().
             self.workers.pop(worker_id, None)
         self.workers.clear()
+        # Keep the Session seed alive until nested run cleanup has removed its
+        # parent-owned effect; its final seed release must not await itself.
+        for binding in tuple(self._run_bindings.values()):
+            if binding.retains == 0:
+                await binding.release()
+        if self._config_seed is not None:
+            seed = self._config_seed
+            await seed.release()
+            self._config_seed = None
         self._lifecycle_state = _CLOSED
         self._closed = True
         self.agent._unregister_session(self.id, self)
-        if self._profile_cleanup is not None:
-            cleanup, self._profile_cleanup = self._profile_cleanup, None
-            if pending := cleanup():
-                await pending
 
     async def _finalize_active_run(self) -> None:
         """Abort an admitted run and wait until its complete unwind is observable.

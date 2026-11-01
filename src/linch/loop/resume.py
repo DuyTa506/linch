@@ -48,6 +48,7 @@ class ResumeContext:
 
     session: Any
     agent: Any
+    config: Any
     run_id: str
     run_record: Any
     checkpoint: Any

@@ -18,6 +18,7 @@ from ..hooks import (
     SubagentStartContext,
     SubagentStopContext,
 )
+from ..profiles import _base_run_config
 from ..session import RunOptions, Session
 from ..session_log import SessionLog
 from ..types import SystemBlock, TextBlock
@@ -37,6 +38,12 @@ class RunSubagentArgs:
     prompt: str
     display_name: str
     subagent_run_id: str
+    config_binding: Any = None
+    """Originating configuration binding captured before scheduling child work."""
+    parent_run_id: str | None = None
+    """Parent run identity used by lifecycle hooks after detachment."""
+    detached: bool = False
+    """Whether a retained background worker remains addressable after cancellation."""
     tools_filter: list[str] | None = None
     run_options: RunOptions | None = None
     """Per-child run options. The runner always overrides ``signal`` with the
@@ -74,6 +81,8 @@ class ContinueSubagentArgs:
     handle: WorkerHandle
     message: str
     subagent_run_id: str
+    parent_run_id: str | None = None
+    """Parent invocation identity used by continuation lifecycle hooks."""
     run_options: RunOptions | None = None
     """Per-continuation run options. The runner always overrides ``signal`` with
     the merged parent/child abort signal before calling ``Session.run``."""
@@ -202,8 +211,43 @@ async def _drive_child(
 
 
 async def run_subagent(args: RunSubagentArgs) -> RunSubagentResult:
+    """Drive a child with real Agent ownership and captured parent configuration.
+
+    Args:
+        args: Child launch settings, including the originating binding and retain policy.
+
+    Returns:
+        The child's answer, completion status, and durable session identity.
+    """
+    binding = args.config_binding
+    if binding is None and args.parent_session.active_run_id is not None:
+        binding = args.parent_session._run_bindings.get(args.parent_session.active_run_id)
+    if binding is not None:
+        binding.retain()
+    child: Session | None = None
+
+    def on_registered(session: Session) -> None:
+        nonlocal child
+        child = session
+        session._config_seed = binding
+
+    try:
+        return await _run_subagent_owned(args, binding, on_registered)
+    except BaseException:
+        if child is not None:
+            if not (args.detached and args.retain):
+                await args.parent_agent.release_session(child, force=True)
+        elif binding is not None:
+            await binding.release()
+        raise
+
+
+async def _run_subagent_owned(
+    args: RunSubagentArgs, binding: Any, on_registered: Any
+) -> RunSubagentResult:
     agent = args.parent_agent
     store = agent._get_store()
+    config = binding.config if binding is not None else _base_run_config(args.parent_session)
 
     child_record = await store.create(
         meta={
@@ -218,10 +262,13 @@ async def run_subagent(args: RunSubagentArgs) -> RunSubagentResult:
     if tools_filter is None:
         tools_filter = args.definition.frontmatter.tools
 
-    effective_tools = args.parent_session.tools_override
-    if effective_tools is None:
-        worker_catalog = getattr(agent, "_subagent_tool_registry", None)
-        effective_tools = worker_catalog if worker_catalog is not None else agent.tools
+    if config._values is not None:
+        effective_tools = config.tools
+    else:
+        effective_tools = args.parent_session.tools_override
+        if effective_tools is None:
+            worker_catalog = getattr(agent, "_subagent_tool_registry", None)
+            effective_tools = worker_catalog if worker_catalog is not None else config.tools
 
     if args.fork:
         # Fork: reuse the parent's tools and system blocks verbatim (and seed the
@@ -232,18 +279,19 @@ async def run_subagent(args: RunSubagentArgs) -> RunSubagentResult:
             if tools_filter is None
             else build_child_tools(effective_tools, tools_filter)
         )
-        child_system = list(args.parent_session.system_blocks_override or agent.system_blocks)
+        effective_system = config.system_blocks_override
+        child_system = list(config.system_blocks if effective_system is None else effective_system)
         seed_view = list(args.parent_session.provider_view)
     else:
         child_tools = build_child_tools(effective_tools, tools_filter)
         # Build the child system blocks from the child's filtered tool names so the
         # protocol block only describes tools the subagent actually has access to.
         child_tool_names = sorted(t.name for t in child_tools.list())
-        builder = getattr(agent, "build_system_blocks_for_tool_names", None)
+        builder = getattr(config, "build_system_blocks_for_tool_names", None)
         if callable(builder):
             child_system = list(cast(Iterable[SystemBlock], builder(child_tool_names)))
         else:
-            child_system = list(agent.system_blocks)
+            child_system = list(config.system_blocks)
         child_system.append(
             SystemBlock(
                 text=f"User-provided instructions:\n\n{args.definition.body}",
@@ -273,13 +321,18 @@ async def run_subagent(args: RunSubagentArgs) -> RunSubagentResult:
     child_session.system_blocks_override = child_system
     # Give the worker a peer-mailbox address (its display_name) so siblings can
     # message it; no-op when the agent has no mailbox configured.
-    if getattr(agent, "mailbox", None) is not None:
+    if config.context.get("mailbox") is not None:
         child_session.mailbox_address = args.display_name
     # Child joins the parent's spending cap: same RunBudget object, so child
     # turns are visible to the parent's next pre-call budget check.
-    child_session.inherited_budget = getattr(args.parent_session, "active_budget", None)
+    child_session.inherited_budget = (
+        binding.budget
+        if binding is not None
+        else getattr(args.parent_session, "active_budget", None)
+    )
 
     agent._sessions[child_record.id] = child_session
+    on_registered(child_session)
 
     if callable(args.on_child_registered):
         args.on_child_registered(child_record.id)
@@ -288,7 +341,7 @@ async def run_subagent(args: RunSubagentArgs) -> RunSubagentResult:
         throw_if_aborted(args.signal)
 
     merged_signal = any_signal(child_session._abort_controller, args.signal)
-    hook_dispatcher = HookDispatcher(getattr(agent, "hooks", None))
+    hook_dispatcher = HookDispatcher(config.hooks)
     result: RunSubagentResult | None = None
     try:
         # Acquire an isolated working directory (if configured) inside the try so
@@ -300,7 +353,8 @@ async def run_subagent(args: RunSubagentArgs) -> RunSubagentResult:
                 lifecycle.SUBAGENT_START,
                 SubagentStartContext(
                     session=args.parent_session,
-                    run_id=args.parent_session.active_run_id or "unknown",
+                    run_id=args.parent_run_id
+                    or (binding.run_id if binding is not None else "unknown"),
                     turn_index=None,
                     deps=getattr(args.parent_session, "run_deps", None),
                     child_session_id=child_record.id,
@@ -334,7 +388,8 @@ async def run_subagent(args: RunSubagentArgs) -> RunSubagentResult:
                 lifecycle.SUBAGENT_STOP,
                 SubagentStopContext(
                     session=args.parent_session,
-                    run_id=args.parent_session.active_run_id or "unknown",
+                    run_id=args.parent_run_id
+                    or (binding.run_id if binding is not None else "unknown"),
                     turn_index=None,
                     deps=getattr(args.parent_session, "run_deps", None),
                     child_session_id=child_record.id,
@@ -386,7 +441,12 @@ async def continue_subagent(args: ContinueSubagentArgs) -> RunSubagentResult:
     merged_signal = any_signal(child_session._abort_controller, args.signal)
 
     subagent_run_id = f"sa_cont_{args.handle.worker_id}"
-    hook_dispatcher = HookDispatcher(getattr(agent, "hooks", None))
+    config = (
+        child_session._config_seed.config
+        if child_session._config_seed is not None
+        else agent._run_config
+    )
+    hook_dispatcher = HookDispatcher(config.hooks)
     result: RunSubagentResult | None = None
     try:
         if hook_dispatcher.active:
@@ -394,7 +454,7 @@ async def continue_subagent(args: ContinueSubagentArgs) -> RunSubagentResult:
                 lifecycle.SUBAGENT_START,
                 SubagentStartContext(
                     session=args.parent_session,
-                    run_id=args.parent_session.active_run_id or "unknown",
+                    run_id=args.parent_run_id or "unknown",
                     turn_index=None,
                     deps=getattr(args.parent_session, "run_deps", None),
                     child_session_id=child_session.id,
@@ -424,7 +484,7 @@ async def continue_subagent(args: ContinueSubagentArgs) -> RunSubagentResult:
                 lifecycle.SUBAGENT_STOP,
                 SubagentStopContext(
                     session=args.parent_session,
-                    run_id=args.parent_session.active_run_id or "unknown",
+                    run_id=args.parent_run_id or "unknown",
                     turn_index=None,
                     deps=getattr(args.parent_session, "run_deps", None),
                     child_session_id=child_session.id,

@@ -257,3 +257,104 @@ async def test_inbox_append_store_outage_leaves_run_retryable_before_provider() 
     )
     assert resumed[-1].type == "result" and resumed[-1].subtype == "success"
     await agent.close()
+
+
+async def test_empty_profile_delivers_host_inbox_once():
+    from linch import Profile, RunOptions
+    from linch.types import Message, TextBlock
+
+    agent = make_agent(ScriptedProvider([TextTurn("done")]), run_store=None)
+    session = await agent.session()
+    calls = []
+
+    async def producer(current, run_id):
+        calls.append((current, run_id))
+        yield Message(role="user", content=[TextBlock(text="peer hello")])
+
+    agent.context.inbox(producer)
+    events = [event async for event in session.run("go", RunOptions(profile=Profile("empty", "1")))]
+    assert len(calls) == 1
+    assert sum("peer hello" in str(message) for message in session.full_history) == 1
+    assert sum(event.type == "user" and "peer hello" in str(event) for event in events) == 1
+    await agent.close()
+
+
+@pytest.mark.parametrize("durable", [False, True])
+async def test_empty_profile_delivers_host_mailbox_and_acks(durable):
+    from linch import Profile, RunOptions
+    from linch.coordination.mailbox import InMemoryMailbox, MailboxMessage, MailboxPlugin
+    from linch.durability import DurabilityOptions
+
+    acked = []
+
+    class RecordingMailbox(InMemoryMailbox):
+        async def ack(self, claims):
+            acked.extend(claim.message.id for claim in claims)
+            await super().ack(claims)
+
+    agent = make_agent(
+        ScriptedProvider([TextTurn("done")]),
+        run_store=None,
+        durability=DurabilityOptions(durable_inbox=durable),
+    )
+    box = RecordingMailbox()
+    await agent.use(MailboxPlugin(), box)
+    session = await agent.session()
+    session.mailbox_address = "recipient"
+    await box.send(
+        MailboxMessage(
+            sender="peer", recipient="recipient", content="peer hello", id="peer-message"
+        )
+    )
+    events = [event async for event in session.run("go", RunOptions(profile=Profile("empty", "1")))]
+    assert sum(event.type == "user" and "peer hello" in str(event) for event in events) == 1
+    assert sum("peer hello" in str(message) for message in session.full_history) == 1
+    assert await box.drain("recipient") == []
+    assert acked == (["peer-message"] if durable else [])
+    await agent.close()
+
+
+async def test_profile_local_producer_is_owned_by_activation_scope():
+    from linch import Profile, RunOptions
+    from linch.kernel import Disposable
+    from linch.types import Message, TextBlock
+
+    calls = []
+    cleaned = []
+
+    class LocalInbox:
+        name, version = "local-inbox", "1"
+        provides = ()
+        requires = ("run_config",)
+
+        def setup(self, ctx, config=None):
+            async def producer(session, run_id):
+                calls.append(run_id)
+                yield Message(role="user", content=[TextBlock(text="private inbox")])
+
+            ctx.effect(lambda: ctx.run_config.inbox(producer))
+            return Disposable(lambda: cleaned.append(True))
+
+    agent = make_agent(ScriptedProvider([TextTurn("local"), TextTurn("plain")]), run_store=None)
+    local, plain = await agent.session(), await agent.session()
+    from linch._telemetry import telemetry_for
+
+    telemetry_for(agent)
+    baseline = len(agent.context._scope._disposers)
+    await _collect_local(
+        local,
+        RunOptions(
+            run_id="local", profile=Profile("local", "1", plugins={"inbox": (LocalInbox(), {})})
+        ),
+    )
+    await _collect_local(plain, RunOptions())
+    assert calls == ["local"]
+    assert cleaned == [True]
+    assert "private inbox" not in str(plain.full_history)
+    assert agent.context._inbox is None
+    assert len(agent.context._scope._disposers) == baseline
+    await agent.close()
+
+
+async def _collect_local(session, options):
+    return [event async for event in session.run("go", options)]

@@ -69,6 +69,9 @@ class ResolvedCall:
     is_immediate_error: bool
     immediate_error_reason: str | None = None
     principal: Principal | None = field(default=None, repr=False)
+    _run_config: Any = field(default=None, repr=False)
+    _run_id: str | None = field(default=None, repr=False)
+    _run_deps: Any = field(default=None, repr=False)
 
 
 @dataclass(slots=True)
@@ -350,7 +353,7 @@ async def _run_background_tool(
         )
 
     outcome, _ = await _dispatch_post_tool_use(
-        HookDispatcher(_scheduler_hooks(agent)),
+        HookDispatcher(_scheduler_hooks(call._run_config or agent)),
         call,
         _effective_input(call, decision),
         outcome,
@@ -495,7 +498,7 @@ async def _execute_one(
     max_attempts = opts.max_attempts if opts is not None else 1
     started = time.perf_counter()
 
-    execution_run_id = run_id or session.active_run_id or "unknown"
+    execution_run_id = run_id or call._run_id or session.active_run_id or "unknown"
     accepting_progress = True
 
     def _report_progress(message: str, data: dict[str, Any] | None) -> None:
@@ -518,13 +521,14 @@ async def _execute_one(
         signal=signal,
         file_read_tracker=getattr(session, "file_read_tracker", None),
         emit=_report_progress,
-        deps=getattr(session, "run_deps", None),
+        deps=_captured_call_deps(call, session),
         execution=getattr(agent, "execution_backend", None),
         filesystem=getattr(session, "filesystem", None),
         # Stable across resume: run_id is reused by resume_loop and call.id comes
         # from the persisted provider_view, so a re-executed tool sees the same key.
         idempotency_key=f"{execution_run_id}:{call.id}",
         _principal=call.principal,
+        _run_config=call._run_config,
     )
     try:
         return await _execute_tool_attempts(
@@ -559,7 +563,7 @@ def _dispatch_execute(
     With no pipeline listeners registered this returns ``tool.execute(...)``
     unchanged, so the default path is byte-identical.
     """
-    pipeline = getattr(agent, "tool_pipeline", None)
+    pipeline = getattr(getattr(ctx, "_run_config", None) or agent, "tool_pipeline", None)
     has_listeners = getattr(pipeline, "has_listeners", None)
     if pipeline is None or not callable(has_listeners) or not has_listeners():
         return tool.execute(effective_input, ctx)
@@ -582,6 +586,7 @@ def _dispatch_execute(
             "execution",
             "idempotency_key",
             "principal",
+            "_run_config",
         )
     }
     execution = ToolExecution(
@@ -917,6 +922,12 @@ def _canonicalize_hook_input(call: ResolvedCall, input: Any) -> str | None:
     return None
 
 
+def _captured_call_deps(call: ResolvedCall, session: Any) -> Any:
+    if getattr(call, "_run_id", None) is not None:
+        return call._run_deps
+    return getattr(session, "run_deps", None)
+
+
 async def _dispatch_post_tool_use(
     dispatcher: HookDispatcher,
     call: ResolvedCall,
@@ -934,7 +945,7 @@ async def _dispatch_post_tool_use(
             session=session,
             run_id=run_id or session.active_run_id or "unknown",
             turn_index=turn_index,
-            deps=getattr(session, "run_deps", None),
+            deps=_captured_call_deps(call, session),
             tool_use_id=call.id,
             tool_name=_tool_name(call),
             input=input,
@@ -1001,7 +1012,7 @@ async def _dispatch_post_tool_use(
     # re-derive "did this fail?" from every PostToolUse.
     events.extend(
         await _dispatch_post_tool_use_failure(
-            dispatcher, call, input, final, session, turn_index=turn_index
+            dispatcher, call, input, final, session, turn_index=turn_index, run_id=run_id
         )
     )
     return final, events
@@ -1015,6 +1026,7 @@ async def _dispatch_post_tool_use_failure(
     session: Any,
     *,
     turn_index: int | None,
+    run_id: str | None = None,
 ) -> list[Event]:
     tool_result = outcome.tool_result
     if not dispatcher.active or tool_result is None or not getattr(tool_result, "is_error", False):
@@ -1023,9 +1035,9 @@ async def _dispatch_post_tool_use_failure(
         lifecycle.POST_TOOL_USE_FAILURE,
         PostToolUseFailureContext(
             session=session,
-            run_id=session.active_run_id or "unknown",
+            run_id=run_id or session.active_run_id or "unknown",
             turn_index=turn_index,
-            deps=getattr(session, "run_deps", None),
+            deps=_captured_call_deps(call, session),
             tool_use_id=call.id,
             tool_name=_tool_name(call),
             input=input,
@@ -1222,7 +1234,7 @@ def _evaluate_permissions(
             continue
 
         tool_obj = call.tool
-        initial = agent.permission_engine.evaluate(
+        initial = (call._run_config or agent).permission_engine.evaluate(
             PendingToolCall(
                 tool_use_id=call.id,
                 tool=tool_obj,
@@ -1274,7 +1286,7 @@ async def _resolve_ask_decisions(
     for idx in ask_indices:
         call = resolved[idx]
         try:
-            decisions[idx] = await agent.permission_engine.resolve(
+            decisions[idx] = await (call._run_config or agent).permission_engine.resolve(
                 PendingToolCall(
                     tool_use_id=call.id,
                     tool=call.tool,
@@ -1600,6 +1612,7 @@ async def execute_tool_calls(
     *,
     turn_index: int | None = None,
     on_permissions_resolved: Callable[[], Awaitable[None]] | None = None,
+    run_config: Any = None,
 ) -> AsyncIterator[Event]:
     """Execute a provider batch and yield its lifecycle events.
 
@@ -1610,6 +1623,7 @@ async def execute_tool_calls(
         signal: Abort signal checked during permission and tool execution.
         turn_index: Optional provider-turn index for hooks and telemetry.
         on_permissions_resolved: Optional durability callback before execution.
+        run_config: Captured run policy and services; omission preserves the direct helper path.
 
     Yields:
         Tool lifecycle, permission, progress, and skill events.
@@ -1619,8 +1633,12 @@ async def execute_tool_calls(
 
     blocks, bg_ids = _strip_background_hints(blocks, agent)
 
-    effective_tools = getattr(session, "tools_override", None) or agent.tools
-    bus = getattr(getattr(agent, "context", None), "events", None)
+    effective_tools = (
+        run_config.tools
+        if run_config is not None
+        else (getattr(session, "tools_override", None) or agent.tools)
+    )
+    bus = getattr(getattr(run_config or agent, "context", None), "events", None)
     if bus is not None and bus.has_listeners(lifecycle.TOOL_RESOLVE):
         resolved = []
         for block in blocks:
@@ -1628,12 +1646,17 @@ async def execute_tool_calls(
             resolved.append(_resolve_call(block, effective_tools, agent.cwd, reason))
     else:
         resolved = [_resolve_call(b, effective_tools, agent.cwd) for b in blocks]
+    origin_run_id = session.active_run_id or "unknown"
+    for call in resolved:
+        call._run_config = run_config
+        call._run_id = origin_run_id
+        call._run_deps = getattr(session, "run_deps", None)
     principal = getattr(session, "_active_principal", None)
     if principal is not None:
         for call in resolved:
             call.principal = principal
     _enforce_turn_tool_availability(resolved, session)
-    hook_dispatcher = HookDispatcher(_scheduler_hooks(agent))
+    hook_dispatcher = HookDispatcher(_scheduler_hooks(run_config or agent))
 
     # PreToolUse is the only input-mutation seam. It runs after the tool's
     # initial schema validation but before final policy evaluation. Every
@@ -1727,7 +1750,11 @@ async def execute_tool_calls(
                 input=input,
                 summary=call.summary,
             )
-            task = asyncio.ensure_future(
+            binding = session._run_bindings.get(origin_run_id) if run_config is not None else None
+            from .profiles import _schedule_with_binding
+
+            task = _schedule_with_binding(
+                binding,
                 _run_background_tool(
                     call,
                     decisions[i],
@@ -1737,8 +1764,8 @@ async def execute_tool_calls(
                     bg_id=bg_id,
                     turn_index=turn_index,
                     middleware_error=middleware_errors.get(call.id),
-                    origin_run_id=session.active_run_id or "unknown",
-                )
+                    origin_run_id=origin_run_id,
+                ),
             )
             session.background_tasks.append(task)
             ack = _background_ack(tool_name, bg_id)

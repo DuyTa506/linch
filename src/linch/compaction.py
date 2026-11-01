@@ -876,6 +876,7 @@ async def _run_compaction_impl(
     model: str | None = None,
     auxiliary_caller: _AccountedAuxiliaryCaller | None = None,
     logical_call_id: str | None = None,
+    _run_config: Any = None,
 ) -> bool:
     """Run *strategy* against the model selected for the current provider call.
 
@@ -891,7 +892,7 @@ async def _run_compaction_impl(
     messages_before = len(snapshot)
     tokens_before = _estimate_tokens(agent, snapshot, model=resolved_model)
 
-    dispatcher = _compaction_hook_dispatcher(agent)
+    dispatcher = _compaction_hook_dispatcher(_run_config or agent)
     run_id = getattr(session, "active_run_id", None) or "unknown"
     if dispatcher is not None:
         from .hooks import PreCompactContext
@@ -1023,6 +1024,7 @@ async def maybe_compact(
     model: str | None = None,
     auxiliary_caller: _AccountedAuxiliaryCaller | None = None,
     logical_call_id: str | None = None,
+    _run_config: Any = None,
 ) -> bool:
     resolved_model = _resolve_compaction_model(session, agent, model)
     strategy = getattr(agent, "compaction", None) or default_compaction
@@ -1065,6 +1067,7 @@ async def maybe_compact(
             model=resolved_model,
             auxiliary_caller=auxiliary_caller,
             logical_call_id=logical_call_id,
+            _run_config=_run_config,
         )
     except Exception:
         # Micro-compaction already recorded a provider-view projection above; if the
@@ -1129,6 +1132,7 @@ async def run_forced_compaction(
     model: str | None = None,
     auxiliary_caller: _AccountedAuxiliaryCaller | None = None,
     logical_call_id: str | None = None,
+    _run_config: Any = None,
 ) -> bool:
     strategy = getattr(agent, "compaction", None) or default_compaction
     return await _run_compaction_impl(
@@ -1139,6 +1143,7 @@ async def run_forced_compaction(
         model=model,
         auxiliary_caller=auxiliary_caller,
         logical_call_id=logical_call_id,
+        _run_config=_run_config,
     )
 
 

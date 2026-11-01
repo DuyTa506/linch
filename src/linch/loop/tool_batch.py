@@ -49,6 +49,7 @@ class ToolBatchContext:
 
     session: Any
     agent: Any
+    config: Any
     signal: Any
     run_id: str
     turn_index: int
@@ -128,6 +129,7 @@ async def run_tool_batch(ctx: ToolBatchContext) -> AsyncIterator[Event]:
         ctx.agent,
         session,
         ctx.signal,
+        run_config=ctx.config,
         turn_index=ctx.turn_index,
         on_permissions_resolved=checkpoint_tool_executing,
     ):

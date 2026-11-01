@@ -52,7 +52,7 @@ def _prompt_message(ctx: RunStartupContext, prompt: str, images: Any) -> Any:
     agent = ctx.runtime.agent
     session = ctx.runtime.session
     listing = agent.skill_listing_text
-    catalog = agent.context.get("request_catalog")
+    catalog = ctx.runtime.config.context.get("request_catalog")
     if catalog is not None:
         listing = catalog.skill_listing(session, listing)
     if listing and not session.tools_override:
@@ -125,7 +125,7 @@ async def initialize_run(ctx: RunStartupContext) -> AsyncIterator[Event]:
             deps=getattr(session, "run_deps", None),
             model=agent.model,
             prompt=prompt,
-            tools=tuple(sorted(tool.name for tool in agent.tools.list())),
+            tools=tuple(sorted(tool.name for tool in runtime.config.tools.list())),
         ),
     )
 
@@ -143,8 +143,8 @@ async def initialize_run(ctx: RunStartupContext) -> AsyncIterator[Event]:
                     session_id=session.id,
                     run_id=runtime.run_id,
                     model=agent.model,
-                    tools=sorted(tool.name for tool in agent.tools.list()),
-                    permission_mode=agent.permission_engine.mode,
+                    tools=sorted(tool.name for tool in runtime.config.tools.list()),
+                    permission_mode=runtime.config.permission_engine.mode,
                     cwd=agent.cwd,
                 )
                 await _persist_event(session, runtime.run_id, event)
