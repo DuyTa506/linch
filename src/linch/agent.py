@@ -56,6 +56,36 @@ _QUIESCING = "quiescing"
 _CLOSED = "closed"
 
 
+async def _close_mcp_connection(connection: Any, primary: BaseException) -> None:
+    """Close a newly connected MCP connection while preserving its failure."""
+    close = getattr(connection, "close", None)
+    if not callable(close):
+        return
+    try:
+        close_task = asyncio.create_task(close())
+    except BaseException as exc:
+        primary.add_note(f"MCP connection cleanup failed: {type(exc).__name__}: {exc}")
+        return
+    cleanup_error: BaseException | None = None
+    while not close_task.done():
+        try:
+            await asyncio.shield(close_task)
+        except asyncio.CancelledError:
+            continue
+        except BaseException as exc:
+            cleanup_error = exc
+            break
+    if cleanup_error is None:
+        try:
+            close_task.result()
+        except BaseException as exc:
+            cleanup_error = exc
+    if cleanup_error is not None:
+        primary.add_note(
+            f"MCP connection cleanup failed: {type(cleanup_error).__name__}: {cleanup_error}"
+        )
+
+
 @dataclass(slots=True)
 class _PermissionConfig:
     mode: PermissionMode
@@ -1491,13 +1521,17 @@ class Agent:
             from .mcp import connect_mcp_servers
 
             mcp_conn = await connect_mcp_servers(cast(Any, self._mcp_servers))
-            await self._attach_mcp_tools(mcp_conn)
+            try:
+                await self._attach_mcp_tools(mcp_conn)
+            except BaseException as exc:
+                await _close_mcp_connection(mcp_conn, exc)
+                raise
             self._mcp_connection = mcp_conn
 
         self._mcp_connect = _load()
         try:
             await self._mcp_connect
-        except Exception:
+        except BaseException:
             self._mcp_connect = None
             raise
 
@@ -1570,8 +1604,12 @@ class Agent:
         from .mcp import connect_mcp_servers
 
         connection = await connect_mcp_servers(cast(Any, servers))
-        await self._attach_mcp_tools(connection)
-        self._extra_mcp_connections.append(connection)
+        try:
+            await self._attach_mcp_tools(connection)
+            self._extra_mcp_connections.append(connection)
+        except BaseException as exc:
+            await _close_mcp_connection(connection, exc)
+            raise
         return connection
 
     async def session(
