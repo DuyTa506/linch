@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
+from contextlib import aclosing
 from typing import Any
 
 from ..events import AssistantEvent, Event, UserEvent
@@ -28,7 +29,7 @@ async def append_feedback(
     paired: bool = False,
     boundary: dict[str, Any] | None = None,
     decision: TurnStoppingDecision | None = None,
-) -> AsyncIterator[Event]:
+) -> AsyncGenerator[Event, None]:
     await _flush_events(session)
     prefix = 0
     if boundary is not None:
@@ -62,7 +63,7 @@ async def correct_invalid_response(
     assembly: AssistantAssembly,
     receipt: ModelCallReceipt,
     rejected_native: bool,
-) -> AsyncIterator[Event]:
+) -> AsyncGenerator[Event, None]:
     reason = "rejected_native_arguments" if rejected_native else None
     if reason is None and assembly.stop_reason == "end_turn":
         text = "".join(b.text for b in assembly.message.content if isinstance(b, TextBlock)).strip()
@@ -85,8 +86,9 @@ async def correct_invalid_response(
     )
     if decision.action == "accept":
         return
-    async for event in ctx.emit_primary_usage(receipt):
-        yield event
+    async with aclosing(ctx.emit_primary_usage(receipt)) as usage_events:
+        async for event in usage_events:
+            yield event
     messages = decision.feedback
     if decision.action == "continue" and not rejected_native:
         diagnostic = Message(
@@ -110,15 +112,18 @@ async def correct_invalid_response(
                 )
             )
         messages = (diagnostic, *messages)
-    async for event in append_feedback(
-        ctx.session,
-        ctx.run_id,
-        messages,
-        stop_reason=assembly.stop_reason,
-        decision=decision,
-        boundary=ctx.active_primary,
-    ):
-        yield event
+    async with aclosing(
+        append_feedback(
+            ctx.session,
+            ctx.run_id,
+            messages,
+            stop_reason=assembly.stop_reason,
+            decision=decision,
+            boundary=ctx.active_primary,
+        )
+    ) as feedback_events:
+        async for event in feedback_events:
+            yield event
     await ctx.end_provider_call(stop_reason=assembly.stop_reason, usage=receipt.usage)
     await ctx.save_checkpoint("turn_complete", turn_index=ctx.turn_index)
     ctx.continued = True

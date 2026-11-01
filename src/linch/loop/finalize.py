@@ -15,15 +15,16 @@ the flag to choose between ``return`` and ``continue``."""
 from __future__ import annotations
 
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
+from contextlib import aclosing
 from dataclasses import dataclass
 from typing import Any
 
-from ..errors import ProviderError
+from ..errors import ConfigError, ProviderError
 from ..events import Event, ResultEvent
 from ..hooks.contexts import _AgentResult
 from ..session import Session
-from ..types import AssistantAssembly, Message, TextBlock, ToolUseBlock, Usage
+from ..types import AssistantAssembly, Message, TextBlock, ToolResultBlock, ToolUseBlock, Usage
 from .checkpoint import _message_digest, _persist_event, _primary_control_message
 from .feedback import append_feedback
 from .request import final_text
@@ -36,7 +37,7 @@ from .terminals import (
     _success_result_tail,
     _validate_structured_output,
 )
-from .turn_stopping import TurnStopping
+from .turn_stopping import TurnStopping, TurnStoppingDecision
 
 
 @dataclass(slots=True)
@@ -90,30 +91,52 @@ class RunFinalization:
     runtime: Any
     result: _AgentResult | None = None
 
+    def _feedback_base_count(self) -> int:
+        """Return the original history boundary for this turn's feedback."""
+        base_count = self.ctx.session.session_log.history_count
+        resume_state = self.ctx.checkpoint.extension_state.get("linch.resume", {})
+        assistant = self.ctx.checkpoint.assistant_message
+        if not (
+            isinstance(resume_state, dict)
+            and resume_state.get("feedback_origin") in {"turn_stopping", "assistant_boundary"}
+            and assistant is not None
+        ):
+            return base_count
+        history = list(self.ctx.session.full_history)
+        existing = resume_state.get("feedback_base_count")
+        if type(existing) is not int or existing <= 0 or existing > len(history):
+            raise ConfigError("invalid turn-stopping feedback boundary")
+        if _message_digest(history[existing - 1]) != _message_digest(assistant):
+            raise ConfigError("turn-stopping feedback boundary differs from its assistant")
+        return existing
+
     async def emit_error(
         self,
         *,
         final_text_value: str | None = None,
         duration_ms: int | None = None,
         end_provider_call_usage: Usage | None = None,
-    ) -> AsyncIterator[Event]:
+    ) -> AsyncGenerator[Event, None]:
         self.runtime.sync_checkpoint_accounting()
         outcome = TerminalOutcome()
-        async for event in emit_error_terminal(
-            self.ctx,
-            total=self.runtime.total,
-            running_cost=self.runtime.running_cost,
-            outcome=outcome,
-            final_text_value=final_text_value,
-            duration_ms=duration_ms,
-            end_provider_call_usage=end_provider_call_usage,
-        ):
-            yield event
+        async with aclosing(
+            emit_error_terminal(
+                self.ctx,
+                total=self.runtime.total,
+                running_cost=self.runtime.running_cost,
+                outcome=outcome,
+                final_text_value=final_text_value,
+                duration_ms=duration_ms,
+                end_provider_call_usage=end_provider_call_usage,
+            )
+        ) as error_events:
+            async for event in error_events:
+                yield event
         self.result = outcome.result
 
     async def finalize(
         self, turn_index: int, forced_final_turn: bool, **answer: Any
-    ) -> AsyncIterator[Event]:
+    ) -> AsyncGenerator[Event, None]:
         forced = forced_final_turn
         tool_blocks = answer.get("tool_blocks", ())
         final_block = answer.get("final_block")
@@ -127,7 +150,22 @@ class RunFinalization:
             final_block,
             forced,
         )
-        decision = await self.ctx.turn_stopping.dispatch(candidate)
+        feedback_base_count = self._feedback_base_count()
+        resume_state = self.ctx.checkpoint.extension_state.get("linch.resume", {})
+        if (
+            isinstance(resume_state, dict)
+            and resume_state.get("feedback_origin") == "assistant_boundary"
+        ):
+            # Acceptance and the listener's post-dispatch state are already durable.
+            # Replaying that decision would relabel its ACK/hook tail as feedback.
+            decision = TurnStoppingDecision("accept")
+        else:
+            self.ctx.checkpoint.extension_state["linch.resume"] = {
+                "feedback_origin": "turn_stopping",
+                "feedback_base_count": feedback_base_count,
+            }
+            await self.ctx.save_checkpoint("assistant_appended", turn_index=turn_index)
+            decision = await self.ctx.turn_stopping.dispatch(candidate)
         messages = decision.feedback
         if final_block is not None and decision.action != "accept":
             paired = _primary_control_message(
@@ -137,37 +175,48 @@ class RunFinalization:
             )
             messages = (paired, *messages)
         replayed = self.runtime.replayed_feedback
-        if replayed and (
-            decision.action == "accept"
-            or list(map(_message_digest, replayed)) != list(map(_message_digest, messages))
+        if replayed and list(map(_message_digest, replayed)) != list(
+            map(_message_digest, messages)
         ):
             raise ValueError("replayed turn feedback differs from its decision")
         self.runtime.replayed_feedback = ()
         if decision.action != "accept":
-            async for event in append_feedback(
-                self.ctx.session,
-                self.ctx.run_id,
-                messages,
-                paired=bool(tool_blocks),
-                decision=decision,
-            ):
-                yield event
+            async with aclosing(
+                append_feedback(
+                    self.ctx.session,
+                    self.ctx.run_id,
+                    messages,
+                    paired=bool(tool_blocks),
+                    decision=decision,
+                )
+            ) as feedback_events:
+                async for event in feedback_events:
+                    yield event
+            self.ctx.checkpoint.extension_state.pop("linch.resume", None)
             await self.ctx.end_active_turn()
             await self.ctx.save_checkpoint("turn_complete", turn_index=turn_index)
             return
+        self.ctx.checkpoint.extension_state["linch.resume"] = {
+            "feedback_origin": "assistant_boundary",
+            "feedback_base_count": feedback_base_count,
+        }
+        await self.ctx.save_checkpoint("assistant_appended", turn_index=turn_index)
         self.runtime.sync_checkpoint_accounting()
         outcome = TerminalOutcome()
         finalize = finalize_final_tool_answer if final_block else finalize_text_answer
-        async for event in finalize(
-            self.ctx,
-            turn_index=turn_index,
-            **answer,
-            total=self.runtime.total,
-            running_cost=self.runtime.running_cost,
-            forced_final_turn=forced,
-            outcome=outcome,
-        ):
-            yield event
+        async with aclosing(
+            finalize(
+                self.ctx,
+                turn_index=turn_index,
+                **answer,
+                total=self.runtime.total,
+                running_cost=self.runtime.running_cost,
+                forced_final_turn=forced,
+                outcome=outcome,
+            )
+        ) as final_events:
+            async for event in final_events:
+                yield event
         self.result = outcome.result
 
 
@@ -195,6 +244,27 @@ def last_user_message_is_feedback(session: Session, feedback: str) -> bool:
         return False
     expected = wrap_in_system_reminder(feedback)
     return any(isinstance(block, TextBlock) and block.text == expected for block in message.content)
+
+
+def _final_tool_ack_present(session: Session, final_id: str) -> bool:
+    """Return whether the current final-tool use already has its host result."""
+    history = list(session.full_history)
+    assistant_index = -1
+    for index, message in enumerate(history):
+        if message.role == "assistant" and any(
+            isinstance(block, ToolUseBlock) and block.id == final_id for block in message.content
+        ):
+            assistant_index = index
+    if assistant_index < 0:
+        return False
+    return any(
+        isinstance(block, ToolResultBlock)
+        and block.tool_use_id == final_id
+        and block.content == "Final answer captured by the host."
+        and not block.is_error
+        for message in history[assistant_index + 1 :]
+        for block in message.content
+    )
 
 
 def build_run_result(
@@ -231,7 +301,7 @@ async def emit_error_terminal(
     final_text_value: str | None = None,
     duration_ms: int | None = None,
     end_provider_call_usage: Usage | None = None,
-) -> AsyncIterator[Event]:
+) -> AsyncGenerator[Event, None]:
     """Record the error result on *outcome*, close spans, and emit the error tail.
 
     ``duration_ms`` defaults to a fresh wall-clock reading; pass it explicitly
@@ -249,17 +319,20 @@ async def emit_error_terminal(
     if end_provider_call_usage is not None:
         await ctx.end_active_provider_call(stop_reason="error", usage=end_provider_call_usage)
     await ctx.end_active_turn()
-    async for event in _error_result_tail(
-        ctx.session,
-        runtime=ctx.runtime,
-        run_id=ctx.run_id,
-        total=total,
-        duration_ms=dur,
-        running_cost=running_cost,
-        final_text_value=final_text_value,
-        usage_complete=ctx.usage_complete(),
-    ):
-        yield event
+    async with aclosing(
+        _error_result_tail(
+            ctx.session,
+            runtime=ctx.runtime,
+            run_id=ctx.run_id,
+            total=total,
+            duration_ms=dur,
+            running_cost=running_cost,
+            final_text_value=final_text_value,
+            usage_complete=ctx.usage_complete(),
+        )
+    ) as error_events:
+        async for event in error_events:
+            yield event
 
 
 async def emit_success_terminal(
@@ -270,7 +343,7 @@ async def emit_success_terminal(
     running_cost: float | None,
     outcome: TerminalOutcome,
     duration_ms: int,
-) -> AsyncIterator[Event]:
+) -> AsyncGenerator[Event, None]:
     """Record the success result on *outcome*, close the turn span, and emit the
     success tail from a hook-approved ``proposed`` ResultEvent."""
     outcome.result = build_run_result(
@@ -282,22 +355,25 @@ async def emit_success_terminal(
         duration_ms=duration_ms,
     )
     await ctx.end_active_turn()
-    async for event in _success_result_tail(
-        ctx.session,
-        ctx.agent,
-        run_id=ctx.run_id,
-        run_record=ctx.run_record,
-        checkpoint=ctx.checkpoint,
-        total=total,
-        duration_ms=duration_ms,
-        running_cost=running_cost,
-        stop_reason=proposed.stop_reason,
-        final_text_value=proposed.final_text,
-        structured_output=proposed.structured_output,
-        structured_error=proposed.structured_error,
-        usage_complete=ctx.usage_complete(),
-    ):
-        yield event
+    async with aclosing(
+        _success_result_tail(
+            ctx.session,
+            ctx.agent,
+            run_id=ctx.run_id,
+            run_record=ctx.run_record,
+            checkpoint=ctx.checkpoint,
+            total=total,
+            duration_ms=duration_ms,
+            running_cost=running_cost,
+            stop_reason=proposed.stop_reason,
+            final_text_value=proposed.final_text,
+            structured_output=proposed.structured_output,
+            structured_error=proposed.structured_error,
+            usage_complete=ctx.usage_complete(),
+        )
+    ) as success_events:
+        async for event in success_events:
+            yield event
 
 
 async def finalize_final_tool_answer(
@@ -310,7 +386,7 @@ async def finalize_final_tool_answer(
     running_cost: float | None,
     forced_final_turn: bool,
     outcome: TerminalOutcome,
-) -> AsyncIterator[Event]:
+) -> AsyncGenerator[Event, None]:
     """Terminal final-tool path: treat the tool input as structured output, run
     the schema/verifier/stop gates, then emit the success or error tail."""
     if len(tool_blocks) != 1:
@@ -318,29 +394,36 @@ async def finalize_final_tool_answer(
             "Invalid terminal tool batch: the final-answer tool must be the only "
             "tool call in its assistant message; no calls were executed."
         )
-        async for event in _final_tool_retry_tail(
-            ctx.session,
-            run_id=ctx.run_id,
-            tool_blocks=tool_blocks,
-            final_id=final_block.id,
-            feedback=feedback,
-        ):
-            yield event
+        async with aclosing(
+            _final_tool_retry_tail(
+                ctx.session,
+                run_id=ctx.run_id,
+                tool_blocks=tool_blocks,
+                final_id=final_block.id,
+                feedback=feedback,
+            )
+        ) as retry_events:
+            async for event in retry_events:
+                yield event
         raise ProviderError(feedback)
 
     # A terminal tool is intercepted rather than scheduled, but provider
     # histories still require every assistant tool_use to have a matching
     # user tool_result.  Persist the acknowledgement before any terminal gate
     # so success, stop, and crash paths all leave a reusable session.
-    async for event in _final_tool_retry_tail(
-        ctx.session,
-        run_id=ctx.run_id,
-        tool_blocks=tool_blocks,
-        final_id=final_block.id,
-        feedback="Final answer captured by the host.",
-        final_is_error=False,
-    ):
-        yield event
+    if not _final_tool_ack_present(ctx.session, final_block.id):
+        async with aclosing(
+            _final_tool_retry_tail(
+                ctx.session,
+                run_id=ctx.run_id,
+                tool_blocks=tool_blocks,
+                final_id=final_block.id,
+                feedback="Final answer captured by the host.",
+                final_is_error=False,
+            )
+        ) as ack_events:
+            async for event in ack_events:
+                yield event
 
     raw_structured_output = dict(final_block.input)
     structured_output: dict[str, Any] | None = raw_structured_output
@@ -362,16 +445,19 @@ async def finalize_final_tool_answer(
         for event in _gate.events:
             yield event
         if _gate.decision == "stop":
-            async for event in emit_error_terminal(
-                ctx, total=total, running_cost=running_cost, outcome=outcome
-            ):
-                yield event
+            async with aclosing(
+                emit_error_terminal(ctx, total=total, running_cost=running_cost, outcome=outcome)
+            ) as error_events:
+                async for event in error_events:
+                    yield event
             return
         if _gate.decision == "retry":
-            async for event in _gate_retry_tail(
-                ctx.session, run_id=ctx.run_id, feedback=_gate.feedback or ""
-            ):
-                yield event
+            async with aclosing(
+                _gate_retry_tail(ctx.session, run_id=ctx.run_id, feedback=_gate.feedback or "")
+            ) as retry_events:
+                async for event in retry_events:
+                    yield event
+            ctx.checkpoint.extension_state.pop("linch.resume", None)
             await ctx.end_active_turn()
             await ctx.save_checkpoint("turn_complete", turn_index=turn_index)
             return
@@ -398,18 +484,27 @@ async def finalize_final_tool_answer(
         yield hook_event
     if hook_action == "retry" and ctx.final_answer_reentries[0] < ctx.max_final_answer_reentries:
         ctx.final_answer_reentries[0] += 1
-        async for event in _gate_retry_tail(
-            ctx.session, run_id=ctx.run_id, feedback=feedback or ""
-        ):
-            yield event
+        async with aclosing(
+            _gate_retry_tail(ctx.session, run_id=ctx.run_id, feedback=feedback or "")
+        ) as retry_events:
+            async for event in retry_events:
+                yield event
+        ctx.checkpoint.extension_state.pop("linch.resume", None)
         await ctx.end_active_turn()
         await ctx.save_checkpoint("turn_complete", turn_index=turn_index)
         return
     if hook_action == "stop":
-        async for event in emit_error_terminal(
-            ctx, total=total, running_cost=running_cost, outcome=outcome, final_text_value=feedback
-        ):
-            yield event
+        async with aclosing(
+            emit_error_terminal(
+                ctx,
+                total=total,
+                running_cost=running_cost,
+                outcome=outcome,
+                final_text_value=feedback,
+            )
+        ) as error_events:
+            async for event in error_events:
+                yield event
         return
     dur = int((time.time() - ctx.started) * 1000)
     proposed = ResultEvent(
@@ -428,28 +523,41 @@ async def finalize_final_tool_answer(
         await _persist_event(ctx.session, ctx.run_id, hook_event)
         yield hook_event
     if stop_action == "continue":
-        async for event in _gate_retry_tail(
-            ctx.session, run_id=ctx.run_id, feedback=feedback or ""
-        ):
-            yield event
+        async with aclosing(
+            _gate_retry_tail(ctx.session, run_id=ctx.run_id, feedback=feedback or "")
+        ) as retry_events:
+            async for event in retry_events:
+                yield event
+        ctx.checkpoint.extension_state.pop("linch.resume", None)
         await ctx.end_active_turn()
         await ctx.save_checkpoint("turn_complete", turn_index=turn_index)
         return
     if stop_action == "stop":
-        async for event in emit_error_terminal(
+        async with aclosing(
+            emit_error_terminal(
+                ctx,
+                total=total,
+                running_cost=running_cost,
+                outcome=outcome,
+                final_text_value=feedback,
+                duration_ms=dur,
+            )
+        ) as error_events:
+            async for event in error_events:
+                yield event
+        return
+    async with aclosing(
+        emit_success_terminal(
             ctx,
+            proposed,
             total=total,
             running_cost=running_cost,
             outcome=outcome,
-            final_text_value=feedback,
             duration_ms=dur,
-        ):
+        )
+    ) as success_events:
+        async for event in success_events:
             yield event
-        return
-    async for event in emit_success_terminal(
-        ctx, proposed, total=total, running_cost=running_cost, outcome=outcome, duration_ms=dur
-    ):
-        yield event
 
 
 async def finalize_text_answer(
@@ -461,7 +569,7 @@ async def finalize_text_answer(
     running_cost: float | None,
     forced_final_turn: bool,
     outcome: TerminalOutcome,
-) -> AsyncIterator[Event]:
+) -> AsyncGenerator[Event, None]:
     """Terminal plain-text path: parse/validate structured output, run the
     schema/verifier/stop gates, then emit the success or error tail."""
     ft = final_text(assembly.message)
@@ -489,20 +597,25 @@ async def finalize_text_answer(
         for event in _gate.events:
             yield event
         if _gate.decision == "stop":
-            async for event in emit_error_terminal(
-                ctx,
-                total=total,
-                running_cost=running_cost,
-                outcome=outcome,
-                final_text_value=ft,
-            ):
-                yield event
+            async with aclosing(
+                emit_error_terminal(
+                    ctx,
+                    total=total,
+                    running_cost=running_cost,
+                    outcome=outcome,
+                    final_text_value=ft,
+                )
+            ) as error_events:
+                async for event in error_events:
+                    yield event
             return
         if _gate.decision == "retry":
-            async for event in _gate_retry_tail(
-                ctx.session, run_id=ctx.run_id, feedback=_gate.feedback or ""
-            ):
-                yield event
+            async with aclosing(
+                _gate_retry_tail(ctx.session, run_id=ctx.run_id, feedback=_gate.feedback or "")
+            ) as retry_events:
+                async for event in retry_events:
+                    yield event
+            ctx.checkpoint.extension_state.pop("linch.resume", None)
             await ctx.end_active_turn()
             await ctx.save_checkpoint("turn_complete", turn_index=turn_index)
             return
@@ -527,18 +640,27 @@ async def finalize_text_answer(
         yield hook_event
     if hook_action == "retry" and ctx.final_answer_reentries[0] < ctx.max_final_answer_reentries:
         ctx.final_answer_reentries[0] += 1
-        async for event in _gate_retry_tail(
-            ctx.session, run_id=ctx.run_id, feedback=feedback or ""
-        ):
-            yield event
+        async with aclosing(
+            _gate_retry_tail(ctx.session, run_id=ctx.run_id, feedback=feedback or "")
+        ) as retry_events:
+            async for event in retry_events:
+                yield event
+        ctx.checkpoint.extension_state.pop("linch.resume", None)
         await ctx.end_active_turn()
         await ctx.save_checkpoint("turn_complete", turn_index=turn_index)
         return
     if hook_action == "stop":
-        async for event in emit_error_terminal(
-            ctx, total=total, running_cost=running_cost, outcome=outcome, final_text_value=feedback
-        ):
-            yield event
+        async with aclosing(
+            emit_error_terminal(
+                ctx,
+                total=total,
+                running_cost=running_cost,
+                outcome=outcome,
+                final_text_value=feedback,
+            )
+        ) as error_events:
+            async for event in error_events:
+                yield event
         return
 
     dur = int((time.time() - ctx.started) * 1000)
@@ -558,25 +680,38 @@ async def finalize_text_answer(
         await _persist_event(ctx.session, ctx.run_id, hook_event)
         yield hook_event
     if stop_action == "continue":
-        async for event in _gate_retry_tail(
-            ctx.session, run_id=ctx.run_id, feedback=feedback or ""
-        ):
-            yield event
+        async with aclosing(
+            _gate_retry_tail(ctx.session, run_id=ctx.run_id, feedback=feedback or "")
+        ) as retry_events:
+            async for event in retry_events:
+                yield event
+        ctx.checkpoint.extension_state.pop("linch.resume", None)
         await ctx.end_active_turn()
         await ctx.save_checkpoint("turn_complete", turn_index=turn_index)
         return
     if stop_action == "stop":
-        async for event in emit_error_terminal(
+        async with aclosing(
+            emit_error_terminal(
+                ctx,
+                total=total,
+                running_cost=running_cost,
+                outcome=outcome,
+                final_text_value=feedback,
+                duration_ms=dur,
+            )
+        ) as error_events:
+            async for event in error_events:
+                yield event
+        return
+    async with aclosing(
+        emit_success_terminal(
             ctx,
+            proposed,
             total=total,
             running_cost=running_cost,
             outcome=outcome,
-            final_text_value=feedback,
             duration_ms=dur,
-        ):
+        )
+    ) as success_events:
+        async for event in success_events:
             yield event
-        return
-    async for event in emit_success_terminal(
-        ctx, proposed, total=total, running_cost=running_cost, outcome=outcome, duration_ms=dur
-    ):
-        yield event

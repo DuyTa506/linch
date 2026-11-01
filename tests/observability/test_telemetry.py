@@ -48,6 +48,538 @@ async def test_store_failure_records_duration_and_error_without_content(otel):
     assert point.attributes == {"op": "run.save_checkpoint", "error.type": "ValueError"}
 
 
+async def test_tool_content_capture_uses_post_tool_redaction(otel, monkeypatch):
+    """Export the PostToolUse result rather than the pre-hook execution value."""
+    from linch import RedactionConfig, RedactionHook, RedactionRule, tool
+    from tests.support.agents import make_agent
+    from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
+    from tests.support.tools import tool_registry
+
+    monkeypatch.setenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", "true")
+    context, exporter, _ = otel
+
+    @tool
+    def read_secret() -> str:
+        """Return a value that the post-tool policy redacts."""
+        return "SECRET_VALUE"
+
+    provider = ScriptedProvider([ToolUseTurn("read_secret", {}), TextTurn("done")])
+    agent = make_agent(
+        provider,
+        context=context,
+        tools=tool_registry(read_secret),
+        hooks=[
+            RedactionHook(RedactionConfig(rules=(RedactionRule("SECRET_VALUE", "[REDACTED]"),)))
+        ],
+    )
+    session = await agent.session()
+    try:
+        events = [event async for event in session.run("prompt")]
+        assert events[-1].subtype == "success"
+        span = next(
+            span
+            for span in exporter.get_finished_spans()
+            if span.attributes.get("gen_ai.operation.name") == "execute_tool"
+        )
+        assert span.attributes["gen_ai.tool.call.result"] == "[REDACTED]"
+        assert "SECRET_VALUE" not in str(span.attributes)
+    finally:
+        await agent.close()
+
+
+async def test_prompt_content_capture_uses_user_prompt_submit_redaction(otel, monkeypatch):
+    """Export the UserPromptSubmit prompt after hooks have redacted it."""
+    import json
+
+    from linch import RedactionConfig, RedactionHook, RedactionRule
+    from tests.support.agents import make_agent
+    from tests.support.providers import ScriptedProvider, TextTurn
+
+    monkeypatch.setenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", "true")
+    context, exporter, _ = otel
+    agent = make_agent(
+        ScriptedProvider([TextTurn("done")]),
+        context=context,
+        hooks=[
+            RedactionHook(
+                RedactionConfig(
+                    redact_user_prompt=True,
+                    rules=(RedactionRule("SECRET_VALUE", "[REDACTED]"),),
+                )
+            )
+        ],
+    )
+    session = await agent.session()
+    try:
+        events = [event async for event in session.run("SECRET_VALUE")]
+        assert events[-1].subtype == "success"
+        span = next(
+            span
+            for span in exporter.get_finished_spans()
+            if span.attributes.get("gen_ai.operation.name") == "invoke_agent"
+        )
+        assert json.loads(span.attributes["gen_ai.input.messages"]) == "[REDACTED]"
+        assert "SECRET_VALUE" not in str(span.attributes)
+    finally:
+        await agent.close()
+
+
+@pytest.mark.parametrize("redact_first", [False, True])
+@pytest.mark.parametrize("action", ["block", "stop"])
+async def test_rejected_prompt_is_not_captured(otel, monkeypatch, redact_first, action):
+    """Rejection can short-circuit redaction, so omit rejected prompt content."""
+    from linch import HookResult, RedactionConfig, RedactionHook, RedactionRule
+    from tests.support.agents import make_agent
+    from tests.support.providers import ScriptedProvider, TextTurn
+
+    monkeypatch.setenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", "true")
+    context, exporter, _ = otel
+
+    class BlockPrompt:
+        resume_policy_id = "test.block_prompt"
+
+        def on_user_prompt_submit(self, ctx):
+            return getattr(HookResult, action)("blocked")
+
+    redactor = RedactionHook(
+        RedactionConfig(
+            redact_user_prompt=True,
+            rules=(RedactionRule("SECRET_VALUE", "[REDACTED]"),),
+        )
+    )
+    agent = make_agent(
+        ScriptedProvider([TextTurn("unreachable")]),
+        context=context,
+        hooks=[redactor, BlockPrompt()] if redact_first else [BlockPrompt(), redactor],
+    )
+    session = await agent.session()
+    try:
+        events = [event async for event in session.run("SECRET_VALUE")]
+        assert events[-1].subtype == "error"
+        span = next(
+            span
+            for span in exporter.get_finished_spans()
+            if span.attributes.get("gen_ai.operation.name") == "invoke_agent"
+        )
+        assert "SECRET_VALUE" not in str(span.attributes)
+        assert "gen_ai.input.messages" not in span.attributes
+    finally:
+        await agent.close()
+
+
+async def test_start_run_span_does_not_capture_prompt_before_hooks(otel, monkeypatch):
+    """Run creation failures cannot export a prompt that hooks never processed."""
+    from types import SimpleNamespace
+
+    from linch._telemetry import start_run_span
+
+    monkeypatch.setenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", "true")
+    context, exporter, _ = otel
+    agent = SimpleNamespace(
+        context=context,
+        provider=SimpleNamespace(id="test-provider"),
+        model="test-model",
+    )
+    session = SimpleNamespace(id="session", agent=agent)
+    span = start_run_span(session, "SECRET_VALUE", "run")
+    span.end()
+    recorded = exporter.get_finished_spans()[0]
+    assert "gen_ai.input.messages" not in recorded.attributes
+    assert "SECRET_VALUE" not in str(recorded.attributes)
+
+
+async def test_closing_run_drains_deferred_tool_spans(otel, monkeypatch):
+    """Closing the run iterator ends tool spans waiting for PostToolUse."""
+    from types import SimpleNamespace
+
+    from linch._telemetry import in_span, telemetry_for, trace_tool
+
+    monkeypatch.setenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", "true")
+    context, exporter, _ = otel
+    agent = SimpleNamespace(context=context)
+    session = SimpleNamespace(id="session", agent=agent, active_run_id="run", _telemetry_run=None)
+    telemetry = telemetry_for(agent)
+    run_span = telemetry.tracer.start_span("invoke_agent")
+    call = SimpleNamespace(id="tool", block=SimpleNamespace(name="echo"), input={})
+    outcome = SimpleNamespace(block=SimpleNamespace(content="raw", is_error=False), error_type=None)
+
+    @trace_tool
+    async def execute(*args, **kwargs):
+        return outcome
+
+    async def events():
+        await execute(call, None, agent, session, None, run_id="run")
+        yield SimpleNamespace(type="system")
+
+    iterator = in_span(events(), run_span, session=session, run_id="run")
+    await anext(iterator)
+    await iterator.aclose()
+    assert any(
+        span.attributes.get("gen_ai.operation.name") == "execute_tool"
+        for span in exporter.get_finished_spans()
+    )
+
+
+async def test_detached_tool_span_uses_originating_run_state(otel, monkeypatch):
+    """Background completion must close the span for its captured run."""
+    from types import SimpleNamespace
+
+    from linch._telemetry import (
+        _RunTrace,
+        record_tool_result,
+        telemetry_for,
+        trace_tool,
+    )
+
+    monkeypatch.setenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", "true")
+    context, exporter, _ = otel
+    agent = SimpleNamespace(context=context)
+    session = SimpleNamespace(id="session", agent=agent, active_run_id="B", _telemetry_run=None)
+    telemetry = telemetry_for(agent)
+    span_a = telemetry.tracer.start_span("invoke_agent A")
+    span_b = telemetry.tracer.start_span("invoke_agent B")
+    state_a = _RunTrace(span_a, "A")
+    state_b = _RunTrace(span_b, "B")
+    telemetry._runs[(session.id, "A")] = state_a
+    session._telemetry_run = state_b
+    call = SimpleNamespace(
+        id="tool",
+        _run_id="A",
+        block=SimpleNamespace(name="echo"),
+        input={},
+    )
+    outcome = SimpleNamespace(block=SimpleNamespace(content="raw", is_error=False), error_type=None)
+
+    @trace_tool
+    async def execute(*args, **kwargs):
+        return outcome
+
+    await execute(call, None, agent, session, None, run_id="A")
+    assert len(state_a.tool_spans) == 1
+    assert not state_b.tool_spans
+    record_tool_result(session, call.id, "redacted", run_id="A")
+    assert not state_a.tool_spans
+    assert any(
+        span.attributes.get("gen_ai.operation.name") == "execute_tool"
+        and span.attributes.get("gen_ai.tool.call.result") == "redacted"
+        for span in exporter.get_finished_spans()
+    )
+    span_a.end()
+    span_b.end()
+
+
+async def test_overlapping_detached_tools_keep_origin_registry_until_both_finish(otel, monkeypatch):
+    """One completed background tool must not retire a sibling's run registry."""
+    from types import SimpleNamespace
+
+    from linch._telemetry import _RunTrace, record_tool_result, telemetry_for, trace_tool
+
+    monkeypatch.setenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", "true")
+    context, exporter, _ = otel
+    agent = SimpleNamespace(context=context)
+    pending_tasks = [SimpleNamespace(done=lambda: False), SimpleNamespace(done=lambda: False)]
+    session = SimpleNamespace(
+        id="session",
+        agent=agent,
+        active_run_id="B",
+        _telemetry_run=None,
+        background_tasks=pending_tasks,
+    )
+    telemetry = telemetry_for(agent)
+    owner_span = telemetry.tracer.start_span("invoke_agent A")
+    owner = _RunTrace(owner_span, "A")
+    owner.closed = True
+    owner.background_tasks = list(pending_tasks)
+    telemetry._runs[(session.id, "A")] = owner
+
+    @trace_tool
+    async def execute(call, *_args, **_kwargs):
+        return SimpleNamespace(
+            block=SimpleNamespace(content=f"raw-{call.id}", is_error=False), error_type=None
+        )
+
+    def call(call_id):
+        return SimpleNamespace(
+            id=call_id,
+            _run_id="A",
+            block=SimpleNamespace(name="echo"),
+            input={},
+        )
+
+    first, second = call("first"), call("second")
+    await execute(first, None, agent, session, None, run_id="A")
+    record_tool_result(session, first.id, "redacted-first", run_id="A")
+    await execute(second, None, agent, session, None, run_id="A")
+    assert len(owner.tool_spans) == 1
+    record_tool_result(session, second.id, "redacted-second", run_id="A")
+    assert (session.id, "A") in telemetry._runs
+    pending_tasks[0].done = lambda: True
+    pending_tasks[1].done = lambda: True
+    record_tool_result(session, "no-span", "ignored", run_id="A")
+    assert (session.id, "A") not in telemetry._runs
+    assert {
+        span.attributes.get("gen_ai.tool.call.result")
+        for span in exporter.get_finished_spans()
+        if span.attributes.get("gen_ai.operation.name") == "execute_tool"
+    } == {"redacted-first", "redacted-second"}
+    owner_span.end()
+
+
+async def test_closed_run_cleanup_ignores_later_run_background_tasks(otel, monkeypatch):
+    """Run A cleanup must not wait on background work admitted by run B."""
+    from types import SimpleNamespace
+
+    from linch._telemetry import _RunTrace, record_tool_result, telemetry_for
+
+    monkeypatch.delenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", raising=False)
+    context, _, _ = otel
+    agent = SimpleNamespace(context=context)
+    task_a = SimpleNamespace(done=lambda: False)
+    task_b = SimpleNamespace(done=lambda: False)
+    session = SimpleNamespace(
+        id="session",
+        agent=agent,
+        active_run_id="B",
+        background_tasks=[task_a, task_b],
+        _telemetry_run=None,
+    )
+    telemetry = telemetry_for(agent)
+    owner_span = telemetry.tracer.start_span("invoke_agent A")
+    owner = _RunTrace(owner_span, "A")
+    owner.closed = True
+    owner.background_tasks = [task_a]
+    telemetry._runs[(session.id, "A")] = owner
+
+    task_a.done = lambda: True
+    record_tool_result(session, "no-span", "ignored", run_id="A")
+    assert (session.id, "A") not in telemetry._runs
+    assert (session.id, "B") not in telemetry._runs
+    owner_span.end()
+
+
+@pytest.mark.parametrize("capture", [False, True])
+async def test_completed_runs_do_not_retain_earlier_run_background_tasks(
+    otel, monkeypatch, capture
+):
+    """A long-lived tool must retain only its originating run's telemetry."""
+    from linch import tool
+    from linch._telemetry import telemetry_for
+    from tests.support.agents import make_agent
+    from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
+    from tests.support.tools import tool_registry
+
+    monkeypatch.setenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", str(capture).lower())
+    context, exporter, _ = otel
+    release = asyncio.Event()
+    started = asyncio.Event()
+
+    @tool
+    async def slow() -> str:
+        """Wait until later runs have finished."""
+        started.set()
+        await release.wait()
+        return "tool-finished"
+
+    agent = make_agent(
+        ScriptedProvider(
+            [
+                ToolUseTurn("slow", {"run_in_background": True}),
+                TextTurn("A"),
+                TextTurn("B"),
+                TextTurn("C"),
+            ]
+        ),
+        context=context,
+        tools=tool_registry(slow),
+        enable_background_tools=True,
+    )
+    session = await agent.session()
+    telemetry = telemetry_for(agent)
+    try:
+        first = [event async for event in session.run("A")]
+        assert first[-1].subtype == "success"
+        await asyncio.wait_for(started.wait(), timeout=1)
+        assert len(telemetry._runs) == 1
+        origin = next(iter(telemetry._runs))
+        for prompt in ("B", "C"):
+            events = [event async for event in session.run(prompt)]
+            assert events[-1].subtype == "success"
+            assert set(telemetry._runs) == {origin}
+        release.set()
+        await asyncio.gather(*session.background_tasks)
+        assert not telemetry._runs
+        if capture:
+            tool_span = next(
+                span
+                for span in exporter.get_finished_spans()
+                if span.attributes.get("gen_ai.operation.name") == "execute_tool"
+            )
+            assert tool_span.attributes["linch.run_id"] == origin[1]
+            assert tool_span.attributes["gen_ai.tool.call.result"] == "tool-finished"
+    finally:
+        release.set()
+        await asyncio.gather(*session.background_tasks, return_exceptions=True)
+        await agent.close()
+
+
+@pytest.mark.parametrize("termination", ["cancel", "failure"])
+async def test_detached_post_tool_failure_closes_only_its_pending_span(
+    otel, monkeypatch, termination
+):
+    """Interrupted post-processing must close its span without capturing raw output."""
+    from linch import RedactionConfig, RedactionHook, RedactionRule, scheduler, tool
+    from linch._telemetry import telemetry_for
+    from tests.support.agents import make_agent
+    from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
+    from tests.support.tools import tool_registry
+
+    monkeypatch.setenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", "true")
+    context, exporter, _ = otel
+    release_tools = asyncio.Event()
+    entered = {name: asyncio.Event() for name in ("first", "second")}
+    release_hooks = {name: asyncio.Event() for name in entered}
+    hook_tasks = {}
+
+    class WaitHook:
+        resume_policy_id = "test.wait_post_tool"
+
+        async def on_post_tool_use(self, ctx):
+            name = ctx.input["name"]
+            hook_tasks[name] = asyncio.current_task()
+            entered[name].set()
+            await release_hooks[name].wait()
+
+    @tool
+    async def slow(name: str) -> str:
+        """Finish execution only after the foreground run has closed."""
+        await release_tools.wait()
+        return "SECRET_VALUE"
+
+    original_offload = scheduler._maybe_offload_block
+
+    async def failing_offload(*args, **kwargs):
+        if kwargs["call"].id == "first" and entered["first"].is_set():
+            raise RuntimeError("post-tool projection failed")
+        return await original_offload(*args, **kwargs)
+
+    if termination == "failure":
+        monkeypatch.setattr(scheduler, "_maybe_offload_block", failing_offload)
+
+    agent = make_agent(
+        ScriptedProvider(
+            [
+                ToolUseTurn("slow", {"name": "first", "run_in_background": True}, "first"),
+                ToolUseTurn("slow", {"name": "second", "run_in_background": True}, "second"),
+                TextTurn("done"),
+            ]
+        ),
+        context=context,
+        tools=tool_registry(slow),
+        enable_background_tools=True,
+        hooks=[
+            WaitHook(),
+            RedactionHook(RedactionConfig(rules=(RedactionRule("SECRET_VALUE", "[REDACTED]"),))),
+        ],
+    )
+    session = await agent.session()
+    telemetry = telemetry_for(agent)
+    try:
+        events = [event async for event in session.run("prompt")]
+        assert events[-1].subtype == "success"
+        release_tools.set()
+        for barrier in entered.values():
+            await asyncio.wait_for(barrier.wait(), timeout=1)
+        owner = next(iter(telemetry._runs.values()))
+        assert set(owner.tool_spans) == {"first", "second"}
+        if termination == "cancel":
+            hook_tasks["first"].cancel()
+        else:
+            release_hooks["first"].set()
+        first_result = await asyncio.gather(hook_tasks["first"], return_exceptions=True)
+        assert isinstance(
+            first_result[0], asyncio.CancelledError if termination == "cancel" else RuntimeError
+        )
+        assert set(owner.tool_spans) == {"second"}
+        assert owner.tool_spans["second"][0].is_recording()
+        assert len(telemetry._runs) == 1
+        release_hooks["second"].set()
+        await hook_tasks["second"]
+        assert not telemetry._runs
+        tool_spans = [
+            span
+            for span in exporter.get_finished_spans()
+            if span.attributes.get("gen_ai.operation.name") == "execute_tool"
+        ]
+        assert len(tool_spans) == 2
+        first_span = next(
+            span for span in tool_spans if span.attributes["gen_ai.tool.call.id"] == "first"
+        )
+        second_span = next(
+            span for span in tool_spans if span.attributes["gen_ai.tool.call.id"] == "second"
+        )
+        assert "gen_ai.tool.call.result" not in first_span.attributes
+        assert second_span.attributes["gen_ai.tool.call.result"] == "[REDACTED]"
+        assert "SECRET_VALUE" not in str([span.attributes for span in tool_spans])
+        await agent.close()
+        assert not telemetry._runs
+    finally:
+        release_tools.set()
+        for barrier in release_hooks.values():
+            barrier.set()
+        await asyncio.gather(*session.background_tasks, return_exceptions=True)
+        await agent.close()
+
+
+async def test_record_tool_result_ignores_unbound_scheduler_session():
+    """Telemetry cleanup is optional for lightweight scheduler sessions."""
+    from types import SimpleNamespace
+
+    from linch._telemetry import record_tool_result, register_background_task
+
+    record_tool_result(SimpleNamespace(id="session", active_run_id="run"), "tool", "result")
+    register_background_task(
+        SimpleNamespace(id="session"), object(), run_id="run", tool_use_id="tool"
+    )
+
+
+async def test_capture_off_releases_closed_run_registry_after_background_tasks_finish(
+    otel, monkeypatch
+):
+    """Capture-off runs must not retain a registry after detached work drains."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from linch._telemetry import in_span, register_background_task, telemetry_for
+
+    monkeypatch.delenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", raising=False)
+    context, _, _ = otel
+    agent = SimpleNamespace(context=context)
+    release = asyncio.Event()
+    task = asyncio.create_task(release.wait())
+    session = SimpleNamespace(
+        id="session",
+        agent=agent,
+        active_run_id="run",
+        _telemetry_run=None,
+        background_tasks=[task],
+    )
+    telemetry = telemetry_for(agent)
+    run_span = telemetry.tracer.start_span("invoke_agent")
+
+    async def events():
+        register_background_task(session, task, run_id="run", tool_use_id="tool")
+        yield SimpleNamespace(type="system")
+
+    iterator = in_span(events(), run_span, session=session, run_id="run")
+    await anext(iterator)
+    await iterator.aclose()
+    assert (session.id, "run") in telemetry._runs
+    release.set()
+    await task
+    await asyncio.sleep(0)
+    assert (session.id, "run") not in telemetry._runs
+
+
 async def test_provider_services_are_isolated_and_errors_are_private(otel):
     from linch._telemetry import Telemetry, set_error
 

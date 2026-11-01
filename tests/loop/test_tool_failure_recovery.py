@@ -106,6 +106,28 @@ async def test_all_failed_with_hint_injects_recovery_message():
     full_text = " ".join(hint_texts)
     assert "Provide" in full_text or "path" in full_text.lower() or "recovery" in full_text.lower()
 
+    assistant_index = next(
+        index
+        for index, message in enumerate(second_call_messages)
+        if getattr(message, "role", None) == "assistant"
+    )
+    result_index = next(
+        index
+        for index, message in enumerate(second_call_messages)
+        if getattr(message, "role", None) == "user"
+        and any(getattr(block, "type", None) == "tool_result" for block in message.content)
+    )
+    hint_index = next(
+        index
+        for index, message in enumerate(second_call_messages)
+        if getattr(message, "role", None) == "user"
+        and any(
+            getattr(block, "type", None) == "text" and "All tool calls failed" in block.text
+            for block in message.content
+        )
+    )
+    assert assistant_index < result_index < hint_index
+
 
 @pytest.mark.asyncio
 async def test_all_failed_without_hint_no_injection():

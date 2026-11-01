@@ -4,14 +4,15 @@ import asyncio
 import copy
 import logging
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
+from contextlib import aclosing
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal, cast
 from uuid import uuid4
 from xml.sax.saxutils import escape
 
 from . import lifecycle
-from ._telemetry import trace_tool
+from ._telemetry import record_tool_result, register_background_task, trace_tool
 from ._wire import UnsupportedWireVersionError
 from .abort import AbortContext, throw_if_aborted
 from .errors import AbortError, ToolExecutionError, ToolTimeoutError
@@ -1007,6 +1008,12 @@ async def _dispatch_post_tool_use(
             block_result=block_result,
             tool_output=outcome.tool_output,
         )
+    record_tool_result(
+        session,
+        call.id,
+        final.tool_result.content,
+        run_id=run_id or getattr(call, "_run_id", None),
+    )
     # PostToolUseFailure: an observational notification fired only when the final
     # (post-mutation) result is an error, so a failure-watcher hook need not
     # re-derive "did this fail?" from every PostToolUse.
@@ -1320,7 +1327,7 @@ async def _run_serial_batch(
     hook_dispatcher: HookDispatcher,
     middleware_errors: dict[str, str],
     turn_index: int | None,
-) -> AsyncIterator[Event]:
+) -> AsyncGenerator[Event, None]:
     """Run a serial (one-call-at-a-time) batch, yielding skill + start/end events."""
     for call, _idx, decision in batch["calls"]:
         input = _effective_input(call, decision)
@@ -1347,8 +1354,9 @@ async def _run_serial_batch(
             middleware_error=middleware_errors.get(call.id),
         )
         try:
-            async for progress in _drain_tool_execution(running):
-                yield progress
+            async with aclosing(_drain_tool_execution(running)) as progress_stream:
+                async for progress in progress_stream:
+                    yield progress
             outcome = running.task.result()
             outcome, hook_events = await _dispatch_post_tool_use(
                 hook_dispatcher,
@@ -1401,7 +1409,7 @@ async def _run_parallel_batch(
     hook_dispatcher: HookDispatcher,
     middleware_errors: dict[str, str],
     turn_index: int | None,
-) -> AsyncIterator[Event]:
+) -> AsyncGenerator[Event, None]:
     """Run a parallel batch: emit all starts, gather concurrently, then all ends.
 
     On abort/cancel, synthesises an ``aborted`` end event for every call that
@@ -1443,8 +1451,11 @@ async def _run_parallel_batch(
             # While waiting for the next provider-ordered result, multiplex
             # every call's bounded progress queue. A later tool can therefore
             # update live without allowing its final end bracket to overtake.
-            async for progress in _drain_parallel_progress_until(running, execution.task):
-                yield progress
+            async with aclosing(
+                _drain_parallel_progress_until(running, execution.task)
+            ) as progress_stream:
+                async for progress in progress_stream:
+                    yield progress
             outcome = execution.task.result()
             input = _effective_input(call, decision)
             outcome, hook_events = await _dispatch_post_tool_use(
@@ -1546,7 +1557,7 @@ def _start_tool_execution(
     return _RunningTool(task=task, progress=progress)
 
 
-async def _drain_tool_execution(running: _RunningTool) -> AsyncIterator[ToolProgressEvent]:
+async def _drain_tool_execution(running: _RunningTool) -> AsyncGenerator[ToolProgressEvent, None]:
     """Yield bounded/coalesced progress live until the tool task settles."""
     while True:
         while not running.progress.empty():
@@ -1557,23 +1568,22 @@ async def _drain_tool_execution(running: _RunningTool) -> AsyncIterator[ToolProg
                 yield running.progress.get_nowait()
             return
         progress_wait = asyncio.ensure_future(running.progress.get())
-        done, _ = await asyncio.wait(
-            [running.task, progress_wait], return_when=asyncio.FIRST_COMPLETED
-        )
-        if progress_wait in done:
-            yield progress_wait.result()
-        else:
-            progress_wait.cancel()
-            try:
-                await progress_wait
-            except asyncio.CancelledError:
-                pass
+        try:
+            done, _ = await asyncio.wait(
+                [running.task, progress_wait], return_when=asyncio.FIRST_COMPLETED
+            )
+            if progress_wait in done:
+                yield progress_wait.result()
+        finally:
+            if not progress_wait.done():
+                progress_wait.cancel()
+            await asyncio.gather(progress_wait, return_exceptions=True)
 
 
 async def _drain_parallel_progress_until(
     executions: list[_RunningTool],
     until: asyncio.Task[ToolExecutionOutcome],
-) -> AsyncIterator[ToolProgressEvent]:
+) -> AsyncGenerator[ToolProgressEvent, None]:
     while True:
         for execution in executions:
             while not execution.progress.empty():
@@ -1613,7 +1623,7 @@ async def execute_tool_calls(
     turn_index: int | None = None,
     on_permissions_resolved: Callable[[], Awaitable[None]] | None = None,
     run_config: Any = None,
-) -> AsyncIterator[Event]:
+) -> AsyncGenerator[Event, None]:
     """Execute a provider batch and yield its lifecycle events.
 
     Args:
@@ -1704,7 +1714,7 @@ async def execute_tool_calls(
                 PermissionRequestItem(
                     tool_use_id=call.id,
                     tool_name=_tool_name(call),
-                    input=call.input,
+                    input=copy.deepcopy(call.input),
                     summary=call.summary,
                 )
             )
@@ -1768,6 +1778,7 @@ async def execute_tool_calls(
                 ),
             )
             session.background_tasks.append(task)
+            register_background_task(session, task, run_id=origin_run_id, tool_use_id=call.id)
             ack = _background_ack(tool_name, bg_id)
             yield ToolCallEndEvent(
                 tool_use_id=call.id,
@@ -1798,19 +1809,16 @@ async def execute_tool_calls(
     for batch in batches:
         throw_if_aborted(signal)
         lane = _run_serial_batch if not batch["parallel"] else _run_parallel_batch
-        lane_events = lane(
-            batch,
-            agent=agent,
-            session=session,
-            signal=signal,
-            hook_dispatcher=hook_dispatcher,
-            middleware_errors=middleware_errors,
-            turn_index=turn_index,
-        )
-        try:
+        async with aclosing(
+            lane(
+                batch,
+                agent=agent,
+                session=session,
+                signal=signal,
+                hook_dispatcher=hook_dispatcher,
+                middleware_errors=middleware_errors,
+                turn_index=turn_index,
+            )
+        ) as lane_events:
             async for event in lane_events:
                 yield event
-        finally:
-            # Async-generator delegation does not automatically close the
-            # delegated iterator when this outer stream is abandoned.
-            await cast(Any, lane_events).aclose()
