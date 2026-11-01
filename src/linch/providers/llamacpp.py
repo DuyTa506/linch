@@ -7,6 +7,7 @@ from urllib import error, request
 from urllib.parse import urlsplit, urlunsplit
 
 from linch._prompt_cache import LLAMACPP_PROMPT_CACHE, apply_extra_body_cache
+from linch.providers.base import ProviderCapabilities
 from linch.providers.openai_chat import (
     OpenAIChatCompletionsProvider,
     OpenAIChatProviderOptions,
@@ -132,6 +133,19 @@ class LlamaCppProvider(OpenAIChatCompletionsProvider):
 
     def _build_payload(self, req: ProviderRequest) -> dict[str, Any]:
         return _build_llamacpp_payload(req, self._llamacpp_options)
+
+    def capabilities(self, model: ModelId) -> ProviderCapabilities:
+        """Return llama.cpp capabilities, including its template thinking switch.
+
+        Args:
+            model: Server model identifier.
+
+        Returns:
+            Capability flags for the configured llama.cpp endpoint.
+        """
+        caps = super().capabilities(model)
+        caps.can_disable_thinking = True
+        return caps
 
     def _chunk_cache_read_tokens(self, chunk: Any) -> int | None:
         return _llamacpp_cache_read_tokens(chunk)

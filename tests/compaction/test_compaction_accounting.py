@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
@@ -46,14 +47,29 @@ def _events(text: str = " Paid summary. ", *, usage: Any = None) -> list[dict[st
 class _Provider:
     id = "normalized-fixture"
 
-    def __init__(self, events: list[Any] | None = None, *, trace: list[str] | None = None):
+    def __init__(
+        self,
+        events: list[Any] | None = None,
+        *,
+        trace: list[str] | None = None,
+        can_disable_thinking: bool = False,
+    ):
         self.events = _events() if events is None else events
         self.trace = [] if trace is None else trace
+        self.can_disable_thinking = can_disable_thinking
         self.requests: list[Any] = []
         self.closed = 0
 
     def context_window(self, model: str) -> int:
         return 1024
+
+    def capabilities(self, model: str) -> Any:
+        from linch.providers import ProviderCapabilities
+
+        return ProviderCapabilities(
+            context_window=self.context_window(model),
+            can_disable_thinking=self.can_disable_thinking,
+        )
 
     async def stream(self, request: Any) -> AsyncIterator[dict[str, Any]]:
         self.trace.append("advanced")
@@ -128,7 +144,7 @@ async def test_summary_ignores_reasoning_content(reasoning: str) -> None:
     events = _events()
     events.insert(1, {"type": reasoning, "text": "private reasoning"})
     events.insert(3, {"type": reasoning, "text": "later reasoning"})
-    _, ledger, _, caller = _setup(provider=_Provider(events))
+    provider, ledger, _, caller = _setup(provider=_Provider(events))
 
     result = await _text(caller)
 
@@ -136,23 +152,39 @@ async def test_summary_ignores_reasoning_content(reasoning: str) -> None:
     assert result.receipt.disposition == "accepted"
     assert result.receipt.usage_status == "reported"
     assert ledger.total_usage == Usage(111, 22)
+    assert provider.requests[0].thinking is None
 
 
 @pytest.mark.parametrize("accounted", [False, True])
-async def test_summary_request_disables_thinking(accounted: bool) -> None:
+@pytest.mark.parametrize("can_disable_thinking", [None, False, True])
+async def test_summary_request_disables_thinking_only_when_supported(
+    accounted: bool, can_disable_thinking: bool | None
+) -> None:
     from linch.abort import AbortContext
     from linch.compaction import summarize_with_provider
     from linch.types import Message, TextBlock
 
-    provider, _, _, caller = _setup()
+    events = _events()
+    events.insert(1, {"type": "thinking_delta", "text": "private reasoning"})
+    backing_provider = _Provider(events, can_disable_thinking=bool(can_disable_thinking))
+    provider: Any = (
+        backing_provider
+        if can_disable_thinking is not None
+        else SimpleNamespace(stream=backing_provider.stream)
+    )
+    _, _, _, caller = _setup(provider=provider)
     if accounted:
-        await _text(caller)
+        result = await _text(caller)
+        assert result.text == "Paid summary."
+        assert result.receipt.disposition == "accepted"
     else:
-        await summarize_with_provider(
+        result = await summarize_with_provider(
             provider, "requested-model", [Message("user", [TextBlock("Earlier.")])], AbortContext()
         )
+        assert result == "Paid summary."
 
-    assert provider.requests[0].thinking == {"type": "disabled"}
+    expected = {"type": "disabled"} if can_disable_thinking else None
+    assert backing_provider.requests[0].thinking == expected
 
 
 @pytest.mark.parametrize("output", ["", "  ", "tool", "oversized", "native-json"])
