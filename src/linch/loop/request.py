@@ -257,7 +257,10 @@ def _build_turn_request(
         and (context is None or context.selected_tools is None)
     )
     if snapshot is not None:
-        frozen_tools = snapshot_tools(snapshot, None if positional else config.tools.schemas())
+        expand_native = not positional and getattr(
+            session.session_log, "_has_native_definitions", False
+        )
+        frozen_tools = snapshot_tools(snapshot, config.tools.schemas() if expand_native else None)
         allowed = getattr(session, "current_turn_allowed_tools", None)
         selected_names: set[str] | None = None
         if allowed is not None:
