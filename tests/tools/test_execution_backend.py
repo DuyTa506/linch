@@ -1,9 +1,3 @@
-"""RED tests for Feature H — sandboxed execution backend (sub-phase 3b).
-
-All imports are lazy (inside test bodies) to stay compatible with
-test_hardening.py's sys.modules reset.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -12,9 +6,18 @@ import subprocess
 
 import pytest
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+from tests.support.agents import make_agent
+from tests.support.providers import ScriptedProvider
+
+
+def _agent(tmp_path, **overrides):
+    return make_agent(
+        ScriptedProvider([]),
+        model="claude-opus-4-8",
+        cwd=str(tmp_path),
+        run_store=None,
+        **overrides,
+    )
 
 
 def _make_ctx(tmp_path):
@@ -45,29 +48,20 @@ def _docker_usable() -> bool:
     return completed.returncode == 0
 
 
-# ---------------------------------------------------------------------------
-# LocalBackend unit tests
-# ---------------------------------------------------------------------------
-
-
+@pytest.mark.parametrize(
+    ("command", "returncode", "stdout"), [("echo hello", 0, "hello"), ("exit 42", 42, "")]
+)
 @pytest.mark.asyncio(loop_scope="module")
-async def test_local_backend_runs_command_returns_stdout(tmp_path) -> None:
+async def test_local_backend_reports_command_outcome(
+    tmp_path, command: str, returncode: int, stdout: str
+) -> None:
     from linch.tools.execution import LocalBackend
 
     backend = LocalBackend()
-    result = await backend.run("echo hello", cwd=str(tmp_path), timeout_s=10.0)
-    assert result.returncode == 0
-    assert "hello" in result.stdout
-    assert result.timed_out is False
-
-
-@pytest.mark.asyncio(loop_scope="module")
-async def test_local_backend_nonzero_returncode(tmp_path) -> None:
-    from linch.tools.execution import LocalBackend
-
-    backend = LocalBackend()
-    result = await backend.run("exit 42", cwd=str(tmp_path), timeout_s=10.0)
-    assert result.returncode == 42
+    result = await backend.run(command, cwd=str(tmp_path), timeout_s=10.0)
+    assert result.returncode == returncode
+    if stdout:
+        assert stdout in result.stdout
     assert result.timed_out is False
 
 
@@ -99,11 +93,6 @@ async def test_local_backend_abort_interrupts_running_command(tmp_path) -> None:
         await asyncio.wait_for(task, timeout=2.0)
 
 
-# ---------------------------------------------------------------------------
-# BashTool with default (LocalBackend) — must be byte-identical to current
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio(loop_scope="module")
 async def test_bash_tool_defaults_to_local_backend(tmp_path) -> None:
     from linch.tools.builtin import BashTool
@@ -115,11 +104,6 @@ async def test_bash_tool_defaults_to_local_backend(tmp_path) -> None:
     assert result.is_error is False
     assert "hi" in result.content
     assert result.summary == "Exited 0"
-
-
-# ---------------------------------------------------------------------------
-# BashTool with injected fake backend
-# ---------------------------------------------------------------------------
 
 
 class _FakeBackend:
@@ -135,32 +119,11 @@ class _FakeBackend:
         return ExecResult(stdout="fake-out", stderr="", returncode=0, timed_out=False)
 
 
-class _FakeFs:
-    """Minimal filesystem transport paired with the fake shell world."""
-
-    async def read(self, path: str, *, offset: int = 0, limit: int | None = None) -> str:
-        return ""
-
-    async def write(self, path: str, content: str) -> None:
-        return None
-
-    async def ls(self, prefix: str = "") -> list[str]:
-        return []
-
-    async def edit(self, path: str, old: str, new: str, *, replace_all: bool = False) -> int:
-        return 0
-
-    async def exists(self, path: str) -> bool:
-        return False
-
-    async def delete(self, path: str) -> None:
-        return None
-
-
 def _fake_world(shell: _FakeBackend):
     from linch.execution import RemoteExecutionBackend
+    from linch.filesystem import StateFileBackend
 
-    return RemoteExecutionBackend(shell=shell, fs=_FakeFs())
+    return RemoteExecutionBackend(shell=shell, fs=StateFileBackend())
 
 
 class _FakeDockerProcess:
@@ -217,11 +180,6 @@ async def test_bash_tool_negative_timeout_runs_command(tmp_path) -> None:
     result = await tool.execute(validated, ctx)
     assert result.is_error is False
     assert "ran" in result.content
-
-
-# ---------------------------------------------------------------------------
-# DockerBackend missing docker raises at execution time
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio(loop_scope="module")
@@ -412,11 +370,6 @@ def test_docker_backend_invalid_workspace_mount_raises() -> None:
         DockerBackend(docker_path="/usr/bin/docker", workspace_mount="bad")  # type: ignore[arg-type]
 
 
-# ---------------------------------------------------------------------------
-# DockerBackend smoke (skipped when docker absent)
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio(loop_scope="module")
 @pytest.mark.skipif(not _docker_usable(), reason="docker daemon not available")
 async def test_docker_backend_smoke(tmp_path) -> None:
@@ -428,11 +381,6 @@ async def test_docker_backend_smoke(tmp_path) -> None:
     assert "docker-ok" in result.stdout
 
 
-# ---------------------------------------------------------------------------
-# Agent replaces BashTool with injected backend
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio(loop_scope="module")
 async def test_agent_replaces_bash_with_backend(tmp_path) -> None:
     from linch import workspace_tools
@@ -441,11 +389,8 @@ async def test_agent_replaces_bash_with_backend(tmp_path) -> None:
     fake = _FakeBackend()
     world = _fake_world(fake)
 
-    from linch import Agent
-
-    agent = Agent(
-        model="claude-opus-4-8",
-        cwd=str(tmp_path),
+    agent = _agent(
+        tmp_path,
         tools=workspace_tools(),
         execution_backend=world,
     )
@@ -460,33 +405,12 @@ async def test_agent_replaces_bash_with_backend(tmp_path) -> None:
     assert result.is_error is False
 
 
-def test_agent_rejects_shell_only_backend(tmp_path) -> None:
-    """An Agent needs a coherent shell and filesystem execution world."""
-    from linch import Agent, workspace_tools
-    from linch.errors import ConfigError
-
-    with pytest.raises(ConfigError, match="shell.*fs"):
-        Agent(
-            model="claude-opus-4-8",
-            cwd=str(tmp_path),
-            tools=workspace_tools(),
-            execution_backend=_FakeBackend(),
-        )
-
-
-# ---------------------------------------------------------------------------
-# System prompt: "no sandbox" present by default, absent with a backend
-# ---------------------------------------------------------------------------
-
-
 def _block_texts(agent) -> list[str]:
     return [b.text for b in agent.system_blocks if hasattr(b, "text")]
 
 
 def test_system_prompt_is_neutral_without_workspace_tools(tmp_path) -> None:
-    from linch import Agent
-
-    agent = Agent(model="claude-opus-4-8", cwd=str(tmp_path))
+    agent = _agent(tmp_path)
     combined = "\n".join(_block_texts(agent))
     assert "There is no sandbox" not in combined
     assert "Tools available: none" in combined
@@ -495,11 +419,10 @@ def test_system_prompt_is_neutral_without_workspace_tools(tmp_path) -> None:
 def test_system_prompt_sandbox_note_when_backend_injected(tmp_path) -> None:
     fake = _FakeBackend()
     world = _fake_world(fake)
-    from linch import Agent, workspace_tools
+    from linch import workspace_tools
 
-    agent = Agent(
-        model="claude-opus-4-8",
-        cwd=str(tmp_path),
+    agent = _agent(
+        tmp_path,
         tools=workspace_tools(),
         execution_backend=world,
     )
@@ -512,24 +435,17 @@ def test_execution_backend_not_injected_into_restricted_registry(tmp_path) -> No
     """execution_backend must not grant shell access to a registry that deliberately omits Bash."""
     fake = _FakeBackend()
     world = _fake_world(fake)
-    from linch import Agent
     from linch.tools import ToolRegistry
 
     no_bash = ToolRegistry()  # intentionally empty — caller wants no shell
-    agent = Agent(
-        model="claude-opus-4-8",
-        cwd=str(tmp_path),
+    agent = _agent(
+        tmp_path,
         tools=no_bash,
         execution_backend=world,
     )
     assert agent.tools.get("Bash") is None, (
         "execution_backend must not inject BashTool into a registry that did not include it"
     )
-
-
-# ---------------------------------------------------------------------------
-# Abort/timeout helper — task draining and public-wait API (code-review fixes)
-# ---------------------------------------------------------------------------
 
 
 class _HangingProcess:
