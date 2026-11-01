@@ -7,6 +7,10 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
 
 ## Unreleased
 
+Planned as 3.0.1. This patch release adds `Agent.reload_skills()`, an owner-approved
+exception to the MINOR rule in `docs/versioning.md`.
+
+
 - Freeze each ordinary session's system blocks and ordered tool schemas in durable
   metadata so stable catalogs and worker restarts preserve the provider prefix.
   Skill listings move into the cacheable system prefix and are deduplicated in

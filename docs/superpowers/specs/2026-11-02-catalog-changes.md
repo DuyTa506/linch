@@ -1,8 +1,8 @@
 # Mid-session catalog changes that keep the prompt cache
 
-Status: approved direction (2026-11-02), target 3.1. Phase 2 below is the
-implementation contract. Phases 3 and 4 are outlines and need measurement results
-from phase 1 before they become contracts.
+Status: approved direction (2026-11-02), target 3.0.1. Phases 2 and 3 below are
+implementation contracts. Phase 4 is an outline. The owner chose a patch release even though
+`docs/versioning.md` places public additions in MINOR; the changelog records that exception.
 
 ## 1. Problem
 
@@ -29,7 +29,8 @@ The prefix is frozen per session. Later changes go at the tail of the conversati
 |---|---|---|
 | Skill, subagent list, text | Tail notification | Tail notification |
 | Tool removed | `tool_removal`, or `allowed_tools` | Schema stays, notify, resolve fails |
-| Tool added or `input_schema` edited | `tool_addition`, or `additional_tools` | Change `tools`, new tools at the end, accept the miss |
+| Tool added | `tool_addition`, or `additional_tools` | Change `tools`, new tools at the end, accept the miss |
+| `input_schema` edited | Change `tools`, accept the miss | Change `tools`, accept the miss |
 | Description-only edit | Tail notification | Tail notification |
 
 Rejected: a `CallTool` gateway (revisit only if phase 1 shows prefill cost matters on
@@ -41,7 +42,7 @@ tool must work on the next request.
 1. Measure with `scripts/measure_catalog_changes.py`. Needs owner-provided keys or
    servers. Record results in `docs/superpowers/measurements/`.
 2. Provider-neutral base. This section's contract. Usable alone.
-3. Native adapters, gated by a `ProviderCapabilities` field.
+3. Native adapters, off by default, gated by a `ProviderCapabilities` field.
 4. `ToolSearchPlugin` returns `tool_reference` on Anthropic and stops changing `tools`.
 
 ## 4. Phase 2 contract
@@ -152,8 +153,8 @@ class CatalogChangeBlock:
 - A description-only change must carry the new description, or the model learns nothing.
   This also applies to `Subagent`, whose description lists agent types.
 - MCP-provided descriptions and instructions are third-party text. For an MCP tool the
-  notification states the name only. On positional providers this is required, because
-  phase 3 renders notifications as system messages with operator authority.
+  notification states the name only. Phase 3 keeps notification text in user-role messages
+  on every provider, so it never gains operator authority.
 
 Order: append the message, then update `notified`. A crash between the two repeats a
 notification, which is harmless. The reverse order loses one, which is not.
@@ -213,25 +214,126 @@ Write each failing first.
 - Each bypass condition in 4.1 keeps 3.0 request bytes, except dedupe.
 - An agent with no change executes no snapshot diff after the first turn.
 
-## 6. Phase 3 outline
+## 6. Phase 3 contract
 
-- Add `ProviderCapabilities.catalog_changes: Literal["append_only", "positional"]`,
-  default `"append_only"`.
-- Add `"system"` to `Message.role`, or render from `CatalogChangeBlock` in the Anthropic
-  adapter only. Prefer the latter: other providers then need no change.
-- Anthropic: `role: "system"` content with `text`, `tool_addition`, `tool_removal`, plus
-  `inline-tools-2026-09-15`. Bedrock and Google Cloud get by-reference only, through
-  `mid-conversation-tool-changes-2026-07-01`. Sonnet 5 and any model outside the docs list
-  fall back to append-only.
-- Placement: only after a user turn or tool results, never between `tool_use` and its
-  result, and not right after a paused turn. A sent system message is never edited.
-- Definitions sent after the first user message are capped at 4 MB. At least one
-  non-deferred tool stays in `tools`.
-- OpenAI Responses: `additional_tools` with role `developer`, keep the item in place on
-  round-trips, restrict with `tool_choice.allowed_tools`.
-- After compaction, 4.6 re-emits native additions and removals in the consolidated message.
-- Test Sonnet 5.5 and Haiku 5.5 specifically: the docs warn they may distrust a system
-  message after a tool result.
+Line budget: about 200 lines of `src/`, excluding tests. No new dependency and no new name
+in `linch.__all__`. Written from provider docs read on 2026-11-02. No key was available, so
+this is unverified against live Anthropic and OpenAI endpoints. Docs must say so.
+
+### 6.1 Switches
+
+- Add `ProviderCapabilities.catalog_changes: Literal["append_only", "positional"]`, default
+  `"append_only"`. `full_capabilities` keeps the default.
+- Add `native_catalog_changes: bool = False` to `AnthropicProviderOptions` and
+  `OpenAIResponsesProviderOptions`. With `False`, payloads stay byte-identical to phase 2.
+- Anthropic reports `"positional"` only when the option is on, the wire mode is `"native"`
+  (first-party endpoint), and the model is in an exact allowlist: `claude-fable-5-1`,
+  `claude-mythos-5-1`, `claude-fable-5`, `claude-mythos-5`, `claude-opus-5-5`, `claude-opus-5`,
+  `claude-sonnet-5-5`, `claude-haiku-5-5`, `claude-opus-4-8`. No prefix matching:
+  `claude-sonnet-5` is unsupported and must stay append-only. Bedrock, Google Cloud, and
+  proxies stay append-only, because by-value definitions need `inline-tools-2026-09-15`,
+  which is Claude API only.
+- OpenAI Responses reports `"positional"` only when the option is on and the model is
+  `gpt-5.4` or later. The docs state no model list for `additional_tools`; this is the
+  conservative bound from `tool_search`.
+
+### 6.2 Core
+
+Add `tool_definitions: tuple[dict[str, Any], ...] = ()` to `CatalogChangeBlock`, round-tripped.
+
+`sync_catalog` reads the capability for the run's model. When `"positional"`, and
+`snapshot["tools"]` is not empty, and the turn has no `allowed_tools` or context tool
+selection narrowing:
+
+| Detected | Action |
+|---|---|
+| Tool added, name not in `snapshot["tools"]` | Text, put definition in `tool_definitions`, name in `added_tools`, `snapshot["tools"]` unchanged |
+| Tool restored, name in `snapshot["tools"]` | Text, name in `added_tools`, no definition |
+| Tool removed | Text, name in `removed_tools`, snapshot unchanged |
+| `input_schema` changed | Phase 2 path: replace the row, accept the miss |
+| Description-only, skill, subagent | Phase 2 path |
+
+The docs do not define redefining an existing name, so a schema edit is not sent natively.
+Otherwise phase 2 behavior applies.
+
+`_build_turn_request` sends `snapshot["tools"]` when positional. When not positional it sends
+`snapshot_tools(snapshot, live_schemas)`, so a fallback model mid-session still sees tools that
+were added natively. A later switch back keeps working, because the log still holds the block.
+
+Compaction needs no new logic. 4.6 reset makes the next sync emit the differences from `base`.
+
+### 6.3 Anthropic rendering
+
+Text stays in the user-role message exactly as in phase 2. System messages carry only tool
+blocks. That keeps operator authority away from notification text, avoids the documented
+Sonnet 5.5 and Haiku 5.5 distrust of system text after tool results, and keeps the existing
+cache breakpoint on the last user message. This replaces the earlier plan.
+
+Only when `req` is positional, walk messages in order with a set of active names, seeded
+from `req.tools`, and render as:
+
+```json
+{"role": "system", "content": [
+  {"type": "tool_addition", "tool": {"type": "tool_definition", "definition":
+    {"name": "x", "description": "...", "input_schema": {}}}},
+  {"type": "tool_addition", "tool": {"type": "tool_reference", "name": "y"}},
+  {"type": "tool_removal", "tool": {"type": "tool_reference", "name": "z"}}
+]}
+```
+
+- Buffer tool blocks and emit one system message immediately before the next assistant
+  message, or at the end of `messages`. That satisfies placement: it follows a user turn and
+  precedes an assistant turn or ends the array, and it covers an aborted turn followed by a
+  new prompt. Skip emission when it would be the first entry.
+- Skip an addition whose name is active and a removal whose name is not active. This handles
+  a block retained through compaction next to the consolidated one. Rendering must be
+  deterministic from `messages` and `req.tools`, so sent messages never change.
+- `tool_reference` is used only for names declared in `req.tools`. A name defined earlier by
+  value is re-sent by value.
+- Send `inline-tools-2026-09-15` in `anthropic-beta` on every positional request, not only
+  those with tool blocks. Merge with betas the adapter already sends.
+- A tool definition is at most the existing translated tool shape. No `cache_control` on it.
+- Sum by-value definition bytes. Past 4,194,304 bytes raise `ConfigError` with an actionable
+  message rather than send a request the API rejects with `available_tools_limit_exceeded`.
+
+`pause_turn` maps to `end_turn` in Linch and is not resumed, so a tool block never directly
+follows a paused assistant turn. Add a test that pins this.
+
+### 6.4 OpenAI Responses rendering
+
+Only when positional:
+
+- Render `tool_definitions` as an item in `input` at the block's position:
+  `{"type": "additional_tools", "role": "developer", "tools": [<translate_tools output>]}`.
+  Position follows the log, so round-trips keep it in place. With `previous_response_id`,
+  only items after the previous response are sent, which holds without extra handling.
+- When any tool is inactive, or was added, and `req.tool_choice` is `None` or `"auto"`, set
+  `{"type": "allowed_tools", "mode": "auto", "tools": [{"type": "function", "name": n}, ...]}`
+  with the active names in stable order. Leave a forced or `"none"` choice alone.
+- Do not set `prompt_cache_breakpoint` on the item. The docs say it is not accepted.
+
+### 6.5 Required tests
+
+Payload tests only, with a fake transport. Write each failing first.
+
+- Option off: Anthropic and Responses payloads byte-identical to phase 2, with and without a
+  block carrying definitions.
+- Allowlist: `claude-sonnet-5`, unknown models, proxies, `gpt-5.3` stay append-only.
+- Positional add: `tools` unchanged, one system message, follows the user text, precedes the
+  next assistant turn. Earlier messages byte-identical across requests.
+- Parallel tool results: the system message is after the single merged user message and never
+  between `tool_use` and `tool_result`.
+- Abort, then a new prompt: placement stays valid.
+- Restore uses `tool_reference`. Removal uses `tool_removal`.
+- Duplicate addition after compaction is skipped.
+- Schema edit takes the phase 2 path.
+- Fallback to an append-only model mid-session: added tool is in `tools`.
+- Run-level `allowed_tools` narrowing takes the phase 2 path.
+- Limit: over 4 MB raises `ConfigError`.
+- Beta header present on every positional request, including those without a tool block.
+- Responses: item position after a round-trip, `allowed_tools` for removal, forced choice kept.
+- Durable resume after a native addition passes contract validation.
+- MCP addition: text states the name only, definition travels only in the tool block.
 
 ## 7. Out of scope
 
