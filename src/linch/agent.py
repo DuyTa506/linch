@@ -1491,7 +1491,7 @@ class Agent:
             from .mcp import connect_mcp_servers
 
             mcp_conn = await connect_mcp_servers(cast(Any, self._mcp_servers))
-            self._attach_mcp_tools(mcp_conn)
+            await self._attach_mcp_tools(mcp_conn)
             self._mcp_connection = mcp_conn
 
         self._mcp_connect = _load()
@@ -1501,7 +1501,7 @@ class Agent:
             self._mcp_connect = None
             raise
 
-    def _attach_mcp_tools(self, connection: Any) -> None:
+    async def _attach_mcp_tools(self, connection: Any) -> None:
         """Register a connection's tools + derived permission rules into the live agent.
 
         Shared by the configured-connect path and mid-run registration. Because
@@ -1511,15 +1511,52 @@ class Agent:
         """
         from .mcp import mcp_permission_rules
 
-        for tool in connection.tools:
-            self.tools.register(cast("Tool", tool))
-            if (
-                self._subagent_tool_registry is not None
-                and self._subagent_tool_registry.get(tool.name) is None
-            ):
-                self._subagent_tool_registry.register(cast("Tool", tool))
-        self.permission_engine.rules.extend(mcp_permission_rules(connection.tools))
-        self._refresh_system_blocks()
+        rules = mcp_permission_rules(connection.tools)
+        registered: list[Disposable] = []
+        try:
+            self.permission_engine.rules.extend(rules)
+            for tool in connection.tools:
+                registered.append(self.tools.register(cast("Tool", tool)))
+                if (
+                    self._subagent_tool_registry is not None
+                    and self._subagent_tool_registry.get(tool.name) is None
+                ):
+                    registered.append(self._subagent_tool_registry.register(cast("Tool", tool)))
+            self._refresh_system_blocks()
+        except BaseException:
+            rule_ids = {id(rule) for rule in rules}
+
+            async def rollback() -> None:
+                cleanup_error: BaseException | None = None
+                for disposer in reversed(registered):
+                    try:
+                        await disposer.dispose()
+                    except BaseException as exc:
+                        if cleanup_error is None:
+                            cleanup_error = exc
+                self.permission_engine.rules[:] = [
+                    rule for rule in self.permission_engine.rules if id(rule) not in rule_ids
+                ]
+                if cleanup_error is not None:
+                    raise cleanup_error
+
+            rollback_task = asyncio.create_task(rollback())
+            cancelled = False
+            while not rollback_task.done():
+                try:
+                    await asyncio.shield(rollback_task)
+                except asyncio.CancelledError:
+                    cancelled = True
+            rollback_error: BaseException | None = None
+            try:
+                rollback_task.result()
+            except BaseException as exc:
+                rollback_error = exc
+            if cancelled:
+                raise asyncio.CancelledError from rollback_error
+            if rollback_error is not None:
+                raise rollback_error from None
+            raise
 
     async def add_mcp_servers(self, servers: dict[str, Any]) -> Any:
         """Connect additional MCP servers during a run; their tools appear next turn.
@@ -1533,7 +1570,7 @@ class Agent:
         from .mcp import connect_mcp_servers
 
         connection = await connect_mcp_servers(cast(Any, servers))
-        self._attach_mcp_tools(connection)
+        await self._attach_mcp_tools(connection)
         self._extra_mcp_connections.append(connection)
         return connection
 
