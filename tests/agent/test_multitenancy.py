@@ -16,6 +16,8 @@ import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
+import pytest
+
 from tests.support.agents import make_agent
 from tests.support.tools import tool_registry
 
@@ -153,3 +155,25 @@ async def test_separate_agents_do_not_share_a_provider_budget() -> None:
 
     await asyncio.gather(*(_drive(session) for session in sessions))
     assert in_flight == 0
+
+
+@pytest.mark.parametrize("option", ["reliability", "tool_cache"])
+def test_failed_agent_constructor_does_not_leave_host_scope_orphaned(option: str) -> None:
+    from linch import Agent, ConfigError, Context
+    from tests.support.providers import ScriptedProvider
+
+    host = Context()
+    before_children = list(host._children)
+    before_disposers = list(host._scope._disposers)
+
+    expected = ConfigError if option == "reliability" else TypeError
+    with pytest.raises(expected):
+        Agent(
+            model="m",
+            provider=ScriptedProvider([]),
+            context=host,
+            **{option: "invalid"},
+        )
+
+    assert host._children == before_children
+    assert host._scope._disposers == before_disposers
