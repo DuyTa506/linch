@@ -272,9 +272,9 @@ async for event in session.run(prompt):
 Consequences to design for:
 
 - **Always drain the iterator.** Abandoning it before a terminal `ResultEvent`
-  leaves the run parked. Either consume to the terminal result, call
-  `session.abort()` (which cancels in-flight provider/tool work and any
-  background tasks), or explicitly close the iterator with `aclosing`. Once a
+  leaves the run parked. Either consume to the terminal result or explicitly
+  close the iterator with `aclosing`; `session.abort()` may accompany early
+  closure to signal cancellation of in-flight work. Once a
   terminal `ResultEvent` is ready, the session finalizes before yielding it, so
   breaking on that event is safe.
 - **One active run per session.** A second `session.run()` while one is live
