@@ -10,6 +10,8 @@ from typing import Any, cast
 
 import pytest
 
+from tests.support.providers import ScriptedProvider, TextTurn
+
 _RUN_WRITES = {
     "create_run",
     "save_checkpoint",
@@ -156,22 +158,10 @@ class _Takeover:
         return Store()
 
 
-class _TextProvider:
-    id = "lease-test"
+def _provider() -> ScriptedProvider:
+    from linch.types import Usage
 
-    def context_window(self, model: str) -> int:
-        return 100_000
-
-    async def stream(self, request: Any) -> AsyncIterator[dict[str, object]]:
-        from linch.types import Usage
-
-        yield {"type": "message_start", "model": request.model}
-        yield {"type": "text_delta", "text": "done"}
-        yield {
-            "type": "message_end",
-            "stop_reason": "end_turn",
-            "usage": Usage(input_tokens=1, output_tokens=1),
-        }
+    return ScriptedProvider([TextTurn("done", usage=Usage(input_tokens=1, output_tokens=1))])
 
 
 class _StopCounter:
@@ -210,7 +200,7 @@ async def test_takeover_stops_all_later_writes_and_preserves_winner(
     stop = _StopCounter()
     agent = Agent(
         model="lease-model",
-        provider=cast(Any, _TextProvider()),
+        provider=cast(Any, _provider()),
         session_store=state.wrap(InMemorySessionStore(), session=True),
         run_store=state.wrap(first),
         hooks=[stop],
@@ -268,7 +258,7 @@ async def test_model_call_journal_failure_keeps_original_store_error_class() -> 
 
     agent = Agent(
         model="lease-model",
-        provider=cast(Any, _TextProvider()),
+        provider=cast(Any, _provider()),
         session_store=InMemorySessionStore(),
         run_store=FailLedgerStore(),
         cwd=".",
@@ -297,7 +287,7 @@ async def test_alignment_dispatch_lease_loss_never_appends_another_error(lease_s
     runs = state.wrap(first)
     agent = Agent(
         model="lease-model",
-        provider=cast(Any, _TextProvider()),
+        provider=cast(Any, _provider()),
         session_store=state.wrap(InMemorySessionStore(), session=True),
         run_store=runs,
         cwd=".",
@@ -353,7 +343,7 @@ async def test_run_creation_failure_propagates_unchanged_without_lifecycle(wrapp
     stop = _StopCounter()
     agent = Agent(
         model="lease-model",
-        provider=cast(Any, _TextProvider()),
+        provider=cast(Any, _provider()),
         session_store=InMemorySessionStore(),
         run_store=CreationLosesLease(),
         hooks=[stop],
@@ -405,7 +395,7 @@ async def test_early_close_flush_lease_loss_cancels_background_and_reports_stop(
     stop = Stop()
     agent = Agent(
         model="lease-model",
-        provider=cast(Any, _TextProvider()),
+        provider=cast(Any, _provider()),
         session_store=state.wrap(InMemorySessionStore(), session=True),
         run_store=state.wrap(first),
         hooks=[stop],
@@ -524,7 +514,7 @@ async def test_failed_tail_atomic_lease_loss_skips_later_writes() -> None:
     store = Store()
     agent = Agent(
         model="lease-model",
-        provider=cast(Any, _TextProvider()),
+        provider=cast(Any, _provider()),
         session_store=InMemorySessionStore(),
         run_store=store,
         hooks=[StopHook()],
@@ -557,7 +547,7 @@ async def test_blocked_prompt_terminal_lease_loss_reaches_single_agent_stop(
     stop = BlockHook()
     agent = Agent(
         model="lease-model",
-        provider=cast(Any, _TextProvider()),
+        provider=cast(Any, _provider()),
         session_store=InMemorySessionStore(),
         run_store=state.wrap(first),
         hooks=[stop],

@@ -8,23 +8,8 @@ from typing import Any, cast
 
 import pytest
 
-
-class _TextProvider:
-    id = "failure-tests"
-
-    def context_window(self, model: str) -> int:
-        return 100_000
-
-    async def stream(self, request: Any) -> AsyncIterator[dict[str, object]]:
-        from linch.types import Usage
-
-        yield {"type": "message_start", "model": request.model}
-        yield {"type": "text_delta", "text": "done"}
-        yield {
-            "type": "message_end",
-            "stop_reason": "end_turn",
-            "usage": Usage(input_tokens=1, output_tokens=1),
-        }
+from tests.support.agents import make_agent
+from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
 
 
 class _StopCounter:
@@ -47,11 +32,16 @@ def _agent(
     hooks: list[Any] | None = None,
     **kw: Any,
 ) -> Any:
-    from linch import Agent
+    from linch.types import Usage
 
-    return Agent(
+    provider = kw.pop(
+        "provider",
+        ScriptedProvider([TextTurn("done", usage=Usage(input_tokens=1, output_tokens=1))]),
+    )
+
+    return make_agent(
+        cast(Any, provider),
         model="failure-model",
-        provider=cast(Any, _TextProvider()),
         permissions={"mode": "skip-dangerous"},
         session_store=session_store,
         run_store=run_store,
@@ -381,7 +371,12 @@ async def test_error_pair_is_durable_when_failed_status_becomes_visible(failure:
         async def append_messages(self, session_id: str, messages: list[Any]) -> Any:
             raise ValueError("session append unavailable")
 
-    class FailProvider(_TextProvider):
+    class FailProvider:
+        id = "failure-provider"
+
+        def context_window(self, model: str) -> int:
+            return 100_000
+
         async def stream(self, request: Any) -> AsyncIterator[dict[str, object]]:
             raise OSError("provider unavailable")
             yield  # pragma: no cover
@@ -751,17 +746,7 @@ async def test_each_terminal_route_commits_result_with_status(route: str) -> Non
         **options,
     )
     if route in {"budget", "max_turns"}:
-
-        class ToolProvider(_TextProvider):
-            async def stream(self, request):
-                from linch.types import Usage
-
-                yield {"type": "message_start", "model": request.model}
-                yield {"type": "tool_use_start", "id": "tool", "name": "Unavailable"}
-                yield {"type": "tool_use_end", "id": "tool"}
-                yield {"type": "message_end", "stop_reason": "tool_use", "usage": Usage(1, 1)}
-
-        agent.provider = ToolProvider()
+        agent.provider = ScriptedProvider([ToolUseTurn("Unavailable", {}, tool_id="tool")])
     session = await agent.session()
     iterator = session.run("hello")
     try:

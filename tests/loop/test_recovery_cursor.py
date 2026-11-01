@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import pytest
-from test_run_resume import ScriptProvider, _agent, _memory_session_store
 
 from linch.events import AssistantEvent, ToolCallEndEvent, ToolCallStartEvent
 from linch.loop.checkpoint import _recover_completed_tool_results
 from linch.run_store import InMemoryRunStore
 from linch.types import Message, TextBlock, ToolUseBlock
+from tests.support.agents import make_agent
+from tests.support.providers import ScriptedProvider
+from tests.support.stores import memory_session_store
 
 
 def _start(tool_use_id: str, name: str = "A") -> ToolCallStartEvent:
@@ -27,10 +29,11 @@ def _assistant(text: str) -> AssistantEvent:
 
 
 async def _session_with_store(store: InMemoryRunStore):
-    agent = _agent(
+    agent = make_agent(
+        ScriptedProvider([]),
         model="gpt-5",
-        provider=ScriptProvider(),
-        session_store=_memory_session_store(),
+        permissions=None,
+        session_store=memory_session_store(),
         run_store=store,
         cwd=".",
     )
