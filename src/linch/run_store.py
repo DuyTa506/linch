@@ -4,26 +4,29 @@ import base64
 import hashlib
 import json
 import math
-import sqlite3
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Awaitable, Mapping, Sequence
+from copy import deepcopy
 from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, Protocol, cast
+from typing import Any, Literal, Protocol, TypeVar, cast
 from uuid import UUID, uuid4
 
+from ._json import walk_json
+from ._telemetry import store_call
+from ._wire import WIRE_VERSION, require_wire_version
 from .events import (
     IGNORABLE_MAX_DEPTH,
     Event,
-    event_from_dict,
-    event_to_dict,
+    _stored_event_from_dict,
+    _stored_event_to_dict,
     usage_from_dict,
     usage_to_dict,
 )
 from .sessions.memory import now_iso
-from .storage._executor import SqliteExecutor
 from .types import (
     Message,
     OutputSchema,
@@ -38,26 +41,27 @@ from .types import (
     message_to_dict,
 )
 
-# Wire-format version for the serialized RunCheckpoint and stored-event log.
-# Bump only on a breaking change to the persisted shape. `checkpoint_from_dict`
-# reads any version best-effort (unknown future keys are ignored). Stored events
-# are required on read unless their envelope explicitly declares them ignorable.
-SCHEMA_VERSION = 1
+# Wire-format version for serialized run state.  Keep this alias for the
+# existing top-level ``RUN_SCHEMA_VERSION`` export; the private module owns the
+# one actual version constant shared by every persisted envelope.
+SCHEMA_VERSION = WIRE_VERSION
 
-# A run contract is versioned independently from the checkpoint wire format.
-# Checkpoints describe *where* execution stopped; this contract describes the
-# execution inputs that must stay stable when that checkpoint is resumed.
-RUN_CONTRACT_SCHEMA_VERSION = 1
+# Run contracts share the common wire generation with checkpoints. Checkpoints
+# describe where execution stopped; contracts bind the execution inputs that
+# must stay stable when that checkpoint is resumed.
+RUN_CONTRACT_SCHEMA_VERSION = WIRE_VERSION
 RUN_CONTRACT_META_KEY = "run_contract"
 
-# Model input snapshots have their own codec version because their compatibility
-# requirement is stricter than the best-effort checkpoint/event readers.  A
-# pending provider request must either decode exactly or fail closed.
-MODEL_INPUT_CODEC_VERSION = 1
+# Model input snapshots share the common wire generation. Their exact-input
+# integrity checks additionally require a pending provider request to decode
+# exactly or fail closed.
+MODEL_INPUT_CODEC_VERSION = WIRE_VERSION
 
 # "suspended" is a workflow parked at a wf.interrupt; distinct from
 # "waiting_permission", which belongs to the tool-permission flow.
-RunStatus = Literal["running", "waiting_permission", "suspended", "completed", "failed", "aborted"]
+RunStatus = Literal[
+    "pending", "running", "waiting_permission", "suspended", "completed", "failed", "aborted"
+]
 RunPhase = Literal[
     "started",
     "user_appended",
@@ -77,6 +81,47 @@ RunPhase = Literal[
 
 @dataclass(slots=True)
 class RunCheckpoint:
+    """Capture the durable state needed to resume one run.
+
+    Checkpoints are serialized at phase boundaries and restored before a run
+    resumes. Store implementations detach the checkpoint from caller-owned
+    objects, while extension state preserves namespaces owned by optional
+    runtime features.
+
+    Args:
+        phase: Execution phase represented by the checkpoint.
+        prompt: User prompt associated with the run.
+        turn_index: Current loop turn index.
+        total_usage: Cumulative provider usage through this checkpoint.
+        assistant_message: Accepted assistant message for the current turn, if any.
+        pending_tool_blocks: Tool calls waiting for permission or execution.
+        completed_tool_results: Tool results already recovered for the current batch.
+        force_final_pending: Whether the loop must take its forced-final path.
+        loop_guard_state: Serialized loop-guard state, when enabled.
+        pending_skill_overlay: Skill overlay waiting to be applied, if any.
+        current_turn_allowed_tools: Tool names allowed for the current turn, if restricted.
+        assistant_stop_reason: Provider stop reason for the accepted assistant response.
+        permission_decisions: Durable permission decisions keyed by tool call or request.
+        background_workers: Durable state for background workers associated with the run.
+        truncation_attempts: Number of output-truncation continuation attempts used for the run.
+        truncation_prefix: Assistant text accumulated from previous output-truncated responses.
+        pending_truncation_feedback: Continuation feedback waiting to be appended before retrying.
+        tool_batch_event_after_seq: Event-log cursor immediately before the tool batch.
+        pending_alignment: Undrained session-alignment entries to restore on resume.
+        extension_state: JSON-safe namespaces owned by optional runtime extensions.
+        provider_attempt: 1-based provider dispatch attempt captured for exact replay.
+        model_input_snapshot_id: Exact provider-request snapshot referenced by this checkpoint.
+
+    Attributes:
+        phase: Execution phase represented by the checkpoint.
+        prompt: User prompt associated with the run.
+        turn_index: Current loop turn index.
+        total_usage: Cumulative provider usage through this checkpoint.
+        extension_state: Opaque JSON-safe state preserved for runtime extensions.
+        provider_attempt: Provider dispatch attempt associated with an exact snapshot.
+        model_input_snapshot_id: Snapshot identifier used to replay a pending provider call.
+    """
+
     phase: RunPhase
     prompt: str
     turn_index: int
@@ -97,8 +142,7 @@ class RunCheckpoint:
     tool_batch_event_after_seq: int | None = None
     """Event-log watermark: the seq just before this turn's tool-batch start
     events. On resume, tool-result recovery scans only events after this cursor.
-    ``None`` (legacy checkpoints / non-tool phases) triggers the boundary
-    fallback in ``_recover_completed_tool_results``."""
+    Tool recovery requires a non-negative integer; non-tool phases may use ``None``."""
     pending_alignment: list[dict[str, Any]] = field(default_factory=list)
     """Undrained ``session.align()`` entries (``{"prompt", "images"}``) at the
     time of this save, restored on resume so steering intent survives a crash.
@@ -110,14 +154,12 @@ class RunCheckpoint:
 
     Keys are extension-owned namespaces (for example a checkpointable hook's
     ``checkpoint_key``).  Core preserves entries it does not understand, so
-    independently installed extensions can share one durable checkpoint.  A
-    checkpoint written before this field existed restores as an empty mapping.
+    independently installed extensions can share one durable checkpoint.
     """
     provider_attempt: int = 0
     """1-based provider dispatch attempt for an exact model-input snapshot.
 
-    Zero is the legacy/default value and is omitted from the checkpoint wire
-    shape so runs without exact-input durability keep their existing payload.
+    Zero means no provider attempt has been captured.
     """
     model_input_snapshot_id: str | None = None
     """Snapshot referenced by a ``provider_pending`` checkpoint, when enabled."""
@@ -125,6 +167,27 @@ class RunCheckpoint:
 
 @dataclass(slots=True)
 class RunRecord:
+    """Represent the durable identity, status, metadata, and checkpoint of a run.
+
+    Args:
+        id: Stable run identifier.
+        session_id: Session that owns the run.
+        status: Current run lifecycle status.
+        created_at: Creation timestamp in the store's ISO representation.
+        updated_at: Timestamp of the most recent durable update.
+        checkpoint: Latest resumable checkpoint, if one has been written.
+        meta: JSON-safe run metadata, including an optional run contract.
+
+    Attributes:
+        id: Stable run identifier.
+        session_id: Session that owns the run.
+        status: Current run lifecycle status.
+        created_at: Creation timestamp in the store's ISO representation.
+        updated_at: Timestamp of the most recent durable update.
+        checkpoint: Latest resumable checkpoint, if one has been written.
+        meta: JSON-safe run metadata.
+    """
+
     id: str
     session_id: str
     status: RunStatus
@@ -136,9 +199,171 @@ class RunRecord:
 
 @dataclass(slots=True)
 class StoredRunEvent:
+    """Represent one ordered event persisted in a run's event log.
+
+    Args:
+        seq: Monotonically increasing, 1-based sequence number within the run.
+        appended_at: Timestamp assigned when the event was persisted.
+        event: Typed event payload.
+
+    Attributes:
+        seq: Monotonically increasing, 1-based sequence number within the run.
+        appended_at: Timestamp assigned when the event was persisted.
+        event: Typed event payload.
+    """
+
     seq: int
     appended_at: str
     event: Event
+
+
+@dataclass(frozen=True, slots=True)
+class RunLease:
+    """A fencing lease held by one worker for one run.
+
+    ``expires_at`` is a Unix timestamp.  Epochs are monotonically increasing
+    per run and are the fencing token: a holder whose epoch is no longer the
+    stored epoch cannot mutate the run.
+
+    Args:
+        run_id: Run whose writes this lease may fence.
+        owner: Unique worker or process identifier holding the lease.
+        epoch: Monotonically increasing fencing token for the run.
+        expires_at: Lease expiry as a Unix timestamp.
+
+    Attributes:
+        run_id: Run whose writes this lease may fence.
+        owner: Unique worker or process identifier holding the lease.
+        epoch: Monotonically increasing fencing token for the run.
+        expires_at: Lease expiry as a Unix timestamp.
+    """
+
+    run_id: str
+    owner: str
+    epoch: int
+    expires_at: float
+
+
+class RunLeaseConflictError(RuntimeError):
+    """Raised when a run has an unexpired lease owned by another worker."""
+
+
+class LeaseLostError(RuntimeError):
+    """Raised when a holder attempts a write after its fencing epoch changed."""
+
+
+class _StoreUnavailableError(LeaseLostError):
+    """Transient store failure leaves the run retryable."""
+
+
+def _is_transient_store_error(error: BaseException) -> bool:
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (OSError, ConnectionError)):
+            return True
+        if any(
+            base.__module__.startswith("asyncpg.")
+            and base.__name__
+            in (
+                "PostgresConnectionError",
+                "InterfaceError",
+                "AdminShutdownError",
+                "CrashShutdownError",
+                "CannotConnectNowError",
+                "TooManyConnectionsError",
+            )
+            for base in type(current).__mro__
+        ):
+            return True
+        current = current.__cause__
+    return False
+
+
+_T = TypeVar("_T")
+
+
+async def durable_call(session: Any, op: str, awaitable: Awaitable[_T]) -> _T:
+    """Measure a durable operation and preserve active runs on transient failure.
+
+    Args:
+        session: Session whose configured run store and active run govern recovery.
+        op: Measurement label; it does not affect failure classification.
+        awaitable: Durable operation to execute, excluding run creation.
+
+    Returns:
+        The operation's result without modification.
+
+    Raises:
+        _StoreUnavailableError: A transient store failure interrupts an active durable run.
+    """
+    try:
+        return await store_call(session, op, awaitable)
+    except Exception as exc:
+        if (
+            session is not None
+            and getattr(session.agent, "run_store", None) is not None
+            and getattr(session, "active_run_id", None) is not None
+        ):
+            if not isinstance(exc, _StoreUnavailableError) and _is_transient_store_error(exc):
+                raise _StoreUnavailableError(f"transient store failure during {op}") from exc
+        raise
+
+
+class RunLeaseStore(Protocol):
+    """Optional capability for claiming and fencing ownership of a run.
+
+    A lease carries a monotonically increasing epoch. Implementations reject a
+    write made with a stale epoch, while stores and runs that do not opt into
+    leases retain their normal single-process behavior.
+    """
+
+    async def claim(self, run_id: str, owner: str, ttl_s: float) -> RunLease:
+        """Claim a run for an owner until the requested TTL expires.
+
+        Args:
+            run_id: Existing run to claim.
+            owner: Unique identifier for the worker or process taking ownership.
+            ttl_s: Positive finite lease duration in seconds.
+
+        Returns:
+            The immutable lease containing the current fencing epoch and expiry.
+
+        Raises:
+            KeyError: If ``run_id`` does not identify a run.
+            RunLeaseConflictError: If another owner holds a live lease.
+            ValueError: If ``ttl_s`` is not positive and finite.
+        """
+
+        ...
+
+    async def renew(self, lease: RunLease) -> RunLease:
+        """Extend a currently held lease without changing its epoch.
+
+        Args:
+            lease: Lease returned by this store instance's latest claim.
+
+        Returns:
+            A lease with the same owner and epoch and a later expiry.
+
+        Raises:
+            LeaseLostError: If the lease is stale, expired, or no longer held.
+        """
+
+        ...
+
+    async def release(self, lease: RunLease) -> None:
+        """Release a matching lease and advance the run's fencing epoch.
+
+        Args:
+            lease: Lease whose ownership should be relinquished.
+
+        Raises:
+            LeaseLostError: If another holder has already changed the epoch.
+        """
+
+        ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +373,24 @@ class ModelInputSnapshot:
     ``request_json`` is canonical JSON rather than a mutable ``ProviderRequest``
     graph.  Use :func:`decode_model_input_snapshot` to integrity-check it and
     recreate a request with the current process's live abort signal.
+
+    Args:
+        id: Stable snapshot identifier.
+        run_id: Run associated with the provider request.
+        provider_attempt: 1-based provider dispatch attempt.
+        codec_version: Wire version used to encode the request.
+        request_json: Canonical JSON request payload without the live signal.
+        integrity_hash: Hash covering the codec version and request payload.
+        created_at: Snapshot creation timestamp.
+
+    Attributes:
+        id: Stable snapshot identifier.
+        run_id: Run associated with the provider request.
+        provider_attempt: 1-based provider dispatch attempt.
+        codec_version: Wire version used to encode the request.
+        request_json: Canonical JSON request payload without the live signal.
+        integrity_hash: Hash covering the codec version and request payload.
+        created_at: Snapshot creation timestamp.
     """
 
     id: str
@@ -171,6 +414,16 @@ class RunContract:
     keys without making older stores unable to decode a run record.  The
     schema version participates in the fingerprint so two meanings of the same
     shape can never compare equal accidentally.
+
+    Args:
+        schema_version: Wire version defining the contract envelope semantics.
+        payload: Canonical JSON-safe execution inputs.
+        fingerprint: Digest of the schema version and payload.
+
+    Attributes:
+        schema_version: Wire version defining the contract envelope semantics.
+        payload: Canonical JSON-safe execution inputs.
+        fingerprint: Digest used to detect changed resume inputs.
     """
 
     schema_version: int
@@ -180,7 +433,18 @@ class RunContract:
 
 @dataclass(frozen=True, slots=True)
 class RunContractDifference:
-    """One actionable difference between a stored and requested contract."""
+    """One actionable difference between a stored and requested contract.
+
+    Args:
+        path: Stable path identifying the differing contract value.
+        stored: Value persisted with the original run.
+        requested: Value supplied for the resume attempt.
+
+    Attributes:
+        path: Stable path identifying the differing contract value.
+        stored: Value persisted with the original run.
+        requested: Value supplied for the resume attempt.
+    """
 
     path: str
     stored: Any
@@ -189,17 +453,34 @@ class RunContractDifference:
 
 @dataclass(frozen=True, slots=True)
 class RunContractComparison:
-    """Result of checking whether a durable run can be resumed safely."""
+    """Result of checking whether a durable run can be resumed safely.
+
+    Args:
+        compatible: Whether the stored and requested contracts match.
+        stored_fingerprint: Fingerprint persisted with the original run.
+        requested_fingerprint: Fingerprint supplied for the resume attempt.
+        differences: Field-level differences explaining incompatibility.
+
+    Attributes:
+        compatible: Whether the stored and requested contracts match.
+        stored_fingerprint: Fingerprint persisted with the original run.
+        requested_fingerprint: Fingerprint supplied for the resume attempt.
+        differences: Field-level differences explaining incompatibility.
+    """
 
     compatible: bool
-    legacy: bool
-    stored_fingerprint: str | None
+    stored_fingerprint: str
     requested_fingerprint: str
     differences: tuple[RunContractDifference, ...] = ()
 
     def describe(self) -> str:
-        if self.legacy:
-            return "legacy run has no persisted run contract"
+        """Format this comparison as a concise diagnostic message.
+
+        Returns:
+            A success message or a mismatch summary containing up to eight
+            field differences and the count of any remaining differences.
+        """
+
         if self.compatible:
             return "run contract matches"
         details = ", ".join(
@@ -216,23 +497,69 @@ class RunContractComparison:
 
 
 class RunContractMismatchError(ValueError):
-    """Raised when resume inputs differ from the inputs of the original run."""
+    """Raised when resume inputs differ from the inputs of the original run.
+
+    Args:
+        comparison: Comparison containing the incompatible contract details.
+    """
 
     def __init__(self, comparison: RunContractComparison) -> None:
+        """Initialize the error with the incompatible contract comparison.
+
+        Args:
+            comparison: Comparison containing the fingerprints and field-level differences.
+        """
+
         self.comparison = comparison
         super().__init__(comparison.describe())
 
 
 class RunStore(Protocol):
+    """Required async persistence contract for durable run state.
+
+    Stores persist detached run records, checkpoints, and an ordered per-run
+    event stream. Implementations fence writes when the calling store instance
+    holds a lease; otherwise they retain the legacy unleased behavior.
+    """
+
     async def create_run(
         self,
         session_id: str,
         *,
         id: str | None = None,
         meta: dict[str, object] | None = None,
-    ) -> RunRecord: ...
+        initial_checkpoint: RunCheckpoint | None = None,
+    ) -> RunRecord:
+        """Create a running record or adopt a matching pending record.
 
-    async def load_run(self, run_id: str) -> RunRecord | None: ...
+        Args:
+            session_id: Session that owns the run.
+            id: Optional stable run identifier; a UUID is generated when omitted.
+            meta: JSON-safe metadata to persist with the run.
+            initial_checkpoint: Checkpoint to persist with the new running record.
+
+        Returns:
+            The detached running record.
+
+        Raises:
+            ValueError: If an existing record is not adoptable, belongs to another
+                session, or has an incompatible run contract.
+            RunContractMismatchError: If pending-run contract inputs differ.
+        """
+
+        ...
+
+    async def load_run(self, run_id: str) -> RunRecord | None:
+        """Load a detached run record by identifier.
+
+        Args:
+            run_id: Run identifier to look up.
+
+        Returns:
+            The run record, or ``None`` when no such run exists.
+        """
+
+        ...
 
     async def save_checkpoint(
         self,
@@ -240,48 +567,234 @@ class RunStore(Protocol):
         checkpoint: RunCheckpoint,
         *,
         status: str = "running",
-    ) -> RunRecord: ...
+    ) -> RunRecord:
+        """Persist a checkpoint and update the run status.
 
-    async def append_event(self, run_id: str, event: Event) -> int: ...
+        Args:
+            run_id: Run whose checkpoint should be replaced.
+            checkpoint: Resumable state to persist.
+            status: Status to store alongside the checkpoint.
 
-    async def load_events(self, run_id: str, *, after_seq: int = 0) -> list[StoredRunEvent]: ...
+        Returns:
+            The detached updated run record.
 
-    async def mark_completed(self, run_id: str, checkpoint: RunCheckpoint) -> RunRecord: ...
+        Raises:
+            KeyError: If the run does not exist.
+            LeaseLostError: If this instance's fencing lease is stale.
+            TypeError: If checkpoint data cannot be encoded.
+        """
+
+        ...
+
+    async def save_checkpoint_with_events(
+        self,
+        run_id: str,
+        checkpoint: RunCheckpoint,
+        events: Sequence[Event],
+        *,
+        status: str = "running",
+    ) -> tuple[RunRecord, list[int]]:
+        """Persist a checkpoint and its pending events as one phase boundary.
+
+        Args:
+            run_id: Run whose state should be updated.
+            checkpoint: Resumable state to persist.
+            events: Events to append in the supplied order.
+            status: Status to store alongside the checkpoint.
+
+        Returns:
+            The detached updated record and 1-based sequence numbers parallel to
+            ``events``.
+
+        Raises:
+            KeyError: If the run does not exist.
+            LeaseLostError: If this instance's fencing lease is stale.
+            TypeError: If checkpoint or event data cannot be encoded.
+        """
+
+        ...
+
+    async def append_event(self, run_id: str, event: Event) -> int:
+        """Append one event and return its 1-based run-local sequence number.
+
+        Args:
+            run_id: Run whose event log should receive the event.
+            event: Typed event to persist.
+
+        Returns:
+            The sequence number assigned to ``event``.
+
+        Raises:
+            KeyError: If the run does not exist.
+            LeaseLostError: If this instance's fencing lease is stale.
+            TypeError: If an event cannot be encoded.
+        """
+
+        ...
+
+    async def load_events(self, run_id: str, *, after_seq: int = 0) -> list[StoredRunEvent]:
+        """Load persisted events after an exclusive sequence watermark.
+
+        Args:
+            run_id: Run whose event log should be read.
+            after_seq: Exclusive sequence watermark; zero reads from the beginning.
+
+        Returns:
+            Events in ascending sequence order.
+        """
+
+        ...
+
+    async def mark_completed(self, run_id: str, checkpoint: RunCheckpoint) -> RunRecord:
+        """Persist a terminal completed status and checkpoint.
+
+        Args:
+            run_id: Run to complete.
+            checkpoint: Final checkpoint whose phase is set to ``completed``.
+
+        Returns:
+            The detached completed record.
+
+        Raises:
+            KeyError: If the run does not exist.
+            LeaseLostError: If this instance's fencing lease is stale.
+        """
+
+        ...
 
     async def mark_failed(
         self,
         run_id: str,
         checkpoint: RunCheckpoint | None = None,
         error: dict[str, object] | None = None,
-    ) -> RunRecord: ...
+        *,
+        events: Sequence[Event] = (),
+    ) -> tuple[RunRecord, list[int]]:
+        """Persist a failed status, optional checkpoint, error, and events.
+
+        Args:
+            run_id: Run to mark failed.
+            checkpoint: Optional final checkpoint whose phase becomes ``failed``.
+            error: Optional JSON-safe error metadata appended to the run history.
+            events: Terminal events to append with the failed state.
+
+        Returns:
+            The detached failed record and 1-based sequence numbers for ``events``.
+
+        Raises:
+            KeyError: If the run does not exist.
+            LeaseLostError: If this instance's fencing lease is stale.
+        """
+
+        ...
 
 
 class RunEventBatchStore(Protocol):
-    """Optional run-store capability: append several events atomically.
+    """Optional run-store capability for appending several events at once.
 
     Detected at runtime with ``getattr`` (a store implementing only ``RunStore``
-    keeps working via per-event ``append_event``). Returns the 1-based seq
-    assigned to each event, in order — parallel to ``append_event -> int``.
+    keeps working via per-event ``append_event``). Implementations assign and
+    persist events in input order as one all-or-nothing batch.
     """
 
-    async def append_events(self, run_id: str, events: list[Event]) -> list[int]: ...
+    async def append_events(self, run_id: str, events: list[Event]) -> list[int]:
+        """Append a batch and return sequence numbers parallel to ``events``.
+
+        Args:
+            run_id: Run whose event log should receive the batch.
+            events: Typed events to persist in order.
+
+        Returns:
+            The assigned 1-based sequence numbers in input order; an empty
+            batch returns ``[]`` without run lookup or lease fencing.
+
+        Raises:
+            KeyError: If a non-empty batch targets a missing run.
+            LeaseLostError: If a non-empty batch uses a stale fencing lease.
+            TypeError: If an event in a non-empty batch cannot be encoded.
+        """
+
+        ...
 
 
 class ModelInputSnapshotStore(Protocol):
-    """Optional run-store capability for exact pending provider requests."""
+    """Optional capability for persisting exact pending provider requests."""
 
     async def save(
         self,
         run_id: str,
         provider_attempt: int,
         request: ProviderRequest,
-    ) -> ModelInputSnapshot: ...
+    ) -> ModelInputSnapshot:
+        """Persist a validated provider request snapshot for a run.
 
-    async def load(self, snapshot_id: str) -> ModelInputSnapshot | None: ...
+        Args:
+            run_id: Run that owns the pending provider request.
+            provider_attempt: Positive attempt number associated with the request.
+            request: Provider request to encode without its live abort signal.
 
-    async def delete(self, snapshot_id: str) -> None: ...
+        Returns:
+            The immutable encoded snapshot.
 
-    async def prune(self, run_id: str, keep_ids: Sequence[str] = ()) -> int: ...
+        Raises:
+            KeyError: If the run does not exist.
+            LeaseLostError: If this instance's fencing lease is stale.
+            ValueError: If ``provider_attempt`` is invalid.
+            TypeError: If the request contains unsupported data.
+            ModelInputSnapshotError: If the request cannot be encoded safely.
+        """
+
+        ...
+
+    async def load(self, snapshot_id: str) -> ModelInputSnapshot | None:
+        """Load and integrity-check a stored provider request snapshot.
+
+        Args:
+            snapshot_id: Snapshot identifier to look up.
+
+        Returns:
+            The validated snapshot, or ``None`` when it does not exist.
+
+        Raises:
+            ModelInputSnapshotError: If the snapshot is corrupt or unsupported.
+        """
+
+        ...
+
+    async def delete(self, snapshot_id: str, *, run_id: str) -> None:
+        """Delete one snapshot only when it belongs to the specified run.
+
+        Args:
+            snapshot_id: Snapshot identifier to delete.
+            run_id: Run that must own the snapshot.
+
+        Raises:
+            LeaseLostError: If this instance's fencing lease is stale.
+
+        A snapshot belonging to another run, or an unknown snapshot, is not
+        deleted. Backends may report an unknown run according to their storage
+        semantics.
+        """
+
+        ...
+
+    async def prune(self, run_id: str, keep_ids: Sequence[str] = ()) -> int:
+        """Delete snapshots for a run except identifiers explicitly retained.
+
+        Args:
+            run_id: Run whose snapshots should be pruned.
+            keep_ids: Snapshot identifiers to retain.
+
+        Returns:
+            Number of snapshots deleted.
+
+        Raises:
+            LeaseLostError: If this instance's fencing lease is stale.
+
+        Backends may report an unknown run according to their storage semantics.
+        """
+
+        ...
 
 
 # Single source of truth with the ignorable-event validator: a value this
@@ -428,43 +941,35 @@ def _strict_model_json(
 ) -> Any:
     """Normalize a JSON value without lossy persistence fallbacks."""
 
+    return walk_json(
+        value,
+        check_node=_check_model_json_node,
+        check_key=_check_model_json_key,
+        path=path,
+        seen=set(seen),
+        depth=depth,
+    )
+
+
+def _check_model_json_node(value: Any, path: str, seen: set[int], depth: int) -> int | None:
     if value is None or isinstance(value, str | bool | int):
-        return value
+        return None
     if isinstance(value, float):
         if not math.isfinite(value):
             raise TypeError(f"{path} contains a non-finite float")
-        return value
+        return None
     if depth >= _JSON_SAFE_MAX_DEPTH:
         raise TypeError(f"{path} exceeds maximum nesting depth {_JSON_SAFE_MAX_DEPTH}")
-    if isinstance(value, Mapping):
-        if id(value) in seen:
-            raise TypeError(f"{path} contains a recursive value")
-        nested_seen = seen | {id(value)}
-        out: dict[str, Any] = {}
-        for key, item in value.items():
-            if not isinstance(key, str):
-                raise TypeError(f"{path} mapping key must be str, got {type(key).__name__}")
-            out[key] = _strict_model_json(
-                item,
-                path=f"{path}.{key}",
-                seen=nested_seen,
-                depth=depth + 1,
-            )
-        return out
-    if isinstance(value, list):
-        if id(value) in seen:
-            raise TypeError(f"{path} contains a recursive value")
-        nested_seen = seen | {id(value)}
-        return [
-            _strict_model_json(
-                item,
-                path=f"{path}[{index}]",
-                seen=nested_seen,
-                depth=depth + 1,
-            )
-            for index, item in enumerate(value)
-        ]
-    raise TypeError(f"{path} contains non-JSON value of type {type(value).__name__}")
+    if not isinstance(value, Mapping | list):
+        raise TypeError(f"{path} contains non-JSON value of type {type(value).__name__}")
+    if id(value) in seen:
+        raise TypeError(f"{path} contains a recursive value")
+    return depth + 1
+
+
+def _check_model_json_key(key: Any, path: str) -> None:
+    if not isinstance(key, str):
+        raise TypeError(f"{path} mapping key must be str, got {type(key).__name__}")
 
 
 def _output_schema_to_snapshot(schema: OutputSchema | None) -> dict[str, Any] | None:
@@ -545,7 +1050,26 @@ def create_model_input_snapshot(
     id: str | None = None,
     created_at: str | None = None,
 ) -> ModelInputSnapshot:
-    """Strictly encode ``request`` while deliberately excluding its live signal."""
+    """Strictly encode a provider request while excluding its live signal.
+
+    The resulting canonical JSON and integrity hash can be persisted before a
+    provider call and decoded later with a newly supplied abort signal.
+
+    Args:
+        run_id: Run associated with the pending provider request.
+        provider_attempt: Positive, 1-based provider dispatch attempt.
+        request: Provider request to encode.
+        id: Optional snapshot identifier; a UUID is generated when omitted.
+        created_at: Optional creation timestamp; the current timestamp is used when omitted.
+
+    Returns:
+        An immutable, integrity-checkable model-input snapshot.
+
+    Raises:
+        ValueError: If the run ID, attempt number, or snapshot ID is invalid.
+        TypeError: If the request contains unsupported or non-JSON data.
+        ModelInputSnapshotError: If the codec cannot cover the request shape.
+    """
 
     if not isinstance(run_id, str) or not run_id:
         raise ValueError("run_id must be a non-empty string")
@@ -582,11 +1106,7 @@ def create_model_input_snapshot(
 
 
 def _validated_snapshot_payload(snapshot: ModelInputSnapshot) -> dict[str, Any]:
-    if snapshot.codec_version != MODEL_INPUT_CODEC_VERSION:
-        raise ModelInputSnapshotError(
-            "unsupported model-input snapshot codec version "
-            f"{snapshot.codec_version}; expected {MODEL_INPUT_CODEC_VERSION}"
-        )
+    require_wire_version(snapshot.codec_version)
     expected = _model_input_integrity_hash(snapshot.codec_version, snapshot.request_json)
     if snapshot.integrity_hash != expected:
         raise ModelInputSnapshotError(
@@ -664,7 +1184,19 @@ def decode_model_input_snapshot(
     *,
     signal: Any = None,
 ) -> ProviderRequest:
-    """Verify and decode a snapshot, rebinding only the caller's live signal."""
+    """Verify and decode a snapshot, rebinding only the caller's live signal.
+
+    Args:
+        snapshot: Encoded snapshot to validate and decode.
+        signal: Live abort signal to attach to the reconstructed request.
+
+    Returns:
+        A provider request reconstructed from the integrity-checked payload.
+
+    Raises:
+        ModelInputSnapshotError: If the snapshot is corrupt, unsupported, or has
+            an invalid provider-request shape.
+    """
 
     raw = _validated_snapshot_payload(snapshot)
     model = raw["model"]
@@ -810,6 +1342,25 @@ def build_run_contract(
     Callers should pass the *resolved* values (after Agent/RunOptions defaults),
     and provider-facing tool schemas rather than tool instances.  Tool order is
     retained because it can affect provider behavior and prompt caching.
+
+    Args:
+        primary_model: Resolved primary provider model identifier.
+        fallback_models: Ordered fallback model identifiers.
+        system_blocks: Resolved system-prompt blocks included in the request.
+        tool_schemas: Provider-facing tool schemas in their offered order.
+        input_payload: Canonical input values that affect execution.
+        output_schema: Structured-output schema, if configured.
+        final_tool_name: Name of the terminal tool, if configured.
+        run_options: Resolved run options that affect execution.
+        budget: Budget limits or a mapping of budget policy values.
+        policies: Resolved policy and reliability settings.
+
+    Returns:
+        A canonical contract with a deterministic fingerprint.
+
+    Raises:
+        ValueError: If a model identifier is empty.
+        TypeError: If an input contains a value that cannot be represented safely.
     """
 
     if not isinstance(primary_model, str) or not primary_model:
@@ -843,22 +1394,49 @@ def build_run_contract(
 
 
 def run_contract_to_dict(contract: RunContract) -> dict[str, Any]:
-    """Encode a run contract with an integrity-checkable fingerprint."""
+    """Encode a run contract with an integrity-checkable fingerprint.
 
+    Args:
+        contract: Contract whose current wire envelope should be serialized.
+
+    Returns:
+        JSON-safe envelope containing the schema version, fingerprint, and payload.
+
+    Raises:
+        ValueError: If the fingerprint does not match the payload.
+        TypeError: If the payload contains a value that cannot be serialized safely.
+    """
+
+    require_wire_version(contract.schema_version)
     payload = _json_safe(contract.payload, strict=True)
+    if contract.fingerprint != _run_contract_fingerprint(contract.schema_version, payload):
+        raise ValueError("run contract fingerprint does not match payload")
     return {
         "schema_version": contract.schema_version,
-        "fingerprint": _run_contract_fingerprint(contract.schema_version, payload),
+        "fingerprint": contract.fingerprint,
         "payload": payload,
     }
 
 
 def run_contract_from_dict(raw: Mapping[str, Any]) -> RunContract:
-    """Decode old or future contract envelopes without rejecting extra keys."""
+    """Decode a current contract envelope while retaining its open payload.
 
-    version_raw = raw.get("schema_version", 1)
-    if not isinstance(version_raw, int) or isinstance(version_raw, bool) or version_raw < 1:
-        raise ValueError("run contract schema_version must be a positive integer")
+    Args:
+        raw: Mapping containing the current schema version, fingerprint, and payload.
+
+    Returns:
+        A validated run contract.
+
+    Raises:
+        ValueError: If the envelope, payload, or fingerprint is malformed.
+        UnsupportedWireVersionError: If the envelope is missing or uses an unsupported
+            wire version.
+    """
+
+    if not isinstance(raw, Mapping):
+        require_wire_version(None)
+    require_wire_version(raw.get("schema_version"))
+    version_raw = raw["schema_version"]
     payload_raw = raw.get("payload")
     if not isinstance(payload_raw, Mapping):
         raise ValueError("run contract payload must be a mapping")
@@ -866,18 +1444,28 @@ def run_contract_from_dict(raw: Mapping[str, Any]) -> RunContract:
     assert isinstance(payload, dict)
     computed = _run_contract_fingerprint(version_raw, payload)
     declared = raw.get("fingerprint")
-    # Missing fingerprints are accepted for early/pre-release contract rows.
-    # A present but invalid value is retained so compatibility comparison can
-    # report corruption instead of silently blessing it.
-    fingerprint = declared if isinstance(declared, str) and declared else computed
-    return RunContract(schema_version=version_raw, payload=payload, fingerprint=fingerprint)
+    if not isinstance(declared, str) or not declared or declared != computed:
+        raise ValueError("run contract fingerprint does not match payload")
+    return RunContract(schema_version=version_raw, payload=payload, fingerprint=declared)
 
 
 def run_meta_with_contract(
     contract: RunContract,
     meta: Mapping[str, Any] | None = None,
 ) -> dict[str, object]:
-    """Return JSON-safe run metadata carrying ``contract`` without mutation."""
+    """Return JSON-safe run metadata carrying ``contract`` without mutation.
+
+    Args:
+        contract: Contract to place under the run-contract metadata key.
+        meta: Optional existing metadata to copy and extend.
+
+    Returns:
+        A detached metadata mapping containing the serialized contract.
+
+    Raises:
+        ValueError: If the contract fingerprint is invalid.
+        TypeError: If contract data cannot be represented safely.
+    """
 
     safe = _json_safe(meta or {}, strict=False)
     assert isinstance(safe, dict)
@@ -885,14 +1473,26 @@ def run_meta_with_contract(
     return safe
 
 
-def run_contract_from_meta(meta: Mapping[str, Any]) -> RunContract | None:
-    """Load a persisted contract; ``None`` means a genuinely legacy run."""
+def run_contract_from_meta(meta: Mapping[str, Any]) -> RunContract:
+    """Load a current persisted contract, rejecting contractless runs.
+
+    Args:
+        meta: Persisted run metadata containing the run-contract entry.
+
+    Returns:
+        The validated contract embedded in ``meta``.
+
+    Raises:
+        ValueError: If the embedded contract envelope is malformed.
+        UnsupportedWireVersionError: If the metadata has no current contract or
+            uses an unsupported wire version.
+    """
 
     if RUN_CONTRACT_META_KEY not in meta:
-        return None
+        require_wire_version(None)
     raw = meta[RUN_CONTRACT_META_KEY]
     if not isinstance(raw, Mapping):
-        raise ValueError("persisted run_contract metadata must be a mapping")
+        require_wire_version(None)
     return run_contract_from_dict(raw)
 
 
@@ -931,23 +1531,24 @@ def _contract_differences(
 def compare_run_contract(
     stored: RunContract | None,
     requested: RunContract,
-    *,
-    allow_legacy: bool = False,
 ) -> RunContractComparison:
-    """Compare persisted and requested inputs, failing closed for legacy runs.
+    """Compare persisted and requested execution inputs field by field.
 
-    Hosts migrating pre-contract records may opt in to ``allow_legacy``.  That
-    flag is intentionally explicit: without the original execution inputs,
-    compatibility cannot be proven.
+    Args:
+        stored: Contract persisted with the original run.
+        requested: Contract resolved for the resume attempt.
+
+    Returns:
+        A comparison containing compatibility, fingerprints, and differences.
+
+    Raises:
+        UnsupportedWireVersionError: If ``stored`` is missing, as contractless
+            runs are not resumable.
     """
 
     if stored is None:
-        return RunContractComparison(
-            compatible=allow_legacy,
-            legacy=True,
-            stored_fingerprint=None,
-            requested_fingerprint=requested.fingerprint,
-        )
+        require_wire_version(None)
+    assert stored is not None
     stored_computed = _run_contract_fingerprint(stored.schema_version, stored.payload)
     requested_computed = _run_contract_fingerprint(requested.schema_version, requested.payload)
     differences: list[RunContractDifference] = []
@@ -965,7 +1566,6 @@ def compare_run_contract(
     compatible = not differences and stored_computed == requested_computed
     return RunContractComparison(
         compatible=compatible,
-        legacy=False,
         stored_fingerprint=stored.fingerprint,
         requested_fingerprint=requested.fingerprint,
         differences=tuple(differences),
@@ -975,12 +1575,23 @@ def compare_run_contract(
 def ensure_run_contract_compatible(
     stored: RunContract | None,
     requested: RunContract,
-    *,
-    allow_legacy: bool = False,
 ) -> RunContractComparison:
-    """Return comparison or raise :class:`RunContractMismatchError`."""
+    """Validate resume inputs and return their compatibility comparison.
 
-    comparison = compare_run_contract(stored, requested, allow_legacy=allow_legacy)
+    Args:
+        stored: Contract persisted with the original run.
+        requested: Contract resolved for the resume attempt.
+
+    Returns:
+        A compatible contract comparison.
+
+    Raises:
+        RunContractMismatchError: If any stored and requested execution inputs differ.
+        UnsupportedWireVersionError: If ``stored`` is missing, as contractless
+            runs are not resumable.
+    """
+
+    comparison = compare_run_contract(stored, requested)
     if not comparison.compatible:
         raise RunContractMismatchError(comparison)
     return comparison
@@ -1015,15 +1626,9 @@ def checkpoint_to_dict(checkpoint: RunCheckpoint) -> dict[str, Any]:
         "tool_batch_event_after_seq": checkpoint.tool_batch_event_after_seq,
         "pending_alignment": checkpoint.pending_alignment,
     }
-    # Additive extensions must cost nothing when unused: preserving the legacy
-    # wire shape for an empty namespace keeps harness-off checkpoint payloads
-    # byte-identical.  Readers still default a missing key to ``{}``.
-    if checkpoint.extension_state:
-        data["extension_state"] = checkpoint.extension_state
-    if checkpoint.provider_attempt:
-        data["provider_attempt"] = checkpoint.provider_attempt
-    if checkpoint.model_input_snapshot_id is not None:
-        data["model_input_snapshot_id"] = checkpoint.model_input_snapshot_id
+    data["extension_state"] = checkpoint.extension_state
+    data["provider_attempt"] = checkpoint.provider_attempt
+    data["model_input_snapshot_id"] = checkpoint.model_input_snapshot_id
     safe = _json_safe(data, strict=False)
     assert isinstance(safe, dict)
     return safe
@@ -1054,29 +1659,35 @@ def _pending_alignment_from_raw(value: Any) -> list[dict[str, Any]]:
 
 
 def _extension_state_from_raw(value: Any) -> dict[str, Any]:
-    """Restore the extension namespace without making legacy reads brittle.
-
-    Checkpoints arrive from JSON-backed stores, but this parser is also public
-    and is used by host stores.  Treat a missing or malformed root as no
-    extension state; per-extension payload validation belongs to the extension
-    that owns the key when it restores its state.
-    """
+    """Preserve extension payloads; each extension validates its own namespace."""
     if not isinstance(value, dict):
         return {}
     return {key: item for key, item in value.items() if isinstance(key, str)}
 
 
+def _require_tool_recovery_cursor(value: int | None) -> int:
+    if type(value) is not int or value < 0:
+        raise ValueError("tool recovery requires a non-negative integer cursor")
+    return value
+
+
 def checkpoint_from_dict(raw: dict[str, Any]) -> RunCheckpoint:
-    assistant_raw = raw.get("assistant_message")
+    if not isinstance(raw, dict):
+        require_wire_version(None)
+    require_wire_version(raw.get("schema_version"))
+    cursor = raw["tool_batch_event_after_seq"]
+    if cursor is not None:
+        _require_tool_recovery_cursor(cursor)
+    assistant_raw = raw["assistant_message"]
     pending_blocks: list[ToolUseBlock] = []
-    for item in raw.get("pending_tool_blocks", []):
+    for item in raw["pending_tool_blocks"]:
         if isinstance(item, dict):
             block = block_from_dict(item)
             if isinstance(block, ToolUseBlock):
                 pending_blocks.append(block)
 
     completed: dict[str, ToolResultBlock] = {}
-    completed_raw = raw.get("completed_tool_results", {})
+    completed_raw = raw["completed_tool_results"]
     if isinstance(completed_raw, dict):
         for key, item in completed_raw.items():
             if isinstance(item, dict):
@@ -1085,66 +1696,59 @@ def checkpoint_from_dict(raw: dict[str, Any]) -> RunCheckpoint:
                     completed[str(key)] = block
 
     return RunCheckpoint(
-        phase=raw.get("phase", "started"),
-        prompt=str(raw.get("prompt", "")),
-        turn_index=int(raw.get("turn_index", 0) or 0),
-        total_usage=usage_from_dict(dict(raw.get("total_usage", {}))),
+        phase=raw["phase"],
+        prompt=str(raw["prompt"]),
+        turn_index=int(raw["turn_index"] or 0),
+        total_usage=usage_from_dict(dict(raw["total_usage"])),
         assistant_message=(
             message_from_dict(dict(assistant_raw)) if isinstance(assistant_raw, dict) else None
         ),
         pending_tool_blocks=pending_blocks,
         completed_tool_results=completed,
-        force_final_pending=bool(raw.get("force_final_pending", False)),
-        loop_guard_state=_dict_or_none(raw.get("loop_guard_state")),
-        pending_skill_overlay=_dict_or_none(raw.get("pending_skill_overlay")),
+        force_final_pending=bool(raw["force_final_pending"]),
+        loop_guard_state=_dict_or_none(raw["loop_guard_state"]),
+        pending_skill_overlay=_dict_or_none(raw["pending_skill_overlay"]),
         current_turn_allowed_tools=(
-            [str(t) for t in raw.get("current_turn_allowed_tools", [])]
-            if isinstance(raw.get("current_turn_allowed_tools"), list)
+            [str(t) for t in raw["current_turn_allowed_tools"]]
+            if isinstance(raw["current_turn_allowed_tools"], list)
             else None
         ),
         assistant_stop_reason=(
-            str(raw.get("assistant_stop_reason"))
-            if isinstance(raw.get("assistant_stop_reason"), str)
+            str(raw["assistant_stop_reason"])
+            if isinstance(raw["assistant_stop_reason"], str)
             else None
         ),
         permission_decisions=(
-            {str(k): dict(v) for k, v in raw.get("permission_decisions", {}).items()}
-            if isinstance(raw.get("permission_decisions"), dict)
+            {str(k): dict(v) for k, v in raw["permission_decisions"].items()}
+            if isinstance(raw["permission_decisions"], dict)
             else {}
         ),
         background_workers=(
-            {str(k): dict(v) for k, v in raw.get("background_workers", {}).items()}
-            if isinstance(raw.get("background_workers"), dict)
+            {str(k): dict(v) for k, v in raw["background_workers"].items()}
+            if isinstance(raw["background_workers"], dict)
             else {}
         ),
-        truncation_attempts=max(0, int(raw.get("truncation_attempts", 0) or 0)),
+        truncation_attempts=max(0, int(raw["truncation_attempts"] or 0)),
         truncation_prefix=(
-            str(raw.get("truncation_prefix"))
-            if isinstance(raw.get("truncation_prefix"), str)
-            else ""
+            str(raw["truncation_prefix"]) if isinstance(raw["truncation_prefix"], str) else ""
         ),
         pending_truncation_feedback=(
-            str(raw.get("pending_truncation_feedback"))
-            if isinstance(raw.get("pending_truncation_feedback"), str)
+            str(raw["pending_truncation_feedback"])
+            if isinstance(raw["pending_truncation_feedback"], str)
             else None
         ),
-        tool_batch_event_after_seq=(
-            int(raw["tool_batch_event_after_seq"])
-            if isinstance(raw.get("tool_batch_event_after_seq"), int)
-            else None
-        ),
-        pending_alignment=_pending_alignment_from_raw(raw.get("pending_alignment")),
-        extension_state=_extension_state_from_raw(raw.get("extension_state")),
+        tool_batch_event_after_seq=cursor,
+        pending_alignment=_pending_alignment_from_raw(raw["pending_alignment"]),
+        extension_state=_extension_state_from_raw(raw["extension_state"]),
         provider_attempt=(
             max(0, raw["provider_attempt"])
-            if isinstance(raw.get("provider_attempt"), int)
-            and not isinstance(raw.get("provider_attempt"), bool)
+            if isinstance(raw["provider_attempt"], int)
+            and not isinstance(raw["provider_attempt"], bool)
             else 0
         ),
         model_input_snapshot_id=(
             raw["model_input_snapshot_id"]
-            if isinstance(raw.get("model_input_snapshot_id"), str)
-            and raw["model_input_snapshot_id"]
+            if isinstance(raw["model_input_snapshot_id"], str) and raw["model_input_snapshot_id"]
             else None
         ),
     )
@@ -1156,15 +1760,13 @@ def _safe_meta(meta: Any) -> dict[str, object]:
 
 
 def _append_run_error(meta: dict[str, object], error: dict[str, object]) -> None:
-    """Append an error without discarding malformed or legacy metadata."""
+    """Append to current error-object history, replacing malformed history."""
 
     existing = meta.get("errors")
-    if isinstance(existing, list):
-        errors = existing
-    else:
-        errors = [] if existing is None else [existing]
-        meta["errors"] = errors
-    errors.append(_json_safe(error, strict=False))
+    if not isinstance(existing, list) or not all(isinstance(item, dict) for item in existing):
+        existing = []
+        meta["errors"] = existing
+    existing.append(_json_safe(error, strict=False))
 
 
 def _copy_checkpoint(checkpoint: RunCheckpoint | None) -> RunCheckpoint | None:
@@ -1174,21 +1776,35 @@ def _copy_checkpoint(checkpoint: RunCheckpoint | None) -> RunCheckpoint | None:
 
 
 def _copy_record(record: RunRecord) -> RunRecord:
+    # In-memory writes already normalize these fields; only detach the returned snapshot.
     return RunRecord(
         id=record.id,
         session_id=record.session_id,
         status=record.status,
         created_at=record.created_at,
         updated_at=record.updated_at,
-        checkpoint=_copy_checkpoint(record.checkpoint),
-        meta=_safe_meta(record.meta),
+        checkpoint=deepcopy(record.checkpoint),
+        meta=deepcopy(record.meta),
     )
 
 
+def _json_safe_stored_event(event: Event) -> dict[str, Any]:
+    """Normalize the payload before adding the outer envelope.
+
+    The event payload's depth budget is shared with the P06 ignorable-event
+    validator. Applying ``_json_safe`` to the wrapper would spend one level on
+    the durability envelope and truncate a payload that was valid before the
+    envelope was introduced.
+    """
+
+    envelope = _stored_event_to_dict(event)
+    payload = _json_safe(envelope["event"], strict=False)
+    assert isinstance(payload, dict)
+    return {"schema_version": envelope["schema_version"], "event": payload}
+
+
 def _copy_event(event: Event) -> Event:
-    raw = _json_safe(event_to_dict(event), strict=False)
-    assert isinstance(raw, dict)
-    return event_from_dict(raw)
+    return _stored_event_from_dict(_json_safe_stored_event(event))
 
 
 def _validate_model_input_snapshot(snapshot: ModelInputSnapshot) -> ModelInputSnapshot:
@@ -1206,11 +1822,39 @@ def _validate_model_input_snapshot(snapshot: ModelInputSnapshot) -> ModelInputSn
     return snapshot
 
 
+def _validate_lease_ttl(ttl_s: float) -> float:
+    if isinstance(ttl_s, bool) or not isinstance(ttl_s, (int, float)):
+        raise ValueError("lease ttl_s must be a finite positive number")
+    ttl = float(ttl_s)
+    if not math.isfinite(ttl) or ttl <= 0:
+        raise ValueError("lease ttl_s must be a finite positive number")
+    return ttl
+
+
+def _lease_lost(run_id: str, expected: int, actual: int | None = None) -> LeaseLostError:
+    detail = f" (stored epoch {actual})" if actual is not None else ""
+    return LeaseLostError(f"lease lost for run {run_id}: expected epoch {expected}{detail}")
+
+
 class InMemoryRunStore:
+    """Keep runs, events, leases, and model-input snapshots in process memory.
+
+    This backend implements the run-store and optional lease/snapshot
+    capabilities for tests and local development. Returned records and events
+    are detached copies; state is lost when the process exits.
+    """
+
     def __init__(self) -> None:
+        """Initialize an empty in-memory run store."""
+
         self._runs: dict[str, RunRecord] = {}
         self._events: dict[str, list[StoredRunEvent]] = {}
         self._model_input_snapshots: dict[str, ModelInputSnapshot] = {}
+        # Durable state and holder-local fencing state are kept separately.
+        self._lease_state: dict[str, tuple[str | None, float | None, int]] = {}
+        self._held_leases: dict[str, int] = {}
+        self._lease_ttls: dict[str, float] = {}
+        self._lease_owners: dict[str, str] = {}
 
     async def create_run(
         self,
@@ -1218,10 +1862,51 @@ class InMemoryRunStore:
         *,
         id: str | None = None,
         meta: dict[str, object] | None = None,
+        initial_checkpoint: RunCheckpoint | None = None,
     ) -> RunRecord:
+        """Create a running record or adopt a matching pending record.
+
+        Args:
+            session_id: Session that owns the run.
+            id: Optional stable run identifier; a UUID is generated when omitted.
+            meta: JSON-safe metadata to persist with the run.
+            initial_checkpoint: Checkpoint to persist with the running record.
+
+        Returns:
+            A detached running record.
+
+        Raises:
+            ValueError: If an existing record is not pending, belongs to another
+                session, or has an incompatible run contract.
+            RunContractMismatchError: If pending-run contract inputs differ.
+            LeaseLostError: If a held lease was replaced before pending adoption.
+        """
+
+        checkpoint = _copy_checkpoint(initial_checkpoint)
         rid = id or str(uuid4())
         existing = self._runs.get(rid)
         if existing is not None:
+            if existing.status != "pending":
+                raise ValueError(f"run {rid} already exists")
+            self._check_lease(rid)
+            if existing.session_id != session_id:
+                raise ValueError(f"run {rid} belongs to session {existing.session_id}")
+            incoming_meta = _safe_meta(meta)
+            stored_contract = existing.meta.get(RUN_CONTRACT_META_KEY)
+            requested_contract = incoming_meta.get(RUN_CONTRACT_META_KEY)
+            if stored_contract is not None and requested_contract is not None:
+                ensure_run_contract_compatible(
+                    run_contract_from_meta(existing.meta),
+                    run_contract_from_meta(incoming_meta),
+                )
+            merged_meta = _safe_meta(existing.meta)
+            merged_meta.update(incoming_meta)
+            if stored_contract is not None:
+                merged_meta[RUN_CONTRACT_META_KEY] = stored_contract
+            existing.meta = merged_meta
+            existing.status = "running"
+            existing.checkpoint = checkpoint
+            existing.updated_at = now_iso()
             return _copy_record(existing)
         ts = now_iso()
         record = RunRecord(
@@ -1231,12 +1916,125 @@ class InMemoryRunStore:
             created_at=ts,
             updated_at=ts,
             meta=_safe_meta(meta),
+            checkpoint=checkpoint,
         )
         self._runs[rid] = record
         self._events[rid] = []
+        self._lease_state.setdefault(rid, (None, None, 0))
         return _copy_record(record)
 
+    async def claim(self, run_id: str, owner: str, ttl_s: float) -> RunLease:
+        """Claim a run and return its current fencing lease.
+
+        Args:
+            run_id: Existing run to claim.
+            owner: Unique worker or process identifier.
+            ttl_s: Positive finite lease duration in seconds.
+
+        Returns:
+            An immutable lease with the run's fencing epoch and expiry.
+
+        Raises:
+            KeyError: If ``run_id`` does not identify a run.
+            RunLeaseConflictError: If another owner holds a live lease.
+            ValueError: If ``ttl_s`` is not positive and finite.
+        """
+
+        ttl = _validate_lease_ttl(ttl_s)
+        if run_id not in self._runs:
+            raise KeyError(f"run not found: {run_id}")
+        current_owner, expires_at, epoch = self._lease_state.get(run_id, (None, None, 0))
+        now = time.time()
+        live = current_owner is not None and expires_at is not None and expires_at > now
+        if live and current_owner != owner:
+            raise RunLeaseConflictError(f"run {run_id} is leased by {current_owner}")
+        next_epoch = epoch if live and current_owner == owner else epoch + 1
+        expires = now + ttl
+        self._lease_state[run_id] = (owner, expires, next_epoch)
+        self._held_leases[run_id] = next_epoch
+        self._lease_ttls[run_id] = ttl
+        self._lease_owners[run_id] = owner
+        return RunLease(run_id, owner, next_epoch, expires)
+
+    async def renew(self, lease: RunLease) -> RunLease:
+        """Extend a held lease without changing its fencing epoch.
+
+        Args:
+            lease: Lease returned by this store instance's latest claim.
+
+        Returns:
+            The same lease identity with a refreshed expiry timestamp.
+
+        Raises:
+            LeaseLostError: If the lease is stale, expired, or no longer held.
+        """
+
+        held = self._held_leases.get(lease.run_id)
+        current_owner, expires_at, epoch = self._lease_state.get(lease.run_id, (None, None, 0))
+        if (
+            held != lease.epoch
+            or epoch != lease.epoch
+            or current_owner != lease.owner
+            or expires_at is None
+            or expires_at <= time.time()
+        ):
+            raise _lease_lost(lease.run_id, lease.epoch, epoch)
+        ttl = self._lease_ttls.get(lease.run_id)
+        if ttl is None:
+            raise _lease_lost(lease.run_id, lease.epoch, epoch)
+        renewed = time.time() + ttl
+        self._lease_state[lease.run_id] = (lease.owner, renewed, lease.epoch)
+        return RunLease(lease.run_id, lease.owner, lease.epoch, renewed)
+
+    async def release(self, lease: RunLease) -> None:
+        """Release a matching lease and advance its fencing epoch.
+
+        Args:
+            lease: Lease whose ownership should be relinquished.
+
+        Raises:
+            LeaseLostError: If the lease no longer matches the stored owner or epoch.
+        """
+
+        try:
+            held = self._held_leases.get(lease.run_id)
+            current_owner, expires_at, epoch = self._lease_state.get(lease.run_id, (None, None, 0))
+            if (
+                held != lease.epoch
+                or epoch != lease.epoch
+                or current_owner != lease.owner
+                or expires_at is None
+            ):
+                raise _lease_lost(lease.run_id, lease.epoch, epoch)
+            self._lease_state[lease.run_id] = (None, None, lease.epoch + 1)
+        finally:
+            if (
+                self._held_leases.get(lease.run_id) == lease.epoch
+                and self._lease_owners.get(lease.run_id) == lease.owner
+            ):
+                self._held_leases.pop(lease.run_id, None)
+                self._lease_ttls.pop(lease.run_id, None)
+                self._lease_owners.pop(lease.run_id, None)
+
+    def _check_lease(self, run_id: str) -> None:
+        held = self._held_leases.get(run_id)
+        if held is None:
+            return
+        current = self._lease_state.get(run_id)
+        actual = current[2] if current is not None else None
+        if actual != held:
+            raise _lease_lost(run_id, held, actual)
+
     async def load_run(self, run_id: str) -> RunRecord | None:
+        """Load a detached run record by identifier.
+
+        Args:
+            run_id: Run identifier to look up.
+
+        Returns:
+            The detached record, or ``None`` when no such run exists.
+        """
+
         record = self._runs.get(run_id)
         return _copy_record(record) if record is not None else None
 
@@ -1247,13 +2045,86 @@ class InMemoryRunStore:
         *,
         status: str = "running",
     ) -> RunRecord:
+        """Persist a checkpoint and update the run status.
+
+        Args:
+            run_id: Run whose checkpoint should be replaced.
+            checkpoint: Resumable state to persist.
+            status: Status to store alongside the checkpoint.
+
+        Returns:
+            A detached updated run record.
+
+        Raises:
+            KeyError: If the run does not exist.
+            LeaseLostError: If this instance's fencing lease is stale.
+        """
+
+        self._check_lease(run_id)
         rec = self._runs[run_id]
         rec.checkpoint = _copy_checkpoint(checkpoint)
         rec.status = status  # type: ignore[assignment]
         rec.updated_at = now_iso()
         return _copy_record(rec)
 
+    async def save_checkpoint_with_events(
+        self,
+        run_id: str,
+        checkpoint: RunCheckpoint,
+        events: Sequence[Event],
+        *,
+        status: str = "running",
+    ) -> tuple[RunRecord, list[int]]:
+        """Atomically publish a checkpoint and its pending event prefix.
+
+        Args:
+            run_id: Run whose state should be updated.
+            checkpoint: Resumable state to persist.
+            events: Events to append in the supplied order.
+            status: Status to store alongside the checkpoint.
+
+        Returns:
+            The detached updated record and sequence numbers parallel to ``events``.
+
+        Raises:
+            KeyError: If the run does not exist.
+            LeaseLostError: If this instance's fencing lease is stale.
+            TypeError: If an event or checkpoint cannot be encoded.
+        """
+
+        self._check_lease(run_id)
+        rec = self._runs[run_id]
+        checkpoint_copy = _copy_checkpoint(checkpoint)
+        event_copies = [_copy_event(event) for event in events]
+        bucket = self._events.setdefault(run_id, [])
+        timestamp = now_iso()
+        seqs = list(range(len(bucket) + 1, len(bucket) + len(event_copies) + 1))
+        rec.checkpoint = checkpoint_copy
+        rec.status = status  # type: ignore[assignment]
+        rec.updated_at = timestamp
+        bucket.extend(
+            StoredRunEvent(seq=seq, appended_at=timestamp, event=event)
+            for seq, event in zip(seqs, event_copies, strict=True)
+        )
+        return _copy_record(rec), seqs
+
     async def append_event(self, run_id: str, event: Event) -> int:
+        """Append one event and return its 1-based sequence number.
+
+        Args:
+            run_id: Run whose event log should receive the event.
+            event: Typed event to persist.
+
+        Returns:
+            The sequence number assigned to ``event``.
+
+        Raises:
+            KeyError: If the run does not exist.
+            LeaseLostError: If this instance's fencing lease is stale.
+            TypeError: If the event cannot be encoded.
+        """
+
+        self._check_lease(run_id)
         if run_id not in self._runs:
             raise KeyError(f"run not found: {run_id}")
         bucket = self._events.setdefault(run_id, [])
@@ -1262,11 +2133,41 @@ class InMemoryRunStore:
         return seq
 
     async def append_events(self, run_id: str, events: list[Event]) -> list[int]:
-        # Delegate to append_event so subclass overrides (test doubles that drop a
-        # start event) are honored through the batch path.
-        return [await self.append_event(run_id, event) for event in events]
+        """Atomically append events in input order.
+
+        Args:
+            run_id: Run whose event log should receive the events.
+            events: Typed events to append in input order.
+
+        Returns:
+            Sequence numbers returned for each input event, in the same order;
+            an empty batch returns ``[]`` without run lookup or lease fencing.
+
+        Raises:
+            KeyError: If a non-empty batch targets a missing run.
+            LeaseLostError: If a non-empty batch uses a stale fencing lease.
+            TypeError: If an event in a non-empty batch cannot be encoded.
+        """
+
+        if not events:
+            return []
+        self._check_lease(run_id)
+        if run_id not in self._runs:
+            raise KeyError(f"run not found: {run_id}")
+        copies = [_copy_event(event) for event in events]
+        return [await self.append_event(run_id, event) for event in copies]
 
     async def load_events(self, run_id: str, *, after_seq: int = 0) -> list[StoredRunEvent]:
+        """Load detached events after an exclusive sequence watermark.
+
+        Args:
+            run_id: Run whose event log should be read.
+            after_seq: Exclusive sequence watermark; zero reads from the beginning.
+
+        Returns:
+            Events in ascending sequence order.
+        """
+
         return [
             StoredRunEvent(seq=row.seq, appended_at=row.appended_at, event=_copy_event(row.event))
             for row in self._events.get(run_id, [])
@@ -1279,6 +2180,25 @@ class InMemoryRunStore:
         provider_attempt: int,
         request: ProviderRequest,
     ) -> ModelInputSnapshot:
+        """Persist an exact provider-request snapshot for a run.
+
+        Args:
+            run_id: Run that owns the pending provider request.
+            provider_attempt: Positive, 1-based provider dispatch attempt.
+            request: Provider request to encode without its live abort signal.
+
+        Returns:
+            The immutable encoded snapshot.
+
+        Raises:
+            KeyError: If the run does not exist.
+            LeaseLostError: If this instance's fencing lease is stale.
+            ValueError: If ``provider_attempt`` is invalid.
+            TypeError: If the request contains unsupported data.
+            ModelInputSnapshotError: If snapshot validation fails.
+        """
+
+        self._check_lease(run_id)
         if run_id not in self._runs:
             raise KeyError(f"run not found: {run_id}")
         snapshot = create_model_input_snapshot(run_id, provider_attempt, request)
@@ -1286,13 +2206,53 @@ class InMemoryRunStore:
         return snapshot
 
     async def load(self, snapshot_id: str) -> ModelInputSnapshot | None:
+        """Load and validate a stored provider-request snapshot.
+
+        Args:
+            snapshot_id: Snapshot identifier to look up.
+
+        Returns:
+            The validated snapshot, or ``None`` when it does not exist.
+
+        Raises:
+            ModelInputSnapshotError: If the stored snapshot is corrupt or unsupported.
+        """
+
         snapshot = self._model_input_snapshots.get(snapshot_id)
         return _validate_model_input_snapshot(snapshot) if snapshot is not None else None
 
-    async def delete(self, snapshot_id: str) -> None:
+    async def delete(self, snapshot_id: str, *, run_id: str) -> None:
+        """Delete a snapshot only when it belongs to the specified run.
+
+        Args:
+            snapshot_id: Snapshot identifier to delete.
+            run_id: Run that must own the snapshot.
+
+        Raises:
+            LeaseLostError: If this instance's fencing lease is stale.
+        """
+
+        self._check_lease(run_id)
+        snapshot = self._model_input_snapshots.get(snapshot_id)
+        if snapshot is not None and snapshot.run_id != run_id:
+            return
         self._model_input_snapshots.pop(snapshot_id, None)
 
     async def prune(self, run_id: str, keep_ids: Sequence[str] = ()) -> int:
+        """Delete all run snapshots except explicitly retained identifiers.
+
+        Args:
+            run_id: Run whose snapshots should be pruned.
+            keep_ids: Snapshot identifiers to retain.
+
+        Returns:
+            Number of snapshots deleted.
+
+        Raises:
+            LeaseLostError: If this instance's fencing lease is stale.
+        """
+
+        self._check_lease(run_id)
         keep = set(keep_ids)
         doomed = [
             snapshot_id
@@ -1304,6 +2264,21 @@ class InMemoryRunStore:
         return len(doomed)
 
     async def mark_completed(self, run_id: str, checkpoint: RunCheckpoint) -> RunRecord:
+        """Persist a terminal completed status and checkpoint.
+
+        Args:
+            run_id: Run to complete.
+            checkpoint: Final checkpoint whose phase is set to ``completed``.
+
+        Returns:
+            A detached completed record.
+
+        Raises:
+            KeyError: If the run does not exist.
+            LeaseLostError: If this instance's fencing lease is stale.
+        """
+
+        self._check_lease(run_id)
         checkpoint.phase = "completed"
         return await self.save_checkpoint(run_id, checkpoint, status="completed")
 
@@ -1312,393 +2287,49 @@ class InMemoryRunStore:
         run_id: str,
         checkpoint: RunCheckpoint | None = None,
         error: dict[str, object] | None = None,
-    ) -> RunRecord:
+        *,
+        events: Sequence[Event] = (),
+    ) -> tuple[RunRecord, list[int]]:
+        """Persist a failed status, optional checkpoint, error, and events.
+
+        Args:
+            run_id: Run to mark failed.
+            checkpoint: Optional final checkpoint whose phase becomes ``failed``.
+            error: Optional JSON-safe error metadata appended to the run history.
+            events: Terminal events to append with the failed state.
+
+        Returns:
+            The detached failed record and sequence numbers parallel to ``events``.
+
+        Raises:
+            KeyError: If the run does not exist.
+            LeaseLostError: If this instance's fencing lease is stale.
+            TypeError: If a checkpoint or event cannot be encoded.
+        """
+
+        self._check_lease(run_id)
         rec = self._runs[run_id]
+        checkpoint_copy = _copy_checkpoint(checkpoint) if checkpoint is not None else rec.checkpoint
+        event_copies = [_copy_event(event) for event in events]
+        meta = _safe_meta(rec.meta)
+        if error is not None:
+            _append_run_error(meta, error)
         if checkpoint is not None:
             checkpoint.phase = "failed"
-            rec.checkpoint = _copy_checkpoint(checkpoint)
-        if error is not None:
-            _append_run_error(rec.meta, error)
-        rec.status = "failed"
-        rec.updated_at = now_iso()
-        return _copy_record(rec)
+            assert checkpoint_copy is not None
+            checkpoint_copy.phase = "failed"
+        bucket = self._events[run_id]
+        timestamp = now_iso()
+        seqs = list(range(len(bucket) + 1, len(bucket) + len(event_copies) + 1))
+        rec.checkpoint, rec.meta = checkpoint_copy, meta
+        rec.status, rec.updated_at = "failed", timestamp
+        bucket.extend(
+            StoredRunEvent(seq=seq, appended_at=timestamp, event=event)
+            for seq, event in zip(seqs, event_copies, strict=True)
+        )
+        return _copy_record(rec), seqs
 
     async def close(self) -> None:
+        """Close the in-memory store; no resources require cleanup."""
+
         return None
-
-
-def _init_schema(conn: sqlite3.Connection) -> None:
-    conn.executescript(
-        """
-        create table if not exists runs (
-          id text primary key,
-          session_id text not null,
-          status text not null,
-          created_at text not null,
-          updated_at text not null,
-          checkpoint text,
-          meta text not null
-        );
-        create table if not exists run_events (
-          run_id text not null,
-          seq integer not null,
-          appended_at text not null,
-          event text not null,
-          primary key (run_id, seq)
-        );
-        create table if not exists model_input_snapshots (
-          id text primary key,
-          run_id text not null,
-          provider_attempt integer not null,
-          codec_version integer not null,
-          request_json text not null,
-          integrity_hash text not null,
-          created_at text not null
-        );
-        create index if not exists model_input_snapshots_run_id_idx
-          on model_input_snapshots (run_id);
-        """
-    )
-
-
-def _record(row: object) -> RunRecord:
-    checkpoint_raw = row[5]  # type: ignore[index]
-    return RunRecord(
-        id=row[0],  # type: ignore[index]
-        session_id=row[1],  # type: ignore[index]
-        status=row[2],  # type: ignore[index]
-        created_at=row[3],  # type: ignore[index]
-        updated_at=row[4],  # type: ignore[index]
-        checkpoint=(checkpoint_from_dict(json.loads(checkpoint_raw)) if checkpoint_raw else None),
-        meta=_safe_meta(json.loads(row[6] or "{}")),  # type: ignore[index]
-    )
-
-
-class SqliteRunStore:
-    def __init__(self, path: str | Path = ".linch/runs.db") -> None:
-        self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._exec = SqliteExecutor(self.path, init=_init_schema, wal=True)
-
-    async def create_run(
-        self,
-        session_id: str,
-        *,
-        id: str | None = None,
-        meta: dict[str, object] | None = None,
-    ) -> RunRecord:
-        return await self._exec.run(lambda c: _create_run(c, session_id, id, meta or {}))
-
-    async def load_run(self, run_id: str) -> RunRecord | None:
-        return await self._exec.run(lambda c: _load_run(c, run_id))
-
-    async def save_checkpoint(
-        self,
-        run_id: str,
-        checkpoint: RunCheckpoint,
-        *,
-        status: str = "running",
-    ) -> RunRecord:
-        return await self._exec.run(lambda c: _save_checkpoint(c, run_id, checkpoint, status))
-
-    async def append_event(self, run_id: str, event: Event) -> int:
-        return await self._exec.run(lambda c: _append_event(c, run_id, event))
-
-    async def append_events(self, run_id: str, events: list[Event]) -> list[int]:
-        if not events:
-            return []
-        return await self._exec.run(lambda c: _append_events(c, run_id, events))
-
-    async def load_events(self, run_id: str, *, after_seq: int = 0) -> list[StoredRunEvent]:
-        return await self._exec.run(lambda c: _load_events(c, run_id, after_seq))
-
-    async def save(
-        self,
-        run_id: str,
-        provider_attempt: int,
-        request: ProviderRequest,
-    ) -> ModelInputSnapshot:
-        snapshot = create_model_input_snapshot(run_id, provider_attempt, request)
-        return await self._exec.run(lambda c: _save_model_input_snapshot(c, snapshot))
-
-    async def load(self, snapshot_id: str) -> ModelInputSnapshot | None:
-        return await self._exec.run(lambda c: _load_model_input_snapshot(c, snapshot_id))
-
-    async def delete(self, snapshot_id: str) -> None:
-        await self._exec.run(lambda c: _delete_model_input_snapshot(c, snapshot_id))
-
-    async def prune(self, run_id: str, keep_ids: Sequence[str] = ()) -> int:
-        ids = tuple(str(snapshot_id) for snapshot_id in keep_ids)
-        return await self._exec.run(lambda c: _prune_model_input_snapshots(c, run_id, ids))
-
-    async def mark_completed(self, run_id: str, checkpoint: RunCheckpoint) -> RunRecord:
-        checkpoint.phase = "completed"
-        return await self.save_checkpoint(run_id, checkpoint, status="completed")
-
-    async def mark_failed(
-        self,
-        run_id: str,
-        checkpoint: RunCheckpoint | None = None,
-        error: dict[str, object] | None = None,
-    ) -> RunRecord:
-        return await self._exec.run(lambda c: _mark_failed(c, run_id, checkpoint, error))
-
-    async def close(self) -> None:
-        await self._exec.close()
-
-    def __enter__(self) -> SqliteRunStore:
-        return self
-
-    def __exit__(self, *_: object) -> None:
-        self._exec.close_sync()
-
-    async def __aenter__(self) -> SqliteRunStore:
-        return self
-
-    async def __aexit__(self, *_: object) -> None:
-        await self.close()
-
-
-def _create_run(
-    conn: sqlite3.Connection,
-    session_id: str,
-    id: str | None,
-    meta: dict[str, object],
-) -> RunRecord:
-    safe_meta = _safe_meta(meta)
-    rid = id or str(uuid4())
-    row = conn.execute(
-        "select id, session_id, status, created_at, updated_at, checkpoint, meta "
-        "from runs where id = ?",
-        (rid,),
-    ).fetchone()
-    if row:
-        return _record(row)
-    ts = now_iso()
-    conn.execute(
-        "insert into runs (id, session_id, status, created_at, updated_at, checkpoint, meta) "
-        "values (?, ?, 'running', ?, ?, null, ?)",
-        (rid, session_id, ts, ts, json.dumps(safe_meta, allow_nan=False)),
-    )
-    conn.commit()
-    return RunRecord(
-        id=rid,
-        session_id=session_id,
-        status="running",
-        created_at=ts,
-        updated_at=ts,
-        meta=safe_meta,
-    )
-
-
-def _load_run(conn: sqlite3.Connection, run_id: str) -> RunRecord | None:
-    row = conn.execute(
-        "select id, session_id, status, created_at, updated_at, checkpoint, meta "
-        "from runs where id = ?",
-        (run_id,),
-    ).fetchone()
-    return _record(row) if row else None
-
-
-def _save_model_input_snapshot(
-    conn: sqlite3.Connection,
-    snapshot: ModelInputSnapshot,
-) -> ModelInputSnapshot:
-    if conn.execute("select 1 from runs where id = ?", (snapshot.run_id,)).fetchone() is None:
-        raise KeyError(f"run not found: {snapshot.run_id}")
-    conn.execute(
-        "insert into model_input_snapshots "
-        "(id, run_id, provider_attempt, codec_version, request_json, integrity_hash, created_at) "
-        "values (?, ?, ?, ?, ?, ?, ?)",
-        (
-            snapshot.id,
-            snapshot.run_id,
-            snapshot.provider_attempt,
-            snapshot.codec_version,
-            snapshot.request_json,
-            snapshot.integrity_hash,
-            snapshot.created_at,
-        ),
-    )
-    conn.commit()
-    return snapshot
-
-
-def _load_model_input_snapshot(
-    conn: sqlite3.Connection,
-    snapshot_id: str,
-) -> ModelInputSnapshot | None:
-    row = conn.execute(
-        "select id, run_id, provider_attempt, codec_version, request_json, integrity_hash, "
-        "created_at from model_input_snapshots where id = ?",
-        (snapshot_id,),
-    ).fetchone()
-    if row is None:
-        return None
-    snapshot = ModelInputSnapshot(
-        id=row[0],
-        run_id=row[1],
-        provider_attempt=row[2],
-        codec_version=row[3],
-        request_json=row[4],
-        integrity_hash=row[5],
-        created_at=row[6],
-    )
-    return _validate_model_input_snapshot(snapshot)
-
-
-def _delete_model_input_snapshot(conn: sqlite3.Connection, snapshot_id: str) -> None:
-    conn.execute("delete from model_input_snapshots where id = ?", (snapshot_id,))
-    conn.commit()
-
-
-def _prune_model_input_snapshots(
-    conn: sqlite3.Connection,
-    run_id: str,
-    keep_ids: tuple[str, ...],
-) -> int:
-    if keep_ids:
-        placeholders = ",".join("?" for _ in keep_ids)
-        cursor = conn.execute(
-            f"delete from model_input_snapshots where run_id = ? and id not in ({placeholders})",
-            (run_id, *keep_ids),
-        )
-    else:
-        cursor = conn.execute("delete from model_input_snapshots where run_id = ?", (run_id,))
-    conn.commit()
-    return max(0, cursor.rowcount)
-
-
-def _save_checkpoint(
-    conn: sqlite3.Connection,
-    run_id: str,
-    checkpoint: RunCheckpoint,
-    status: str,
-) -> RunRecord:
-    row = conn.execute(
-        "select id, session_id, status, created_at, updated_at, checkpoint, meta "
-        "from runs where id = ?",
-        (run_id,),
-    ).fetchone()
-    if row is None:
-        raise KeyError(f"run not found: {run_id}")
-    ts = now_iso()
-    checkpoint_data = checkpoint_to_dict(checkpoint)
-    conn.execute(
-        "update runs set updated_at = ?, status = ?, checkpoint = ? where id = ?",
-        (ts, status, json.dumps(checkpoint_data, allow_nan=False), run_id),
-    )
-    conn.commit()
-    return RunRecord(
-        id=row[0],
-        session_id=row[1],
-        status=status,  # type: ignore[arg-type]
-        created_at=row[3],
-        updated_at=ts,
-        checkpoint=checkpoint_from_dict(checkpoint_data),
-        meta=_safe_meta(json.loads(row[6] or "{}")),
-    )
-
-
-def _append_event(conn: sqlite3.Connection, run_id: str, event: Event) -> int:
-    row = conn.execute("select coalesce(max(seq), 0) from run_events where run_id = ?", (run_id,))
-    seq = int(row.fetchone()[0]) + 1
-    ts = now_iso()
-    conn.execute(
-        "insert into run_events (run_id, seq, appended_at, event) values (?, ?, ?, ?)",
-        (
-            run_id,
-            seq,
-            ts,
-            json.dumps(_json_safe(event_to_dict(event), strict=False), allow_nan=False),
-        ),
-    )
-    conn.commit()
-    return seq
-
-
-def _append_events(conn: sqlite3.Connection, run_id: str, events: list[Event]) -> list[int]:
-    # One MAX lookup + executemany + one commit, amortizing the per-event round
-    # trip. The executor's locked call rolls back on error, so it is all-or-nothing.
-    base = int(
-        conn.execute(
-            "select coalesce(max(seq), 0) from run_events where run_id = ?", (run_id,)
-        ).fetchone()[0]
-    )
-    ts = now_iso()
-    rows = [
-        (
-            run_id,
-            base + i,
-            ts,
-            json.dumps(_json_safe(event_to_dict(event), strict=False), allow_nan=False),
-        )
-        for i, event in enumerate(events, start=1)
-    ]
-    conn.executemany(
-        "insert into run_events (run_id, seq, appended_at, event) values (?, ?, ?, ?)",
-        rows,
-    )
-    conn.commit()
-    return [base + i for i in range(1, len(events) + 1)]
-
-
-def _load_events(
-    conn: sqlite3.Connection,
-    run_id: str,
-    after_seq: int,
-) -> list[StoredRunEvent]:
-    rows = conn.execute(
-        "select seq, appended_at, event from run_events where run_id = ? and seq > ? order by seq",
-        (run_id, after_seq),
-    ).fetchall()
-    return [
-        StoredRunEvent(
-            seq=row[0],
-            appended_at=row[1],
-            event=event_from_dict(json.loads(row[2])),
-        )
-        for row in rows
-    ]
-
-
-def _mark_failed(
-    conn: sqlite3.Connection,
-    run_id: str,
-    checkpoint: RunCheckpoint | None,
-    error: dict[str, object] | None,
-) -> RunRecord:
-    row = conn.execute(
-        "select id, session_id, status, created_at, updated_at, checkpoint, meta "
-        "from runs where id = ?",
-        (run_id,),
-    ).fetchone()
-    if row is None:
-        raise KeyError(f"run not found: {run_id}")
-    meta = _safe_meta(json.loads(row[6] or "{}"))
-    if error is not None:
-        _append_run_error(meta, error)
-    ts = now_iso()
-    checkpoint_json = row[5]
-    checkpoint_data: dict[str, Any] | None = None
-    if checkpoint is not None:
-        checkpoint.phase = "failed"
-        checkpoint_data = checkpoint_to_dict(checkpoint)
-        checkpoint_json = json.dumps(checkpoint_data, allow_nan=False)
-    elif checkpoint_json:
-        checkpoint_data = json.loads(checkpoint_json)
-    safe_meta = _safe_meta(meta)
-    conn.execute(
-        "update runs set updated_at = ?, status = 'failed', checkpoint = ?, meta = ? where id = ?",
-        (ts, checkpoint_json, json.dumps(safe_meta, allow_nan=False), run_id),
-    )
-    conn.commit()
-    return RunRecord(
-        id=row[0],
-        session_id=row[1],
-        status="failed",
-        created_at=row[3],
-        updated_at=ts,
-        checkpoint=(checkpoint_from_dict(checkpoint_data) if checkpoint_data is not None else None),
-        meta=safe_meta,
-    )
