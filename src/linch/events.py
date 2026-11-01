@@ -1318,7 +1318,26 @@ def _json_safe(value: Any, *, active: set[int] | None = None, depth: int = 0) ->
         active.remove(identity)
 
 
+def _within_depth(value: Any, limit: int) -> bool:
+    # Explicit bound: json's own recursion limit differs between Python versions.
+    stack = [(value, 0)]
+    while stack:
+        current, depth = stack.pop()
+        if isinstance(current, dict):
+            items: Any = current.values()
+        elif isinstance(current, list | tuple):
+            items = current
+        else:
+            continue
+        if depth >= limit:
+            return False
+        stack.extend((item, depth + 1) for item in items)
+    return True
+
+
 def _is_json_serializable(value: Any) -> bool:
+    if not _within_depth(value, IGNORABLE_MAX_DEPTH):
+        return False
     try:
         json.dumps(value)
     except (TypeError, ValueError, RecursionError):
