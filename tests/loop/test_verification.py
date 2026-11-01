@@ -12,44 +12,22 @@ from typing import Any
 
 import pytest
 
+from tests.support.agents import make_agent
+from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
+from tests.support.tools import StubTool, tool_registry
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
 def _make_agent(provider: Any, *, loop_guard: Any = None, **kwargs: Any):
-    from linch import Agent
     from linch.config import FeatureFlags
-    from linch.sessions import InMemorySessionStore
-    from linch.tools import ToolResult
-    from linch.tools.registry import empty_tools
 
-    class _DummyTool:
-        name = "FakeTool"
-        description = "Dummy tool"
-        input_schema = {"type": "object", "properties": {}}
-        scope = "read"
-        parallel = True
-        tags: tuple[str, ...] = ()
-
-        def validate(self, raw):
-            return raw
-
-        def summarize(self, inp):
-            return "FakeTool"
-
-        def resources(self, inp):
-            return []
-
-        async def execute(self, inp, ctx):
-            return ToolResult(content="ok")
-
-    return Agent(
-        model="test-model",
-        provider=provider,
-        tools=empty_tools(_DummyTool()),
-        permissions={"mode": "skip-dangerous"},
-        session_store=InMemorySessionStore(),
+    return make_agent(
+        provider,
+        tools=tool_registry(StubTool("FakeTool", scope="read", parallel=True)),
+        run_store=None,
         features=FeatureFlags(skills=False, subagents=False, mcp=False),
         loop_guard=loop_guard,
         **kwargs,
@@ -82,16 +60,13 @@ def _verification_events(events):
 # ---------------------------------------------------------------------------
 
 
-def test_verdict_defaults_to_pass():
-    from linch.verification import Verdict
+def test_normalize_verifiers_accepts_none_single_and_list():
+    from linch.errors import ConfigError
+    from linch.verification import Verdict, normalize_verifiers
 
     verdict = Verdict()
     assert verdict.action == "pass"
     assert verdict.feedback == ""
-
-
-def test_normalize_verifiers_accepts_none_single_and_list():
-    from linch.verification import Verdict, normalize_verifiers
 
     class _V:
         name = "v"
@@ -104,11 +79,6 @@ def test_normalize_verifiers_accepts_none_single_and_list():
     assert normalize_verifiers(single) == [single]
     pair = [_V(), _V()]
     assert normalize_verifiers(pair) == pair
-
-
-def test_normalize_verifiers_rejects_non_verifier():
-    from linch.errors import ConfigError
-    from linch.verification import normalize_verifiers
 
     with pytest.raises(ConfigError):
         normalize_verifiers(object())
@@ -199,7 +169,6 @@ _SCHEMA = {
 
 @pytest.mark.asyncio
 async def test_structured_output_retry_repairs_invalid_json():
-    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.types import OutputSchema
 
     provider = ScriptedProvider(
@@ -226,34 +195,27 @@ async def test_structured_output_retry_repairs_invalid_json():
 
 
 @pytest.mark.asyncio
-async def test_structured_output_no_retry_by_default():
-    from linch.ext.evals import ScriptedProvider, TextTurn
+@pytest.mark.parametrize(
+    ("turns", "retry_count", "expected_actions"),
+    [
+        ([TextTurn(text="not json at all")], None, []),
+        (
+            [TextTurn(text="still not json"), TextTurn(text="again not json")],
+            1,
+            ["retry", "exhausted"],
+        ),
+    ],
+    ids=["no-retry", "exhausted"],
+)
+async def test_structured_output_invalid_json_paths(turns, retry_count, expected_actions):
     from linch.types import OutputSchema
 
-    provider = ScriptedProvider(turns=[TextTurn(text="not json at all")])
-    agent = _make_agent(provider, output_schema=OutputSchema(name="ans", schema=_SCHEMA))
-    session = await agent.session()
-    events = await _collect(session)
-
-    result = _result(events)
-    assert result.subtype == "success"
-    assert result.structured_output is None
-    assert result.structured_error is not None
-    assert _verification_events(events) == []
-
-
-@pytest.mark.asyncio
-async def test_structured_output_retries_exhausted_surfaces_error():
-    from linch.ext.evals import ScriptedProvider, TextTurn
-    from linch.types import OutputSchema
-
-    provider = ScriptedProvider(
-        turns=[TextTurn(text="still not json"), TextTurn(text="again not json")]
-    )
+    provider = ScriptedProvider(turns=turns)
+    retry_options = {} if retry_count is None else {"structured_output_retries": retry_count}
     agent = _make_agent(
         provider,
         output_schema=OutputSchema(name="ans", schema=_SCHEMA),
-        structured_output_retries=1,
+        **retry_options,
     )
     session = await agent.session()
     events = await _collect(session)
@@ -263,13 +225,13 @@ async def test_structured_output_retries_exhausted_surfaces_error():
     assert result.structured_output is None
     assert result.structured_error is not None
     vevents = _verification_events(events)
-    assert [event.action for event in vevents] == ["retry", "exhausted"]
-    assert vevents[-1].verifier == "output_schema"
+    assert [event.action for event in vevents] == expected_actions
+    if vevents:
+        assert vevents[-1].verifier == "output_schema"
 
 
 @pytest.mark.asyncio
 async def test_final_tool_structured_output_retry_repairs_schema_error():
-    from linch.ext.evals import ScriptedProvider, ToolUseTurn
     from linch.types import OutputSchema
 
     provider = ScriptedProvider(
@@ -302,7 +264,6 @@ async def test_final_tool_retry_pairs_tool_use_with_tool_result():
     terminal tool_use with a tool_result.  Otherwise the next provider request
     carries a tool_use with no matching tool_result and real providers reject
     it.  This provider asserts pairing on every call."""
-    from linch.ext.evals import ScriptedProvider, ToolUseTurn
     from linch.types import OutputSchema, ToolResultBlock, ToolUseBlock
 
     class PairingProvider(ScriptedProvider):
@@ -341,7 +302,7 @@ async def test_final_tool_retry_pairs_tool_use_with_tool_result():
     result = _result(events)
     assert result.subtype == "success"
     assert result.structured_output == {"answer": 42}
-    assert provider._index == 2  # both turns consumed; retry did not crash
+    assert len(provider.requests) == 2  # both turns consumed; retry did not crash
 
 
 # ---------------------------------------------------------------------------
@@ -364,7 +325,6 @@ class _RequireFinal:
 
 @pytest.mark.asyncio
 async def test_verifier_retry_then_pass():
-    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.hooks import FinalAnswerVerifierHook
 
     provider = ScriptedProvider(turns=[TextTurn(text="draft"), TextTurn(text="FINAL answer")])
@@ -396,7 +356,6 @@ async def test_verifier_retry_then_pass():
 
 @pytest.mark.asyncio
 async def test_verifier_stop_fails_run():
-    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.hooks import FinalAnswerVerifierHook
     from linch.verification import Verdict
 
@@ -421,7 +380,6 @@ async def test_verifier_stop_fails_run():
 
 @pytest.mark.asyncio
 async def test_verifier_retries_exhausted_falls_through():
-    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.hooks import FinalAnswerVerifierHook
     from linch.verification import Verdict
 
@@ -446,7 +404,6 @@ async def test_verifier_retries_exhausted_falls_through():
 
 @pytest.mark.asyncio
 async def test_scorer_verifier_in_live_run():
-    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.ext.evals.scorers import text_contains
     from linch.hooks import FinalAnswerVerifierHook
     from linch.verification import ScorerVerifier
@@ -541,7 +498,6 @@ async def test_forced_final_turn_bypasses_verifiers():
 
 @pytest.mark.asyncio
 async def test_stop_when_predicate_stops_run_early():
-    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.hooks import StopPredicateHook
 
     provider = ScriptedProvider(
@@ -567,12 +523,11 @@ async def test_stop_when_predicate_stops_run_early():
     assert result.subtype == "success"
     # Only the first scripted turn was consumed — the predicate stopped the
     # run before the second provider call.
-    assert provider._index == 1
+    assert len(provider.requests) == 1
 
 
 @pytest.mark.asyncio
 async def test_stop_when_faulty_predicate_does_not_crash():
-    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.hooks import StopPredicateHook
 
     def _boom(sess) -> bool:

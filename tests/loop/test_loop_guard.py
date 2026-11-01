@@ -6,9 +6,13 @@ fake provider through run_loop to verify the guard actually stops loops.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
+
+from tests.support.agents import make_agent
+from tests.support.tools import StubTool, tool_registry
 
 # ---------------------------------------------------------------------------
 # Helpers shared by both unit and integration sections
@@ -16,26 +20,15 @@ import pytest
 
 
 def _make_tool_block(name: str, input: dict[str, Any] | None = None):
-    """Minimal duck-typed ToolUseBlock for guard evaluation tests."""
+    """Build the attributes consumed by guard evaluation."""
 
-    class _Block:
-        pass
-
-    b = _Block()
-    b.name = name  # type: ignore[attr-defined]
-    b.input = dict(input) if input is not None else {}  # type: ignore[attr-defined]
-    return b
+    return SimpleNamespace(name=name, input=dict(input or {}))
 
 
 def _make_result_block(is_error: bool = False):
-    """Minimal duck-typed ToolResultBlock for guard evaluation tests."""
+    """Build the attributes consumed by guard evaluation."""
 
-    class _Block:
-        pass
-
-    b = _Block()
-    b.is_error = is_error  # type: ignore[attr-defined]
-    return b
+    return SimpleNamespace(is_error=is_error)
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +159,23 @@ def test_normalize_loop_guard_type_error():
         normalize_loop_guard(42)
 
 
+def test_guard_on_by_default():
+    """Agent construction without loop_guard enables the default guard."""
+    from linch.config import FeatureFlags
+    from linch.loop_guard import LoopGuard
+
+    agent = make_agent(
+        LoopingProvider(),
+        tools=tool_registry(StubTool(name="FakeTool", scope="read", parallel=True, output="ok")),
+        run_store=None,
+        features=FeatureFlags(skills=False, subagents=False, mcp=False),
+    )
+
+    assert isinstance(agent.loop_guard, LoopGuard), (
+        "Agent() without loop_guard should default to LoopGuard()"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Integration tests — loop guard wired into run_loop via a fake provider
 # ---------------------------------------------------------------------------
@@ -223,44 +233,23 @@ class LoopingProvider:
         }
 
 
-def _make_agent(provider: Any, *, loop_guard: Any = None, tool_name: str = "FakeTool"):
+def _make_agent(
+    provider: Any,
+    *,
+    loop_guard: Any = None,
+    tool_name: str = "FakeTool",
+    **overrides: Any,
+):
     """Build a minimal Agent suitable for loop guard integration tests."""
-    from linch import Agent
     from linch.config import FeatureFlags
-    from linch.sessions import InMemorySessionStore
-    from linch.tools import ToolResult
-    from linch.tools.registry import empty_tools
 
-    class _DummyTool:
-        description = "Dummy tool"
-        input_schema = {"type": "object", "properties": {}}
-        scope = "read"
-        parallel = True
-
-        def __init__(self, name: str) -> None:
-            self.name = name
-            self.tags: tuple[str, ...] = ()
-
-        def validate(self, raw):
-            return raw
-
-        def summarize(self, input):
-            return self.name
-
-        def resources(self, input):
-            return []
-
-        async def execute(self, input, ctx):
-            return ToolResult(content="ok")
-
-    return Agent(
-        model="test-model",
-        provider=provider,
-        tools=empty_tools(_DummyTool(tool_name)),
-        permissions={"mode": "skip-dangerous"},
-        session_store=InMemorySessionStore(),
-        features=FeatureFlags(skills=False, subagents=False, mcp=False),
+    return make_agent(
+        provider,
+        tools=tool_registry(StubTool(name=tool_name, scope="read", parallel=True, output="ok")),
+        run_store=None,
         loop_guard=loop_guard,
+        features=FeatureFlags(skills=False, subagents=False, mcp=False),
+        **overrides,
     )
 
 
@@ -358,43 +347,7 @@ async def test_guard_disabled_via_none():
     from linch.events import LoopGuardEvent
 
     provider = LoopingProvider(tool_name="FakeTool", tool_input={"k": "v"})
-    # Use max_turns=5 so the test terminates, but loop_guard=None
-    from linch import Agent
-    from linch.config import FeatureFlags
-    from linch.sessions import InMemorySessionStore
-    from linch.tools import ToolResult
-    from linch.tools.registry import empty_tools
-
-    class _T:
-        name = "FakeTool"
-        description = "t"
-        input_schema = {"type": "object", "properties": {}}
-        scope = "read"
-        parallel = True
-        tags: tuple = ()
-
-        def validate(self, r):
-            return r
-
-        def summarize(self, i):
-            return "t"
-
-        def resources(self, i):
-            return []
-
-        async def execute(self, i, c):
-            return ToolResult(content="ok")
-
-    agent = Agent(
-        model="test-model",
-        provider=provider,
-        tools=empty_tools(_T()),
-        permissions={"mode": "skip-dangerous"},
-        session_store=InMemorySessionStore(),
-        features=FeatureFlags(skills=False, subagents=False, mcp=False),
-        loop_guard=None,
-        max_turns=5,
-    )
+    agent = _make_agent(provider, loop_guard=None, max_turns=5)
     session = await agent.session()
     events = await _collect(session)
 
@@ -408,97 +361,12 @@ async def test_guard_disabled_via_none():
 
 
 @pytest.mark.asyncio
-async def test_guard_on_by_default():
-    """Agent() without loop_guard argument should default to LoopGuard()."""
-    from linch.loop_guard import LoopGuard
-
-    provider = LoopingProvider()
-
-    # _make_agent passes loop_guard=None in the signature default which means
-    # "disabled"; here we omit it to check the default Agent() behavior.
-    from linch import Agent
-    from linch.config import FeatureFlags
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import empty_tools
-
-    class _T:
-        name = "FakeTool"
-        description = "t"
-        input_schema = {"type": "object", "properties": {}}
-        scope = "read"
-        parallel = True
-        tags: tuple = ()
-
-        def validate(self, r):
-            return r
-
-        def summarize(self, i):
-            return "t"
-
-        def resources(self, i):
-            return []
-
-        async def execute(self, i, c):
-            from linch.tools import ToolResult
-
-            return ToolResult(content="ok")
-
-    agent = Agent(
-        model="test-model",
-        provider=provider,
-        tools=empty_tools(_T()),
-        permissions={"mode": "skip-dangerous"},
-        session_store=InMemorySessionStore(),
-        features=FeatureFlags(skills=False, subagents=False, mcp=False),
-        # loop_guard not passed — should default to LoopGuard()
-    )
-    assert isinstance(agent.loop_guard, LoopGuard), (
-        "Agent() without loop_guard should default to LoopGuard()"
-    )
-
-
-@pytest.mark.asyncio
 async def test_max_turns_emits_loop_guard_event():
     """Exhausting max_turns should emit a LoopGuardEvent(reason='max_turns')."""
     from linch.events import LoopGuardEvent, ResultEvent
 
     provider = LoopingProvider()
-    from linch import Agent
-    from linch.config import FeatureFlags
-    from linch.sessions import InMemorySessionStore
-    from linch.tools import ToolResult
-    from linch.tools.registry import empty_tools
-
-    class _T:
-        name = "FakeTool"
-        description = "t"
-        input_schema = {"type": "object", "properties": {}}
-        scope = "read"
-        parallel = True
-        tags: tuple = ()
-
-        def validate(self, r):
-            return r
-
-        def summarize(self, i):
-            return "t"
-
-        def resources(self, i):
-            return []
-
-        async def execute(self, i, c):
-            return ToolResult(content="ok")
-
-    agent = Agent(
-        model="test-model",
-        provider=provider,
-        tools=empty_tools(_T()),
-        permissions={"mode": "skip-dangerous"},
-        session_store=InMemorySessionStore(),
-        features=FeatureFlags(skills=False, subagents=False, mcp=False),
-        loop_guard=None,  # disable guard so we hit max_turns
-        max_turns=2,
-    )
+    agent = _make_agent(provider, loop_guard=None, max_turns=2)
     session = await agent.session()
     events = await _collect(session)
 
