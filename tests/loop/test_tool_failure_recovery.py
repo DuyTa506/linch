@@ -122,8 +122,7 @@ async def test_all_failed_with_hint_injects_recovery_message():
         for index, message in enumerate(second_call_messages)
         if getattr(message, "role", None) == "user"
         and any(
-            getattr(block, "type", None) == "text"
-            and "All tool calls failed" in block.text
+            getattr(block, "type", None) == "text" and "All tool calls failed" in block.text
             for block in message.content
         )
     )
