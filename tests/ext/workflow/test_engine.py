@@ -318,6 +318,73 @@ async def test_partial_workflow_lease_capability_fails_closed() -> None:
     assert agent._sessions == {}
 
 
+async def test_cancelled_claim_releases_lease_acquired_before_return() -> None:
+    from linch import InMemoryRunStore
+
+    class GatedClaimStore(InMemoryRunStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.claimed = asyncio.Event()
+            self.allow_claim_return = asyncio.Event()
+
+        async def claim(self, *args: Any, **kwargs: Any) -> Any:
+            lease = await super().claim(*args, **kwargs)
+            self.claimed.set()
+            await self.allow_claim_return.wait()
+            return lease
+
+    store = GatedClaimStore()
+    agent = _make_agent(CountingTextProvider(), run_store=store)
+
+    async def flow(wf: Any) -> str:
+        return "done"
+
+    task = asyncio.create_task(_run_workflow(agent, flow, run_id="wf-claim-cancel"))
+    try:
+        await asyncio.wait_for(store.claimed.wait(), timeout=1)
+        task.cancel()
+        store.allow_claim_return.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert store._held_leases == {}
+        assert agent._sessions == {}
+    finally:
+        store.allow_claim_return.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await store.close()
+
+
+async def test_mark_completed_failure_marks_workflow_failed() -> None:
+    from linch import InMemoryRunStore
+    from linch.events import ErrorEvent
+
+    class FailingCompletionStore(InMemoryRunStore):
+        async def mark_completed(self, *args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("terminal failed")
+
+    store = FailingCompletionStore()
+    agent = _make_agent(CountingTextProvider(), run_store=store)
+
+    async def flow(wf: Any) -> str:
+        return "done"
+
+    with pytest.raises(RuntimeError, match="terminal failed"):
+        await _run_workflow(agent, flow, run_id="wf-terminal-fail")
+
+    record = await store.load_run("wf-terminal-fail")
+    assert record is not None
+    assert record.status == "failed"
+    assert record.meta["errors"] == [
+        {"name": "RuntimeError", "message": "terminal failed", "retryable": False}
+    ]
+    events = await store.load_events("wf-terminal-fail")
+    assert [event.event for event in events] == [
+        ErrorEvent(error={"name": "RuntimeError", "message": "terminal failed", "retryable": False})
+    ]
+
+
 @pytest.mark.parametrize("kind", ["memory", "postgres"])
 async def test_concurrent_workflow_resumes_claim_one_lease(kind: str, pg_dsn: str) -> None:
     from linch import InMemoryRunStore
