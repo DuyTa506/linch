@@ -1,7 +1,7 @@
 # Mid-session catalog changes that keep the prompt cache
 
 Status: approved direction (2026-11-02), target 3.0.1. Phases 2 and 3 below are
-implementation contracts. Phase 4 is an outline. The owner chose a patch release even though
+implementation contracts. Phase 4 is deferred out of 3.0.1; section 6.6 records why. The owner chose a patch release even though
 `docs/versioning.md` places public additions in MINOR; the changelog records that exception.
 
 ## 1. Problem
@@ -43,7 +43,8 @@ tool must work on the next request.
    servers. Record results in `docs/superpowers/measurements/`.
 2. Provider-neutral base. This section's contract. Usable alone.
 3. Native adapters, off by default, gated by a `ProviderCapabilities` field.
-4. `ToolSearchPlugin` returns `tool_reference` on Anthropic and stops changing `tools`.
+4. Deferred. `ToolSearchPlugin` returns `tool_reference` on Anthropic and stops changing
+   `tools`.
 
 ## 4. Phase 2 contract
 
@@ -342,6 +343,22 @@ Payload tests only, with a fake transport. Write each failing first.
 - Responses: item position after a round-trip, `allowed_tools` for removal, forced choice kept.
 - Durable resume after a native addition passes contract validation.
 - MCP addition: text states the name only, definition travels only in the tool block.
+
+### 6.6 Phase 4, deferred
+
+An active `request_catalog` bypasses the snapshot, so `ToolSearchPlugin` sessions keep 3.0
+behavior, including their cache misses. That is not a regression, so it does not block 3.0.1.
+
+Facts for the later design, from the tool search docs read on 2026-11-02:
+
+- Every deferred definition is sent in `tools` on every request with `defer_loading: true`.
+  This is the larger change: the plugin sends only offered tools today.
+- A custom tool returns a standard `tool_result` whose content is
+  `[{"type": "tool_reference", "tool_name": "x"}]`. Note `tool_name` here, unlike `name` in
+  `tool_addition`. Every referenced name must be defined in `tools`, or the request is a 400.
+- At least one tool stays non-deferred, and a deferred tool cannot carry `cache_control`.
+- The limit is 10,000 deferred tools per request. Model support differs from section 6.1 and
+  includes `claude-sonnet-5`.
 
 ## 7. Out of scope
 
