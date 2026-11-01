@@ -59,7 +59,7 @@ The keyword arguments to `run_workflow` control budget, journaling, and observat
 
 The `wf` argument is a `linch.ext.workflow.WorkflowContext`. It exposes a small, fixed surface — you compose your orchestration out of these primitives rather than calling the loop directly:
 
-- `await wf.agent(prompt, *, name=None, label=None, tools=None, run_options=None, output_schema=None, final_tool_name=None, timeout_ms=None, retry=None) -> str` — run a subagent (a named definition from the subagent registry, or the built-in general-purpose one) and return its final text. When the child produces `structured_output`, the returned string is compact JSON. A failed child raises `WorkflowError`.
+- `await wf.agent(prompt, *, name=None, label=None, tools=None, run_options=None, key=None, output_schema=None, final_tool_name=None, timeout_ms=None, retry=None) -> str` — run a subagent (a named definition from the subagent registry, or the built-in general-purpose one) and return its final text. When the child produces `structured_output`, the returned string is compact JSON. A failed child raises `WorkflowError`.
 - `await wf.step(name, fn, *, key=None, timeout_ms=None, retry=None) -> Any` — run *fn* (a zero-argument callable, sync or async) as a journaled step and return its value. This is how deterministic code, a tool call, or any other side-effecting work becomes a replayable node instead of something that re-runs on every resume. See [Journaling your own code](#journaling-your-own-code) below.
 - `await wf.interrupt(key, payload=None) -> Any` — park the workflow until someone supplies an answer for *key*. See [Human in the loop](#human-in-the-loop).
 - `await wf.parallel(thunks) -> list` — run thunks concurrently, capped by `max_concurrency` (default 4); results keep input order. A failing branch cancels its siblings.
@@ -101,8 +101,11 @@ Because the journal is keyed by content hash, resume is precise: editing one pro
 Durable workflow runs require `schema_version=3` in their metadata and use the
 current tools-aware call-key formula. Missing, old, or unknown metadata versions
 are rejected; start a new workflow run. Old fingerprint algorithms are not
-replayed. Within current-version runs, unchanged tool filters and policy-bearing
-run options remain part of the call hash.
+replayed. Replay arguments use canonical JSON encoding, with sets sorted;
+unsupported values raise `ConfigError` before execution. Tool filters remain
+part of the hash; `wf.agent(key=...)` replaces automatic run-option identity
+with a caller-owned key, which must include policy and dependency revisions
+that should invalidate replay.
 
 ---
 
@@ -117,7 +120,7 @@ async def flow(wf):
     return await wf.agent("summarize")
 ```
 
-Wrap that side effect in a step and it happens exactly once across the whole run, however many times you resume:
+Wrap that side effect in a step so resume replays its durably journaled result. The side effect still needs idempotency for a process crash before that journal write:
 
 ```python
 async def flow(wf):

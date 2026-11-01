@@ -3,10 +3,13 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import threading
+from dataclasses import replace
 
 import pytest
 
 from linch import ConfigError, OutputSchema, RunOptions
+from linch.ext import loop_runner as loop_runner_module
 from linch.ext.loop_runner import (
     FileLoopLeaseStore,
     InMemoryLoopLeaseStore,
@@ -16,7 +19,8 @@ from linch.ext.loop_runner import (
     LoopTrigger,
 )
 from tests.support.agents import make_agent
-from tests.support.providers import ScriptedProvider, TextTurn
+from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
+from tests.support.stores import memory_session_store
 
 
 def _agent(provider: ScriptedProvider, tmp_path):
@@ -228,6 +232,46 @@ async def test_file_lease_store_refresh_and_release(tmp_path) -> None:
     assert reacquired is not None
 
 
+async def test_file_lease_store_requires_owner_on_refresh_and_release(tmp_path) -> None:
+    store = FileLoopLeaseStore(root=tmp_path / "domains")
+    lease = await store.try_acquire("docs-loop", owner="owner", ttl_s=60)
+    assert lease is not None
+    forged = replace(lease, owner="other")
+
+    with pytest.raises(ConfigError, match="not held by this owner"):
+        await store.refresh(forged, ttl_s=60)
+    await store.release(forged)
+    assert await store.try_acquire("docs-loop", owner="other", ttl_s=60) is None
+
+    await store.release(lease)
+
+
+async def test_inmemory_lease_store_requires_owner_on_refresh_and_release() -> None:
+    store = InMemoryLoopLeaseStore()
+    lease = await store.try_acquire("docs-loop", owner="owner", ttl_s=60)
+    assert lease is not None
+    forged = replace(lease, owner="other")
+
+    with pytest.raises(ConfigError, match="not held by this owner"):
+        await store.refresh(forged, ttl_s=60)
+    await store.release(forged)
+    assert await store.try_acquire("docs-loop", owner="other", ttl_s=60) is None
+
+    await store.release(lease)
+
+
+async def test_inmemory_lease_store_rejects_expired_refresh(monkeypatch) -> None:
+    now = 100.0
+    monkeypatch.setattr(loop_runner_module.time, "time", lambda: now)
+    store = InMemoryLoopLeaseStore()
+    lease = await store.try_acquire("docs-loop", owner="owner", ttl_s=1)
+    assert lease is not None
+
+    now = 102.0
+    with pytest.raises(ConfigError, match="expired"):
+        await store.refresh(lease, ttl_s=60)
+
+
 async def test_file_lease_refresh_refuses_symlinked_lock(tmp_path) -> None:
     # Hardening: a symlink planted at the lock path must not let a refresh write
     # the lease JSON through it to an arbitrary target (O_NOFOLLOW). The refresh
@@ -261,6 +305,388 @@ async def test_file_lease_store_recovers_malformed_lock(tmp_path) -> None:
 
     assert lease is not None
     assert json.loads(lock.read_text(encoding="utf-8"))["owner"] == "owner"
+
+
+async def test_file_lease_store_recovers_malformed_utf8_lock(tmp_path) -> None:
+    lock = tmp_path / "domains" / "docs-loop" / ".lock.json"
+    lock.parent.mkdir(parents=True)
+    lock.write_bytes(b"\xff")
+    store = FileLoopLeaseStore(root=tmp_path / "domains")
+
+    lease = await store.try_acquire("docs-loop", owner="owner", ttl_s=60)
+
+    assert lease is not None
+    assert json.loads(lock.read_text(encoding="utf-8"))["owner"] == "owner"
+
+
+async def test_file_lease_store_does_not_steal_an_in_progress_acquisition(
+    tmp_path, monkeypatch
+) -> None:
+    store = FileLoopLeaseStore(root=tmp_path / "domains")
+    entered = threading.Event()
+    proceed = threading.Event()
+    original_fdopen = loop_runner_module.os.fdopen
+    first = True
+
+    def delayed_fdopen(*args, **kwargs):
+        nonlocal first
+        handle = original_fdopen(*args, **kwargs)
+        if first:
+            first = False
+            entered.set()
+            assert proceed.wait(timeout=2)
+        return handle
+
+    monkeypatch.setattr(loop_runner_module.os, "fdopen", delayed_fdopen)
+    first_task = asyncio.create_task(store.try_acquire("docs-loop", owner="first", ttl_s=60))
+    await asyncio.to_thread(entered.wait)
+    second_task = asyncio.create_task(store.try_acquire("docs-loop", owner="second", ttl_s=60))
+    try:
+        second = await asyncio.wait_for(asyncio.shield(second_task), timeout=0.1)
+    except TimeoutError:
+        second = None
+    proceed.set()
+    first = await first_task
+    if not second_task.done():
+        second = await second_task
+
+    assert first is not None
+    assert second is None
+
+
+async def test_file_lease_store_treats_empty_lock_as_held(tmp_path) -> None:
+    lock = tmp_path / "domains" / "docs-loop" / ".lock.json"
+    lock.parent.mkdir(parents=True)
+    lock.touch()
+    store = FileLoopLeaseStore(root=tmp_path / "domains")
+
+    assert await store.try_acquire("docs-loop", owner="second", ttl_s=60) is None
+
+
+async def test_file_lease_store_serializes_refresh_and_reclaim(tmp_path, monkeypatch) -> None:
+    store = FileLoopLeaseStore(root=tmp_path / "domains")
+    lease = await store.try_acquire("docs-loop", owner="first", ttl_s=60)
+    assert lease is not None
+    truncated = threading.Event()
+    proceed = threading.Event()
+    original_open = loop_runner_module.os.open
+
+    def delayed_open(path, flags, mode=0o777):
+        fd = original_open(path, flags, mode)
+        if flags & os.O_TRUNC:
+            truncated.set()
+            assert proceed.wait(timeout=2)
+        return fd
+
+    monkeypatch.setattr(loop_runner_module.os, "open", delayed_open)
+    refresh_task = asyncio.create_task(store.refresh(lease, ttl_s=60))
+    try:
+        await asyncio.wait_for(asyncio.to_thread(truncated.wait, 1), timeout=0.2)
+    except TimeoutError:
+        # The fixed implementation publishes via atomic replacement and never
+        # opens the live path with O_TRUNC.
+        refreshed = await refresh_task
+        assert refreshed.token == lease.token
+        assert await store.try_acquire("docs-loop", owner="second", ttl_s=60) is None
+        return
+    second_task = asyncio.create_task(store.try_acquire("docs-loop", owner="second", ttl_s=60))
+    try:
+        second = await asyncio.wait_for(asyncio.shield(second_task), timeout=0.1)
+    except TimeoutError:
+        second = None
+    proceed.set()
+    refreshed = await refresh_task
+    if not second_task.done():
+        second = await second_task
+
+    assert refreshed.token == lease.token
+    assert second is None
+
+
+async def test_run_once_releases_retained_subagent_sessions(tmp_path) -> None:
+    from linch.ext.deep_agent import create_deep_agent
+
+    provider = ScriptedProvider(
+        [
+            turn
+            for _ in range(3)
+            for turn in (
+                ToolUseTurn("Subagent", {"description": "helper", "prompt": "inspect"}),
+                TextTurn("child done"),
+                TextTurn("tick done"),
+            )
+        ]
+    )
+    agent = create_deep_agent(
+        model="gpt-5",
+        provider=provider,
+        session_store=memory_session_store(),
+        permissions={"mode": "skip-dangerous"},
+        cwd=str(tmp_path),
+        durable=False,
+    )
+    runner = LoopRunner(agent)
+
+    for _ in range(3):
+        await runner.run_once(_spec(tmp_path))
+
+    assert agent._sessions == {}
+
+
+async def test_run_once_renews_long_tick_lease(tmp_path) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingProvider(ScriptedProvider):
+        async def stream(self, request):
+            started.set()
+            await release.wait()
+            async for event in super().stream(request):
+                yield event
+
+    class RecordingLeaseStore(InMemoryLoopLeaseStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.refreshed = asyncio.Event()
+
+        async def refresh(self, lease, *, ttl_s):
+            self.refreshed.set()
+            return await super().refresh(lease, ttl_s=ttl_s)
+
+    lease_store = RecordingLeaseStore()
+    agent = _agent(BlockingProvider([TextTurn("done")]), tmp_path)
+    runner = LoopRunner(
+        agent,
+        leases=lease_store,
+        lease_owner="runner",
+        lease_ttl_s=0.03,
+    )
+    task = asyncio.create_task(runner.run_once(_spec(tmp_path)))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    renewed = False
+    try:
+        await asyncio.wait_for(lease_store.refreshed.wait(), timeout=1)
+        renewed = True
+    except TimeoutError:
+        pass
+    finally:
+        release.set()
+    result = await task
+
+    assert renewed
+    assert result.status == "completed"
+
+
+async def test_run_once_stops_when_lease_renewal_fails(tmp_path) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    class BlockingProvider(ScriptedProvider):
+        async def stream(self, request):
+            started.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+            async for event in super().stream(request):
+                yield event
+
+    class FailingLeaseStore(InMemoryLoopLeaseStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.released = asyncio.Event()
+
+        async def refresh(self, lease, *, ttl_s):
+            raise ConfigError("lease lost")
+
+        async def release(self, lease) -> None:
+            self.released.set()
+            await super().release(lease)
+
+    lease_store = FailingLeaseStore()
+    agent = _agent(BlockingProvider([TextTurn("done")]), tmp_path)
+    runner = LoopRunner(
+        agent,
+        leases=lease_store,
+        lease_owner="runner",
+        lease_ttl_s=0.03,
+    )
+    task = asyncio.create_task(runner.run_once(_spec(tmp_path)))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    try:
+        with pytest.raises(ConfigError, match="lease lost"):
+            await asyncio.wait_for(asyncio.shield(task), timeout=1)
+    except TimeoutError:
+        release.set()
+        await task
+        pytest.fail("run_once did not stop after lease renewal failed")
+
+    assert cancelled.is_set()
+    assert lease_store.released.is_set()
+
+
+async def test_run_once_clears_active_guard_when_release_fails(tmp_path) -> None:
+    class FailingReleaseStore(InMemoryLoopLeaseStore):
+        async def release(self, lease) -> None:
+            await super().release(lease)
+            raise ConfigError("release failed")
+
+    lease_store = FailingReleaseStore()
+    agent = _agent(ScriptedProvider([TextTurn("done"), TextTurn("done")]), tmp_path)
+    runner = LoopRunner(
+        agent,
+        leases=lease_store,
+        lease_owner="runner",
+        lease_ttl_s=60,
+    )
+
+    with pytest.raises(ConfigError, match="release failed"):
+        await runner.run_once(_spec(tmp_path))
+    with pytest.raises(ConfigError, match="release failed"):
+        await runner.run_once(_spec(tmp_path))
+
+
+async def test_run_once_drains_release_after_repeated_cancellation(tmp_path) -> None:
+    started = asyncio.Event()
+    release_started = asyncio.Event()
+    allow_release = asyncio.Event()
+    release_finished = asyncio.Event()
+
+    class BlockingProvider(ScriptedProvider):
+        async def stream(self, request):
+            started.set()
+            await allow_release.wait()
+            async for event in super().stream(request):
+                yield event
+
+    class SlowReleaseStore(InMemoryLoopLeaseStore):
+        async def release(self, lease) -> None:
+            release_started.set()
+            await allow_release.wait()
+            await super().release(lease)
+            release_finished.set()
+
+    lease_store = SlowReleaseStore()
+    agent = _agent(BlockingProvider([TextTurn("done")]), tmp_path)
+    runner = LoopRunner(
+        agent,
+        leases=lease_store,
+        lease_owner="runner",
+        lease_ttl_s=60,
+    )
+    task = asyncio.create_task(runner.run_once(_spec(tmp_path)))
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    task.cancel()
+    await asyncio.wait_for(release_started.wait(), timeout=1)
+    task.cancel()
+    allow_release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert release_finished.is_set()
+
+    result = await runner.run_once(_spec(tmp_path))
+    assert result.status == "completed"
+
+
+async def test_run_once_drains_session_release_after_repeated_cancellation(
+    tmp_path, monkeypatch
+) -> None:
+    from linch.session import Session
+
+    started = asyncio.Event()
+    allow_provider = asyncio.Event()
+    close_started = asyncio.Event()
+    allow_close = asyncio.Event()
+
+    class BlockingProvider(ScriptedProvider):
+        async def stream(self, request):
+            started.set()
+            await allow_provider.wait()
+            async for event in super().stream(request):
+                yield event
+
+    agent = _agent(BlockingProvider([TextTurn("done")]), tmp_path)
+    session = await agent.session(id="tick")
+
+    async def return_session(*, meta=None, **kwargs):
+        return session
+
+    monkeypatch.setattr(agent, "session", return_session)
+    original_aclose_impl = Session._aclose_impl
+
+    async def delayed_aclose_impl(self, *, force):
+        if self is session:
+            close_started.set()
+            await allow_close.wait()
+        await original_aclose_impl(self, force=force)
+
+    monkeypatch.setattr(Session, "_aclose_impl", delayed_aclose_impl)
+    runner = LoopRunner(agent)
+    task = asyncio.create_task(runner.run_once(_spec(tmp_path)))
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    task.cancel()
+    await asyncio.wait_for(close_started.wait(), timeout=1)
+    task.cancel()
+
+    returned_early = False
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=0.1)
+    except TimeoutError:
+        pass
+    except asyncio.CancelledError:
+        returned_early = True
+    else:
+        returned_early = True
+
+    close_task = session._close_task
+    assert close_task is not None
+    allow_close.set()
+    await asyncio.wait_for(asyncio.shield(close_task), timeout=1)
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert close_task.done()
+    assert session.id not in agent._sessions
+    assert not returned_early, "run_once returned before session release drained"
+
+
+async def test_run_once_releases_lease_if_acquisition_is_cancelled(tmp_path) -> None:
+    acquired = asyncio.Event()
+    allow_return = asyncio.Event()
+    released = asyncio.Event()
+
+    class GatedAcquireStore(InMemoryLoopLeaseStore):
+        async def try_acquire(self, loop_id, *, owner, ttl_s):
+            lease = await super().try_acquire(loop_id, owner=owner, ttl_s=ttl_s)
+            acquired.set()
+            await allow_return.wait()
+            return lease
+
+        async def release(self, lease) -> None:
+            released.set()
+            await super().release(lease)
+
+    store = GatedAcquireStore()
+    runner = LoopRunner(
+        _agent(ScriptedProvider([TextTurn("done")]), tmp_path),
+        leases=store,
+        lease_owner="runner",
+    )
+    task = asyncio.create_task(runner.run_once(_spec(tmp_path)))
+    await asyncio.wait_for(acquired.wait(), timeout=1)
+    task.cancel()
+    allow_return.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert released.is_set()
+    probe = await store.try_acquire("docs-loop", owner="other", ttl_s=60)
+    assert probe is not None
+    await store.release(probe)
 
 
 async def test_run_failure_releases_durable_lease(tmp_path) -> None:
