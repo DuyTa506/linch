@@ -162,3 +162,122 @@ async def test_subagent_hooks_keep_the_child_invocation_dependencies() -> None:
     assert not result.errored
     assert hooks.deps == [deps_a, deps_a]
     await agent.close()
+
+
+async def test_isolation_release_failure_preserves_child_error_and_cleanup(caplog) -> None:
+    from linch.subagents.default_agent import DEFAULT_AGENT
+    from linch.subagents.runner import RunSubagentArgs, run_subagent
+
+    class FailingProvider(ScriptedProvider):
+        async def stream(self, req: Any):
+            self.requests.append(req)
+            raise RuntimeError("child failed")
+            yield  # pragma: no cover
+
+    class FailingRelease:
+        async def acquire(self) -> str:
+            return "."
+
+        async def release(self, cwd: str, *, keep: bool = False) -> None:
+            raise RuntimeError("release failed")
+
+    class Hooks:
+        resume_policy_id = "test.hooks"
+
+        def __init__(self) -> None:
+            self.stops: list[Any] = []
+
+        def on_subagent_stop(self, ctx: Any) -> None:
+            self.stops.append(ctx)
+
+    hooks = Hooks()
+    agent = make_agent(FailingProvider([]), model="gpt-5", hooks=[hooks])
+    parent = await agent.session()
+    child_ids: list[str] = []
+
+    result = await run_subagent(
+        RunSubagentArgs(
+            parent_session=parent,
+            parent_agent=agent,
+            definition=DEFAULT_AGENT,
+            prompt="do the thing",
+            display_name="helper",
+            subagent_run_id="sa_release_failure",
+            isolation=FailingRelease(),
+            on_child_registered=child_ids.append,
+        )
+    )
+
+    assert result.errored
+    assert result.error == {"name": "RuntimeError", "message": "child failed"}
+    assert len(hooks.stops) == 1
+    assert child_ids and child_ids[0] not in agent._sessions
+    assert "release failed" in caplog.text
+    await agent.close()
+
+
+
+async def test_registration_failure_logs_failed_child_cleanup(monkeypatch, caplog) -> None:
+    from linch.subagents.default_agent import DEFAULT_AGENT
+    from linch.subagents.runner import RunSubagentArgs, run_subagent
+
+    agent = make_agent(ScriptedProvider([]))
+    parent = await agent.session()
+
+    def fail_registration(child_id):
+        raise ValueError("registration failed")
+
+    async def fail_cleanup(*args, **kwargs):
+        raise RuntimeError("cleanup unavailable")
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(agent, "release_session", fail_cleanup)
+            with pytest.raises(ValueError, match="registration failed"):
+                await run_subagent(
+                    RunSubagentArgs(
+                        parent_session=parent,
+                        parent_agent=agent,
+                        definition=DEFAULT_AGENT,
+                        prompt="go",
+                        display_name="worker",
+                        subagent_run_id="register-failure",
+                        on_child_registered=fail_registration,
+                    )
+                )
+        assert "cleanup unavailable" in caplog.text
+    finally:
+        await agent.close()
+
+
+
+async def test_failed_child_event_delivery_closes_retained_run() -> None:
+    from linch.subagents.default_agent import DEFAULT_AGENT
+    from linch.subagents.runner import RunSubagentArgs, run_subagent
+
+    def fail_emit(event):
+        raise RuntimeError("event sink failed")
+
+    agent = make_agent(ScriptedProvider([TextTurn("child")]), run_store=None)
+    parent = await agent.session()
+    try:
+        result = await run_subagent(
+            RunSubagentArgs(
+                parent_session=parent,
+                parent_agent=agent,
+                definition=DEFAULT_AGENT,
+                prompt="go",
+                display_name="worker",
+                subagent_run_id="emit-failure",
+                emit=fail_emit,
+                retain=True,
+            )
+        )
+        child = agent._sessions[result.child_session_id]
+        assert result.errored
+        assert result.error == {"name": "RuntimeError", "message": "event sink failed"}
+        assert not child._active
+        assert child.active_run_id is None
+        assert child._active_gen is None
+    finally:
+        await agent.close()
