@@ -124,6 +124,152 @@ async def test_prompt_content_capture_uses_user_prompt_submit_redaction(otel, mo
         await agent.close()
 
 
+async def test_prompt_capture_keeps_redaction_when_a_later_hook_blocks(otel, monkeypatch):
+    """A blocking hook must not restore the pre-redaction prompt in telemetry."""
+    import json
+
+    from linch import HookResult, RedactionConfig, RedactionHook, RedactionRule
+    from tests.support.agents import make_agent
+    from tests.support.providers import ScriptedProvider, TextTurn
+
+    monkeypatch.setenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", "true")
+    context, exporter, _ = otel
+
+    class BlockPrompt:
+        resume_policy_id = "test.block_prompt"
+
+        def on_user_prompt_submit(self, ctx):
+            return HookResult.block("blocked")
+
+    agent = make_agent(
+        ScriptedProvider([TextTurn("unreachable")]),
+        context=context,
+        hooks=[
+            RedactionHook(
+                RedactionConfig(
+                    redact_user_prompt=True,
+                    rules=(RedactionRule("SECRET_VALUE", "[REDACTED]"),),
+                )
+            ),
+            BlockPrompt(),
+        ],
+    )
+    session = await agent.session()
+    try:
+        events = [event async for event in session.run("SECRET_VALUE")]
+        assert events[-1].subtype == "error"
+        span = next(
+            span
+            for span in exporter.get_finished_spans()
+            if span.attributes.get("gen_ai.operation.name") == "invoke_agent"
+        )
+        assert json.loads(span.attributes["gen_ai.input.messages"]) == "[REDACTED]"
+        assert "SECRET_VALUE" not in str(span.attributes)
+    finally:
+        await agent.close()
+
+
+async def test_start_run_span_does_not_capture_prompt_before_hooks(otel, monkeypatch):
+    """Run creation failures cannot export a prompt that hooks never processed."""
+    from types import SimpleNamespace
+
+    from linch._telemetry import start_run_span
+
+    monkeypatch.setenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", "true")
+    context, exporter, _ = otel
+    agent = SimpleNamespace(
+        context=context,
+        provider=SimpleNamespace(id="test-provider"),
+        model="test-model",
+    )
+    session = SimpleNamespace(id="session", agent=agent)
+    span = start_run_span(session, "SECRET_VALUE", "run")
+    span.end()
+    recorded = exporter.get_finished_spans()[0]
+    assert "gen_ai.input.messages" not in recorded.attributes
+    assert "SECRET_VALUE" not in str(recorded.attributes)
+
+
+async def test_closing_run_drains_deferred_tool_spans(otel, monkeypatch):
+    """Closing the run iterator ends tool spans waiting for PostToolUse."""
+    from types import SimpleNamespace
+
+    from linch._telemetry import in_span, telemetry_for, trace_tool
+
+    monkeypatch.setenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", "true")
+    context, exporter, _ = otel
+    agent = SimpleNamespace(context=context)
+    session = SimpleNamespace(id="session", agent=agent, active_run_id="run", _telemetry_run=None)
+    telemetry = telemetry_for(agent)
+    run_span = telemetry.tracer.start_span("invoke_agent")
+    call = SimpleNamespace(id="tool", block=SimpleNamespace(name="echo"), input={})
+    outcome = SimpleNamespace(block=SimpleNamespace(content="raw", is_error=False), error_type=None)
+
+    @trace_tool
+    async def execute(*args, **kwargs):
+        return outcome
+
+    async def events():
+        await execute(call, None, agent, session, None, run_id="run")
+        yield SimpleNamespace(type="system")
+
+    iterator = in_span(events(), run_span, session=session, run_id="run")
+    await anext(iterator)
+    await iterator.aclose()
+    assert any(
+        span.attributes.get("gen_ai.operation.name") == "execute_tool"
+        for span in exporter.get_finished_spans()
+    )
+
+
+async def test_detached_tool_span_uses_originating_run_state(otel, monkeypatch):
+    """Background completion must close the span for its captured run."""
+    from types import SimpleNamespace
+
+    from linch._telemetry import (
+        _RunTrace,
+        record_tool_result,
+        telemetry_for,
+        trace_tool,
+    )
+
+    monkeypatch.setenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", "true")
+    context, exporter, _ = otel
+    agent = SimpleNamespace(context=context)
+    session = SimpleNamespace(id="session", agent=agent, active_run_id="B", _telemetry_run=None)
+    telemetry = telemetry_for(agent)
+    span_a = telemetry.tracer.start_span("invoke_agent A")
+    span_b = telemetry.tracer.start_span("invoke_agent B")
+    state_a = _RunTrace(span_a, "A")
+    state_b = _RunTrace(span_b, "B")
+    telemetry._runs[(session.id, "A")] = state_a
+    session._telemetry_run = state_b
+    call = SimpleNamespace(
+        id="tool",
+        _run_id="A",
+        block=SimpleNamespace(name="echo"),
+        input={},
+    )
+    outcome = SimpleNamespace(block=SimpleNamespace(content="raw", is_error=False), error_type=None)
+
+    @trace_tool
+    async def execute(*args, **kwargs):
+        return outcome
+
+    await execute(call, None, agent, session, None, run_id="A")
+    assert len(state_a.tool_spans) == 1
+    assert not state_b.tool_spans
+    record_tool_result(session, call.id, "redacted", run_id="A")
+    assert not state_a.tool_spans
+    assert any(
+        span.attributes.get("gen_ai.operation.name") == "execute_tool"
+        and span.attributes.get("gen_ai.tool.call.result") == "redacted"
+        for span in exporter.get_finished_spans()
+    )
+    span_a.end()
+    span_b.end()
+
+
 async def test_provider_services_are_isolated_and_errors_are_private(otel):
     from linch._telemetry import Telemetry, set_error
 
