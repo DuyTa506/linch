@@ -84,6 +84,22 @@ jobs:
     name: Tests with all extras (3.11)
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      AGENT_KIT_TEST_PG_DSN: postgresql://postgres:postgres@127.0.0.1:5432/postgres
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -101,7 +117,5 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev,mcp,anthropic,gemini,postgres,otel,worker]"
 
-      # Postgres tests self-skip without AGENT_KIT_TEST_PG_DSN; the extra just
-      # exercises the adapter imports and the OpenTelemetry observer path.
       - name: Run tests
         run: pytest -q --timeout=60 --timeout-method=thread
