@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from tests.support.agents import make_agent
-from tests.support.providers import ScriptedProvider, TextTurn
+from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
 
 
 class _FailOnceMarkFailedStore:
@@ -34,8 +36,9 @@ class _FailOnceMarkFailedStore:
         return await self._inner.mark_failed(run_id, checkpoint, error=error, events=events)
 
 
-async def test_failed_terminal_tail_recovery_persists_one_result_event() -> None:
-    from linch import HookResult
+@pytest.mark.parametrize("route", ["stop", "budget", "max_turns"])
+async def test_failed_terminal_tail_recovery_persists_one_result_event(route: str) -> None:
+    from linch import HookResult, RunBudget
     from linch.sessions import InMemorySessionStore
 
     class StopHook:
@@ -45,15 +48,27 @@ async def test_failed_terminal_tail_recovery_persists_one_result_event() -> None
         def on_before_final_answer(self, ctx: Any) -> Any:
             return HookResult.stop("blocked")
 
+    provider: Any = ScriptedProvider([TextTurn("done")])
+    options: dict[str, Any] = {}
+    hooks: list[Any] | None = None
+    if route == "stop":
+        hooks = [StopHook()]
+    elif route == "budget":
+        options["budget"] = RunBudget(max_tokens=0)
+    else:
+        provider = ScriptedProvider([ToolUseTurn("Unavailable", {}, tool_id="tool")])
+        options["max_turns"] = 1
+
     store = _FailOnceMarkFailedStore()
     agent = make_agent(
-        ScriptedProvider([TextTurn("done")]),
+        provider,
         model="terminal-tail-model",
         permissions={"mode": "skip-dangerous"},
         session_store=InMemorySessionStore(),
         run_store=store,
-        hooks=[StopHook()],
+        hooks=hooks,
         cwd=".",
+        **options,
     )
     session = await agent.session(id="terminal-tail")
 
@@ -62,5 +77,6 @@ async def test_failed_terminal_tail_recovery_persists_one_result_event() -> None
     rows = await store.load_events(run_id)
 
     assert store.mark_failed_calls == 2
+    assert [row.event.type for row in rows[:2]] == ["system", "user"]
     assert sum(row.event.type == "result" for row in rows) == 1
     assert sum(event.type == "result" for event in events) == 1
