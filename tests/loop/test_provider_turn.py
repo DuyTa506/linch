@@ -189,6 +189,38 @@ async def test_force_final_turn_rejects_provider_tool_calls() -> None:
     assert "not offered for the current turn" in second_end.result
 
 
+@pytest.mark.asyncio
+async def test_closing_provider_parser_closes_raw_provider_stream() -> None:
+    """Closing a parser phase closes the provider iterator it delegates to."""
+    import asyncio
+
+    from linch.loop.streaming import _stream_turn
+
+    class TrackedProvider:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def stream(self, _req: Any) -> Any:
+            try:
+                yield {"type": "message_start", "model": "model"}
+                yield {"type": "text_delta", "text": "partial"}
+                await asyncio.Event().wait()
+            finally:
+                self.closed = True
+
+    provider = TrackedProvider()
+    session = SimpleNamespace(
+        agent=SimpleNamespace(include_partial_messages=True, provider=provider)
+    )
+    request = SimpleNamespace(stream_partials=True)
+    iterator = _stream_turn(session, request).__aiter__()
+
+    await iterator.__anext__()
+    await iterator.aclose()
+
+    assert provider.closed is True
+
+
 async def _no_compaction(*args: Any, **kwargs: Any) -> bool:
     return False
 
