@@ -28,6 +28,7 @@ from linch.errors import (
 )
 from linch.providers.base import BaseProvider, ProviderCapabilities, full_capabilities
 from linch.types import (
+    CatalogChangeBlock,
     ImageBlock,
     Message,
     ModelId,
@@ -513,7 +514,7 @@ def _translate_messages(
             for block in msg.content:
                 if isinstance(block, ToolResultBlock):
                     tool_result_parts.append(_translate_tool_result(block))
-                elif isinstance(block, TextBlock):
+                elif isinstance(block, (TextBlock, CatalogChangeBlock)):
                     content_parts.append({"type": "text", "text": block.text})
                 elif isinstance(block, ImageBlock):
                     content_parts.append(_translate_image(block))
@@ -537,7 +538,7 @@ def _translate_assistant_content(
 ) -> list[dict[str, Any]]:
     parts: list[dict[str, Any]] = []
     for block in content:
-        if isinstance(block, TextBlock):
+        if isinstance(block, (TextBlock, CatalogChangeBlock)):
             parts.append({"type": "text", "text": block.text})
         elif isinstance(block, ToolUseBlock):
             parts.append(
@@ -567,7 +568,7 @@ def _translate_tool_result(block: ToolResultBlock) -> dict[str, Any]:
         content = [
             {"type": "text", "text": part.text}
             for part in block.content
-            if isinstance(part, TextBlock)
+            if isinstance(part, (TextBlock, CatalogChangeBlock))
         ]
     item: dict[str, Any] = {
         "type": "tool_result",

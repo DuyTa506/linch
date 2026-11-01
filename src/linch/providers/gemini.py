@@ -19,6 +19,7 @@ from .._client_lifecycle import loop_changed, running_loop
 from .._http_errors import retry_after_seconds
 from ..errors import AuthError, ContextLengthError, LinchError, ProviderError, RateLimitError
 from ..types import (
+    CatalogChangeBlock,
     ImageBlock,
     Message,
     ModelId,
@@ -74,7 +75,7 @@ def _translate_messages(messages: list[Message]) -> list[dict[str, Any]]:
         role = "model" if msg.role == "assistant" else "user"
         parts: list[dict[str, Any]] = []
         for block in msg.content:
-            if isinstance(block, TextBlock) and block.text:
+            if isinstance(block, (TextBlock, CatalogChangeBlock)) and block.text:
                 parts.append({"text": block.text})
             elif isinstance(block, ImageBlock):
                 source = block.source

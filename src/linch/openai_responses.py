@@ -16,6 +16,7 @@ from ._http_errors import (
 from ._prompt_cache import openai_responses_cached_tokens
 from .errors import AbortError, AuthError, ContextLengthError, ProviderError, RateLimitError
 from .types import (
+    CatalogChangeBlock,
     ImageBlock,
     Message,
     ProviderRequest,
@@ -140,7 +141,7 @@ def translate_input(messages: list[Message]) -> list[dict[str, Any]]:
             parts: list[dict[str, Any]] = []
             calls: list[dict[str, Any]] = []
             for block in message.content:
-                if block.type == "text":
+                if isinstance(block, (TextBlock, CatalogChangeBlock)):
                     parts.append({"type": "output_text", "text": block.text})
                 elif block.type == "tool_use":
                     calls.append(
@@ -166,7 +167,7 @@ def translate_input(messages: list[Message]) -> list[dict[str, Any]]:
                         "output": tool_result_to_output(block.content),
                     }
                 )
-            elif block.type == "text":
+            elif isinstance(block, (TextBlock, CatalogChangeBlock)):
                 parts.append({"type": "input_text", "text": block.text})
             elif block.type == "image":
                 parts.append({"type": "input_image", "image_url": image_to_url(block.source)})
