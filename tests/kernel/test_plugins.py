@@ -629,3 +629,21 @@ async def test_requirement_returning_during_cleanup_reactivates_plugin() -> None
     assert agent.context.get("out") is not None
     await replacement.dispose()
     await mounted.dispose()
+
+
+async def test_agent_close_does_not_reactivate_plugin_on_closing_context() -> None:
+    from linch.kernel.plugins import _PluginMount
+
+    parent = Context()
+    parent.register("x", object())
+    agent = _agent(context=parent)
+    dependent = _Plugin(name="dependent", provides=("out",), requires=("x",))
+    provider = _Plugin(name="provider", provides=("x",))
+
+    mount = _PluginMount(agent.context, dependent, None)
+    await mount.start()
+    await agent.use(provider)
+    await mount._reconcile()
+    assert dependent.calls == 2
+
+    await agent.close()
