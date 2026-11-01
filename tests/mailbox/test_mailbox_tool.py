@@ -272,7 +272,7 @@ async def test_spawned_worker_address(configured: bool) -> None:
     )
 
     child = agent._sessions[result.child_session_id]
-    assert child.mailbox_address == ("worker-b" if configured else None)
+    assert child.mailbox_address == (child.id if configured else None)
 
 
 async def test_agent_sends_to_peer_via_tool_during_turn() -> None:

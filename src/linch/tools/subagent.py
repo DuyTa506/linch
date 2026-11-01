@@ -168,10 +168,24 @@ class SubagentTool:
         return f"Spawn subagent: {input['description']}"
 
     async def execute(self, input: dict[str, object], ctx: ToolContext) -> ToolResult:
+        """Run a child with the invoking run's configuration and dependencies.
+
+        Args:
+            input: Validated child task, definition, and background selection.
+            ctx: Invoking call's captured capabilities and authorization identity.
+
+        Returns:
+            The child result, or an acknowledgement for a detached worker.
+        """
         import asyncio
 
         from ..subagents.default_agent import DEFAULT_AGENT_TYPE
-        from ..subagents.runner import RunSubagentArgs, result_text_for_caller, run_subagent
+        from ..subagents.runner import (
+            RunSubagentArgs,
+            RunSubagentResult,
+            result_text_for_caller,
+            run_subagent,
+        )
         from ..subagents.workers import WorkerHandle
 
         requested = str(input.get("subagent_type", "")).strip()
@@ -212,7 +226,7 @@ class SubagentTool:
             display_name = definition.frontmatter.name
 
         subagent_run_id = f"sa_{uuid4().hex[:8]}"
-        worker_id = f"agent-{uuid4().hex[:4]}"
+        worker_id = f"agent-{uuid4().hex}"
         run_in_background = bool(input.get("run_in_background", False))
         if run_in_background and not self._enable_background_subagents:
             return ToolResult(
@@ -240,10 +254,12 @@ class SubagentTool:
             prompt=str(input["prompt"]),
             display_name=display_name,
             subagent_run_id=subagent_run_id,
+            mailbox_address=worker_id,
             signal=ctx.signal,
             emit=emit_fn,
             retain=self._retain_subagents,
-            run_options=RunOptions(principal=ctx.principal),
+            run_options=RunOptions(principal=ctx.principal, deps=ctx.deps),
+            _deps_captured=True,
         )
 
         if run_in_background:
@@ -268,6 +284,11 @@ class SubagentTool:
             runner_args.on_child_registered = _record_child_id
 
             binding = runner_args.config_binding
+            from ..hooks import HookDispatcher, PostToolUseContext
+
+            completion_hooks = HookDispatcher(
+                ctx._run_config.hooks if ctx._run_config is not None else session.agent.hooks
+            )
 
             async def _bg_run() -> None:
                 try:
@@ -276,6 +297,14 @@ class SubagentTool:
                     if handle.status != "killed":
                         handle.status = "killed"
                     raise
+                except Exception as exc:
+                    result = RunSubagentResult(
+                        child_session_id=handle.child_session_id,
+                        final_text="",
+                        aborted=False,
+                        errored=True,
+                        error={"name": type(exc).__name__, "message": str(exc)},
+                    )
                 result_text = result_text_for_caller(result)
                 handle.child_session_id = result.child_session_id
                 handle.last_result_text = result_text
@@ -305,6 +334,32 @@ class SubagentTool:
                     f"{error_line}"
                     f"</task-notification>"
                 )
+                if completion_hooks.active:
+                    from .. import lifecycle
+
+                    dispatched = await completion_hooks.dispatch(
+                        lifecycle.POST_TOOL_USE,
+                        PostToolUseContext(
+                            session=session,
+                            run_id=ctx.run_id,
+                            turn_index=None,
+                            deps=ctx.deps,
+                            tool_use_id=worker_id,
+                            tool_name=self.name,
+                            input=dict(input),
+                            result=ToolResult(content=notification_text, is_error=result.errored),
+                        ),
+                    )
+                    if emit_list is not None:
+                        emit_list.extend(dispatched.events)
+                    if dispatched.result.action in {"block", "stop"}:
+                        notification_text = (
+                            dispatched.result.reason
+                            or dispatched.result.feedback
+                            or "Worker result blocked"
+                        )
+                    else:
+                        notification_text = dispatched.context.result.content
                 await session.notify(
                     Message(role="user", content=[TextBlock(text=notification_text)]),
                     delivery_id=f"subagent:{worker_id}",
@@ -336,6 +391,12 @@ class SubagentTool:
             from ..profiles import _schedule_with_binding
 
             handle.task = _schedule_with_binding(binding, _bg_run())
+
+            def _settle_cancelled(task: asyncio.Task[Any]) -> None:
+                if task.cancelled() and handle.status == "running":
+                    handle.status = "killed"
+
+            handle.task.add_done_callback(_settle_cancelled)
             return ToolResult(
                 content=(
                     f"Worker '{worker_id}' started in background."
