@@ -94,8 +94,9 @@ async def test_partial_copy_failure_removes_workspace(tmp_path: Path, monkeypatc
     source.mkdir()
     root = tmp_path / "scratch-root"
 
-    def fail_copy(_source: str, destination: str, *, dirs_exist_ok: bool) -> None:
+    def fail_copy(_source: str, destination: str, *, dirs_exist_ok: bool, symlinks: bool) -> None:
         assert dirs_exist_ok is True
+        assert symlinks is True
         (Path(destination) / "partial.txt").write_text("partial")
         raise OSError("copy failed")
 
@@ -118,8 +119,9 @@ async def test_cancelled_copy_failure_preserves_cancellation_and_cleans_workspac
     started = threading.Event()
     continue_copy = threading.Event()
 
-    def fail_copy(_source: str, destination: str, *, dirs_exist_ok: bool) -> None:
+    def fail_copy(_source: str, destination: str, *, dirs_exist_ok: bool, symlinks: bool) -> None:
         assert dirs_exist_ok is True
+        assert symlinks is True
         (Path(destination) / "partial.txt").write_text("partial")
         raise OSError("copy failed")
 
@@ -189,3 +191,16 @@ async def test_default_root_inside_source_fails_before_copytree(
 
 def test_tempdir_isolation_satisfies_protocol() -> None:
     assert isinstance(TempDirIsolation(), IsolationBackend)
+
+
+async def test_copy_rejects_symlinks_outside_isolated_root(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    outside = tmp_path / "private.txt"
+    outside.write_text("outside-secret")
+    (source / "link.txt").symlink_to(outside)
+    scratch = tmp_path / "scratch"
+    isolation = TempDirIsolation(source=str(source), root=str(scratch))
+    with pytest.raises(ValueError, match="symlink"):
+        await isolation.acquire()
+    assert not any(scratch.iterdir())
