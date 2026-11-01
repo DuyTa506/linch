@@ -36,19 +36,13 @@ def _providers() -> list[tuple[str, Any]]:
 
 
 @pytest.mark.parametrize("name", ["openai-chat", "anthropic", "openai-responses"])
-def test_client_is_rebuilt_on_a_new_event_loop(name: str) -> None:
+def test_client_loop_lifecycle(name: str) -> None:
     provider = dict(_providers())[name]
 
     first = asyncio.run(provider._get_client())
     second = asyncio.run(provider._get_client())
 
     assert first is not second, "a client bound to a closed loop was handed out again"
-
-
-@pytest.mark.parametrize("name", ["openai-chat", "anthropic", "openai-responses"])
-def test_client_is_built_once_within_one_loop(name: str) -> None:
-    """The common case must stay free: one loop, one client, no rebuild."""
-    provider = dict(_providers())[name]
 
     async def twice() -> tuple[Any, Any]:
         return await provider._get_client(), await provider._get_client()

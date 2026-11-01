@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 # ---------------------------------------------------------------------------
-# Unit: import + instantiation
+# Unit: import, instantiation, and model limits
 # ---------------------------------------------------------------------------
 
 
@@ -43,11 +43,8 @@ def test_gemini_provider_options_defaults():
 
     opts = GeminiProviderOptions()
     assert opts.api_key is None
-
-
-# ---------------------------------------------------------------------------
-# Unit: context_window
-# ---------------------------------------------------------------------------
+    assert opts.project is None
+    assert opts.location == "us-central1"
 
 
 def test_gemini_context_window_flash():
@@ -80,11 +77,6 @@ def test_gemini_context_window_unknown_defaults():
 
     provider = GeminiProvider()
     assert provider.context_window("gemini-unknown-xyz") >= 32_000
-
-
-# ---------------------------------------------------------------------------
-# Unit: capabilities
-# ---------------------------------------------------------------------------
 
 
 def test_gemini_capabilities_structured_output():
