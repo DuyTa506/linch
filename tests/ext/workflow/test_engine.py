@@ -259,6 +259,115 @@ async def test_step_replays_when_rebuilt_set_key_has_different_insertion_order()
     assert calls == ["ran"]
 
 
+@pytest.mark.parametrize("kind", ["memory", "postgres"])
+async def test_workflow_step_end_persists_before_callback_failure(kind: str, pg_dsn: str) -> None:
+    from linch import InMemoryRunStore
+
+    if kind == "memory":
+        store: Any = InMemoryRunStore()
+    else:
+        from linch import PostgresRunStore
+
+        store = PostgresRunStore(pg_dsn)
+    agent = _make_agent(CountingTextProvider(), run_store=store)
+    side_effects: list[str] = []
+
+    async def flow(wf: Any) -> str:
+        async def charge() -> str:
+            side_effects.append("charged")
+            return "ok"
+
+        return await wf.step("charge", charge)
+
+    def callback(event: Any) -> None:
+        if event.type == "workflow" and event.kind == "step_end":
+            raise ConnectionResetError("websocket closed")
+
+    try:
+        with pytest.raises(ConnectionResetError, match="websocket closed"):
+            await _run_workflow(agent, flow, run_id="wf-step-callback", on_event=callback)
+        stored_kinds = [event.event.kind for event in await store.load_events("wf-step-callback")]
+        assert stored_kinds == ["step_start", "step_end"]
+
+        assert await _run_workflow(agent, flow, run_id="wf-step-callback") == "ok"
+        assert side_effects == ["charged"]
+    finally:
+        await store.close()
+
+
+@pytest.mark.parametrize("kind", ["memory", "postgres"])
+async def test_cancelled_step_append_is_drained_before_resume(kind: str, pg_dsn: str) -> None:
+    from linch import InMemoryRunStore
+
+    if kind == "memory":
+        inner_store: Any = InMemoryRunStore()
+    else:
+        from linch import PostgresRunStore
+
+        inner_store = PostgresRunStore(pg_dsn)
+
+    class DelayedEndStore:
+        def __init__(self, inner: Any) -> None:
+            self.inner = inner
+            self.append_started = asyncio.Event()
+            self.allow_append = asyncio.Event()
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self.inner, name)
+
+        async def append_event(self, run_id: str, event: Any) -> int:
+            if getattr(event, "kind", None) == "step_end":
+                self.append_started.set()
+                await self.allow_append.wait()
+            return await self.inner.append_event(run_id, event)
+
+    store = DelayedEndStore(inner_store)
+    agent = _make_agent(CountingTextProvider(), run_store=store)
+    side_effects: list[str] = []
+    charge_task: asyncio.Task[Any] | None = None
+
+    async def charge() -> str:
+        side_effects.append("charged")
+        return "ok"
+
+    async def fail() -> str:
+        await store.append_started.wait()
+        raise RuntimeError("reserve failed")
+
+    async def flow(wf: Any) -> list[Any]:
+        async def charge_branch() -> str:
+            nonlocal charge_task
+            charge_task = asyncio.current_task()
+            return await wf.step("charge", charge)
+
+        return await wf.parallel([charge_branch, fail])
+
+    task: asyncio.Task[Any] | None = None
+    try:
+        task = asyncio.create_task(_run_workflow(agent, flow, run_id="wf-cancelled-end"))
+        await asyncio.wait_for(store.append_started.wait(), timeout=2)
+
+        async def wait_for_charge_cancel() -> None:
+            while charge_task is None or charge_task.cancelling() == 0:
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(wait_for_charge_cancel(), timeout=2)
+        store.allow_append.set()
+        with pytest.raises(RuntimeError, match="reserve failed"):
+            await task
+
+        stored_kinds = [event.event.kind for event in await store.load_events("wf-cancelled-end")]
+        assert stored_kinds.count("step_end") == 1
+        assert side_effects == ["charged"]
+    finally:
+        store.allow_append.set()
+        if task is not None and not task.done():
+            task.cancel()
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
+        await store.close()
+
+
 async def test_wf_agent_inherited_subagent_tool_filter_is_part_of_replay_key() -> None:
     from linch import InMemoryRunStore
     from linch.subagents.registry import AgentRegistry
