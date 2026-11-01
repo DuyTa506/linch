@@ -323,3 +323,46 @@ async def test_fallback_freezes_a_new_incremented_provider_attempt() -> None:
     record = await store.load_run(run_id)
     assert record is not None and record.checkpoint is not None
     assert record.checkpoint.provider_attempt == 2
+
+
+async def test_fallback_binds_snapshot_before_pruning_previous_checkpoint() -> None:
+    class _OrderingStore(InMemoryRunStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.prune_checkpoint_ids: list[str | None] = []
+            self.prune_keep_ids: list[tuple[str, ...]] = []
+
+        async def prune(self, run_id: str, keep_ids: Any = ()) -> int:
+            self.prune_keep_ids.append(tuple(keep_ids))
+            if len(self.prune_checkpoint_ids) >= 1:
+                record = await self.load_run(run_id)
+                checkpoint = record.checkpoint if record is not None else None
+                self.prune_checkpoint_ids.append(
+                    checkpoint.model_input_snapshot_id if checkpoint is not None else None
+                )
+            else:
+                self.prune_checkpoint_ids.append(None)
+            return await super().prune(run_id, keep_ids)
+
+    class _FallbackProvider(ScriptedProvider):
+        def __init__(self) -> None:
+            super().__init__([TextTurn("done")])
+
+        async def stream(self, req: Any) -> AsyncIterator[dict[str, object]]:
+            self.requests.append(req)
+            if len(self.requests) == 1:
+                raise ProviderError("overloaded", retryable=True)
+            yield {"type": "message_start", "model": req.model}
+            yield {"type": "text_delta", "text": "done"}
+            yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
+
+    store = _OrderingStore()
+    provider = _FallbackProvider()
+    agent = _exact_agent(provider, fallback_models=["model-b"], run_store=store)
+    session = await agent.session()
+
+    events = [event async for event in session.run("hello")]
+
+    assert events[-1].type == "result"
+    assert len(store.prune_checkpoint_ids) >= 2
+    assert store.prune_checkpoint_ids[1] == store.prune_keep_ids[1][0]
