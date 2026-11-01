@@ -1,72 +1,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
-
-class RecordingProvider:
-    id = "fake"
-
-    def __init__(self) -> None:
-        self.calls: list[dict[str, Any]] = []
-
-    def context_window(self, model: str) -> int:
-        return 128_000
-
-    async def stream(self, req):
-        from linch.types import TextBlock, Usage
-
-        self.calls.append(
-            {
-                "system": [block.text for block in req.system],
-                "messages": [
-                    {
-                        "role": message.role,
-                        "content": [
-                            block.text if isinstance(block, TextBlock) else str(block)
-                            for block in message.content
-                        ],
-                    }
-                    for message in req.messages
-                ],
-                "tools": [tool["name"] for tool in req.tools],
-            }
-        )
-        yield {"type": "message_start", "model": req.model}
-        yield {"type": "text_delta", "text": "done"}
-        yield {
-            "type": "message_end",
-            "stop_reason": "end_turn",
-            "usage": Usage(),
-            "provider_metadata": None,
-        }
+from tests.support.agents import make_agent
+from tests.support.providers import ScriptedProvider, TextTurn
+from tests.support.tools import StubTool, tool_registry
 
 
-def _fake_tool(name: str, tags: tuple[str, ...] = ()):
-    class FakeTool:
-        description = f"Fake {name}"
-        input_schema = {"type": "object", "properties": {}}
-        scope = "read"
-        parallel = True
-
-        def __init__(self) -> None:
-            self.name = name
-            self.tags = tags
-
-        def validate(self, raw):
-            return raw
-
-        async def execute(self, input, ctx):
-            from linch.tools import ToolResult
-
-            return ToolResult(content="ok", summary=self.name)
-
-        def summarize(self, input):
-            return self.name
-
-    return FakeTool()
+def _fake_tool(name: str, tags: tuple[str, ...] = ()) -> StubTool:
+    tool = StubTool(name, parallel=True)
+    cast(Any, tool).tags = tags
+    return tool
 
 
 def _context_hook(builder: Any):
@@ -76,28 +23,21 @@ def _context_hook(builder: Any):
 
 
 def _agent(provider: Any, *, hooks: Any):
-    from linch import Agent
     from linch.config import FeatureFlags
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import empty_tools
 
-    return Agent(
+    return make_agent(
+        provider,
         model="gpt-5",
-        provider=provider,
-        tools=empty_tools(_fake_tool("SearchDocs", ("rag",)), _fake_tool("WriteNote")),
-        permissions={"mode": "skip-dangerous"},
-        session_store=InMemorySessionStore(),
+        tools=tool_registry(_fake_tool("SearchDocs", ("rag",)), _fake_tool("WriteNote")),
         hooks=hooks,
         features=FeatureFlags(skills=False, subagents=False, mcp=False),
         result_offload=None,
+        run_store=None,
     )
 
 
 async def _drain(session, prompt: str = "hello"):
-    events = []
-    async for event in session.run(prompt):
-        events.append(event)
-    return events
+    return [event async for event in session.run(prompt)]
 
 
 class StaticBuilder:
@@ -118,23 +58,6 @@ class StaticBuilder:
 
 
 @pytest.mark.asyncio
-async def test_context_builder_reaches_provider_without_persisting():
-    provider = RecordingProvider()
-    agent = _agent(provider, hooks=[_context_hook(StaticBuilder())])
-    session = await agent.session()
-
-    events = await _drain(session)
-
-    assert any(event.type == "context_build" for event in events)
-    assert any("CTX_SYSTEM turn=0" in text for text in provider.calls[0]["system"])
-    all_text = [text for msg in provider.calls[0]["messages"] for text in msg["content"]]
-    assert "CTX_MESSAGE turn=0" in all_text
-
-    persisted = [text for msg in session.provider_view for text in getattr(msg, "content", [])]
-    assert all(getattr(block, "text", "") != "CTX_MESSAGE turn=0" for block in persisted)
-
-
-@pytest.mark.asyncio
 async def test_context_builders_run_in_stable_order():
     from linch import ContextBuildResult
     from linch.types import Message, TextBlock
@@ -149,15 +72,22 @@ async def test_context_builders_run_in_stable_order():
                 metadata={self.label: turn.turn_index},
             )
 
-    provider = RecordingProvider()
-    agent = _agent(provider, hooks=[_context_hook([Builder("a"), Builder("b")])])
+    provider = ScriptedProvider([TextTurn("done")])
+    agent = _agent(provider, hooks=[_context_hook([StaticBuilder(), Builder("a"), Builder("b")])])
     session = await agent.session()
     events = await _drain(session)
 
-    texts = [text for msg in provider.calls[0]["messages"] for text in msg["content"]]
+    request = provider.requests[0]
+    assert any("CTX_SYSTEM turn=0" in getattr(block, "text", "") for block in request.system)
+    all_text = [getattr(block, "text", "") for msg in request.messages for block in msg.content]
+    assert "CTX_MESSAGE turn=0" in all_text
+    persisted = [block for msg in session.provider_view for block in getattr(msg, "content", [])]
+    assert all(getattr(block, "text", "") != "CTX_MESSAGE turn=0" for block in persisted)
+
+    texts = [getattr(block, "text", "") for msg in request.messages for block in msg.content]
     assert texts.index("context-a") < texts.index("context-b")
     context_event = next(event for event in events if event.type == "context_build")
-    assert context_event.metadata == {"a": 0, "b": 0}
+    assert context_event.metadata == {"source": "static", "a": 0, "b": 0}
 
 
 @pytest.mark.asyncio
@@ -175,12 +105,14 @@ async def test_context_budget_trims_ephemeral_messages():
                 budget=ContextBudget(max_tokens=2),
             )
 
-    provider = RecordingProvider()
+    provider = ScriptedProvider([TextTurn("done")])
     agent = _agent(provider, hooks=[_context_hook(BudgetBuilder())])
     session = await agent.session()
     events = await _drain(session)
 
-    texts = [text for msg in provider.calls[0]["messages"] for text in msg["content"]]
+    texts = [
+        getattr(block, "text", "") for msg in provider.requests[0].messages for block in msg.content
+    ]
     assert "first context block" not in texts
     assert "second" in texts
     context_event = next(event for event in events if event.type == "context_build")
@@ -196,12 +128,12 @@ async def test_context_selected_tools_are_request_scoped():
         async def build(self, turn):
             return ContextBuildResult(selected_tools={"SearchDocs"})
 
-    provider = RecordingProvider()
+    provider = ScriptedProvider([TextTurn("done")])
     agent = _agent(provider, hooks=[_context_hook(SelectingBuilder())])
     session = await agent.session()
     await _drain(session)
 
-    assert provider.calls[0]["tools"] == ["SearchDocs"]
+    assert [tool["name"] for tool in provider.requests[0].tools] == ["SearchDocs"]
     assert sorted(tool.name for tool in agent.tools.list()) == ["SearchDocs", "WriteNote"]
 
 
@@ -210,10 +142,13 @@ async def test_context_builder_reruns_after_compaction_retry():
     from linch import ContextBuildResult, ContextLengthError
     from linch.types import Message, TextBlock
 
-    class RetryProvider(RecordingProvider):
+    class RetryProvider(ScriptedProvider):
+        def __init__(self):
+            super().__init__([TextTurn("done")])
+
         async def stream(self, req):
-            if not self.calls:
-                self.calls.append({"first": True})
+            if not self.requests:
+                self.requests.append(req)
                 raise ContextLengthError("too long")
             async for event in super().stream(req):
                 yield event
@@ -249,7 +184,11 @@ async def test_context_builder_reruns_after_compaction_retry():
 
     assert builder.calls == 2
     assert [event.type for event in events].count("context_build") == 2
-    texts = [text for msg in provider.calls[-1]["messages"] for text in msg["content"]]
+    texts = [
+        getattr(block, "text", "")
+        for msg in provider.requests[-1].messages
+        for block in msg.content
+    ]
     assert "fresh-context-2" in texts
 
 
@@ -260,48 +199,39 @@ def _msg(text: str):
 
 
 def test_estimator_budget_trims_oldest_first_under_budget():
-    """Estimator-based trim drops oldest messages first and lands under budget."""
     from linch import ContextBudget, ContextBuildResult
     from linch.context.builder import apply_context_budget
 
-    # Each message costs 1 token under this estimator (one per message).
+    calls: list[tuple[list[object], str]] = []
+
     def estimator(messages, model):
+        calls.append((messages, model))
         return len(messages)
 
-    messages = [_msg(f"m{i}") for i in range(10)]
-    result = ContextBuildResult(messages=messages, budget=ContextBudget(max_tokens=3))
-
+    result = ContextBuildResult(
+        messages=[_msg(f"m{i}") for i in range(10)], budget=ContextBudget(max_tokens=3)
+    )
     out = apply_context_budget(result, estimator=estimator, model="gpt-5")
-
-    kept = [block.text for msg in out.messages for block in msg.content]
-    # Under budget, oldest dropped first, newest retained.
+    kept = [getattr(block, "text", "") for msg in out.messages for block in msg.content]
     assert out.budget.used_tokens <= 3
     assert out.budget.trimmed is True
     assert kept == ["m7", "m8", "m9"]
+    assert calls and all(model == "gpt-5" for _, model in calls)
 
 
 def test_estimator_budget_invocations_are_linear():
-    """Pins the O(n) fix: the estimator must not be re-run over the whole list per pop."""
     from linch import ContextBudget, ContextBuildResult
     from linch.context.builder import apply_context_budget
 
     work = {"messages_seen": 0}
 
     def estimator(messages, model):
-        # Real estimators (e.g. tiktoken-backed) do work proportional to the
-        # number of messages they are handed. Count total messages processed
-        # across all invocations to detect O(n*k) re-estimation of the whole
-        # remaining list on every pop.
         work["messages_seen"] += len(messages)
         return len(messages)
 
     n = 50
-    messages = [_msg(f"m{i}") for i in range(n)]
-    result = ContextBuildResult(messages=messages, budget=ContextBudget(max_tokens=1))
-
+    result = ContextBuildResult(
+        messages=[_msg(f"m{i}") for i in range(n)], budget=ContextBudget(max_tokens=1)
+    )
     apply_context_budget(result, estimator=estimator, model="gpt-5")
-
-    # Incremental cost model touches each message a constant number of times
-    # (O(n) total work), not O(n*k) where the whole remaining list is
-    # re-estimated on every pop.
     assert work["messages_seen"] <= 3 * n
