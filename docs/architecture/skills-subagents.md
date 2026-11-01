@@ -80,8 +80,8 @@ sequenceDiagram
 - `session.workers: dict[str, WorkerHandle]` indexes every spawned worker by `worker_id`.
 - **`run_in_background=True`** on `SubagentTool`: spawns `asyncio.create_task(_bg_run())` and returns an acknowledgement immediately. On completion, the task calls `Session.notify()` with a stable delivery ID before recording its `BackgroundWorkerEvent`. The default notification is in-memory; durable inbox mode persists an already-enqueued completion across restart.
 - The loop drains the selected next-turn channel at the top of each new turn, yielding each notification as a `UserEvent` before `ContextInjectionHook.build_context()` runs, so the model sees task-completion content before the next provider call.
-- `SubagentContinueTool` resolves a worker by id or display name via `resolve_worker`, then calls `continue_subagent()`, which re-drives the live child session using the full prior `provider_view`.
-- `TaskStopTool` cancels the background `asyncio.Task` and signals abort on the child session; the `WorkerHandle` remains in `session.workers` so the worker can be continued later.
+- `SubagentContinueTool` resolves a worker by exact id or a unique display name via `resolve_worker`, then calls `continue_subagent()`, which re-drives the live child session using the full prior `provider_view`. An ambiguous display name is rejected with the matching worker ids; callers must use the id.
+- `TaskStopTool` uses the same exact-id or unique-name resolution before it cancels the background `asyncio.Task` and signals abort on the child session; an ambiguous name stops neither worker. The `WorkerHandle` remains in `session.workers` so the worker can be continued later.
 - `session.abort()` and `agent.close()` both cancel all running background worker tasks. `agent.close()` additionally clears `agent._sessions`.
 - A process restart cannot resume an active detached task. Durable inbox mode
   preserves only completions that reached `Session.notify()`; hosts that need

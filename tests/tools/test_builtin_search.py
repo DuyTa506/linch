@@ -29,6 +29,48 @@ def _make_ctx(tmp_path):
     )
 
 
+@pytest.mark.parametrize(
+    ("tool_cls", "raw", "error"),
+    [
+        (ReadTool, {"path": "a.txt"}, ValueError),
+        (WriteTool, {"path": "a.txt", "content": "text"}, ValueError),
+        (
+            EditTool,
+            {"path": "a.txt", "old": "before", "new": "after"},
+            ValueError,
+        ),
+        (GlobTool, {"pattern": "*.py"}, ToolExecutionError),
+    ],
+)
+def test_builtin_legacy_argument_aliases_are_rejected(tool_cls, raw, error) -> None:
+    with pytest.raises(error):
+        tool_cls().validate(raw)
+
+
+@pytest.mark.parametrize(
+    ("legacy_field", "raw"),
+    [
+        (
+            "old",
+            {"file_path": "a.txt", "old": "before", "new_string": "after"},
+        ),
+        (
+            "new",
+            {"file_path": "a.txt", "old_string": "before", "new": "after"},
+        ),
+    ],
+)
+def test_edit_legacy_replacement_aliases_are_rejected(legacy_field, raw) -> None:
+    with pytest.raises(ValueError, match=legacy_field):
+        EditTool().validate(raw)
+
+
+def test_glob_path_alias_does_not_select_target_directory() -> None:
+    assert GlobTool().validate({"glob_pattern": "*.py", "path": "other"}) == {
+        "glob_pattern": "*.py"
+    }
+
+
 @pytest.mark.asyncio
 async def test_grep_pattern_is_an_option_value_and_paths_follow_separator(
     monkeypatch: pytest.MonkeyPatch, tmp_path

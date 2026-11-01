@@ -135,7 +135,7 @@ Supported scorer types map to the built-in scorers exported from
 
 | Type | Fields |
 |---|---|
-| `text_contains` | `substring` or `text` or `contains` |
+| `text_contains` | `substring` (defaults to `{expected}` when omitted) |
 | `tool_called` | `tool` |
 | `schema_valid` | `schema` |
 | `cost_under` | `budget_usd` |

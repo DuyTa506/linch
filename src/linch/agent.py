@@ -56,6 +56,33 @@ _QUIESCING = "quiescing"
 _CLOSED = "closed"
 
 
+async def _close_mcp_connection(connection: Any, primary: BaseException) -> None:
+    """Close a newly connected MCP connection while preserving its failure."""
+    try:
+        close_task = asyncio.create_task(connection.close())
+    except BaseException as exc:
+        primary.add_note(f"MCP connection cleanup failed: {type(exc).__name__}: {exc}")
+        return
+    cleanup_error: BaseException | None = None
+    while not close_task.done():
+        try:
+            await asyncio.shield(close_task)
+        except asyncio.CancelledError:
+            continue
+        except BaseException as exc:
+            cleanup_error = exc
+            break
+    if cleanup_error is None:
+        try:
+            close_task.result()
+        except BaseException as exc:
+            cleanup_error = exc
+    if cleanup_error is not None:
+        primary.add_note(
+            f"MCP connection cleanup failed: {type(cleanup_error).__name__}: {cleanup_error}"
+        )
+
+
 @dataclass(slots=True)
 class _PermissionConfig:
     mode: PermissionMode
@@ -120,7 +147,7 @@ def _normalize_permissions(permissions: Any | dict[str, object] | None) -> _Perm
                     "permissions.rules entries must be ToolRule, PathRule, or BashRule"
                 )
             perm_rules.append(rule)
-        can_use = permissions.get("canUseTool") or permissions.get("can_use_tool")
+        can_use = permissions.get("can_use_tool")
         return _PermissionConfig(
             mode=perm_mode,
             rules=perm_rules,
@@ -130,7 +157,7 @@ def _normalize_permissions(permissions: Any | dict[str, object] | None) -> _Perm
     perm_mode = _normalize_permission_mode(getattr(permissions, "mode", "default"))
     raw_rules = getattr(permissions, "rules", None)
     perm_rules = list(raw_rules) if raw_rules else []
-    can_use = getattr(permissions, "canUseTool", None) or getattr(permissions, "can_use_tool", None)
+    can_use = getattr(permissions, "can_use_tool", None)
     return _PermissionConfig(
         mode=perm_mode,
         rules=cast(list[PermissionRule], perm_rules),
@@ -1491,13 +1518,17 @@ class Agent:
             from .mcp import connect_mcp_servers
 
             mcp_conn = await connect_mcp_servers(cast(Any, self._mcp_servers))
-            await self._attach_mcp_tools(mcp_conn)
+            try:
+                await self._attach_mcp_tools(mcp_conn)
+            except BaseException as exc:
+                await _close_mcp_connection(mcp_conn, exc)
+                raise
             self._mcp_connection = mcp_conn
 
         self._mcp_connect = _load()
         try:
             await self._mcp_connect
-        except Exception:
+        except BaseException:
             self._mcp_connect = None
             raise
 
@@ -1570,8 +1601,12 @@ class Agent:
         from .mcp import connect_mcp_servers
 
         connection = await connect_mcp_servers(cast(Any, servers))
-        await self._attach_mcp_tools(connection)
-        self._extra_mcp_connections.append(connection)
+        try:
+            await self._attach_mcp_tools(connection)
+            self._extra_mcp_connections.append(connection)
+        except BaseException as exc:
+            await _close_mcp_connection(connection, exc)
+            raise
         return connection
 
     async def session(
@@ -1587,7 +1622,8 @@ class Agent:
             The live session registered on this agent.
 
         Raises:
-            ConfigError: If the agent is closed or closing, or a live session is closing.
+            ConfigError: If the agent is closed or closing, a live session is closing,
+                or stored skill metadata is malformed.
         """
         from .session import Session
         from .session_log import SessionLog
@@ -1665,19 +1701,38 @@ class Agent:
                 )
 
             session.invoked_skills = []
-            for rec in record.invoked_skills:
+            for index, rec in enumerate(record.invoked_skills):
                 if not isinstance(rec, dict):
-                    continue
+                    raise ConfigError(
+                        f"session.invoked_skills[{index}] must be an object with canonical fields"
+                    )
+                missing = {
+                    field
+                    for field in ("name", "substituted_body", "invoked_at")
+                    if field not in rec
+                }
+                if missing:
+                    missing_fields = ", ".join(sorted(missing))
+                    raise ConfigError(
+                        f"session.invoked_skills[{index}] is missing canonical field(s): "
+                        f"{missing_fields}"
+                    )
+                name = rec["name"]
+                substituted_body = rec["substituted_body"]
+                invoked_at = rec["invoked_at"]
+                if not isinstance(name, str) or not isinstance(substituted_body, str):
+                    raise ConfigError(
+                        f"session.invoked_skills[{index}] name and substituted_body must be strings"
+                    )
+                if isinstance(invoked_at, bool) or not isinstance(invoked_at, (int, float)):
+                    raise ConfigError(
+                        f"session.invoked_skills[{index}] invoked_at must be a number"
+                    )
                 session.invoked_skills.append(
-                    # Stored metadata may come from JSON backends; normalize defensively.
                     InvokedSkillRecord(
-                        name=str(rec.get("name", "")),
-                        substituted_body=str(
-                            rec.get("substituted_body", rec.get("substitutedBody", ""))
-                        ),
-                        invoked_at=float(
-                            cast(Any, rec.get("invoked_at", rec.get("invokedAt", 0.0)) or 0.0)
-                        ),
+                        name=name,
+                        substituted_body=substituted_body,
+                        invoked_at=float(invoked_at),
                     )
                 )
             # close() may have started while store/setup calls were awaiting. Do

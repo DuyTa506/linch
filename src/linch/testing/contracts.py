@@ -226,7 +226,7 @@ async def assert_tool_contract(
         "tool.description must be a non-empty string"
     )
 
-    input_schema = getattr(tool, "input_schema", getattr(tool, "schema", None))
+    input_schema = getattr(tool, "input_schema", None)
     assert isinstance(input_schema, dict), "tool.input_schema must be a dict"
 
     scope = getattr(tool, "scope", None)
