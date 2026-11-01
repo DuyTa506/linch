@@ -287,11 +287,19 @@ async def test_named_queues_have_independent_fleet_limits(pool):
             release.set()
 
 
-async def test_worker_hands_factory_plain_store_and_releases_after_run(pool):
-    from linch import PostgresRunStore
+async def test_worker_hands_factory_plain_store_and_releases_after_run(pool, monkeypatch):
+    from linch import PostgresRunStore, Session
     from linch.worker import Worker, enqueue_run
 
     bound = []
+    options = []
+    real_run = Session.run
+
+    def capture_run(session, prompt, run_options=None):
+        options.append(run_options)
+        return real_run(session, prompt, run_options)
+
+    monkeypatch.setattr(Session, "run", capture_run)
 
     async def factory(job):
         bound.append(job.run_store)
@@ -306,6 +314,8 @@ async def test_worker_hands_factory_plain_store_and_releases_after_run(pool):
     async with running(worker):
         await wait_for(lambda: pool.fetchval("SELECT count(*)=0 FROM pgqueuer"))
     assert len(bound) == 1 and type(bound[0]) is PostgresRunStore
+    assert len(options) == 1 and options[0].lease.run_id == rid
+    assert options[0].lease.owner == worker.worker_id
     assert await pool.fetchval("SELECT lease_owner FROM runs WHERE id=$1", rid) is None
     assert await pool.fetchval("SELECT status FROM runs WHERE id=$1", rid) == "completed"
     assert not pool.is_closing()
@@ -329,11 +339,20 @@ async def test_worker_preserves_a_contract_persisted_before_first_checkpoint(poo
     assert json.loads(row["meta"])["run_contract"] == original["run_contract"]
 
 
-async def test_lease_loss_during_failure_recording_retries_nonterminal_run(pool):
+async def test_lease_loss_during_failure_recording_retries_nonterminal_run(pool, monkeypatch):
+    from linch import PostgresRunStore
     from linch.worker import Worker, enqueue_run
 
     rid = await enqueue_run(pool, "s", "hello")
     calls = 0
+    failed_leases = []
+    real_mark_failed = PostgresRunStore.mark_failed
+
+    async def mark_failed(store, run_id, checkpoint=None, error=None, *, events=(), lease=None):
+        failed_leases.append(lease)
+        return await real_mark_failed(store, run_id, checkpoint, error, events=events, lease=lease)
+
+    monkeypatch.setattr(PostgresRunStore, "mark_failed", mark_failed)
 
     async def factory(job):
         nonlocal calls
@@ -349,6 +368,14 @@ async def test_lease_loss_during_failure_recording_retries_nonterminal_run(pool)
         )
         await wait_for(lambda: pool.fetchval("SELECT count(*)=0 FROM pgqueuer"))
     assert calls == 2
+    assert len(failed_leases) == 1
+    assert failed_leases[0] is not None
+    assert failed_leases[0].run_id == rid
+    assert (
+        await pool.fetchval("SELECT lease_epoch FROM runs WHERE id=$1", rid)
+        > failed_leases[0].epoch
+    )
+    assert not pool.is_closing()
 
 
 async def test_failed_model_run_is_acknowledged_without_retry(pool):

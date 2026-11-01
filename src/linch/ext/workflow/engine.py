@@ -11,7 +11,13 @@ from uuid import uuid4
 from ..._wire import WIRE_VERSION, require_wire_version
 from ...errors import ConfigError, WorkflowSuspended, WorkflowTimeoutError
 from ...events import ErrorEvent, Event
-from ...run_store import LeaseLostError, RunLease, _lease_kwargs, _validate_lease_run
+from ...run_store import (
+    LeaseLostError,
+    RunLease,
+    _lease_kwargs,
+    _preflight_lease_capabilities,
+    _validate_lease_run,
+)
 from .context import SNAPSHOT_NAMESPACE, WorkflowContext, workflow_checkpoint
 from .journal import WorkflowJournal
 
@@ -100,6 +106,14 @@ async def run_workflow(
     # Durable journaling only when both a store and a run_id are present.
     store = raw_store if (raw_store is not None and run_id is not None) else None
     _validate_lease_run(run_id or "", lease)
+    if store is not None and lease is None:
+        lifecycle_methods = tuple(
+            getattr(store, name, None) for name in ("claim", "renew", "release")
+        )
+        if any(callable(method) for method in lifecycle_methods):
+            if not all(callable(method) for method in lifecycle_methods):
+                raise ConfigError("run store lease capability requires claim, renew, release")
+            _preflight_lease_capabilities(store, include_lifecycle=True)
     if lease is not None and store is not None:
         for name in (
             "create_run",

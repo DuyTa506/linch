@@ -89,6 +89,25 @@ class WorkflowContext:
         workflow_name: str = "workflow",
         journal_snapshot_every: int = 0,
     ) -> None:
+        """Initialize a workflow context bound to one host run and lease.
+
+        Args:
+            agent: Agent used for child workflow calls.
+            host_session: Session that owns the workflow host run.
+            journal: Durable or in-memory workflow journal.
+            budget: Shared budget for workflow branches and child calls.
+            max_concurrency: Maximum concurrent workflow branches.
+            max_agent_concurrency: Maximum concurrent child provider calls.
+            on_event: Callback receiving workflow and child events.
+            store: Run store used for durable journal writes.
+            run_id: Durable workflow run identifier, if enabled.
+            lease: Immutable token fencing this workflow's writes.
+            step_timeout_ms: Default timeout for journaled calls.
+            signal: Abort signal propagated to child calls.
+            resume: Answers restored for pending interrupt keys.
+            workflow_name: Stable name used in workflow events.
+            journal_snapshot_every: Journal checkpoint interval; zero disables snapshots.
+        """
         self._agent = agent
         self._host_session = host_session
         self._journal = journal or WorkflowJournal()

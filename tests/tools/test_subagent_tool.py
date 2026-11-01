@@ -558,10 +558,21 @@ async def test_background_subagent_child_is_unleased_and_completion_keeps_origin
     tmp_path: Any,
 ) -> None:
     """Child writes stay unleased while parent completion keeps its captured token."""
+    import asyncio
     from types import SimpleNamespace
 
     from linch.events import BackgroundWorkerEvent
     from linch.run_store import InMemoryRunStore
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class PausedProvider(ScriptedProvider):
+        async def stream(self, request: Any):
+            started.set()
+            await release.wait()
+            async for event in super().stream(request):
+                yield event
 
     class TrackingStore(InMemoryRunStore):
         def __init__(self) -> None:
@@ -576,7 +587,9 @@ async def test_background_subagent_child_is_unleased_and_completion_keeps_origin
             self.calls.append(("append", run_id, type(event), lease))
             return await super().append_event(run_id, event, lease=lease)
 
-    agent, session = await _make_agent_and_session(tmp_path)
+    agent, session = await _make_agent_and_session(
+        tmp_path, provider=PausedProvider([TextTurn("done")])
+    )
     store = TrackingStore()
     agent.run_store = store
     await store.create_run(session.id, id="test-run")
@@ -592,6 +605,11 @@ async def test_background_subagent_child_is_unleased_and_completion_keeps_origin
         )
         assert not result.is_error
         worker = next(iter(session.workers.values()))
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        await store.release(origin_lease)
+        replacement = await store.claim("test-run", "replacement-owner", 30.0)
+        session._event_journal = SimpleNamespace(lease=replacement)
+        release.set()
         await worker.task
 
         parent_completion = [
@@ -607,6 +625,97 @@ async def test_background_subagent_child_is_unleased_and_completion_keeps_origin
         ]
         assert child_calls
         assert all(lease is None for lease in child_calls)
+        await store.append_event(
+            "test-run",
+            BackgroundWorkerEvent(worker_id="probe", status="completed", display_name="probe"),
+            lease=replacement,
+        )
+        assert not any(
+            isinstance(row.event, BackgroundWorkerEvent) and row.event.worker_id != "probe"
+            for row in await store.load_events("test-run")
+        )
+    finally:
+        release.set()
+        await agent.close()
+
+
+async def test_leased_parent_keeps_foreground_and_continuation_children_unleased(
+    tmp_path: Any,
+) -> None:
+    """A lost parent token cannot fence or authorize a retained child run."""
+    from types import SimpleNamespace
+
+    from linch.run_store import InMemoryRunStore
+
+    class TrackingStore(InMemoryRunStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls: list[tuple[str, str, Any]] = []
+
+        async def create_run(self, session_id: str, **kwargs: Any) -> Any:
+            self.calls.append(("create", str(kwargs.get("id")), kwargs.get("lease")))
+            return await super().create_run(session_id, **kwargs)
+
+        async def append_event(self, run_id: str, event: Any, *, lease: Any = None) -> int:
+            self.calls.append(("append", run_id, lease))
+            return await super().append_event(run_id, event, lease=lease)
+
+        async def save_checkpoint_with_events(
+            self,
+            run_id: str,
+            checkpoint: Any,
+            events: list[Any],
+            *,
+            status: str = "running",
+            lease: Any = None,
+        ) -> Any:
+            self.calls.append(("checkpoint_events", run_id, lease))
+            return await super().save_checkpoint_with_events(
+                run_id, checkpoint, events, status=status, lease=lease
+            )
+
+        async def save_checkpoint(
+            self, run_id: str, checkpoint: Any, *, status: str = "running", lease: Any = None
+        ) -> Any:
+            self.calls.append(("checkpoint", run_id, lease))
+            return await super().save_checkpoint(run_id, checkpoint, status=status, lease=lease)
+
+    from linch.events import BackgroundWorkerEvent
+
+    agent, session = await _make_agent_and_session(tmp_path)
+    store = TrackingStore()
+    agent.run_store = store
+    await store.create_run(session.id, id="parent-run")
+    parent_lease = await store.claim("parent-run", "parent-owner", 30.0)
+    session._event_journal = SimpleNamespace(lease=parent_lease)
+    ctx = _make_ctx(session)
+    ctx.run_id = "parent-run"
+    try:
+        foreground = await agent.tools.get("Subagent").execute(
+            {"description": "worker", "prompt": "first"}, ctx
+        )
+        assert not foreground.is_error
+        worker_id = next(iter(session.workers))
+
+        await store.release(parent_lease)
+        replacement = await store.claim("parent-run", "replacement-owner", 30.0)
+        session._event_journal = SimpleNamespace(lease=replacement)
+        continuation = await agent.tools.get("SubagentContinue").execute(
+            {"to": worker_id, "message": "second"}, ctx
+        )
+        assert not continuation.is_error
+
+        child_calls = [lease for operation, run_id, lease in store.calls if run_id != "parent-run"]
+        assert child_calls
+        assert all(lease is None for lease in child_calls)
+        assert not any(
+            operation == "append" and lease is parent_lease
+            for operation, _run_id, lease in store.calls
+        )
+        assert not any(
+            isinstance(row.event, BackgroundWorkerEvent)
+            for row in await store.load_events("parent-run")
+        )
     finally:
         await agent.close()
 

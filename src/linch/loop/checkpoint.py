@@ -23,6 +23,7 @@ from ..events import (
 from ..model_calls import _context_fingerprint, _model_call_fingerprint
 from ..run_store import (
     RunCheckpoint,
+    RunLease,
     _lease_kwargs,
     _require_tool_recovery_cursor,
     durable_call,
@@ -216,10 +217,19 @@ class RunEventBuffer:
         store: Any,
         run_id: str,
         *,
-        lease: Any = None,
+        lease: RunLease | None = None,
         initial_seq: int = 0,
         session: Any = None,
     ) -> None:
+        """Initialize a run-scoped event buffer.
+
+        Args:
+            store: Run store receiving flushed events.
+            run_id: Run whose events are buffered.
+            lease: Immutable token fencing the buffered writes, if leased.
+            initial_seq: Last durable event sequence before this buffer starts.
+            session: Session used for durable-operation telemetry.
+        """
         self.store = store
         self.session = session
         self.run_id = run_id

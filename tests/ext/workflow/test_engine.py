@@ -144,6 +144,129 @@ async def test_run_workflow_uses_supplied_lease_for_every_durable_write() -> Non
     assert all(seen_lease is None for _, _, seen_lease in child_terminal_writes)
 
 
+async def test_auto_claim_preflights_leased_write_capabilities_before_setup() -> None:
+    from linch import InMemoryRunStore
+
+    class LegacyAppendStore(InMemoryRunStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.create_calls = 0
+            self.append_body_calls = 0
+
+        async def create_run(self, session_id: str, **kwargs: Any) -> Any:
+            self.create_calls += 1
+            return await super().create_run(session_id, **kwargs)
+
+        async def append_event(self, run_id: str, event: Any) -> int:
+            self.append_body_calls += 1
+            return await super().append_event(run_id, event)
+
+    store = LegacyAppendStore()
+    agent = _make_agent(CountingTextProvider(), run_store=store)
+    body_calls = 0
+
+    async def flow(wf: Any) -> str:
+        nonlocal body_calls
+        body_calls += 1
+        await wf.phase("body")
+        return "done"
+
+    with pytest.raises(TypeError, match="append_event"):
+        await _run_workflow(agent, flow, run_id="wf-capability")
+
+    assert body_calls == 0
+    assert store.create_calls == 0
+    assert store.append_body_calls == 0
+    assert agent._sessions == {}
+
+
+async def test_auto_claim_rejects_opaque_leased_store_before_setup() -> None:
+    from linch import InMemoryRunStore
+
+    class OpaqueAppend:
+        @property
+        def __signature__(self) -> Any:
+            raise ValueError("opaque callable")
+
+        async def __call__(self, run_id: str, event: Any) -> int:
+            return await self._append(run_id, event)
+
+        def bind(self, callback: Any) -> None:
+            self._append = callback
+
+    class OpaqueStore(InMemoryRunStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.create_calls = 0
+            self.append_events = None
+            self.append_event = OpaqueAppend()
+            self.append_event.bind(self._append_event)
+
+        async def create_run(self, session_id: str, **kwargs: Any) -> Any:
+            self.create_calls += 1
+            return await super().create_run(session_id, **kwargs)
+
+        async def _append_event(self, run_id: str, event: Any) -> int:
+            return await InMemoryRunStore.append_event(self, run_id, event)
+
+    store = OpaqueStore()
+    agent = _make_agent(CountingTextProvider(), run_store=store)
+    body_calls = 0
+
+    async def flow(wf: Any) -> str:
+        nonlocal body_calls
+        body_calls += 1
+        await wf.phase("body")
+        return "done"
+
+    with pytest.raises(TypeError, match="does not support lease"):
+        await _run_workflow(agent, flow, run_id="wf-opaque")
+
+    assert body_calls == 0
+    assert store.create_calls == 0
+    assert agent._sessions == {}
+
+
+async def test_unleased_legacy_workflow_store_keeps_old_call_shape() -> None:
+    from linch import InMemoryRunStore
+
+    class LegacyStore:
+        claim = renew = release = None
+
+        def __init__(self) -> None:
+            self.inner = InMemoryRunStore()
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self.inner, name)
+
+        async def create_run(
+            self,
+            session_id: str,
+            *,
+            id: str | None = None,
+            meta: dict[str, object] | None = None,
+            initial_checkpoint: Any = None,
+        ) -> Any:
+            return await self.inner.create_run(
+                session_id,
+                id=id,
+                meta=meta,
+                initial_checkpoint=initial_checkpoint,
+            )
+
+        async def append_event(self, run_id: str, event: Any) -> int:
+            return await self.inner.append_event(run_id, event)
+
+    store = LegacyStore()
+    agent = _make_agent(CountingTextProvider(), run_store=store)
+
+    async def flow(wf: Any) -> str:
+        await wf.phase("legacy")
+        return "done"
+
+    assert await _run_workflow(agent, flow, run_id="wf-legacy") == "done"
+
+
 class SchemaNameProvider:
     """Returns JSON derived from the requested output schema name."""
 
