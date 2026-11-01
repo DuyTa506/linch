@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 from linch.abort import AbortContext
 from linch.events import ToolCallEndEvent
 from linch.hooks import HookResult
@@ -10,32 +8,22 @@ from linch.providers.retry import RetryOptions
 from linch.scheduler import execute_tool_calls
 from linch.tools import ToolOutput, ToolOutputError, ToolRegistry, ToolResult, tool
 from linch.types import ToolUseBlock
+from tests.support.scheduler import scheduler_agent, scheduler_session
 
 
 def _agent(registry: ToolRegistry, *, hooks=(), retry: RetryOptions | None = None):
-    return SimpleNamespace(
-        cwd=".",
+    return scheduler_agent(
+        registry,
         model="m",
-        tools=registry,
         permission_engine=PermissionEngine(mode="skip-dangerous"),
         max_tool_concurrency=1,
-        tool_concurrency=1,
+        hooks=hooks,
         tool_retry=retry,
-        hooks=list(hooks),
-        result_offload=None,
     )
 
 
 def _session():
-    return SimpleNamespace(
-        id="s",
-        store=None,
-        active_run_id="r",
-        tools_override=None,
-        current_turn_allowed_tools=None,
-        run_deps=None,
-        filesystem=None,
-    )
+    return scheduler_session(session_id="s", run_id="r")
 
 
 async def _run(tool_obj, *, hooks=(), retry: RetryOptions | None = None):

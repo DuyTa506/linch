@@ -247,7 +247,7 @@ async def test_timeout_wrapper_preserves_inner_timeout_error() -> None:
     pipe.on_execute(timeout_wrapper(1))
 
     async def inner_timeout() -> str:
-        raise asyncio.TimeoutError("inner deadline")
+        raise TimeoutError("inner deadline")
 
     with pytest.raises(asyncio.TimeoutError, match="inner deadline"):
         await pipe.run_execute(_exec(), inner_timeout)
@@ -355,18 +355,8 @@ class _FakeCall:
 
 
 @pytest.mark.asyncio
-async def test_dispatch_execute_passthrough_without_pipeline() -> None:
-    from linch.scheduler import _dispatch_execute
-
-    tool = _FakeTool()
-    call = _FakeCall(tool)
-    agent = type("A", (), {"tool_pipeline": None})()
-    coro = _dispatch_execute(agent, call, tool, {"v": 1}, ctx=None, signal=None)  # type: ignore[arg-type]
-    assert await coro == "ran:1"
-
-
-@pytest.mark.asyncio
-async def test_dispatch_execute_runs_pipeline_wrapper() -> None:
+@pytest.mark.parametrize("with_pipeline", [False, True], ids=["passthrough", "wrapped"])
+async def test_dispatch_execute_uses_optional_pipeline(with_pipeline: bool) -> None:
     from linch.scheduler import _dispatch_execute
 
     seen: list[str] = []
@@ -376,13 +366,14 @@ async def test_dispatch_execute_runs_pipeline_wrapper() -> None:
         seen.append(execution.tool_name)
         return await next()
 
-    pipe.on_execute(wrapper)
+    if with_pipeline:
+        pipe.on_execute(wrapper)
     tool = _FakeTool()
     call = _FakeCall(tool)
-    agent = type("A", (), {"tool_pipeline": pipe})()
-    coro = _dispatch_execute(agent, call, tool, {"v": 2}, ctx=None, signal=None)  # type: ignore[arg-type]
-    assert await coro == "ran:2"
-    assert seen == ["Echo"]
+    agent = type("A", (), {"tool_pipeline": pipe if with_pipeline else None})()
+    coro = _dispatch_execute(agent, call, tool, {"v": 1}, ctx=None, signal=None)  # type: ignore[arg-type]
+    assert await coro == "ran:1"
+    assert seen == (["Echo"] if with_pipeline else [])
 
 
 @pytest.mark.asyncio
@@ -504,6 +495,7 @@ async def test_dispatch_allows_signal_and_result_mutation() -> None:
 async def test_pipeline_cannot_mutate_away_v2_normalization_boundary() -> None:
     from types import SimpleNamespace
 
+    from linch import Context
     from linch.abort import AbortContext
     from linch.events import ToolCallEndEvent
     from linch.permissions import PermissionEngine
@@ -537,6 +529,7 @@ async def test_pipeline_cannot_mutate_away_v2_normalization_boundary() -> None:
         hooks=[],
         result_offload=None,
         tool_pipeline=pipeline,
+        context=Context(),
     )
     session = SimpleNamespace(
         id="s",

@@ -14,6 +14,9 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any
 
+from tests.support.agents import make_agent
+from tests.support.tools import StubTool, tool_registry
+
 
 class ScriptProvider:
     id = "script"
@@ -50,56 +53,24 @@ def _last_is_tool_result(messages: list[Any]) -> bool:
     return any(getattr(block, "type", None) == "tool_result" for block in messages[-1].content)
 
 
-class RecordingTool:
-    description = "Records the idempotency key seen at execution."
-    input_schema = {"type": "object", "properties": {}}
-    parallel = False
+def _recording_tool(name: str, seen: list[str]) -> StubTool:
+    def record(_input: dict[str, Any], ctx: Any) -> None:
+        seen.append(ctx.idempotency_key)
 
-    def __init__(self, name: str, seen: list[str]) -> None:
-        self.name = name
-        self.seen = seen
-        self.scope: Any = "read"
-
-    def validate(self, raw: dict[str, Any]) -> dict[str, Any]:
-        return raw
-
-    def summarize(self, input: dict[str, Any]) -> str:
-        return self.name
-
-    async def execute(self, input: dict[str, Any], ctx: Any):
-        from linch.tools import ToolResult
-
-        self.seen.append(ctx.idempotency_key)
-        return ToolResult(content=self.name)
-
-
-def _registry(*tools: Any):
-    from linch.tools import ToolRegistry
-
-    registry = ToolRegistry()
-    for tool in tools:
-        registry.register(tool)
-    return registry
+    return StubTool(name, on_execute=record)
 
 
 def _agent(provider: Any, tools: Any, run_store: Any = None, **kwargs: Any):
-    from linch import Agent
     from linch.config import FeatureFlags
-    from linch.run_store import InMemoryRunStore
-    from linch.sessions import InMemorySessionStore
 
-    return Agent(
-        model="gpt-5",
-        provider=provider,
-        tools=tools,
-        permissions={"mode": "skip-dangerous"},
-        session_store=InMemorySessionStore(),
-        run_store=run_store if run_store is not None else InMemoryRunStore(),
-        features=FeatureFlags(skills=False, subagents=False, mcp=False),
-        result_offload=None,
-        cwd=".",
+    options = {
+        "features": FeatureFlags(skills=False, subagents=False, mcp=False),
+        "result_offload": None,
         **kwargs,
-    )
+    }
+    if run_store is not None:
+        options["run_store"] = run_store
+    return make_agent(provider, tools=tools, model="gpt-5", **options)
 
 
 async def _run(session: Any, prompt: str = "go") -> tuple[str, list[Any]]:
@@ -114,7 +85,7 @@ async def _run(session: Any, prompt: str = "go") -> tuple[str, list[Any]]:
 
 async def test_idempotency_key_is_run_id_and_tool_use_id() -> None:
     seen: list[str] = []
-    agent = _agent(ScriptProvider(["Do"]), _registry(RecordingTool("Do", seen)))
+    agent = _agent(ScriptProvider(["Do"]), tool_registry(_recording_tool("Do", seen)))
     session = await agent.session(id="s1")
 
     run_id, events = await _run(session)
@@ -129,7 +100,7 @@ async def test_idempotency_key_is_run_scoped_and_call_scoped() -> None:
     seen: list[str] = []
     agent = _agent(
         ScriptProvider(["A", "B"]),
-        _registry(RecordingTool("A", seen), RecordingTool("B", seen)),
+        tool_registry(_recording_tool("A", seen), _recording_tool("B", seen)),
     )
 
     run1, _ = await _run(await agent.session(id="s1"))
@@ -149,8 +120,9 @@ async def test_idempotency_key_stable_across_resume() -> None:
     """Crash after the ``tool_executing`` checkpoint but before the start event is
     durable, then resume: the re-executed tool must see a key built from the
     *original* run's identity (run_id + tool_use_id), not a fresh run."""
+    from linch.config import FeatureFlags
     from linch.run_store import InMemoryRunStore
-    from linch.sessions import InMemorySessionStore
+    from tests.support.stores import memory_session_store
 
     class DropStartStore(InMemoryRunStore):
         def __init__(self) -> None:
@@ -162,24 +134,19 @@ async def test_idempotency_key_stable_across_resume() -> None:
                 return 0
             return await super().append_event(run_id, event)
 
-    session_store = InMemorySessionStore()
+    session_store = memory_session_store()
     run_store = DropStartStore()
     seen: list[str] = []
 
     def build_agent() -> Any:
-        from linch import Agent
-        from linch.config import FeatureFlags
-
-        return Agent(
+        return make_agent(
+            ScriptProvider(["Do"]),
             model="gpt-5",
-            provider=ScriptProvider(["Do"]),
-            tools=_registry(RecordingTool("Do", seen)),
-            permissions={"mode": "skip-dangerous"},
+            tools=tool_registry(_recording_tool("Do", seen)),
             session_store=session_store,
             run_store=run_store,
             features=FeatureFlags(skills=False, subagents=False, mcp=False),
             result_offload=None,
-            cwd=".",
         )
 
     # Run until the tool starts, then "crash" (stop consuming) before it executes.

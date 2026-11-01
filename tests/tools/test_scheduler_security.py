@@ -21,6 +21,7 @@ from linch.scheduler import ResolvedCall, _execute_one, execute_tool_calls
 from linch.tools import ToolContext, ToolRegistry, ToolResult, ToolScope
 from linch.tools.builtin import BashTool
 from linch.types import ToolUseBlock
+from tests.support.scheduler import scheduler_agent, scheduler_session
 
 
 class _RecordingTool:
@@ -55,33 +56,19 @@ def _agent(
     enable_background_tools: bool = False,
 ) -> SimpleNamespace:
     registry = ToolRegistry()
-    registry.add(tool)
-    return SimpleNamespace(
-        cwd="/project",
-        tools=registry,
+    registry.register(tool)
+    return scheduler_agent(
+        registry,
         permission_engine=permission_engine,
-        max_tool_concurrency=4,
-        tool_concurrency=4,
         hooks=hooks or [],
         run_store=run_store,
         enable_background_tools=enable_background_tools,
+        cwd="/project",
     )
 
 
 def _session(**overrides: Any) -> SimpleNamespace:
-    values = {
-        "id": "s1",
-        "store": None,
-        "active_run_id": "run-origin",
-        "tools_override": None,
-        "current_turn_allowed_tools": None,
-        "current_turn_permission_decisions": {},
-        "background_tasks": [],
-        "pending_notifications": [],
-        "pending_child_events": [],
-    }
-    values.update(overrides)
-    return SimpleNamespace(**values)
+    return scheduler_session(run_id="run-origin", **overrides)
 
 
 async def _events(agent: Any, session: Any, block: ToolUseBlock) -> list[Any]:
@@ -155,6 +142,7 @@ async def test_checkpoint_restored_tool_allowlist_beats_stored_permission_replay
         current_turn_allowed_tools=["Read"],
         current_turn_permission_decisions={
             permission_decision_key("Bash", input): {
+                "schema_version": 3,
                 "decision": "allow",
                 "reason": None,
                 "updated_input": None,
@@ -196,7 +184,7 @@ async def test_permission_callback_updated_input_is_rejected() -> None:
     assert "updatedInput is unsupported" in (decision.reason or "")
 
 
-async def test_legacy_updated_input_decision_is_not_replayed() -> None:
+async def test_current_updated_input_decision_is_not_replayed() -> None:
     tool = _RecordingTool()
     callback_calls = 0
 
@@ -209,6 +197,7 @@ async def test_legacy_updated_input_decision_is_not_replayed() -> None:
     session = _session(
         current_turn_permission_decisions={
             permission_decision_key("Write", final_input): {
+                "schema_version": 3,
                 "decision": "allow",
                 "reason": None,
                 "updated_input": {"file_path": "other.txt"},
@@ -355,8 +344,8 @@ async def test_parallel_later_tool_progress_is_not_hidden_by_slow_first() -> Non
     first = ParallelTool("First", False)
     second = ParallelTool("Second", True)
     registry = ToolRegistry()
-    registry.add(first)
-    registry.add(second)
+    registry.register(first)
+    registry.register(second)
     agent = _agent(first, PermissionEngine(mode="skip-dangerous"))
     agent.tools = registry
     iterator = execute_tool_calls(
@@ -433,8 +422,8 @@ async def test_closing_parallel_event_stream_cancels_all_started_tools() -> None
     first = BlockingTool("First")
     second = BlockingTool("Second")
     registry = ToolRegistry()
-    registry.add(first)
-    registry.add(second)
+    registry.register(first)
+    registry.register(second)
     agent = _agent(first, PermissionEngine(mode="skip-dangerous"))
     agent.tools = registry
     iterator = execute_tool_calls(
@@ -539,3 +528,29 @@ async def test_background_audit_failure_logs_origin_and_worker(caplog: Any) -> N
     assert "origin_run_id=run-origin" in record.message
     assert "worker_id=bgtool_" in record.message
     assert record.exc_info is not None
+
+
+def test_legacy_parallel_safe_does_not_authorize_parallel_execution() -> None:
+    from linch.scheduler import _tool_parallel
+
+    tool = SimpleNamespace(scope="read", parallel_safe=True)
+    call = ResolvedCall(
+        id="legacy-call",
+        block=ToolUseBlock(id="legacy-call", name="LegacyRead", input={}),
+        input={},
+        tool=tool,
+        summary="legacy read",
+        is_immediate_error=False,
+    )
+    assert not _tool_parallel(call)
+
+
+def test_permission_writer_records_only_current_decision_fields() -> None:
+    from linch.permissions.engine import PermissionDecision
+    from linch.permissions.keys import permission_decision_to_dict
+
+    assert permission_decision_to_dict(PermissionDecision(decision="allow", reason="approved")) == {
+        "schema_version": 3,
+        "decision": "allow",
+        "reason": "approved",
+    }

@@ -26,25 +26,29 @@ def _make_ctx(tmp_path):
     )
 
 
-# ---------------------------------------------------------------------------
-# BUG 1 — Grep malformed regex must not be a silent success
-# ---------------------------------------------------------------------------
-
-
+@pytest.mark.parametrize("use_rg", [False, True])
 @pytest.mark.asyncio
-async def test_grep_malformed_regex_fallback_reports_error(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
+async def test_grep_malformed_regex_reports_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, use_rg: bool
 ) -> None:
-    # Force the pure-Python fallback path (rg disabled).
-    monkeypatch.setattr(builtin_mod, "_RG_PATH", None)
+    if use_rg:
+        monkeypatch.setattr(builtin_mod, "_RG_PATH", "/usr/bin/rg")
+
+        async def fake_rg(args, search_root, timeout=120.0):
+            return "", 2, "regex parse error"
+
+        monkeypatch.setattr(builtin_mod, "_run_grep_via_rg_async", fake_rg)
+    else:
+        monkeypatch.setattr(builtin_mod, "_RG_PATH", None)
     (tmp_path / "a.txt").write_text("hello\n")
 
     tool = GrepTool()
-    ctx = _make_ctx(tmp_path)
-    validated = tool.validate({"pattern": "("})
-    result = await tool.execute(validated, ctx)
+    result = await tool.execute(tool.validate({"pattern": "("}), _make_ctx(tmp_path))
 
-    assert "Invalid regex" in result.content
+    if use_rg:
+        assert result.is_error is True
+    else:
+        assert "Invalid regex" in result.content
     assert result.content != "No matches found."
 
 
@@ -62,41 +66,20 @@ async def test_grep_malformed_regex_rg_reports_error(tmp_path) -> None:
     assert result.content != "No matches found."
 
 
+@pytest.mark.parametrize("use_rg", [False, True])
 @pytest.mark.asyncio
-async def test_grep_rg_error_exit_code_surfaces_error(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
+async def test_grep_no_match_is_consistently_non_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, use_rg: bool
 ) -> None:
-    """rg exit code 2 (error) must not be reported as a silent 'No matches found.'.
+    if use_rg:
+        monkeypatch.setattr(builtin_mod, "_RG_PATH", "/usr/bin/rg")
 
-    Drives the rg path without requiring rg on PATH by faking the rg runner.
-    """
-    monkeypatch.setattr(builtin_mod, "_RG_PATH", "/usr/bin/rg")
+        async def fake_rg(args, search_root, timeout=120.0):
+            return "", 1, ""
 
-    async def fake_rg(args, search_root, timeout=120.0):
-        # rg returncode 2 == error (e.g. malformed regex), empty stdout.
-        return "", 2, "regex parse error"
-
-    monkeypatch.setattr(builtin_mod, "_run_grep_via_rg_async", fake_rg)
-    (tmp_path / "a.txt").write_text("hello\n")
-
-    tool = GrepTool()
-    ctx = _make_ctx(tmp_path)
-    validated = tool.validate({"pattern": "("})
-    result = await tool.execute(validated, ctx)
-
-    assert result.is_error is True
-    assert result.content != "No matches found."
-
-
-@pytest.mark.asyncio
-async def test_grep_rg_exit_code_1_is_no_match(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    """rg exit code 1 (no match) must still map to a non-error 'No matches found.'."""
-    monkeypatch.setattr(builtin_mod, "_RG_PATH", "/usr/bin/rg")
-
-    async def fake_rg(args, search_root, timeout=120.0):
-        return "", 1, ""
-
-    monkeypatch.setattr(builtin_mod, "_run_grep_via_rg_async", fake_rg)
+        monkeypatch.setattr(builtin_mod, "_run_grep_via_rg_async", fake_rg)
+    else:
+        monkeypatch.setattr(builtin_mod, "_RG_PATH", None)
     (tmp_path / "a.txt").write_text("hello\n")
 
     tool = GrepTool()
@@ -104,93 +87,47 @@ async def test_grep_rg_exit_code_1_is_no_match(monkeypatch: pytest.MonkeyPatch, 
     validated = tool.validate({"pattern": "zzz"})
     result = await tool.execute(validated, ctx)
 
-    assert result.is_error is False
-    assert result.content == "No matches found."
-
-
-@pytest.mark.asyncio
-async def test_grep_no_match_still_reports_no_matches(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:
-    """The normal no-match path must remain a non-error 'No matches found.'."""
-    monkeypatch.setattr(builtin_mod, "_RG_PATH", None)
-    (tmp_path / "a.txt").write_text("hello\n")
-
-    tool = GrepTool()
-    ctx = _make_ctx(tmp_path)
-    validated = tool.validate({"pattern": "zzz-nope"})
-    result = await tool.execute(validated, ctx)
-
     assert result.content == "No matches found."
     assert result.is_error is False
 
 
-# ---------------------------------------------------------------------------
-# BUG 2 — Glob must honour explicitly-requested dotfile patterns
-# ---------------------------------------------------------------------------
-
-
+@pytest.mark.parametrize(
+    ("pattern", "files", "expected", "absent"),
+    [
+        (
+            ".env*",
+            [(".env", "SECRET=1\n"), (".env.local", "SECRET=2\n")],
+            (".env", ".env.local"),
+            (),
+        ),
+        (".github/**/*.yml", [(".github/workflows/ci.yml", "name: ci\n")], ("ci.yml",), ()),
+        (
+            "*.txt",
+            [("visible.txt", "x\n"), (".hidden.txt", "y\n")],
+            ("visible.txt",),
+            (".hidden.txt",),
+        ),
+    ],
+)
 @pytest.mark.asyncio
-async def test_glob_dotfile_pattern_returns_dotfiles(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
+async def test_glob_patterns_respect_dotfile_rules(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, pattern, files, expected, absent
 ) -> None:
     monkeypatch.setattr(builtin_mod, "_RG_PATH", None)
-    (tmp_path / ".env").write_text("SECRET=1\n")
-    (tmp_path / ".env.local").write_text("SECRET=2\n")
+    for relative, content in files:
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
 
     tool = GlobTool()
     ctx = _make_ctx(tmp_path)
-    validated = tool.validate({"glob_pattern": ".env*"})
+    validated = tool.validate({"glob_pattern": pattern})
     result = await tool.execute(validated, ctx)
 
-    assert ".env" in result.content
-    assert ".env.local" in result.content
-
-
-@pytest.mark.asyncio
-async def test_glob_dotdir_pattern_returns_dotdir_files(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:
-    monkeypatch.setattr(builtin_mod, "_RG_PATH", None)
-    gh = tmp_path / ".github" / "workflows"
-    gh.mkdir(parents=True)
-    (gh / "ci.yml").write_text("name: ci\n")
-
-    tool = GlobTool()
-    ctx = _make_ctx(tmp_path)
-    validated = tool.validate({"glob_pattern": ".github/**/*.yml"})
-    result = await tool.execute(validated, ctx)
-
-    assert "ci.yml" in result.content
-
-
-@pytest.mark.asyncio
-async def test_glob_normal_pattern_still_hides_dotfiles(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:
-    monkeypatch.setattr(builtin_mod, "_RG_PATH", None)
-    (tmp_path / "visible.txt").write_text("x\n")
-    (tmp_path / ".hidden.txt").write_text("y\n")
-
-    tool = GlobTool()
-    ctx = _make_ctx(tmp_path)
-    validated = tool.validate({"glob_pattern": "*.txt"})
-    result = await tool.execute(validated, ctx)
-
-    assert "visible.txt" in result.content
-    assert ".hidden.txt" not in result.content
-
-
-# ---------------------------------------------------------------------------
-# BUG 3 — gitignore matching must respect path-segment boundaries
-# ---------------------------------------------------------------------------
-
-
-def test_matches_gitignore_respects_segment_boundary() -> None:
-    entries = ["build"]
-    assert builtin_mod._matches_gitignore("build", entries) is True
-    assert builtin_mod._matches_gitignore("build/x.py", entries) is True
-    assert builtin_mod._matches_gitignore("builder/x.py", entries) is False
+    for text in expected:
+        assert text in result.content
+    for text in absent:
+        assert text not in result.content
 
 
 @pytest.mark.asyncio

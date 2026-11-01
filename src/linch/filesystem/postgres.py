@@ -1,7 +1,6 @@
 """PostgreSQL-backed :class:`~linch.filesystem.backend.FileBackend`.
 
-Use instead of :class:`~linch.filesystem.backend.SqliteFileBackend` when
-you need cross-session or cross-process persistence (e.g. shared offload
+Use for cross-session or cross-process persistence (e.g. shared offload
 storage on multi-worker deployments).
 
 Install::
@@ -26,7 +25,7 @@ import asyncio
 import time
 from typing import Any
 
-from ..storage._pg import _import_asyncpg
+from ..storage._pg import _import_asyncpg, close_pool, ensure_pool
 from .backend import _slice_lines, normalize_path
 
 _SCHEMA = """
@@ -47,9 +46,13 @@ class PostgresFileBackend:
 
     Args:
         dsn: PostgreSQL connection string.
-        pool: Pre-created asyncpg.Pool to reuse; when set, dsn is ignored.
+        pool: Pre-created asyncpg.Pool to reuse; when set, dsn is ignored. The
+            pool is closed by :meth:`close`.
         min_size: Minimum pool connections.
         max_size: Maximum pool connections.
+
+    Raises:
+        ModuleNotFoundError: If the optional ``asyncpg`` dependency is unavailable.
     """
 
     def __init__(
@@ -60,6 +63,17 @@ class PostgresFileBackend:
         min_size: int = 1,
         max_size: int = 10,
     ) -> None:
+        """Create a lazily initialized Postgres file backend.
+
+        Args:
+            dsn: PostgreSQL connection string, ignored when ``pool`` is supplied.
+            pool: Optional pre-created asyncpg pool. It is closed by :meth:`close`.
+            min_size: Minimum size for a pool created from ``dsn``.
+            max_size: Maximum size for a pool created from ``dsn``.
+
+        Raises:
+            ModuleNotFoundError: If ``asyncpg`` is not installed.
+        """
         _import_asyncpg()
         self._dsn = dsn
         self._pool: Any = pool
@@ -69,32 +83,26 @@ class PostgresFileBackend:
         self._init_lock = asyncio.Lock()
 
     async def _ensure(self) -> Any:
-        if self._initialized:
-            return self._pool
-        async with self._init_lock:
-            if self._initialized:
-                return self._pool
-            asyncpg = _import_asyncpg()
-            if self._pool is None:
-                self._pool = await asyncpg.create_pool(
-                    self._dsn,
-                    min_size=self._min_size,
-                    max_size=self._max_size,
-                )
-            try:
-                async with self._pool.acquire() as conn:
-                    async with conn.transaction():
-                        await conn.execute(_SCHEMA)
-            except Exception:
-                pool, self._pool = self._pool, None
-                await pool.close()
-                raise
-            self._initialized = True
-        return self._pool
+        return await ensure_pool(
+            self, _SCHEMA, _import_asyncpg, schema_key="filesystem", tables=("agentkit_files",)
+        )
 
     # ── FileBackend protocol ─────────────────────────────────────────────────
 
     async def read(self, path: str, *, offset: int = 0, limit: int | None = None) -> str:
+        """Read a persisted file, optionally returning a line window.
+
+        Args:
+            path: Virtual path to read.
+            offset: 1-indexed line to start at; ``0`` and ``1`` start at the first line.
+            limit: Maximum number of lines; non-positive or ``None`` reads to the end.
+
+        Returns:
+            The selected file contents.
+
+        Raises:
+            FileNotFoundError: If ``path`` is not stored.
+        """
         p = normalize_path(path)
         pool = await self._ensure()
         async with pool.acquire() as conn:
@@ -104,6 +112,12 @@ class PostgresFileBackend:
         return _slice_lines(row["content"], offset, limit)
 
     async def write(self, path: str, content: str) -> None:
+        """Create or overwrite a persisted file.
+
+        Args:
+            path: Virtual path to create or replace.
+            content: Complete text to store.
+        """
         p = normalize_path(path)
         pool = await self._ensure()
         async with pool.acquire() as conn:
@@ -121,6 +135,14 @@ class PostgresFileBackend:
             )
 
     async def ls(self, prefix: str = "") -> list[str]:
+        """List persisted paths in sorted order.
+
+        Args:
+            prefix: Optional virtual path prefix; an empty prefix lists all files.
+
+        Returns:
+            Sorted paths matching ``prefix``.
+        """
         pool = await self._ensure()
         async with pool.acquire() as conn:
             if not prefix:
@@ -135,6 +157,21 @@ class PostgresFileBackend:
             return [r["path"] for r in rows]
 
     async def edit(self, path: str, old: str, new: str, *, replace_all: bool = False) -> int:
+        """Replace exact text in a persisted file.
+
+        Args:
+            path: Virtual path whose contents should be edited.
+            old: Exact text to find.
+            new: Replacement text.
+            replace_all: Whether to replace every occurrence instead of requiring a unique match.
+
+        Returns:
+            Number of replacements made.
+
+        Raises:
+            FileNotFoundError: If ``path`` is not stored.
+            ValueError: If ``old`` is absent or is not unique while ``replace_all`` is false.
+        """
         p = normalize_path(path)
         pool = await self._ensure()
         async with pool.acquire() as conn:
@@ -161,6 +198,14 @@ class PostgresFileBackend:
         return count if replace_all else 1
 
     async def exists(self, path: str) -> bool:
+        """Check whether a persisted file exists.
+
+        Args:
+            path: Virtual path to check.
+
+        Returns:
+            ``True`` when a row exists for ``path``; otherwise ``False``.
+        """
         p = normalize_path(path)
         pool = await self._ensure()
         async with pool.acquire() as conn:
@@ -168,6 +213,11 @@ class PostgresFileBackend:
         return row is not None
 
     async def delete(self, path: str) -> None:
+        """Delete a persisted file if present.
+
+        Args:
+            path: Virtual path to remove.
+        """
         p = normalize_path(path)
         pool = await self._ensure()
         async with pool.acquire() as conn:
@@ -176,6 +226,9 @@ class PostgresFileBackend:
     # ── lifecycle ────────────────────────────────────────────────────────────
 
     async def close(self) -> None:
-        if self._pool is not None:
-            await self._pool.close()
-            self._pool = None
+        """Close the backend's Postgres pool.
+
+        A pool supplied to the constructor is closed as well as one created from
+        the DSN.
+        """
+        await close_pool(self)

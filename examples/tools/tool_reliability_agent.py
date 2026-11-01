@@ -196,7 +196,7 @@ async def _run(calls: list[ToolUseBlock], agent: SimpleNamespace) -> None:
 async def demo_timeout() -> None:
     print("── 1. Timeout: agent_timeout=50ms, tool sleeps 200ms ──────────────")
     registry = ToolRegistry()
-    registry.add(SlowReadTool("SlowRead", delay_ms=200))
+    registry.register(SlowReadTool("SlowRead", delay_ms=200))
     agent = _make_agent(registry, tool_timeout_ms=50)
     await _run([ToolUseBlock(id="a", name="SlowRead", input={"key": "alpha"})], agent)
 
@@ -204,7 +204,7 @@ async def demo_timeout() -> None:
 async def demo_opt_out() -> None:
     print("\n── 2. Opt-out: execution_timeout_ms=0 ignores agent deadline ──────")
     registry = ToolRegistry()
-    registry.add(ManagedTimeoutTool())
+    registry.register(ManagedTimeoutTool())
     # agent_timeout=50ms but ManagedTimeoutTool declares execution_timeout_ms=0
     agent = _make_agent(registry, tool_timeout_ms=50)
     await _run([ToolUseBlock(id="b", name="ManagedTimeout", input={"key": "beta"})], agent)
@@ -213,8 +213,8 @@ async def demo_opt_out() -> None:
 async def demo_parallel_timeout() -> None:
     print("\n── 3. Parallel safety: sibling tool succeeds when other times out ──")
     registry = ToolRegistry()
-    registry.add(SlowReadTool("Slow", delay_ms=200))
-    registry.add(SlowReadTool("Fast", delay_ms=10))
+    registry.register(SlowReadTool("Slow", delay_ms=200))
+    registry.register(SlowReadTool("Fast", delay_ms=10))
     agent = _make_agent(registry, tool_timeout_ms=50)
     calls = [
         ToolUseBlock(id="c1", name="Slow", input={"key": "slow"}),
@@ -227,7 +227,7 @@ async def demo_retry_read() -> None:
     print("\n── 4. Retry: read tool fails 2×, succeeds on attempt 3 ────────────")
     flaky = FlakySearchTool(fail_count=2)
     registry = ToolRegistry()
-    registry.add(flaky)
+    registry.register(flaky)
     agent = _make_agent(registry, tool_retry=RetryOptions(max_attempts=3, base_delay_ms=5))
     await _run([ToolUseBlock(id="d", name="FlakySearch", input={"query": "resilience"})], agent)
     print(f"  → total attempts: {flaky.call_count}")
@@ -237,7 +237,7 @@ async def demo_retry_exhausted() -> None:
     print("\n── 5. Retry exhausted: fail_count > max_attempts ───────────────────")
     flaky = FlakySearchTool(fail_count=10)
     registry = ToolRegistry()
-    registry.add(flaky)
+    registry.register(flaky)
     agent = _make_agent(registry, tool_retry=RetryOptions(max_attempts=3, base_delay_ms=5))
     await _run([ToolUseBlock(id="e", name="FlakySearch", input={"query": "hopeless"})], agent)
     print(f"  → total attempts: {flaky.call_count}")
@@ -247,7 +247,7 @@ async def demo_write_retry_opt_in() -> None:
     print("\n── 6. Write retry opt-in: retryable=True on write tool ─────────────")
     write_tool = FlakyWriteTool("FlakyWrite", fail_count=1)
     registry = ToolRegistry()
-    registry.add(write_tool)
+    registry.register(write_tool)
     agent = _make_agent(registry, tool_retry=RetryOptions(max_attempts=3, base_delay_ms=5))
     await _run([ToolUseBlock(id="f", name="FlakyWrite", input={"data": "payload"})], agent)
     print(f"  → total attempts: {write_tool.call_count}")

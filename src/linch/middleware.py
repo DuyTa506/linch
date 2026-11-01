@@ -1,14 +1,25 @@
 from __future__ import annotations
 
-import inspect
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
-
-from .tools import ToolResult
 
 
 @dataclass(frozen=True, slots=True)
 class MiddlewareContext:
+    """Provide run and tool identity to a tool-call middleware.
+
+    Attributes:
+        deps: Run-scoped dependency object supplied to the tool.
+
+    Args:
+        session_id: Session owning the tool call.
+        run_id: Run executing the tool call.
+        turn_index: Current turn number, when known.
+        tool_use_id: Provider identifier for the tool call.
+        tool_name: Registered tool name.
+        deps: Run-scoped dependencies exposed to the tool.
+    """
+
     session_id: str
     run_id: str
     turn_index: int | None
@@ -16,145 +27,58 @@ class MiddlewareContext:
     tool_name: str
     deps: Any = None
 
-    @property
-    def sessionId(self) -> str:
-        return self.session_id
-
-    @property
-    def runId(self) -> str:
-        return self.run_id
-
-    @property
-    def turnIndex(self) -> int | None:
-        return self.turn_index
-
-    @property
-    def toolUseId(self) -> str:
-        return self.tool_use_id
-
-    @property
-    def toolName(self) -> str:
-        return self.tool_name
-
 
 @dataclass(frozen=True, slots=True)
 class ToolCallMiddlewareInput:
+    """Describe the input presented to tool-call middleware.
+
+    Attributes:
+        input: Mutable-by-copy JSON-compatible arguments that middleware may
+            validate or rewrite.
+
+    Args:
+        tool_use_id: Provider identifier for the tool call.
+        tool_name: Registered tool name.
+        input: JSON-compatible arguments presented to the tool.
+        summary: Human-readable invocation summary.
+    """
+
     tool_use_id: str
     tool_name: str
     input: dict[str, Any]
     summary: str = ""
 
-    @property
-    def toolUseId(self) -> str:
-        return self.tool_use_id
-
-    @property
-    def toolName(self) -> str:
-        return self.tool_name
-
 
 @dataclass(frozen=True, slots=True)
 class ToolCallMiddlewareResult:
+    """Carry middleware input rewrites or a veto error.
+
+    Attributes:
+        input: Replacement arguments; ``None`` leaves the original input in
+            place when no error is returned.
+        error: Non-empty error text vetoes execution.
+
+    Args:
+        input: Replacement tool input, when middleware rewrites the call.
+        error: Error message that vetoes the call, when present.
+    """
+
     input: dict[str, Any] | None = None
     error: str | None = None
 
 
-class AgentMiddleware:
-    """Tool middleware may implement either hook."""
-
-    def before_tool_call(
-        self,
-        call: ToolCallMiddlewareInput,
-        ctx: MiddlewareContext,
-    ) -> ToolCallMiddlewareResult | None:
-        return None
-
-    def after_tool_result(
-        self,
-        call: ToolCallMiddlewareInput,
-        result: ToolResult,
-        ctx: MiddlewareContext,
-    ) -> ToolResult:
-        return result
-
-
-@dataclass(frozen=True, slots=True)
-class BeforeToolCallOutcome:
-    call: ToolCallMiddlewareInput
-    error: str | None = None
-
-
 def normalize_middleware(raw: Any) -> list[Any]:
+    """Normalize optional middleware configuration to a list.
+
+    Args:
+        raw: A middleware object, list or tuple of objects, or ``None``.
+
+    Returns:
+        A new list containing the configured middleware objects.
+    """
+
     if raw is None:
         return []
     if isinstance(raw, (list, tuple)):
         return list(raw)
     return [raw]
-
-
-async def _maybe_await(value: Any) -> Any:
-    if inspect.isawaitable(value):
-        return await value
-    return value
-
-
-async def dispatch_before_tool_call(
-    middleware: list[Any],
-    call: ToolCallMiddlewareInput,
-    ctx: MiddlewareContext,
-) -> BeforeToolCallOutcome:
-    current = call
-    for item in middleware:
-        hook = getattr(item, "before_tool_call", None)
-        if hook is None:
-            continue
-        try:
-            raw = await _maybe_await(hook(current, ctx))
-        except Exception as exc:
-            return BeforeToolCallOutcome(
-                call=current,
-                error=f"Middleware before_tool_call failed: {exc}",
-            )
-        if raw is None:
-            continue
-        if not isinstance(raw, ToolCallMiddlewareResult):
-            return BeforeToolCallOutcome(
-                call=current,
-                error=(
-                    "Middleware before_tool_call failed: expected ToolCallMiddlewareResult or None"
-                ),
-            )
-        if raw.input is not None:
-            current = replace(current, input=raw.input)
-        if raw.error:
-            return BeforeToolCallOutcome(call=current, error=raw.error)
-    return BeforeToolCallOutcome(call=current)
-
-
-async def dispatch_after_tool_result(
-    middleware: list[Any],
-    call: ToolCallMiddlewareInput,
-    result: ToolResult,
-    ctx: MiddlewareContext,
-) -> ToolResult:
-    current = result
-    for item in middleware:
-        hook = getattr(item, "after_tool_result", None)
-        if hook is None:
-            continue
-        try:
-            raw = await _maybe_await(hook(call, current, ctx))
-        except Exception as exc:
-            return ToolResult(
-                content=f"Middleware after_tool_result failed: {exc}",
-                is_error=True,
-                duration_ms=current.duration_ms,
-            )
-        if not isinstance(raw, ToolResult):
-            return ToolResult(
-                content="Middleware after_tool_result failed: expected ToolResult",
-                is_error=True,
-                duration_ms=current.duration_ms,
-            )
-        current = raw
-    return current

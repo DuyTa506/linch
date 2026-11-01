@@ -13,6 +13,19 @@ from .base import ResourceAccess, ToolContext, ToolResult, ToolScope, require_st
 
 
 def resolve_under(cwd: str, path_str: str) -> Path:
+    """Resolve a path while enforcing containment under the working directory.
+
+    Args:
+        cwd: Allowed working-directory root.
+        path_str: Relative or absolute path to resolve.
+
+    Returns:
+        Resolved path below ``cwd``.
+
+    Raises:
+        ToolExecutionError: If the path escapes ``cwd``.
+    """
+
     base = Path(cwd).resolve()
     target = (
         (base / path_str).resolve()
@@ -32,6 +45,8 @@ def resolve_under(cwd: str, path_str: str) -> Path:
 
 
 class ReadTool:
+    """Read UTF-8 text from a workspace file."""
+
     name = "Read"
     description = "Read a UTF-8 text file from the workspace."
     input_schema = {
@@ -47,6 +62,18 @@ class ReadTool:
     parallel: bool = True
 
     def validate(self, raw: dict[str, object]) -> dict[str, object]:
+        """Validate a read path and optional line window.
+
+        Args:
+            raw: Provider-supplied read request.
+
+        Returns:
+            Normalized read request.
+
+        Raises:
+            ValueError: If the path is missing or empty.
+        """
+
         file_path = raw.get("file_path")
         if file_path is None:
             # Legacy alias.
@@ -61,6 +88,19 @@ class ReadTool:
         return result
 
     async def execute(self, input: dict[str, object], ctx: ToolContext) -> ToolResult:
+        """Read and number selected lines from a workspace file.
+
+        Args:
+            input: Validated read request.
+            ctx: Runtime context containing the workspace root.
+
+        Returns:
+            Tool result containing numbered file text.
+
+        Raises:
+            ToolExecutionError: If the path cannot be resolved or read.
+        """
+
         path = resolve_under(ctx.cwd, str(input["file_path"]))
         try:
             text = path.read_text(encoding="utf-8")
@@ -82,9 +122,27 @@ class ReadTool:
         return ToolResult(content=text, summary=f"Read {path}")
 
     def summarize(self, input: dict[str, object]) -> str:
+        """Summarize a read call.
+
+        Args:
+            input: Validated read request.
+
+        Returns:
+            Human-readable summary.
+        """
+
         return f"Read {input['file_path']}"
 
     def resources(self, input: dict[str, object]) -> list[ResourceAccess]:
+        """Describe the file resource read by the call.
+
+        Args:
+            input: Validated read request.
+
+        Returns:
+            One read resource descriptor.
+        """
+
         return [ResourceAccess(resource=f"file:{input['file_path']}", mode="read")]
 
 
@@ -94,6 +152,8 @@ class ReadTool:
 
 
 class WriteTool:
+    """Write UTF-8 text to a workspace file."""
+
     name = "Write"
     description = "Write UTF-8 text to a workspace file, creating parent directories."
     input_schema = {
@@ -108,6 +168,18 @@ class WriteTool:
     parallel: bool = False
 
     def validate(self, raw: dict[str, object]) -> dict[str, object]:
+        """Validate a write path and text content.
+
+        Args:
+            raw: Provider-supplied write request.
+
+        Returns:
+            Normalized write request.
+
+        Raises:
+            ValueError: If the path or content is invalid.
+        """
+
         file_path = raw.get("file_path")
         if file_path is None:
             file_path = raw.get("path")
@@ -122,15 +194,46 @@ class WriteTool:
         }
 
     async def execute(self, input: dict[str, object], ctx: ToolContext) -> ToolResult:
+        """Write content to a workspace file, creating parent directories.
+
+        Args:
+            input: Validated write request.
+            ctx: Runtime workspace context.
+
+        Returns:
+            Tool result describing the written path.
+
+        Raises:
+            ToolExecutionError: If the path escapes the workspace.
+        """
+
         path = resolve_under(ctx.cwd, str(input["file_path"]))
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(str(input["content"]), encoding="utf-8")
         return ToolResult(content=f"Wrote {path}", summary=f"Wrote {path}")
 
     def summarize(self, input: dict[str, object]) -> str:
+        """Summarize a write call.
+
+        Args:
+            input: Validated write request.
+
+        Returns:
+            Human-readable summary.
+        """
+
         return f"Write {input['file_path']}"
 
     def resources(self, input: dict[str, object]) -> list[ResourceAccess]:
+        """Describe the file resource written by the call.
+
+        Args:
+            input: Validated write request.
+
+        Returns:
+            One write resource descriptor.
+        """
+
         return [ResourceAccess(resource=f"file:{input['file_path']}", mode="write")]
 
 
@@ -140,6 +243,8 @@ class WriteTool:
 
 
 class EditTool:
+    """Replace exact text in a workspace file."""
+
     name = "Edit"
     description = "Replace text in a workspace file with exact byte-for-byte match."
     input_schema = {
@@ -156,6 +261,18 @@ class EditTool:
     parallel: bool = False
 
     def validate(self, raw: dict[str, object]) -> dict[str, object]:
+        """Validate an exact replacement request.
+
+        Args:
+            raw: Provider-supplied edit request.
+
+        Returns:
+            Normalized edit request.
+
+        Raises:
+            ValueError: If path or replacement strings are invalid.
+        """
+
         file_path = raw.get("file_path")
         if file_path is None:
             file_path = raw.get("path")
@@ -179,6 +296,19 @@ class EditTool:
         }
 
     async def execute(self, input: dict[str, object], ctx: ToolContext) -> ToolResult:
+        """Apply an exact replacement after read-before-write checks.
+
+        Args:
+            input: Validated edit request.
+            ctx: Runtime workspace context.
+
+        Returns:
+            Tool result describing success or a policy error.
+
+        Raises:
+            ToolExecutionError: If the path escapes the workspace or old text is absent.
+        """
+
         path = resolve_under(ctx.cwd, str(input["file_path"]))
         if ctx.file_read_tracker is not None and not ctx.file_read_tracker.has_read(str(path)):
             return ToolResult(
@@ -208,9 +338,27 @@ class EditTool:
         return ToolResult(content=f"Edited {path}", summary=f"Edited {path}")
 
     def summarize(self, input: dict[str, object]) -> str:
+        """Summarize an edit call.
+
+        Args:
+            input: Validated edit request.
+
+        Returns:
+            Human-readable summary.
+        """
+
         return f"Edit {input['file_path']}"
 
     def resources(self, input: dict[str, object]) -> list[ResourceAccess]:
+        """Describe the file resource edited by the call.
+
+        Args:
+            input: Validated edit request.
+
+        Returns:
+            One write resource descriptor.
+        """
+
         return [ResourceAccess(resource=f"file:{input['file_path']}", mode="write")]
 
 
@@ -220,6 +368,8 @@ class EditTool:
 
 
 class BashTool:
+    """Run a shell command through the configured execution backend."""
+
     name = "Bash"
     description = "Run a shell command in the workspace. Default timeout 120s."
     input_schema = {
@@ -236,21 +386,31 @@ class BashTool:
     scope: ToolScope = "exec"
     parallel: bool = False
 
-    def __init__(self, *, backend: Any = None, execution: Any = None) -> None:
+    def __init__(self, *, execution: Any = None) -> None:
+        """Create a shell tool using an optional execution capability.
+
+        Args:
+            execution: Optional execution capability; defaults to local execution.
+        """
+
         from .execution import LocalBackend
 
-        if backend is not None and execution is not None:
-            raise ValueError("pass either backend= or execution= to BashTool, not both")
-        # An ExecutionBackend (capability seam) sources the shell half; an
-        # explicit legacy ``backend`` remains available for direct use.
-        if execution is not None:
-            self._backend: Any = execution.shell
-        elif backend is not None:
-            self._backend = backend
-        else:
-            self._backend = LocalBackend()
+        # An ExecutionBackend (capability seam) sources the shell half.
+        self._backend: Any = execution.shell if execution is not None else LocalBackend()
 
     def validate(self, raw: dict[str, object]) -> dict[str, object]:
+        """Validate a shell command and clamp its timeout.
+
+        Args:
+            raw: Provider-supplied command request.
+
+        Returns:
+            Normalized command and timeout.
+
+        Raises:
+            ValueError: If the command is missing or empty.
+        """
+
         timeout = _to_int(raw.get("timeout_ms", 120000), 120000)
         if timeout <= 0:
             timeout = 120000
@@ -260,6 +420,19 @@ class BashTool:
         }
 
     async def execute(self, input: dict[str, object], ctx: ToolContext) -> ToolResult:
+        """Run a command in the workspace.
+
+        Args:
+            input: Validated command request.
+            ctx: Runtime context containing cwd and cancellation signal.
+
+        Returns:
+            Tool result containing stdout and stderr.
+
+        Raises:
+            ToolExecutionError: If the command times out.
+        """
+
         timeout_s = _to_float(input.get("timeout_ms"), 120000.0) / 1000.0
         result = await self._backend.run(
             str(input["command"]),
@@ -277,6 +450,15 @@ class BashTool:
         )
 
     def summarize(self, input: dict[str, object]) -> str:
+        """Summarize a shell command.
+
+        Args:
+            input: Validated command request.
+
+        Returns:
+            Truncated command summary.
+        """
+
         return f"Bash: {str(input['command'])[:60]}"
 
 
@@ -525,6 +707,8 @@ def _glob_files(root: str, pattern: str) -> list[str]:
 
 
 class GrepTool:
+    """Search workspace file contents with regex matching."""
+
     name = "Grep"
     description = (
         "Searches file contents by regex. Uses ripgrep when available;"
@@ -591,6 +775,18 @@ class GrepTool:
     parallel: bool = True
 
     def validate(self, raw: dict[str, object]) -> dict[str, object]:
+        """Validate regex search options.
+
+        Args:
+            raw: Provider-supplied search request.
+
+        Returns:
+            Normalized search options.
+
+        Raises:
+            ValueError: If the pattern is missing or empty.
+        """
+
         pattern = require_str(raw, "pattern")
         if not pattern:
             raise ToolExecutionError("pattern must be non-empty")
@@ -615,14 +811,42 @@ class GrepTool:
         return result
 
     def summarize(self, input: dict[str, object]) -> str:
+        """Summarize a regex search.
+
+        Args:
+            input: Validated search options.
+
+        Returns:
+            Human-readable summary including output mode.
+        """
+
         mode = input.get("output_mode", "files_with_matches")
         return f"Grep {input['pattern']} ({mode})"
 
     def resources(self, input: dict[str, object]) -> list[ResourceAccess]:
+        """Describe the filesystem area searched.
+
+        Args:
+            input: Validated search options.
+
+        Returns:
+            One read resource descriptor.
+        """
+
         path = str(input.get("path", "") or ".")
         return [ResourceAccess(resource=f"fs:{path}", mode="read")]
 
     async def execute(self, input: dict[str, object], ctx: ToolContext) -> ToolResult:
+        """Search files and return capped matching output.
+
+        Args:
+            input: Validated search options.
+            ctx: Runtime context containing workspace root.
+
+        Returns:
+            Tool result containing matches or a search error.
+        """
+
         pattern = str(input["pattern"])
         path = str(input.get("path", "") or "")
         try:
@@ -733,6 +957,8 @@ def _pattern_targets_dotfiles(pattern: str) -> bool:
 
 
 class GlobTool:
+    """Find workspace files matching a glob pattern."""
+
     name = "Glob"
     description = (
         "Finds files matching a glob pattern. Uses ripgrep for speed"
@@ -757,6 +983,18 @@ class GlobTool:
     parallel: bool = True
 
     def validate(self, raw: dict[str, object]) -> dict[str, object]:
+        """Validate a glob pattern and optional target directory.
+
+        Args:
+            raw: Provider-supplied glob request.
+
+        Returns:
+            Normalized glob options.
+
+        Raises:
+            ToolExecutionError: If the pattern is missing or empty.
+        """
+
         pattern = raw.get("glob_pattern")
         if pattern is None:
             pattern = raw.get("pattern")
@@ -773,13 +1011,41 @@ class GlobTool:
         return result
 
     def summarize(self, input: dict[str, object]) -> str:
+        """Summarize a glob search.
+
+        Args:
+            input: Validated glob options.
+
+        Returns:
+            Human-readable pattern summary.
+        """
+
         return f"Glob {input['glob_pattern']}"
 
     def resources(self, input: dict[str, object]) -> list[ResourceAccess]:
+        """Describe the filesystem area searched.
+
+        Args:
+            input: Validated glob options.
+
+        Returns:
+            One read resource descriptor.
+        """
+
         path = str(input.get("target_directory", "") or ".")
         return [ResourceAccess(resource=f"fs:{path}", mode="read")]
 
     async def execute(self, input: dict[str, object], ctx: ToolContext) -> ToolResult:
+        """Find and sort matching files with a bounded result count.
+
+        Args:
+            input: Validated glob options.
+            ctx: Runtime context containing workspace root.
+
+        Returns:
+            Tool result containing matching paths or an error.
+        """
+
         pattern = str(input["glob_pattern"])
         path_str = str(input.get("target_directory", "") or "")
         try:
@@ -809,10 +1075,7 @@ class GlobTool:
                 )
             files = [line.strip() for line in raw_out.split("\n") if line.strip()]
         else:
-            try:
-                entries = glob.glob(pattern, root_dir=root, recursive=True)
-            except TypeError:
-                entries = glob.glob(pattern, root_dir=root)
+            entries = glob.glob(pattern, root_dir=root, recursive=True)
             if include_dotfiles:
                 files = sorted(entries)
             else:

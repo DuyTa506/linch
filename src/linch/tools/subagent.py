@@ -4,6 +4,7 @@ from html import escape
 from typing import Any
 from uuid import uuid4
 
+from ..session import RunOptions
 from .base import ToolContext, ToolResult, ToolScope
 
 SUBAGENT_TOOL_NAME = "Subagent"
@@ -46,7 +47,6 @@ class SubagentTool:
     name = SUBAGENT_TOOL_NAME
     input_schema = SUBAGENT_TOOL_SCHEMA
     scope: ToolScope = "exec"
-    parallel = True
 
     def __init__(
         self,
@@ -54,14 +54,67 @@ class SubagentTool:
         get_session: Any,
         next_default_display_name: Any,
         *,
+        tool_registry: Any = None,
         retain_subagents: bool = False,
         enable_background_subagents: bool = False,
     ) -> None:
         self._registry = registry
+        # A typed subagent's declared tools are resolved against the effective
+        # worker catalog.  The catalog may be supplied as a zero-argument
+        # callable because coordinator mode installs its worker registry after
+        # this tool is constructed.
+        self._tool_registry = tool_registry
         self._get_session = get_session
         self._next_default_display_name = next_default_display_name
         self._retain_subagents = retain_subagents
         self._enable_background_subagents = enable_background_subagents
+
+    def parallel(self, input: dict[str, object]) -> bool:
+        """Return whether this invocation is safe to run alongside another.
+
+        ``SubagentTool`` itself is an exec-scoped tool, so a plain boolean
+        cannot express the safety boundary: an omitted/general-purpose
+        subagent receives the full worker catalog while a named read-only
+        definition can be parallelized.  Keep the decision fail-closed for
+        malformed input, registry failures, inherited tool access, and any
+        unresolved or non-read tool.
+        """
+        try:
+            if not isinstance(input, dict) or bool(input.get("run_in_background", False)):
+                return False
+
+            requested = input.get("subagent_type")
+            if not isinstance(requested, str):
+                return False
+            requested = requested.strip()
+            if requested == "" or requested == "general-purpose":
+                return False
+
+            definition = self._registry.get(requested)
+            if definition is None:
+                return False
+            allowed_tools = getattr(getattr(definition, "frontmatter", None), "tools", None)
+            if not isinstance(allowed_tools, list):
+                return False
+
+            tool_registry: Any = self._tool_registry
+            if callable(tool_registry):
+                tool_registry = tool_registry()
+            if tool_registry is None:
+                return False
+
+            for tool_name in allowed_tools:
+                # ``build_child_tools`` treats ``*`` as inherited/full access;
+                # never let a literal tool with that name turn the wildcard
+                # into a read-only declaration.
+                if not isinstance(tool_name, str) or tool_name in {"", "*"}:
+                    return False
+                tool = tool_registry.get(tool_name)
+                if tool is None or getattr(tool, "scope", None) != "read":
+                    return False
+            return True
+        except Exception:
+            return False
 
     @property
     def description(self) -> str:
@@ -186,6 +239,7 @@ class SubagentTool:
             signal=ctx.signal,
             emit=emit_fn,
             retain=self._retain_subagents,
+            run_options=RunOptions(principal=ctx.principal),
         )
 
         if run_in_background:
