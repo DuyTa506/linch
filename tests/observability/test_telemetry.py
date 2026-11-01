@@ -48,6 +48,82 @@ async def test_store_failure_records_duration_and_error_without_content(otel):
     assert point.attributes == {"op": "run.save_checkpoint", "error.type": "ValueError"}
 
 
+async def test_tool_content_capture_uses_post_tool_redaction(otel, monkeypatch):
+    """Export the PostToolUse result rather than the pre-hook execution value."""
+    from linch import RedactionConfig, RedactionHook, RedactionRule, tool
+    from tests.support.agents import make_agent
+    from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
+    from tests.support.tools import tool_registry
+
+    monkeypatch.setenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", "true")
+    context, exporter, _ = otel
+
+    @tool
+    def read_secret() -> str:
+        """Return a value that the post-tool policy redacts."""
+        return "SECRET_VALUE"
+
+    provider = ScriptedProvider([ToolUseTurn("read_secret", {}), TextTurn("done")])
+    agent = make_agent(
+        provider,
+        context=context,
+        tools=tool_registry(read_secret),
+        hooks=[
+            RedactionHook(RedactionConfig(rules=(RedactionRule("SECRET_VALUE", "[REDACTED]"),)))
+        ],
+    )
+    session = await agent.session()
+    try:
+        events = [event async for event in session.run("prompt")]
+        assert events[-1].subtype == "success"
+        span = next(
+            span
+            for span in exporter.get_finished_spans()
+            if span.attributes.get("gen_ai.operation.name") == "execute_tool"
+        )
+        assert span.attributes["gen_ai.tool.call.result"] == "[REDACTED]"
+        assert "SECRET_VALUE" not in str(span.attributes)
+    finally:
+        await agent.close()
+
+
+async def test_prompt_content_capture_uses_user_prompt_submit_redaction(otel, monkeypatch):
+    """Export the UserPromptSubmit prompt after hooks have redacted it."""
+    import json
+
+    from linch import RedactionConfig, RedactionHook, RedactionRule
+    from tests.support.agents import make_agent
+    from tests.support.providers import ScriptedProvider, TextTurn
+
+    monkeypatch.setenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", "true")
+    context, exporter, _ = otel
+    agent = make_agent(
+        ScriptedProvider([TextTurn("done")]),
+        context=context,
+        hooks=[
+            RedactionHook(
+                RedactionConfig(
+                    redact_user_prompt=True,
+                    rules=(RedactionRule("SECRET_VALUE", "[REDACTED]"),),
+                )
+            )
+        ],
+    )
+    session = await agent.session()
+    try:
+        events = [event async for event in session.run("SECRET_VALUE")]
+        assert events[-1].subtype == "success"
+        span = next(
+            span
+            for span in exporter.get_finished_spans()
+            if span.attributes.get("gen_ai.operation.name") == "invoke_agent"
+        )
+        assert json.loads(span.attributes["gen_ai.input.messages"]) == "[REDACTED]"
+        assert "SECRET_VALUE" not in str(span.attributes)
+    finally:
+        await agent.close()
+
+
 async def test_provider_services_are_isolated_and_errors_are_private(otel):
     from linch._telemetry import Telemetry, set_error
 
