@@ -12,7 +12,28 @@ from typing import Any
 
 import pytest
 
-from tests.loop.test_run_resume import _pin_run_contract
+from tests.support.agents import make_agent
+from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
+from tests.support.runs import pin_run_contract
+from tests.support.stores import memory_run_store, memory_session_store
+from tests.support.tools import StubTool, tool_registry
+
+
+class _NeverCalledProvider:
+    """Count calls and fail if a resume path dispatches unexpectedly."""
+
+    id = "never-called"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def context_window(self, model: str) -> int:
+        return 100_000
+
+    async def stream(self, req: Any) -> AsyncIterator[dict[str, Any]]:
+        self.calls += 1
+        raise AssertionError("resume must not dispatch a provider call")
+        yield {}
 
 
 async def _run_compaction_case(
@@ -22,10 +43,9 @@ async def _run_compaction_case(
     main_model: str = "offline-model",
 ) -> tuple[Any, list[Any], Any]:
     """Run one long-history turn and return provider, emitted events, and budget."""
-    from linch import Agent, RunBudget
+    from linch import RunBudget
     from linch.providers import BaseProvider
     from linch.session import RunOptions
-    from linch.sessions import InMemorySessionStore
     from linch.types import Message, TextBlock, Usage
 
     summary_usage = Usage(input_tokens=111, output_tokens=22)
@@ -54,11 +74,11 @@ async def _run_compaction_case(
             yield {"type": "message_end", "stop_reason": "end_turn", "usage": usage}
 
     provider = DistinctUsageProvider()
-    agent = Agent(
+    agent = make_agent(
+        provider,
         model="offline-model",
-        provider=provider,
-        session_store=InMemorySessionStore(),
-        permissions={"mode": "skip-dangerous"},
+        session_store=memory_session_store(),
+        run_store=None,
         system_prompt="main system",
         max_output_tokens=100,
     )
@@ -141,36 +161,17 @@ async def test_actual_models_price_each_settled_receipt() -> None:
 @pytest.mark.asyncio
 async def test_after_provider_stop_preserves_settled_primary_usage() -> None:
     """A stop hook cannot erase an already settled primary receipt."""
-    from linch import Agent, HookResult
+    from linch import HookResult
     from linch.events import ResultEvent, UsageEvent
-    from linch.providers import BaseProvider
-    from linch.sessions import InMemorySessionStore
     from linch.types import Usage
-
-    class Provider(BaseProvider):
-        id = "after-provider-stop"
-
-        def context_window(self, model: str) -> int:
-            return 100_000
-
-        async def stream(self, req: Any) -> AsyncIterator[dict[str, Any]]:
-            yield {"type": "message_start", "model": req.model}
-            yield {"type": "text_delta", "text": "paid output"}
-            yield {
-                "type": "message_end",
-                "stop_reason": "end_turn",
-                "usage": Usage(input_tokens=9, output_tokens=4),
-            }
 
     class StopHook:
         def on_after_provider_call(self, ctx: Any) -> Any:
             return HookResult.stop("test", feedback="stopped after payment")
 
-    agent = Agent(
-        model="offline-model",
-        provider=Provider(),
-        session_store=InMemorySessionStore(),
-        permissions={"mode": "skip-dangerous"},
+    agent = make_agent(
+        ScriptedProvider([TextTurn("paid output", usage=Usage(input_tokens=9, output_tokens=4))]),
+        run_store=None,
         hooks=[StopHook()],
     )
     session = await agent.session()
@@ -331,68 +332,29 @@ async def test_rejected_native_arguments_are_charged_but_never_durable(
 @pytest.mark.asyncio
 async def test_explicit_empty_native_object_remains_a_valid_tool_input() -> None:
     """Only an explicit ``{}`` is accepted; an omitted delta is not guessed."""
-    from linch import Agent
     from linch.events import ResultEvent
-    from linch.providers import BaseProvider
-    from linch.sessions import InMemorySessionStore
-    from linch.tools import ToolRegistry, ToolResult
-    from linch.types import Usage
 
     calls: list[dict[str, object]] = []
 
-    class EmptyInputTool:
-        name = "EmptyInputTool"
-        description = "Accept an empty JSON object."
-        input_schema = {"type": "object"}
-        scope: Any = "read"
-        parallel = False
-
-        def validate(self, raw: dict[str, object]) -> dict[str, object]:
-            return raw
-
-        def summarize(self, input: dict[str, object]) -> str:
-            return "empty"
-
-        async def execute(self, input: dict[str, object], ctx: Any) -> ToolResult:
-            calls.append(input)
-            return ToolResult(content="accepted")
-
-    class Provider(BaseProvider):
-        id = "explicit-empty-native"
-
-        def __init__(self) -> None:
-            self.calls = 0
-
-        def context_window(self, model: str) -> int:
-            return 100_000
-
-        async def stream(self, req: Any) -> AsyncIterator[dict[str, Any]]:
-            self.calls += 1
-            yield {"type": "message_start", "model": req.model}
-            if self.calls == 1:
-                yield {"type": "tool_use_start", "id": "empty-1", "name": "EmptyInputTool"}
-                yield {"type": "tool_use_input_delta", "id": "empty-1", "json_delta": "{}"}
-                yield {"type": "tool_use_end", "id": "empty-1"}
-                yield {"type": "message_end", "stop_reason": "tool_use", "usage": Usage()}
-                return
-            yield {"type": "text_delta", "text": "done"}
-            yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
-
-    tools = ToolRegistry()
-    tools.register(EmptyInputTool())
-    provider = Provider()
-    agent = Agent(
-        model="offline-model",
-        provider=provider,
-        session_store=InMemorySessionStore(),
-        permissions={"mode": "skip-dangerous"},
-        tools=tools,
+    tool = StubTool(
+        "EmptyInputTool",
+        output="accepted",
+        on_execute=lambda input, _ctx: calls.append(input),
+    )
+    provider = ScriptedProvider(
+        [ToolUseTurn("EmptyInputTool", {}), TextTurn("done")], context_window=100_000
+    )
+    agent = make_agent(
+        provider,
+        tools=tool_registry(tool),
+        session_store=memory_session_store(),
+        run_store=None,
     )
     session = await agent.session()
     events = [event async for event in session.run("go")]
 
     assert calls == [{}]
-    assert provider.calls == 2
+    assert len(provider.requests) == 2
     assert next(event for event in events if isinstance(event, ResultEvent)).subtype == "success"
 
 
@@ -541,27 +503,12 @@ async def test_forced_compaction_budget_stops_before_rebuilding_main_request(
 @pytest.mark.asyncio
 async def test_legacy_nonzero_checkpoint_without_receipts_is_rejected_before_dispatch() -> None:
     """Aggregate pre-accounting usage cannot be admitted or repriced on resume."""
-    from linch import Agent, RunBudget
+    from linch import RunBudget
     from linch.errors import ConfigError
-    from linch.providers import BaseProvider
     from linch.run_store import InMemoryRunStore, RunCheckpoint
     from linch.session import RunOptions
     from linch.sessions import InMemorySessionStore
     from linch.types import Usage
-
-    class Provider(BaseProvider):
-        id = "legacy-resume-fence"
-
-        def __init__(self) -> None:
-            self.calls = 0
-
-        def context_window(self, model: str) -> int:
-            return 100_000
-
-        async def stream(self, req: Any) -> AsyncIterator[dict[str, Any]]:
-            self.calls += 1
-            raise AssertionError("legacy aggregate checkpoint must not dispatch a provider call")
-            yield {}  # pragma: no cover
 
     session_store = InMemorySessionStore()
     run_store = InMemoryRunStore()
@@ -577,18 +524,17 @@ async def test_legacy_nonzero_checkpoint_without_receipts_is_rejected_before_dis
         ),
     )
 
-    provider = Provider()
+    provider = _NeverCalledProvider()
     budget = RunBudget(max_tokens=100)
-    agent = Agent(
+    agent = make_agent(
+        provider,
         model="claude-sonnet-4-6",
-        provider=provider,
         session_store=session_store,
         run_store=run_store,
-        permissions={"mode": "skip-dangerous"},
     )
     session = await agent.session(id="legacy-accounting")
 
-    await _pin_run_contract(session, run.id, RunOptions(budget=budget))
+    await pin_run_contract(session, run.id, RunOptions(budget=budget))
 
     with pytest.raises(ConfigError, match="receipt provenance"):
         _ = [
@@ -607,29 +553,13 @@ async def test_legacy_nonzero_checkpoint_without_receipts_is_rejected_before_dis
 @pytest.mark.asyncio
 async def test_resume_rejects_an_unproven_legacy_offset_alongside_new_receipts() -> None:
     """A later ledger cannot legitimize a prior aggregate-only usage offset."""
-    from linch import Agent
     from linch.errors import ConfigError
     from linch.loop.checkpoint import _model_call_runtime_to_extension
     from linch.model_calls import ModelCallIntent, ModelCallReceipt, _ModelCallLedger
-    from linch.providers import BaseProvider
     from linch.run_store import InMemoryRunStore, RunCheckpoint
     from linch.session import RunOptions
     from linch.sessions import InMemorySessionStore
     from linch.types import Usage
-
-    class Provider(BaseProvider):
-        id = "legacy-offset-fence"
-
-        def __init__(self) -> None:
-            self.calls = 0
-
-        def context_window(self, model: str) -> int:
-            return 100_000
-
-        async def stream(self, req: Any) -> AsyncIterator[dict[str, Any]]:
-            self.calls += 1
-            raise AssertionError("unproven aggregate offset must not dispatch a provider call")
-            yield {}  # pragma: no cover
 
     session_store = InMemorySessionStore()
     run_store = InMemoryRunStore()
@@ -688,17 +618,16 @@ async def test_resume_rejects_an_unproven_legacy_offset_alongside_new_receipts()
         ),
     )
 
-    provider = Provider()
-    agent = Agent(
+    provider = _NeverCalledProvider()
+    agent = make_agent(
+        provider,
         model="offline-model",
-        provider=provider,
         session_store=session_store,
         run_store=run_store,
-        permissions={"mode": "skip-dangerous"},
     )
     session = await agent.session(id="legacy-offset")
 
-    await _pin_run_contract(session, run.id)
+    await pin_run_contract(session, run.id)
 
     with pytest.raises(ConfigError, match="receipt provenance"):
         _ = [event async for event in session.resume(run.id, RunOptions())]
@@ -712,33 +641,16 @@ async def test_resume_merges_journal_after_receipt_backed_checkpoint_without_dou
     reuse_budget: bool,
 ) -> None:
     """A later durable receipt advances a receipt-backed checkpoint on resume."""
-    from linch import Agent, RunBudget
+    from linch import RunBudget
     from linch.events import ResultEvent
     from linch.loop.checkpoint import _model_call_runtime_to_extension
     from linch.model_calls import ModelCallIntent, ModelCallReceipt, _ModelCallLedger
-    from linch.providers import BaseProvider
-    from linch.run_store import InMemoryRunStore, RunCheckpoint
+    from linch.run_store import RunCheckpoint
     from linch.session import RunOptions
-    from linch.sessions import InMemorySessionStore
     from linch.types import Usage
 
-    class Provider(BaseProvider):
-        id = "journal-ahead-resume"
-
-        def __init__(self) -> None:
-            self.calls = 0
-
-        def context_window(self, model: str) -> int:
-            return 100_000
-
-        async def stream(self, req: Any) -> AsyncIterator[dict[str, Any]]:
-            self.calls += 1
-            yield {"type": "message_start", "model": req.model}
-            yield {"type": "text_delta", "text": "resumed"}
-            yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
-
-    session_store = InMemorySessionStore()
-    run_store = InMemoryRunStore()
+    session_store = memory_session_store()
+    run_store = memory_run_store()
     await session_store.create(id=f"journal-ahead-{reuse_budget}")
     run = await run_store.create_run(f"journal-ahead-{reuse_budget}")
     owner_budget = RunBudget(max_tokens=100)
@@ -808,16 +720,15 @@ async def test_resume_merges_journal_after_receipt_backed_checkpoint_without_dou
     )
 
     resumed_budget = owner_budget if reuse_budget else RunBudget(max_tokens=100)
-    provider = Provider()
-    agent = Agent(
+    provider = ScriptedProvider([TextTurn("resumed", usage=Usage())])
+    agent = make_agent(
+        provider,
         model="offline-model",
-        provider=provider,
         session_store=session_store,
         run_store=run_store,
-        permissions={"mode": "skip-dangerous"},
     )
     session = await agent.session(id=f"journal-ahead-{reuse_budget}")
-    await _pin_run_contract(session, run.id, RunOptions(budget=resumed_budget))
+    await pin_run_contract(session, run.id, RunOptions(budget=resumed_budget))
     events = [
         event
         async for event in session.resume(
@@ -827,7 +738,7 @@ async def test_resume_merges_journal_after_receipt_backed_checkpoint_without_dou
     ]
 
     result = next(event for event in events if isinstance(event, ResultEvent))
-    assert provider.calls == 1
+    assert len(provider.requests) == 1
     assert result.total_usage == Usage(input_tokens=3)
     assert resumed_budget.spent_tokens == 3
 

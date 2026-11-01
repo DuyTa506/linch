@@ -29,42 +29,34 @@ def _text(message: Message) -> TextBlock:
     return block
 
 
-def test_append_populates_both_projections() -> None:
+@pytest.mark.parametrize("many", [False, True])
+def test_append_populates_both_projections(many: bool) -> None:
     log = SessionLog()
-    a, b = _msg("a"), _msg("b")
-    log.append(a)
-    log.append(b)
-    assert log.full_history == (a, b)
-    assert log.provider_view == (a, b)
-
-
-def test_append_many_is_both_projections() -> None:
-    log = SessionLog()
-    msgs = [_msg("a"), _msg("b"), _msg("c")]
-    log.append_many(msgs)
+    msgs = [_msg("a"), _msg("b")] if not many else [_msg("a"), _msg("b"), _msg("c")]
+    if many:
+        log.append_many(msgs)
+    else:
+        for message in msgs:
+            log.append(message)
     assert log.full_history == tuple(msgs)
     assert log.provider_view == tuple(msgs)
 
 
-def test_visible_only_entry_skips_full_history() -> None:
-    # A re-surfaced skill reminder: provider view only, not audit history.
+@pytest.mark.parametrize("mode", ["visible_only", "historical_only"])
+def test_append_visibility_projection(mode: str) -> None:
     log = SessionLog()
     normal = _msg("normal")
-    inject = _msg("reminder")
     log.append(normal)
-    log.append(inject, historical=False)
-    assert log.full_history == (normal,)
-    assert log.provider_view == (normal, inject)
-
-
-def test_historical_only_entry_skips_provider_view() -> None:
-    log = SessionLog()
-    normal = _msg("normal")
-    audit = _msg("audit")
-    log.append(normal)
-    log.append(audit, visible=False)
-    assert log.full_history == (normal, audit)
-    assert log.provider_view == (normal,)
+    if mode == "visible_only":
+        inject = _msg("reminder")
+        log.append(inject, historical=False)
+        assert log.full_history == (normal,)
+        assert log.provider_view == (normal, inject)
+    else:
+        audit = _msg("audit")
+        log.append(audit, visible=False)
+        assert log.full_history == (normal, audit)
+        assert log.provider_view == (normal,)
 
 
 def test_projection_replaces_provider_view_not_history() -> None:
@@ -92,51 +84,27 @@ def test_appends_after_projection_extend_compacted_view() -> None:
 
 def test_provider_view_is_an_immutable_snapshot() -> None:
     log = SessionLog()
+    empty_history = log.full_history
     log.append_many([_msg("1"), _msg("2")])
+    assert empty_history == ()
     view = log.provider_view
+    history = log.full_history
     with pytest.raises(TypeError):
         view[0] = _msg("escaped")  # type: ignore[index]
-    log.record_projection([_msg("summary")])
-    assert view == (_msg("1"), _msg("2"))
-    assert log.provider_view == (_msg("summary"),)
-
-
-def test_provider_view_nested_mutation_does_not_reach_log() -> None:
-    log = SessionLog()
-    log.append(_msg("owned"))
-
-    inspected = log.provider_view[0]
-    _text(inspected).text = "tampered"
-    assert inspected.provider_metadata is not None
-    inspected.provider_metadata["nested"]["source"] = "tampered"
-
-    authoritative = log.provider_view[0]
-    assert _text(authoritative).text == "owned"
-    assert authoritative.provider_metadata == {"nested": {"source": "owned"}}
-
-
-def test_full_history_is_an_immutable_snapshot() -> None:
-    log = SessionLog()
-    hist = log.full_history
-    log.append(_msg("1"))
-    assert hist == ()
-    assert log.full_history == (_msg("1"),)
     with pytest.raises(TypeError):
-        log.full_history[0] = _msg("escaped")  # type: ignore[index]
-
-
-def test_full_history_nested_mutation_does_not_reach_log() -> None:
-    log = SessionLog()
-    log.append(_msg("owned"))
-
-    inspected = log.full_history[0]
-    _text(inspected).text = "tampered"
-    assert inspected.provider_metadata is not None
-    inspected.provider_metadata["nested"]["source"] = "tampered"
-
-    authoritative = log.full_history[0]
-    assert _text(authoritative).text == "owned"
-    assert authoritative.provider_metadata == {"nested": {"source": "owned"}}
+        history[0] = _msg("escaped")  # type: ignore[index]
+    log.append(_msg("3"))
+    assert view == (_msg("1"), _msg("2"))
+    assert history == (_msg("1"), _msg("2"))
+    for inspected in (log.provider_view[0], log.full_history[0]):
+        _text(inspected).text = "tampered"
+        assert inspected.provider_metadata is not None
+        inspected.provider_metadata["nested"]["source"] = "tampered"
+    for authoritative in (log.provider_view[0], log.full_history[0]):
+        assert _text(authoritative).text == "1"
+        assert authoritative.provider_metadata == {"nested": {"source": "1"}}
+    log.record_projection([_msg("summary")])
+    assert log.provider_view == (_msg("summary"),)
 
 
 def test_append_takes_defensive_ownership_of_message_graph() -> None:
@@ -203,21 +171,25 @@ def test_equal_projection_is_not_logged() -> None:
     assert [entry.kind for entry in log.entries] == ["message"]
 
 
-def test_seed_equal_views_no_projection() -> None:
-    hist = [_msg("1"), _msg("2")]
-    log = SessionLog.seed(historical=hist, visible=list(hist))
-    assert log.full_history == tuple(hist)
-    assert log.provider_view == tuple(hist)
-    assert all(e.kind == "message" for e in log.entries)
-
-
-def test_seed_differing_views_records_projection() -> None:
-    hist = [_msg("1"), _msg("2"), _msg("3")]
-    view = [_msg("summary")]
-    log = SessionLog.seed(historical=hist, visible=view)
-    assert log.full_history == tuple(hist)
-    assert log.provider_view == tuple(view)
-    assert log.entries[-1].kind == "projection"
+@pytest.mark.parametrize(
+    ("historical", "visible", "kinds"),
+    [
+        ([], [], []),
+        (["1", "2"], ["1", "2"], ["message", "message"]),
+        (["1", "2", "3"], ["summary"], ["message", "message", "message", "projection"]),
+        ([], ["parent-a", "parent-b"], ["projection"]),
+    ],
+)
+def test_seed_views_and_projection(
+    historical: list[str], visible: list[str], kinds: list[str]
+) -> None:
+    log = SessionLog.seed(
+        historical=[_msg(text) for text in historical],
+        visible=[_msg(text) for text in visible],
+    )
+    assert log.full_history == tuple(_msg(text) for text in historical)
+    assert log.provider_view == tuple(_msg(text) for text in visible)
+    assert [entry.kind for entry in log.entries] == kinds
 
 
 def test_seed_takes_defensive_ownership_of_both_input_graphs() -> None:
@@ -234,20 +206,6 @@ def test_seed_takes_defensive_ownership_of_both_input_graphs() -> None:
 
     assert log.full_history == (_msg("history"),)
     assert log.provider_view == (_msg("summary"),)
-
-
-def test_seed_visible_only_subagent_case() -> None:
-    # Subagent seeds provider view from parent; its own history starts empty.
-    seed_view = [_msg("parent-a"), _msg("parent-b")]
-    log = SessionLog.seed(historical=[], visible=seed_view)
-    assert log.full_history == ()
-    assert log.provider_view == tuple(seed_view)
-
-
-def test_seed_empty_is_empty() -> None:
-    log = SessionLog.seed()
-    assert log.full_history == ()
-    assert log.provider_view == ()
 
 
 def test_session_provider_projection_is_logged() -> None:
@@ -278,11 +236,17 @@ def test_counts_and_last_visible_are_cheap_accessors() -> None:
     deepcopy of the entire history on every check.
     """
     log = SessionLog()
+    assert log.last_visible() is None
+    assert log.visible_count == 0
     log.append_many([_msg("1"), _msg("2")])
     log.append(_msg("audit"), visible=False)
 
     assert log.visible_count == 2
     assert log.history_count == 3
+    assert log.last_visible() == _msg("2")
+    first = log.last_visible()
+    assert first is not None
+    first.content[0].text = "mutated"  # type: ignore[union-attr]
     assert log.last_visible() == _msg("2")
 
     import linch.session_log as mod
@@ -304,18 +268,6 @@ def test_counts_and_last_visible_are_cheap_accessors() -> None:
         assert calls == 1, "last_visible copies only the one message it returns"
     finally:
         mod.deepcopy = real
-
-
-def test_last_visible_is_detached_and_empty_safe() -> None:
-    log = SessionLog()
-    assert log.last_visible() is None
-    assert log.visible_count == 0
-
-    log.append(_msg("only"))
-    first = log.last_visible()
-    assert first is not None
-    first.content[0].text = "mutated"  # type: ignore[union-attr]
-    assert log.last_visible() == _msg("only")  # authoritative state untouched
 
 
 def test_history_fingerprint_matches_reference_through_projection_changes() -> None:

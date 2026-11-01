@@ -6,6 +6,9 @@ from uuid import uuid4
 
 import pytest
 
+from tests.support.agents import make_agent as _make_agent
+from tests.support.providers import ScriptedProvider, TextTurn
+
 
 @pytest.fixture(params=["memory", "postgres"])
 def kind(request):
@@ -45,17 +48,7 @@ async def seed_pending(store, dsn, run_id, session_id="s"):
 
 
 def make_agent(store):
-    from linch import Agent, empty_tools
-    from linch.ext.evals import ScriptedProvider, TextTurn
-    from linch.sessions import InMemorySessionStore
-
-    return Agent(
-        model="m",
-        provider=ScriptedProvider([TextTurn("done")]),
-        tools=empty_tools(),
-        session_store=InMemorySessionStore(),
-        run_store=store,
-    )
+    return _make_agent(ScriptedProvider([TextTurn("done")]), run_store=store, model="m")
 
 
 async def test_run_options_adopts_pending_run_id(pending_store):
