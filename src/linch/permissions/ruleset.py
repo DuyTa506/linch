@@ -18,8 +18,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .engine import PendingToolCall, PermissionDecision, evaluate_rule_list
-from .rules import PermissionRule
+from .engine import PendingToolCall, PermissionDecision, _rule_applies, evaluate_rule_list
+from .rules import (
+    BashRule,
+    PermissionRule,
+    ToolRule,
+    _contains_unparsed_shell_construct,
+    _match_unparsed_bash_rule,
+    match_tool_rule,
+)
 
 
 @dataclass(slots=True)
@@ -71,6 +78,10 @@ class PermissionRuleSet:
             A deny decision when any layer denies, otherwise the highest-precedence
             non-abstaining decision, or ``None`` when every layer abstains.
         """
+        unparsed_floor = _unparsed_bash_deny_floor(call, self.layers)
+        if unparsed_floor is not None:
+            return unparsed_floor
+
         opinions: list[PermissionDecision] = []
         for layer in self.layers:
             decision = evaluate_rule_list(layer.rules, call, self.project_root)
@@ -80,3 +91,28 @@ class PermissionRuleSet:
                 return decision  # deny-override: a policy deny is final.
             opinions.append(decision)
         return opinions[-1] if opinions else None
+
+
+def _unparsed_bash_deny_floor(
+    call: PendingToolCall, layers: list[PermissionLayer]
+) -> PermissionDecision | None:
+    if call.tool.name != "Bash":
+        return None
+    command = call.input.get("command")
+    if not isinstance(command, str) or not _contains_unparsed_shell_construct(command):
+        return None
+
+    saw_bash_deny = False
+    for layer in layers:
+        for rule in layer.rules:
+            if not _rule_applies(rule, call.principal):
+                continue
+            if isinstance(rule, ToolRule) and match_tool_rule(rule, "Bash", call.input):
+                if rule.decision == "deny":
+                    return PermissionDecision(decision="deny", reason="tool rule matched Bash.")
+                continue
+            if isinstance(rule, BashRule) and rule.decision == "deny":
+                saw_bash_deny = True
+                if _match_unparsed_bash_rule(rule, command.strip()):
+                    return PermissionDecision(decision="deny", reason="bash rule matched Bash.")
+    return PermissionDecision(decision="ask") if saw_bash_deny else None

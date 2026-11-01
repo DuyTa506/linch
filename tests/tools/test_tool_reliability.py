@@ -316,6 +316,31 @@ async def test_timeout_is_retried_for_read_tool() -> None:
 
 
 @pytest.mark.asyncio
+async def test_timeout_is_not_retried_for_write_tool_without_opt_in() -> None:
+    """A timeout cannot prove a write side effect did not already happen."""
+    attempts: list[bool] = []
+    tool = SleepyTool(
+        "Write",
+        delay=0.2,
+        scope="write",
+        parallel=False,
+        finally_flag=attempts,
+    )
+    registry = ToolRegistry()
+    registry.register(tool)
+
+    events = await collect_events(
+        registry,
+        [_block("Write", "b1")],
+        tool_timeout_ms=20,
+        tool_retry=RetryOptions(max_attempts=3, base_delay_ms=0),
+    )
+
+    assert end_events(events)[0].is_error is True
+    assert len(attempts) == 1
+
+
+@pytest.mark.asyncio
 async def test_abort_error_not_retried() -> None:
     """AbortError raised from a tool must not be retried — should propagate."""
     call_count: list[int] = []
