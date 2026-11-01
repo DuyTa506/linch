@@ -1,19 +1,3 @@
-"""Maximal tool-batching strategy (ROADMAP WS3).
-
-``Agent(tool_batching_strategy="maximal")`` opts into a denser packing of
-parallel-safe tool calls: instead of ending a batch at the first resource
-conflict (the default "greedy" contiguous-prefix rule), maximal skips a
-conflicting call and admits every other currently-compatible call — deferring
-the conflict to a later batch. Non-parallel calls stay hard barriers, and the
-result blocks the provider sees remain in provider order regardless of admission
-order.
-
-These tests pin: greedy stays byte-identical; maximal packs across a conflict;
-the concurrency cap and non-parallel barriers still hold; the observed
-start-event order reflects actual admission order; and the config plumbing
-(snake/camel + validation) is correct.
-"""
-
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -27,10 +11,10 @@ from linch.errors import ConfigError
 from linch.events import ToolCallEndEvent, ToolCallStartEvent
 from linch.permissions import PermissionEngine
 from linch.permissions.engine import PermissionDecision
-from linch.providers import BaseProvider
 from linch.scheduler import ResolvedCall, _partition_batches, execute_tool_calls
 from linch.tools import ResourceAccess, ToolContext, ToolRegistry, ToolResult
 from linch.types import ToolUseBlock
+from tests.support.providers import ScriptedProvider
 
 
 class _Conflicting:
@@ -85,15 +69,6 @@ class _SerialTool:
         return ToolResult(content=self.name)
 
 
-class DummyProvider(BaseProvider):
-    async def stream(self, request):  # pragma: no cover - not exercised
-        if False:
-            yield {}
-
-    def context_window(self, model: str) -> int:
-        return 1000
-
-
 def _call(tool: Any, idx: int, res: str | None) -> ResolvedCall:
     inp = {"res": res} if res is not None else {}
     return ResolvedCall(
@@ -112,9 +87,6 @@ def _shapes(batches: list[dict[str, Any]]) -> list[tuple[bool, list[int]]]:
 
 def _allow(n: int) -> list[PermissionDecision]:
     return [PermissionDecision(decision="allow") for _ in range(n)]
-
-
-# ── Partition-level (greedy vs maximal) ──────────────────────────────────────
 
 
 def test_greedy_default_stops_at_first_conflict() -> None:
@@ -161,9 +133,6 @@ def test_maximal_matches_greedy_when_no_conflicts() -> None:
     greedy = _partition_batches(resolved, _allow(4), max_concurrency=8)
     maximal = _partition_batches(resolved, _allow(4), max_concurrency=8, strategy="maximal")
     assert _shapes(greedy) == _shapes(maximal) == [(True, [0, 1, 2, 3])]
-
-
-# ── End-to-end admission order via execute_tool_calls ────────────────────────
 
 
 def _session() -> SimpleNamespace:
@@ -224,24 +193,18 @@ async def test_maximal_start_order_reflects_admission() -> None:
     assert ends == ["t0", "t2", "t1"]
 
 
-# ── Config plumbing ──────────────────────────────────────────────────────────
-
-
-def test_agent_accepts_tool_batching_strategy() -> None:
-    agent = Agent(model="dummy", provider=DummyProvider(), tool_batching_strategy="maximal")
-    assert agent.tool_batching_strategy == "maximal"
-
-
-def test_agent_defaults_to_greedy() -> None:
-    agent = Agent(model="dummy", provider=DummyProvider())
-    assert agent.tool_batching_strategy == "greedy"
-
-
-def test_agent_accepts_snake_case_strategy() -> None:
-    agent = Agent(model="dummy", provider=DummyProvider(), tool_batching_strategy="maximal")
-    assert agent.tool_batching_strategy == "maximal"
+@pytest.mark.parametrize(
+    ("strategy", "expected"),
+    [("maximal", "maximal"), (None, "greedy")],
+)
+def test_agent_tool_batching_strategy_defaults_and_accepts(
+    strategy: str | None, expected: str
+) -> None:
+    kwargs = {} if strategy is None else {"tool_batching_strategy": strategy}
+    agent = Agent(model="dummy", provider=ScriptedProvider([]), **kwargs)
+    assert agent.tool_batching_strategy == expected
 
 
 def test_agent_rejects_invalid_strategy() -> None:
     with pytest.raises(ConfigError):
-        Agent(model="dummy", provider=DummyProvider(), tool_batching_strategy="bogus")
+        Agent(model="dummy", provider=ScriptedProvider([]), tool_batching_strategy="bogus")

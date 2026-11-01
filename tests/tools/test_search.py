@@ -6,6 +6,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.support.agents import make_agent
+from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
+from tests.support.stores import memory_run_store, memory_session_store
+
 
 def _tools(count=31):
     from linch import FunctionTool, ToolRegistry
@@ -24,17 +28,9 @@ def _tools(count=31):
 
 
 def _agent(tools, turns=(), **kwargs):
-    from linch import Agent
-    from linch.ext.evals import ScriptedProvider
-
-    return Agent(
-        model="m",
-        provider=ScriptedProvider(list(turns)),
-        tools=tools,
-        permissions={"mode": "skip-dangerous"},
-        result_offload=None,
-        **kwargs,
-    )
+    options = {"model": "m", "tools": tools, "run_store": None, "result_offload": None}
+    options.update(kwargs)
+    return make_agent(ScriptedProvider(list(turns)), **options)
 
 
 def _request(session, context=None):
@@ -50,6 +46,12 @@ def _names(request):
 
 async def _run(session, prompt="go"):
     return [event async for event in session.run(prompt)]
+
+
+async def _run_agent(tools, turns=(), **kwargs):
+    agent = _agent(tools, turns, **kwargs)
+    session = await agent.session()
+    return agent, session, await _run(session)
 
 
 @pytest.mark.parametrize("count", [0, 1, 30])
@@ -127,8 +129,6 @@ async def test_default_defers_native_and_mcp_tools_except_truthy_always_load():
 
 
 async def test_search_returns_schema_and_loads_on_next_request():
-    from linch.ext.evals import TextTurn, ToolUseTurn
-
     agent = _agent(
         _tools(),
         [ToolUseTurn("tool_search", {"query": "select:lookup_2,lookup_4"}), TextTurn("done")],
@@ -145,11 +145,9 @@ async def test_search_returns_schema_and_loads_on_next_request():
 
 
 async def test_deferred_call_tells_model_to_search_first():
-    from linch.ext.evals import TextTurn, ToolUseTurn
-
-    agent = _agent(_tools(), [ToolUseTurn("lookup_2", {"value": "x"}), TextTurn("done")])
-    session = await agent.session()
-    events = await _run(session)
+    agent, _, events = await _run_agent(
+        _tools(), [ToolUseTurn("lookup_2", {"value": "x"}), TextTurn("done")]
+    )
     result = next(event for event in events if event.type == "tool_call_end")
     assert result.is_error
     assert "tool_search" in result.result and "first" in result.result
@@ -197,8 +195,6 @@ def _add_skills(agent, count):
 
 @pytest.mark.parametrize("count", [50, 51])
 async def test_skill_threshold_and_body_loading(count):
-    from linch.ext.evals import TextTurn, ToolUseTurn
-
     turns = (
         [
             ToolUseTurn("tool_search", {"query": "select:skill-2"}, tool_id="search"),
@@ -233,7 +229,6 @@ async def test_skill_threshold_and_body_loading(count):
 
 async def test_loaded_names_survive_new_run_reload_and_compaction():
     from linch import InMemorySessionStore
-    from linch.ext.evals import TextTurn, ToolUseTurn
     from linch.types import Message, TextBlock
 
     store = InMemorySessionStore()
@@ -264,8 +259,6 @@ async def test_loaded_names_survive_new_run_reload_and_compaction():
 
 
 async def test_keywords_score_name_and_description_and_no_match_loads_nothing():
-    from linch.ext.evals import TextTurn, ToolUseTurn
-
     tools = _tools()
     tools.get("lookup_7").description = "Search invoices by account"
     agent = _agent(
@@ -285,6 +278,20 @@ async def test_keywords_score_name_and_description_and_no_match_loads_nothing():
     result = next(event for event in events if event.type == "tool_call_end")
     assert json.loads(result.result) == {"tools": [], "skills": []}
     assert _names(_request(session)) == ["lookup_7", "tool_search"]
+    await agent.close()
+
+
+async def test_keyword_results_use_token_scores_and_rank_best_matches_first():
+    tools = _tools()
+    tools.get("lookup_0").description = "accounting"
+    tools.get("lookup_1").description = "account"
+    tools.get("lookup_2").description = "account invoices"
+    agent, _, events = await _run_agent(
+        tools,
+        [ToolUseTurn("tool_search", {"query": "account invoices"}), TextTurn("done")],
+    )
+    result = next(e for e in events if e.type == "tool_call_end")
+    assert [s["name"] for s in json.loads(result.result)["tools"]] == ["lookup_2", "lookup_1"]
     await agent.close()
 
 
@@ -313,7 +320,6 @@ async def test_context_selection_cannot_be_widened_by_search():
 
 async def test_loaded_tool_still_runs_validation_hooks_and_permissions():
     from linch import HookResult, ToolRule
-    from linch.ext.evals import TextTurn, ToolUseTurn
 
     seen = []
 
@@ -368,10 +374,7 @@ async def test_search_only_loads_tools_from_the_next_request_not_the_same_batch(
 
 @pytest.mark.parametrize("cut", ["tool_call_end", "assistant"])
 async def test_loaded_names_survive_crash_and_resume(cut):
-    from linch import InMemoryRunStore, InMemorySessionStore
-    from linch.ext.evals import TextTurn, ToolUseTurn
-
-    session_store, run_store = InMemorySessionStore(), InMemoryRunStore()
+    session_store, run_store = memory_session_store(), memory_run_store()
     turns = [
         ToolUseTurn("tool_search", {"query": "select:lookup_2"}, tool_id="search"),
         ToolUseTurn("lookup_2", {"value": "found"}, tool_id="lookup"),
@@ -407,13 +410,12 @@ async def test_loaded_names_survive_crash_and_resume(cut):
 
 async def test_failed_metadata_write_does_not_load_tools():
     from linch import InMemorySessionStore
-    from linch.ext.evals import TextTurn, ToolUseTurn
 
     class FailingMetaStore(InMemorySessionStore):
         async def update_meta(self, id, meta):
             raise RuntimeError("metadata unavailable")
 
-    agent = _agent(
+    agent, session, events = await _run_agent(
         _tools(),
         [
             ToolUseTurn("tool_search", {"query": "select:lookup_2"}),
@@ -421,8 +423,6 @@ async def test_failed_metadata_write_does_not_load_tools():
         ],
         session_store=FailingMetaStore(),
     )
-    session = await agent.session()
-    events = await _run(session)
     result = next(e for e in events if e.type == "tool_call_end")
     assert result.is_error and "metadata unavailable" in result.result
     assert _names(_request(session)) == ["tool_search"]
@@ -430,13 +430,11 @@ async def test_failed_metadata_write_does_not_load_tools():
 
 
 async def test_dispose_during_run_restores_direct_calls():
-    from linch.ext.evals import TextTurn, ToolUseTurn
-
     class DisableSearch:
         async def on_after_provider_call(self, ctx):
             await ctx.session.agent.tool_search.dispose()
 
-    agent = _agent(
+    agent, _, events = await _run_agent(
         _tools(),
         [
             ToolUseTurn("lookup_2", {"value": "found"}),
@@ -444,8 +442,6 @@ async def test_dispose_during_run_restores_direct_calls():
         ],
         hooks=[DisableSearch()],
     )
-    session = await agent.session()
-    events = await _run(session)
     result = next(e for e in events if e.type == "tool_call_end")
     assert not result.is_error and result.result == "found"
     await agent.close()
@@ -464,30 +460,8 @@ async def test_catalog_can_cross_threshold_in_both_directions():
     await agent.close()
 
 
-async def test_keyword_results_use_token_scores_and_rank_best_matches_first():
-    from linch.ext.evals import TextTurn, ToolUseTurn
-
-    tools = _tools()
-    tools.get("lookup_0").description = "accounting"
-    tools.get("lookup_1").description = "account"
-    tools.get("lookup_2").description = "account invoices"
-    agent = _agent(
-        tools,
-        [
-            ToolUseTurn("tool_search", {"query": "account invoices"}),
-            TextTurn("done"),
-        ],
-    )
-    events = await _run(await agent.session())
-    result = next(e for e in events if e.type == "tool_call_end")
-    assert [s["name"] for s in json.loads(result.result)["tools"]] == ["lookup_2", "lookup_1"]
-    await agent.close()
-
-
 async def test_terminal_tool_cannot_bypass_discovery():
-    from linch.ext.evals import ToolUseTurn
-
-    agent = _agent(
+    agent, _, events = await _run_agent(
         _tools(),
         [
             ToolUseTurn("lookup_2", {"value": "premature"}, tool_id="deferred"),
@@ -496,7 +470,6 @@ async def test_terminal_tool_cannot_bypass_discovery():
         ],
         final_tool_name="lookup_2",
     )
-    events = await _run(await agent.session())
     assert events[-1].structured_output == {"value": "loaded"}
     deferred = next(e for e in events if e.type == "tool_call_end" and e.tool_use_id == "deferred")
     assert deferred.is_error and "tool_search" in deferred.result
@@ -504,22 +477,19 @@ async def test_terminal_tool_cannot_bypass_discovery():
 
 
 async def test_synthetic_terminal_tool_is_outside_the_native_search_catalog():
-    from linch.ext.evals import ToolUseTurn
-
-    agent = _agent(_tools(), [ToolUseTurn("submit", {"answer": "done"})], final_tool_name="submit")
-    events = await _run(await agent.session())
+    agent, _, events = await _run_agent(
+        _tools(), [ToolUseTurn("submit", {"answer": "done"})], final_tool_name="submit"
+    )
     assert events[-1].structured_output == {"answer": "done"}
     await agent.close()
 
 
 async def test_dispose_during_run_restores_terminal_calls():
-    from linch.ext.evals import ToolUseTurn
-
     class DisableSearch:
         async def on_after_provider_call(self, ctx):
             await ctx.session.agent.tool_search.dispose()
 
-    agent = _agent(
+    agent, _, events = await _run_agent(
         _tools(),
         [
             ToolUseTurn("lookup_2", {"value": "found"}),
@@ -527,17 +497,13 @@ async def test_dispose_during_run_restores_terminal_calls():
         final_tool_name="lookup_2",
         hooks=[DisableSearch()],
     )
-    events = await _run(await agent.session())
     assert events[-1].structured_output == {"value": "found"}
     await agent.close()
 
 
 @pytest.mark.parametrize("raw", [{}, {"__invalid_json": True, "raw": "{"}])
 async def test_malformed_deferred_calls_are_rejected_before_validation(raw):
-    from linch.ext.evals import TextTurn, ToolUseTurn
-
-    agent = _agent(_tools(), [ToolUseTurn("lookup_2", raw), TextTurn("done")])
-    events = await _run(await agent.session())
+    agent, _, events = await _run_agent(_tools(), [ToolUseTurn("lookup_2", raw), TextTurn("done")])
     result = next(e for e in events if e.type == "tool_call_end")
     assert result.is_error
     assert (
@@ -548,7 +514,6 @@ async def test_malformed_deferred_calls_are_rejected_before_validation(raw):
 
 async def test_loaded_ask_user_keeps_its_single_normalization_step():
     from linch import AskUserTool
-    from linch.ext.evals import TextTurn, ToolUseTurn
 
     tools = _tools()
     tools.register(AskUserTool(lambda request, ctx: {"accepted": True, "answers": {"q": "A"}}))
@@ -565,7 +530,7 @@ async def test_loaded_ask_user_keeps_its_single_normalization_step():
             }
         ]
     }
-    agent = _agent(
+    agent, _, events = await _run_agent(
         tools,
         [
             ToolUseTurn("tool_search", {"query": "select:AskUser"}, tool_id="search"),
@@ -573,7 +538,6 @@ async def test_loaded_ask_user_keeps_its_single_normalization_step():
             TextTurn("done"),
         ],
     )
-    events = await _run(await agent.session())
     result = next(e for e in events if e.type == "tool_call_end" and e.tool_name == "AskUser")
     assert not result.is_error
     assert json.loads(result.result)["answers"] == {"q": "A"}
@@ -583,7 +547,6 @@ async def test_loaded_ask_user_keeps_its_single_normalization_step():
 @pytest.mark.parametrize("same_session_id", [False, True])
 async def test_agents_sharing_registry_keep_search_state_isolated(same_session_id):
     from linch import Context
-    from linch.ext.evals import TextTurn, ToolUseTurn
 
     registry = _tools()
     parent = Context()
@@ -647,9 +610,6 @@ async def test_deferral_snapshot_survives_catalog_shrinking_during_request():
 
 
 async def test_resume_keeps_pre_search_snapshot_for_the_unfinished_batch():
-    from linch import InMemoryRunStore, InMemorySessionStore
-    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
-
     class BatchProvider(ScriptedProvider):
         async def stream(self, req):
             async for event in super().stream(req):
@@ -663,7 +623,7 @@ async def test_resume_keeps_pre_search_snapshot_for_the_unfinished_batch():
                     yield {"type": "tool_use_end", "id": "deferred"}
                 yield event
 
-    store, runs = InMemorySessionStore(), InMemoryRunStore()
+    store, runs = memory_session_store(), memory_run_store()
     agent = _agent(_tools(), session_store=store, run_store=runs)
     agent.provider = BatchProvider(
         [

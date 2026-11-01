@@ -1,21 +1,3 @@
-"""Regression tests for MCP connection cleanup on failed connects.
-
-A failed MCP connect must not leak the stdio subprocess transport, the
-`ClientSession`, or — over HTTP — the httpx client linch builds to carry the
-server's headers. Each must have `__aexit__` awaited when:
-
-  (a) `session.list_tools()` raises after a successful connect,
-  (b) `session.initialize()` raises while opening the session, and
-  (c) the transport itself fails to enter (HTTP only, where a resource is
-      already held by then).
-
-These tests monkeypatch the symbols `client.py` binds at import time. They
-deliberately do **not** fake the `mcp` package: an earlier version injected fake
-`mcp.*` modules into `sys.modules`, which hid mcp 2.0's renamed transport and
-snake_case models until CI went red. `test_mcp_api_contract.py` pins the real
-API those fakes stand in for.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -28,35 +10,18 @@ pytest.importorskip("mcp", reason="the 'mcp' extra is not installed")
 from linch.mcp import client as mcp_client  # noqa: E402
 
 
-class FakeTransport:
-    """Async-context-manager stand-in for an stdio/http transport."""
-
-    def __init__(self, *, n_yield: int = 2, enter_error: bool = False) -> None:
-        self._yield = tuple(object() for _ in range(n_yield))
-        self._enter_error = enter_error
-        self.aenter_calls = 0
-        self.aexit_calls = 0
-
-    async def __aenter__(self):
-        self.aenter_calls += 1
-        if self._enter_error:
-            raise RuntimeError("transport boom")
-        return self._yield
-
-    async def __aexit__(self, *exc) -> None:
-        self.aexit_calls += 1
-
-
-class FakeSession:
-    """Stand-in for an mcp ClientSession used as an async context manager."""
-
+class _Resource:
     def __init__(
         self,
         *,
+        result=None,
+        enter_error: bool = False,
         initialize_error: bool = False,
         list_tools_error: bool = False,
         hang: bool = False,
     ) -> None:
+        self._result = result if result is not None else self
+        self._enter_error = enter_error
         self.initialize_error = initialize_error
         self.list_tools_error = list_tools_error
         self.hang = hang
@@ -65,7 +30,9 @@ class FakeSession:
 
     async def __aenter__(self):
         self.aenter_calls += 1
-        return self
+        if self._enter_error:
+            raise RuntimeError("transport boom")
+        return self._result
 
     async def __aexit__(self, *exc) -> None:
         self.aexit_calls += 1
@@ -82,21 +49,25 @@ class FakeSession:
         raise AssertionError("list_tools should not be reached in these tests")
 
 
-class FakeHttpClient:
-    """Stand-in for the httpx client linch builds to carry per-server headers."""
+class FakeTransport(_Resource):
+    def __init__(self, *, n_yield: int = 2, enter_error: bool = False) -> None:
+        super().__init__(result=tuple(object() for _ in range(n_yield)), enter_error=enter_error)
 
-    def __init__(self) -> None:
-        self.aexit_calls = 0
 
-    async def __aenter__(self):
-        return self
+class FakeSession(_Resource):
+    def __init__(
+        self, *, initialize_error: bool = False, list_tools_error: bool = False, hang: bool = False
+    ) -> None:
+        super().__init__(
+            initialize_error=initialize_error, list_tools_error=list_tools_error, hang=hang
+        )
 
-    async def __aexit__(self, *exc) -> None:
-        self.aexit_calls += 1
+
+class FakeHttpClient(_Resource):
+    pass
 
 
 def _patch_http(monkeypatch, transport: FakeTransport, session: FakeSession) -> FakeHttpClient:
-    """Wire the HTTP connect path to fakes and return the httpx stand-in."""
     http_client = FakeHttpClient()
     monkeypatch.setattr(mcp_client, "create_mcp_http_client", lambda *a, **k: http_client)
     monkeypatch.setattr(mcp_client, "streamable_http_client", lambda *a, **k: transport)
@@ -112,72 +83,40 @@ def _http_cfg(headers: dict[str, str] | None = None) -> types.SimpleNamespace:
     return types.SimpleNamespace(type="http", url="https://example.test/mcp", headers=headers)
 
 
-async def test_list_tools_failure_cleans_up_transport_and_session(monkeypatch):
-    """If list_tools() raises after a successful connect, BOTH the transport
-    and the session must have __aexit__ awaited (no leak)."""
+async def _assert_failure(
+    monkeypatch, config: types.SimpleNamespace, *, http: bool = False, initialize: bool = False
+) -> None:
     transport = FakeTransport()
-    session = FakeSession(list_tools_error=True)
-
-    monkeypatch.setattr(mcp_client, "stdio_client", lambda *a, **k: transport)
-    monkeypatch.setattr(mcp_client, "ClientSession", lambda *a, **k: session)
-
+    session = FakeSession(initialize_error=initialize, list_tools_error=not initialize)
+    http_client = _patch_http(monkeypatch, transport, session) if http else None
+    if not http:
+        monkeypatch.setattr(mcp_client, "stdio_client", lambda *a, **k: transport)
+        monkeypatch.setattr(mcp_client, "ClientSession", lambda *a, **k: session)
     with pytest.raises(mcp_client.ConfigError):
-        await mcp_client.connect_mcp_servers({"srv": _stdio_cfg()})
+        await mcp_client.connect_mcp_servers({"srv": config})
+    assert session.aexit_calls == 1
+    assert transport.aexit_calls == 1
+    if http_client is not None:
+        assert http_client.aexit_calls == 1
 
-    assert session.aexit_calls == 1, "session __aexit__ not awaited (ClientSession leaked)"
-    assert transport.aexit_calls == 1, "transport __aexit__ not awaited (subprocess leaked)"
+
+async def test_list_tools_failure_cleans_up_transport_and_session(monkeypatch):
+    await _assert_failure(monkeypatch, _stdio_cfg())
 
 
 async def test_initialize_failure_cleans_up_transport_and_session(monkeypatch):
-    """If initialize() raises after the session context is entered, BOTH the
-    session and transport must have __aexit__ awaited (no leak)."""
-    transport = FakeTransport()
-    session = FakeSession(initialize_error=True)
-
-    monkeypatch.setattr(mcp_client, "stdio_client", lambda *a, **k: transport)
-    monkeypatch.setattr(mcp_client, "ClientSession", lambda *a, **k: session)
-
-    with pytest.raises(mcp_client.ConfigError):
-        await mcp_client.connect_mcp_servers({"srv": _stdio_cfg()})
-
-    assert session.aexit_calls == 1, "session __aexit__ not awaited (ClientSession leaked)"
-    assert transport.aexit_calls == 1, "transport __aexit__ not awaited (subprocess leaked)"
-
-
-# The HTTP path holds a third resource — the httpx client that carries the
-# server's headers, which mcp does not close because it did not create it.
+    await _assert_failure(monkeypatch, _stdio_cfg(), initialize=True)
 
 
 async def test_http_list_tools_failure_cleans_up_every_resource(monkeypatch):
-    """list_tools() failure over HTTP must close session, transport, and client."""
-    transport = FakeTransport()
-    session = FakeSession(list_tools_error=True)
-    http_client = _patch_http(monkeypatch, transport, session)
-
-    with pytest.raises(mcp_client.ConfigError):
-        await mcp_client.connect_mcp_servers({"srv": _http_cfg()})
-
-    assert session.aexit_calls == 1, "session __aexit__ not awaited (ClientSession leaked)"
-    assert transport.aexit_calls == 1, "transport __aexit__ not awaited (HTTP transport leaked)"
-    assert http_client.aexit_calls == 1, "httpx client __aexit__ not awaited (socket leaked)"
+    await _assert_failure(monkeypatch, _http_cfg(), http=True)
 
 
 async def test_http_initialize_failure_cleans_up_every_resource(monkeypatch):
-    """initialize() failure over HTTP must close session, transport, and client."""
-    transport = FakeTransport()
-    session = FakeSession(initialize_error=True)
-    http_client = _patch_http(monkeypatch, transport, session)
-
-    with pytest.raises(mcp_client.ConfigError):
-        await mcp_client.connect_mcp_servers({"srv": _http_cfg()})
-
-    assert session.aexit_calls == 1, "session __aexit__ not awaited (ClientSession leaked)"
-    assert transport.aexit_calls == 1, "transport __aexit__ not awaited (HTTP transport leaked)"
-    assert http_client.aexit_calls == 1, "httpx client __aexit__ not awaited (socket leaked)"
+    await _assert_failure(monkeypatch, _http_cfg(), http=True, initialize=True)
 
 
 async def test_http_transport_enter_failure_releases_the_client(monkeypatch):
-    """A transport that never enters still leaves the httpx client to close."""
     transport = FakeTransport(enter_error=True)
     session = FakeSession()
     http_client = _patch_http(monkeypatch, transport, session)
@@ -191,7 +130,6 @@ async def test_http_transport_enter_failure_releases_the_client(monkeypatch):
 
 
 async def test_http_headers_are_carried_on_the_client(monkeypatch):
-    """mcp 2.x has no headers= kwarg, so they must reach the httpx client."""
     transport = FakeTransport(enter_error=True)
     session = FakeSession()
     seen: list[object] = []
@@ -214,11 +152,6 @@ async def test_http_headers_are_carried_on_the_client(monkeypatch):
     assert seen == [{"Authorization": "Bearer t"}]
 
 
-# Cancellation is not an Exception, so an `except Exception` unwind never runs.
-# A connect cancelled by a shutdown or a timeout would otherwise strand the
-# stdio subprocess, the session, and the httpx client.
-
-
 async def _cancel_during_list_tools(coro) -> None:
     task = asyncio.create_task(coro)
     await asyncio.sleep(0.05)
@@ -227,26 +160,17 @@ async def _cancel_during_list_tools(coro) -> None:
         await task
 
 
-async def test_cancelling_a_stdio_connect_releases_its_resources(monkeypatch):
+@pytest.mark.parametrize("http", [False, True])
+async def test_cancelling_connect_releases_resources(monkeypatch, http: bool):
     transport = FakeTransport()
     session = FakeSession(hang=True)
-
-    monkeypatch.setattr(mcp_client, "stdio_client", lambda *a, **k: transport)
-    monkeypatch.setattr(mcp_client, "ClientSession", lambda *a, **k: session)
-
-    await _cancel_during_list_tools(mcp_client.connect_mcp_servers({"srv": _stdio_cfg()}))
-
-    assert session.aexit_calls == 1, "session __aexit__ not awaited (ClientSession leaked)"
-    assert transport.aexit_calls == 1, "transport __aexit__ not awaited (subprocess leaked)"
-
-
-async def test_cancelling_an_http_connect_releases_its_resources(monkeypatch):
-    transport = FakeTransport()
-    session = FakeSession(hang=True)
-    http_client = _patch_http(monkeypatch, transport, session)
-
-    await _cancel_during_list_tools(mcp_client.connect_mcp_servers({"srv": _http_cfg()}))
-
-    assert session.aexit_calls == 1, "session __aexit__ not awaited (ClientSession leaked)"
-    assert transport.aexit_calls == 1, "transport __aexit__ not awaited (HTTP transport leaked)"
-    assert http_client.aexit_calls == 1, "httpx client __aexit__ not awaited (socket leaked)"
+    http_client = _patch_http(monkeypatch, transport, session) if http else None
+    if not http:
+        monkeypatch.setattr(mcp_client, "stdio_client", lambda *a, **k: transport)
+        monkeypatch.setattr(mcp_client, "ClientSession", lambda *a, **k: session)
+    config = _http_cfg() if http else _stdio_cfg()
+    await _cancel_during_list_tools(mcp_client.connect_mcp_servers({"srv": config}))
+    assert session.aexit_calls == 1
+    assert transport.aexit_calls == 1
+    if http_client is not None:
+        assert http_client.aexit_calls == 1

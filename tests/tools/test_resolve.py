@@ -11,6 +11,7 @@ from linch.permissions import PermissionEngine
 from linch.scheduler import execute_tool_calls
 from linch.tools import ToolContext, ToolRegistry, ToolResult
 from linch.types import ToolUseBlock
+from tests.support.scheduler import scheduler_agent, scheduler_session
 
 
 class _RecordingTool:
@@ -73,26 +74,17 @@ def _agent(
 
     registry = ToolRegistry()
     registry.register(tool)
-    return SimpleNamespace(
-        cwd=".",
-        tools=registry,
+    return scheduler_agent(
+        registry,
         permission_engine=permission_engine or PermissionEngine(mode="skip-dangerous"),
         max_tool_concurrency=1,
-        tool_concurrency=1,
         hooks=list(hooks or []),
         context=context or Context(),
     )
 
 
 def _session() -> SimpleNamespace:
-    return SimpleNamespace(
-        id="session",
-        store=None,
-        active_run_id="run",
-        tools_override=None,
-        current_turn_allowed_tools=None,
-        run_deps=None,
-    )
+    return scheduler_session(session_id="session", run_id="run")
 
 
 async def _events(agent: Any, session: Any | None = None) -> list[Any]:

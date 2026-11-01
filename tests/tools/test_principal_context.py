@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
+
+from tests.support.scheduler import scheduler_agent, scheduler_session
 
 
 class _ContextTool:
@@ -32,46 +33,22 @@ class _ContextTool:
 
 
 def _scheduler_agent(tool: Any, *, permission_engine: Any = None, pipeline: Any = None) -> Any:
-    from linch import Context
     from linch.permissions import PermissionEngine
     from linch.tools import ToolRegistry
 
     registry = ToolRegistry()
     registry.register(tool)
-    return SimpleNamespace(
-        cwd=".",
-        tools=registry,
+    return scheduler_agent(
+        registry,
         permission_engine=permission_engine or PermissionEngine(mode="skip-dangerous"),
         max_tool_concurrency=4,
-        tool_concurrency=4,
-        tool_retry=None,
-        hooks=[],
-        result_offload=None,
         tool_pipeline=pipeline,
         enable_background_tools=True,
-        context=Context(),
     )
 
 
 def _scheduler_session(principal: Any = None) -> Any:
-    async def notify(*args: Any, **kwargs: Any) -> None:
-        return None
-
-    return SimpleNamespace(
-        id="session",
-        store=None,
-        active_run_id="run",
-        _active_principal=principal,
-        tools_override=None,
-        current_turn_allowed_tools=None,
-        current_turn_permission_decisions={},
-        run_deps=None,
-        filesystem=None,
-        background_tasks=[],
-        pending_notifications=[],
-        pending_child_events=[],
-        notify=notify,
-    )
+    return scheduler_session(session_id="session", run_id="run", principal=principal)
 
 
 @pytest.mark.asyncio
@@ -358,90 +335,14 @@ def _bind_fake_run(session: Any, run_id: str, principal: Any) -> None:
 
 
 @pytest.mark.asyncio
-async def test_deferred_background_tool_keeps_origin_principal_after_next_run_begins() -> None:
-    from linch import Principal
-    from linch.abort import AbortContext
-    from linch.scheduler import execute_tool_calls
-    from linch.tools import ToolResult
-    from linch.types import ToolUseBlock
-
-    old = Principal("tenant-a", "alice", {"reader"})
-    new = Principal("tenant-b", "bob", {"admin"})
-    gate = asyncio.Event()
-    seen: list[Any] = []
-
-    class _DeferredTool(_ContextTool):
-        async def execute(self, input: dict[str, Any], ctx: Any) -> Any:
-            await gate.wait()
-            seen.append(ctx.principal)
-            return ToolResult(content="done")
-
-    session = _scheduler_session(old)
-    _bind_fake_run(session, "old-run", old)
-    tool = _DeferredTool("Deferred", seen, scope="read", parallel=True)
-    iterator = execute_tool_calls(
-        [ToolUseBlock(id="bg", name="Deferred", input={"run_in_background": True})],
-        _scheduler_agent(tool),
-        session,
-        AbortContext(),
-    )
-    await iterator.__anext__()
-    await iterator.__anext__()
-    tasks = list(session.background_tasks)
-    await iterator.aclose()
-
-    session._finish_run()
-    session.active_run_id = "new-run"
-    session._active_principal = new
-    gate.set()
-    await asyncio.gather(*tasks)
-    await asyncio.sleep(0)
-
-    assert seen == [old]
-
-
-@pytest.mark.asyncio
-async def test_deferred_anonymous_tool_keeps_none_after_privileged_run_begins() -> None:
-    from linch import Principal
-    from linch.abort import AbortContext
-    from linch.scheduler import execute_tool_calls
-    from linch.tools import ToolResult
-    from linch.types import ToolUseBlock
-
-    privileged = Principal("tenant-b", "bob", {"admin"})
-    gate = asyncio.Event()
-    seen: list[Any] = []
-
-    class _DeferredTool(_ContextTool):
-        async def execute(self, input: dict[str, Any], ctx: Any) -> Any:
-            await gate.wait()
-            seen.append(ctx.principal)
-            return ToolResult(content="done")
-
-    session = _scheduler_session(None)
-    _bind_fake_run(session, "anonymous-run", None)
-    iterator = execute_tool_calls(
-        [ToolUseBlock(id="bg", name="Deferred", input={"run_in_background": True})],
-        _scheduler_agent(_DeferredTool("Deferred", seen, scope="read", parallel=True)),
-        session,
-        AbortContext(),
-    )
-    await iterator.__anext__()
-    await iterator.__anext__()
-    tasks = list(session.background_tasks)
-    await iterator.aclose()
-
-    session._finish_run()
-    session.active_run_id = "privileged-run"
-    session._active_principal = privileged
-    gate.set()
-    await asyncio.gather(*tasks)
-
-    assert seen == [None]
-
-
-@pytest.mark.asyncio
-async def test_same_id_resume_retains_binding_until_deferred_task_finishes() -> None:
+@pytest.mark.parametrize(
+    ("initial_kind", "same_run"),
+    [("principal", False), ("anonymous", False), ("principal", True)],
+    ids=["new-principal", "new-anonymous", "same-run-resume"],
+)
+async def test_deferred_background_tool_retains_origin_principal(
+    initial_kind: str, same_run: bool
+) -> None:
     from linch import Principal
     from linch.abort import AbortContext
     from linch.scheduler import execute_tool_calls
@@ -450,6 +351,8 @@ async def test_same_id_resume_retains_binding_until_deferred_task_finishes() -> 
 
     old = Principal("tenant-a", "alice", {"reader"})
     resumed = Principal("tenant-a", "alice", {"reader"})
+    replacement = Principal("tenant-b", "bob", {"admin"})
+    initial = old if initial_kind == "principal" else None
     gate = asyncio.Event()
     seen: list[Any] = []
 
@@ -459,8 +362,9 @@ async def test_same_id_resume_retains_binding_until_deferred_task_finishes() -> 
             seen.append(ctx.principal)
             return ToolResult(content="done")
 
-    session = _scheduler_session(old)
-    _bind_fake_run(session, "same-run", old)
+    run_id = "same-run" if same_run else "old-run"
+    session = _scheduler_session(initial)
+    _bind_fake_run(session, run_id, initial)
     iterator = execute_tool_calls(
         [ToolUseBlock(id="bg", name="Deferred", input={"run_in_background": True})],
         _scheduler_agent(_DeferredTool("Deferred", seen, scope="read", parallel=True)),
@@ -472,14 +376,21 @@ async def test_same_id_resume_retains_binding_until_deferred_task_finishes() -> 
     tasks = list(session.background_tasks)
     await iterator.aclose()
     session._finish_run()
-
-    session._active = True
-    session.active_run_id = "same-run"
-    session._active_principal = resumed
+    if same_run:
+        session._active = True
+        session.active_run_id = run_id
+        session._active_principal = resumed
+    else:
+        session.active_run_id = "replacement-run"
+        session._active_principal = replacement
     gate.set()
     await asyncio.gather(*tasks)
 
-    assert seen == [old]
+    if initial_kind == "principal":
+        assert seen == [old]
+        assert seen[0] is old
+    else:
+        assert seen == [None]
     session._finish_run()
 
 

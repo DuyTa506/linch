@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
+
+from tests.support.agents import make_agent as support_make_agent
+from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
+from tests.support.scheduler import scheduler_agent, scheduler_session
+from tests.support.tools import StubTool, tool_registry
 
 
 class RecordingTool:
@@ -65,45 +69,24 @@ class AppendMiddleware:
         return replace(result, content=result.content + self.text)
 
 
-def make_agent(registry: Any, middleware: Any = None) -> SimpleNamespace:
-    from linch import Context
-    from linch.hooks import ToolMiddlewareHook
-    from linch.permissions import PermissionEngine
-
-    hooks = [] if middleware is None else [ToolMiddlewareHook(middleware)]
-    return SimpleNamespace(
-        cwd=".",
-        tools=registry,
-        permission_engine=PermissionEngine(mode="skip-dangerous"),
-        max_tool_concurrency=1,
-        tool_concurrency=1,
-        hooks=hooks,
-        context=Context(),
-    )
-
-
-def make_session() -> SimpleNamespace:
-    return SimpleNamespace(
-        id="s1",
-        store=None,
-        active_run_id="run-1",
-        tools_override=None,
-        current_turn_allowed_tools=None,
-        run_deps={"tenant": "unit"},
-    )
-
-
 async def collect_events(registry: Any, middleware: Any = None) -> list[Any]:
     from linch.abort import AbortContext
+    from linch.hooks import ToolMiddlewareHook
     from linch.scheduler import execute_tool_calls
     from linch.types import ToolUseBlock
 
+    hooks = [] if middleware is None else [ToolMiddlewareHook(middleware)]
     return [
         event
         async for event in execute_tool_calls(
             [ToolUseBlock(id="t1", name="Record", input={"value": "original"})],
-            make_agent(registry, middleware),
-            make_session(),
+            scheduler_agent(
+                registry,
+                max_tool_concurrency=1,
+                tool_concurrency=1,
+                hooks=hooks,
+            ),
+            scheduler_session(run_id="run-1", run_deps={"tenant": "unit"}),
             AbortContext(),
             turn_index=3,
         )
@@ -112,11 +95,10 @@ async def collect_events(registry: Any, middleware: Any = None) -> list[Any]:
 
 @pytest.mark.asyncio
 async def test_before_tool_call_rewrites_effective_input() -> None:
-    from linch import ToolCallEndEvent, ToolCallStartEvent, ToolRegistry
+    from linch import ToolCallEndEvent, ToolCallStartEvent
 
     tool = RecordingTool()
-    registry = ToolRegistry()
-    registry.register(tool)
+    registry = tool_registry(tool)
 
     events = await collect_events(registry, RewriteInputMiddleware())
 
@@ -130,11 +112,10 @@ async def test_before_tool_call_rewrites_effective_input() -> None:
 
 @pytest.mark.asyncio
 async def test_before_tool_call_can_block_with_bracketed_events() -> None:
-    from linch import ToolCallEndEvent, ToolCallStartEvent, ToolRegistry
+    from linch import ToolCallEndEvent, ToolCallStartEvent
 
     tool = RecordingTool()
-    registry = ToolRegistry()
-    registry.register(tool)
+    registry = tool_registry(tool)
 
     events = await collect_events(registry, BlockMiddleware())
 
@@ -149,10 +130,9 @@ async def test_before_tool_call_can_block_with_bracketed_events() -> None:
 
 @pytest.mark.asyncio
 async def test_after_tool_result_rewrites_event_result() -> None:
-    from linch import ToolCallEndEvent, ToolRegistry
+    from linch import ToolCallEndEvent
 
-    registry = ToolRegistry()
-    registry.register(RecordingTool(content="contains secret"))
+    registry = tool_registry(RecordingTool(content="contains secret"))
 
     events = await collect_events(registry, RedactResultMiddleware())
 
@@ -164,10 +144,9 @@ async def test_after_tool_result_rewrites_event_result() -> None:
 
 @pytest.mark.asyncio
 async def test_multiple_middleware_run_in_order() -> None:
-    from linch import ToolCallEndEvent, ToolCallStartEvent, ToolRegistry
+    from linch import ToolCallEndEvent, ToolCallStartEvent
 
-    registry = ToolRegistry()
-    registry.register(RecordingTool(content="base"))
+    registry = tool_registry(RecordingTool(content="base"))
 
     events = await collect_events(registry, [AppendMiddleware("-a"), AppendMiddleware("-b")])
 
@@ -179,11 +158,10 @@ async def test_multiple_middleware_run_in_order() -> None:
 
 @pytest.mark.asyncio
 async def test_no_middleware_preserves_existing_behavior() -> None:
-    from linch import ToolCallEndEvent, ToolCallStartEvent, ToolRegistry
+    from linch import ToolCallEndEvent, ToolCallStartEvent
 
     tool = RecordingTool()
-    registry = ToolRegistry()
-    registry.register(tool)
+    registry = tool_registry(tool)
 
     events = await collect_events(registry)
 
@@ -196,56 +174,15 @@ async def test_no_middleware_preserves_existing_behavior() -> None:
 
 @pytest.mark.asyncio
 async def test_rewritten_result_enters_provider_history() -> None:
-    from linch import Agent, ToolResult, ToolResultBlock, Usage
+    from linch import ToolResultBlock
     from linch.hooks import ToolMiddlewareHook
-    from linch.providers import BaseProvider
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import empty_tools
 
-    class SecretTool:
-        name = "Secret"
-        description = "Returns a secret."
-        input_schema = {"type": "object", "properties": {}}
-        scope = "read"
-        parallel = False
-
-        def validate(self, raw: dict[str, Any]) -> dict[str, Any]:
-            return raw
-
-        def summarize(self, input: dict[str, Any]) -> str:
-            return "Secret"
-
-        async def execute(self, input: dict[str, Any], ctx: Any) -> ToolResult:
-            return ToolResult(content="raw secret")
-
-    class FakeProvider(BaseProvider):
-        id = "fake-provider"
-
-        def __init__(self) -> None:
-            self.requests: list[Any] = []
-
-        def context_window(self, model: str) -> int:
-            return 128_000
-
-        async def stream(self, req: Any) -> Any:
-            self.requests.append(req)
-            yield {"type": "message_start", "model": req.model}
-            if len(self.requests) == 1:
-                yield {"type": "tool_use_start", "id": "t1", "name": "Secret"}
-                yield {"type": "tool_use_input_delta", "id": "t1", "json_delta": "{}"}
-                yield {"type": "tool_use_end", "id": "t1"}
-                yield {"type": "message_end", "stop_reason": "tool_use", "usage": Usage()}
-            else:
-                yield {"type": "text_delta", "text": "done"}
-                yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
-
-    provider = FakeProvider()
-    agent = Agent(
-        model="gpt-5",
+    provider = ScriptedProvider([ToolUseTurn("Secret", {}), TextTurn("done")])
+    agent = support_make_agent(
         provider=provider,
-        tools=empty_tools(SecretTool()),
-        permissions={"mode": "skip-dangerous"},
-        session_store=InMemorySessionStore(),
+        model="gpt-5",
+        tools=tool_registry(StubTool("Secret", output="raw secret")),
+        run_store=None,
         hooks=[ToolMiddlewareHook(RedactResultMiddleware())],
     )
     session = await agent.session()
