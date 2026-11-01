@@ -10,7 +10,6 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
 Planned as 3.0.1. This patch release adds `Agent.reload_skills()`, an owner-approved
 exception to the MINOR rule in `docs/versioning.md`.
 
-
 - Freeze each ordinary session's system blocks and ordered tool schemas in durable
   metadata so stable catalogs and worker restarts preserve the provider prefix.
   Skill listings move into the cacheable system prefix and are deduplicated in
@@ -23,6 +22,12 @@ exception to the MINOR rule in `docs/versioning.md`.
   catalog changes into one subsequent reminder. Persist separate base and
   notified digests, including skills, for restart deduplication and crash recovery.
   Description changes carry the new description; MCP notifications use names only.
+- Add off-by-default `native_catalog_changes` to Anthropic and OpenAI Responses
+  provider options. Eligible models carry additions in durable positional tool
+  blocks while retaining the tool prefix; narrowing and schema edits use the
+  phase-2 path, and append-only fallback includes native additions. Anthropic
+  by-value removals remain text-only. Both native paths are **UNVERIFIED against
+  live endpoints**; fake-transport tests cover wire payloads and durable replay.
 
 ## 3.0.0 — 2026-11-01
 
