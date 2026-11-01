@@ -125,23 +125,7 @@ def in_span(
                                 tool_span.end()
                         run.tool_spans.clear()
                         run.closed = True
-                        pending = tuple(
-                            task
-                            for task in getattr(session, "background_tasks", ())
-                            if not task.done()
-                        )
-                        run.background_tasks = pending
-                        if pending:
-                            for task in pending:
-                                add_done_callback = getattr(task, "add_done_callback", None)
-                                if callable(add_done_callback):
-                                    add_done_callback(
-                                        lambda _done, *, _session=session, _run=run: (
-                                            _release_closed_run(_session, _run)
-                                        )
-                                    )
-                        else:
-                            _release_closed_run(session, run)
+                        _release_closed_run(session, run)
                         session._telemetry_run = previous
                     if end_on_exit:
                         span.end()
@@ -325,7 +309,7 @@ class _RunTrace:
         self.tool_spans: dict[str, tuple[trace.Span, bool]] = {}
         self.prompt_captured = False
         self.closed = False
-        self.background_tasks: tuple[Any, ...] = ()
+        self.background_tasks: list[Any] = []
 
     def observe(self, event: Any) -> None:
         if event.type == "error":
@@ -620,6 +604,26 @@ def _run_trace_for(session: Any, run_id: str | None = None) -> Any:
         return None
     telemetry = telemetry_for(agent)
     return telemetry._runs.get((session.id, resolved_run_id))
+
+
+def register_background_task(session: Any, task: Any, *, run_id: str) -> None:
+    """Retain the originating run until its detached task finishes.
+
+    Args:
+        session: Session owning the detached task.
+        task: Newly scheduled background task.
+        run_id: Explicit originating run identifier.
+    """
+    state = _run_trace_for(session, run_id)
+    if state is None:
+        return
+    state.background_tasks.append(task)
+
+    def finished(done: Any) -> None:
+        state.background_tasks.remove(done)
+        _release_closed_run(session, state)
+
+    task.add_done_callback(finished)
 
 
 def _release_closed_run(session: Any, state: Any) -> None:

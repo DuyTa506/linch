@@ -291,7 +291,7 @@ async def test_overlapping_detached_tools_keep_origin_registry_until_both_finish
     owner_span = telemetry.tracer.start_span("invoke_agent A")
     owner = _RunTrace(owner_span, "A")
     owner.closed = True
-    owner.background_tasks = tuple(pending_tasks)
+    owner.background_tasks = list(pending_tasks)
     telemetry._runs[(session.id, "A")] = owner
 
     @trace_tool
@@ -349,7 +349,7 @@ async def test_closed_run_cleanup_ignores_later_run_background_tasks(otel, monke
     owner_span = telemetry.tracer.start_span("invoke_agent A")
     owner = _RunTrace(owner_span, "A")
     owner.closed = True
-    owner.background_tasks = (task_a,)
+    owner.background_tasks = [task_a]
     telemetry._runs[(session.id, "A")] = owner
 
     task_a.done = lambda: True
@@ -359,13 +359,79 @@ async def test_closed_run_cleanup_ignores_later_run_background_tasks(otel, monke
     owner_span.end()
 
 
+@pytest.mark.parametrize("capture", [False, True])
+async def test_completed_runs_do_not_retain_earlier_run_background_tasks(
+    otel, monkeypatch, capture
+):
+    """A long-lived tool must retain only its originating run's telemetry."""
+    from linch import tool
+    from linch._telemetry import telemetry_for
+    from tests.support.agents import make_agent
+    from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
+    from tests.support.tools import tool_registry
+
+    monkeypatch.setenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", str(capture).lower())
+    context, exporter, _ = otel
+    release = asyncio.Event()
+    started = asyncio.Event()
+
+    @tool
+    async def slow() -> str:
+        """Wait until later runs have finished."""
+        started.set()
+        await release.wait()
+        return "tool-finished"
+
+    agent = make_agent(
+        ScriptedProvider(
+            [
+                ToolUseTurn("slow", {"run_in_background": True}),
+                TextTurn("A"),
+                TextTurn("B"),
+                TextTurn("C"),
+            ]
+        ),
+        context=context,
+        tools=tool_registry(slow),
+        enable_background_tools=True,
+    )
+    session = await agent.session()
+    telemetry = telemetry_for(agent)
+    try:
+        first = [event async for event in session.run("A")]
+        assert first[-1].subtype == "success"
+        await asyncio.wait_for(started.wait(), timeout=1)
+        assert len(telemetry._runs) == 1
+        origin = next(iter(telemetry._runs))
+        for prompt in ("B", "C"):
+            events = [event async for event in session.run(prompt)]
+            assert events[-1].subtype == "success"
+            assert set(telemetry._runs) == {origin}
+        release.set()
+        await asyncio.gather(*session.background_tasks)
+        assert not telemetry._runs
+        if capture:
+            tool_span = next(
+                span
+                for span in exporter.get_finished_spans()
+                if span.attributes.get("gen_ai.operation.name") == "execute_tool"
+            )
+            assert tool_span.attributes["linch.run_id"] == origin[1]
+            assert tool_span.attributes["gen_ai.tool.call.result"] == "tool-finished"
+    finally:
+        release.set()
+        await asyncio.gather(*session.background_tasks, return_exceptions=True)
+        await agent.close()
+
+
 async def test_record_tool_result_ignores_unbound_scheduler_session():
     """Telemetry cleanup is optional for lightweight scheduler sessions."""
     from types import SimpleNamespace
 
-    from linch._telemetry import record_tool_result
+    from linch._telemetry import record_tool_result, register_background_task
 
     record_tool_result(SimpleNamespace(id="session", active_run_id="run"), "tool", "result")
+    register_background_task(SimpleNamespace(id="session"), object(), run_id="run")
 
 
 async def test_capture_off_releases_closed_run_registry_after_background_tasks_finish(
@@ -375,7 +441,7 @@ async def test_capture_off_releases_closed_run_registry_after_background_tasks_f
     import asyncio
     from types import SimpleNamespace
 
-    from linch._telemetry import in_span, telemetry_for
+    from linch._telemetry import in_span, register_background_task, telemetry_for
 
     monkeypatch.delenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", raising=False)
     context, _, _ = otel
@@ -393,6 +459,7 @@ async def test_capture_off_releases_closed_run_registry_after_background_tasks_f
     run_span = telemetry.tracer.start_span("invoke_agent")
 
     async def events():
+        register_background_task(session, task, run_id="run")
         yield SimpleNamespace(type="system")
 
     iterator = in_span(events(), run_span, session=session, run_id="run")
