@@ -111,6 +111,7 @@ async def connect_mcp_servers(
 
     opened: list[_OpenSession] = []
     tools: list[object] = []
+    tool_names: set[str] = set()
     failures: list[str] = []
 
     for name, config in entries:
@@ -122,6 +123,11 @@ async def connect_mcp_servers(
             session = opened[-1].session
             result = await session.list_tools()
             mcp_tools = [make_mcp_tool(name, t, _make_call_tool(session)) for t in result.tools]
+            for tool in mcp_tools:
+                tool_name = str(getattr(tool, "name", ""))
+                if tool_name in tool_names:
+                    raise ConfigError(f"MCP tool names collide after normalization: '{tool_name}'")
+                tool_names.add(tool_name)
             tools.extend(mcp_tools)
         except BaseException as exc:
             for s in reversed(opened):

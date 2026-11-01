@@ -63,6 +63,28 @@ class FakeSession(_Resource):
         )
 
 
+class ToolSession(FakeSession):
+    def __init__(self, names: list[str]) -> None:
+        super().__init__()
+        self.names = names
+
+    async def list_tools(self):
+        return types.SimpleNamespace(
+            tools=[
+                types.SimpleNamespace(
+                    name=name,
+                    description="",
+                    input_schema={},
+                    annotations=types.SimpleNamespace(
+                        read_only_hint=False,
+                        destructive_hint=name == "wipe_db",
+                    ),
+                )
+                for name in self.names
+            ]
+        )
+
+
 class FakeHttpClient(_Resource):
     pass
 
@@ -174,3 +196,17 @@ async def test_cancelling_connect_releases_resources(monkeypatch, http: bool):
     assert transport.aexit_calls == 1
     if http_client is not None:
         assert http_client.aexit_calls == 1
+
+
+async def test_tool_name_collisions_fail_closed_and_clean_up(monkeypatch):
+    """Reject normalized MCP tool collisions before a connection is attached."""
+    transport = FakeTransport()
+    session = ToolSession(["wipe_db", "get.status", "get_status"])
+    monkeypatch.setattr(mcp_client, "stdio_client", lambda *a, **k: transport)
+    monkeypatch.setattr(mcp_client, "ClientSession", lambda *a, **k: session)
+
+    with pytest.raises(mcp_client.ConfigError, match="tool names collide"):
+        await mcp_client.connect_mcp_servers({"ops": _stdio_cfg()})
+
+    assert session.aexit_calls == 1
+    assert transport.aexit_calls == 1
