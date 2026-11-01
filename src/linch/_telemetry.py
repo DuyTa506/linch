@@ -17,8 +17,9 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from opentelemetry import metrics, trace
 
 try:  # Private API; without it the default provider counts as active (slower, still correct).
-    from opentelemetry.metrics._internal import _ProxyMeterProvider
+    from opentelemetry.metrics._internal import _ProxyMeter, _ProxyMeterProvider
 except ImportError:  # pragma: no cover
+    _ProxyMeter = metrics.NoOpMeter
     _ProxyMeterProvider = metrics.NoOpMeterProvider
 
 from .types import Usage
@@ -147,7 +148,13 @@ class Telemetry:
             else None
         )
         global_meter = (
-            metrics.get_meter_provider() if meter is None and meter_provider is None else None
+            metrics.get_meter_provider()
+            if isinstance(meter, _ProxyMeter)
+            or (
+                meter is None
+                and (meter_provider is None or isinstance(meter_provider, _ProxyMeterProvider))
+            )
+            else None
         )
         bindings = (tracer, tracer_provider, meter, meter_provider, global_tracer, global_meter)
         if self._bindings is not None and all(
@@ -163,7 +170,14 @@ class Telemetry:
         resolved_meter = (
             meter
             if meter is not None
-            else metrics.get_meter("linch", meter_provider=meter_provider)
+            else metrics.get_meter(
+                "linch",
+                meter_provider=(
+                    global_meter
+                    if isinstance(meter_provider, _ProxyMeterProvider)
+                    else meter_provider
+                ),
+            )
         )
         self.tokens = resolved_meter.create_histogram(TOKEN_USAGE, unit="{token}")
         self.duration = resolved_meter.create_histogram(OPERATION_DURATION, unit="s")
@@ -182,9 +196,11 @@ class Telemetry:
     @property
     def metrics_enabled(self) -> bool:
         meter = self._context.get("meter")
-        if meter is not None:
+        if meter is not None and not isinstance(meter, _ProxyMeter):
             return not isinstance(meter, metrics.NoOpMeter)
-        provider = self._context.get("meter_provider") or metrics.get_meter_provider()
+        provider = self._context.get("meter_provider")
+        if provider is None or isinstance(provider, _ProxyMeterProvider) or meter is not None:
+            provider = metrics.get_meter_provider()
         # The API has no instrument enabled flag. Its deferred default provider
         # is inactive until a host installs one; recheck so late setup still works.
         return not isinstance(provider, metrics.NoOpMeterProvider | _ProxyMeterProvider)
@@ -193,6 +209,7 @@ class Telemetry:
         if not self.metrics_enabled:
             return await awaitable
         started = perf_counter()
+        duration = self.store_duration
         attributes = {STORE_OP: op}
         try:
             return await awaitable
@@ -200,7 +217,7 @@ class Telemetry:
             attributes[ERROR_TYPE] = type(exc).__name__
             raise
         finally:
-            self.store_duration.record(perf_counter() - started, attributes)
+            duration.record(perf_counter() - started, attributes)
 
 
 def telemetry_for(agent: Any) -> Telemetry:
@@ -385,6 +402,9 @@ class ChatCall:
         self.capture = self.span.is_recording() and capture_content()
         if self.capture:
             self.span.set_attribute(INPUT_MESSAGES, _json(request.messages))
+        self.instruments = (
+            (self.telemetry.duration, self.telemetry.tokens) if self.telemetry is not None else None
+        )
         self.record_metrics = self.telemetry is not None and self.telemetry.metrics_enabled
         self.started = perf_counter() if self.record_metrics else 0
 
@@ -428,13 +448,12 @@ class ChatCall:
                         if isinstance(content, bytes | bytearray):
                             content = content.decode("utf-8")
                     self.span.set_attribute(OUTPUT_MESSAGES, _json(content))
-            if self.record_metrics:
-                self.telemetry.duration.record(perf_counter() - self.started, attrs)
+            if self.record_metrics and self.instruments is not None:
+                duration, tokens = self.instruments
+                duration.record(perf_counter() - self.started, attrs)
                 if usage is not None:
-                    self.telemetry.tokens.record(usage.input_tokens, {**attrs, TOKEN_TYPE: "input"})
-                    self.telemetry.tokens.record(
-                        usage.output_tokens, {**attrs, TOKEN_TYPE: "output"}
-                    )
+                    tokens.record(usage.input_tokens, {**attrs, TOKEN_TYPE: "input"})
+                    tokens.record(usage.output_tokens, {**attrs, TOKEN_TYPE: "output"})
         finally:
             self.span.end()
 

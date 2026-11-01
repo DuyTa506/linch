@@ -166,3 +166,92 @@ async def test_late_global_providers_refresh_deferred_bindings(otel, monkeypatch
     assert reader.get_metrics_data() is not None
     assert metrics.get_meter_provider() is host.meter_provider
     await context.dispose()
+
+
+@pytest.mark.parametrize("direct", [False, True])
+async def test_explicit_deferred_meter_activates_after_global_setup(otel, monkeypatch, direct):
+    from types import SimpleNamespace
+
+    from opentelemetry import metrics
+    from opentelemetry.metrics import _internal as metric_api
+
+    from linch import Context
+    from linch._telemetry import telemetry_for
+
+    host, _, reader = otel
+    monkeypatch.setattr(metric_api, "_METER_PROVIDER", None)
+    monkeypatch.setattr(
+        metric_api, "_METER_PROVIDER_SET_ONCE", type(metric_api._METER_PROVIDER_SET_ONCE)()
+    )
+    monkeypatch.setattr(
+        metric_api, "_PROXY_METER_PROVIDER", type(metric_api._PROXY_METER_PROVIDER)()
+    )
+    context = Context()
+    if direct:
+        context.register("meter", metrics.get_meter("host"))
+    else:
+        context.register("meter_provider", metrics.get_meter_provider())
+    agent = SimpleNamespace(context=context)
+    assert not telemetry_for(agent).metrics_enabled
+    metrics.set_meter_provider(host.meter_provider)
+    telemetry = telemetry_for(agent)
+    assert telemetry.metrics_enabled
+    await telemetry.store_call("late deferred meter", asyncio.sleep(0))
+    assert reader.get_metrics_data() is not None
+    await context.dispose()
+
+
+@pytest.mark.parametrize("operation", ["chat", "store"])
+async def test_inflight_operation_keeps_its_starting_metric_binding(otel, operation):
+    from types import SimpleNamespace
+
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+    from linch import Context
+    from linch._telemetry import ChatCall, telemetry_for
+    from linch.types import ProviderRequest
+
+    host, _, reader = otel
+    context = Context()
+    initial = context.register("meter_provider", host.meter_provider)
+    agent = SimpleNamespace(
+        context=context, model="test-model", provider=SimpleNamespace(id="test-provider")
+    )
+    session = SimpleNamespace(id="session", agent=agent)
+    other_reader = InMemoryMetricReader()
+    other_meter = MeterProvider(metric_readers=[other_reader])
+    ready, release = asyncio.Event(), asyncio.Event()
+
+    async def wait():
+        ready.set()
+        await release.wait()
+
+    telemetry = telemetry_for(agent)
+    task = None
+    chat = None
+    try:
+        if operation == "chat":
+            request = ProviderRequest(model=agent.model, messages=[], tools=[], system=[])
+            chat = ChatCall(session, request)
+        else:
+            task = asyncio.create_task(telemetry.store_call("inflight", wait()))
+            await ready.wait()
+        await initial.dispose()
+        context.register("meter_provider", other_meter)
+        telemetry_for(agent)
+        if chat is not None:
+            chat.finish()
+        else:
+            release.set()
+            await task
+        assert reader.get_metrics_data() is not None
+        assert other_reader.get_metrics_data() is None
+    finally:
+        release.set()
+        if task is not None:
+            await task
+        if chat is not None:
+            chat.finish()
+        await context.dispose()
+        other_meter.shutdown()
