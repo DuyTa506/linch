@@ -5,7 +5,7 @@ Run:
     OPENAI_API_KEY=sk-... python3 examples/core/reading_agent.py
 
 Demonstrates:
-  - Read-only tool set: tools_from_defaults(exclude={"Write", "Edit", "Bash"})
+  - Read-only tool set: workspace_tools(exclude={"Write", "Edit", "Bash"})
     → the model can Read, Glob, Grep but cannot modify anything
   - PathRule to fence access to the project root only
   - mode="default" so any unexpected tool call still requires approval
@@ -34,7 +34,7 @@ def _make_agent():
     from linch.providers import OpenAIChatCompletionsProvider
     from linch.providers.openai_chat import OpenAIChatProviderOptions
     from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import tools_from_defaults
+    from linch.tools.registry import workspace_tools
 
     api_key = (
         os.environ.get("DEEPSEEK_API_KEY")
@@ -48,7 +48,7 @@ def _make_agent():
     model = "deepseek-v4-flash" if base_url else "gpt-5-nano-2025-08-07"
 
     # Read, Glob, Grep — no Write, Edit, or Bash.
-    tools = tools_from_defaults(exclude={"Write", "Edit", "Bash"})
+    tools = workspace_tools(exclude={"Write", "Edit", "Bash"})
 
     return Agent(
         model=model,

@@ -31,14 +31,16 @@ from pathlib import Path
 
 from linch import (
     Agent,
+    RunOptions,
+)
+from linch.config import FeatureFlags, SystemPromptConfig
+from linch.ext.loop_runner import (
     FileLoopLeaseStore,
     LoopRunner,
     LoopSpec,
     LoopTickResult,
     LoopTrigger,
-    RunOptions,
 )
-from linch.config import FeatureFlags, SystemPromptConfig
 from linch.sessions import InMemorySessionStore
 from linch.tools.registry import empty_tools
 
@@ -140,7 +142,7 @@ async def main() -> None:
             ),
             timeout=float(os.environ.get("LOOP_RUNNER_TIMEOUT_S", "60")),
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         print("LoopRunner tick timed out; check BASE_URL/model credentials and retry.")
         await agent.close()
         await _close_provider(provider)
@@ -166,7 +168,7 @@ async def _close_provider(provider: object) -> None:
         return
     try:
         await asyncio.wait_for(close(), timeout=5)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         pass
 
 

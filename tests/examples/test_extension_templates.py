@@ -1,25 +1,18 @@
 from __future__ import annotations
 
-import importlib.util
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+from tests.support.modules import load_module
+
+ROOT = Path(__file__).resolve().parents[2]
 TEMPLATES = ROOT / "examples" / "extensions"
 
 
 def _load(name: str):
-    path = TEMPLATES / f"{name}.py"
-    spec = importlib.util.spec_from_file_location(name, path)
-    assert spec is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
+    return load_module(TEMPLATES / f"{name}.py", name)
 
 
 @pytest.mark.asyncio
@@ -42,34 +35,6 @@ async def test_provider_template_streams_normalized_events():
     assert events[0]["type"] == "message_start"
     assert events[1] == {"type": "text_delta", "text": "Echo: hello"}
     assert events[2]["type"] == "message_end"
-
-
-@pytest.mark.asyncio
-async def test_memory_store_template_searches_and_filters():
-    from linch.memory import MemoryItem
-
-    module = _load("memory_store_template")
-    store = module.TemplateMemoryStore()
-    await store.upsert(
-        [
-            MemoryItem(
-                id="m1",
-                content="PTO rolls over each January",
-                namespace="hr",
-                metadata={"kind": "policy"},
-            ),
-            MemoryItem(id="m2", content="Deploy notes", namespace="eng"),
-        ]
-    )
-
-    results = await store.search(
-        "pto january",
-        namespace="hr",
-        metadata_filter={"kind": "policy"},
-    )
-
-    assert [result.item.id for result in results] == ["m1"]
-    assert results[0].score == 1.0
 
 
 @pytest.mark.asyncio

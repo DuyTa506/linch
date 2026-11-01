@@ -23,6 +23,9 @@ from typing import Any
 
 from linch import (
     Agent,
+)
+from linch.config import FeatureFlags
+from linch.ext.loop_runner import (
     FileLoopArtifactStore,
     InMemoryLoopLeaseStore,
     LoopRunner,
@@ -30,7 +33,6 @@ from linch import (
     LoopTickResult,
     LoopTrigger,
 )
-from linch.config import FeatureFlags
 from linch.providers.base import BaseProvider
 from linch.sessions import InMemorySessionStore
 from linch.types import Usage

@@ -4,15 +4,16 @@ build-backend = "hatchling.build"
 
 [project]
 name = "linch"
-version = "2.0.0"
+version = "3.0.0a1"
 description = "Production grade agentic harnessing SDK."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "MIT"
 authors = [{ name = "CallMeZuy", email = "duyfaker01@gmail.com" }]
 dependencies = [
   "jsonschema>=4,<5",
   "openai>=1.0.0",
+  "opentelemetry-api>=1.20",
   "PyYAML>=6.0",
   "typing_extensions>=4.10",
 ]
@@ -22,7 +23,7 @@ Homepage = "https://github.com/DuyTa506/linch"
 Repository = "https://github.com/DuyTa506/linch"
 
 [project.scripts]
-linch = "linch.cli:main"
+linch = "linch.ext.scaffold:main"
 
 [project.optional-dependencies]
 # mcp 2.0 renamed the streamable-HTTP transport, moved headers onto a
@@ -34,19 +35,19 @@ mcp = [
 anthropic = [
   "anthropic>=0.30.0",
 ]
-otel = [
-  "opentelemetry-api>=1.20",
-  "opentelemetry-sdk>=1.20",
-]
 gemini = [
-  "google-generativeai>=0.8.0",
+  "google-genai>=1.0",
 ]
+worker = ["pgqueuer[asyncpg]>=1.6,<1.7"]
 postgres = [
-  "asyncpg>=0.29",
+  "asyncpg>=0.32",
 ]
 dev = [
+  "opentelemetry-sdk>=1.20",
+  "psutil>=7.2.2",
   "pytest>=8.0,<9.0",
   "pytest-asyncio>=0.23,<1.0",
+  "pytest-cov>=5.0",
   "pytest-timeout>=2.3",
   # Formatter output is version-sensitive by design (0.16 began formatting
   # Python inside Markdown), so pin it: an unpinned range turns CI red on a
@@ -61,11 +62,11 @@ packages = ["src/linch"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
@@ -73,6 +74,6 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.pyright]
 # Follow-up: expand this gate to tests and examples after shipped src stays clean.
 include = ["src"]
-pythonVersion = "3.10"
+pythonVersion = "3.11"
 typeCheckingMode = "basic"
 reportMissingImports = false
