@@ -37,7 +37,7 @@ from .terminals import (
     _success_result_tail,
     _validate_structured_output,
 )
-from .turn_stopping import TurnStopping
+from .turn_stopping import TurnStopping, TurnStoppingDecision
 
 
 @dataclass(slots=True)
@@ -151,12 +151,21 @@ class RunFinalization:
             forced,
         )
         feedback_base_count = self._feedback_base_count()
-        self.ctx.checkpoint.extension_state["linch.resume"] = {
-            "feedback_origin": "turn_stopping",
-            "feedback_base_count": feedback_base_count,
-        }
-        await self.ctx.save_checkpoint("assistant_appended", turn_index=turn_index)
-        decision = await self.ctx.turn_stopping.dispatch(candidate)
+        resume_state = self.ctx.checkpoint.extension_state.get("linch.resume", {})
+        if (
+            isinstance(resume_state, dict)
+            and resume_state.get("feedback_origin") == "assistant_boundary"
+        ):
+            # Acceptance and the listener's post-dispatch state are already durable.
+            # Replaying that decision would relabel its ACK/hook tail as feedback.
+            decision = TurnStoppingDecision("accept")
+        else:
+            self.ctx.checkpoint.extension_state["linch.resume"] = {
+                "feedback_origin": "turn_stopping",
+                "feedback_base_count": feedback_base_count,
+            }
+            await self.ctx.save_checkpoint("assistant_appended", turn_index=turn_index)
+            decision = await self.ctx.turn_stopping.dispatch(candidate)
         messages = decision.feedback
         if final_block is not None and decision.action != "accept":
             paired = _primary_control_message(
