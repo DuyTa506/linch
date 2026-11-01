@@ -240,3 +240,39 @@ async def test_stream_propagates_wait_for_timeout_instead_of_swallowing_it() -> 
 
     with pytest.raises(asyncio.TimeoutError):
         await asyncio.wait_for(consume(), timeout=0.05)
+
+
+@pytest.mark.parametrize("arguments", ["", " \n\t"])
+@pytest.mark.parametrize("completed_arguments", ["", " ", '{"value":"complete"}'])
+async def test_map_wire_events_normalizes_empty_tool_arguments(
+    arguments: str, completed_arguments: str
+) -> None:
+    import json
+
+    async def wire():
+        yield {
+            "type": "response.output_item.added",
+            "item": {
+                "type": "function_call",
+                "id": "item_1",
+                "call_id": "call_1",
+                "name": "NoArgs",
+            },
+        }
+        yield {
+            "type": "response.function_call_arguments.delta",
+            "item_id": "item_1",
+            "delta": arguments,
+        }
+        yield {
+            "type": "response.output_item.done",
+            "item": {"type": "function_call", "id": "item_1", "arguments": completed_arguments},
+        }
+        yield {"type": "response.completed", "response": {"status": "completed"}}
+
+    events = [event async for event in map_wire_events(wire(), "gpt-5")]
+    raw_input = "".join(
+        event["json_delta"] for event in events if event["type"] == "tool_use_input_delta"
+    )
+    assert json.loads(raw_input) == json.loads(completed_arguments.strip() or "{}")
+    assert events[-1]["stop_reason"] == "tool_use"

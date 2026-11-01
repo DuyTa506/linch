@@ -36,7 +36,7 @@ anthropic = [
   "anthropic>=0.30.0",
 ]
 gemini = [
-  "google-genai>=1.0",
+  "google-genai>=1.39.0",
 ]
 worker = ["pgqueuer[asyncpg]>=1.6,<1.7"]
 postgres = [

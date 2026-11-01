@@ -337,3 +337,54 @@ async def test_chat_client_close_resets_fields_before_close_and_preserves_errors
         await provider.aclose()
     await provider.aclose()
     assert calls == [method]
+
+
+@pytest.mark.parametrize(
+    "provider_name",
+    [
+        "OpenAIChatCompletionsProvider",
+        "DeepSeekProvider",
+        "LlamaCppProvider",
+        "VLLMProvider",
+        "SGLangProvider",
+    ],
+)
+@pytest.mark.parametrize("arguments", ["", " \n\t"])
+@pytest.mark.parametrize("finish_reason", ["tool_calls", "stop"])
+async def test_stream_normalizes_empty_tool_arguments(
+    provider_name: str, arguments: str, finish_reason: str
+) -> None:
+    import json
+
+    import linch.providers as providers
+
+    chunks = [
+        _chunk(
+            delta=SimpleNamespace(
+                content=None,
+                reasoning_content=None,
+                tool_calls=[
+                    SimpleNamespace(
+                        index=0,
+                        id="call_1",
+                        function=SimpleNamespace(name="NoArgs", arguments=arguments),
+                    )
+                ],
+            ),
+            finish_reason=finish_reason,
+        )
+    ]
+    provider = getattr(providers, provider_name)()
+    provider._client = OpenAICompatibleFakeClient(chunks)
+    events = [
+        event
+        async for event in provider.stream(
+            ProviderRequest(model="test", system=[], tools=[], messages=[])
+        )
+    ]
+    raw_input = "".join(
+        event["json_delta"] for event in events if event["type"] == "tool_use_input_delta"
+    )
+    assert json.loads(raw_input) == {}
+    assert sum(event["type"] == "tool_use_end" for event in events) == 1
+    assert events[-1]["stop_reason"] == "tool_use"

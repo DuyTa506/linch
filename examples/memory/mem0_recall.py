@@ -122,15 +122,32 @@ class Mem0RecallHook:
 
     name = "mem0_recall"
 
+    def __init__(self) -> None:
+        self._history_starts: dict[str, int] = {}
+
+    async def on_agent_start(self, ctx: Any) -> None:
+        """Capture the history boundary before this run appends its prompt.
+
+        Args:
+            ctx: Starting run and its session history.
+        """
+        self._history_starts[ctx.run_id] = ctx.session.session_log.history_count
+
     async def on_agent_stop(self, ctx: Any) -> None:
-        if getattr(ctx.result, "subtype", None) != "success":
+        """Store only messages added during this successful run.
+
+        Args:
+            ctx: Stopped run, terminal result, and scoped mem0 dependencies.
+        """
+        start = self._history_starts.pop(ctx.run_id, None)
+        if start is None or getattr(ctx.result, "subtype", None) != "success":
             return
 
         client = _dependency(ctx.deps, "mem0")
         user_id = _dependency(ctx.deps, "user_id")
         if client is None or not isinstance(user_id, str) or not user_id:
             return
-        messages = _history_messages(getattr(ctx.session, "full_history", ()))
+        messages = _history_messages(ctx.session.full_history[start:])
         if not messages:
             return
 

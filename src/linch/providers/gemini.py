@@ -6,7 +6,9 @@ SDK objects stay inside this adapter; the loop receives normalized Linch events.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+import re
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import aclosing
@@ -17,6 +19,7 @@ from .._client_lifecycle import loop_changed, running_loop
 from .._http_errors import retry_after_seconds
 from ..errors import AuthError, ContextLengthError, LinchError, ProviderError, RateLimitError
 from ..types import (
+    ImageBlock,
     Message,
     ModelId,
     ProviderRequest,
@@ -73,6 +76,19 @@ def _translate_messages(messages: list[Message]) -> list[dict[str, Any]]:
         for block in msg.content:
             if isinstance(block, TextBlock) and block.text:
                 parts.append({"text": block.text})
+            elif isinstance(block, ImageBlock):
+                source = block.source
+                if source.get("type") == "base64":
+                    parts.append(
+                        {
+                            "inline_data": {
+                                "data": base64.b64decode(source["data"]),
+                                "mime_type": source["media_type"],
+                            }
+                        }
+                    )
+                elif source.get("type") == "url":
+                    parts.append({"file_data": {"file_uri": source["url"]}})
             elif isinstance(block, ToolUseBlock):
                 tool_names_by_id[block.id] = block.name
                 parts.append(
@@ -125,6 +141,30 @@ def _translate_tool_choice(tool_choice: Any) -> dict[str, Any] | None:
     return {"function_calling_config": config}
 
 
+def _retry_after_seconds(exc: Exception) -> float | None:
+    header_delay = retry_after_seconds(exc)
+    if header_delay is not None:
+        return header_delay
+    body = getattr(exc, "details", None)
+    if not isinstance(body, dict):
+        return None
+    error = body.get("error", body)
+    if not isinstance(error, dict):
+        return None
+    details = error.get("details")
+    if not isinstance(details, list):
+        return None
+    for detail in details:
+        if (
+            isinstance(detail, dict)
+            and detail.get("@type") == "type.googleapis.com/google.rpc.RetryInfo"
+            and isinstance(delay := detail.get("retryDelay"), str)
+            and re.fullmatch(r"[0-9]+(?:\.[0-9]+)?s", delay)
+        ):
+            return float(delay[:-1])
+    return None
+
+
 def _map_error(exc: Exception) -> LinchError:
     from httpx import TransportError
 
@@ -137,7 +177,7 @@ def _map_error(exc: Exception) -> LinchError:
         return AuthError(f"Gemini auth error: {exc}")
     if code == 429 or (code is None and any(s in msg for s in ("quota", "rate limit", "429"))):
         return RateLimitError(
-            f"Gemini rate limit: {exc}", retry_after_seconds=retry_after_seconds(exc)
+            f"Gemini rate limit: {exc}", retry_after_seconds=_retry_after_seconds(exc)
         )
     if code in (None, 400, 413) and (
         "context" in msg
@@ -320,21 +360,22 @@ class GeminiProvider(BaseProvider):
                     ):
                         stop_reason = "refusal"
                     elif candidate.finish_reason == types.FinishReason.MALFORMED_FUNCTION_CALL:
-                        stop_reason = "error"
+                        raise ProviderError(
+                            "Gemini returned a malformed function call", retryable=True
+                        )
                     for part in candidate.content.parts or [] if candidate.content else []:
                         fc = part.function_call
                         saved = part.model_dump(mode="json", exclude_none=True)
                         if fc is not None and fc.name:
                             tool_input = fc.args or {}
-                            key = fc.id or json.dumps([fc.name, tool_input], sort_keys=True)
-                            if key in seen_tool_calls:
+                            tool_id = fc.id or f"gemini_{uuid.uuid4().hex}"
+                            if tool_id in seen_tool_calls:
                                 if part.thought_signature:
-                                    seen_tool_calls[key]["thought_signature"] = saved[
+                                    seen_tool_calls[tool_id]["thought_signature"] = saved[
                                         "thought_signature"
                                     ]
                                 continue
-                            seen_tool_calls[key] = saved
-                            tool_id = fc.id or f"gemini_{uuid.uuid4().hex[:8]}"
+                            seen_tool_calls[tool_id] = saved
                             saved["function_call"]["id"] = tool_id
                             model_parts.append(saved)
                             yield {"type": "tool_use_start", "id": tool_id, "name": fc.name}
@@ -351,6 +392,8 @@ class GeminiProvider(BaseProvider):
                                     "type": "thinking_delta" if part.thought else "text_delta",
                                     "text": part.text,
                                 }
+        except LinchError:
+            raise
         except Exception as exc:
             raise _map_error(exc) from exc
         yield {

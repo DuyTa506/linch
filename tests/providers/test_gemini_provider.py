@@ -309,13 +309,20 @@ async def test_stream_usage_excludes_cached_prompt_tokens(
 @pytest.mark.parametrize(
     "parts, count",
     [
-        ([{"function_call": {"name": "Read", "args": {"path": "a"}}}], 1),
+        ([{"function_call": {"name": "Read", "args": {"path": "a"}}}], 2),
         (
             [
                 {"function_call": {"name": "Read", "args": {"path": "a"}}},
                 {"function_call": {"name": "Read", "args": {"path": "b"}}},
             ],
-            2,
+            4,
+        ),
+        (
+            [
+                {"function_call": {"name": "Read", "args": {"path": "a"}}},
+                {"function_call": {"name": "Read", "args": {"path": "a"}}},
+            ],
+            4,
         ),
         (
             [
@@ -326,7 +333,7 @@ async def test_stream_usage_excludes_cached_prompt_tokens(
         ),
     ],
 )
-async def test_stream_tool_calls_deduplicated_across_chunks(
+async def test_stream_deduplicates_only_explicit_tool_ids(
     fake_client: FakeClient, sdk: Any, parts: list[dict[str, Any]], count: int
 ) -> None:
     from linch.providers.gemini import GeminiProvider
@@ -337,7 +344,9 @@ async def test_stream_tool_calls_deduplicated_across_chunks(
     inputs = [e for e in events if e["type"] == "tool_use_input_delta"]
     ends = [e for e in events if e["type"] == "tool_use_end"]
     assert len(starts) == len(inputs) == len(ends) == count
-    for start, delta, end, part in zip(starts, inputs, ends, parts, strict=True):
+    assert len({start["id"] for start in starts}) == count
+    expected_parts = parts if "id" in parts[0]["function_call"] else parts * 2
+    for start, delta, end, part in zip(starts, inputs, ends, expected_parts, strict=True):
         assert start["name"] == "Read"
         assert start["id"] == delta["id"] == end["id"]
         assert json.loads(delta["json_delta"]) == part["function_call"]["args"]
@@ -393,6 +402,33 @@ async def test_stream_builds_typed_request(fake_client: FakeClient, sdk: Any) ->
     assert config.tool_config.function_calling_config.allowed_function_names == ["Read"]
     assert config.automatic_function_calling.disable is True
     assert options.default_generation_config == {"temperature": 0.8, "top_p": 0.7}
+
+
+async def test_stream_preserves_images_in_message_order(fake_client: FakeClient, sdk: Any) -> None:
+    from linch.providers.gemini import GeminiProvider
+    from linch.types import ImageBlock, Message, TextBlock
+
+    messages = [
+        Message(
+            role="user",
+            content=[
+                TextBlock(text="before"),
+                ImageBlock(
+                    source={"type": "base64", "media_type": "image/png", "data": "aW1hZ2U="}
+                ),
+                TextBlock(text="between"),
+                ImageBlock(source={"type": "url", "url": "https://example.com/image.jpg"}),
+                TextBlock(text="after"),
+            ],
+        )
+    ]
+    _ = [event async for event in GeminiProvider().stream(request(messages=messages))]
+    parts = fake_client.calls[0]["contents"][0].parts
+    assert len(parts) == 5
+    assert [parts[i].text for i in (0, 2, 4)] == ["before", "between", "after"]
+    assert parts[1].inline_data.data == b"image"
+    assert parts[1].inline_data.mime_type == "image/png"
+    assert parts[3].file_data.file_uri == "https://example.com/image.jpg"
 
 
 async def test_vertex_uses_project_and_location(fake_client: FakeClient) -> None:
@@ -453,7 +489,7 @@ async def test_shared_thinking_config(
 async def test_repeated_call_can_supply_signature_later(fake_client: FakeClient, sdk: Any) -> None:
     from linch.providers.gemini import GeminiProvider
 
-    call = {"function_call": {"name": "Read", "args": {}}}
+    call = {"function_call": {"id": "explicit", "name": "Read", "args": {}}}
     fake_client.chunks = [
         chunk(sdk, [call]),
         chunk(sdk, [{**call, "thought_signature": b"late"}], "STOP"),
@@ -528,7 +564,6 @@ async def test_thinking_usage_and_signature_replay(fake_client: FakeClient, sdk:
         ("STOP", "end_turn"),
         ("SAFETY", "refusal"),
         ("RECITATION", "refusal"),
-        ("MALFORMED_FUNCTION_CALL", "error"),
     ],
 )
 async def test_finish_reasons(
@@ -539,6 +574,29 @@ async def test_finish_reasons(
     fake_client.chunks = [chunk(sdk, [], finish)]
     events = [e async for e in GeminiProvider().stream(request())]
     assert events[-1]["stop_reason"] == expected
+
+
+@pytest.mark.parametrize(
+    "parts",
+    [[], [{"text": "partial"}], [{"function_call": {"name": "Read", "args": {}}}]],
+)
+async def test_malformed_function_call_is_retryable_error(
+    fake_client: FakeClient, sdk: Any, parts: list[dict[str, Any]]
+) -> None:
+    from linch.errors import ProviderError
+    from linch.providers.gemini import GeminiProvider
+
+    fake_client.chunks = [
+        chunk(sdk, [{"text": "earlier partial output"}]),
+        chunk(sdk, parts, "MALFORMED_FUNCTION_CALL"),
+    ]
+    events = []
+    with pytest.raises(ProviderError, match="malformed function call") as info:
+        async for event in GeminiProvider().stream(request()):
+            events.append(event)
+    assert info.value.retryable
+    assert not any(event["type"] == "message_end" for event in events)
+    assert fake_client.stream_closed
 
 
 async def test_tool_calls_override_later_token_limit(fake_client: FakeClient, sdk: Any) -> None:
@@ -624,6 +682,31 @@ async def test_retry_after_from_sdk_response(fake_client: FakeClient, sdk: Any) 
     assert info.value.retry_after_seconds == 2.5
 
 
+@pytest.mark.parametrize("delay, expected", [("37s", 37.0), ("0.125s", 0.125)])
+@pytest.mark.parametrize("header", [None, "2.5", "0"])
+async def test_retry_info_delay_from_sdk_error(
+    fake_client: FakeClient, sdk: Any, delay: str, expected: float, header: str | None
+) -> None:
+    from linch.errors import RateLimitError
+    from linch.providers.gemini import GeminiProvider
+
+    fake_client.open_error = sdk.errors.ClientError(
+        429,
+        {
+            "error": {
+                "message": "quota",
+                "details": [
+                    {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": delay}
+                ],
+            }
+        },
+        response=SimpleNamespace(headers={"Retry-After": header}) if header is not None else None,
+    )
+    with pytest.raises(RateLimitError) as info:
+        _ = [event async for event in GeminiProvider().stream(request())]
+    assert info.value.retry_after_seconds == (float(header) if header is not None else expected)
+
+
 @pytest.mark.parametrize("error", [TimeoutError("timeout"), ConnectionError("disconnected")])
 async def test_transport_errors_retryable(fake_client: FakeClient, error: Exception) -> None:
     from linch.errors import ProviderError
@@ -705,3 +788,25 @@ def test_gemini_cached_tokens_surfaced_from_usage_metadata() -> None:
     assert gemini_cached_tokens(SimpleNamespace(cached_content_token_count=512)) == 512
     assert gemini_cached_tokens(SimpleNamespace(cached_content_token_count=None)) == 0
     assert gemini_cached_tokens(object()) == 0
+
+
+@pytest.mark.parametrize(
+    "details",
+    [
+        None,
+        [{"@type": "other", "retryDelay": "37s"}],
+        [{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "invalid"}],
+    ],
+)
+async def test_invalid_retry_info_does_not_mask_rate_limit(
+    fake_client: FakeClient, sdk: Any, details: Any
+) -> None:
+    from linch.errors import RateLimitError
+    from linch.providers.gemini import GeminiProvider
+
+    fake_client.open_error = sdk.errors.ClientError(
+        429, {"error": {"message": "quota", "details": details}}
+    )
+    with pytest.raises(RateLimitError) as info:
+        _ = [event async for event in GeminiProvider().stream(request())]
+    assert info.value.retry_after_seconds is None

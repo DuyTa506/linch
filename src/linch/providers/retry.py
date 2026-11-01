@@ -4,7 +4,7 @@ import asyncio
 import random
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TypeVar, cast
+from typing import TypeVar
 
 from linch.errors import AbortError, ConfigError, RateLimitError
 
@@ -18,7 +18,8 @@ class RetryOptions:
     Args:
         max_attempts: Maximum number of calls, including the first attempt.
         base_delay_ms: Initial exponential-backoff delay in milliseconds.
-        max_delay_ms: Upper bound for a computed delay in milliseconds.
+        max_delay_ms: Upper bound for exponential backoff in milliseconds. Server
+            retry-after hints take precedence and may exceed this bound.
         jitter: Fractional randomization applied to exponential delays.
 
     Attributes:
@@ -35,7 +36,7 @@ class RetryOptions:
 def _delay_for_error(err: Exception, attempt: int, opts: RetryOptions) -> float:
     retry_after = err.retry_after_seconds if isinstance(err, RateLimitError) else None
     if retry_after is not None:
-        return min(float(cast(float, retry_after)) * 1000.0, float(opts.max_delay_ms))
+        return float(retry_after) * 1000.0
     exp = min(float(opts.base_delay_ms) * (2**attempt), float(opts.max_delay_ms))
     jitter = exp * opts.jitter * ((random.random() * 2.0) - 1.0)
     return max(0.0, exp + jitter)

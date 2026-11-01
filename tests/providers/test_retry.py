@@ -136,3 +136,22 @@ async def test_no_signal_normal_retry_path():
     result = await with_retry(fn, signal=None, options=_FAST)
     assert result == "ok"
     assert calls == 2
+
+
+@pytest.mark.parametrize("delay", [37.0, 37.125])
+def test_server_retry_delay_exceeds_exponential_cap(delay: float) -> None:
+    from linch.errors import RateLimitError
+    from linch.providers.retry import _delay_for_error
+
+    opts = RetryOptions(base_delay_ms=5000, max_delay_ms=30000, jitter=0.0)
+    assert (
+        _delay_for_error(RateLimitError("quota", retry_after_seconds=delay), 0, opts)
+        == delay * 1000
+    )
+
+
+def test_exponential_retry_delay_remains_capped() -> None:
+    from linch.providers.retry import _delay_for_error
+
+    opts = RetryOptions(base_delay_ms=5000, max_delay_ms=30000, jitter=0.0)
+    assert _delay_for_error(_Retryable("quota"), 10, opts) == 30000.0

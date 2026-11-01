@@ -123,6 +123,111 @@ async def test_run_store_round_trip_status_and_reconnect(store_case: _StoreCase)
     assert failed_loaded.meta["errors"] == [{"message": "boom"}]
 
 
+async def test_run_store_preserves_cyclic_tool_metadata_as_markers(store_case: _StoreCase) -> None:
+    from linch.events import ToolCallEndEvent
+    from linch.tools.base import ToolResult
+
+    metadata = {"labels": ["stable"]}
+    metadata["cycle"] = metadata
+    event = ToolCallEndEvent(
+        tool_use_id="tool-1",
+        tool_name="Lookup",
+        tool_result=ToolResult(content="done", metadata=metadata),
+    )
+    store = store_case.store
+    run_id = f"conformance-{uuid4()}"
+    await store.create_run("session-1", id=run_id)
+
+    await store.append_event(run_id, event)
+    rows = await store.load_events(run_id)
+
+    assert rows[0].event.tool_result.metadata == {"labels": ["stable"], "cycle": "<recursion>"}
+
+
+async def test_run_store_bounds_deep_acyclic_tool_metadata(store_case: _StoreCase) -> None:
+    from typing import Any
+
+    from linch.events import IGNORABLE_MAX_DEPTH, ToolCallEndEvent
+    from linch.tools.base import ToolResult
+
+    payload: Any = "leaf"
+    for _ in range(IGNORABLE_MAX_DEPTH + 1000):
+        payload = [payload]
+    event = ToolCallEndEvent(
+        tool_use_id="tool-1",
+        tool_name="Lookup",
+        tool_result=ToolResult(content="done", metadata={"payload": payload}),
+    )
+    store = store_case.store
+    run_id = f"conformance-{uuid4()}"
+    await store.create_run("session-1", id=run_id)
+
+    await store.append_event(run_id, event)
+    rows = await store.load_events(run_id)
+
+    node = rows[0].event.tool_result.metadata["payload"]
+    while isinstance(node, list):
+        node = node[0]
+    assert node == "<max-depth>"
+
+
+async def test_run_store_omits_attachments_beyond_json_encoder_recursion_limit(
+    store_case: _StoreCase,
+) -> None:
+    from typing import Any
+
+    from linch.events import ToolCallEndEvent
+    from linch.tools.base import ToolResult
+
+    payload: Any = "leaf"
+    for _ in range(1100):
+        payload = [payload]
+    event = ToolCallEndEvent(
+        tool_use_id="tool-1",
+        tool_name="Lookup",
+        tool_result=ToolResult(content="done", attachments=[payload]),
+    )
+    store = store_case.store
+    run_id = f"conformance-{uuid4()}"
+    await store.create_run("session-1", id=run_id)
+
+    await store.append_event(run_id, event)
+    rows = await store.load_events(run_id)
+
+    assert rows[0].event.tool_result.attachments == []
+
+
+@pytest.mark.parametrize("kind", ["dict", "list", "mixed"])
+@pytest.mark.parametrize("wrappers", [0, 1, 2])
+async def test_run_store_preserves_opaque_event_at_exact_depth_boundary(
+    store_case: _StoreCase, kind: str, wrappers: int
+) -> None:
+    from typing import Any
+
+    from linch.events import IGNORABLE_MAX_DEPTH, IgnorableEvent, SubagentEvent, event_to_dict
+
+    payload: Any = "leaf"
+    for index in range(IGNORABLE_MAX_DEPTH - 1 - wrappers):
+        payload = (
+            {"next": payload} if kind == "dict" or (kind == "mixed" and index % 2) else [payload]
+        )
+    event = IgnorableEvent(
+        original_type="future_event",
+        raw={"type": "future_event", "ignorable": True, "payload": payload},
+    )
+    for _ in range(wrappers):
+        event = SubagentEvent("parent", "child", "worker", "Worker", event)
+    expected = event_to_dict(event)
+    store = store_case.store
+    run_id = f"conformance-{uuid4()}"
+    await store.create_run("session-1", id=run_id)
+
+    await store.append_event(run_id, event)
+    rows = await store.load_events(run_id)
+
+    assert event_to_dict(rows[0].event) == expected
+
+
 async def test_run_store_event_sequence_is_monotonic_under_concurrent_appends(
     store_case: _StoreCase,
 ) -> None:
