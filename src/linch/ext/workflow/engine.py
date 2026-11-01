@@ -11,7 +11,13 @@ from uuid import uuid4
 from ..._wire import WIRE_VERSION, require_wire_version
 from ...errors import ConfigError, WorkflowSuspended, WorkflowTimeoutError
 from ...events import ErrorEvent, Event
-from ...run_store import LeaseLostError
+from ...run_store import (
+    LeaseLostError,
+    RunLease,
+    _lease_kwargs,
+    _preflight_lease_capabilities,
+    _validate_lease_run,
+)
 from .context import SNAPSHOT_NAMESPACE, WorkflowContext, workflow_checkpoint
 from .journal import WorkflowJournal
 
@@ -41,6 +47,7 @@ async def run_workflow(
     journal_snapshot_every: int = 0,
     signal: Any = None,
     resume: dict[str, Any] | None = None,
+    lease: RunLease | None = None,
 ) -> Any:
     """Run workflow function *fn* and return its value.
 
@@ -81,6 +88,8 @@ async def run_workflow(
         journal_snapshot_every: Checkpoint interval for journal snapshots.
         signal: Abort signal propagated to child calls.
         resume: Answers for pending interrupt keys.
+        lease: Optional immutable lease that fences this workflow run's writes;
+            the engine renews and releases it when durable journaling is enabled.
 
     Returns:
         The value returned by ``fn``.
@@ -96,6 +105,29 @@ async def run_workflow(
         raise ConfigError("run_workflow(run_id=...) requires Agent(run_store=...)")
     # Durable journaling only when both a store and a run_id are present.
     store = raw_store if (raw_store is not None and run_id is not None) else None
+    _validate_lease_run(run_id or "", lease)
+    if store is not None and lease is None:
+        lifecycle_methods = tuple(
+            getattr(store, name, None) for name in ("claim", "renew", "release")
+        )
+        if any(callable(method) for method in lifecycle_methods):
+            if not all(callable(method) for method in lifecycle_methods):
+                raise ConfigError("run store lease capability requires claim, renew, release")
+            _preflight_lease_capabilities(store, include_lifecycle=True)
+    if lease is not None and store is not None:
+        for name in (
+            "create_run",
+            "append_event",
+            "save_checkpoint",
+            "mark_completed",
+            "mark_failed",
+            "renew",
+            "release",
+        ):
+            method = getattr(store, name, None)
+            if not callable(method):
+                raise ConfigError(f"run store lease capability missing {name}")
+            _lease_kwargs(method, lease)
     workflow_name = getattr(fn, "__name__", "workflow")
     host = None
     lease_ref: list[Any] = [None]
@@ -111,15 +143,27 @@ async def run_workflow(
         journal = WorkflowJournal()
         if store is not None and run_id is not None:
             if existing is not None:
-                await _claim_workflow_run(store, run_id, lease_ref)
+                if lease is None:
+                    await _claim_workflow_run(store, run_id, lease_ref)
+                else:
+                    lease_ref[0] = lease
                 snapshot, after_seq = _stored_snapshot(existing)
                 journal = WorkflowJournal.from_stored_events(
                     await store.load_events(run_id, after_seq=after_seq),
                     snapshot=snapshot,
                 )
             else:
-                await store.create_run(host.id, id=run_id, meta={"schema_version": WIRE_VERSION})
-                await _claim_workflow_run(store, run_id, lease_ref)
+                method = store.create_run
+                await method(
+                    host.id,
+                    id=run_id,
+                    meta={"schema_version": WIRE_VERSION},
+                    **_lease_kwargs(method, lease),
+                )
+                if lease is None:
+                    await _claim_workflow_run(store, run_id, lease_ref)
+                else:
+                    lease_ref[0] = lease
 
         resolved_budget = budget if budget is not None else getattr(agent, "budget", None)
         # Subagent children inherit the budget from the host session's
@@ -136,6 +180,7 @@ async def run_workflow(
             on_event=on_event,
             store=store,
             run_id=run_id if store is not None else None,
+            lease=lease_ref[0],
             step_timeout_ms=step_timeout_ms,
             signal=signal,
             resume=resume,
@@ -158,28 +203,40 @@ async def run_workflow(
                     # Carry any journal snapshot forward; overwriting it here would
                     # silently downgrade the next resume to a full event-log fold.
                     checkpoint.extension_state.update(wf.extension_state())
-                    await store.save_checkpoint(run_id, checkpoint, status="suspended")
+                    method = store.save_checkpoint
+                    await method(
+                        run_id,
+                        checkpoint,
+                        status="suspended",
+                        **_lease_kwargs(method, lease_ref[0]),
+                    )
                 raise
             except LeaseLostError:
                 raise
             except BaseException:
                 if store is not None and run_id is not None:
-                    await store.mark_failed(run_id)
+                    method = store.mark_failed
+                    await method(run_id, **_lease_kwargs(method, lease_ref[0]))
                 raise
             else:
                 if store is not None and run_id is not None:
                     try:
-                        await store.mark_completed(
-                            run_id, workflow_checkpoint(workflow_name, "completed")
+                        method = store.mark_completed
+                        await method(
+                            run_id,
+                            workflow_checkpoint(workflow_name, "completed"),
+                            **_lease_kwargs(method, lease_ref[0]),
                         )
                     except (asyncio.CancelledError, LeaseLostError):
                         raise
                     except BaseException as exc:
                         error = _workflow_error_payload(exc)
-                        await store.mark_failed(
+                        method = store.mark_failed
+                        await method(
                             run_id,
                             error=error,
                             events=[ErrorEvent(error=error)],
+                            **_lease_kwargs(method, lease_ref[0]),
                         )
                         raise
                 return result
@@ -270,7 +327,8 @@ async def _run_claimed_workflow(
 async def _renew_workflow_lease(store: Any, lease_ref: list[Any]) -> None:
     """Renew a workflow lease periodically until the workflow finishes."""
     while True:
-        await asyncio.sleep(_WORKFLOW_LEASE_TTL_S / 3)
+        current = lease_ref[0]
+        await asyncio.sleep(current.ttl_s / 3)
         lease_ref[0] = await store.renew(lease_ref[0])
 
 

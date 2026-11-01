@@ -29,7 +29,9 @@ from ..run_store import (
     RunCheckpoint,
     RunContractMismatchError,
     RunRecord,
+    _lease_kwargs,
     _require_tool_recovery_cursor,
+    _validate_lease_run,
     durable_call,
     ensure_run_contract_compatible,
     run_contract_from_meta,
@@ -142,6 +144,10 @@ async def run_loop(
 ) -> AsyncIterator[Event]:
     opts = replace(opts)
     store = session.agent.run_store
+    if opts.lease is not None and opts.run_id is not None:
+        _validate_lease_run(opts.run_id, opts.lease)
+        if store is not None:
+            _lease_kwargs(store.create_run, opts.lease)
     if store is not None and opts.run_id is not None and _adopt_run_id:
         existing = await durable_call(session, "run.load_run", store.load_run(opts.run_id))
         if existing is not None:
@@ -157,6 +163,7 @@ async def run_loop(
         _require_model_input_snapshot_store(session.agent)
     await session.agent._ensure_provider_prepared()
     run_id = opts.run_id or str(uuid4())
+    _validate_lease_run(run_id, opts.lease)
     run_span = start_run_span(session, prompt, run_id)
     session.active_run_id = run_id
     session.run_deps = opts.deps if opts.deps is not None else getattr(session.agent, "deps", None)
@@ -201,6 +208,7 @@ async def run_loop(
                             },
                         },
                     ),
+                    **_lease_kwargs(store.create_run, opts.lease),
                 ),
             )
             if store is not None
@@ -230,12 +238,14 @@ async def run_loop(
 
 async def resume_loop(session: Session, run_id: str, opts: RunOptions) -> AsyncIterator[Event]:
     opts = replace(opts)
+    _validate_lease_run(run_id, opts.lease)
     if _exact_model_input_enabled(session.agent):
         _require_model_input_snapshot_store(session.agent)
     await session.agent._ensure_provider_prepared()
     store = session.agent.run_store
     if store is None:
         raise RuntimeError("Agent has no run_store configured")
+    _lease_kwargs(store.save_checkpoint, opts.lease)
     run_record = await durable_call(session, "run.load_run", store.load_run(run_id))
     if run_record is None:
         raise KeyError(f"run not found: {run_id}")
@@ -554,7 +564,9 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             active_primary=active_primary,
             load_pending_provider_request=_load_pending_provider_request,
             maybe_save_provider_snapshot=_maybe_save_provider_snapshot,
-            persist_event=lambda event: _persist_event(session, run_id, event),
+            persist_event=lambda event: _persist_event(
+                session, run_id, event, lease=_runtime.lease
+            ),
             emit_error_terminal=_emit_error_terminal,
             drain_auxiliary_usage=_drain_auxiliary_usage,
             save_checkpoint=_save_checkpoint,
@@ -628,11 +640,13 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                     total_cost_usd=running_cost,
                     usage_complete=ledger.usage_complete,
                 )
-                await _persist_event(session, run_id, event)
+                await _persist_event(session, run_id, event, lease=_runtime.lease)
                 store = agent.run_store
                 if run_record is not None and store is not None:
                     checkpoint.total_usage = total
-                    await _complete_with_pending_events(session, run_id, checkpoint)
+                    await _complete_with_pending_events(
+                        session, run_id, checkpoint, lease=_runtime.lease
+                    )
                 yield event
                 return
             if turn_index != _align_defer_turn:
@@ -708,7 +722,9 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 forced_compaction_logical_call_id=_forced_compaction_logical_call_id,
                 load_pending_provider_request=_load_pending_provider_request,
                 dispatch_before_provider_call=_dispatch_before_provider_call,
-                persist_event=lambda event: _persist_event(session, run_id, event),
+                persist_event=lambda event: _persist_event(
+                    session, run_id, event, lease=_runtime.lease
+                ),
                 drain_auxiliary_usage=_drain_auxiliary_usage,
                 save_checkpoint=_save_checkpoint,
                 emit_budget_exhausted=_emit_budget_exhausted,
@@ -741,7 +757,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                     provider_feedback,
                 ) = await _dispatch_before_provider_call(req, turn_index, context_result)
                 for hook_event in hook_events:
-                    await _persist_event(session, run_id, hook_event)
+                    await _persist_event(session, run_id, hook_event, lease=_runtime.lease)
                     yield hook_event
                 if provider_action == "continue":
                     _pending_tools = (
@@ -813,6 +829,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                             total=total,
                             duration_ms=_dur,
                             running_cost=running_cost,
+                            lease=_runtime.lease,
                             usage_complete=ledger.usage_complete,
                         )
                     ) as stop_events:
@@ -871,7 +888,9 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 emit_error_terminal=_emit_error_terminal,
                 emit_budget_exhausted=_emit_budget_exhausted,
                 dispatch_after_provider_call=_dispatch_after_provider_call,
-                persist_event=lambda event: _persist_event(session, run_id, event),
+                persist_event=lambda event: _persist_event(
+                    session, run_id, event, lease=_runtime.lease
+                ),
                 flush_events=lambda: _flush_events(session),
                 maybe_save_provider_snapshot=_maybe_save_provider_snapshot,
                 close_active_spans=_close_active_spans,
@@ -941,7 +960,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                         )
                     await session.append([control])
                     event = UserEvent(message=control)
-                    await _persist_event(session, run_id, event)
+                    await _persist_event(session, run_id, event, lease=_runtime.lease)
                     yield event
                 await _end_active_turn()
                 await _save_checkpoint("turn_complete", turn_index=turn_index)
@@ -1029,7 +1048,9 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 guard_state=_guard_state,
                 save_checkpoint=_save_checkpoint,
                 flush_events=lambda: _flush_events(session),
-                persist_event=lambda event: _persist_event(session, run_id, event),
+                persist_event=lambda event: _persist_event(
+                    session, run_id, event, lease=_runtime.lease
+                ),
                 dispatch_lifecycle=_dispatch_lifecycle,
                 emit_error_terminal=_emit_error_terminal,
                 force_final_pending=_force_final_pending,

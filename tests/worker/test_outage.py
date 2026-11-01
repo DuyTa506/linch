@@ -313,8 +313,11 @@ async def test_three_second_database_outage_restores_dispatch_and_listen(
             await before.queries.log_jobs([(queued, "failed", None)])
         if stop_during_outage:
             assert not worker._active_runs and not pool.is_closing()
-            store = worker._run_store
-            assert store._held_leases == store._lease_owners == store._lease_ttls == {}
+            lease_row = await pool.fetchrow(
+                "SELECT lease_owner,lease_epoch FROM runs WHERE id=$1", rid
+            )
+            assert lease_row["lease_owner"] == worker.worker_id
+            assert lease_row["lease_epoch"] == row["lease_epoch"]
             assert await pool.fetchval("SELECT 1") == 1
             return
         await wait_for(
@@ -356,8 +359,7 @@ async def test_three_second_database_outage_restores_dispatch_and_listen(
         with suppress(asyncio.CancelledError):
             await asyncio.wait_for(task, 5)
     assert not worker._active_runs
-    store = worker._run_store
-    assert store._held_leases == store._lease_owners == store._lease_ttls == {}
+    assert await pool.fetchval("SELECT lease_owner FROM runs WHERE id=$1", rid) is None
     assert not pool.is_closing() and await pool.fetchval("SELECT 1") == 1
 
 

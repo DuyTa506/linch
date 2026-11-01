@@ -95,9 +95,9 @@ async def test_killed_worker_is_repicked_resumed_and_old_epoch_is_fenced(pool):
         )
         before = await pool.fetchval("SELECT count(*) FROM run_events")
         with pytest.raises(LeaseLostError):
-            await stale.append_event(rid, ErrorEvent(error="late worker write"))
+            await stale.append_event(rid, ErrorEvent(error="late worker write"), lease=original)
         with pytest.raises(LeaseLostError):
-            await stale.mark_failed(rid, error={"type": "late"})
+            await stale.mark_failed(rid, error={"type": "late"}, lease=original)
         assert await pool.fetchval("SELECT count(*) FROM run_events") == before
         assert await pool.fetchval("SELECT status FROM runs WHERE id=$1", rid) == "completed"
     finally:

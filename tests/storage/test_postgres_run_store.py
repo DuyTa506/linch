@@ -99,6 +99,103 @@ class _RollbackPool:
         return getattr(self._real, name)
 
 
+class _TraceConnection:
+    def __init__(self, real: Any, queries: list[str]) -> None:
+        self._real = real
+        self._queries = queries
+
+    async def fetchrow(self, query: str, *args: Any) -> Any:
+        self._queries.append(query)
+        return await self._real.fetchrow(query, *args)
+
+    async def fetchval(self, query: str, *args: Any) -> Any:
+        self._queries.append(query)
+        return await self._real.fetchval(query, *args)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+
+class _TraceAcquire:
+    def __init__(self, real: Any, queries: list[str]) -> None:
+        self._real = real
+        self._queries = queries
+
+    async def __aenter__(self) -> _TraceConnection:
+        return _TraceConnection(await self._real.__aenter__(), self._queries)
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+        return await self._real.__aexit__(exc_type, exc, tb)
+
+
+class _TracePool:
+    def __init__(self, real: Any, queries: list[str]) -> None:
+        self._real = real
+        self._queries = queries
+
+    def acquire(self, *args: Any, **kwargs: Any) -> _TraceAcquire:
+        return _TraceAcquire(self._real.acquire(*args, **kwargs), self._queries)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+
+class _DeleteRaceConnection(_TraceConnection):
+    def __init__(self, real: Any, queries: list[str], run_id: str, delete_dsn: str) -> None:
+        super().__init__(real, queries)
+        self._run_id = run_id
+        self._delete_dsn = delete_dsn
+        self._deleted = False
+
+    async def _delete_from_peer(self) -> None:
+        import asyncpg
+
+        peer = await asyncpg.connect(self._delete_dsn)
+        try:
+            await peer.execute("DELETE FROM runs WHERE id = $1", self._run_id)
+        finally:
+            await peer.close()
+
+    async def fetchval(self, query: str, *args: Any) -> Any:
+        if not self._deleted and "SELECT 1 FROM runs WHERE id = $1" in query:
+            result = await super().fetchval(query, *args)
+            if result is not None:
+                await self._delete_from_peer()
+                self._deleted = True
+            return result
+        return await super().fetchval(query, *args)
+
+    async def fetchrow(self, query: str, *args: Any) -> Any:
+        if not self._deleted and "FROM runs WHERE id = $1 FOR UPDATE" in query:
+            await self._delete_from_peer()
+            self._deleted = True
+        return await super().fetchrow(query, *args)
+
+
+class _DeleteRaceAcquire(_TraceAcquire):
+    def __init__(self, real: Any, queries: list[str], run_id: str, delete_dsn: str) -> None:
+        super().__init__(real, queries)
+        self._run_id = run_id
+        self._delete_dsn = delete_dsn
+
+    async def __aenter__(self) -> _DeleteRaceConnection:
+        return _DeleteRaceConnection(
+            await self._real.__aenter__(), self._queries, self._run_id, self._delete_dsn
+        )
+
+
+class _DeleteRacePool(_TracePool):
+    def __init__(self, real: Any, queries: list[str], run_id: str, delete_dsn: str) -> None:
+        super().__init__(real, queries)
+        self._run_id = run_id
+        self._delete_dsn = delete_dsn
+
+    def acquire(self, *args: Any, **kwargs: Any) -> _DeleteRaceAcquire:
+        return _DeleteRaceAcquire(
+            self._real.acquire(*args, **kwargs), self._queries, self._run_id, self._delete_dsn
+        )
+
+
 @needs_postgres
 async def test_postgres_init_and_create_run_race() -> None:
     from linch.run_stores.postgres import PostgresRunStore
@@ -146,6 +243,73 @@ async def test_postgres_create_pending_run_is_transactional_and_session_scoped()
         assert loaded is not None
         assert loaded.status == "pending"
     finally:
+        await store.close()
+
+
+@needs_postgres
+async def test_postgres_leased_pending_adoption_skips_insert() -> None:
+    """An explicit token adopts a locked pending row without an INSERT race."""
+    from linch.run_store import RunCheckpoint
+    from linch.run_stores.postgres import PostgresRunStore
+    from linch.types import Usage
+
+    dsn = os.environ["AGENT_KIT_TEST_PG_DSN"]
+    store = PostgresRunStore(dsn)
+    run_id = f"pg-leased-adoption-no-insert-{uuid4()}"
+    real_pool: Any = None
+    try:
+        real_pool = await store._ensure()
+        async with real_pool.acquire() as conn:
+            async with conn.transaction():
+                await store.create_pending_run(conn, "session-pending", id=run_id)
+        lease = await store.claim(run_id, "owner", 30.0)
+        queries: list[str] = []
+        store._pool = _TracePool(real_pool, queries)
+        adopted = await store.create_run(
+            "session-pending",
+            id=run_id,
+            initial_checkpoint=RunCheckpoint("started", "adopted", 1, Usage()),
+            lease=lease,
+        )
+        assert adopted.status == "running"
+        assert not any("INSERT INTO runs" in query for query in queries)
+    finally:
+        if real_pool is not None:
+            store._pool = real_pool
+        await store.close()
+
+
+@needs_postgres
+async def test_postgres_leased_adoption_race_does_not_recreate_pending_row() -> None:
+    """A row disappearing at the adoption boundary cannot be recreated."""
+    from linch.run_store import LeaseLostError, RunCheckpoint
+    from linch.run_stores.postgres import PostgresRunStore
+    from linch.types import Usage
+
+    dsn = os.environ["AGENT_KIT_TEST_PG_DSN"]
+    store = PostgresRunStore(dsn)
+    run_id = f"pg-leased-adoption-race-{uuid4()}"
+    real_pool: Any = None
+    try:
+        real_pool = await store._ensure()
+        async with real_pool.acquire() as conn:
+            async with conn.transaction():
+                await store.create_pending_run(conn, "session-pending", id=run_id)
+        lease = await store.claim(run_id, "owner", 30.0)
+        queries: list[str] = []
+        store._pool = _DeleteRacePool(real_pool, queries, run_id, dsn)
+        with pytest.raises(LeaseLostError):
+            await store.create_run(
+                "session-pending",
+                id=run_id,
+                initial_checkpoint=RunCheckpoint("started", "adopted", 1, Usage()),
+                lease=lease,
+            )
+        store._pool = real_pool
+        assert await store.load_run(run_id) is None
+    finally:
+        if real_pool is not None:
+            store._pool = real_pool
         await store.close()
 
 
@@ -201,8 +365,7 @@ async def test_postgres_claim_rollback_does_not_publish_local_lease(
             await first.claim(run_id, "owner-a", 30.0)
         first._pool = real_pool
 
-        assert first._held_leases == {}
-        assert first._lease_ttls == {}
+        assert not hasattr(first, "_held_leases")
 
         # A newly created run starts at epoch zero; the failed claimant's
         # candidate would have been epoch one, and the independent peer must
@@ -216,14 +379,19 @@ async def test_postgres_claim_rollback_does_not_publish_local_lease(
             owner="owner-a",
             epoch=failed_candidate_epoch,
             expires_at=peer_lease.expires_at,
+            ttl_s=30.0,
         )
-        for token in (candidate, peer_lease):
-            with pytest.raises(LeaseLostError):
-                await first.renew(token)
-            with pytest.raises(LeaseLostError):
-                await first.release(token)
-            assert first._held_leases == {}
-            assert first._lease_ttls == {}
+        with pytest.raises(LeaseLostError):
+            await first.renew(candidate)
+        with pytest.raises(LeaseLostError):
+            await first.release(candidate)
+        checkpoint = RunCheckpoint(
+            phase="started",
+            prompt="current owner",
+            turn_index=1,
+            total_usage=Usage(),
+        )
+        assert (await first.save_checkpoint(run_id, checkpoint, lease=peer_lease)).checkpoint
 
         renewed = await peer.renew(peer_lease)
         checkpoint = RunCheckpoint(
@@ -232,12 +400,11 @@ async def test_postgres_claim_rollback_does_not_publish_local_lease(
             turn_index=1,
             total_usage=Usage(),
         )
-        saved = await peer.save_checkpoint(run_id, checkpoint)
+        saved = await peer.save_checkpoint(run_id, checkpoint, lease=renewed)
         assert saved.checkpoint is not None
         assert saved.checkpoint.prompt == "live owner"
         await peer.release(renewed)
-        assert peer._held_leases == {}
-        assert peer._lease_ttls == {}
+        assert not hasattr(peer, "_held_leases")
     finally:
         if real_pool is not None:
             first._pool = real_pool
@@ -403,28 +570,37 @@ async def test_atomic_checkpoint_fencing_leaves_both_components_unchanged(pg_dsn
         await peer.claim(run_id, "new", 30)
         with pytest.raises(LeaseLostError):
             await store.save_checkpoint_with_events(
-                run_id, _atomic_checkpoint("zombie"), [_atomic_event("zombie")]
+                run_id,
+                _atomic_checkpoint("zombie"),
+                [_atomic_event("zombie")],
+                lease=lease,
             )
         record = await peer.load_run(run_id)
         assert record.checkpoint.prompt == "before"
         assert await peer.load_events(run_id) == []
-        assert store._held_leases[run_id] == lease.epoch
+        assert not hasattr(store, "_held_leases")
     finally:
         await asyncio.gather(store.close(), peer.close())
 
 
 @needs_postgres
 async def test_missing_local_lease_owner_fails_closed(pg_dsn) -> None:
-    from linch.run_store import LeaseLostError
+    from linch.run_store import LeaseLostError, RunLease
     from linch.run_stores.postgres import PostgresRunStore
 
     store = PostgresRunStore(pg_dsn)
     run_id = f"lease-owner-missing-{uuid4()}"
     try:
         await store.create_run("session", id=run_id)
-        store._held_leases[run_id] = 1
+        candidate = RunLease(
+            run_id=run_id,
+            owner="missing-owner",
+            epoch=1,
+            expires_at=time.time() + 30,
+            ttl_s=30,
+        )
         with pytest.raises(LeaseLostError):
-            await store.save_checkpoint(run_id, _atomic_checkpoint())
+            await store.save_checkpoint(run_id, _atomic_checkpoint(), lease=candidate)
         assert await store.load_run(run_id) is not None
     finally:
         await store.close()

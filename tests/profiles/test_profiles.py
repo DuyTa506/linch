@@ -426,17 +426,16 @@ async def test_same_profile_resumes_on_a_cold_agent_after_lease_takeover() -> No
     await iterator.aclose()
 
     second_store = copy.copy(store)
-    for name in ("_held_leases", "_lease_ttls", "_lease_owners"):
-        if hasattr(store, name):
-            setattr(second_store, name, dict(getattr(store, name)))
     await store.claim(run_id, "worker-a", 0.01)
     await asyncio.sleep(0.02)
-    await second_store.claim(run_id, "worker-b", 60.0)
+    new = await second_store.claim(run_id, "worker-b", 60.0)
 
     second_provider = _CaptureProvider([("text", "resumed")])
     second = _agent(second_provider, tool_registry(), run_store=second_store)
     resumed = await second.session(id="s")
-    events = [event async for event in resumed.resume(run_id, RunOptions(profile=profile))]
+    events = [
+        event async for event in resumed.resume(run_id, RunOptions(profile=profile, lease=new))
+    ]
     assert events[-1].final_text == "resumed"
     assert second_provider._index == 1
 

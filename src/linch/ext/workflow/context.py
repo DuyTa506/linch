@@ -23,6 +23,7 @@ from ...errors import (
 )
 from ...events import Event, WorkflowEvent
 from ...providers.retry import RetryOptions, with_retry
+from ...run_store import RunLease, _lease_kwargs
 from ...session import RunOptions
 from .journal import WorkflowJournal, WorkflowJournalRecord, call_key, interrupt_key, step_key
 
@@ -81,12 +82,32 @@ class WorkflowContext:
         on_event: Callable[[Event], None] | None = None,
         store: Any = None,
         run_id: str | None = None,
+        lease: RunLease | None = None,
         step_timeout_ms: float | None = None,
         signal: Any = None,
         resume: dict[str, Any] | None = None,
         workflow_name: str = "workflow",
         journal_snapshot_every: int = 0,
     ) -> None:
+        """Initialize a workflow context bound to one host run and lease.
+
+        Args:
+            agent: Agent used for child workflow calls.
+            host_session: Session that owns the workflow host run.
+            journal: Durable or in-memory workflow journal.
+            budget: Shared budget for workflow branches and child calls.
+            max_concurrency: Maximum concurrent workflow branches.
+            max_agent_concurrency: Maximum concurrent child provider calls.
+            on_event: Callback receiving workflow and child events.
+            store: Run store used for durable journal writes.
+            run_id: Durable workflow run identifier, if enabled.
+            lease: Immutable token fencing this workflow's writes.
+            step_timeout_ms: Default timeout for journaled calls.
+            signal: Abort signal propagated to child calls.
+            resume: Answers restored for pending interrupt keys.
+            workflow_name: Stable name used in workflow events.
+            journal_snapshot_every: Journal checkpoint interval; zero disables snapshots.
+        """
         self._agent = agent
         self._host_session = host_session
         self._journal = journal or WorkflowJournal()
@@ -99,6 +120,7 @@ class WorkflowContext:
         self._on_event = on_event
         self._store = store
         self._run_id = run_id
+        self._lease = lease
         self._step_timeout_ms = step_timeout_ms
         self._signal = signal
         # Copied and consumed per key: one answer resolves one interrupt, so a
@@ -121,7 +143,10 @@ class WorkflowContext:
     async def _emit(self, event: Event) -> None:
         """Forward to the host callback and persist when the run is durable."""
         if self._store is not None and self._run_id is not None:
-            append_task = asyncio.create_task(self._store.append_event(self._run_id, event))
+            method = self._store.append_event
+            append_task = asyncio.create_task(
+                method(self._run_id, event, **_lease_kwargs(method, self._lease))
+            )
             cancelled = False
             while not append_task.done():
                 try:
@@ -169,7 +194,12 @@ class WorkflowContext:
         self._snapshot = snapshot
         checkpoint = workflow_checkpoint(self._workflow_name, "workflow_running")
         checkpoint.extension_state.update(self.extension_state())
-        await self._store.save_checkpoint(self._run_id, checkpoint)
+        method = self._store.save_checkpoint
+        await method(
+            self._run_id,
+            checkpoint,
+            **_lease_kwargs(method, self._lease),
+        )
 
     # ── primitives ───────────────────────────────────────────────────────
 

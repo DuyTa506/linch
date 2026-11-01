@@ -36,6 +36,7 @@ from .hooks import (
 from .permissions import PendingToolCall, PermissionDecision, Principal
 from .permissions.keys import permission_decision_key as _permission_key
 from .providers.retry import RetryOptions, _delay_for_error
+from .run_store import _lease_kwargs
 from .tools import (
     CanonicalToolOutput,
     ResourceAccess,
@@ -325,6 +326,7 @@ async def _run_background_tool(
     turn_index: int | None,
     middleware_error: str | None,
     origin_run_id: str,
+    origin_lease: Any = None,
 ) -> None:
     """Run a detached tool call and post its completion as a <task-notification>.
 
@@ -400,7 +402,12 @@ async def _run_background_tool(
     run_store = getattr(agent, "run_store", None)
     if run_store is not None:
         try:
-            await run_store.append_event(origin_run_id, completion_event)
+            method = run_store.append_event
+            await method(
+                origin_run_id,
+                completion_event,
+                **_lease_kwargs(method, origin_lease),
+            )
         except Exception:
             logger.warning(
                 "Failed to append background worker completion event "
@@ -1761,6 +1768,7 @@ async def execute_tool_calls(
                 summary=call.summary,
             )
             binding = session._run_bindings.get(origin_run_id) if run_config is not None else None
+            origin_lease = getattr(getattr(session, "_event_journal", None), "lease", None)
             from .profiles import _schedule_with_binding
 
             task = _schedule_with_binding(
@@ -1775,6 +1783,7 @@ async def execute_tool_calls(
                     turn_index=turn_index,
                     middleware_error=middleware_errors.get(call.id),
                     origin_run_id=origin_run_id,
+                    origin_lease=origin_lease,
                 ),
             )
             session.background_tasks.append(task)

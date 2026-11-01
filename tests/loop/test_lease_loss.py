@@ -50,8 +50,6 @@ async def lease_stores(request: pytest.FixtureRequest, pg_dsn: str) -> AsyncIter
     if request.param == "memory":
         first = InMemoryRunStore()
         second = copy.copy(first)
-        for name in ("_held_leases", "_lease_ttls", "_lease_owners"):
-            setattr(second, name, dict(getattr(first, name)))
     else:
         first = PostgresRunStore(pg_dsn)
         second = PostgresRunStore(pg_dsn)
@@ -86,18 +84,22 @@ class _Takeover:
         from linch.types import ProviderRequest, Usage
 
         await asyncio.sleep(max(0.0, self.lease.expires_at - time.time()) + 0.01)
-        await self.second.claim(self.run_id, "winner-b", 60.0)
+        winner_lease = await self.second.claim(self.run_id, "winner-b", 60.0)
         checkpoint = RunCheckpoint(
             phase="completed", prompt="winner-b", turn_index=99, total_usage=Usage()
         )
         await self.second.append_event(
             self.run_id,
             ErrorEvent(error={"name": "WinnerMarker", "message": "B", "retryable": False}),
+            lease=winner_lease,
         )
         self.winner_snapshot = await self.second.save(
-            self.run_id, 99, ProviderRequest(model="winner", system=[], tools=[], messages=[])
+            self.run_id,
+            99,
+            ProviderRequest(model="winner", system=[], tools=[], messages=[]),
+            lease=winner_lease,
         )
-        await self.second.mark_completed(self.run_id, checkpoint)
+        await self.second.mark_completed(self.run_id, checkpoint, lease=winner_lease)
         self.winner_record = await self.second.load_run(self.run_id)
         self.winner_events = await self.second.load_events(self.run_id)
         self.takeover_done = True
@@ -121,7 +123,8 @@ class _Takeover:
                     if not session and name == "create_run":
                         record = await method(*args, **kwargs)
                         state.run_id = record.id
-                        state.lease = await state.first.claim(record.id, "holder-a", 0.001)
+                        if state.lease is None:
+                            state.lease = await state.first.claim(record.id, "holder-a", 0.001)
                         return record
                     # Secondary terminal loss must replace the original non-transient
                     # completion error while preserving the fencing assertion.
@@ -209,6 +212,17 @@ async def test_takeover_stops_all_later_writes_and_preserves_winner(
         durability=DurabilityOptions(exact_model_input=True),
     )
     session = await agent.session()
+    from linch.session import RunOptions
+
+    state.run_id = "lease-loop-run"
+    if hasattr(first, "_runs"):
+        await first.create_run(session.id, id=state.run_id)
+        first._runs[state.run_id].status = "pending"
+    else:
+        pool = await first._ensure()
+        async with pool.acquire() as conn:
+            await first.create_pending_run(conn, session.id, id=state.run_id)
+    state.lease = await first.claim(state.run_id, "holder-a", 0.001)
     started = asyncio.Event()
     cancelled_and_awaited = asyncio.Event()
 
@@ -224,7 +238,13 @@ async def test_takeover_stops_all_later_writes_and_preserves_winner(
     session.background_tasks.append(task)
     await started.wait()
     try:
-        events = [event async for event in session.run("hello")]
+        events = [
+            event
+            async for event in session.run(
+                "hello",
+                RunOptions(run_id=state.run_id, lease=state.lease),
+            )
+        ]
         assert state.lost, f"target {target} never exercised real fencing"
         assert state.after_loss == [], (state.first_loss, state.after_loss)
         assert cancelled_and_awaited.is_set() and task.done()
@@ -300,7 +320,9 @@ async def test_alignment_dispatch_lease_loss_never_appends_another_error(lease_s
 
     async def dispatch(*args: Any) -> Any:
         await runs.save_checkpoint(
-            record.id, RunCheckpoint(phase="started", prompt="A", turn_index=0, total_usage=Usage())
+            record.id,
+            RunCheckpoint(phase="started", prompt="A", turn_index=0, total_usage=Usage()),
+            lease=state.lease,
         )
         raise AssertionError("the stale holder must be fenced")
 
@@ -417,7 +439,18 @@ async def test_early_close_flush_lease_loss_cancels_background_and_reports_stop(
     task = asyncio.create_task(background())
     session.background_tasks.append(task)
     await started.wait()
-    iterator = session.run("hello")
+    from linch.session import RunOptions
+
+    state.run_id = "lease-early-close"
+    if hasattr(first, "_runs"):
+        await first.create_run(session.id, id=state.run_id)
+        first._runs[state.run_id].status = "pending"
+    else:
+        pool = await first._ensure()
+        async with pool.acquire() as conn:
+            await first.create_pending_run(conn, session.id, id=state.run_id)
+    state.lease = await first.claim(state.run_id, "holder-a", 0.001)
+    iterator = session.run("hello", RunOptions(run_id=state.run_id, lease=state.lease))
     try:
         async for event in iterator:
             if event.type == "hook":
@@ -556,7 +589,23 @@ async def test_blocked_prompt_terminal_lease_loss_reaches_single_agent_stop(
     )
     session = await agent.session()
     try:
-        events = [event async for event in session.run("hello")]
+        from linch.session import RunOptions
+
+        state.run_id = "lease-blocked-prompt"
+        if hasattr(first, "_runs"):
+            await first.create_run(session.id, id=state.run_id)
+            first._runs[state.run_id].status = "pending"
+        else:
+            pool = await first._ensure()
+            async with pool.acquire() as conn:
+                await first.create_pending_run(conn, session.id, id=state.run_id)
+        state.lease = await first.claim(state.run_id, "holder-a", 0.001)
+        events = [
+            event
+            async for event in session.run(
+                "hello", RunOptions(run_id=state.run_id, lease=state.lease)
+            )
+        ]
         assert state.lost and state.after_loss == []
         assert events[-2].error["name"] == "LeaseLostError"
         assert events[-1].stop_reason == "lease_lost"

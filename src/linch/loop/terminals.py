@@ -22,7 +22,7 @@ from ..events import (
     ResultEvent,
     VerificationEvent,
 )
-from ..run_store import durable_call
+from ..run_store import _lease_kwargs, durable_call
 from ..session import Session
 from ..types import (
     Message,
@@ -35,6 +35,7 @@ from .checkpoint import (
     _flush_events,
     _persist_event,
     _primary_control_message,
+    _same_lease_identity,
 )
 from .feedback import append_feedback
 from .request import final_text
@@ -107,17 +108,36 @@ def _last_assistant_text(session: Session) -> str | None:
     return None
 
 
-async def _complete_with_pending_events(session: Session, run_id: str, checkpoint: Any) -> None:
+async def _complete_with_pending_events(
+    session: Session, run_id: str, checkpoint: Any, *, lease: Any = None
+) -> None:
     """Write through a successful terminal and its pending result together."""
     store = session.agent.run_store
     assert store is not None
     buf = session._event_journal
-    if buf is not None and buf._pending:
+    if (
+        buf is not None
+        and (lease is None or _same_lease_identity(buf.lease, lease))
+        and buf._pending
+    ):
         checkpoint.phase = "completed"
         await buf.flush_with_checkpoint(checkpoint, status="completed")
         return
+    if buf is not None and lease is not None and not _same_lease_identity(buf.lease, lease):
+        method = store.mark_completed
+        await durable_call(
+            session,
+            "run.mark_completed",
+            method(run_id, checkpoint, **_lease_kwargs(method, lease)),
+        )
+        return
     await _flush_events(session)
-    await durable_call(session, "run.mark_completed", store.mark_completed(run_id, checkpoint))
+    method = store.mark_completed
+    await durable_call(
+        session,
+        "run.mark_completed",
+        method(run_id, checkpoint, **_lease_kwargs(method, lease)),
+    )
 
 
 async def _budget_exhausted_tail(
@@ -139,7 +159,7 @@ async def _budget_exhausted_tail(
         max_tokens=budget.max_tokens,
         max_cost_usd=budget.max_cost_usd,
     )
-    await _persist_event(session, run_id, event)
+    await _persist_event(session, run_id, event, lease=runtime.lease)
     yield event
     budget_error = {
         "name": "BudgetExceededError",
@@ -150,7 +170,7 @@ async def _budget_exhausted_tail(
     }
     budget_error_event = ErrorEvent(error=budget_error)
     event = budget_error_event
-    await _persist_event(session, run_id, event)
+    await _persist_event(session, run_id, event, lease=runtime.lease)
     yield event
     budget_result_event = ResultEvent(
         subtype="error",
@@ -161,7 +181,7 @@ async def _budget_exhausted_tail(
         usage_complete=usage_complete,
     )
     event = budget_result_event
-    await _persist_event(session, run_id, event)
+    await _persist_event(session, run_id, event, lease=runtime.lease)
     store = runtime.agent.run_store
     checkpoint = runtime.checkpoint
     if runtime.run_record is not None and store is not None:
@@ -185,6 +205,7 @@ async def _stop_when_tail(
     total: Usage,
     duration_ms: int,
     running_cost: float | None,
+    lease: Any = None,
     usage_complete: bool = True,
 ) -> AsyncGenerator[Event, None]:
     """Emit the graceful-stop event sequence for a met stop_when predicate."""
@@ -197,11 +218,11 @@ async def _stop_when_tail(
         total_cost_usd=running_cost,
         usage_complete=usage_complete,
     )
-    await _persist_event(session, run_id, event)
+    await _persist_event(session, run_id, event, lease=lease)
     store = agent.run_store
     if run_record is not None and store is not None:
         checkpoint.total_usage = total
-        await _complete_with_pending_events(session, run_id, checkpoint)
+        await _complete_with_pending_events(session, run_id, checkpoint, lease=lease)
     yield event
 
 
@@ -228,7 +249,7 @@ async def _error_result_tail(
         total_cost_usd=running_cost,
         usage_complete=usage_complete,
     )
-    await _persist_event(session, run_id, event)
+    await _persist_event(session, run_id, event, lease=runtime.lease)
     store = runtime.agent.run_store
     checkpoint = runtime.checkpoint
     if runtime.run_record is not None and store is not None:
@@ -253,6 +274,7 @@ async def _success_result_tail(
     duration_ms: int,
     running_cost: float | None,
     stop_reason: StopReason,
+    lease: Any = None,
     final_text_value: str | None = None,
     structured_output: dict[str, Any] | None = None,
     structured_error: str | None = None,
@@ -272,11 +294,11 @@ async def _success_result_tail(
         total_cost_usd=running_cost,
         usage_complete=usage_complete,
     )
-    await _persist_event(session, run_id, event)
+    await _persist_event(session, run_id, event, lease=lease)
     store = agent.run_store
     if run_record is not None and store is not None:
         checkpoint.total_usage = total
-        await _complete_with_pending_events(session, run_id, checkpoint)
+        await _complete_with_pending_events(session, run_id, checkpoint, lease=lease)
     yield event
 
 
@@ -302,11 +324,11 @@ async def _max_turns_tail(
         detail=f"Maximum turns ({max_turns}) reached.",
         action="stop",
     )
-    await _persist_event(session, run_id, event)
+    await _persist_event(session, run_id, event, lease=runtime.lease)
     yield event
     turn_error_event = ErrorEvent(error=turn_error)
     event = turn_error_event
-    await _persist_event(session, run_id, event)
+    await _persist_event(session, run_id, event, lease=runtime.lease)
     yield event
     turn_result_event = ResultEvent(
         subtype="error",
@@ -317,7 +339,7 @@ async def _max_turns_tail(
         usage_complete=usage_complete,
     )
     event = turn_result_event
-    await _persist_event(session, run_id, event)
+    await _persist_event(session, run_id, event, lease=runtime.lease)
     store = runtime.agent.run_store
     checkpoint = runtime.checkpoint
     if runtime.run_record is not None and store is not None:

@@ -51,12 +51,15 @@ its callback when sharing a pool with other workloads.
 
 ## Atomic phase writes
 
-`create_run(session_id, *, id=None, meta=None, initial_checkpoint=None)` must
-commit the supplied initial checkpoint with a fresh running row or the fenced
-adoption of a pending row. The SDK always supplies a `started` checkpoint, so
-worker-owned running runs are resumable even before startup returns. The optional
-default supports direct store callers; it does not make manually created runs
-without a checkpoint resumable. Custom stores must accept the new keyword.
+`create_run(session_id, *, id=None, meta=None, initial_checkpoint=None,
+lease=None)` must commit the supplied initial checkpoint with a fresh running row
+or the fenced adoption of a pending row. The SDK always supplies a `started`
+checkpoint, so worker-owned running runs are resumable even before startup
+returns. The optional default supports direct store callers; it does not make
+manually created runs without a checkpoint resumable. Custom stores that support
+leases must expose inspectable mutation signatures accepting the `lease=`
+keyword on every mutation; unleased custom stores may retain their old call
+shape.
 
 Startup events commit with the checkpoint that owns their progress. Ordinary
 runs use `user_appended`; startup-affecting hooks also have a preparation boundary
@@ -69,16 +72,17 @@ Startup hooks must be repeatable across takeover; arbitrary external hook side
 effects do not have an exactly-once guarantee.
 
 Every `RunStore` implements
-`save_checkpoint_with_events(run_id, checkpoint, events, *, status="running")`.
+`save_checkpoint_with_events(run_id, checkpoint, events, *, status="running", lease=None)`.
 The loop uses it whenever a phase has pending events, committing those events
 and its checkpoint in one fenced statement before a guarded tool runs. It returns
 `(run_record, event_seqs)`.
 
 Terminal writes follow the same atomic boundary.
-`mark_failed(run_id, checkpoint=None, error=None, *, events=())` commits the
-failed status, checkpoint, error metadata, and pending events together and
-returns `(run_record, event_seqs)`. Success, interruption, and abort commit
-their terminal checkpoint and events with `save_checkpoint_with_events`.
+`mark_failed(run_id, checkpoint=None, error=None, *, events=(), lease=None)`
+commits the failed status, checkpoint, error metadata, and pending events
+together and returns `(run_record, event_seqs)`. Success, interruption, and
+abort commit their terminal checkpoint and events with
+`save_checkpoint_with_events`.
 
 The statement fences the run and atomically advances its sequence counter,
 then inserts the events through a data-modifying CTE. Encoding, writing, or
@@ -110,43 +114,45 @@ async def handle_job():
         await runs.release(lease)
 ```
 
-`RunLease` is immutable and carries `run_id`, `owner`, `epoch`, and
-`expires_at` (Unix seconds). TTL must be positive and finite. Claiming an unknown
-run raises `KeyError`; create the run first. Use a unique owner identifier for
-each independent worker. Claiming an already live lease with the same owner
-preserves the epoch and refreshes the TTL. Renew uses the TTL from that store
-instance's most recent claim and requires its matching live lease.
+`RunLease` is immutable and carries `run_id`, `owner`, `epoch`, `expires_at`
+(Unix seconds), and `ttl_s`. TTL must be positive and finite. Claiming an
+unknown run raises `KeyError`; create the run first. Use a unique owner
+identifier for each independent worker. Claiming an already live lease with the
+same owner preserves the epoch and refreshes the TTL. Renewal uses the `ttl_s`
+from the supplied token and requires its matching live lease.
 
-Each instance remembers the epoch it claimed for each run. Checkpoint saves,
+Every run-store mutation accepts an explicit `lease=` token. Checkpoint saves,
 event appends (including batches), status updates, and model-input snapshot
-writes check that epoch in the same statement as the write. If another worker
-claims an expired lease, the epoch increases and the previous holder's next
-write raises `LeaseLostError`. The failed write changes no persisted state.
-Expiry alone permits takeover; writes are fenced by epoch, not by a local
-clock check. An expired lease cannot be renewed.
+writes validate the token's run, owner, and epoch in the same operation as the
+write. If another worker claims an expired lease, the epoch increases and the
+previous holder's next write raises `LeaseLostError`. The failed write changes
+no persisted state. Expiry alone permits takeover; writes are fenced by epoch,
+not by a local clock check. An expired lease cannot be renewed. Writes without a
+token remain supported for unleased in-process runs and for custom stores that
+do not implement lease capability.
 
 Release clears ownership and advances the epoch when the lease still matches.
-Every release attempt removes this instance's holder-local state only when its
-owner and epoch still match the released lease, including when it raises
-`LeaseLostError` after a takeover. A newer claim on the same instance retains
-its local state. Releasing a stale lease does not affect the current owner. A fenced write retains its local
-lease state until the host calls release, so further zombie writes stay fenced.
+Release permanently fences that token, including after a successful release;
+never reuse it for a later write. Releasing a stale lease does not affect the
+current owner.
 
 Hosts call release in `finally` after stopping all work for the run. Release
-ends fencing for that run on this instance; do not write to it after releasing
-it. The local ownership maps therefore track active ownership rather than
-growing with every run a long-lived worker has ever claimed.
+ends ownership for that token; later writes with it remain fenced. Do not write
+to the run with it after releasing it. Each active operation must retain and
+forward its own immutable token rather than depending on store-instance holder
+state.
 
-Worker reconnect cycles retain these adapters and ownership maps; they drain
-the old manager before rebuilding queue dispatch on a fresh connection. The host
-pool remains open throughout recovery and graceful shutdown.
+Worker reconnect cycles retain these adapters and forward each active run's
+immutable lease token; they drain the old manager before rebuilding queue
+dispatch on a fresh connection. The host pool remains open throughout recovery
+and graceful shutdown.
 
 The host owns claiming, renewal, and stopping work after lease loss; the agent
 loop does not start a heartbeat. A lease fences the run store's writes. Host
 tools still need their own idempotency or fencing for external effects.
-Instances that never claimed a particular run retain their existing write
-behavior, including when another instance has a lease. All competing host
-workers must opt into claiming for ownership protection.
+Calls without a token retain unleased behavior even when another execution
+holds a lease. All competing host workers must claim and pass their token on
+every mutation for ownership protection.
 
 Built-in Postgres stores create complete version-3 schemas,
 including run lease columns, on fresh databases. Existing databases with old,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import errno
 import hashlib
+import inspect
 import json
 import math
 import time
@@ -19,6 +20,7 @@ from uuid import UUID, uuid4
 from ._json import walk_json
 from ._telemetry import store_call
 from ._wire import WIRE_VERSION, require_wire_version
+from .errors import ConfigError
 from .events import (
     IGNORABLE_MAX_DEPTH,
     Event,
@@ -231,18 +233,21 @@ class RunLease:
         owner: Unique worker or process identifier holding the lease.
         epoch: Monotonically increasing fencing token for the run.
         expires_at: Lease expiry as a Unix timestamp.
+        ttl_s: Renewal duration carried by this immutable token.
 
     Attributes:
         run_id: Run whose writes this lease may fence.
         owner: Unique worker or process identifier holding the lease.
         epoch: Monotonically increasing fencing token for the run.
         expires_at: Lease expiry as a Unix timestamp.
+        ttl_s: Renewal duration carried by this immutable token.
     """
 
     run_id: str
     owner: str
     epoch: int
     expires_at: float
+    ttl_s: float
 
 
 class RunLeaseConflictError(RuntimeError):
@@ -355,7 +360,7 @@ class RunLeaseStore(Protocol):
         """Extend a currently held lease without changing its epoch.
 
         Args:
-            lease: Lease returned by this store instance's latest claim.
+            lease: Immutable owner, epoch, and renewal-duration token.
 
         Returns:
             A lease with the same owner and epoch and a later expiry.
@@ -542,6 +547,7 @@ class RunStore(Protocol):
         id: str | None = None,
         meta: dict[str, object] | None = None,
         initial_checkpoint: RunCheckpoint | None = None,
+        lease: RunLease | None = None,
     ) -> RunRecord:
         """Create a running record or adopt a matching pending record.
 
@@ -550,6 +556,7 @@ class RunStore(Protocol):
             id: Optional stable run identifier; a UUID is generated when omitted.
             meta: JSON-safe metadata to persist with the run.
             initial_checkpoint: Checkpoint to persist with the new running record.
+            lease: Explicit owner/epoch token for pending adoption; omit for an unleased creation.
 
         Returns:
             The detached running record.
@@ -580,6 +587,7 @@ class RunStore(Protocol):
         checkpoint: RunCheckpoint,
         *,
         status: str = "running",
+        lease: RunLease | None = None,
     ) -> RunRecord:
         """Persist a checkpoint and update the run status.
 
@@ -587,13 +595,14 @@ class RunStore(Protocol):
             run_id: Run whose checkpoint should be replaced.
             checkpoint: Resumable state to persist.
             status: Status to store alongside the checkpoint.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
             The detached updated run record.
 
         Raises:
             KeyError: If the run does not exist.
-            LeaseLostError: If this instance's fencing lease is stale.
+            LeaseLostError: If the supplied lease token is stale or mismatched.
             TypeError: If checkpoint data cannot be encoded.
         """
 
@@ -606,6 +615,7 @@ class RunStore(Protocol):
         events: Sequence[Event],
         *,
         status: str = "running",
+        lease: RunLease | None = None,
     ) -> tuple[RunRecord, list[int]]:
         """Persist a checkpoint and its pending events as one phase boundary.
 
@@ -614,6 +624,7 @@ class RunStore(Protocol):
             checkpoint: Resumable state to persist.
             events: Events to append in the supplied order.
             status: Status to store alongside the checkpoint.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
             The detached updated record and 1-based sequence numbers parallel to
@@ -621,25 +632,28 @@ class RunStore(Protocol):
 
         Raises:
             KeyError: If the run does not exist.
-            LeaseLostError: If this instance's fencing lease is stale.
+            LeaseLostError: If the supplied lease token is stale or mismatched.
             TypeError: If checkpoint or event data cannot be encoded.
         """
 
         ...
 
-    async def append_event(self, run_id: str, event: Event) -> int:
+    async def append_event(
+        self, run_id: str, event: Event, *, lease: RunLease | None = None
+    ) -> int:
         """Append one event and return its 1-based run-local sequence number.
 
         Args:
             run_id: Run whose event log should receive the event.
             event: Typed event to persist.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
             The sequence number assigned to ``event``.
 
         Raises:
             KeyError: If the run does not exist.
-            LeaseLostError: If this instance's fencing lease is stale.
+            LeaseLostError: If the supplied lease token is stale or mismatched.
             TypeError: If an event cannot be encoded.
         """
 
@@ -658,19 +672,22 @@ class RunStore(Protocol):
 
         ...
 
-    async def mark_completed(self, run_id: str, checkpoint: RunCheckpoint) -> RunRecord:
+    async def mark_completed(
+        self, run_id: str, checkpoint: RunCheckpoint, *, lease: RunLease | None = None
+    ) -> RunRecord:
         """Persist a terminal completed status and checkpoint.
 
         Args:
             run_id: Run to complete.
             checkpoint: Final checkpoint whose phase is set to ``completed``.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
             The detached completed record.
 
         Raises:
             KeyError: If the run does not exist.
-            LeaseLostError: If this instance's fencing lease is stale.
+            LeaseLostError: If the supplied lease token is stale or mismatched.
         """
 
         ...
@@ -682,6 +699,7 @@ class RunStore(Protocol):
         error: dict[str, object] | None = None,
         *,
         events: Sequence[Event] = (),
+        lease: RunLease | None = None,
     ) -> tuple[RunRecord, list[int]]:
         """Persist a failed status, optional checkpoint, error, and events.
 
@@ -690,13 +708,14 @@ class RunStore(Protocol):
             checkpoint: Optional final checkpoint whose phase becomes ``failed``.
             error: Optional JSON-safe error metadata appended to the run history.
             events: Terminal events to append with the failed state.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
             The detached failed record and 1-based sequence numbers for ``events``.
 
         Raises:
             KeyError: If the run does not exist.
-            LeaseLostError: If this instance's fencing lease is stale.
+            LeaseLostError: If the supplied lease token is stale or mismatched.
         """
 
         ...
@@ -710,16 +729,19 @@ class RunEventBatchStore(Protocol):
     persist events in input order as one all-or-nothing batch.
     """
 
-    async def append_events(self, run_id: str, events: list[Event]) -> list[int]:
+    async def append_events(
+        self, run_id: str, events: list[Event], *, lease: RunLease | None = None
+    ) -> list[int]:
         """Append a batch and return sequence numbers parallel to ``events``.
 
         Args:
             run_id: Run whose event log should receive the batch.
             events: Typed events to persist in order.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
             The assigned 1-based sequence numbers in input order; an empty
-            batch returns ``[]`` without run lookup or lease fencing.
+            batch returns ``[]``; a supplied lease is still validated before returning.
 
         Raises:
             KeyError: If a non-empty batch targets a missing run.
@@ -738,6 +760,8 @@ class ModelInputSnapshotStore(Protocol):
         run_id: str,
         provider_attempt: int,
         request: ProviderRequest,
+        *,
+        lease: RunLease | None = None,
     ) -> ModelInputSnapshot:
         """Persist a validated provider request snapshot for a run.
 
@@ -745,13 +769,14 @@ class ModelInputSnapshotStore(Protocol):
             run_id: Run that owns the pending provider request.
             provider_attempt: Positive attempt number associated with the request.
             request: Provider request to encode without its live abort signal.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
             The immutable encoded snapshot.
 
         Raises:
             KeyError: If the run does not exist.
-            LeaseLostError: If this instance's fencing lease is stale.
+            LeaseLostError: If the supplied lease token is stale or mismatched.
             ValueError: If ``provider_attempt`` is invalid.
             TypeError: If the request contains unsupported data.
             ModelInputSnapshotError: If the request cannot be encoded safely.
@@ -774,15 +799,16 @@ class ModelInputSnapshotStore(Protocol):
 
         ...
 
-    async def delete(self, snapshot_id: str, *, run_id: str) -> None:
+    async def delete(self, snapshot_id: str, *, run_id: str, lease: RunLease | None = None) -> None:
         """Delete one snapshot only when it belongs to the specified run.
 
         Args:
             snapshot_id: Snapshot identifier to delete.
             run_id: Run that must own the snapshot.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Raises:
-            LeaseLostError: If this instance's fencing lease is stale.
+            LeaseLostError: If the supplied lease token is stale or mismatched.
 
         A snapshot belonging to another run, or an unknown snapshot, is not
         deleted. Backends may report an unknown run according to their storage
@@ -791,18 +817,21 @@ class ModelInputSnapshotStore(Protocol):
 
         ...
 
-    async def prune(self, run_id: str, keep_ids: Sequence[str] = ()) -> int:
+    async def prune(
+        self, run_id: str, keep_ids: Sequence[str] = (), *, lease: RunLease | None = None
+    ) -> int:
         """Delete snapshots for a run except identifiers explicitly retained.
 
         Args:
             run_id: Run whose snapshots should be pruned.
             keep_ids: Snapshot identifiers to retain.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
             Number of snapshots deleted.
 
         Raises:
-            LeaseLostError: If this instance's fencing lease is stale.
+            LeaseLostError: If the supplied lease token is stale or mismatched.
 
         Backends may report an unknown run according to their storage semantics.
         """
@@ -1849,6 +1878,94 @@ def _lease_lost(run_id: str, expected: int, actual: int | None = None) -> LeaseL
     return LeaseLostError(f"lease lost for run {run_id}: expected epoch {expected}{detail}")
 
 
+def _supports_lease_keyword(method: Any) -> bool:
+    """Report whether a callable can receive the explicit lease keyword."""
+    try:
+        signature = inspect.signature(method)
+    except (TypeError, ValueError):
+        return False
+    lease_parameter = signature.parameters.get("lease")
+    return (
+        lease_parameter is not None
+        and lease_parameter.kind
+        in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    ) or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
+
+
+def _lease_kwargs(method: Any, lease: RunLease | None) -> dict[str, Any]:
+    """Build a mutation keyword mapping without dropping an explicit lease.
+
+    Unleased calls omit the keyword so custom stores retain their existing
+    signatures. A leased call fails before invoking an override that cannot
+    receive the token; callers must never retry that call without its fence.
+    """
+    if lease is None:
+        return {}
+    if not _supports_lease_keyword(method):
+        raise TypeError(f"{getattr(method, '__qualname__', method)!s} does not support lease")
+    return {"lease": lease}
+
+
+def _validate_lease_run(run_id: str, lease: RunLease | None) -> None:
+    """Reject malformed or wrong-run tokens before a mutation starts."""
+    if lease is None:
+        return
+    if lease.run_id != run_id:
+        raise LeaseLostError(f"lease run {lease.run_id} does not match target run {run_id}")
+    if not isinstance(lease.owner, str):
+        raise LeaseLostError(f"lease for run {run_id} has no valid owner")
+    if isinstance(lease.epoch, bool) or not isinstance(lease.epoch, int) or lease.epoch < 1:
+        raise LeaseLostError(f"lease for run {run_id} has no valid epoch")
+
+
+def _preflight_leased_store(
+    store: Any,
+    run_id: str,
+    lease: RunLease | None,
+    *,
+    include_snapshots: bool = False,
+) -> None:
+    """Check leased mutation signatures before an execution has side effects."""
+    if lease is None:
+        return
+    _validate_lease_run(run_id, lease)
+    _preflight_lease_capabilities(store, include_snapshots=include_snapshots)
+
+
+def _preflight_lease_capabilities(
+    store: Any,
+    *,
+    include_snapshots: bool = False,
+    include_lifecycle: bool = False,
+) -> None:
+    """Check leased mutation and optional lifecycle signatures before setup."""
+    required = (
+        "create_run",
+        "save_checkpoint",
+        "save_checkpoint_with_events",
+        "append_event",
+        "mark_completed",
+        "mark_failed",
+    )
+    optional = ("append_events",)
+    snapshot_methods: tuple[str, ...] = ()
+    if include_snapshots:
+        snapshot_methods = ("save", "delete", "prune")
+        optional += snapshot_methods
+    lifecycle = ("claim", "renew", "release") if include_lifecycle else ()
+    for name in (*required, *optional, *lifecycle):
+        method = getattr(store, name, None)
+        if not callable(method):
+            if name in required or name in snapshot_methods or name in lifecycle:
+                raise ConfigError(f"run store lease capability missing {name}")
+            continue
+        if not _supports_lease_keyword(method) and name not in {"claim", "renew", "release"}:
+            raise TypeError(f"{getattr(method, '__qualname__', method)!s} does not support lease")
+
+
 class InMemoryRunStore:
     """Keep runs, events, leases, and model-input snapshots in process memory.
 
@@ -1863,11 +1980,9 @@ class InMemoryRunStore:
         self._runs: dict[str, RunRecord] = {}
         self._events: dict[str, list[StoredRunEvent]] = {}
         self._model_input_snapshots: dict[str, ModelInputSnapshot] = {}
-        # Durable state and holder-local fencing state are kept separately.
+        # The durable lease state is shared by copied test-store handles.  A
+        # caller's immutable RunLease is the only holder authority.
         self._lease_state: dict[str, tuple[str | None, float | None, int]] = {}
-        self._held_leases: dict[str, int] = {}
-        self._lease_ttls: dict[str, float] = {}
-        self._lease_owners: dict[str, str] = {}
 
     async def create_run(
         self,
@@ -1876,6 +1991,7 @@ class InMemoryRunStore:
         id: str | None = None,
         meta: dict[str, object] | None = None,
         initial_checkpoint: RunCheckpoint | None = None,
+        lease: RunLease | None = None,
     ) -> RunRecord:
         """Create a running record or adopt a matching pending record.
 
@@ -1884,6 +2000,7 @@ class InMemoryRunStore:
             id: Optional stable run identifier; a UUID is generated when omitted.
             meta: JSON-safe metadata to persist with the run.
             initial_checkpoint: Checkpoint to persist with the running record.
+            lease: Explicit owner/epoch token for pending adoption; omit for an unleased creation.
 
         Returns:
             A detached running record.
@@ -1899,9 +2016,10 @@ class InMemoryRunStore:
         rid = id or str(uuid4())
         existing = self._runs.get(rid)
         if existing is not None:
+            _validate_lease_run(rid, lease)
+            self._check_lease(rid, lease)
             if existing.status != "pending":
                 raise ValueError(f"run {rid} already exists")
-            self._check_lease(rid)
             if existing.session_id != session_id:
                 raise ValueError(f"run {rid} belongs to session {existing.session_id}")
             incoming_meta = _safe_meta(meta)
@@ -1921,6 +2039,8 @@ class InMemoryRunStore:
             existing.checkpoint = checkpoint
             existing.updated_at = now_iso()
             return _copy_record(existing)
+        if lease is not None:
+            raise _lease_lost(rid, lease.epoch)
         ts = now_iso()
         record = RunRecord(
             id=rid,
@@ -1964,16 +2084,13 @@ class InMemoryRunStore:
         next_epoch = epoch if live and current_owner == owner else epoch + 1
         expires = now + ttl
         self._lease_state[run_id] = (owner, expires, next_epoch)
-        self._held_leases[run_id] = next_epoch
-        self._lease_ttls[run_id] = ttl
-        self._lease_owners[run_id] = owner
-        return RunLease(run_id, owner, next_epoch, expires)
+        return RunLease(run_id, owner, next_epoch, expires, ttl)
 
     async def renew(self, lease: RunLease) -> RunLease:
         """Extend a held lease without changing its fencing epoch.
 
         Args:
-            lease: Lease returned by this store instance's latest claim.
+            lease: Immutable owner, epoch, and renewal-duration token.
 
         Returns:
             The same lease identity with a refreshed expiry timestamp.
@@ -1982,22 +2099,19 @@ class InMemoryRunStore:
             LeaseLostError: If the lease is stale, expired, or no longer held.
         """
 
-        held = self._held_leases.get(lease.run_id)
+        _validate_lease_run(lease.run_id, lease)
         current_owner, expires_at, epoch = self._lease_state.get(lease.run_id, (None, None, 0))
         if (
-            held != lease.epoch
-            or epoch != lease.epoch
+            epoch != lease.epoch
             or current_owner != lease.owner
             or expires_at is None
             or expires_at <= time.time()
         ):
             raise _lease_lost(lease.run_id, lease.epoch, epoch)
-        ttl = self._lease_ttls.get(lease.run_id)
-        if ttl is None:
-            raise _lease_lost(lease.run_id, lease.epoch, epoch)
+        ttl = _validate_lease_ttl(lease.ttl_s)
         renewed = time.time() + ttl
         self._lease_state[lease.run_id] = (lease.owner, renewed, lease.epoch)
-        return RunLease(lease.run_id, lease.owner, lease.epoch, renewed)
+        return RunLease(lease.run_id, lease.owner, lease.epoch, renewed, ttl)
 
     async def release(self, lease: RunLease) -> None:
         """Release a matching lease and advance its fencing epoch.
@@ -2009,34 +2123,22 @@ class InMemoryRunStore:
             LeaseLostError: If the lease no longer matches the stored owner or epoch.
         """
 
-        try:
-            held = self._held_leases.get(lease.run_id)
-            current_owner, expires_at, epoch = self._lease_state.get(lease.run_id, (None, None, 0))
-            if (
-                held != lease.epoch
-                or epoch != lease.epoch
-                or current_owner != lease.owner
-                or expires_at is None
-            ):
-                raise _lease_lost(lease.run_id, lease.epoch, epoch)
-            self._lease_state[lease.run_id] = (None, None, lease.epoch + 1)
-        finally:
-            if (
-                self._held_leases.get(lease.run_id) == lease.epoch
-                and self._lease_owners.get(lease.run_id) == lease.owner
-            ):
-                self._held_leases.pop(lease.run_id, None)
-                self._lease_ttls.pop(lease.run_id, None)
-                self._lease_owners.pop(lease.run_id, None)
+        _validate_lease_run(lease.run_id, lease)
+        current_owner, _expires_at, epoch = self._lease_state.get(lease.run_id, (None, None, 0))
+        if epoch != lease.epoch or current_owner != lease.owner:
+            raise _lease_lost(lease.run_id, lease.epoch, epoch)
+        self._lease_state[lease.run_id] = (None, None, lease.epoch + 1)
 
-    def _check_lease(self, run_id: str) -> None:
-        held = self._held_leases.get(run_id)
-        if held is None:
+    def _check_lease(self, run_id: str, lease: RunLease | None = None) -> None:
+        _validate_lease_run(run_id, lease)
+        if lease is None:
             return
         current = self._lease_state.get(run_id)
-        actual = current[2] if current is not None else None
-        if actual != held:
-            raise _lease_lost(run_id, held, actual)
+        if current is None:
+            raise _lease_lost(run_id, lease.epoch)
+        current_owner, _expires_at, actual = current
+        if actual != lease.epoch or current_owner != lease.owner:
+            raise _lease_lost(run_id, lease.epoch, actual)
 
     async def load_run(self, run_id: str) -> RunRecord | None:
         """Load a detached run record by identifier.
@@ -2057,6 +2159,7 @@ class InMemoryRunStore:
         checkpoint: RunCheckpoint,
         *,
         status: str = "running",
+        lease: RunLease | None = None,
     ) -> RunRecord:
         """Persist a checkpoint and update the run status.
 
@@ -2064,16 +2167,17 @@ class InMemoryRunStore:
             run_id: Run whose checkpoint should be replaced.
             checkpoint: Resumable state to persist.
             status: Status to store alongside the checkpoint.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
             A detached updated run record.
 
         Raises:
             KeyError: If the run does not exist.
-            LeaseLostError: If this instance's fencing lease is stale.
+            LeaseLostError: If the supplied lease token is stale or mismatched.
         """
 
-        self._check_lease(run_id)
+        self._check_lease(run_id, lease)
         rec = self._runs[run_id]
         rec.checkpoint = _copy_checkpoint(checkpoint)
         rec.status = status  # type: ignore[assignment]
@@ -2087,6 +2191,7 @@ class InMemoryRunStore:
         events: Sequence[Event],
         *,
         status: str = "running",
+        lease: RunLease | None = None,
     ) -> tuple[RunRecord, list[int]]:
         """Atomically publish a checkpoint and its pending event prefix.
 
@@ -2095,17 +2200,18 @@ class InMemoryRunStore:
             checkpoint: Resumable state to persist.
             events: Events to append in the supplied order.
             status: Status to store alongside the checkpoint.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
             The detached updated record and sequence numbers parallel to ``events``.
 
         Raises:
             KeyError: If the run does not exist.
-            LeaseLostError: If this instance's fencing lease is stale.
+            LeaseLostError: If the supplied lease token is stale or mismatched.
             TypeError: If an event or checkpoint cannot be encoded.
         """
 
-        self._check_lease(run_id)
+        self._check_lease(run_id, lease)
         rec = self._runs[run_id]
         checkpoint_copy = _copy_checkpoint(checkpoint)
         event_copies = [_copy_event(event) for event in events]
@@ -2121,23 +2227,26 @@ class InMemoryRunStore:
         )
         return _copy_record(rec), seqs
 
-    async def append_event(self, run_id: str, event: Event) -> int:
+    async def append_event(
+        self, run_id: str, event: Event, *, lease: RunLease | None = None
+    ) -> int:
         """Append one event and return its 1-based sequence number.
 
         Args:
             run_id: Run whose event log should receive the event.
             event: Typed event to persist.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
             The sequence number assigned to ``event``.
 
         Raises:
             KeyError: If the run does not exist.
-            LeaseLostError: If this instance's fencing lease is stale.
+            LeaseLostError: If the supplied lease token is stale or mismatched.
             TypeError: If the event cannot be encoded.
         """
 
-        self._check_lease(run_id)
+        self._check_lease(run_id, lease)
         if run_id not in self._runs:
             raise KeyError(f"run not found: {run_id}")
         bucket = self._events.setdefault(run_id, [])
@@ -2145,16 +2254,19 @@ class InMemoryRunStore:
         bucket.append(StoredRunEvent(seq=seq, appended_at=now_iso(), event=_copy_event(event)))
         return seq
 
-    async def append_events(self, run_id: str, events: list[Event]) -> list[int]:
+    async def append_events(
+        self, run_id: str, events: list[Event], *, lease: RunLease | None = None
+    ) -> list[int]:
         """Atomically append events in input order.
 
         Args:
             run_id: Run whose event log should receive the events.
             events: Typed events to append in input order.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
             Sequence numbers returned for each input event, in the same order;
-            an empty batch returns ``[]`` without run lookup or lease fencing.
+            an empty batch returns ``[]``; a supplied lease is still validated.
 
         Raises:
             KeyError: If a non-empty batch targets a missing run.
@@ -2163,13 +2275,18 @@ class InMemoryRunStore:
         """
 
         if not events:
+            if lease is not None:
+                self._check_lease(run_id, lease)
             return []
-        self._check_lease(run_id)
+        self._check_lease(run_id, lease)
         if run_id not in self._runs:
             raise KeyError(f"run not found: {run_id}")
         copies = [_copy_event(event) for event in events]
         if type(self).append_event is not InMemoryRunStore.append_event:
-            return [await self.append_event(run_id, event) for event in copies]
+            return [
+                await self.append_event(run_id, event, **_lease_kwargs(self.append_event, lease))
+                for event in copies
+            ]
         bucket = self._events.setdefault(run_id, [])
         timestamp = now_iso()
         seqs = list(range(len(bucket) + 1, len(bucket) + len(copies) + 1))
@@ -2201,6 +2318,8 @@ class InMemoryRunStore:
         run_id: str,
         provider_attempt: int,
         request: ProviderRequest,
+        *,
+        lease: RunLease | None = None,
     ) -> ModelInputSnapshot:
         """Persist an exact provider-request snapshot for a run.
 
@@ -2208,19 +2327,20 @@ class InMemoryRunStore:
             run_id: Run that owns the pending provider request.
             provider_attempt: Positive, 1-based provider dispatch attempt.
             request: Provider request to encode without its live abort signal.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
             The immutable encoded snapshot.
 
         Raises:
             KeyError: If the run does not exist.
-            LeaseLostError: If this instance's fencing lease is stale.
+            LeaseLostError: If the supplied lease token is stale or mismatched.
             ValueError: If ``provider_attempt`` is invalid.
             TypeError: If the request contains unsupported data.
             ModelInputSnapshotError: If snapshot validation fails.
         """
 
-        self._check_lease(run_id)
+        self._check_lease(run_id, lease)
         if run_id not in self._runs:
             raise KeyError(f"run not found: {run_id}")
         snapshot = create_model_input_snapshot(run_id, provider_attempt, request)
@@ -2243,38 +2363,42 @@ class InMemoryRunStore:
         snapshot = self._model_input_snapshots.get(snapshot_id)
         return _validate_model_input_snapshot(snapshot) if snapshot is not None else None
 
-    async def delete(self, snapshot_id: str, *, run_id: str) -> None:
+    async def delete(self, snapshot_id: str, *, run_id: str, lease: RunLease | None = None) -> None:
         """Delete a snapshot only when it belongs to the specified run.
 
         Args:
             snapshot_id: Snapshot identifier to delete.
             run_id: Run that must own the snapshot.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Raises:
-            LeaseLostError: If this instance's fencing lease is stale.
+            LeaseLostError: If the supplied lease token is stale or mismatched.
         """
 
-        self._check_lease(run_id)
+        self._check_lease(run_id, lease)
         snapshot = self._model_input_snapshots.get(snapshot_id)
         if snapshot is not None and snapshot.run_id != run_id:
             return
         self._model_input_snapshots.pop(snapshot_id, None)
 
-    async def prune(self, run_id: str, keep_ids: Sequence[str] = ()) -> int:
+    async def prune(
+        self, run_id: str, keep_ids: Sequence[str] = (), *, lease: RunLease | None = None
+    ) -> int:
         """Delete all run snapshots except explicitly retained identifiers.
 
         Args:
             run_id: Run whose snapshots should be pruned.
             keep_ids: Snapshot identifiers to retain.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
             Number of snapshots deleted.
 
         Raises:
-            LeaseLostError: If this instance's fencing lease is stale.
+            LeaseLostError: If the supplied lease token is stale or mismatched.
         """
 
-        self._check_lease(run_id)
+        self._check_lease(run_id, lease)
         keep = set(keep_ids)
         doomed = [
             snapshot_id
@@ -2285,24 +2409,32 @@ class InMemoryRunStore:
             del self._model_input_snapshots[snapshot_id]
         return len(doomed)
 
-    async def mark_completed(self, run_id: str, checkpoint: RunCheckpoint) -> RunRecord:
+    async def mark_completed(
+        self, run_id: str, checkpoint: RunCheckpoint, *, lease: RunLease | None = None
+    ) -> RunRecord:
         """Persist a terminal completed status and checkpoint.
 
         Args:
             run_id: Run to complete.
             checkpoint: Final checkpoint whose phase is set to ``completed``.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
             A detached completed record.
 
         Raises:
             KeyError: If the run does not exist.
-            LeaseLostError: If this instance's fencing lease is stale.
+            LeaseLostError: If the supplied lease token is stale or mismatched.
         """
 
-        self._check_lease(run_id)
+        self._check_lease(run_id, lease)
         checkpoint.phase = "completed"
-        return await self.save_checkpoint(run_id, checkpoint, status="completed")
+        return await self.save_checkpoint(
+            run_id,
+            checkpoint,
+            status="completed",
+            **_lease_kwargs(self.save_checkpoint, lease),
+        )
 
     async def mark_failed(
         self,
@@ -2311,6 +2443,7 @@ class InMemoryRunStore:
         error: dict[str, object] | None = None,
         *,
         events: Sequence[Event] = (),
+        lease: RunLease | None = None,
     ) -> tuple[RunRecord, list[int]]:
         """Persist a failed status, optional checkpoint, error, and events.
 
@@ -2319,17 +2452,18 @@ class InMemoryRunStore:
             checkpoint: Optional final checkpoint whose phase becomes ``failed``.
             error: Optional JSON-safe error metadata appended to the run history.
             events: Terminal events to append with the failed state.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
             The detached failed record and sequence numbers parallel to ``events``.
 
         Raises:
             KeyError: If the run does not exist.
-            LeaseLostError: If this instance's fencing lease is stale.
+            LeaseLostError: If the supplied lease token is stale or mismatched.
             TypeError: If a checkpoint or event cannot be encoded.
         """
 
-        self._check_lease(run_id)
+        self._check_lease(run_id, lease)
         rec = self._runs[run_id]
         checkpoint_copy = _copy_checkpoint(checkpoint) if checkpoint is not None else rec.checkpoint
         event_copies = [_copy_event(event) for event in events]

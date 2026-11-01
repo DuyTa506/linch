@@ -366,6 +366,7 @@ async def emit_success_terminal(
             duration_ms=duration_ms,
             running_cost=running_cost,
             stop_reason=proposed.stop_reason,
+            lease=ctx.runtime.lease,
             final_text_value=proposed.final_text,
             structured_output=proposed.structured_output,
             structured_error=proposed.structured_error,
@@ -480,7 +481,7 @@ async def finalize_final_tool_answer(
         skip=forced_final_turn,
     )
     for hook_event in hook_events:
-        await _persist_event(ctx.session, ctx.run_id, hook_event)
+        await _persist_event(ctx.session, ctx.run_id, hook_event, lease=ctx.runtime.lease)
         yield hook_event
     if hook_action == "retry" and ctx.final_answer_reentries[0] < ctx.max_final_answer_reentries:
         ctx.final_answer_reentries[0] += 1
@@ -520,7 +521,7 @@ async def finalize_final_tool_answer(
     )
     proposed, hook_events, stop_action, feedback = await ctx.dispatch_stop(proposed, turn_index)
     for hook_event in hook_events:
-        await _persist_event(ctx.session, ctx.run_id, hook_event)
+        await _persist_event(ctx.session, ctx.run_id, hook_event, lease=ctx.runtime.lease)
         yield hook_event
     if stop_action == "continue":
         async with aclosing(
@@ -636,7 +637,7 @@ async def finalize_text_answer(
         skip=forced_final_turn,
     )
     for hook_event in hook_events:
-        await _persist_event(ctx.session, ctx.run_id, hook_event)
+        await _persist_event(ctx.session, ctx.run_id, hook_event, lease=ctx.runtime.lease)
         yield hook_event
     if hook_action == "retry" and ctx.final_answer_reentries[0] < ctx.max_final_answer_reentries:
         ctx.final_answer_reentries[0] += 1
@@ -677,7 +678,7 @@ async def finalize_text_answer(
     )
     proposed, hook_events, stop_action, feedback = await ctx.dispatch_stop(proposed, turn_index)
     for hook_event in hook_events:
-        await _persist_event(ctx.session, ctx.run_id, hook_event)
+        await _persist_event(ctx.session, ctx.run_id, hook_event, lease=ctx.runtime.lease)
         yield hook_event
     if stop_action == "continue":
         async with aclosing(

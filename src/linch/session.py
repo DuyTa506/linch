@@ -9,7 +9,7 @@ from uuid import uuid4
 from .abort import AbortContext
 from .errors import ConfigError
 from .events import Event, ResultEvent
-from .run_store import durable_call
+from .run_store import RunLease, _preflight_leased_store, durable_call
 from .session_log import SessionLog
 from .sessions import SessionStore
 from .tools import FileReadTracker
@@ -62,6 +62,7 @@ class RunOptions:
         budget: Spending cap shared with child runs in the subagent tree.
         principal: Immutable identity used by permission evaluation.
         profile: Versioned declarative defaults pinned by the run contract.
+        lease: Ephemeral run-store fencing token for this execution.
 
     Args:
         signal: Abort signal forwarded to the run loop.
@@ -77,6 +78,7 @@ class RunOptions:
         deps: Per-run dependency object for tools.
         budget: Per-run spending budget.
         run_id: Pending run identifier to adopt when starting a queued run.
+        lease: Immutable run-store lease that fences this run's writes.
         principal: Tenant, user, and role identity for authorization.
         profile: Versioned profile supplying run-scoped defaults.
     """
@@ -112,6 +114,9 @@ class RunOptions:
 
     run_id: str | None = None
     """Adopt this pending run ID when starting a queued run."""
+
+    lease: RunLease | None = None
+    """Immutable run-store lease used to fence this execution's writes."""
 
     principal: Principal | None = None
     """Immutable tenant/user/role identity for this run's authorization."""
@@ -355,6 +360,17 @@ class Session:
             raise ConfigError("agent is closing")
         if self._active:
             raise ConfigError("Session already has an active run")
+        options = replace(
+            opts or RunOptions(), run_id=(opts.run_id if opts else None) or str(uuid4())
+        )
+        _preflight_leased_store(
+            self.agent.run_store,
+            options.run_id or "",
+            options.lease,
+            include_snapshots=bool(
+                getattr(getattr(self.agent, "durability", None), "exact_model_input", False)
+            ),
+        )
         self._active = True
         self._active_started = False
         self._idle.clear()
@@ -363,9 +379,6 @@ class Session:
 
         from .loop import run_loop
 
-        options = replace(
-            opts or RunOptions(), run_id=(opts.run_id if opts else None) or str(uuid4())
-        )
         inner = run_loop(self, prompt, options, _adopt_run_id=bool(opts and opts.run_id))
         self._active_inner = inner
         it = self._iterate(inner, "", options)
@@ -393,6 +406,15 @@ class Session:
             raise ConfigError("Session already has an active run")
         if self.agent.run_store is None:
             raise ConfigError("Agent has no run_store configured")
+        options = replace(opts or RunOptions(), run_id=run_id)
+        _preflight_leased_store(
+            self.agent.run_store,
+            options.run_id or "",
+            options.lease,
+            include_snapshots=bool(
+                getattr(getattr(self.agent, "durability", None), "exact_model_input", False)
+            ),
+        )
         self._active = True
         self._active_started = False
         self._idle.clear()
@@ -401,7 +423,6 @@ class Session:
 
         from .loop import resume_loop
 
-        options = replace(opts or RunOptions(), run_id=run_id)
         inner = resume_loop(self, run_id, options)
         self._active_inner = inner
         it = self._iterate(inner, run_id, options)

@@ -38,6 +38,31 @@ async def test_run_subagent_does_not_leak_watcher_tasks() -> None:
     assert await _pending_background_tasks() == []
 
 
+async def test_child_rejects_explicit_parent_lease_before_provider() -> None:
+    from linch import RunOptions
+    from linch.run_store import RunLease
+    from linch.subagents.default_agent import DEFAULT_AGENT
+    from linch.subagents.runner import RunSubagentArgs, run_subagent
+
+    provider = ScriptedProvider([TextTurn("must not run")])
+    agent = make_agent(provider, model="gpt-5")
+    parent = await agent.session()
+    result = await run_subagent(
+        RunSubagentArgs(
+            parent_session=parent,
+            parent_agent=agent,
+            definition=DEFAULT_AGENT,
+            prompt="child",
+            display_name="helper",
+            subagent_run_id="sa_parent_lease",
+            run_options=RunOptions(lease=RunLease("parent-run", "parent-owner", 1, 999.0, 30.0)),
+        )
+    )
+
+    assert result.errored
+    assert provider.requests == []
+
+
 async def test_cancelled_unretained_subagent_releases_child_session() -> None:
     from linch.subagents.default_agent import DEFAULT_AGENT
     from linch.subagents.runner import RunSubagentArgs, run_subagent
