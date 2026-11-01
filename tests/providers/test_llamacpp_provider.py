@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from linch.providers import LlamaCppProvider, LlamaCppProviderOptions
 from linch.providers.llamacpp import _build_llamacpp_payload, _extract_n_ctx, _props_urls
 from linch.types import Message, OutputSchema, ProviderRequest, TextBlock, ThinkingBlock, Usage
@@ -105,6 +107,26 @@ def test_llamacpp_payload_includes_llamacpp_specific_options() -> None:
     assert payload["extra_body"]["generation_prompt"] == "<think>\n"
     assert payload["extra_body"]["parse_tool_calls"] is True
     assert payload["extra_body"]["cache_prompt"] is True
+
+
+@pytest.mark.parametrize("configured_in", ["option", "extra_body", "neither"])
+def test_llamacpp_request_disables_thinking(configured_in: str) -> None:
+    template = {"enable_thinking": True, "other": "keep"}
+    options = LlamaCppProviderOptions(
+        chat_template_kwargs=template if configured_in == "option" else None,
+        extra_body={"chat_template_kwargs": template} if configured_in == "extra_body" else None,
+    )
+    req = ProviderRequest(
+        model="local-tool-model", system=[], tools=[], messages=[], thinking={"type": "disabled"}
+    )
+
+    payload = _build_llamacpp_payload(req, options)
+
+    expected = {"enable_thinking": False}
+    if configured_in != "neither":
+        expected["other"] = "keep"
+    assert payload["extra_body"]["chat_template_kwargs"] == expected
+    assert template == {"enable_thinking": True, "other": "keep"}
 
 
 def test_llamacpp_payload_enables_cache_prompt_from_request() -> None:

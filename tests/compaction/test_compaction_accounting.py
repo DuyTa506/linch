@@ -121,7 +121,41 @@ async def test_gateway_settles_before_return_and_gates_only_one_delivery() -> No
     assert UUID(receipt.delivery_attempt_id).version == 4
 
 
-@pytest.mark.parametrize("output", ["", "  ", "tool", "thinking", "oversized", "native-json"])
+@pytest.mark.parametrize("reasoning", ["thinking_delta", "redacted_thinking"])
+async def test_summary_ignores_reasoning_content(reasoning: str) -> None:
+    from linch.types import Usage
+
+    events = _events()
+    events.insert(1, {"type": reasoning, "text": "private reasoning"})
+    events.insert(3, {"type": reasoning, "text": "later reasoning"})
+    _, ledger, _, caller = _setup(provider=_Provider(events))
+
+    result = await _text(caller)
+
+    assert result.text == "Paid summary."
+    assert result.receipt.disposition == "accepted"
+    assert result.receipt.usage_status == "reported"
+    assert ledger.total_usage == Usage(111, 22)
+
+
+@pytest.mark.parametrize("accounted", [False, True])
+async def test_summary_request_disables_thinking(accounted: bool) -> None:
+    from linch.abort import AbortContext
+    from linch.compaction import summarize_with_provider
+    from linch.types import Message, TextBlock
+
+    provider, _, _, caller = _setup()
+    if accounted:
+        await _text(caller)
+    else:
+        await summarize_with_provider(
+            provider, "requested-model", [Message("user", [TextBlock("Earlier.")])], AbortContext()
+        )
+
+    assert provider.requests[0].thinking == {"type": "disabled"}
+
+
+@pytest.mark.parametrize("output", ["", "  ", "tool", "oversized", "native-json"])
 async def test_valid_final_usage_is_charged_when_output_is_rejected(output: str) -> None:
     from linch.types import Usage
 
@@ -137,8 +171,6 @@ async def test_valid_final_usage_is_charged_when_output_is_rejected(output: str)
             {"type": "tool_use_end", "id": "tool-1"},
         ]
         events[-1]["stop_reason"] = "tool_use"
-    elif output == "thinking":
-        events.insert(1, {"type": "thinking_delta", "text": "private reasoning"})
     elif output == "oversized":
         events[1:2] = [
             {"type": "text_delta", "text": "é" * 262144},

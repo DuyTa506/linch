@@ -1174,9 +1174,7 @@ class _AuxiliaryResponse:
             text = event.get("text")
             if not isinstance(text, str):
                 raise _auxiliary_protocol_error(f"{typ}.text must be a string")
-            if typ == "thinking_delta":
-                self.reject("non_text_output")
-            elif self.rejection_reason is None:
+            if typ == "text_delta" and self.rejection_reason is None:
                 remaining = _ACCEPTED_TEXT_MAX_BYTES - len(self.text)
                 if len(text) > remaining:
                     self.reject("oversized_output")
@@ -1191,7 +1189,7 @@ class _AuxiliaryResponse:
                         else:
                             self.text.extend(encoded)
         elif typ == "redacted_thinking":
-            self.reject("non_text_output")
+            pass
         elif typ == "tool_use_start":
             tool_id, name = event.get("id"), event.get("name")
             if not isinstance(tool_id, str) or not tool_id or tool_id in self.seen_tools:
@@ -1309,6 +1307,7 @@ class _AccountedAuxiliaryCaller:
             messages=messages,
             max_output_tokens=max_output_tokens,
             signal=signal,
+            thinking={"type": "disabled"},
         )
         delivery = _AuxiliaryDelivery(self, request, logical_call_id, signal)
         stream = delivery.stream()
