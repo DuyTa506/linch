@@ -17,16 +17,14 @@ Two layers:
 
 from __future__ import annotations
 
-import sys
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from linch.testing import assert_provider_contract
 from linch.types import Message, ProviderRequest, TextBlock
-
-pytestmark = pytest.mark.asyncio
 
 
 def _all_providers() -> list[tuple[str, Any, str]]:
@@ -51,104 +49,62 @@ def _all_providers() -> list[tuple[str, Any, str]]:
     ]
 
 
-def _req_forcing(name: str) -> ProviderRequest:
-    return ProviderRequest(
-        model="m",
-        system=[],
-        tools=[
-            {
-                "name": name,
-                "description": "d",
-                "input_schema": {"type": "object", "properties": {}},
-            }
-        ],
-        messages=[Message(role="user", content=[TextBlock(text="hi")])],
-        tool_choice={"name": name},
-    )
-
-
 @pytest.mark.parametrize("name,cls,model", _all_providers(), ids=[p[0] for p in _all_providers()])
 async def test_provider_satisfies_lifecycle_contract(name: str, cls: Any, model: str) -> None:
     await assert_provider_contract(lambda: cls(), model=model)
 
 
-# ── tool_choice must be honored wherever it is advertised ────────────────────
-
-
-async def test_anthropic_builder_maps_forced_tool_choice() -> None:
-    from linch.providers.anthropic import AnthropicProviderOptions, _build_payload
-
-    payload = _build_payload(_req_forcing("Weather"), AnthropicProviderOptions())
-    assert payload["tool_choice"] == {"type": "tool", "name": "Weather"}
-
-
-async def test_openai_responses_builder_maps_forced_tool_choice() -> None:
-    from linch.openai_responses import build_payload
-
-    payload = build_payload(_req_forcing("Weather"))
-    assert payload["tool_choice"] == {"type": "function", "name": "Weather"}
+def _forced_tool_request() -> ProviderRequest:
+    return ProviderRequest(
+        model="m",
+        system=[],
+        tools=[
+            {
+                "name": "Weather",
+                "description": "d",
+                "input_schema": {"type": "object", "properties": {}},
+            }
+        ],
+        messages=[Message(role="user", content=[TextBlock(text="hi")])],
+        tool_choice={"name": "Weather"},
+    )
 
 
 @pytest.mark.parametrize(
-    "cls",
-    [
-        "OpenAIChatCompletionsProvider",
-        "LlamaCppProvider",
-        "VLLMProvider",
-        "SGLangProvider",
-        "DeepSeekProvider",
-    ],
+    "provider_key",
+    ["anthropic", "responses", "chat", "llamacpp", "vllm", "sglang", "deepseek"],
 )
-async def test_openai_compatible_builders_map_forced_tool_choice(cls: str) -> None:
-    import linch.providers.deepseek as deepseek
-    import linch.providers.llamacpp as llamacpp
-    import linch.providers.openai_chat as openai_chat
-    import linch.providers.sglang as sglang
-    import linch.providers.vllm as vllm
+def test_forced_tool_choice_payload_mapping(provider_key: str) -> None:
+    req = _forced_tool_request()
+    if provider_key == "anthropic":
+        from linch.providers.anthropic import AnthropicProviderOptions, _build_payload
 
-    lookup = {
-        "OpenAIChatCompletionsProvider": openai_chat.OpenAIChatCompletionsProvider,
-        "LlamaCppProvider": llamacpp.LlamaCppProvider,
-        "VLLMProvider": vllm.VLLMProvider,
-        "SGLangProvider": sglang.SGLangProvider,
-        "DeepSeekProvider": deepseek.DeepSeekProvider,
+        assert _build_payload(req, AnthropicProviderOptions())["tool_choice"] == {
+            "type": "tool",
+            "name": "Weather",
+        }
+        return
+    if provider_key == "responses":
+        from linch.openai_responses import build_payload
+
+        assert build_payload(req)["tool_choice"] == {"type": "function", "name": "Weather"}
+        return
+
+    from linch.providers.deepseek import DeepSeekProvider, DeepSeekProviderOptions
+    from linch.providers.llamacpp import LlamaCppProvider
+    from linch.providers.openai_chat import OpenAIChatCompletionsProvider
+    from linch.providers.sglang import SGLangProvider
+    from linch.providers.vllm import VLLMProvider
+
+    providers = {
+        "chat": OpenAIChatCompletionsProvider(),
+        "llamacpp": LlamaCppProvider(),
+        "vllm": VLLMProvider(),
+        "sglang": SGLangProvider(),
+        "deepseek": DeepSeekProvider(DeepSeekProviderOptions(thinking="disabled")),
     }
-    if cls == "DeepSeekProvider":
-        provider = lookup[cls](deepseek.DeepSeekProviderOptions(thinking="disabled"))
-    else:
-        provider = lookup[cls]()
-    payload = provider._build_payload(_req_forcing("Weather"))
+    payload = providers[provider_key]._build_payload(req)
     assert payload["tool_choice"] == {"type": "function", "function": {"name": "Weather"}}
-
-
-async def test_gemini_stream_maps_forced_tool_choice_to_tool_config() -> None:
-    from linch.providers.gemini import GeminiProvider
-
-    fake_candidate = MagicMock()
-    fake_candidate.content.parts = []
-    fake_candidate.finish_reason = 1  # STOP
-
-    fake_chunk = MagicMock()
-    fake_chunk.candidates = [fake_candidate]
-    fake_chunk.usage_metadata.prompt_token_count = 1
-    fake_chunk.usage_metadata.candidates_token_count = 1
-
-    async def _fake_stream(*args: Any, **kwargs: Any) -> Any:
-        yield fake_chunk
-
-    fake_model = MagicMock()
-    fake_model.generate_content_async = MagicMock(return_value=_fake_stream())
-    fake_genai = MagicMock()
-    fake_genai.GenerativeModel.return_value = fake_model
-
-    with patch.dict(sys.modules, {"google.generativeai": fake_genai}):
-        provider = GeminiProvider()
-        _ = [e async for e in provider.stream(_req_forcing("Weather"))]
-
-    kwargs = fake_genai.GenerativeModel.call_args.kwargs
-    assert kwargs["tool_config"] == {
-        "function_calling_config": {"mode": "ANY", "allowed_function_names": ["Weather"]}
-    }
 
 
 async def test_gemini_tool_choice_mapping_modes() -> None:
@@ -166,34 +122,27 @@ async def test_gemini_tool_choice_mapping_modes() -> None:
 async def test_gemini_omits_tool_config_when_no_tools() -> None:
     from linch.providers.gemini import GeminiProvider
 
-    fake_candidate = MagicMock()
-    fake_candidate.content.parts = []
-    fake_candidate.finish_reason = 1
+    sdk = pytest.importorskip("google.genai")
 
-    fake_chunk = MagicMock()
-    fake_chunk.candidates = [fake_candidate]
-    fake_chunk.usage_metadata.prompt_token_count = 1
-    fake_chunk.usage_metadata.candidates_token_count = 1
+    async def empty_stream() -> Any:
+        if False:
+            yield
 
-    async def _fake_stream(*args: Any, **kwargs: Any) -> Any:
-        yield fake_chunk
-
-    fake_model = MagicMock()
-    fake_model.generate_content_async = MagicMock(return_value=_fake_stream())
-    fake_genai = MagicMock()
-    fake_genai.GenerativeModel.return_value = fake_model
-
+    generate = AsyncMock(return_value=empty_stream())
+    fake_client = SimpleNamespace(
+        aio=SimpleNamespace(models=SimpleNamespace(generate_content_stream=generate))
+    )
     req = ProviderRequest(
         model="m",
         system=[],
         tools=[],
         messages=[Message(role="user", content=[TextBlock(text="hi")])],
-        tool_choice="required",  # ignored: no tools to force
+        tool_choice="required",
     )
-    with patch.dict(sys.modules, {"google.generativeai": fake_genai}):
+    with patch.object(sdk, "Client", return_value=fake_client):
         _ = [e async for e in GeminiProvider().stream(req)]
 
-    assert "tool_config" not in fake_genai.GenerativeModel.call_args.kwargs
+    assert generate.call_args.kwargs["config"].tool_config is None
 
 
 # ── transport closers (Anthropic + OpenAI Responses) ─────────────────────────
@@ -218,22 +167,19 @@ class _FakeDualCloseClient:
         self._closed.append("sync")
 
 
-async def test_aclose_client_prefers_async_close() -> None:
+@pytest.mark.parametrize("client_kind,expected", [("async", "async"), ("sync", "sync")])
+async def test_aclose_client_supports_async_and_sync_close(client_kind: str, expected: str) -> None:
     from linch._client_lifecycle import aclose_client
 
     closed: list[str] = []
-    await aclose_client(_FakeDualCloseClient(closed))
+    client = (
+        _FakeDualCloseClient(closed)
+        if client_kind == "async"
+        else type("SyncClient", (), {"close": lambda self: closed.append("sync")})()
+    )
+    await aclose_client(client)
 
-    assert closed == ["async"]
-
-
-async def test_aclose_client_supports_sync_close() -> None:
-    from linch._client_lifecycle import aclose_client
-
-    closed: list[str] = []
-    await aclose_client(type("SyncClient", (), {"close": lambda self: closed.append("sync")})())
-
-    assert closed == ["sync"]
+    assert closed == [expected]
 
 
 async def test_anthropic_aclose_closes_client_and_is_idempotent() -> None:

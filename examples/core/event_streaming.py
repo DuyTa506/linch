@@ -24,7 +24,7 @@ from linch import Agent
 from linch.config import FeatureFlags, SystemPromptConfig
 from linch.events import event_to_dict
 from linch.sessions import InMemorySessionStore
-from linch.tools.registry import empty_tools, tools_from_defaults
+from linch.tools.registry import empty_tools, workspace_tools
 from linch.types import Usage
 
 API_KEY = os.environ.get("OPENAI_API_KEY", "")
@@ -45,7 +45,7 @@ async def demo_all_events() -> None:
     print("\n── 1. All event types ──")
     agent = Agent(
         **BASE,
-        tools=tools_from_defaults(exclude={"Bash", "Write", "Edit"}),
+        tools=workspace_tools(exclude={"Bash", "Write", "Edit"}),
         permissions={"mode": "skip-dangerous"},
         system_prompt_config=SystemPromptConfig(
             replace_defaults=True,
@@ -111,7 +111,7 @@ async def demo_tool_observer() -> None:
     print("\n── 3. Tool call observer ──")
     agent = Agent(
         **BASE,
-        tools=tools_from_defaults(exclude={"Bash", "Write", "Edit"}),
+        tools=workspace_tools(exclude={"Bash", "Write", "Edit"}),
         permissions={"mode": "skip-dangerous"},
         cwd=os.getcwd(),
     )
@@ -217,7 +217,7 @@ async def demo_progress() -> None:
     print("\n── 6. Terminal progress indicator ──")
     agent = Agent(
         **BASE,
-        tools=tools_from_defaults(exclude={"Bash", "Write", "Edit"}),
+        tools=workspace_tools(exclude={"Bash", "Write", "Edit"}),
         permissions={"mode": "skip-dangerous"},
         cwd=os.getcwd(),
     )

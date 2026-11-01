@@ -14,7 +14,6 @@ worlds move. It stays a duck-typed :class:`typing.Protocol` — any object with 
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import Any, Protocol, runtime_checkable
 
 from linch.filesystem.backend import FileBackend
@@ -32,149 +31,72 @@ class ShellBackend(Protocol):
         cwd: str,
         timeout_s: float,
         signal: Any = None,
-    ) -> ExecResult: ...
+    ) -> ExecResult:
+        """Run a shell command within the requested working directory.
+
+        Args:
+            command: Shell command to execute.
+            cwd: Working directory for the command.
+            timeout_s: Maximum execution time in seconds.
+            signal: Optional abort signal observed by the implementation.
+
+        Returns:
+            Execution result containing stdout, stderr, exit status, and timeout state.
+        """
+        ...
 
 
 @runtime_checkable
 class ExecutionBackend(Protocol):
-    """One execution world: a shell backend and a filesystem backend together."""
+    """One execution world: a shell backend and a filesystem backend together.
+
+    Attributes:
+        shell: Subprocess or remote shell transport.
+        fs: Virtual filesystem transport for the same execution world.
+    """
 
     shell: ShellBackend
     fs: FileBackend
 
 
-class UnavailableFileBackend:
-    """Filesystem placeholder for the deprecated shell-only compatibility path.
-
-    A shell-only backend cannot honestly provide a filesystem in the same
-    execution world.  This object deliberately fails every operation instead
-    of silently pairing (for example) a Docker shell with unrelated in-memory
-    state.  Applications using the compatibility path can pass an explicit
-    ``filesystem=`` while they migrate to a unified backend.
-    """
-
-    _MESSAGE = (
-        "this legacy shell-only execution backend has no filesystem transport; "
-        "pass filesystem= explicitly or migrate to an ExecutionBackend with shell and fs"
-    )
-
-    async def read(self, path: str, *, offset: int = 0, limit: int | None = None) -> str:
-        raise RuntimeError(self._MESSAGE)
-
-    async def write(self, path: str, content: str) -> None:
-        raise RuntimeError(self._MESSAGE)
-
-    async def ls(self, prefix: str = "") -> list[str]:
-        raise RuntimeError(self._MESSAGE)
-
-    async def edit(
-        self,
-        path: str,
-        old: str,
-        new: str,
-        *,
-        replace_all: bool = False,
-    ) -> int:
-        raise RuntimeError(self._MESSAGE)
-
-    async def exists(self, path: str) -> bool:
-        raise RuntimeError(self._MESSAGE)
-
-    async def delete(self, path: str) -> None:
-        raise RuntimeError(self._MESSAGE)
-
-
-class ExecutionBackendView:
-    """Deprecated shell-only backend adapted to the unified shape.
-
-    It never rewrites a genuine execution world's filesystem. An explicit
-    filesystem is accepted here only as a compatibility aid for legacy shells
-    while applications migrate to a backend that natively owns both transports.
-    """
-
-    def __init__(
-        self,
-        *,
-        shell: ShellBackend,
-        fs: FileBackend,
-        source: Any,
-        legacy_shell_only: bool = False,
-    ) -> None:
-        self.shell = shell
-        self.fs = fs
-        self.source = source
-        self.legacy_shell_only = legacy_shell_only
-
-    @property
-    def confinement(self) -> Mapping[str, object] | None:
-        value = getattr(self.source, "confinement", None)
-        return value if isinstance(value, Mapping) and value else None
-
-    @property
-    def sandboxed(self) -> bool:
-        """Whether the provider made a non-empty confinement declaration."""
-        return self.confinement is not None
-
-    @property
-    def resume_policy_id(self) -> str | None:
-        policy_id = getattr(self.source, "resume_policy_id", None)
-        return policy_id if isinstance(policy_id, str) and policy_id else None
-
-    @property
-    def resume_policy_version(self) -> str | None:
-        version = getattr(self.source, "resume_policy_version", None)
-        return str(version) if version is not None else None
-
-    @property
-    def resume_policy_config(self) -> dict[str, object] | None:
-        try:
-            source_config = getattr(self.source, "resume_policy_config", None)
-        except Exception:
-            return None
-        source_fs = getattr(self.source, "fs", None)
-        if source_fs is self.fs or self.legacy_shell_only:
-            return source_config if isinstance(source_config, dict) else None
-        fs_policy = resume_policy_descriptor(self.fs)
-        if not isinstance(source_config, dict) or fs_policy is None:
-            return None
-        return {"source": source_config, "filesystem_override": fs_policy}
-
-
 def normalize_execution_backend(
-    backend: Any,
+    backend: ExecutionBackend,
     *,
     filesystem: FileBackend | None = None,
 ) -> ExecutionBackend:
-    """Return a unified execution view, adapting legacy shell-only backends.
+    """Validate one indivisible shell/filesystem execution world.
 
-    A genuine unified backend is already one indivisible world: a different
-    explicit ``filesystem=`` is rejected. The explicit filesystem escape hatch
-    exists only for the deprecated shell-only adapter.
+    Args:
+        backend: Candidate object exposing both ``shell`` and ``fs`` capabilities.
+        filesystem: Optional filesystem that must be the exact ``backend.fs`` object.
+
+    Returns:
+        The validated execution backend.
+
+    Raises:
+        TypeError: If ``backend`` does not satisfy the protocol or ``filesystem``
+            is a different object from ``backend.fs``.
     """
-    if isinstance(backend, ExecutionBackend):
-        if filesystem is None or filesystem is backend.fs:
-            return backend
+    if not isinstance(backend, ExecutionBackend):
+        raise TypeError("execution_backend must expose both .shell and .fs")
+    if filesystem is not None and filesystem is not backend.fs:
         raise TypeError(
             "filesystem= conflicts with execution_backend.fs; a unified execution "
             "backend is one indivisible shell/filesystem world"
         )
-
-    if not isinstance(backend, ShellBackend):
-        raise TypeError(
-            "execution_backend must expose {shell, fs}, or implement the deprecated "
-            "shell-only run(...) protocol"
-        )
-
-    return ExecutionBackendView(
-        shell=backend,
-        fs=filesystem if filesystem is not None else UnavailableFileBackend(),
-        source=backend,
-        legacy_shell_only=True,
-    )
+    return backend
 
 
 def resume_policy_descriptor(component: Any) -> dict[str, object] | None:
-    """Return a stable durable identity for one transport, or ``None`` if opaque."""
+    """Describe a transport's stable durable identity when it declares one.
+
+    Args:
+        component: Shell or filesystem transport to inspect.
+
+    Returns:
+        A JSON-compatible policy descriptor, or ``None`` when the component is
+        opaque or has not opted into a resume identity.
+    """
     policy_id = getattr(component, "resume_policy_id", None)
     if not isinstance(policy_id, str) or not policy_id:
         return None

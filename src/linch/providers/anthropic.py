@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Literal, cast
@@ -55,6 +56,22 @@ AnthropicAPIMode = Literal["auto", "native", "compatible"]
 
 @dataclass(slots=True)
 class AnthropicProviderOptions:
+    """Configure the Anthropic Messages adapter.
+
+    Args:
+        api_key: Optional credential passed to the Anthropic client.
+        base_url: Optional endpoint override for a proxy or compatible service.
+        default_headers: Headers added to every client request.
+        thinking: Native thinking configuration; ``None`` preserves provider defaults.
+        api_mode: Whether to choose native, compatible, or automatic wire behavior.
+        effort: Optional provider reasoning effort hint.
+
+    Attributes:
+        api_mode: ``auto`` uses native mode for the direct Anthropic endpoint
+            and the compatible fallback for unknown proxies.
+        thinking: Optional native thinking configuration passed to the Messages API.
+    """
+
     api_key: str | None = None
     base_url: str | None = None
     default_headers: dict[str, str] | None = None
@@ -73,20 +90,48 @@ class AnthropicProviderOptions:
 
 
 class AnthropicProvider(BaseProvider):
+    """Stream normalized responses from Anthropic's Messages API.
+
+    Args:
+        options: Optional credentials, endpoint, and wire-mode settings.
+    """
+
     id = "anthropic"
 
     def __init__(self, options: AnthropicProviderOptions | None = None) -> None:
+        """Create an Anthropic provider with optional client configuration.
+
+        Args:
+            options: Credentials, endpoint, and wire-mode settings for the client.
+        """
         self._options = options or AnthropicProviderOptions()
         self._client: Any | None = None
         self._client_loop: Any | None = None
 
     def context_window(self, model: ModelId) -> int:
+        """Return Anthropic's configured context capacity for a model.
+
+        Args:
+            model: Anthropic model identifier.
+
+        Returns:
+            The known model capacity, or the adapter fallback for unknown models.
+        """
         return _KNOWN_CONTEXT.get(model, 200_000)
 
     def capabilities(self, model: ModelId) -> ProviderCapabilities:
+        """Return capabilities for the selected Anthropic model.
+
+        Args:
+            model: Anthropic model identifier.
+
+        Returns:
+            Capability flags including whether structured output uses a terminal tool.
+        """
         return full_capabilities(
             self.context_window(model),
             structured_output_terminal_tool=_effective_api_mode(self._options) == "compatible",
+            can_disable_thinking=True,
         )
 
     async def _get_client(self) -> Any:
@@ -116,6 +161,7 @@ class AnthropicProvider(BaseProvider):
         return self._client
 
     async def aclose(self) -> None:
+        """Close the owned Anthropic client when one has been created."""
         client = self._client
         self._client = None
         self._client_loop = None
@@ -124,6 +170,22 @@ class AnthropicProvider(BaseProvider):
         await aclose_client(client)
 
     async def stream(self, req: ProviderRequest) -> AsyncIterator[dict[str, object]]:
+        """Yield normalized events for one Anthropic request.
+
+        Args:
+            req: Request to send through the Anthropic Messages API.
+
+        Returns:
+            An async iterator of normalized message, thinking, tool, and usage events.
+
+        Raises:
+            AbortError: If the request is aborted while streaming.
+            AuthError: If Anthropic rejects the configured credentials.
+            ContextLengthError: If the request exceeds the provider context limit.
+            RateLimitError: If Anthropic rate-limits the request.
+            ProviderError: If the optional dependency is missing or another provider
+                error cannot be classified more specifically.
+        """
         client = await self._get_client()
         payload = _build_payload(req, self._options)
 
@@ -137,6 +199,11 @@ class AnthropicProvider(BaseProvider):
         stop_reason: StopReason = "end_turn"
         # Maps content-block index → tool_use id for correlating deltas and stops.
         tool_idx: dict[int, str] = {}
+        # Anthropic sometimes carries a complete native tool object on the
+        # start frame and sends no input_json_delta. Keep that actual wire
+        # object so the normalized stream still has explicit JSON input.
+        tool_initial_inputs: dict[int, dict[str, Any]] = {}
+        tool_nonempty_input_seen: set[int] = set()
 
         try:
             raw_stream = await client.messages.create(**payload)
@@ -153,6 +220,9 @@ class AnthropicProvider(BaseProvider):
                     cb = event.content_block
                     if cb.type == "tool_use":
                         tool_idx[event.index] = cb.id
+                        initial_input = getattr(cb, "input", None)
+                        if isinstance(initial_input, dict):
+                            tool_initial_inputs[event.index] = initial_input
                         yield {"type": "tool_use_start", "id": cb.id, "name": cb.name}
                     elif cb.type == "redacted_thinking":
                         data = getattr(cb, "data", "")
@@ -166,6 +236,8 @@ class AnthropicProvider(BaseProvider):
                         yield {"type": "text_delta", "text": delta.text}
                     elif dtype == "input_json_delta":
                         tid = tool_idx.get(event.index, "")
+                        if delta.partial_json.strip():
+                            tool_nonempty_input_seen.add(event.index)
                         yield {
                             "type": "tool_use_input_delta",
                             "id": tid,
@@ -184,7 +256,20 @@ class AnthropicProvider(BaseProvider):
 
                 elif etype == "content_block_stop":
                     tid = tool_idx.pop(event.index, None)
+                    initial_input = tool_initial_inputs.pop(event.index, None)
+                    had_input_delta = event.index in tool_nonempty_input_seen
+                    tool_nonempty_input_seen.discard(event.index)
                     if tid is not None:
+                        if not had_input_delta:
+                            yield {
+                                "type": "tool_use_input_delta",
+                                "id": tid,
+                                "json_delta": json.dumps(
+                                    initial_input or {},
+                                    ensure_ascii=False,
+                                    separators=(",", ":"),
+                                ),
+                            }
                         yield {"type": "tool_use_end", "id": tid}
 
                 elif etype == "message_delta":

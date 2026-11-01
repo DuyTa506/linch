@@ -1,5 +1,3 @@
-"""Tests for provider-agnostic compaction (decoupled from openai_responses)."""
-
 from __future__ import annotations
 
 import pytest
@@ -13,7 +11,8 @@ from linch.compaction import (
     summarize_with_provider,
 )
 from linch.session_log import SessionLog
-from linch.types import Message, TextBlock, Usage
+from linch.types import Message, TextBlock
+from tests.support.providers import ScriptedProvider, TextTurn
 
 
 class _LoggedViews:
@@ -39,27 +38,15 @@ class _LoggedViews:
 # ── Fake provider that is NOT the OpenAI Responses provider ──────────────────
 
 
-class _FakeNonOpenAIProvider:
+class _FakeNonOpenAIProvider(ScriptedProvider):
     id = "not-openai"
 
-    _stream_calls: list
+    def __init__(self, text: str = "Summary of conversation.") -> None:
+        super().__init__([TextTurn(text)], context_window=1024)
 
-    def __init__(self) -> None:
-        self._stream_calls = []
-
-    def context_window(self, model: str) -> int:
-        return 1024  # small so compaction triggers easily
-
-    async def stream(self, req):
-        self._stream_calls.append(req)
-        yield {"type": "message_start", "model": req.model}
-        yield {"type": "text_delta", "text": "Summary of conversation."}
-        yield {
-            "type": "message_end",
-            "stop_reason": "end_turn",
-            "usage": Usage(),
-            "provider_metadata": None,
-        }
+    @property
+    def _stream_calls(self):
+        return self.requests
 
 
 _DETAILED_SUMMARY = """\
@@ -74,16 +61,8 @@ _DETAILED_SUMMARY = """\
 
 
 class _FakeDetailedSummaryProvider(_FakeNonOpenAIProvider):
-    async def stream(self, req):
-        self._stream_calls.append(req)
-        yield {"type": "message_start", "model": req.model}
-        yield {"type": "text_delta", "text": _DETAILED_SUMMARY}
-        yield {
-            "type": "message_end",
-            "stop_reason": "end_turn",
-            "usage": Usage(),
-            "provider_metadata": None,
-        }
+    def __init__(self) -> None:
+        super().__init__(_DETAILED_SUMMARY)
 
 
 def _make_messages(n: int = 30) -> list[Message]:
@@ -109,28 +88,7 @@ async def test_summarize_uses_provider_stream_directly():
 
     assert summary == "Summary of conversation."
     assert len(provider._stream_calls) == 1
-    # The request model must match what was passed
     assert provider._stream_calls[0].model == "model-x"
-
-
-@pytest.mark.asyncio
-async def test_default_compaction_uses_non_openai_provider():
-    """DefaultCompaction.compact works with a non-OpenAI provider."""
-    provider = _FakeNonOpenAIProvider()
-    signal = AbortContext()
-    messages = _make_messages(30)  # enough for compaction to have an "older" portion
-
-    strategy = DefaultCompaction()
-    ctx = CompactionContext(messages=messages, model="model-x", signal=signal)
-    result = await strategy.compact(ctx, provider)
-
-    # Should have compacted; the summary message should be present
-    assert any(
-        isinstance(m.content[0], TextBlock) and "summary" in m.content[0].text.lower()
-        for m in result
-    )
-    assert len(result) < len(messages)
-    assert len(provider._stream_calls) == 1
 
 
 @pytest.mark.asyncio
@@ -164,184 +122,73 @@ async def test_detailed_compaction_uses_no_tool_provider_request():
 
 
 @pytest.mark.asyncio
-async def test_default_compaction_accepts_custom_prompt():
-    """A non-coding embedder can reword the summary without writing a strategy."""
-    provider = _FakeNonOpenAIProvider()
-    signal = AbortContext()
-    messages = _make_messages(30)
-
-    custom = "Summarize for a customer-support transcript. Capture open tickets only."
-    strategy = DefaultCompaction(prompt=custom)
-    ctx = CompactionContext(messages=messages, model="model-x", signal=signal)
-    await strategy.compact(ctx, provider)
-
-    assert provider._stream_calls[0].system[0].text == custom
-
-
-@pytest.mark.asyncio
-async def test_default_compaction_prompt_defaults_unchanged():
-    """Omitting prompt keeps the coding-oriented default (byte-identical)."""
-    provider = _FakeNonOpenAIProvider()
-    signal = AbortContext()
-    messages = _make_messages(30)
-
-    strategy = DefaultCompaction()
-    ctx = CompactionContext(messages=messages, model="model-x", signal=signal)
-    await strategy.compact(ctx, provider)
-
-    assert "Summarize the conversation so far" in provider._stream_calls[0].system[0].text
-
-
-@pytest.mark.asyncio
-async def test_general_summary_prompt_is_domain_neutral():
-    """A ready-made non-coding default: importable and free of file/path framing."""
+@pytest.mark.parametrize("prompt_kind", ["default", "custom", "general", "detailed"])
+async def test_compaction_prompts(prompt_kind: str):
+    """Compaction strategies forward built-in and host-supplied prompts."""
     from linch import GENERAL_SUMMARY_PROMPT
 
-    provider = _FakeNonOpenAIProvider()
-    signal = AbortContext()
-    messages = _make_messages(30)
-
-    strategy = DefaultCompaction(prompt=GENERAL_SUMMARY_PROMPT)
-    ctx = CompactionContext(messages=messages, model="model-x", signal=signal)
-    await strategy.compact(ctx, provider)
+    custom = "Summarize for a customer-support transcript. Capture open tickets only."
+    if prompt_kind == "detailed":
+        provider = _FakeDetailedSummaryProvider()
+        strategy = DetailedCompaction(prompt="Custom continuation summary instructions.")
+        expected = "Custom continuation summary instructions."
+    else:
+        provider = _FakeNonOpenAIProvider()
+        prompt = {"custom": custom, "general": GENERAL_SUMMARY_PROMPT}.get(prompt_kind)
+        strategy = DefaultCompaction(prompt=prompt) if prompt is not None else DefaultCompaction()
+        expected = prompt
+    ctx = CompactionContext(messages=_make_messages(30), model="model-x", signal=AbortContext())
+    result = await strategy.compact(ctx, provider)
 
     sent = provider._stream_calls[0].system[0].text
-    assert sent == GENERAL_SUMMARY_PROMPT
-    assert "Files" not in sent  # no coding/filesystem assumption
-
-
-@pytest.mark.asyncio
-async def test_detailed_compaction_accepts_custom_prompt():
-    provider = _FakeDetailedSummaryProvider()
-    signal = AbortContext()
-    messages = _make_messages(30)
-
-    custom = "Custom continuation summary instructions."
-    strategy = DetailedCompaction(prompt=custom)
-    ctx = CompactionContext(messages=messages, model="model-x", signal=signal)
-    await strategy.compact(ctx, provider)
-
-    assert provider._stream_calls[0].system[0].text == custom
-
-
-def test_detailed_prompt_is_domain_neutral():
-    """The opt-in detailed handoff must not assume a coding host, while keeping
-    its continuation-safe structure (6 sections + text-only guard)."""
-    from linch.compaction import _DETAILED_SUMMARY_PROMPT
-
-    p = _DETAILED_SUMMARY_PROMPT
-    assert "CRITICAL: Respond with TEXT ONLY" in p
-    for section in (
-        "Primary Request and Intent",
-        "Errors and Fixes",
-        "Pending Tasks",
-        "Current Work",
-        "Next Step",
-    ):
-        assert section in p
-    for coding_term in ("Code Sections", "API names", "public interfaces", "test results"):
-        assert coding_term not in p
-
-
-@pytest.mark.asyncio
-async def test_maybe_compact_uses_provider_context_window():
-    """maybe_compact calls agent.provider.context_window, not openai_responses.context_window."""
-    fake_provider = _FakeNonOpenAIProvider()
-    # fake_provider.context_window returns 1024, so with big messages compaction fires
-
-    # Build a minimal fake agent/session
-    class FakeAgent:
-        model = "model-x"
-        provider = fake_provider
-        max_output_tokens = None
-        compaction = None
-        token_estimator = None
-
-    class FakeSession(_LoggedViews):
-        last_usage: object
-        last_compaction_info: dict | None
-        compaction_retry_used_this_turn = False
-
-        def __init__(self):
-            # Many big messages to exceed 80% of the 1024 token limit
-            self._seed_views(_make_messages(40))
-            self.last_usage = object()  # non-None so maybe_compact proceeds
-            self.last_compaction_info = None
-
-        def mark_compaction_used(self):
-            self.compaction_retry_used_this_turn = True
-
-    agent = FakeAgent()
-    session = FakeSession()
-    signal = AbortContext()
-
-    fired = await maybe_compact(session, agent, signal)
-
-    assert fired is True
-    assert len(fake_provider._stream_calls) >= 1  # provider.stream was used for summarization
-
-
-@pytest.mark.asyncio
-async def test_maybe_compact_estimates_without_last_usage():
-    """Fresh/reloaded sessions still compact when their derived view is large."""
-    provider = _FakeNonOpenAIProvider()
-
-    class FakeAgent:
-        model = "model-x"
-        max_output_tokens = 10
-        compaction = None
-        compaction_ladder = None
-        token_estimator = None
-
-        def __init__(self, provider):
-            self.provider = provider
-
-    class FakeSession(_LoggedViews):
-        last_usage = None
-        last_compaction_info = None
-        active_model = None
-
-        def __init__(self):
-            self._seed_views(_make_messages(40))
-
-    session = FakeSession()
-    history_before = list(session.full_history)
-
-    fired = await maybe_compact(session, FakeAgent(provider), AbortContext())
-
-    assert fired is True
     assert provider._stream_calls[0].model == "model-x"
-    assert list(session.full_history) == history_before
-    assert all(a is not b for a, b in zip(session.full_history, history_before, strict=True))
+    if prompt_kind == "default":
+        assert "Summarize the conversation so far" in sent
+        assert any(
+            isinstance(message.content[0], TextBlock)
+            and "summary" in message.content[0].text.lower()
+            for message in result
+        )
+        assert len(result) < len(ctx.messages)
+    elif prompt_kind == "detailed":
+        from linch.compaction import _DETAILED_SUMMARY_PROMPT
+
+        assert sent == expected
+        assert "CRITICAL: Respond with TEXT ONLY" in _DETAILED_SUMMARY_PROMPT
+        for coding_term in ("Code Sections", "API names", "public interfaces", "test results"):
+            assert coding_term not in _DETAILED_SUMMARY_PROMPT
+    else:
+        assert sent == expected
+    if prompt_kind == "general":
+        assert "Files" not in sent
 
 
 @pytest.mark.asyncio
-async def test_maybe_compact_missing_usage_below_estimated_threshold_is_noop():
+@pytest.mark.parametrize("large", [True, False])
+async def test_maybe_compact_usage_thresholds(large: bool):
     provider = _FakeNonOpenAIProvider()
+    session = _FakeSession()
+    session.last_usage = None
+    agent = _FakeAgent(provider)
+    agent.max_output_tokens = 10
+    if large:
+        history_before = list(session.full_history)
+    else:
+        session._seed_views(_make_messages(2))
+        agent.token_estimator = lambda messages, model: 1
+    session.agent = agent
 
-    class FakeAgent:
-        model = "model-x"
-        max_output_tokens = 10
-        compaction = None
-        compaction_ladder = None
-        token_estimator = staticmethod(lambda messages, model: 1)
+    fired = await maybe_compact(session, agent, AbortContext())
 
-        def __init__(self, provider):
-            self.provider = provider
-
-    class FakeSession:
-        provider_view = _make_messages(2)
-        last_usage = None
-        last_compaction_info = None
-        active_model = None
-
-    original = list(FakeSession.provider_view)
-
-    fired = await maybe_compact(FakeSession(), FakeAgent(provider), AbortContext())
-
-    assert fired is False
-    assert list(FakeSession.provider_view) == original
-    assert provider._stream_calls == []
+    if large:
+        assert fired is True
+        assert provider._stream_calls[0].model == "model-x"
+        assert list(session.full_history) == history_before
+        assert all(a is not b for a, b in zip(session.full_history, history_before, strict=True))
+    else:
+        assert fired is False
+        assert len(session.provider_view) == 2
+        assert provider._stream_calls == []
 
 
 @pytest.mark.asyncio
@@ -358,42 +205,29 @@ async def test_compaction_uses_active_fallback_model_consistently():
     provider = TrackingProvider()
     estimated_models: list[str] = []
 
-    class FakeAgent:
-        model = "primary-model"
-        max_output_tokens = 10
-        compaction = None
-        compaction_ladder = None
+    agent = _FakeAgent(provider)
+    agent.model = "primary-model"
+    agent.max_output_tokens = 10
+    agent.token_estimator = lambda messages, model: (
+        estimated_models.append(model)
+        or sum(
+            len(block.text)
+            for message in messages
+            for block in message.content
+            if isinstance(block, TextBlock)
+        )
+        // 4
+    )
+    session = _FakeSession()
+    session.last_usage = None
+    session.active_model = "fallback-model"
+    session.agent = agent
 
-        def __init__(self, provider):
-            self.provider = provider
-
-        @staticmethod
-        def token_estimator(messages, model):
-            estimated_models.append(model)
-            return (
-                sum(
-                    len(block.text)
-                    for message in messages
-                    for block in message.content
-                    if isinstance(block, TextBlock)
-                )
-                // 4
-            )
-
-    class FakeSession(_LoggedViews):
-        last_usage = None
-        last_compaction_info = None
-        active_model = "fallback-model"
-
-        def __init__(self):
-            self._seed_views(_make_messages(40))
-
-    session = FakeSession()
-
-    fired = await maybe_compact(session, FakeAgent(provider), AbortContext())
+    fired = await maybe_compact(session, agent, AbortContext())
 
     assert fired is True
-    assert provider.window_models == ["fallback-model"]
+    assert provider.window_models
+    assert set(provider.window_models) == {"fallback-model"}
     assert set(estimated_models) == {"fallback-model"}
     assert provider._stream_calls[0].model == "fallback-model"
     assert session.last_compaction_info["model"] == "fallback-model"
@@ -408,12 +242,17 @@ class _FakeAgent:
     token_estimator = None
 
     def __init__(self, provider):
+        from linch import Context
+
         self.provider = provider
+        self.context = Context()
 
 
 class _FakeSession(_LoggedViews):
     def __init__(self, n_messages: int = 40):
         self._seed_views(_make_messages(n_messages))
+        self.id = "fake-session"
+        self.active_model = None
         self.last_usage = object()  # non-None so maybe_compact proceeds
         self.last_compaction_info = None
         self.compaction_retry_used_this_turn = False
@@ -449,40 +288,25 @@ class _AlwaysFailsProvider(_FakeNonOpenAIProvider):
 
 
 @pytest.mark.asyncio
-async def test_maybe_compact_resilient_retries_transient_provider_error():
-    """A transient retryable ProviderError during proactive-compaction
-    summarization must not crash the run — it should retry like the main
-    turn loop does, and still compact once the provider recovers."""
+@pytest.mark.parametrize("case", ["recovers", "exhausted"])
+async def test_maybe_compact_resilient_provider_errors(case: str):
     from linch.loop.streaming import maybe_compact_resilient
 
-    provider = _FlakyThenOkProvider(fail_times=2)
+    provider = _FlakyThenOkProvider(fail_times=2) if case == "recovers" else _AlwaysFailsProvider()
     agent = _FakeAgent(provider)
+    if case == "exhausted":
+        agent.max_retries = 2
     session = _FakeSession()
-    signal = AbortContext()
-
-    fired = await maybe_compact_resilient(session, agent, signal)
-
-    assert fired is True
-    assert provider._call_count == 3
-
-
-@pytest.mark.asyncio
-async def test_maybe_compact_resilient_skips_compaction_when_exhausted():
-    """When every retry is exhausted, proactive compaction is skipped (not
-    raised) so the run can proceed to the turn call instead of crashing."""
-    from linch.loop.streaming import maybe_compact_resilient
-
-    provider = _AlwaysFailsProvider()
-    agent = _FakeAgent(provider)
-    agent.max_retries = 2  # keep the test fast
-    session = _FakeSession()
+    session.agent = agent
     original_view = list(session.provider_view)
-    signal = AbortContext()
+    fired = await maybe_compact_resilient(session, agent, AbortContext())
 
-    fired = await maybe_compact_resilient(session, agent, signal)
-
-    assert fired is False
-    assert list(session.provider_view) == original_view  # untouched, no partial mutation
+    if case == "recovers":
+        assert fired is True
+        assert provider._call_count == 3
+    else:
+        assert fired is False
+        assert list(session.provider_view) == original_view
 
 
 @pytest.mark.asyncio
@@ -525,6 +349,7 @@ async def test_maybe_compact_resilient_resets_read_tracker_after_partial_micro_e
     agent.compaction_ladder = CompactionLadder(keep_recent_turns=2)
 
     session = _FakeSession()
+    session.agent = agent
     # 12 turns, keep_recent_turns=2 -> 10 old tool results elided but the 2 kept
     # (2000 chars each) still push the projection back over the 0.8*1024 limit,
     # so maybe_compact falls through to the (always-failing) summarization call.

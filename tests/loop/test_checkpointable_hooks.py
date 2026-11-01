@@ -7,19 +7,9 @@ from typing import Any
 
 import pytest
 
-
-class _TextProvider:
-    id = "checkpointable-hook-test"
-
-    def context_window(self, model: str) -> int:
-        return 100_000
-
-    async def stream(self, req: Any) -> AsyncIterator[dict[str, object]]:
-        from linch.types import Usage
-
-        yield {"type": "message_start", "model": req.model}
-        yield {"type": "text_delta", "text": "done"}
-        yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
+from tests.support.agents import make_agent
+from tests.support.providers import ScriptedProvider, TextTurn
+from tests.support.runs import pin_run_contract
 
 
 class _DurableStateHook:
@@ -41,22 +31,14 @@ class _DurableStateHook:
         self.restored.append((state, session.id, run_id))
 
 
-def _agent(*, provider: Any, session_store: Any, run_store: Any, hooks: list[Any]):
-    from linch import Agent
-    from linch.config import FeatureFlags
-    from linch.tools.registry import empty_tools
-
-    return Agent(
-        model="test-model",
-        provider=provider,
-        tools=empty_tools(),
+def _hook_agent(session_store: Any, run_store: Any, hook: Any) -> Any:
+    return make_agent(
+        ScriptedProvider([TextTurn("done")], context_window=100_000),
         session_store=session_store,
         run_store=run_store,
-        hooks=hooks,
-        features=FeatureFlags(skills=False, subagents=False, mcp=False, filesystem=False),
-        read_before_write=False,
+        hooks=[hook],
         result_offload=None,
-        cwd=".",
+        read_before_write=False,
     )
 
 
@@ -74,26 +56,27 @@ async def test_checkpointable_hook_snapshots_session_scoped_json_state() -> None
     hook = _DurableStateHook({"profile": "hash-1", "repair": {"used": 1}})
     assert isinstance(hook, CheckpointableHook)
 
-    agent = _agent(
-        provider=_TextProvider(),
-        session_store=session_store,
-        run_store=run_store,
-        hooks=[hook],
-    )
+    agent = _hook_agent(session_store, run_store, hook)
     session = await agent.session(id="session-1")
     events = await _collect(session.run("hello"))
     run_id = next(event.run_id for event in events if event.type == "system")
 
     run = await run_store.load_run(run_id)
     assert run is not None and run.checkpoint is not None
-    assert run.checkpoint.extension_state == {"test.durable-state": hook.state}
+    assert run.checkpoint.extension_state["test.durable-state"] == hook.state
+    accounting = run.checkpoint.extension_state["linch.model_calls.v1"]
+    assert accounting["version"] == 3
+    assert accounting["format"] == "journal-v1"
+    assert accounting["active_primary"] is None
+    assert accounting["ledger"] is None
+    assert isinstance(accounting["journal_count"], int)
+    assert accounting["journal_count"] > 0
     assert hook.snapshots
     assert {session_id for session_id, _ in hook.snapshots} == {"session-1"}
     assert {saved_run_id for _, saved_run_id in hook.snapshots} == {run_id}
 
 
 async def test_checkpointable_hook_restores_matching_state_and_preserves_other_extensions() -> None:
-    from linch import RunOptions
     from linch.run_store import InMemoryRunStore, RunCheckpoint
     from linch.sessions import InMemorySessionStore
     from linch.types import Usage
@@ -116,15 +99,11 @@ async def test_checkpointable_hook_restores_matching_state_and_preserves_other_e
         ),
     )
     hook = _DurableStateHook({"profile": "pinned", "repair": {"used": 2}})
-    agent = _agent(
-        provider=_TextProvider(),
-        session_store=session_store,
-        run_store=run_store,
-        hooks=[hook],
-    )
+    agent = _hook_agent(session_store, run_store, hook)
     session = await agent.session(id="session-restore")
 
-    events = await _collect(session.resume(run.id, RunOptions(allow_legacy_resume=True)))
+    await pin_run_contract(session, run.id)
+    events = await _collect(session.resume(run.id))
 
     assert events[-1].type == "result"
     assert hook.restored == [
@@ -137,7 +116,6 @@ async def test_checkpointable_hook_restores_matching_state_and_preserves_other_e
 
 
 async def test_empty_hook_snapshot_clears_stale_active_namespace_only() -> None:
-    from linch import RunOptions
     from linch.run_store import InMemoryRunStore, RunCheckpoint
     from linch.sessions import InMemorySessionStore
     from linch.types import Usage
@@ -160,15 +138,11 @@ async def test_empty_hook_snapshot_clears_stale_active_namespace_only() -> None:
         ),
     )
     hook = _DurableStateHook({})
-    agent = _agent(
-        provider=_TextProvider(),
-        session_store=session_store,
-        run_store=run_store,
-        hooks=[hook],
-    )
+    agent = _hook_agent(session_store, run_store, hook)
     session = await agent.session(id="session-clear")
 
-    events = await _collect(session.resume(run.id, RunOptions(allow_legacy_resume=True)))
+    await pin_run_contract(session, run.id)
+    events = await _collect(session.resume(run.id))
 
     assert events[-1].type == "result"
     loaded = await run_store.load_run(run.id)
@@ -190,12 +164,7 @@ async def test_incomplete_checkpointable_hook_fails_closed_with_configuration_er
         def checkpoint_state(self, session: Any, run_id: str) -> dict[str, Any]:
             return {}
 
-    agent = _agent(
-        provider=_TextProvider(),
-        session_store=InMemorySessionStore(),
-        run_store=InMemoryRunStore(),
-        hooks=[_IncompleteHook()],
-    )
+    agent = _hook_agent(InMemorySessionStore(), InMemoryRunStore(), _IncompleteHook())
     session = await agent.session()
 
     with pytest.raises(ConfigError, match="restore_checkpoint_state"):

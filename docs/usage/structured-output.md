@@ -121,12 +121,10 @@ uses a generated terminal tool only for endpoints that lack that native format.
 
 ## Schema validation
 
-Validation uses the optional `jsonschema` library. **When `jsonschema` is not
-installed, schema validation is skipped** — the parsed JSON object is returned
-as-is and `structured_error` stays `None`. Install it (`pip install jsonschema`)
-if you want the parsed output checked against `schema` before it is handed back.
-Without it you still get JSON parsing and type-of-root checks (the result must be
-a JSON object), just not full schema validation.
+`jsonschema` is a core dependency. Linch always checks parsed JSON against the
+configured `OutputSchema.schema` before returning successful structured output;
+JSON parsing and the object-root check still run first. Validation failures
+populate `structured_error` and can trigger the configured repair retries.
 
 ---
 

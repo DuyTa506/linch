@@ -1,15 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import sqlite3
-from collections.abc import AsyncIterator
 
 import pytest
 
-from linch.durability import DurabilityOptions, InboxDelivery, JsonValue
+from linch.durability import DurabilityOptions, InboxDelivery, JsonValue, _strict_json
 from linch.errors import ConfigError
-from linch.sessions import InMemorySessionStore, SqliteSessionStore
+from linch.sessions import InMemorySessionStore
 from linch.sessions.postgres import _SCHEMA, PostgresSessionStore
 from linch.types import Message, TextBlock
 
@@ -18,14 +15,13 @@ def _message(text: str) -> Message:
     return Message(role="user", content=[TextBlock(text=text)])
 
 
-async def _stores(tmp_path) -> AsyncIterator[InMemorySessionStore | SqliteSessionStore]:
-    memory = InMemorySessionStore()
-    yield memory
-    sqlite = SqliteSessionStore(tmp_path / "inbox.db")
+@pytest.fixture(params=["memory", "postgres"])
+async def inbox_store(request, pg_dsn):
+    store = InMemorySessionStore() if request.param == "memory" else PostgresSessionStore(pg_dsn)
     try:
-        yield sqlite
+        yield store
     finally:
-        await sqlite.close()
+        await store.close()
 
 
 def test_durability_options_are_opt_in_and_strict_profile_is_stable() -> None:
@@ -63,83 +59,191 @@ def test_inbox_delivery_is_user_only_json_safe_and_detached() -> None:
         InboxDelivery("tuple", _message("bad"), metadata={"tuple": (1, 2)})  # type: ignore[dict-item]
 
 
-async def test_store_inbox_fifo_dedupe_conflict_and_response_loss(tmp_path) -> None:
-    async for store in _stores(tmp_path):
-        session = await store.create()
-        await store.append_messages(session.id, [_message("existing")])
-        first = InboxDelivery("delivery-1", _message("first"), metadata={"n": 1})
-        second = InboxDelivery("delivery-2", _message("second"), source="mailbox")
+@pytest.mark.parametrize("mappings", [False, True], ids=["lists", "dicts"])
+async def test_inbox_delivery_rejects_excessive_metadata_nesting(
+    inbox_store, mappings: bool
+) -> None:
+    session = await inbox_store.create()
+    value: object = "leaf"
+    for _ in range(1500):
+        value = {"child": value} if mappings else [value]
 
-        await store.enqueue_inbox(session.id, first)
-        await store.enqueue_inbox(session.id, first)
-        await store.enqueue_inbox(session.id, second)
-        with pytest.raises(ConfigError, match="conflicting inbox delivery"):
-            await store.enqueue_inbox(
-                session.id,
-                InboxDelivery("delivery-1", _message("changed"), metadata={"n": 1}),
+    with pytest.raises(ConfigError, match="maximum nesting depth"):
+        InboxDelivery(
+            f"deep-{session.id}",
+            _message("bad"),
+            metadata={"payload": value},  # type: ignore[dict-item]
+        )
+
+
+@pytest.mark.parametrize(("depth", "reject"), [(100, False), (101, True)])
+async def test_inbox_delivery_matches_strict_json_depth_boundary(
+    inbox_store, depth, reject
+) -> None:
+    session = await inbox_store.create()
+    payload: object = "leaf"
+    for _ in range(depth):
+        payload = {"child": payload}
+    delivery_payload: object = "leaf"
+    for _ in range(depth - 1):
+        delivery_payload = {"child": delivery_payload}
+
+    if reject:
+        with pytest.raises(ConfigError, match="maximum nesting depth 100"):
+            _strict_json(payload, label="boundary")
+        with pytest.raises(ConfigError, match="maximum nesting depth 100"):
+            InboxDelivery(
+                f"boundary-{depth}-{session.id}",
+                _message("bad"),
+                metadata=delivery_payload,  # type: ignore[arg-type]
             )
-
-        committed = await store.commit_inbox(session.id, after_seq=1)
-        assert [row.seq for row in committed] == [2, 3]
-        assert [row.message.content[0].text for row in committed] == ["first", "second"]  # type: ignore[union-attr]
-
-        # Simulate a commit whose successful response was lost.  The caller's
-        # old cursor recovers all history after it, without another insertion.
-        recovered = await store.commit_inbox(session.id, after_seq=1)
-        assert [row.seq for row in recovered] == [2, 3]
-        assert len(await store.load_messages(session.id)) == 3
-
-        # Receipts remain authoritative after payload pruning.
-        await store.enqueue_inbox(session.id, first)
-        with pytest.raises(ConfigError, match="conflicting inbox delivery"):
-            await store.enqueue_inbox(
-                session.id,
-                InboxDelivery("delivery-1", _message("post-commit conflict")),
-            )
+    else:
+        _strict_json(payload, label="boundary")
+        InboxDelivery(
+            f"boundary-{depth}-{session.id}",
+            _message("good"),
+            metadata=delivery_payload,  # type: ignore[arg-type]
+        )
 
 
-async def test_commit_returns_non_inbox_messages_newer_than_cursor(tmp_path) -> None:
-    async for store in _stores(tmp_path):
-        session = await store.create()
-        await store.append_messages(session.id, [_message("direct")])
+async def test_store_inbox_fifo_dedupe_conflict_and_response_loss(inbox_store) -> None:
+    store = inbox_store
+    session = await store.create()
+    await store.append_messages(session.id, [_message("existing")])
+    first = InboxDelivery("delivery-1", _message("first"), metadata={"n": 1})
+    second = InboxDelivery("delivery-2", _message("second"), source="mailbox")
 
-        rows = await store.commit_inbox(session.id, after_seq=0)
+    await store.enqueue_inbox(session.id, first)
+    await store.enqueue_inbox(session.id, first)
+    await store.enqueue_inbox(session.id, second)
+    with pytest.raises(ConfigError, match="conflicting inbox delivery"):
+        await store.enqueue_inbox(
+            session.id,
+            InboxDelivery("delivery-1", _message("changed"), metadata={"n": 1}),
+        )
 
-        assert [row.message.content[0].text for row in rows] == ["direct"]  # type: ignore[union-attr]
+    committed = await store.commit_inbox(session.id, after_seq=1)
+    assert [row.seq for row in committed] == [2, 3]
+    assert [row.message.content[0].text for row in committed] == ["first", "second"]  # type: ignore[union-attr]
+
+    # Simulate a commit whose successful response was lost.  The caller's
+    # old cursor recovers all history after it, without another insertion.
+    recovered = await store.commit_inbox(session.id, after_seq=1)
+    assert [row.seq for row in recovered] == [2, 3]
+    assert len(await store.load_messages(session.id)) == 3
+
+    # Receipts remain authoritative after payload pruning.
+    await store.enqueue_inbox(session.id, first)
+    with pytest.raises(ConfigError, match="conflicting inbox delivery"):
+        await store.enqueue_inbox(
+            session.id,
+            InboxDelivery("delivery-1", _message("post-commit conflict")),
+        )
 
 
-async def test_store_inbox_unknown_session_and_cursor_validation(tmp_path) -> None:
-    async for store in _stores(tmp_path):
-        with pytest.raises(KeyError):
-            await store.enqueue_inbox("missing", InboxDelivery("one", _message("x")))
-        with pytest.raises(KeyError):
-            await store.commit_inbox("missing", after_seq=0)
+async def test_commit_returns_non_inbox_messages_newer_than_cursor(inbox_store) -> None:
+    store = inbox_store
+    session = await store.create()
+    await store.append_messages(session.id, [_message("direct")])
 
-        session = await store.create()
-        with pytest.raises(ConfigError, match="non-negative integer"):
-            await store.commit_inbox(session.id, after_seq=-1)
-        with pytest.raises(ConfigError, match="non-negative integer"):
-            await store.commit_inbox(session.id, after_seq=True)
+    rows = await store.commit_inbox(session.id, after_seq=0)
+
+    assert [row.message.content[0].text for row in rows] == ["direct"]  # type: ignore[union-attr]
 
 
-async def test_sqlite_receipt_prunes_payload_and_survives_reopen(tmp_path) -> None:
-    path = tmp_path / "reopen.db"
-    store = SqliteSessionStore(path)
+@pytest.mark.parametrize(
+    ("payload", "error"),
+    [
+        ("{", ValueError),
+        ("[]", ConfigError),
+        ('{"role":"user","content":[{"type":"unknown"}]}', ValueError),
+    ],
+)
+@pytest.mark.parametrize("after_seq", [0, 100])
+async def test_inbox_decode_failure_leaves_batch_pending(
+    inbox_store, payload, error, after_seq
+) -> None:
+    store = inbox_store
+    session = await store.create()
+    await store.enqueue_inbox(session.id, InboxDelivery("first", _message("first")))
+    await store.enqueue_inbox(session.id, InboxDelivery("second", _message("second")))
+    if isinstance(store, InMemorySessionStore):
+        store._inbox[session.id]["second"].message_json = payload
+    else:
+        pool = await store._ensure()
+        await pool.execute(
+            "UPDATE session_inbox SET message = $1 WHERE session_id = $2 AND delivery_id = $3",
+            payload,
+            session.id,
+            "second",
+        )
+
+    with pytest.raises(error):
+        await store.commit_inbox(session.id, after_seq=after_seq)
+
+    if isinstance(store, InMemorySessionStore):
+        message_count = len(store._messages[session.id])
+        pending_count = sum(row.message_seq is None for row in store._inbox[session.id].values())
+    else:
+        message_count = await pool.fetchval(
+            "SELECT count(*) FROM messages WHERE session_id = $1", session.id
+        )
+        pending_count = await pool.fetchval(
+            "SELECT count(*) FROM session_inbox WHERE session_id = $1 AND message_seq IS NULL",
+            session.id,
+        )
+    assert (message_count, pending_count) == (0, 2)
+
+
+@pytest.mark.parametrize("replay", [False, True])
+async def test_inbox_results_are_detached(inbox_store, replay) -> None:
+    store = inbox_store
+    session = await store.create()
+    await store.enqueue_inbox(session.id, InboxDelivery("first", _message("before")))
+    if replay:
+        await store.commit_inbox(session.id, after_seq=0)
+    rows = await store.commit_inbox(session.id, after_seq=0)
+    rows[0].seq = 99
+    rows[0].message.content[0].text = "caller mutation"
+    reloaded = await store.load_messages(session.id)
+    assert reloaded[0].seq == 1
+    assert reloaded[0].message == _message("before")
+    assert (await store.commit_inbox(session.id, after_seq=0))[0].message == _message("before")
+
+
+async def test_store_inbox_unknown_session_and_cursor_validation(inbox_store) -> None:
+    store = inbox_store
+    with pytest.raises(KeyError):
+        await store.enqueue_inbox("missing", InboxDelivery("one", _message("x")))
+    with pytest.raises(KeyError):
+        await store.commit_inbox("missing", after_seq=0)
+
+    session = await store.create()
+    with pytest.raises(ConfigError, match="non-negative integer"):
+        await store.commit_inbox(session.id, after_seq=-1)
+    with pytest.raises(ConfigError, match="non-negative integer"):
+        await store.commit_inbox(session.id, after_seq=True)
+
+
+async def test_postgres_receipt_prunes_payload_and_survives_reopen(
+    pg_dsn,
+) -> None:
+    store = PostgresSessionStore(pg_dsn)
     session = await store.create()
     delivery = InboxDelivery("stable", _message("payload"), metadata={"large": "x" * 1000})
     await store.enqueue_inbox(session.id, delivery)
     await store.commit_inbox(session.id, after_seq=0)
-    receipt = await store._exec.run(
-        lambda conn: conn.execute(
-            "select digest, message, source, metadata_json, message_seq "
-            "from session_inbox where session_id = ? and delivery_id = ?",
-            (session.id, delivery.delivery_id),
-        ).fetchone()
+    pool = await store._ensure()
+    receipt = await pool.fetchrow(
+        "SELECT digest, message, source, metadata_json, message_seq "
+        "FROM session_inbox WHERE session_id = $1 AND delivery_id = $2",
+        session.id,
+        delivery.delivery_id,
     )
     assert tuple(receipt) == (delivery.digest, None, None, None, 1)
     await store.close()
 
-    reopened = SqliteSessionStore(path)
+    reopened = PostgresSessionStore(pg_dsn)
     try:
         await reopened.enqueue_inbox(session.id, delivery)
         rows = await reopened.commit_inbox(session.id, after_seq=0)
@@ -149,10 +253,11 @@ async def test_sqlite_receipt_prunes_payload_and_survives_reopen(tmp_path) -> No
         await reopened.close()
 
 
-async def test_sqlite_two_connections_enqueue_without_lost_fifo_rows(tmp_path) -> None:
-    path = tmp_path / "concurrent.db"
-    first = SqliteSessionStore(path)
-    second = SqliteSessionStore(path)
+async def test_postgres_two_connections_enqueue_without_lost_fifo_rows(
+    pg_dsn,
+) -> None:
+    first = PostgresSessionStore(pg_dsn)
+    second = PostgresSessionStore(pg_dsn)
     session = await first.create()
     try:
         await asyncio.gather(
@@ -165,35 +270,6 @@ async def test_sqlite_two_connections_enqueue_without_lost_fifo_rows(tmp_path) -
     finally:
         await first.close()
         await second.close()
-
-
-async def test_sqlite_additive_migration_from_pre_inbox_database(tmp_path) -> None:
-    path = tmp_path / "legacy.db"
-    conn = sqlite3.connect(path)
-    conn.execute(
-        "create table sessions (id text primary key, created_at text not null, "
-        "updated_at text not null, meta text not null, invoked_skills text not null default '[]')"
-    )
-    conn.execute(
-        "create table messages (session_id text not null, seq integer not null, "
-        "appended_at text not null, message text not null, primary key (session_id, seq))"
-    )
-    conn.execute("insert into sessions values ('legacy', 'old', 'old', '{}', '[]')")
-    conn.execute(
-        "insert into messages values ('legacy', 1, 'old', ?)",
-        (json.dumps({"role": "user", "content": [{"type": "text", "text": "kept"}]}),),
-    )
-    conn.commit()
-    conn.close()
-
-    store = SqliteSessionStore(path)
-    try:
-        await store.enqueue_inbox("legacy", InboxDelivery("new", _message("new")))
-        rows = await store.commit_inbox("legacy", after_seq=0)
-        assert [row.seq for row in rows] == [1, 2]
-        assert [row.message.content[0].text for row in rows] == ["kept", "new"]  # type: ignore[union-attr]
-    finally:
-        await store.close()
 
 
 class _AsyncContext:

@@ -18,7 +18,7 @@ def _disk_agent(name: str, *, description: str = "Disk agent.") -> AgentDefiniti
     )
 
 
-def test_verification_builtin_is_visible_and_default_is_implicit() -> None:
+def test_registry_builtin_and_disk_override() -> None:
     registry = AgentRegistry([])
 
     visible = registry.list()
@@ -32,9 +32,7 @@ def test_verification_builtin_is_visible_and_default_is_implicit() -> None:
     assert verification is not None
     assert verification.source == "built-in"
     assert verification.frontmatter.tools == ["Read", "Glob", "Grep", "Bash"]
-
-
-def test_disk_agent_overrides_builtin_verification() -> None:
+    assert "_default" in [agent.name for agent in registry.list_all()]
     disk_verification = _disk_agent(
         "verification",
         description="Project-specific verifier.",
@@ -43,15 +41,9 @@ def test_disk_agent_overrides_builtin_verification() -> None:
 
     resolved = registry.get("verification")
     assert resolved is disk_verification
+    assert resolved is not None
     assert resolved.source == "disk"
 
     visible = registry.list()
     assert [agent.name for agent in visible].count("verification") == 1
     assert visible[0] is disk_verification
-
-
-def test_list_all_includes_default_without_showing_it_in_list() -> None:
-    registry = AgentRegistry([_disk_agent("researcher")])
-
-    assert "_default" not in [agent.name for agent in registry.list()]
-    assert "_default" in [agent.name for agent in registry.list_all()]

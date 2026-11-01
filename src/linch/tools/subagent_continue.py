@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import uuid4
 
+from ..session import RunOptions
 from .base import ToolContext, ToolResult, ToolScope
 
 SUBAGENT_CONTINUE_TOOL_NAME = "SubagentContinue"
@@ -64,6 +65,15 @@ class SubagentContinueTool:
         return f"Continue worker: {input.get('to', '?')}"
 
     async def execute(self, input: dict[str, object], ctx: ToolContext) -> ToolResult:
+        """Continue a worker using the invoking run's dependencies and budget.
+
+        Args:
+            input: Validated worker target and follow-up message.
+            ctx: Invoking call's captured capabilities and authorization identity.
+
+        Returns:
+            The worker's answer or an error explaining why it could not continue.
+        """
         from ..subagents.runner import (
             ContinueSubagentArgs,
             continue_subagent,
@@ -83,7 +93,14 @@ class SubagentContinueTool:
 
         from ._worker_utils import resolve_worker
 
-        handle = resolve_worker(session, target)
+        try:
+            handle = resolve_worker(session, target)
+        except ValueError as exc:
+            return ToolResult(
+                content=str(exc),
+                summary=self.summarize(input),
+                is_error=True,
+            )
         if handle is None:
             known = list(session.workers.keys())
             if known:
@@ -111,11 +128,14 @@ class SubagentContinueTool:
             ContinueSubagentArgs(
                 parent_session=session,
                 parent_agent=session.agent,
+                parent_run_id=ctx.run_id,
                 handle=handle,
                 message=message,
                 subagent_run_id=subagent_run_id,
                 signal=ctx.signal,
                 emit=emit_fn,
+                run_options=RunOptions(principal=ctx.principal, deps=ctx.deps),
+                _deps_captured=True,
             )
         )
         result_text = result_text_for_caller(result)

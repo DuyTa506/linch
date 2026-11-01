@@ -19,7 +19,19 @@ SKILL_TOOL_SCHEMA = {
 
 
 class SkillTool:
+    """Load a named skill body and record its run-scoped overlay when possible.
+
+    A live session is required for recording invocation state and applying an
+    overlay; direct or detached tool calls still return the skill body.
+
+    Args:
+        skills: Mapping of skill names to loaded definitions.
+        session_registry: Optional mapping of session IDs to live sessions.
+        get_session_model: Optional callback returning a session's model.
+    """
+
     name = "Skill"
+    always_load = True
     description = (
         "Invoke a skill by name. Skills are listed in the skill_listing system-reminder. "
         "The skill's body is returned to you so you can act on its instructions in the next turn."
@@ -34,11 +46,31 @@ class SkillTool:
         session_registry: dict[str, Any] | None = None,
         get_session_model: Any = None,
     ) -> None:
+        """Create a skill invocation tool.
+
+        Args:
+            skills: Loaded skill definitions keyed by name.
+            session_registry: Optional live-session mapping.
+            get_session_model: Optional callback for session model lookup.
+        """
+
         self._skills = skills
         self._session_registry = session_registry if session_registry is not None else {}
         self._get_session_model = get_session_model
 
     def validate(self, raw: dict[str, Any]) -> dict[str, Any]:
+        """Validate a skill name and optional argument string.
+
+        Args:
+            raw: Provider-supplied skill request.
+
+        Returns:
+            Normalized skill request mapping.
+
+        Raises:
+            ValueError: If the name or argument type is invalid.
+        """
+
         skill = raw.get("skill")
         if not isinstance(skill, str) or skill.strip() == "":
             raise ValueError("skill must be a non-empty string")
@@ -51,9 +83,28 @@ class SkillTool:
         return result
 
     def summarize(self, input: dict[str, Any]) -> str:
+        """Summarize a validated skill invocation.
+
+        Args:
+            input: Validated skill request.
+
+        Returns:
+            Human-readable invocation summary.
+        """
+
         return f"Invoke skill: {input['skill']}"
 
     async def execute(self, input: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        """Load a skill body and return it as model-visible tool output.
+
+        Args:
+            input: Validated skill request.
+            ctx: Runtime context identifying the invoking session.
+
+        Returns:
+            Legacy ``ToolResult`` containing the skill body or an error.
+        """
+
         from linch.skills.overlay import resolve_model_override
         from linch.skills.substitute import substitute_skill_body
         from linch.types import InvokedSkillRecord, SkillOverlay

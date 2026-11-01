@@ -13,6 +13,18 @@ def build_skill_listing(
     skills: list[Skill],
     context_window_tokens: int | None = None,
 ) -> str:
+    """Render model-invokable skills within the configured prompt budget.
+
+    Disabled skills are omitted, names are sorted case-insensitively, and
+    descriptions are shortened when the context-window budget is exceeded.
+
+    Args:
+        skills: Candidate skills to include in the listing.
+        context_window_tokens: Optional model context size used to derive the budget.
+
+    Returns:
+        A newline-delimited listing, or an empty string when no skill is visible.
+    """
     visible = sorted(
         [s for s in skills if not s.frontmatter.disable_model_invocation],
         key=lambda s: s.name.lower(),

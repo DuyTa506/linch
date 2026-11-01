@@ -3,23 +3,45 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from ..abort import throw_if_aborted
 from ..errors import AbortError
+from ..kernel import Context, Disposable
 from .base import ToolContext, ToolResult, ToolScope
 
 
 @dataclass(frozen=True, slots=True)
 class AskUserOption:
+    """Describe one selectable answer option.
+
+    Args:
+        label: Short option text shown to the user.
+        description: Explanation of what selecting the option means.
+    """
+
     label: str
     description: str
 
 
 @dataclass(frozen=True, slots=True)
 class AskUserQuestion:
+    """Describe one question in an AskUser request.
+
+    Attributes:
+        id: Stable identifier used to associate a submitted answer with this
+            question.
+
+    Args:
+        id: Stable identifier for the answer.
+        header: Short display header, at most twelve characters.
+        question: Full question text.
+        options: Two to four selectable options.
+        multi_select: Whether multiple options may be selected.
+    """
+
     id: str
     header: str
     question: str
@@ -29,22 +51,77 @@ class AskUserQuestion:
 
 @dataclass(frozen=True, slots=True)
 class AskUserRequest:
+    """Bundle questions presented in one user interaction.
+
+    Args:
+        questions: Ordered questions to present.
+    """
+
     questions: list[AskUserQuestion]
 
 
 @dataclass(frozen=True, slots=True)
 class AskUserResponse:
+    """Represent the user's response to an AskUser request.
+
+    Attributes:
+        answers: Submitted values keyed by the question identifiers.
+
+    Args:
+        accepted: Whether the user accepted and answered the request.
+        answers: Answers keyed by question identifier.
+        note: Optional free-form note from the user.
+    """
+
     accepted: bool
     answers: dict[str, str | list[str]] = field(default_factory=dict)
     note: str = ""
 
 
 class AskUserHandler(Protocol):
+    """Define a callable that obtains AskUser responses from a host UI.
+
+    Implementers provide the callable contract documented on ``__call__``;
+    protocol construction is supplied by ``typing.Protocol`` machinery.
+    """
+
     def __call__(
         self,
         request: AskUserRequest,
         ctx: ToolContext,
-    ) -> AskUserResponse | dict[str, Any] | Any: ...
+    ) -> AskUserResponse | dict[str, Any] | Any:
+        """Collect the user's response.
+
+        Args:
+            request: Validated questions to present.
+            ctx: Tool context for the interaction.
+
+        Returns:
+            A response object, mapping, or host-defined value.
+        """
+
+        ...
+
+
+class AskUserPlugin:
+    """Provide the opt-in ``AskUser`` tool through the plugin lifecycle."""
+
+    name = "ask_user"
+    version = "1"
+    provides: Iterable[str] = ()
+    requires: Iterable[str] = ("agent",)
+
+    def setup(self, ctx: Context, config: Any = None) -> Disposable:
+        """Install an ``AskUser`` tool using the supplied handler.
+
+        Args:
+            ctx: Plugin activation context containing the owning agent.
+            config: AskUser handler callable.
+
+        Returns:
+            A disposer that restores the tool registry state before mounting.
+        """
+        return ctx.run_config.tools.replace(AskUserTool(config))
 
 
 def _option_from_raw(raw: Any) -> AskUserOption:
@@ -93,11 +170,11 @@ def _response_from_value(value: Any) -> AskUserResponse:
     if isinstance(value, AskUserResponse):
         return value
     if isinstance(value, dict):
+        if set(value) - {"accepted", "answers", "note"}:
+            return AskUserResponse(accepted=False, answers={})
         answers_raw = value.get("answers", {})
         answers = dict(answers_raw) if isinstance(answers_raw, dict) else {}
         accepted = value.get("accepted")
-        if accepted is None:
-            accepted = value.get("ok", value.get("confirmed"))
         if accepted is None:
             # No explicit acceptance signal: infer from whether the user
             # actually provided answers; otherwise fail closed (declined) rather
@@ -114,6 +191,13 @@ def _response_from_value(value: Any) -> AskUserResponse:
 
 
 class AskUserTool:
+    """Ask a user to choose among explicit options.
+
+    Args:
+        handler: Host callback that presents the request and returns a response.
+        timeout_s: Optional maximum wait for the user response.
+    """
+
     name = "AskUser"
     description = "Ask the user to choose from short, explicit options before proceeding."
     scope: ToolScope = "read"
@@ -159,10 +243,29 @@ class AskUserTool:
         *,
         timeout_s: float | None = None,
     ) -> None:
+        """Create an AskUser tool backed by a host handler.
+
+        Args:
+            handler: Callback that collects the user's response.
+            timeout_s: Optional timeout in seconds.
+        """
+
         self._handler = handler
         self._timeout_s = timeout_s
 
     def validate(self, raw: dict[str, Any]) -> dict[str, Any]:
+        """Validate and normalize AskUser questions.
+
+        Args:
+            raw: Provider-supplied request mapping.
+
+        Returns:
+            Mapping containing validated :class:`AskUserQuestion` objects.
+
+        Raises:
+            ValueError: If questions or options violate the request contract.
+        """
+
         questions_raw = raw.get("questions")
         if not isinstance(questions_raw, list) or not 1 <= len(questions_raw) <= 4:
             raise ValueError("AskUser requires 1-4 questions")
@@ -173,9 +276,31 @@ class AskUserTool:
         return {"questions": questions}
 
     def summarize(self, input: dict[str, Any]) -> str:
+        """Summarize the number of questions being asked.
+
+        Args:
+            input: Validated AskUser input.
+
+        Returns:
+            Human-readable summary.
+        """
+
         return f"AskUser({len(input.get('questions', []))} question(s))"
 
     async def execute(self, input: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        """Wait for a user response and return it as tool output.
+
+        Args:
+            input: Validated AskUser questions.
+            ctx: Runtime context, including cancellation and dependencies.
+
+        Returns:
+            Tool result containing answers or a declined/timed-out message.
+
+        Raises:
+            AbortError: If the run is aborted while waiting.
+        """
+
         throw_if_aborted(ctx.signal)
         request = AskUserRequest(questions=list(input["questions"]))
         handler_task = asyncio.create_task(self._call_handler(request, ctx))

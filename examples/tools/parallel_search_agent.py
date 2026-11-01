@@ -90,9 +90,9 @@ class SearchTool:
 
 def build_registry() -> ToolRegistry:
     registry = ToolRegistry()
-    registry.add(SearchTool("SearchDocs", "docs", 0.20))
-    registry.add(SearchTool("SearchTickets", "tickets", 0.20))
-    registry.add(SearchTool("SearchWiki", "wiki", 0.20))
+    registry.register(SearchTool("SearchDocs", "docs", 0.20))
+    registry.register(SearchTool("SearchTickets", "tickets", 0.20))
+    registry.register(SearchTool("SearchWiki", "wiki", 0.20))
     return registry
 
 

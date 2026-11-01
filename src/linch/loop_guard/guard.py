@@ -1,8 +1,16 @@
 from __future__ import annotations
 
-import json
+import hashlib
 from dataclasses import dataclass, field
 from typing import Any, Literal
+
+from ..permissions.keys import permission_decision_key
+
+
+def _call_digest(name: str, input_value: Any) -> str:
+    """Return the fixed-size key used by live and checkpointed guard state."""
+    key = permission_decision_key(name, input_value).encode()
+    return hashlib.blake2b(key, digest_size=8).hexdigest()
 
 
 @dataclass(slots=True)
@@ -16,6 +24,11 @@ class LoopGuard:
     This guard is **on by default** at :class:`~linch.Agent` construction
     with conservative thresholds.  Disable entirely with
     ``Agent(loop_guard=None)``.
+
+    Args:
+        max_identical_tool_calls: Repetition threshold for identical calls.
+        max_consecutive_failures: Failure-batch threshold.
+        force_final_answer: Whether to inject a tools-disabled final turn.
 
     Attributes:
         max_identical_tool_calls: Maximum number of times the same tool may
@@ -40,6 +53,13 @@ class LoopGuardState:
     """Mutable per-run state tracked by the loop guard.
 
     One instance is created at the start of each ``run_loop`` invocation.
+
+    Attributes:
+        call_counts: Counts keyed by digests of repeated tool calls.
+
+    Args:
+        call_counts: Digest counts for repeated tool calls.
+        consecutive_failures: Number of consecutive all-failed batches.
     """
 
     call_counts: dict[str, int] = field(default_factory=dict)
@@ -59,16 +79,16 @@ class LoopGuardDecision:
             action is ``"continue"``.
         detail: Human-readable description of why the guard tripped.  Empty
             when action is ``"continue"``.
+
+    Args:
+        action: Decision to continue, stop, or force a final answer.
+        reason: Machine-readable trip reason.
+        detail: Human-readable trip description.
     """
 
     action: Literal["continue", "stop", "force_final"]
     reason: str
     detail: str
-
-
-def _canonical_sig(name: str, input: dict[str, Any]) -> str:
-    """Return a stable string signature for a tool name + input pair."""
-    return f"{name}:{json.dumps(input, sort_keys=True, separators=(',', ':'))}"
 
 
 def evaluate_loop_guard(
@@ -97,7 +117,7 @@ def evaluate_loop_guard(
     # ── Repeated identical tool-call check ────────────────────────────────
     if guard.max_identical_tool_calls > 0:
         for block in tool_blocks:
-            sig = _canonical_sig(block.name, block.input)
+            sig = _call_digest(block.name, block.input)
             state.call_counts[sig] = state.call_counts.get(sig, 0) + 1
             if state.call_counts[sig] >= guard.max_identical_tool_calls:
                 action: Literal["stop", "force_final"] = (
@@ -144,6 +164,12 @@ def normalize_loop_guard(value: Any) -> LoopGuard | None:
     * ``None`` / ``False`` → disabled (returns ``None``).
     * :class:`LoopGuard` instance → returned as-is.
     * ``dict`` → ``LoopGuard(**value)``.
+
+    Args:
+        value: Loop-guard instance, mapping, ``None``, or ``False``.
+
+    Returns:
+        Normalized configuration, or ``None`` when disabled.
 
     Raises :class:`TypeError` for any other type.
     """

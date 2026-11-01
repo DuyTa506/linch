@@ -1,59 +1,31 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+import pytest
 
-from linch import Agent
 from linch.config import FeatureFlags
 from linch.filesystem import OffloadConfig, StateFileBackend
 from linch.filesystem.offload import maybe_offload
-from linch.sessions import InMemorySessionStore
 from linch.tools.base import ToolContext, ToolResult
-from linch.tools.registry import tools_from_defaults
-from linch.types import Usage
+from linch.tools.registry import workspace_tools
+from tests.support.agents import make_agent
+from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
+from tests.support.tools import StubTool
 
 BIG = "\n".join(f"result line {i} with some filler text" for i in range(200))
 
 
-class BigTool:
-    name = "big_search"
-    description = "Returns a large result."
-    input_schema = {"type": "object", "properties": {}}
-    scope = "read"
-    parallel = True
-
-    def validate(self, raw: dict) -> dict:
-        return {}
-
-    async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
-        return ToolResult(content=BIG, summary="big")
-
-    def summarize(self, input: dict) -> str:
-        return "big_search()"
-
-
-class FakeProvider:
-    id = "fake"
-
-    def __init__(self) -> None:
-        self.calls = 0
-
-    def context_window(self, model: str) -> int:
-        return 100_000
-
-    async def stream(self, req) -> AsyncIterator[dict]:
-        self.calls += 1
-        yield {"type": "message_start", "model": req.model}
-        if self.calls == 1:
-            yield {"type": "tool_use_start", "id": "call_1", "name": "big_search"}
-            yield {"type": "tool_use_input_delta", "id": "call_1", "json_delta": "{}"}
-            yield {"type": "tool_use_end", "id": "call_1"}
-            yield {"type": "message_end", "stop_reason": "tool_use", "usage": Usage()}
-        else:
-            yield {"type": "text_delta", "text": "done"}
-            yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
-
-
-# ── Unit: maybe_offload ──────────────────────────────────────────────────────
+def _agent(*, result_offload, filesystem=None):
+    turns = [ToolUseTurn("big_search", {}), TextTurn("done")]
+    return make_agent(
+        ScriptedProvider(turns),
+        model="gpt-5",
+        tools=workspace_tools(  # type: ignore[arg-type]
+            extra=[StubTool("big_search", output=BIG, parallel=True)]
+        ),
+        features=FeatureFlags(filesystem=result_offload is not None or filesystem is not None),
+        filesystem=filesystem,
+        result_offload=result_offload,
+    )
 
 
 async def test_maybe_offload_replaces_large_content() -> None:
@@ -73,56 +45,25 @@ async def test_maybe_offload_replaces_large_content() -> None:
     assert await backend.read(path) == BIG  # full content preserved in backend
 
 
-async def test_maybe_offload_skips_small_results() -> None:
+@pytest.mark.parametrize("case", ["small", "error", "filesystem"])
+async def test_maybe_offload_skip_cases(case: str) -> None:
     backend = StateFileBackend()
-    result = ToolResult(content="small")
+    result = ToolResult(content="small" if case == "small" else BIG, is_error=case == "error")
     out = await maybe_offload(
         result,
-        tool_name="t",
+        tool_name="t" if case == "small" else "big_search" if case == "error" else "read_file",
         call_id="x",
         backend=backend,
-        config=OffloadConfig(threshold_tokens=10_000),
+        config=OffloadConfig(threshold_tokens=10_000 if case == "small" else 1),
     )
-    assert out.content == "small"
-    assert not out.truncated
-    assert await backend.ls() == []
-
-
-async def test_maybe_offload_skips_errors_and_fs_tools() -> None:
-    backend = StateFileBackend()
-    err = await maybe_offload(
-        ToolResult(content=BIG, is_error=True),
-        tool_name="big_search",
-        call_id="x",
-        backend=backend,
-        config=OffloadConfig(threshold_tokens=1),
-    )
-    assert err.content == BIG  # errors are never offloaded
-
-    fs = await maybe_offload(
-        ToolResult(content=BIG),
-        tool_name="read_file",  # in default skip_tools
-        call_id="x",
-        backend=backend,
-        config=OffloadConfig(threshold_tokens=1),
-    )
-    assert fs.content == BIG
-
-
-# ── End-to-end through the loop ──────────────────────────────────────────────
+    assert out.content == ("small" if case == "small" else BIG)
+    if case == "small":
+        assert not out.truncated
+        assert await backend.ls() == []
 
 
 async def test_offload_end_to_end() -> None:
-    agent = Agent(
-        model="gpt-5",
-        provider=FakeProvider(),
-        session_store=InMemorySessionStore(),
-        permissions={"mode": "skip-dangerous"},
-        cwd=".",
-        tools=tools_from_defaults(extra=[BigTool()]),
-        features=FeatureFlags(filesystem=True),
-        result_offload=OffloadConfig(threshold_tokens=10, preview_lines=5),
-    )
+    agent = _agent(result_offload=OffloadConfig(threshold_tokens=10, preview_lines=5))
     session = await agent.session()
     events = [e async for e in session.run("search")]
 
@@ -152,17 +93,44 @@ async def test_offload_end_to_end() -> None:
 
 
 async def test_no_offload_when_disabled() -> None:
-    agent = Agent(
-        model="gpt-5",
-        provider=FakeProvider(),
-        session_store=InMemorySessionStore(),
-        permissions={"mode": "skip-dangerous"},
-        cwd=".",
-        tools=tools_from_defaults(extra=[BigTool()]),
-        result_offload=None,  # explicitly disable
-    )
+    agent = _agent(result_offload=None)
     session = await agent.session()
     assert session.filesystem is None
     events = [e async for e in session.run("search")]
     end = next(e for e in events if e.type == "tool_call_end" and e.tool_name == "big_search")
     assert end.result == BIG  # untouched
+
+
+async def test_scoped_run_offloads_and_reads_back_through_same_backend() -> None:
+    from linch import RunOptions, ScopedFileBackend
+    from linch.filesystem.tools import ReadFileTool
+
+    shared = StateFileBackend()
+    scoped = ScopedFileBackend(shared, "/tenants/alice")
+    agent = _agent(
+        result_offload=OffloadConfig(threshold_tokens=10),
+        filesystem=shared,
+    )
+    try:
+        session = await agent.session()
+        events = [
+            event async for event in session.run("search", RunOptions(deps={"filesystem": scoped}))
+        ]
+        assert events[-1].subtype == "success"
+        paths = await scoped.ls("/offload")
+        assert len(paths) == 1
+        result = await ReadFileTool().execute(
+            {"path": paths[0]},
+            ToolContext(
+                cwd=".",
+                session_id=session.id,
+                run_id="read-back",
+                session_store=session.store,
+                filesystem=shared,
+                deps={"filesystem": scoped},
+            ),
+        )
+        assert result.content == BIG
+        assert await shared.ls("/offload") == []
+    finally:
+        await agent.close()

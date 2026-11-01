@@ -28,7 +28,8 @@ stores.
 ## Manual tick
 
 ```python
-from linch import Agent, LoopRunner, LoopSpec, LoopTrigger
+from linch import Agent
+from linch.ext.loop_runner import LoopRunner, LoopSpec, LoopTrigger
 
 agent = Agent(model="gpt-5", permissions={"mode": "skip-dangerous"})
 
@@ -86,7 +87,7 @@ The runner does not infer domain completion from marker files. Use caller
 predicates over `LoopTickResult` and its `RunReport`.
 
 ```python
-from linch import LoopTickResult
+from linch.ext.loop_runner import LoopTickResult
 
 
 def verify(result: LoopTickResult) -> bool:
@@ -137,7 +138,7 @@ For cron, CI workers, webhook handlers, or multiple app processes, add a durable
 lease store:
 
 ```python
-from linch import FileLoopLeaseStore
+from linch.ext.loop_runner import FileLoopLeaseStore
 
 runner = LoopRunner(
     agent,
@@ -147,7 +148,9 @@ runner = LoopRunner(
 )
 ```
 
-`FileLoopLeaseStore` writes `domains/<loop_id>/.lock.json` with an expiry time.
+`FileLoopLeaseStore` atomically writes `domains/<loop_id>/.lock.json` under an
+`fcntl` lock and fails closed on platforms without `fcntl`. `LoopRunner` renews
+the lease every TTL/3 while the tick runs.
 Another process cannot acquire the same loop until the holder releases the lease
 or the TTL expires. Use the same root as `LoopSpec.root` when you override it.
 
@@ -155,30 +158,8 @@ or the TTL expires. Use the same root as `LoopSpec.root` when you override it.
 
 ## Scheduling integration
 
-`SchedulerLoop` can trigger the host call, but it does not own execution. Keep the
-scheduler responsible for due times and the runner responsible for the agent tick.
-
-```python
-from linch import InMemoryScheduleStore, LoopTrigger, SchedulerLoop
-
-store = InMemoryScheduleStore()
-scheduler = SchedulerLoop(store, session)
-
-for schedule in await scheduler.tick():
-    await runner.run_once(
-        spec,
-        LoopTrigger(
-            source="schedule",
-            id=schedule.id,
-            payload=schedule.payload,
-            metadata={"name": schedule.name},
-        ),
-    )
-```
-
-This keeps trigger ownership in the host application. A future daemon or webhook
-adapter can wrap the same `run_once()` primitive without changing loop artifacts or
-run reports.
+Durable schedules are dispatched by `linch.worker` on PgQueuer. For the queue
+topology and schedule tools, see [Scale out](./production.md#scale-out).
 
 ---
 

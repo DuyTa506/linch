@@ -60,6 +60,16 @@ class _FakeConnection:
     async def fetchrow(self, query: str, *args: object) -> dict[str, object] | None:
         normalized = " ".join(query.split())
         self.queries.append(normalized)
+        if "UPDATE sessions" in normalized:
+            if not self.session_exists:
+                return {"session_id": None, "allocated_seqs": []}
+            encoded = args[2]
+            assert isinstance(encoded, list)
+            first = self.current_seq + 1
+            return {
+                "session_id": args[0],
+                "allocated_seqs": list(range(first, first + len(encoded))),
+            }
         if "INSERT INTO sessions" not in normalized:
             raise AssertionError(f"unexpected fetchrow: {normalized}")
         if not self.insert_session_wins:
@@ -90,7 +100,7 @@ def _store_with(conn: _FakeConnection) -> PostgresSessionStore:
     return store
 
 
-async def test_append_locks_session_before_reading_max_sequence() -> None:
+async def test_append_advances_session_sequence_in_one_statement() -> None:
     conn = _FakeConnection(current_seq=4)
     store = _store_with(conn)
     messages = [
@@ -101,10 +111,11 @@ async def test_append_locks_session_before_reading_max_sequence() -> None:
     stored = await store.append_messages("s-1", messages)
 
     assert [item.seq for item in stored] == [5, 6]
-    assert "FOR UPDATE" in conn.queries[0]
-    assert "MAX(seq)" in conn.queries[1]
-    inserts = [query for query, _ in conn.executions if "INSERT INTO messages" in query]
-    assert len(inserts) == 2
+    assert len(conn.queries) == 1
+    assert "UPDATE sessions" in conn.queries[0]
+    assert "last_message_seq" in conn.queries[0]
+    assert "MAX(seq)" not in conn.queries[0]
+    assert conn.executions == []
 
 
 async def test_append_rejects_unknown_session_before_inserting() -> None:

@@ -149,12 +149,12 @@ async def run_openai_tools(api_key: str) -> None:
     from linch.config import FeatureFlags
     from linch.loop_guard import LoopGuard
     from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import tools_from_defaults
+    from linch.tools.registry import workspace_tools
 
     agent = Agent(
         model=MODEL_FLASH,
         provider=_make_openai_provider(api_key),
-        tools=tools_from_defaults(),
+        tools=workspace_tools(),
         session_store=InMemorySessionStore(),
         permissions={"mode": "skip-dangerous"},
         features=FeatureFlags(skills=False, subagents=False, mcp=False),
@@ -195,12 +195,12 @@ async def run_openai_thinking_with_tools(api_key: str) -> None:
     from linch.config import FeatureFlags
     from linch.loop_guard import LoopGuard
     from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import tools_from_defaults
+    from linch.tools.registry import workspace_tools
 
     agent = Agent(
         model=MODEL_FLASH,
         provider=_make_openai_provider(api_key),
-        tools=tools_from_defaults(),
+        tools=workspace_tools(),
         session_store=InMemorySessionStore(),
         permissions={"mode": "skip-dangerous"},
         features=FeatureFlags(skills=False, subagents=False, mcp=False),

@@ -5,12 +5,20 @@ import json
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeAlias, cast
 
 from jsonschema import Draft202012Validator
 
+from .._json import walk_json
+from .._tracing import trace_id_for
+
+if TYPE_CHECKING:
+    from ..permissions import Principal
+
 JsonValue: TypeAlias = None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
 RenderOutput: TypeAlias = Callable[[JsonValue], str]
+
+_STRICT_JSON_MAX_DEPTH = 100
 
 ToolScope = Literal["read", "write", "exec"]
 ResourceMode = Literal["read", "write"]
@@ -18,12 +26,38 @@ ResourceMode = Literal["read", "write"]
 
 @dataclass(frozen=True, slots=True)
 class ResourceAccess:
+    """Describe a resource a tool reads or writes.
+
+    Attributes:
+        resource: Stable resource identifier used for conflict detection.
+
+    Args:
+        resource: Stable resource identifier used for conflict checks.
+        mode: Access mode requested by the tool.
+    """
+
     resource: str
     mode: ResourceMode = "read"
 
 
 @dataclass(slots=True)
 class Citation:
+    """Attach a source citation to a tool result.
+
+    Attributes:
+        source: Locator or document identifier from which the citation came.
+        chunk: Optional excerpt supporting the citation.
+        metadata: Additional citation details retained for consumers.
+
+    Args:
+        id: Stable citation identifier.
+        source: Source locator or document identifier.
+        label: Optional display label.
+        chunk: Optional cited text chunk.
+        score: Optional retrieval score.
+        metadata: Additional citation metadata.
+    """
+
     id: str
     source: str
     label: str | None = None
@@ -34,6 +68,29 @@ class Citation:
 
 @dataclass(slots=True)
 class ToolContext:
+    """Provide runtime capabilities to a tool invocation.
+
+    Attributes:
+        deps: Run-scoped application dependencies.
+        filesystem: Optional virtual filesystem backend.
+        idempotency_key: Stable key for this run/tool-call pair.
+        execution: Optional unified execution capability.
+
+    Args:
+        cwd: Working directory for the invocation.
+        session_id: Session owning the invocation.
+        run_id: Run executing the invocation.
+        session_store: Session-store capability.
+        signal: Optional cancellation signal.
+        file_read_tracker: Optional tracker for read-before-write policy.
+        emit: Optional progress sink.
+        deps: Run-scoped application dependencies.
+        filesystem: Optional virtual filesystem backend.
+        idempotency_key: Stable key for this invocation.
+        execution: Optional unified execution capability.
+        _principal: Optional principal captured for this invocation.
+    """
+
     cwd: str
     session_id: str
     run_id: str
@@ -75,25 +132,31 @@ class ToolContext:
     reaching back through the Agent or global state. ``None`` on the legacy
     default path. Kept last for positional-constructor compatibility."""
 
-    @property
-    def sessionId(self) -> str:
-        return self.session_id
+    _trace_id: str | None = field(init=False, default=None, repr=False)
+    _run_config: Any = field(default=None, repr=False, kw_only=True)
+    """Private originating configuration captured before detached execution."""
+    _principal: Principal | None = field(default=None, kw_only=True, repr=False)
+
+    def __post_init__(self) -> None:
+        self._trace_id = trace_id_for(self.run_id)
 
     @property
-    def runId(self) -> str:
-        return self.run_id
+    def trace_id(self) -> str | None:
+        """Return the immutable trace correlation value for this tool call.
+
+        Returns:
+            Trace identifier, or ``None`` when tracing is unavailable.
+        """
+        return self._trace_id
 
     @property
-    def sessionStore(self) -> Any:
-        return self.session_store
+    def principal(self) -> Principal | None:
+        """Return the immutable principal captured for this tool call.
 
-    @property
-    def fileReadTracker(self) -> Any:
-        return self.file_read_tracker
-
-    @property
-    def idempotencyKey(self) -> str:
-        return self.idempotency_key
+        Returns:
+            Principal associated with the call, or ``None``.
+        """
+        return self._principal
 
     def report_progress(self, message: str, data: dict[str, Any] | None = None) -> None:
         """Report transient execution progress to event-stream observers.
@@ -101,6 +164,13 @@ class ToolContext:
         Progress is deliberately best-effort and cannot fail tool execution:
         observer/sink exceptions are swallowed. Calls are a no-op when the
         scheduler did not install a sink (for example in direct unit tests).
+
+        Args:
+            message: Human-readable progress message.
+            data: Optional progress payload passed to observers.
+
+        Raises:
+            TypeError: If ``message`` is not text or ``data`` is not a mapping.
         """
         if not isinstance(message, str):
             raise TypeError("progress message must be a string")
@@ -114,13 +184,29 @@ class ToolContext:
         except Exception:
             return
 
-    @property
-    def reportProgress(self) -> Callable[[str, dict[str, Any] | None], None]:
-        return self.report_progress
-
 
 @dataclass(slots=True)
 class ToolResult:
+    """Represent the legacy text projection of a tool invocation.
+
+    Attributes:
+        metadata: Additional result details for host consumers.
+        citations: Source references associated with the result.
+        attachments: Host-defined attachments without an enforced reference shape.
+        recovery_hint: Guidance the loop can append after an all-error tool batch.
+
+    Args:
+        content: Provider-facing result text.
+        summary: Short human-readable result summary.
+        is_error: Whether the invocation failed.
+        metadata: Additional result metadata.
+        citations: Source citations associated with the result.
+        attachments: External attachments associated with the result.
+        duration_ms: Invocation duration in milliseconds.
+        truncated: Whether content was truncated.
+        recovery_hint: Optional guidance for recovering from an error.
+    """
+
     content: str
     summary: str = ""
     is_error: bool = False
@@ -138,6 +224,15 @@ class ToolAttachment:
 
     ``reference`` is deliberately not a bytes payload. Hosts can use a URI, an
     object-store key, or a JSON object containing their own stable locator.
+
+    Attributes:
+        reference: JSON-safe locator used to retrieve the external payload.
+
+    Args:
+        reference: JSON-safe locator for the external payload.
+        name: Optional attachment name.
+        media_type: Optional MIME type.
+        metadata: JSON-safe attachment metadata.
     """
 
     reference: JsonValue
@@ -148,7 +243,16 @@ class ToolAttachment:
 
 @dataclass(slots=True)
 class ToolOutput:
-    """Canonical successful output from a V2 tool."""
+    """Canonical successful output from a V2 tool.
+
+    Attributes:
+        value: Primary JSON-safe result value before rendering for a provider.
+
+    Args:
+        value: JSON-safe primary result value.
+        attachments: External payload references.
+        metadata: JSON-safe output metadata.
+    """
 
     value: JsonValue
     attachments: list[ToolAttachment] = field(default_factory=list)
@@ -162,6 +266,16 @@ class ToolOutputError:
     Error outputs intentionally bypass the tool's success ``output_schema``.
     ``message`` is the provider-facing error text; structured error details can
     be retained separately without forcing them into that text projection.
+
+    Attributes:
+        details: Optional JSON-safe structured information about the failure.
+
+    Args:
+        message: Provider-facing error text.
+        code: Optional machine-readable error code.
+        details: Optional JSON-safe structured details.
+        attachments: External payload references.
+        metadata: JSON-safe error metadata.
     """
 
     message: str
@@ -183,50 +297,60 @@ def normalize_json_value(value: Any) -> JsonValue:
 
     Unlike ``json.dumps(default=str)``, this never coerces foreign objects or
     mapping keys. It also rejects cycles and non-finite floats, which JSON's
-    default Python encoder otherwise accepts as non-standard tokens.
+    default Python encoder otherwise accepts as non-standard tokens. Containers
+    may be nested up to 100 levels; deeper values are rejected before recursive
+    traversal can hit Python's recursion limit.
+
+    Args:
+        value: Value to validate and isolate.
+
+    Returns:
+        An isolated JSON-compatible value.
+
+    Raises:
+        ValueError: If ``value`` contains an unsupported object, key, cycle, or
+            non-finite float.
     """
 
-    active: set[int] = set()
+    return cast(
+        JsonValue,
+        walk_json(value, check_node=_check_tool_json_node, check_key=_check_tool_json_key),
+    )
 
-    def visit(item: Any, path: str) -> JsonValue:
-        if item is None or isinstance(item, str | bool):
-            return cast(JsonValue, item)
-        if isinstance(item, int):
-            return item
-        if isinstance(item, float):
-            if not math.isfinite(item):
-                raise ValueError(f"{path} contains a non-finite float")
-            return item
-        if isinstance(item, list):
-            identity = id(item)
-            if identity in active:
-                raise ValueError(f"{path} contains a cycle")
-            active.add(identity)
-            try:
-                return [visit(child, f"{path}[{index}]") for index, child in enumerate(item)]
-            finally:
-                active.remove(identity)
-        if isinstance(item, dict):
-            identity = id(item)
-            if identity in active:
-                raise ValueError(f"{path} contains a cycle")
-            active.add(identity)
-            try:
-                normalized: dict[str, JsonValue] = {}
-                for key, child in item.items():
-                    if not isinstance(key, str):
-                        raise ValueError(f"{path} contains a non-string object key")
-                    normalized[key] = visit(child, f"{path}.{key}")
-                return normalized
-            finally:
-                active.remove(identity)
-        raise ValueError(f"{path} contains non-JSON value {type(item).__name__}")
 
-    return visit(value, "$")
+def _check_tool_json_node(value: Any, path: str, active: set[int], depth: int) -> int | None:
+    if value is None or isinstance(value, str | bool | int):
+        return None
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"{path} contains a non-finite float")
+        return None
+    if not isinstance(value, list | dict):
+        raise ValueError(f"{path} contains non-JSON value {type(value).__name__}")
+    if id(value) in active:
+        raise ValueError(f"{path} contains a cycle")
+    if depth >= _STRICT_JSON_MAX_DEPTH:
+        raise ValueError(f"{path} exceeds maximum nesting depth {_STRICT_JSON_MAX_DEPTH}")
+    return depth + 1
+
+
+def _check_tool_json_key(key: Any, path: str) -> None:
+    if not isinstance(key, str):
+        raise ValueError(f"{path} contains a non-string object key")
 
 
 def normalize_tool_output(output: CanonicalToolOutput | JsonValue) -> CanonicalToolOutput:
-    """Normalize raw V2 output and every attachment/reference without coercion."""
+    """Normalize raw V2 output and every attachment/reference without coercion.
+
+    Args:
+        output: Canonical output or JSON value returned by a tool.
+
+    Returns:
+        Isolated canonical output.
+
+    Raises:
+        ValueError: If the output or attachment data is not strict JSON.
+    """
 
     if isinstance(output, ToolOutputError):
         if not isinstance(output.message, str):
@@ -283,7 +407,15 @@ def _normalize_metadata(metadata: Any, label: str) -> dict[str, JsonValue]:
 
 
 def validate_tool_output(output: CanonicalToolOutput, schema: dict[str, Any]) -> None:
-    """Validate a canonical success output with JSON Schema Draft 2020-12."""
+    """Validate a canonical success output with JSON Schema Draft 2020-12.
+
+    Args:
+        output: Canonical output to validate.
+        schema: JSON Schema applied to successful output values.
+
+    Raises:
+        jsonschema.ValidationError: If a successful value violates ``schema``.
+    """
 
     if isinstance(output, ToolOutputError):
         return
@@ -291,7 +423,14 @@ def validate_tool_output(output: CanonicalToolOutput, schema: dict[str, Any]) ->
 
 
 def default_render_output(value: JsonValue) -> str:
-    """Render JSON deterministically for the provider-facing legacy projection."""
+    """Render JSON deterministically for the provider-facing legacy projection.
+
+    Args:
+        value: JSON-safe value to render.
+
+    Returns:
+        Deterministic string representation.
+    """
 
     normalized = normalize_json_value(value)
     if isinstance(normalized, str):
@@ -309,7 +448,18 @@ def render_tool_output(
     output: CanonicalToolOutput,
     renderer: RenderOutput | None = None,
 ) -> str:
-    """Render a canonical output and enforce the synchronous string contract."""
+    """Render a canonical output and enforce the synchronous string contract.
+
+    Args:
+        output: Canonical output to render.
+        renderer: Optional synchronous renderer for successful values.
+
+    Returns:
+        Provider-facing result text.
+
+    Raises:
+        TypeError: If the renderer is asynchronous or does not return text.
+    """
 
     if isinstance(output, ToolOutputError):
         return output.message
@@ -325,22 +475,84 @@ def render_tool_output(
 
 
 class Tool(Protocol):
+    """Define the duck-typed contract implemented by executable tools.
+
+    Attributes:
+        name: Stable tool name exposed to the model.
+        description: Human-readable tool description.
+        input_schema: JSON Schema for accepted inputs.
+        scope: Access scope used for scheduling and policy.
+    """
+
     name: str
     description: str
     input_schema: dict[str, Any]
     scope: ToolScope
-    parallel: bool
 
-    def validate(self, raw: dict[str, Any]) -> dict[str, Any]: ...
+    @property
+    def parallel(self) -> bool | Callable[[dict[str, Any]], bool]:
+        """Return whether this input may run in parallel with peers.
+
+        Returns:
+            A static flag or input-aware predicate.
+        """
+
+        ...
+
+    def validate(self, raw: dict[str, Any]) -> dict[str, Any]:
+        """Validate and normalize model-supplied input.
+
+        Args:
+            raw: Untrusted input mapping from the provider.
+
+        Returns:
+            Normalized input accepted by :meth:`execute`.
+        """
+
+        ...
 
     async def execute(
         self, input: dict[str, Any], ctx: ToolContext
-    ) -> ToolResult | CanonicalToolOutput | JsonValue: ...
+    ) -> ToolResult | CanonicalToolOutput | JsonValue:
+        """Execute the tool with validated input and runtime context.
 
-    def summarize(self, input: dict[str, Any]) -> str: ...
+        Args:
+            input: Normalized tool arguments.
+            ctx: Runtime capabilities for this invocation.
+
+        Returns:
+            Legacy text result, canonical output, or a JSON value.
+        """
+
+        ...
+
+    def summarize(self, input: dict[str, Any]) -> str:
+        """Summarize a validated call for logs and event streams.
+
+        Args:
+            input: Normalized tool arguments.
+
+        Returns:
+            Human-readable invocation summary.
+        """
+
+        ...
 
 
 def require_str(raw: dict[str, Any], key: str) -> str:
+    """Read a required non-empty string from an input mapping.
+
+    Args:
+        raw: Input mapping to inspect.
+        key: Field name that must contain text.
+
+    Returns:
+        The validated string.
+
+    Raises:
+        ValueError: If the field is missing, empty, or not a string.
+    """
+
     value = raw.get(key)
     if not isinstance(value, str) or value == "":
         raise ValueError(f"{key} must be a non-empty string")

@@ -68,7 +68,7 @@ class LocalBackend:
             stdout_b, stderr_b = await _communicate_with_timeout_and_abort(
                 proc, timeout_s=timeout_s, signal=signal
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             _kill_process_group(proc)
             await _wait_after_kill(proc)
             return ExecResult(stdout="", stderr="", returncode=-1, timed_out=True)
@@ -221,7 +221,7 @@ class DockerBackend:
             stdout_b, stderr_b = await _communicate_with_timeout_and_abort(
                 proc, timeout_s=timeout_s, signal=signal
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             proc.kill()
             await _wait_after_kill(proc)
             await self._remove_container(docker, container_name)
@@ -321,7 +321,7 @@ def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
 async def _wait_after_kill(proc: asyncio.subprocess.Process) -> None:
     try:
         await asyncio.wait_for(proc.wait(), timeout=1.0)
-    except (asyncio.TimeoutError, ProcessLookupError):
+    except (TimeoutError, ProcessLookupError):
         pass
 
 
@@ -364,7 +364,7 @@ async def _communicate_with_timeout_and_abort(
             return communicate_task.result()
         if abort_task in done:
             throw_if_aborted(signal)
-        raise asyncio.TimeoutError
+        raise TimeoutError
     finally:
         # Cancel AND await both tasks so the subprocess pipe readers held by
         # proc.communicate() are released — an un-awaited cancelled task leaks

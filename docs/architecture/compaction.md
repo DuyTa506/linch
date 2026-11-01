@@ -6,21 +6,32 @@
 
 1. Count tokens in `provider_view` via `agent.provider.context_window(agent.model)`.
 2. If within threshold — no-op.
-3. Otherwise submit a summarization request via `agent.provider.stream()` and record the summary as a **logged projection** — `session.session_log.record_projection(...)` appends a `ProjectionEntry` and rewrites the derived `provider_view` — emitting `CompactionEvent`.
+3. Otherwise submit a summarization request through the run's accounted
+   auxiliary gateway (which uses `agent.provider`), settle its physical
+   delivery receipt, and record the summary as a **logged projection** —
+   `session.session_log.record_projection(...)` appends a `ProjectionEntry`
+   and rewrites the derived `provider_view` — emitting `CompactionEvent`.
 
 **Invariant:** `full_history` is never modified. Only `provider_view` (a projection of the single append-only log) shrinks, and it shrinks by a *logged* projection, not an untracked in-place mutation. This covers session-owned model input; per-request `ContextInjectionHook`/RAG context is ephemeral and exists only in `ProviderRequest`. Compaction uses the configured `agent.provider` — never a hardcoded OpenAI call.
 
-The compaction path is provider-agnostic in Linch 2.0: summaries use the same
+The compaction path is provider-agnostic: summaries use the same
 normalized provider stream contract as a normal turn, retain message/tool
-pairing, and do not assume a coding workspace. Malformed or missing durable
-snapshot state is treated as a cache miss and rebuilt from `full_history`.
+pairing, and do not assume a coding workspace. Missing or malformed current
+wire-3 snapshot caches can be rebuilt from `full_history`; incompatible snapshot
+versions are rejected rather than treated as cache misses.
+
+The direct `summarize_with_provider(...)` helper remains available for
+standalone callers with its existing provider-stream behavior. The normal run
+path wraps built-in strategies and compliant custom strategies in the
+accounting gateway so cancellation, one provider-slot acquisition, and receipt
+settlement are shared with the primary loop.
 
 ```mermaid
 flowchart TD
     A["Top of turn: maybe_compact()"] --> B{provider_view tokens<br/>within threshold?}
     B -- yes --> Z["no-op (byte-identical)"]
     B -- no --> C{compaction_ladder set?}
-    C -- no --> S["summarize old messages<br/>via agent.provider.stream()"]
+    C -- no --> S["accounted summary delivery<br/>via agent.provider"]
     C -- yes --> M["Rung 1: micro_compact<br/>elide old ToolResultBlocks<br/>(no LLM · copy-on-write)"]
     M --> D{enough freed?}
     D -- yes --> Z2["proceed"]
@@ -49,6 +60,39 @@ built-in prompt, so default behavior is unchanged. A ready-made domain-neutral p
 default without writing their own:
 `Agent(compaction=DefaultCompaction(prompt=GENERAL_SUMMARY_PROMPT))`.
 
+### Accounting and durable paid-result recovery
+
+The run-scoped ledger is the source of cumulative model usage. A physical
+compaction delivery gets a fresh delivery ID, and a valid `message_end` usage is
+settled exactly once before the result can be accepted, rejected, applied to
+the provider view, or followed by another dispatch. Valid usage remains billed
+even when the summary is empty, non-text, tool-using, oversized, or otherwise
+unusable. A summary that exhausts a `RunBudget` is followed by an admission
+recheck, so the next primary request is not dispatched.
+
+For `DefaultCompaction` and `DetailedCompaction`, a durable accepted result is
+paired with its receipt and an ordered, hash-only `compaction_source` recipe.
+The recipe binds the physical delivery, request, strategy configuration,
+durable full-history boundary, ordered source messages, and provider-view-only
+reminders. Required invoked-skill bodies are flushed through the existing
+session store before the recipe is written. On resume, Linch reconstructs only
+from that verified historical source and applies the bounded accepted text
+without another provider call or duplicate charge. A changed source, missing
+skill body, changed listing wrapper, mismatched strategy/configuration, or
+legacy source-less paid record fails closed.
+
+The custom `CompactionStrategy` protocol is unchanged. Calls made through the
+supplied provider facade receive the run's accounting, cancellation, and
+limiter guarantees. Opaque calls outside the facade and arbitrary transforms
+are not observable, and custom strategies do not receive deterministic paid
+replay unless they provide an explicit deterministic result/commit seam.
+
+An unknown final usage is never treated as zero. Capped runs block subsequent
+model calls at the unknown-use fence; uncapped runs may report a known
+lower-bound total. Shared receipt ownership covers the live in-process budget
+tree only — it does not promise distributed cap recovery, exactly-once
+external billing, or reservations for concurrent admissions.
+
 ### Compaction ladder (opt-in)
 
 `Agent(compaction_ladder=CompactionLadder())` adds recovery rungs around the
@@ -62,11 +106,12 @@ byte-identical.
   `tool_use_id` stays paired. Runs proactively inside `maybe_compact` (skips
   summarization when elision frees enough) and reactively, once per turn, when
   the provider raises `ContextLengthError`.
-- **Rung 2 — forced compaction with a circuit breaker**: the reactive path
-  (`_stream_turn_with_ladder` in `loop/streaming.py`) retries with forced compactions up
-  to `max_forced_compactions` per run, then lets the error surface. The legacy
-  path (no ladder) keeps its original single-retry-per-turn semantics in
-  `_stream_turn_with_compaction_retry`.
+- **Rung 2 — forced compaction with a circuit breaker**: the shared
+  `_stream_turn_with_recovery` driver in `loop/streaming.py` retries with forced
+  compactions up to `max_forced_compactions` per run, then lets the error surface.
+  Without a ladder, that same driver retains one compaction retry per turn.
+  Consolidation preserves each policy's retry/fallback boundaries, observer
+  ordering, and accounting.
 
 ### Durable compacted views (opt-in, store-detected)
 
@@ -86,14 +131,14 @@ compaction seam; on load, the agent restores the snapshot and appends only the
 messages written *after* `covers_seq`, reproducing the live view exactly.
 
 Both methods are optional and detected at runtime with `getattr`. The built-in
-in-memory, SQLite, and Postgres stores implement them; a custom store that omits
+in-memory and Postgres stores implement them; a custom store that omits
 them keeps reconstructing the view from full history (byte-identical to before).
-The snapshot payload is schema-versioned and read best-effort, so an older store
-file stays forward-tolerant. Because the snapshot is only a cache, the load path
-validates it and silently falls back to rebuilding from `full_history` whenever
-it cannot be trusted — a loader error, a malformed payload, or a `covers_seq`
-that is negative, ahead of the newest stored message, or inconsistent with a
-non-monotonic message log. Message-sequence gaps are legal and preserved;
+The snapshot envelope requires exact wire version 3. Missing, older, or unknown
+versions fail with the start-new-run error; incompatible stores require fresh
+databases. After the version gate, the load path validates the current snapshot
+cache and falls back to rebuilding from `full_history` on an ordinary loader
+error, malformed payload, or a `covers_seq` that is negative, ahead of the newest
+stored message, or inconsistent with a non-monotonic message log. Message-sequence gaps are legal and preserved;
 out-of-order sequences simply disable snapshot caching for that session.
 Compaction never mutates or removes the append-only session log's historical
 projection — the snapshot is a cache of a derived view, never a source of truth.

@@ -24,10 +24,9 @@ class ProviderCapabilities:
         parallel_tool_calls: Whether the provider supports executing
             multiple tool calls in a single response.  Informational — no
             request field is gated on this flag yet.
-        structured_output: Whether the provider natively supports constrained
-            JSON output via ``output_schema``.  When ``False``,
-            ``req.output_schema`` is cleared and the loop falls back to
-            text-parsing the response.
+        structured_output: Whether the provider supports the ``output_schema``
+            intent. The adapter may use native schema support, JSON-object mode,
+            or loop-side validation. When ``False``, ``req.output_schema`` is cleared.
         structured_output_terminal_tool: Whether the provider implements
             ``output_schema`` by synthesising a terminal tool call.  This is
             separate from native JSON-schema and JSON-object response formats:
@@ -41,6 +40,18 @@ class ProviderCapabilities:
             ``cache_prompt``) or with provider-native automatic prefix/session
             caching plus usage reporting (OpenAI/Gemini). When ``False``,
             those fields are cleared before the provider sees the request.
+        can_disable_thinking: Whether the provider supports an explicit
+            request-level switch that disables its reasoning/thinking mode for
+            every model it serves.
+
+    Args:
+        context_window: Maximum context size supported for the selected model.
+        parallel_tool_calls: Whether multiple tool calls may be returned together.
+        structured_output: Whether schema-constrained output is supported.
+        structured_output_terminal_tool: Whether structured output uses a terminal tool call.
+        tool_choice: Whether the provider honors tool-choice hints.
+        prompt_cache: Whether request-level prompt-cache controls are supported.
+        can_disable_thinking: Whether request-level thinking can be disabled safely.
     """
 
     context_window: int = 128_000
@@ -49,6 +60,7 @@ class ProviderCapabilities:
     structured_output_terminal_tool: bool = False
     tool_choice: bool = True
     prompt_cache: bool = False
+    can_disable_thinking: bool = False
 
 
 def full_capabilities(
@@ -56,8 +68,9 @@ def full_capabilities(
     *,
     parallel_tool_calls: bool = True,
     structured_output_terminal_tool: bool = False,
+    can_disable_thinking: bool = False,
 ) -> ProviderCapabilities:
-    """``ProviderCapabilities`` for providers with schema-native, prompt-cache-aware
+    """Build capabilities for providers with schema/output and prompt-cache support
     APIs (Anthropic, OpenAI Chat/Responses, Gemini, and OpenAI-compatible local
     servers). These providers all declare the same feature set and only differ in
     ``context_window``, optional parallel-tool support, and whether their
@@ -66,6 +79,17 @@ def full_capabilities(
 
     Not a ``BaseProvider.capabilities()`` default: the base class stays
     conservative (``prompt_cache=False``) for providers that don't opt in.
+
+    Args:
+        context_window: Maximum context size supported by the provider.
+        parallel_tool_calls: Whether parallel tool calls are supported.
+        structured_output_terminal_tool: Whether structured output is represented as
+            a terminal tool.
+        can_disable_thinking: Whether request-level thinking can be disabled safely.
+
+    Returns:
+        Capability flags for a provider that opts into its adapter-specific
+        structured-output and prompt-cache behavior.
     """
     return ProviderCapabilities(
         context_window=context_window,
@@ -74,6 +98,7 @@ def full_capabilities(
         structured_output_terminal_tool=structured_output_terminal_tool,
         tool_choice=True,
         prompt_cache=True,
+        can_disable_thinking=can_disable_thinking,
     )
 
 
@@ -99,16 +124,51 @@ ThinkingConfig = ThinkingDisabled | ThinkingEnabled | ThinkingAdaptive
 
 
 class BaseProvider(ABC):
+    """Define the normalized provider interface consumed by the agent loop.
+
+    Implementations keep SDK-specific objects inside the adapter and expose
+    normalized event dictionaries through :meth:`stream`.
+
+    Attributes:
+        id: Stable provider identifier used in diagnostics and model metadata.
+    """
+
     id: str
 
     @abstractmethod
     def context_window(self, model: ModelId) -> int:
+        """Return the positive token capacity for a model.
+
+        Args:
+            model: Provider model identifier to look up.
+
+        Returns:
+            The model's maximum context window in tokens.
+        """
         raise NotImplementedError
 
     @abstractmethod
     def stream(self, req: ProviderRequest) -> AsyncIterator[dict[str, object]]:
+        """Return an async iterator of normalized provider events.
+
+        Args:
+            req: Normalized request to send to the provider.
+
+        Returns:
+            An async iterator yielding the event dictionaries described by the
+            provider contract; raw SDK objects must remain inside the adapter.
+        """
         raise NotImplementedError
 
     def capabilities(self, model: ModelId) -> ProviderCapabilities:
-        """Conservative default capability set; subclasses override to declare real support."""
+        """Return a conservative capability set for a model.
+
+        Args:
+            model: Provider model identifier to inspect.
+
+        Returns:
+            Capabilities containing the model context window and the dataclass
+            defaults for parallel tools, structured output, and tool choice;
+            prompt caching remains disabled unless a subclass opts in.
+        """
         return ProviderCapabilities(context_window=self.context_window(model))

@@ -45,11 +45,24 @@ class Limiter(Protocol):
     """
 
     async def acquire(self, *, model: str) -> None:
-        """Wait until this call may proceed. *model* allows per-model budgets."""
+        """Wait until a provider call may proceed.
+
+        Args:
+            model: Model identifier used for per-model budgets.
+
+        Implementations must hold the reservation until the matching
+        :meth:`release` call.
+        """
         ...
 
     def release(self, *, model: str) -> None:
-        """Hand the slot back. Must not raise."""
+        """Return a previously acquired provider-call reservation.
+
+        Args:
+            model: Model identifier associated with the reservation.
+
+        Implementations must not raise while releasing a slot.
+        """
         ...
 
 
@@ -57,8 +70,8 @@ class _SemaphoreLimiter:
     """Backs ``Agent(max_provider_concurrency=N)``.
 
     The semaphore is built on first acquire, not in ``__init__``: an ``Agent``
-    is routinely constructed outside a running loop, and on 3.10 a semaphore
-    built there binds to the wrong one.
+    is routinely constructed outside a running loop, so constructing it lazily
+    avoids binding to the wrong loop.
 
     It also binds to the loop of its first *contended* acquire, so an idle
     limiter reused from another loop is rebuilt — the same staleness rule the
@@ -118,6 +131,13 @@ def provider_slot(agent: Any, model: str) -> AbstractAsyncContextManager[Any]:
 
     With no limiter configured this is ``nullcontext()`` — no semaphore, no
     task, no behavior change — so the feature stays free when unused.
+
+    Args:
+        agent: Agent whose optional limiter should gate the call.
+        model: Model identifier passed to the limiter.
+
+    Returns:
+        An async context manager that acquires and releases one provider slot.
     """
     limiter = getattr(agent, "limiter", None)
     return nullcontext() if limiter is None else _Slot(limiter, model)

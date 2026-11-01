@@ -11,6 +11,14 @@ class _Retryable(Exception):
     retryable = True
 
 
+class _BodyMessage(Exception):
+    body = {"error": {"message": "message from response body"}}
+
+
+class ArgumentLessError(Exception):
+    pass
+
+
 _FAST = RetryOptions(max_attempts=5, base_delay_ms=0, max_delay_ms=0, jitter=0.0)
 
 
@@ -27,23 +35,18 @@ def test_retry_after_zero_is_honored_not_dropped() -> None:
     assert retry_after_seconds(Err("rate limited")) == 0.0
 
 
-def test_error_message_preserves_body_and_exception_messages() -> None:
+@pytest.mark.parametrize(
+    "error_factory,expected",
+    [
+        (lambda: _BodyMessage("message from exception"), "message from response body"),
+        (lambda: Exception("message from exception"), "message from exception"),
+        (lambda: ArgumentLessError(), "ArgumentLessError: ArgumentLessError()"),
+    ],
+)
+def test_error_message_formats_variants(error_factory, expected: str) -> None:
     from linch._http_errors import error_message
 
-    class BodyMessage(Exception):
-        body = {"error": {"message": "message from response body"}}
-
-    assert error_message(BodyMessage("message from exception")) == "message from response body"
-    assert error_message(Exception("message from exception")) == "message from exception"
-
-
-def test_error_message_falls_back_to_exception_type() -> None:
-    from linch._http_errors import error_message
-
-    class ArgumentLessError(Exception):
-        pass
-
-    assert error_message(ArgumentLessError()) == "ArgumentLessError: ArgumentLessError()"
+    assert error_message(error_factory()) == expected
 
 
 def test_delay_for_error_uses_zero_retry_after_for_immediate_retry() -> None:
@@ -89,51 +92,34 @@ async def test_abort_between_retries_stops_retrying():
     assert calls == 1
 
 
+@pytest.mark.parametrize("case", ["override", "refuse", "abort"])
 @pytest.mark.asyncio
-async def test_retry_on_predicate_overrides_the_retryable_attribute():
-    """A caller-supplied predicate decides retryability for exceptions that do
-    not carry ``retryable`` themselves."""
+async def test_retry_on_predicates(case: str):
     calls = 0
 
     async def fn(attempt: int) -> str:
         nonlocal calls
         calls += 1
-        if attempt < 2:
-            raise ValueError("not marked retryable")
-        return "ok"
-
-    result = await with_retry(fn, signal=None, options=_FAST, retry_on=lambda _e: True)
-
-    assert result == "ok"
-    assert calls == 3
-
-
-@pytest.mark.asyncio
-async def test_retry_on_predicate_can_refuse_a_retryable_exception():
-    calls = 0
-
-    async def fn(attempt: int) -> str:
-        nonlocal calls
-        calls += 1
-        raise _Retryable("boom")
-
-    with pytest.raises(_Retryable):
-        await with_retry(fn, signal=None, options=_FAST, retry_on=lambda _e: False)
-    assert calls == 1
-
-
-@pytest.mark.asyncio
-async def test_retry_on_does_not_swallow_abort_error():
-    calls = 0
-
-    async def fn(attempt: int) -> str:
-        nonlocal calls
-        calls += 1
+        if case == "override":
+            if attempt < 2:
+                raise ValueError("not marked retryable")
+            return "ok"
+        if case == "refuse":
+            raise _Retryable("boom")
         raise AbortError("stop")
 
-    with pytest.raises(AbortError):
-        await with_retry(fn, signal=None, options=_FAST, retry_on=lambda _e: True)
-    assert calls == 1
+    if case == "override":
+        result = await with_retry(fn, signal=None, options=_FAST, retry_on=lambda _e: True)
+        assert result == "ok"
+        assert calls == 3
+    elif case == "refuse":
+        with pytest.raises(_Retryable):
+            await with_retry(fn, signal=None, options=_FAST, retry_on=lambda _e: False)
+        assert calls == 1
+    else:
+        with pytest.raises(AbortError):
+            await with_retry(fn, signal=None, options=_FAST, retry_on=lambda _e: True)
+        assert calls == 1
 
 
 @pytest.mark.asyncio
@@ -150,3 +136,38 @@ async def test_no_signal_normal_retry_path():
     result = await with_retry(fn, signal=None, options=_FAST)
     assert result == "ok"
     assert calls == 2
+
+
+@pytest.mark.parametrize("delay", [37.0, 37.125])
+def test_server_retry_delay_exceeds_exponential_cap(delay: float) -> None:
+    from linch.errors import RateLimitError
+    from linch.providers.retry import _delay_for_error
+
+    opts = RetryOptions(base_delay_ms=5000, max_delay_ms=30000, jitter=0.0)
+    assert (
+        _delay_for_error(RateLimitError("quota", retry_after_seconds=delay), 0, opts)
+        == delay * 1000
+    )
+
+
+async def test_server_retry_delay_above_cap_fails_without_sleeping() -> None:
+    from linch.errors import RateLimitError
+    from linch.providers.retry import with_retry
+
+    calls = 0
+
+    async def fn(_attempt: int) -> str:
+        nonlocal calls
+        calls += 1
+        raise RateLimitError("quota", retry_after_seconds=3600.0)
+
+    with pytest.raises(RateLimitError):
+        await with_retry(fn, signal=None, options=RetryOptions(max_delay_ms=30000))
+    assert calls == 1
+
+
+def test_exponential_retry_delay_remains_capped() -> None:
+    from linch.providers.retry import _delay_for_error
+
+    opts = RetryOptions(base_delay_ms=5000, max_delay_ms=30000, jitter=0.0)
+    assert _delay_for_error(_Retryable("quota"), 10, opts) == 30000.0

@@ -16,20 +16,9 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-
-def _agent(provider: Any, tools: Any, **kwargs: Any) -> Any:
-    from linch import Agent
-    from linch.sessions import InMemorySessionStore
-
-    return Agent(
-        model="m",
-        provider=provider,
-        session_store=InMemorySessionStore(),
-        permissions={"mode": "skip-dangerous"},
-        cwd=".",
-        tools=tools,
-        **kwargs,
-    )
+from tests.support.agents import make_agent
+from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
+from tests.support.tools import tool_registry
 
 
 def _texts(message: Any) -> str:
@@ -37,8 +26,7 @@ def _texts(message: Any) -> str:
 
 
 async def test_background_tool_returns_immediate_ack_then_notifies() -> None:
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
-    from linch.tools import ToolRegistry, tool
+    from linch.tools import tool
 
     gate = asyncio.Event()
     started = asyncio.Event()
@@ -50,8 +38,7 @@ async def test_background_tool_returns_immediate_ack_then_notifies() -> None:
         await gate.wait()
         return "tool-finished"
 
-    tools = ToolRegistry()
-    tools.register(slow)
+    tools = tool_registry(slow)
     provider = ScriptedProvider(
         [
             ToolUseTurn(tool_name="slow", tool_input={"run_in_background": True}),
@@ -59,7 +46,9 @@ async def test_background_tool_returns_immediate_ack_then_notifies() -> None:
             TextTurn(text="all-done"),
         ]
     )
-    agent = _agent(provider, tools, enable_background_tools=True)
+    agent = make_agent(
+        provider, model="m", tools=tools, run_store=None, enable_background_tools=True
+    )
     session = await agent.session()
 
     events1 = [event async for event in session.run("go")]
@@ -86,8 +75,7 @@ async def test_background_tool_returns_immediate_ack_then_notifies() -> None:
 
 
 async def test_background_disabled_runs_inline() -> None:
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
-    from linch.tools import ToolRegistry, tool
+    from linch.tools import tool
 
     ran = asyncio.Event()
 
@@ -97,8 +85,7 @@ async def test_background_disabled_runs_inline() -> None:
         ran.set()
         return "inline-result"
 
-    tools = ToolRegistry()
-    tools.register(quick)
+    tools = tool_registry(quick)
     provider = ScriptedProvider(
         [
             ToolUseTurn(tool_name="quick", tool_input={"run_in_background": True}),
@@ -106,7 +93,7 @@ async def test_background_disabled_runs_inline() -> None:
         ]
     )
     # No enable_background_tools → byte-identical: the hint is passed through.
-    agent = _agent(provider, tools)
+    agent = make_agent(provider, model="m", tools=tools, run_store=None)
     session = await agent.session()
 
     events = [event async for event in session.run("go")]
@@ -118,8 +105,7 @@ async def test_background_disabled_runs_inline() -> None:
 
 
 async def test_abort_cancels_background_tool() -> None:
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
-    from linch.tools import ToolRegistry, tool
+    from linch.tools import tool
 
     gate = asyncio.Event()
     started = asyncio.Event()
@@ -131,15 +117,16 @@ async def test_abort_cancels_background_tool() -> None:
         await gate.wait()
         return "never"
 
-    tools = ToolRegistry()
-    tools.register(hang)
+    tools = tool_registry(hang)
     provider = ScriptedProvider(
         [
             ToolUseTurn(tool_name="hang", tool_input={"run_in_background": True}),
             TextTurn(text="ack"),
         ]
     )
-    agent = _agent(provider, tools, enable_background_tools=True)
+    agent = make_agent(
+        provider, model="m", tools=tools, run_store=None, enable_background_tools=True
+    )
     session = await agent.session()
 
     [event async for event in session.run("go")]
@@ -154,3 +141,151 @@ async def test_abort_cancels_background_tool() -> None:
     except asyncio.CancelledError:
         pass
     assert tasks[0].cancelled() or tasks[0].done()
+
+
+async def test_background_tool_completion_runs_post_tool_use_hooks() -> None:
+    from linch import RedactionConfig, RedactionHook, RedactionRule
+    from linch.abort import AbortContext
+    from linch.scheduler import execute_tool_calls
+    from linch.tools import ToolRegistry, tool
+    from linch.types import ToolUseBlock
+    from tests.support.scheduler import scheduler_agent, scheduler_session
+
+    @tool
+    async def secret() -> str:
+        """Return a secret for the redaction regression."""
+        return "SECRET_VALUE"
+
+    registry = ToolRegistry()
+    registry.register(secret)
+    hook = RedactionHook(RedactionConfig(rules=(RedactionRule(r"SECRET_VALUE", "[REDACTED]"),)))
+    agent = scheduler_agent(
+        registry,
+        hooks=[hook],
+        enable_background_tools=True,
+    )
+    session = scheduler_session()
+
+    events = [
+        event
+        async for event in execute_tool_calls(
+            [
+                ToolUseBlock(
+                    id="call",
+                    name="secret",
+                    input={"run_in_background": True},
+                )
+            ],
+            agent,
+            session,
+            AbortContext(),
+        )
+    ]
+    assert events[-1].type == "tool_call_end"
+    await asyncio.gather(*session.background_tasks)
+
+    notification = session.pending_notifications[0]
+    text = notification.content[0].text
+    assert "[REDACTED]" in text
+    assert "SECRET_VALUE" not in text
+
+
+async def test_background_post_tool_use_keeps_origin_run_id_after_run_settles() -> None:
+    from linch.abort import AbortContext
+    from linch.scheduler import execute_tool_calls
+    from linch.tools import ToolRegistry, tool
+    from linch.types import ToolUseBlock
+    from tests.support.scheduler import scheduler_agent, scheduler_session
+
+    seen_run_ids: list[str] = []
+
+    @tool
+    async def quick() -> str:
+        """Return a completed background result."""
+        return "done"
+
+    class CaptureRunId:
+        def on_post_tool_use(self, ctx: Any) -> None:
+            seen_run_ids.append(ctx.run_id)
+
+    registry = ToolRegistry()
+    registry.register(quick)
+    agent = scheduler_agent(
+        registry,
+        hooks=[CaptureRunId()],
+        enable_background_tools=True,
+    )
+    session = scheduler_session(run_id="origin-run")
+
+    [
+        event
+        async for event in execute_tool_calls(
+            [ToolUseBlock(id="call", name="quick", input={"run_in_background": True})],
+            agent,
+            session,
+            AbortContext(),
+        )
+    ]
+    session.active_run_id = None
+    await asyncio.gather(*session.background_tasks)
+
+    assert seen_run_ids == ["origin-run"]
+
+
+async def test_background_tool_completion_uses_captured_origin_lease() -> None:
+    """A detached completion must not write with a lease adopted later."""
+    from types import SimpleNamespace
+
+    from linch.abort import AbortContext
+    from linch.events import BackgroundWorkerEvent
+    from linch.run_store import InMemoryRunStore
+    from linch.scheduler import execute_tool_calls
+    from linch.tools import ToolRegistry, tool
+    from linch.types import ToolUseBlock
+    from tests.support.scheduler import scheduler_agent, scheduler_session
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    @tool
+    async def slow() -> str:
+        """Wait until the test releases the detached completion."""
+        started.set()
+        await release.wait()
+        return "done"
+
+    registry = ToolRegistry()
+    registry.register(slow)
+    store = InMemoryRunStore()
+    await store.create_run("s1", id="origin-run")
+    origin_lease = await store.claim("origin-run", "origin-worker", 30.0)
+    agent = scheduler_agent(
+        registry,
+        run_store=store,
+        enable_background_tools=True,
+    )
+    session = scheduler_session(
+        run_id="origin-run",
+        _event_journal=SimpleNamespace(lease=origin_lease),
+    )
+
+    [
+        event
+        async for event in execute_tool_calls(
+            [ToolUseBlock(id="call", name="slow", input={"run_in_background": True})],
+            agent,
+            session,
+            AbortContext(),
+        )
+    ]
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+
+    await store.release(origin_lease)
+    replacement_lease = await store.claim("origin-run", "later-worker", 30.0)
+    session.active_run_id = "later-run"
+    session._event_journal = SimpleNamespace(lease=replacement_lease)
+    release.set()
+    await asyncio.gather(*session.background_tasks)
+
+    rows = await store.load_events("origin-run")
+    assert not any(isinstance(row.event, BackgroundWorkerEvent) for row in rows)

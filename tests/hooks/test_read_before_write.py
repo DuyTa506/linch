@@ -2,22 +2,28 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
+from tests.support.agents import make_agent
+from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
+from tests.support.stores import memory_session_store
+
 
 def _agent(provider: Any, tmp_path: Any, **kwargs: Any) -> Any:
-    from linch import Agent, workspace_tools
+    from linch import workspace_tools
     from linch.config import FeatureFlags
-    from linch.sessions import InMemorySessionStore
 
     kwargs.setdefault("result_offload", None)
+    kwargs.setdefault("run_store", None)
     filesystem = kwargs.get("filesystem") is not None
     kwargs.setdefault("read_before_write", True)
-    return Agent(
+    return make_agent(
         model="m",
         provider=provider,
         cwd=str(tmp_path),
         tools=workspace_tools(),
         permissions={"mode": "skip-dangerous"},
-        session_store=InMemorySessionStore(),
+        session_store=memory_session_store(),
         features=FeatureFlags(skills=False, subagents=False, mcp=False, filesystem=filesystem),
         **kwargs,
     )
@@ -35,9 +41,21 @@ def _tool_end(events: list[Any], name: str) -> Any:
     )
 
 
+async def _run_tool(provider: Any, tmp_path: Any, name: str, **kwargs: Any) -> Any:
+    events = await _collect(await _agent(provider, tmp_path, **kwargs).session())
+    return _tool_end(events, name)
+
+
+def _provider(*turns: Any) -> ScriptedProvider:
+    return ScriptedProvider([*turns, TextTurn("done")])
+
+
+async def _run_tool_sequence(tmp_path: Any, name: str, *turns: Any, **kwargs: Any) -> Any:
+    return await _run_tool(_provider(*turns), tmp_path, name, **kwargs)
+
+
 async def test_default_agent_installs_read_before_write_hook(tmp_path: Any) -> None:
     from linch import ReadBeforeWriteHook
-    from linch.evals import ScriptedProvider, TextTurn
 
     agent = _agent(ScriptedProvider([TextTurn("done")]), tmp_path)
 
@@ -46,7 +64,6 @@ async def test_default_agent_installs_read_before_write_hook(tmp_path: Any) -> N
 
 async def test_read_before_write_can_be_disabled(tmp_path: Any) -> None:
     from linch import ReadBeforeWriteHook
-    from linch.evals import ScriptedProvider, TextTurn
 
     agent = _agent(
         ScriptedProvider([TextTurn("done")]),
@@ -57,126 +74,92 @@ async def test_read_before_write_can_be_disabled(tmp_path: Any) -> None:
     assert not any(isinstance(hook, ReadBeforeWriteHook) for hook in agent.hooks)
 
 
-async def test_workspace_edit_is_blocked_until_read(tmp_path: Any) -> None:
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+@pytest.mark.parametrize("virtual", [False, True])
+async def test_edit_requires_prior_read(tmp_path: Any, virtual: bool) -> None:
+    if virtual:
+        from linch.filesystem import StateFileBackend
 
-    target = tmp_path / "a.txt"
-    target.write_text("hello", encoding="utf-8")
-    provider = ScriptedProvider(
-        [
-            ToolUseTurn(
-                tool_name="Edit",
-                tool_input={"file_path": "a.txt", "old_string": "hello", "new_string": "bye"},
-            ),
-            TextTurn("done"),
-        ]
-    )
-
-    events = await _collect(await _agent(provider, tmp_path).session())
-    end = _tool_end(events, "Edit")
-
-    assert end.is_error
-    # Workspace Edit is gated by the builtin Edit tool (single source of truth),
-    # which keeps its original capital-R message.
-    assert end.result == "Error: You must Read this file before editing it."
-    assert target.read_text(encoding="utf-8") == "hello"
-
-
-async def test_workspace_read_allows_later_edit(tmp_path: Any) -> None:
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
-
-    target = tmp_path / "a.txt"
-    target.write_text("hello", encoding="utf-8")
-    provider = ScriptedProvider(
-        [
-            ToolUseTurn(tool_name="Read", tool_input={"file_path": "a.txt"}, tool_id="r1"),
-            ToolUseTurn(
-                tool_name="Edit",
-                tool_input={"file_path": "a.txt", "old_string": "hello", "new_string": "bye"},
-                tool_id="e1",
-            ),
-            TextTurn("done"),
-        ]
-    )
-
-    events = await _collect(await _agent(provider, tmp_path).session())
-    end = _tool_end(events, "Edit")
-
-    assert not end.is_error
-    assert target.read_text(encoding="utf-8") == "bye"
-
-
-async def test_virtual_edit_file_is_blocked_until_read_file(tmp_path: Any) -> None:
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
-    from linch.filesystem import StateFileBackend
-
-    backend = StateFileBackend({"/note.txt": "alpha"})
-    provider = ScriptedProvider(
-        [
+        backend = StateFileBackend({"/note.txt": "alpha"})
+        end = await _run_tool_sequence(
+            tmp_path,
+            "edit_file",
             ToolUseTurn(
                 tool_name="edit_file",
                 tool_input={"path": "/note.txt", "old_string": "alpha", "new_string": "beta"},
             ),
-            TextTurn("done"),
-        ]
+            filesystem=backend,
+        )
+        assert end.is_error
+        assert end.result == "Error: You must read this file before editing it."
+        assert await backend.read("/note.txt") == "alpha"
+        return
+
+    target = tmp_path / "a.txt"
+    target.write_text("hello", encoding="utf-8")
+    end = await _run_tool_sequence(
+        tmp_path,
+        "Edit",
+        ToolUseTurn(
+            tool_name="Edit",
+            tool_input={"file_path": "a.txt", "old_string": "hello", "new_string": "bye"},
+        ),
     )
-
-    events = await _collect(await _agent(provider, tmp_path, filesystem=backend).session())
-    end = _tool_end(events, "edit_file")
-
     assert end.is_error
-    assert end.result == "Error: You must read this file before editing it."
-    assert await backend.read("/note.txt") == "alpha"
+    assert end.result == "Error: You must Read this file before editing it."
+    assert target.read_text(encoding="utf-8") == "hello"
 
 
-async def test_virtual_read_file_allows_later_edit_file(tmp_path: Any) -> None:
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
-    from linch.filesystem import StateFileBackend
+@pytest.mark.parametrize("virtual", [False, True])
+async def test_read_then_edit_cases(tmp_path: Any, virtual: bool) -> None:
+    if virtual:
+        from linch.filesystem import StateFileBackend
 
-    backend = StateFileBackend({"/note.txt": "alpha"})
-    provider = ScriptedProvider(
-        [
+        backend = StateFileBackend({"/note.txt": "alpha"})
+        end = await _run_tool_sequence(
+            tmp_path,
+            "edit_file",
             ToolUseTurn(tool_name="read_file", tool_input={"path": "/note.txt"}, tool_id="r1"),
             ToolUseTurn(
                 tool_name="edit_file",
                 tool_input={"path": "/note.txt", "old_string": "alpha", "new_string": "beta"},
                 tool_id="e1",
             ),
-            TextTurn("done"),
-        ]
+            filesystem=backend,
+        )
+        assert not end.is_error
+        assert await backend.read("/note.txt") == "beta"
+        return
+
+    target = tmp_path / "a.txt"
+    target.write_text("hello", encoding="utf-8")
+    end = await _run_tool_sequence(
+        tmp_path,
+        "Edit",
+        ToolUseTurn(tool_name="Read", tool_input={"file_path": "a.txt"}, tool_id="r1"),
+        ToolUseTurn(
+            tool_name="Edit",
+            tool_input={"file_path": "a.txt", "old_string": "hello", "new_string": "bye"},
+            tool_id="e1",
+        ),
     )
-
-    events = await _collect(await _agent(provider, tmp_path, filesystem=backend).session())
-    end = _tool_end(events, "edit_file")
-
     assert not end.is_error
-    assert await backend.read("/note.txt") == "beta"
+    assert target.read_text(encoding="utf-8") == "bye"
 
 
 async def test_virtual_edit_file_opt_out_keeps_existing_behavior(tmp_path: Any) -> None:
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.filesystem import StateFileBackend
 
     backend = StateFileBackend({"/note.txt": "alpha"})
-    provider = ScriptedProvider(
-        [
-            ToolUseTurn(
-                tool_name="edit_file",
-                tool_input={"path": "/note.txt", "old_string": "alpha", "new_string": "beta"},
-            ),
-            TextTurn("done"),
-        ]
+    end = await _run_tool_sequence(
+        tmp_path,
+        "edit_file",
+        ToolUseTurn(
+            tool_name="edit_file",
+            tool_input={"path": "/note.txt", "old_string": "alpha", "new_string": "beta"},
+        ),
+        filesystem=backend,
+        read_before_write=False,
     )
-
-    events = await _collect(
-        await _agent(
-            provider,
-            tmp_path,
-            filesystem=backend,
-            read_before_write=False,
-        ).session()
-    )
-    end = _tool_end(events, "edit_file")
 
     assert not end.is_error
     assert await backend.read("/note.txt") == "beta"
@@ -184,7 +167,6 @@ async def test_virtual_edit_file_opt_out_keeps_existing_behavior(tmp_path: Any) 
 
 async def test_cached_read_still_marks_file_as_read(tmp_path: Any) -> None:
     from linch import ToolCacheConfig
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
 
     target = tmp_path / "a.txt"
     target.write_text("hello", encoding="utf-8")
@@ -229,43 +211,35 @@ async def test_cached_read_still_marks_file_as_read(tmp_path: Any) -> None:
 async def test_write_file_then_edit_file_allowed(tmp_path: Any) -> None:
     # Finding #2: writing a virtual file marks it read, so write_file -> edit_file
     # (a previously-broken flow under the default-on hook) now succeeds.
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.filesystem import StateFileBackend
 
     backend = StateFileBackend()
-    provider = ScriptedProvider(
-        [
-            ToolUseTurn(
-                tool_name="write_file",
-                tool_input={"path": "/n.txt", "content": "alpha"},
-                tool_id="w1",
-            ),
-            ToolUseTurn(
-                tool_name="edit_file",
-                tool_input={"path": "/n.txt", "old_string": "alpha", "new_string": "beta"},
-                tool_id="e1",
-            ),
-            TextTurn("done"),
-        ]
+    end = await _run_tool_sequence(
+        tmp_path,
+        "edit_file",
+        ToolUseTurn(
+            tool_name="write_file",
+            tool_input={"path": "/n.txt", "content": "alpha"},
+            tool_id="w1",
+        ),
+        ToolUseTurn(
+            tool_name="edit_file",
+            tool_input={"path": "/n.txt", "old_string": "alpha", "new_string": "beta"},
+            tool_id="e1",
+        ),
+        filesystem=backend,
     )
-    events = await _collect(await _agent(provider, tmp_path, filesystem=backend).session())
-    end = _tool_end(events, "edit_file")
     assert not end.is_error
     assert await backend.read("/n.txt") == "beta"
 
 
 async def test_workspace_write_new_file_is_allowed(tmp_path: Any) -> None:
     # Finding #1: creating a new file is never blocked (only overwrite is gated).
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
-
-    provider = ScriptedProvider(
-        [
-            ToolUseTurn(tool_name="Write", tool_input={"file_path": "new.txt", "content": "fresh"}),
-            TextTurn("done"),
-        ]
+    end = await _run_tool_sequence(
+        tmp_path,
+        "Write",
+        ToolUseTurn(tool_name="Write", tool_input={"file_path": "new.txt", "content": "fresh"}),
     )
-    events = await _collect(await _agent(provider, tmp_path).session())
-    end = _tool_end(events, "Write")
     assert not end.is_error
     assert (tmp_path / "new.txt").read_text(encoding="utf-8") == "fresh"
 
@@ -280,146 +254,113 @@ def _overwrite_guarded_hook() -> Any:
     )
 
 
-async def test_workspace_write_overwrite_blocked_when_opted_in(tmp_path: Any) -> None:
-    # Finding #1 (data loss), opt-in: overwriting an existing, unread file is
-    # blocked and the prior contents survive.
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+@pytest.mark.parametrize("virtual", [False, True])
+async def test_overwrite_requires_prior_read(tmp_path: Any, virtual: bool) -> None:
+    # Default: whole-file overwrite is Write's purpose and is NOT gated (regen).
+    if virtual:
+        from linch.filesystem import StateFileBackend
+
+        backend = StateFileBackend({"/n.txt": "alpha"})
+        end = await _run_tool_sequence(
+            tmp_path,
+            "write_file",
+            ToolUseTurn(
+                tool_name="write_file",
+                tool_input={"path": "/n.txt", "content": "OVERWRITE"},
+            ),
+            filesystem=backend,
+            hooks=[_overwrite_guarded_hook()],
+        )
+        assert end.is_error
+        assert await backend.read("/n.txt") == "alpha"
+        return
 
     target = tmp_path / "a.txt"
     target.write_text("hello", encoding="utf-8")
-    provider = ScriptedProvider(
-        [
-            ToolUseTurn(
-                tool_name="Write",
-                tool_input={"file_path": "a.txt", "content": "OVERWRITTEN"},
-            ),
-            TextTurn("done"),
-        ]
+    end = await _run_tool_sequence(
+        tmp_path,
+        "Write",
+        ToolUseTurn(
+            tool_name="Write",
+            tool_input={"file_path": "a.txt", "content": "OVERWRITTEN"},
+        ),
+        hooks=[_overwrite_guarded_hook()],
     )
-    events = await _collect(
-        await _agent(provider, tmp_path, hooks=[_overwrite_guarded_hook()]).session()
-    )
-    end = _tool_end(events, "Write")
     assert end.is_error
     assert "overwriting" in end.result
     assert target.read_text(encoding="utf-8") == "hello"
 
 
 async def test_workspace_write_overwrite_allowed_by_default(tmp_path: Any) -> None:
-    # Default: whole-file overwrite is Write's purpose and is NOT gated (regen).
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
-
     target = tmp_path / "a.txt"
     target.write_text("hello", encoding="utf-8")
-    provider = ScriptedProvider(
-        [
-            ToolUseTurn(
-                tool_name="Write",
-                tool_input={"file_path": "a.txt", "content": "regenerated"},
-            ),
-            TextTurn("done"),
-        ]
+    end = await _run_tool_sequence(
+        tmp_path,
+        "Write",
+        ToolUseTurn(
+            tool_name="Write",
+            tool_input={"file_path": "a.txt", "content": "regenerated"},
+        ),
     )
-    events = await _collect(await _agent(provider, tmp_path).session())
-    end = _tool_end(events, "Write")
     assert not end.is_error
     assert target.read_text(encoding="utf-8") == "regenerated"
 
 
 async def test_workspace_write_then_edit_allowed(tmp_path: Any) -> None:
     # Writing a file marks it read, so a later Edit on it is allowed.
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
-
-    provider = ScriptedProvider(
-        [
-            ToolUseTurn(
-                tool_name="Write",
-                tool_input={"file_path": "n.txt", "content": "abc"},
-                tool_id="w1",
-            ),
-            ToolUseTurn(
-                tool_name="Edit",
-                tool_input={"file_path": "n.txt", "old_string": "abc", "new_string": "xyz"},
-                tool_id="e1",
-            ),
-            TextTurn("done"),
-        ]
+    end = await _run_tool_sequence(
+        tmp_path,
+        "Edit",
+        ToolUseTurn(
+            tool_name="Write",
+            tool_input={"file_path": "n.txt", "content": "abc"},
+            tool_id="w1",
+        ),
+        ToolUseTurn(
+            tool_name="Edit",
+            tool_input={"file_path": "n.txt", "old_string": "abc", "new_string": "xyz"},
+            tool_id="e1",
+        ),
     )
-    events = await _collect(await _agent(provider, tmp_path).session())
-    end = _tool_end(events, "Edit")
     assert not end.is_error
     assert (tmp_path / "n.txt").read_text(encoding="utf-8") == "xyz"
 
 
-async def test_virtual_write_file_overwrite_blocked_when_opted_in(tmp_path: Any) -> None:
-    # Finding #1 for the virtual filesystem, opt-in.
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
-    from linch.filesystem import StateFileBackend
-
-    backend = StateFileBackend({"/n.txt": "alpha"})
-    provider = ScriptedProvider(
-        [
-            ToolUseTurn(
-                tool_name="write_file",
-                tool_input={"path": "/n.txt", "content": "OVERWRITE"},
-            ),
-            TextTurn("done"),
-        ]
-    )
-    events = await _collect(
-        await _agent(
-            provider, tmp_path, filesystem=backend, hooks=[_overwrite_guarded_hook()]
-        ).session()
-    )
-    end = _tool_end(events, "write_file")
-    assert end.is_error
-    assert await backend.read("/n.txt") == "alpha"
-
-
 async def test_windowed_read_file_does_not_grant_edit(tmp_path: Any) -> None:
     # Finding #6: a partial (windowed) read must not unlock edits to unseen regions.
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.filesystem import StateFileBackend
 
     backend = StateFileBackend({"/n.txt": "l1\nl2\nl3\n"})
-    provider = ScriptedProvider(
-        [
-            ToolUseTurn(
-                tool_name="read_file",
-                tool_input={"path": "/n.txt", "offset": 1, "limit": 1},
-                tool_id="r1",
-            ),
-            ToolUseTurn(
-                tool_name="edit_file",
-                tool_input={"path": "/n.txt", "old_string": "l2", "new_string": "X"},
-                tool_id="e1",
-            ),
-            TextTurn("done"),
-        ]
+    end = await _run_tool_sequence(
+        tmp_path,
+        "edit_file",
+        ToolUseTurn(
+            tool_name="read_file",
+            tool_input={"path": "/n.txt", "offset": 1, "limit": 1},
+            tool_id="r1",
+        ),
+        ToolUseTurn(
+            tool_name="edit_file",
+            tool_input={"path": "/n.txt", "old_string": "l2", "new_string": "X"},
+            tool_id="e1",
+        ),
+        filesystem=backend,
     )
-    events = await _collect(await _agent(provider, tmp_path, filesystem=backend).session())
-    end = _tool_end(events, "edit_file")
     assert end.is_error
 
 
 async def test_overwrite_gate_unresolvable_path_fails_closed(tmp_path: Any) -> None:
     # Finding #5: an unresolvable (cwd-escaping) path on the opt-in overwrite gate
     # blocks (fail-closed) rather than silently allowing it.
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
-
-    provider = ScriptedProvider(
-        [
-            ToolUseTurn(
-                tool_name="Write",
-                tool_input={"file_path": "../../escape.txt", "content": "x"},
-            ),
-            TextTurn("done"),
-        ]
+    end = await _run_tool_sequence(
+        tmp_path,
+        "Write",
+        ToolUseTurn(
+            tool_name="Write",
+            tool_input={"file_path": "../../escape.txt", "content": "x"},
+        ),
+        hooks=[_overwrite_guarded_hook()],
     )
-    events = await _collect(
-        await _agent(provider, tmp_path, hooks=[_overwrite_guarded_hook()]).session()
-    )
-    end = _tool_end(events, "Write")
     assert end.is_error
     assert "overwriting" in end.result
 
@@ -427,7 +368,6 @@ async def test_overwrite_gate_unresolvable_path_fails_closed(tmp_path: Any) -> N
 async def test_unrelated_hook_named_rbw_does_not_suppress_default(tmp_path: Any) -> None:
     # Finding #7: a foreign hook whose name collides must not suppress the guard.
     from linch import ReadBeforeWriteHook
-    from linch.evals import ScriptedProvider, TextTurn
 
     class Impostor:
         name = "read_before_write"

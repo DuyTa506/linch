@@ -20,7 +20,7 @@ From a local checkout:
 pip install -e '.[dev,mcp,anthropic,gemini]'
 ```
 
-Linch targets Python 3.10+. Optional extras are intentionally split by feature;
+Linch targets Python 3.11+. Optional extras are intentionally split by feature;
 you only need provider extras when you use those providers.
 
 Prefer a ready-made project? `linch new my-agent` scaffolds a runnable,
@@ -38,7 +38,7 @@ import asyncio
 
 from linch import Agent
 from linch.config import FeatureFlags
-from linch.evals import ScriptedProvider, TextTurn
+from linch.ext.evals import ScriptedProvider, TextTurn
 from linch.sessions import InMemorySessionStore
 
 
@@ -142,25 +142,37 @@ you expose write, shell, filesystem, or external-service tools.
 
 ## 5. Keep state when the process restarts
 
-Use SQLite stores when conversation history or run resume matters:
+Use Postgres when conversation history or run resume matters. Local durable
+development uses the same backend as production. Install `linch[postgres]`, then
+start a local database (the example credentials are for local development):
+
+```bash
+docker run --name linch-postgres -e POSTGRES_PASSWORD=linch -e POSTGRES_DB=linch \
+  -p 5432:5432 -d postgres:16
+export LINCH_POSTGRES_DSN='postgresql://postgres:linch@localhost:5432/linch'
+```
+
+Your application reads the environment and passes the DSN explicitly. The
+library does not discover DSNs or create durable stores from the environment.
 
 ```python
-from pathlib import Path
+import os
+from linch import Agent, PostgresRunStore
+from linch.sessions.postgres import PostgresSessionStore
 
-from linch import Agent, SqliteRunStore
-from linch.sessions import SqliteSessionStore
-
-
-state = Path(".linch-state")
-state.mkdir(exist_ok=True)
-
+dsn = os.environ["LINCH_POSTGRES_DSN"]
 agent = Agent(
     model="gpt-5",
-    session_store=SqliteSessionStore(state / "sessions.db"),
-    run_store=SqliteRunStore(state / "runs.db"),
+    session_store=PostgresSessionStore(dsn),
+    run_store=PostgresRunStore(dsn),
     permissions={"mode": "skip-dangerous"},
 )
+# At application shutdown:
+await agent.close()
 ```
+
+See [Production wiring](./production.md) for host lifecycle ownership and
+[Run stores](./run-stores.md) for persistence and schema requirements.
 
 `session_store` persists conversation state. `run_store` persists checkpoints
 and events, which enables durable resume and operational reports.

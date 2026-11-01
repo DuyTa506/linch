@@ -5,12 +5,11 @@ agent, and using each subsystem. If you are new to the SDK, start with
 [Quickstart](./quickstart.md); then come back here for the subsystem map.
 
 For the *why* behind the design (data flow, the turn pipeline, module
-boundaries) see [`../architecture.md`](../architecture.md).
+boundaries) see the [architecture index](../architecture/README.md).
 
-If you are upgrading from Linch 1.x, read the
-[Linch 2.0 migration guide](../migration-2.0.md) first. Linch is an SDK: a
-coding workspace and its trust policy are now explicit choices at the call
-site.
+If you are upgrading to Linch 3.0, read the
+[Linch 3.0 migration guide](../migration-3.0.md) first. Linch is an SDK: a
+coding workspace and its trust policy are explicit choices at the call site.
 
 ---
 
@@ -21,12 +20,13 @@ site.
 pip install -e /path/to/linch
 
 # With common optional extras
-pip install -e "/path/to/linch[mcp,anthropic,gemini,postgres]"
+pip install -e "/path/to/linch[mcp,anthropic,gemini,postgres,worker]"
 ```
 
 Once published, `pip install linch` will work directly. Extras are opt-in:
-`anthropic`, `gemini`, `postgres`, `mcp`, and `otel` each pull in only the
-dependencies that feature needs.
+`anthropic`, `gemini`, `postgres`, `worker`, and `mcp` each pull in only the
+dependencies that feature needs. OpenTelemetry's API is part of the core install; hosts add
+the SDK and an exporter when they want to collect traces or metrics.
 
 ---
 
@@ -40,7 +40,7 @@ from linch.sessions import InMemorySessionStore
 agent = Agent(
     model="gpt-5",                              # or any supported model
     session_store=InMemorySessionStore(),
-    permissions={"mode": "skip-dangerous"},     # auto-approve all tool calls
+    permissions={"mode": "skip-dangerous"},     # allow tools without prompting
 )
 
 async def main():
@@ -84,23 +84,33 @@ One `Agent`, many `Session`s is the canonical web-app shape — see
 | [Quickstart](./quickstart.md) | New-developer path: install, offline smoke test, live provider, first tool, persistence |
 | [Scaffolding CLI](./cli.md) | `linch new` / `linch add tool` — generate a runnable, offline-testable project you own |
 | [Production wiring](./production.md) | Minimal checklist to embed Linch in a service: persistence, streaming, HITL, resume, shutdown, blast radius |
+| [Worker fleet](./production.md#scale-out) | Optional `linch.worker`/PgQueuer dispatch, leases, takeover, drain, and reconnect |
+| [Run stores](./run-stores.md) | Durable checkpoints, Postgres, optional leases and fencing, reconnect by event sequence |
 | [Agent & session](./agent.md) | Session stores, feature flags, system prompt, compaction, run budgets, truncation recovery |
+| [Domain profiles](./profiles.md) | Versioned per-run roles, plugin configuration, tool restrictions, limits, layering, and resume pinning |
+| [Plugins and `agent.use`](../architecture/kernel.md#plugins) | Reversible plugin mounts, dependency activation, scoped services, and teardown |
 | [Providers](./providers.md) | Choosing a provider, model catalog, capabilities, thinking events |
 | [Events](./events.md) | Event stream, cost fields, run reports, long-run eval scorers |
+| [Model-call accounting](./events.md#model-call-accounting) | Cumulative primary/compaction usage, budget fences, receipts, and unknown-usage handling |
+| [Lifecycle catalog and trace IDs](./events.md#opentelemetry-traces-and-metrics) | Typed lifecycle points, generated producer/consumer catalog, and run/tool trace correlation |
 | [Evals and benchmarks](./evals.md) | `EvalSuite`, `run_eval_benchmark`, and `scripts/eval_benchmark.py` for CI/provider comparison |
-| [Tools](./tools.md) | `@tool`, `FunctionTool`, class tools, scheduler, timeouts/retry, Bash backend, deps, permissions |
+| [Tools](./tools.md) | `@tool`, `FunctionTool`, class tools, scheduler, timeouts/retry, Bash backend, deps, permissions, per-run principals and roles |
+| [Tool search](./tools.md#tool-search-for-large-catalogs) | Deferred tool/skill schemas for large catalogs through `ToolSearchPlugin` |
+| [Principal/RBAC](./tools.md#per-run-principals-and-role-rules) | Per-run tenant/user/role identity and role-conditioned permission rules |
 | [Structured output](./structured-output.md) | `OutputSchema`, final-tool capture, schema repair |
+| [Canonical tool output](./tools.md#custom-tools) | JSON Schema validated `ToolOutput`, renderers, citations, attachments, and durable result metadata |
 | [Hooks](./hooks.md) | The canonical extension mechanism: chokepoints, `HookResult`, built-in adapters |
 | [Tool cache](./tool-cache.md) | Opt-in per-run memoization of read-scope tool calls (`tool_cache=`) |
-| [Context & memory](./context-and-memory.md) | Per-turn RAG context building, memory primitives, tiered memory |
-| [Vector memory adapters](./vector-memory-adapters.md) | FAISS, pgvector, and Qdrant recipes using the existing `MemoryStore` seam |
+| [Context & memory](./context-and-memory.md) | `RagConnector` retrieval and grounding, per-turn context, scoped file memory, and the optional mem0 recipe |
+| [RAG and grounding](./context-and-memory.md#sourced-retrieval-and-grounding) | Sourced chunks, `[doc:<id>]` citations, and final-answer grounding checks |
 | [Virtual filesystem](./filesystem.md) | Large-result offloading and the `ls`/`read_file`/`write_file`/`edit_file` tools |
 | [Workflows](./workflows.md) | Deterministic fleet loops (`run_workflow`), journaling, resume |
 | [Outer loop runner](./loop-runner.md) | `LoopSpec` + `LoopRunner.run_once()` for cron, CI, webhooks, and manual recurring work |
 | [Deep agent](./deep-agent.md) | `create_deep_agent`, background workers, fork/continue, coordinator mode |
-| [Coordination](./coordination.md) | Advance the loop from a clock or a peer: scheduling (cron/interval) and multi-agent teams (mailbox + correlator) |
+| [Coordination](./coordination.md) | Multi-agent teams with mailbox messaging and correlator handshakes |
 | [Skills](./skills.md) | Slash-command prompt workflows, the built-in `verify` skill |
-| [Extending](./extending.md) | Implement your own seam: `IsolationBackend`, `Mailbox`, `ScheduleStore`, prompt assembly, memory lifecycle |
+| [Extending](./extending.md) | Implement your own seam: `IsolationBackend`, `Mailbox`, prompt assembly, and context builders |
+| [`linch.ext.*` boundary](../architecture/overview.md#extensions) | Explicit workflow, eval, deep-agent, reports, loop-runner, and scaffold extensions |
 | [Examples](./examples.md) | Index of runnable examples under `examples/` |
 
 ---
