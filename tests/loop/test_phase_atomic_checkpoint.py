@@ -99,23 +99,22 @@ class _RecordingStore:
 
 
 async def test_phase_atomic_run_reduces_writes_and_keeps_tool_guard_durable(pg_dsn):
-    from test_run_resume import CountingTool, ScriptProvider, _agent, _memory_session_store
+    from test_run_resume import ScriptProvider, _agent, _memory_session_store
 
     from linch.run_stores.postgres import PostgresRunStore
-    from linch.tools import ToolRegistry
+    from tests.support.tools import StubTool, tool_registry
 
     store = _RecordingStore(PostgresRunStore(pg_dsn))
     checked = []
 
-    class DurableTool(CountingTool):
+    class DurableTool(StubTool):
         async def execute(self, input, ctx, _store=store, _checked=checked):
             record = await _store.load_run(ctx.run_id)
             assert record.checkpoint.phase == "tool_executing"
             _checked.append(True)
             return await super().execute(input, ctx)
 
-    tools = ToolRegistry()
-    tools.register(DurableTool("A", {}))
+    tools = tool_registry(DurableTool("A"))
     agent = _agent(
         model="gpt-5",
         provider=ScriptProvider(tool_names=["A"]),

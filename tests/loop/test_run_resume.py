@@ -6,19 +6,16 @@ from typing import Any
 
 import pytest
 
+from tests.support.agents import make_agent
+from tests.support.stores import memory_run_store as _memory_run_store
+from tests.support.stores import memory_session_store as _memory_session_store
+
 
 async def _pin_run_contract(session: Any, run_id: str, opts: Any = None) -> None:
     """Give a hand-built in-memory checkpoint its original execution contract."""
-    from linch import RunOptions
-    from linch.loop.contracts import _build_run_contract
-    from linch.run_store import run_meta_with_contract
+    from tests.support.runs import pin_run_contract
 
-    await session.agent._ensure_provider_prepared()
-    record = session.agent.run_store._runs[run_id]
-    assert "run_contract" not in record.meta
-    record.meta = run_meta_with_contract(
-        _build_run_contract(session, record.checkpoint.prompt, opts or RunOptions()), record.meta
-    )
+    await pin_run_contract(session, run_id, opts)
 
 
 class ScriptProvider:
@@ -214,95 +211,26 @@ class _TransientCheckpointStore:
         return await self.store.mark_failed(run_id, *args, **kwargs)
 
 
-class PricedScriptProvider:
-    """Like ScriptProvider but emits non-zero usage so cost accumulates.
-
-    First call (tool-use turn) and the final text turn each report usage, so a
-    priced model accrues a non-zero running cost across the whole run.
-    """
-
-    id = "priced-script"
-
-    def __init__(self, *, fail_on_call: bool = False) -> None:
-        self.fail_on_call = fail_on_call
-        self.calls = 0
-
-    def context_window(self, model: str) -> int:
-        return 100_000
-
-    async def stream(self, req) -> AsyncIterator[dict[str, object]]:
-        from linch.types import Usage
-
-        if self.fail_on_call:
-            raise AssertionError("provider should not be called")
-        self.calls += 1
-        usage = Usage(input_tokens=1000, output_tokens=500)
-        yield {"type": "message_start", "model": req.model}
-
-        if _last_message_is_tool_result(req.messages):
-            yield {"type": "text_delta", "text": "done"}
-            yield {"type": "message_end", "stop_reason": "end_turn", "usage": usage}
-            return
-
-        tool_id = "call-1"
-        yield {"type": "tool_use_start", "id": tool_id, "name": "A"}
-        yield {
-            "type": "tool_use_input_delta",
-            "id": tool_id,
-            "json_delta": json.dumps({"value": "A"}),
-        }
-        yield {"type": "tool_use_end", "id": tool_id}
-        yield {"type": "message_end", "stop_reason": "tool_use", "usage": usage}
-
-
-class CountingTool:
-    description = "Counts executions."
-    input_schema = {"type": "object", "properties": {"value": {"type": "string"}}}
-    parallel = False
-
-    def __init__(self, name: str, counts: dict[str, int], *, scope: Any = "read") -> None:
-        self.name = name
-        self.counts = counts
-        self.scope: Any = scope
-
-    def validate(self, raw: dict[str, Any]) -> dict[str, Any]:
-        return raw
-
-    def summarize(self, input: dict[str, Any]) -> str:
-        return self.name
-
-    async def execute(self, input: dict[str, Any], ctx: Any):
-        from linch.tools import ToolResult
-
-        self.counts[self.name] = self.counts.get(self.name, 0) + 1
-        return ToolResult(content=f"{self.name}:{self.counts[self.name]}")
-
-
 def _agent(**kwargs):
-    from linch import Agent
-
-    return Agent(**kwargs)
-
-
-def _memory_session_store():
-    from linch.sessions import InMemorySessionStore
-
-    return InMemorySessionStore()
-
-
-def _memory_run_store():
-    from linch.run_store import InMemoryRunStore
-
-    return InMemoryRunStore()
+    options: dict[str, Any] = {"model": "gpt-5", "cwd": "."}
+    options.update(kwargs)
+    provider = options.pop("provider", None)
+    options.setdefault("permissions", None)
+    options.setdefault("run_store", None)
+    return make_agent(provider, **options)
 
 
 def _registry(counts: dict[str, int], *names: str, scope: str = "read"):
-    from linch.tools import ToolRegistry
+    from tests.support.tools import StubTool, tool_registry
 
-    registry = ToolRegistry()
+    tools = []
     for name in names:
-        registry.register(CountingTool(name, counts, scope=scope))
-    return registry
+
+        def count(_input: dict[str, Any], _ctx: Any, *, name: str = name) -> None:
+            counts[name] = counts.get(name, 0) + 1
+
+        tools.append(StubTool(name, scope=scope, on_execute=count))
+    return tool_registry(*tools)
 
 
 def _last_message_is_tool_result(messages: list[Any]) -> bool:
@@ -343,21 +271,17 @@ async def test_resume_after_user_append_does_not_duplicate_user_message() -> Non
 
     provider = ScriptProvider()
     agent = _agent(
-        model="gpt-5",
         provider=provider,
         session_store=session_store,
         run_store=run_store,
-        cwd=".",
     )
     session = await agent.session(id="s1")
     run_id, _ = await _run_until(session, "hello", lambda event: event.type == "user")
 
     restarted = _agent(
-        model="gpt-5",
         provider=provider,
         session_store=session_store,
         run_store=run_store,
-        cwd=".",
     )
     resumed = await restarted.session(id="s1")
     events = await _collect(resumed.resume(run_id))
@@ -373,12 +297,10 @@ async def test_resume_retries_provider_before_assistant_append() -> None:
     run_store = _memory_run_store()
     provider = ScriptProvider(partial_before_final=True)
     agent = _agent(
-        model="gpt-5",
         provider=provider,
         session_store=session_store,
         run_store=run_store,
         include_partial_messages=True,
-        cwd=".",
     )
     session = await agent.session(id="s1")
     run_id, _ = await _run_until(
@@ -388,12 +310,10 @@ async def test_resume_retries_provider_before_assistant_append() -> None:
     )
 
     restarted = _agent(
-        model="gpt-5",
         provider=provider,
         session_store=session_store,
         run_store=run_store,
         include_partial_messages=True,
-        cwd=".",
     )
     resumed = await restarted.session(id="s1")
     events = await _collect(resumed.resume(run_id))
@@ -407,25 +327,21 @@ async def test_resume_after_assistant_tool_use_skips_provider() -> None:
     run_store = _memory_run_store()
     counts: dict[str, int] = {}
     agent = _agent(
-        model="gpt-5",
         provider=ScriptProvider(tool_names=["A"]),
         tools=_registry(counts, "A"),
         permissions={"mode": "skip-dangerous"},
         session_store=session_store,
         run_store=run_store,
-        cwd=".",
     )
     session = await agent.session(id="s1")
     run_id, _ = await _run_until(session, "use tool", lambda event: event.type == "assistant")
 
     restarted = _agent(
-        model="gpt-5",
         provider=ScriptProvider(fail_on_call=True),
         tools=_registry(counts, "A"),
         permissions={"mode": "skip-dangerous"},
         session_store=session_store,
         run_store=run_store,
-        cwd=".",
     )
     resumed = await restarted.session(id="s1")
     events = await _collect_until(
@@ -442,13 +358,11 @@ async def test_resume_after_one_tool_completed_runs_only_missing_tool() -> None:
     run_store = _memory_run_store()
     counts: dict[str, int] = {}
     agent = _agent(
-        model="gpt-5",
         provider=ScriptProvider(tool_names=["A", "B"]),
         tools=_registry(counts, "A", "B"),
         permissions={"mode": "skip-dangerous"},
         session_store=session_store,
         run_store=run_store,
-        cwd=".",
     )
     session = await agent.session(id="s1")
     run_id, _ = await _run_until(
@@ -458,13 +372,11 @@ async def test_resume_after_one_tool_completed_runs_only_missing_tool() -> None:
     )
 
     restarted = _agent(
-        model="gpt-5",
         provider=ScriptProvider(fail_on_call=True),
         tools=_registry(counts, "A", "B"),
         permissions={"mode": "skip-dangerous"},
         session_store=session_store,
         run_store=run_store,
-        cwd=".",
     )
     resumed = await restarted.session(id="s1")
     events = await _collect_until(
@@ -508,13 +420,11 @@ async def test_transient_checkpoint_store_error_stops_without_terminal_and_resum
     )
     counts: dict[str, int] = {}
     agent = _agent(
-        model="gpt-5",
         provider=ScriptProvider(tool_names=["A"]),
         tools=_registry(counts, "A"),
         permissions={"mode": "skip-dangerous"},
         session_store=session_store,
         run_store=injected,
-        cwd=".",
     )
     session = await agent.session(id="s1")
     first_events = await _collect(session.run("use tool"))
@@ -531,13 +441,11 @@ async def test_transient_checkpoint_store_error_stops_without_terminal_and_resum
     assert counts == {}
 
     restarted = _agent(
-        model="gpt-5",
         provider=ScriptProvider(),
         tools=_registry(counts, "A"),
         permissions={"mode": "skip-dangerous"},
         session_store=session_store,
         run_store=injected,
-        cwd=".",
     )
     resumed = await restarted.session(id="s1")
     resumed_events = await _collect(resumed.resume(run_id))
@@ -574,13 +482,11 @@ async def test_transient_checkpoint_failure_ignores_telemetry_operation_name(
     injected = _TransientCheckpointStore(_memory_run_store())
     counts: dict[str, int] = {}
     agent = _agent(
-        model="gpt-5",
         provider=ScriptProvider(tool_names=["A"]),
         tools=_registry(counts, "A"),
         permissions={"mode": "skip-dangerous"},
         session_store=_memory_session_store(),
         run_store=injected,
-        cwd=".",
     )
     session = await agent.session(id="opaque-checkpoint")
     events = await _collect(session.run("use tool"))
@@ -618,13 +524,11 @@ async def test_tool_batch_checkpoint_is_not_saved_after_each_tool_end() -> None:
     run_store = CountingRunStore()
     counts: dict[str, int] = {}
     agent = _agent(
-        model="gpt-5",
         provider=ScriptProvider(tool_names=["A", "B"]),
         tools=_registry(counts, "A", "B"),
         permissions={"mode": "skip-dangerous"},
         session_store=session_store,
         run_store=run_store,
-        cwd=".",
     )
     session = await agent.session(id="s1")
 
@@ -650,13 +554,11 @@ async def test_permission_pending_resume_reemits_before_tool_execution() -> None
     allow.__dict__["resume_policy_id"] = "test-allow"
 
     agent = _agent(
-        model="gpt-5",
         provider=ScriptProvider(tool_names=["WriteThing"]),
         tools=_registry(counts, "WriteThing", scope="write"),
         permissions={"mode": "default", "canUseTool": allow},
         session_store=session_store,
         run_store=run_store,
-        cwd=".",
     )
     session = await agent.session(id="s1")
     run_id, _ = await _run_until(
@@ -695,10 +597,8 @@ async def test_loop_drains_pending_notifications_at_turn_start() -> None:
 
     session_store = _memory_session_store()
     agent = _agent(
-        model="gpt-5",
         provider=ScriptProvider(),
         session_store=session_store,
-        cwd=".",
     )
     session = await agent.session(id="s1")
 
@@ -743,10 +643,8 @@ async def test_notification_lands_in_provider_view_before_provider_call() -> Non
 
     session_store = _memory_session_store()
     agent = _agent(
-        model="gpt-5",
         provider=CapturingProvider(),
         session_store=session_store,
-        cwd=".",
     )
     session = await agent.session(id="s1")
 
@@ -800,7 +698,6 @@ async def test_loop_abort_cancels_background_worker_tasks() -> None:
         provider=ScriptProvider(),
         session_store=session_store,
         permissions={"mode": "skip-dangerous"},
-        cwd=".",
     )
     # agent.session() calls connect_subagents() internally
     session = await agent.session(id="s1")
@@ -849,13 +746,11 @@ async def test_started_tool_recovered_as_interrupted_from_event_log() -> None:
     run_store = _memory_run_store()
     counts: dict[str, int] = {}
     agent = _agent(
-        model="gpt-5",
         provider=ScriptProvider(tool_names=["A"]),
         tools=_registry(counts, "A"),
         permissions={"mode": "skip-dangerous"},
         session_store=session_store,
         run_store=run_store,
-        cwd=".",
     )
     session = await agent.session(id="s1")
     run_id, _events = await _run_until(
@@ -878,13 +773,11 @@ async def test_started_tool_recovered_as_interrupted_from_event_log() -> None:
     assert [s for s in stored if s.event.type == "tool_call_end"] == []
 
     restarted = _agent(
-        model="gpt-5",
         provider=ScriptProvider(),
         tools=_registry(counts, "A"),
         permissions={"mode": "skip-dangerous"},
         session_store=session_store,
         run_store=run_store,
-        cwd=".",
     )
     resumed = await restarted.session(id="s1")
     resume_events = await _collect(resumed.resume(run_id))
@@ -902,26 +795,22 @@ async def test_interrupted_tool_guard_recovery_survives_two_resume_cuts() -> Non
     run_store = _CheckpointCrashStore(_memory_run_store())
     counts: dict[str, int] = {}
     agent = _agent(
-        model="gpt-5",
         provider=ScriptProvider(tool_names=["A"]),
         tools=_registry(counts, "A"),
         permissions={"mode": "skip-dangerous"},
         session_store=session_store,
         run_store=run_store,
-        cwd=".",
     )
     session = await agent.session(id="s1")
     run_id, _ = await _run_until(session, "use tool", lambda event: event.type == "tool_call_start")
 
     run_store.reset("checkpoint:turn_complete")
     restarted = _agent(
-        model="gpt-5",
         provider=ScriptProvider(),
         tools=_registry(counts, "A"),
         permissions={"mode": "skip-dangerous"},
         session_store=session_store,
         run_store=run_store,
-        cwd=".",
     )
     resumed = await restarted.session(id="s1")
     with pytest.raises(_Crash):
@@ -933,13 +822,11 @@ async def test_interrupted_tool_guard_recovery_survives_two_resume_cuts() -> Non
 
     run_store.reset(None)
     restarted_again = _agent(
-        model="gpt-5",
         provider=ScriptProvider(),
         tools=_registry(counts, "A"),
         permissions={"mode": "skip-dangerous"},
         session_store=session_store,
         run_store=run_store,
-        cwd=".",
     )
     resumed_again = await restarted_again.session(id="s1")
     events = await _collect(resumed_again.resume(run_id))
@@ -954,13 +841,11 @@ async def test_guard_recovery_does_not_require_missing_assistant_observation() -
     run_store.drop_assistant_events = True
     counts: dict[str, int] = {}
     agent = _agent(
-        model="gpt-5",
         provider=ScriptProvider(tool_names=["A"]),
         tools=_registry(counts, "A"),
         permissions={"mode": "skip-dangerous"},
         session_store=session_store,
         run_store=run_store,
-        cwd=".",
     )
     session = await agent.session(id="s1")
     run_id, _ = await _run_until(session, "use tool", lambda event: event.type == "tool_call_start")
@@ -968,13 +853,11 @@ async def test_guard_recovery_does_not_require_missing_assistant_observation() -
 
     run_store.reset("checkpoint:turn_complete")
     restarted = _agent(
-        model="gpt-5",
         provider=ScriptProvider(),
         tools=_registry(counts, "A"),
         permissions={"mode": "skip-dangerous"},
         session_store=session_store,
         run_store=run_store,
-        cwd=".",
     )
     resumed = await restarted.session(id="s1")
     with pytest.raises(_Crash):
@@ -982,13 +865,11 @@ async def test_guard_recovery_does_not_require_missing_assistant_observation() -
 
     run_store.reset(None)
     restarted_again = _agent(
-        model="gpt-5",
         provider=ScriptProvider(),
         tools=_registry(counts, "A"),
         permissions={"mode": "skip-dangerous"},
         session_store=session_store,
         run_store=run_store,
-        cwd=".",
     )
     resumed_again = await restarted_again.session(id="s1")
     events = await _collect(resumed_again.resume(run_id))
@@ -1005,28 +886,24 @@ async def test_guard_recovery_does_not_count_inflight_batch_twice() -> None:
     run_store = _CheckpointCrashStore(_memory_run_store())
     counts: dict[str, int] = {}
     agent = _agent(
-        model="gpt-5",
         provider=ScriptProvider(tool_names=["A"]),
         tools=_registry(counts, "A"),
         loop_guard=LoopGuard(max_identical_tool_calls=2, max_consecutive_failures=0),
         permissions={"mode": "skip-dangerous"},
         session_store=session_store,
         run_store=run_store,
-        cwd=".",
     )
     session = await agent.session(id="s1")
     run_id, _ = await _run_until(session, "use tool", lambda event: event.type == "tool_call_end")
 
     run_store.reset("checkpoint:tool_results_appended")
     restarted = _agent(
-        model="gpt-5",
         provider=ScriptProvider(),
         tools=_registry(counts, "A"),
         loop_guard=LoopGuard(max_identical_tool_calls=2, max_consecutive_failures=0),
         permissions={"mode": "skip-dangerous"},
         session_store=session_store,
         run_store=run_store,
-        cwd=".",
     )
     resumed = await restarted.session(id="s1")
     with pytest.raises(_Crash):
@@ -1034,14 +911,12 @@ async def test_guard_recovery_does_not_count_inflight_batch_twice() -> None:
 
     run_store.reset(None)
     restarted_again = _agent(
-        model="gpt-5",
         provider=ScriptProvider(),
         tools=_registry(counts, "A"),
         loop_guard=LoopGuard(max_identical_tool_calls=2, max_consecutive_failures=0),
         permissions={"mode": "skip-dangerous"},
         session_store=session_store,
         run_store=run_store,
-        cwd=".",
     )
     resumed_again = await restarted_again.session(id="s1")
     events = await _collect(resumed_again.resume(run_id))
@@ -1057,14 +932,12 @@ async def test_disabled_guard_has_no_checkpoint_state() -> None:
     run_store = _memory_run_store()
     counts: dict[str, int] = {}
     agent = _agent(
-        model="gpt-5",
         provider=ScriptProvider(tool_names=["A"]),
         tools=_registry(counts, "A"),
         loop_guard=LoopGuard(max_identical_tool_calls=0, max_consecutive_failures=0),
         permissions={"mode": "skip-dangerous"},
         session_store=session_store,
         run_store=run_store,
-        cwd=".",
     )
     session = await agent.session(id="s1")
     events = await _collect(session.run("use tool"))
@@ -1086,28 +959,24 @@ async def test_pending_guard_trip_replays_once_after_interleaved_host_notificati
         max_identical_tool_calls=1, max_consecutive_failures=0, force_final_answer=True
     )
     agent = _agent(
-        model="gpt-5",
         provider=ScriptProvider(tool_names=["A"]),
         tools=_registry(counts, "A"),
         loop_guard=guard,
         permissions={"mode": "skip-dangerous"},
         session_store=session_store,
         run_store=run_store,
-        cwd=".",
     )
     session = await agent.session(id="s1")
     run_id, _ = await _run_until(session, "use tool", lambda event: event.type == "tool_call_end")
 
     run_store.reset("checkpoint:turn_complete")
     restarted = _agent(
-        model="gpt-5",
         provider=ScriptProvider(),
         tools=_registry(counts, "A"),
         loop_guard=guard,
         permissions={"mode": "skip-dangerous"},
         session_store=session_store,
         run_store=run_store,
-        cwd=".",
     )
     resumed = await restarted.session(id="s1")
     with pytest.raises(_Crash):
@@ -1121,14 +990,12 @@ async def test_pending_guard_trip_replays_once_after_interleaved_host_notificati
 
     run_store.reset(None)
     restarted_again = _agent(
-        model="gpt-5",
         provider=ScriptProvider(),
         tools=_registry(counts, "A"),
         loop_guard=guard,
         permissions={"mode": "skip-dangerous"},
         session_store=session_store,
         run_store=run_store,
-        cwd=".",
     )
     resumed_again = await restarted_again.session(id="s1")
     events = await _collect(resumed_again.resume(run_id))
@@ -1148,16 +1015,15 @@ async def test_pending_guard_trip_replays_once_after_interleaved_host_notificati
 
 
 def _failing_registry(counts: dict[str, int]):
-    from linch.tools import ToolRegistry, ToolResult
+    from linch.tools import ToolResult
+    from tests.support.tools import StubTool, tool_registry
 
-    class FailingTool(CountingTool):
+    class FailingTool(StubTool):
         async def execute(self, input: dict[str, Any], ctx: Any):
-            self.counts[self.name] = self.counts.get(self.name, 0) + 1
-            return ToolResult(content=f"{self.name}:{self.counts[self.name]}", is_error=True)
+            counts[self.name] = counts.get(self.name, 0) + 1
+            return ToolResult(content=f"{self.name}:{counts[self.name]}", is_error=True)
 
-    registry = ToolRegistry()
-    registry.register(FailingTool("A", counts))
-    return registry
+    return tool_registry(FailingTool("A"))
 
 
 def _guard_run_summary(events: list[Any], history: list[Any], checkpoint: Any) -> tuple[Any, ...]:
@@ -1186,6 +1052,45 @@ def _guard_run_summary(events: list[Any], history: list[Any], checkpoint: Any) -
     )
 
 
+def _guard_agent(
+    provider: Any,
+    session_store: Any,
+    run_store: Any,
+    counts: dict[str, int],
+    force_final: bool,
+) -> Any:
+    from linch import LoopGuard
+
+    return _agent(
+        provider=provider,
+        tools=_failing_registry(counts),
+        loop_guard=LoopGuard(
+            max_identical_tool_calls=3,
+            max_consecutive_failures=5,
+            force_final_answer=force_final,
+        ),
+        permissions={"mode": "skip-dangerous"},
+        session_store=session_store,
+        run_store=run_store,
+    )
+
+
+async def _guard_baseline(force_final: bool, session_id: str) -> tuple[Any, ...]:
+    session_store = _memory_session_store()
+    run_store = _memory_run_store()
+    counts: dict[str, int] = {}
+    agent = _guard_agent(ThreeBatchProvider(), session_store, run_store, counts, force_final)
+    session = await agent.session(id=session_id)
+    events = await _collect(session.run("repeat"))
+    record = await run_store.load_run(
+        next(event.run_id for event in events if event.type == "system")
+    )
+    assert record is not None
+    summary = _guard_run_summary(events, list(session.full_history), record.checkpoint)
+    await agent.close()
+    return summary
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("force_final", [False, True])
 @pytest.mark.parametrize(
@@ -1201,48 +1106,13 @@ def _guard_run_summary(events: list[Any], history: list[Any], checkpoint: Any) -
 async def test_repeated_guard_resume_preserves_decision_at_each_tool_phase(
     phase, force_final
 ) -> None:
-    from linch import LoopGuard
-
-    def build_agent(provider, session_store, run_store, counts):
-        return _agent(
-            model="gpt-5",
-            provider=provider,
-            tools=_failing_registry(counts),
-            loop_guard=LoopGuard(
-                max_identical_tool_calls=3,
-                max_consecutive_failures=5,
-                force_final_answer=force_final,
-            ),
-            permissions={"mode": "skip-dangerous"},
-            session_store=session_store,
-            run_store=run_store,
-            cwd=".",
-        )
-
-    baseline_session_store = _memory_session_store()
-    baseline_run_store = _memory_run_store()
-    baseline_counts: dict[str, int] = {}
-    baseline_agent = build_agent(
-        ThreeBatchProvider(), baseline_session_store, baseline_run_store, baseline_counts
-    )
-    baseline_session = await baseline_agent.session(id="baseline")
-    baseline_events = await _collect(baseline_session.run("repeat"))
-    baseline_record = await baseline_run_store.load_run(
-        next(event.run_id for event in baseline_events if event.type == "system")
-    )
-    assert baseline_record is not None
-    expected = _guard_run_summary(
-        baseline_events,
-        list(baseline_session.full_history),
-        baseline_record.checkpoint,
-    )
-    await baseline_agent.close()
+    expected = await _guard_baseline(force_final, "baseline")
 
     session_store = _memory_session_store()
     run_store = _CheckpointCrashStore(_memory_run_store())
     counts: dict[str, int] = {}
     run_store.reset(f"checkpoint:{phase}")
-    agent = build_agent(ThreeBatchProvider(), session_store, run_store, counts)
+    agent = _guard_agent(ThreeBatchProvider(), session_store, run_store, counts, force_final)
     session = await agent.session(id="s1")
     run_id = ""
     with pytest.raises(_Crash):
@@ -1253,7 +1123,9 @@ async def test_repeated_guard_resume_preserves_decision_at_each_tool_phase(
     await agent.close()
 
     run_store.reset(None)
-    restarted = build_agent(ThreeBatchProvider(start_calls=1), session_store, run_store, counts)
+    restarted = _guard_agent(
+        ThreeBatchProvider(start_calls=1), session_store, run_store, counts, force_final
+    )
     resumed = await restarted.session(id="s1")
     resumed_events = await _collect(resumed.resume(run_id))
     resumed_record = await run_store.load_run(run_id)
@@ -1274,47 +1146,12 @@ async def test_repeated_guard_resume_preserves_decision_at_each_tool_phase(
 @pytest.mark.parametrize("force_final", [False, True])
 async def test_guard_trip_after_results_checkpoint_replays_guard_action(force_final) -> None:
     """A crash after batch three's checkpoint must not lose its guard action."""
-    from linch import LoopGuard
-
-    def build_agent(provider, session_store, run_store, counts):
-        return _agent(
-            model="gpt-5",
-            provider=provider,
-            tools=_failing_registry(counts),
-            loop_guard=LoopGuard(
-                max_identical_tool_calls=3,
-                max_consecutive_failures=5,
-                force_final_answer=force_final,
-            ),
-            permissions={"mode": "skip-dangerous"},
-            session_store=session_store,
-            run_store=run_store,
-            cwd=".",
-        )
-
-    baseline_session_store = _memory_session_store()
-    baseline_run_store = _memory_run_store()
-    baseline_counts: dict[str, int] = {}
-    baseline_agent = build_agent(
-        ThreeBatchProvider(), baseline_session_store, baseline_run_store, baseline_counts
-    )
-    baseline_session = await baseline_agent.session(id="baseline-after-checkpoint")
-    baseline_events = await _collect(baseline_session.run("repeat"))
-    baseline_record = await baseline_run_store.load_run(
-        next(event.run_id for event in baseline_events if event.type == "system")
-    )
-    assert baseline_record is not None
-    expected = _guard_run_summary(
-        baseline_events,
-        list(baseline_session.full_history),
-        baseline_record.checkpoint,
-    )
-    await baseline_agent.close()
+    expected = await _guard_baseline(force_final, "baseline-after-checkpoint")
 
     session_store = _memory_session_store()
     run_store = _memory_run_store()
     counts: dict[str, int] = {}
-    agent = build_agent(ThreeBatchProvider(), session_store, run_store, counts)
+    agent = _guard_agent(ThreeBatchProvider(), session_store, run_store, counts, force_final)
     session = await agent.session(id="s1-after-checkpoint")
     run_id = ""
     tool_results_seen = 0
@@ -1333,7 +1170,9 @@ async def test_guard_trip_after_results_checkpoint_replays_guard_action(force_fi
     assert crashed_record.checkpoint.phase == "tool_results_appended"
     await agent.close()
 
-    restarted = build_agent(ThreeBatchProvider(start_calls=3), session_store, run_store, counts)
+    restarted = _guard_agent(
+        ThreeBatchProvider(start_calls=3), session_store, run_store, counts, force_final
+    )
     resumed = await restarted.session(id="s1-after-checkpoint")
     resumed_events = await _collect(resumed.resume(run_id))
     resumed_record = await run_store.load_run(run_id)
@@ -1381,13 +1220,11 @@ async def test_crash_between_permission_checkpoint_and_start_event_reruns_tool()
     allow_callback.__dict__["resume_policy_id"] = "test-allow"
 
     agent = _agent(
-        model="gpt-5",
         provider=ScriptProvider(tool_names=["WriteThing"]),
         tools=_registry(counts, "WriteThing", scope="write"),
         permissions={"mode": "default", "canUseTool": allow_callback},
         session_store=session_store,
         run_store=run_store,
-        cwd=".",
     )
     session = await agent.session(id="s1")
     run_id, _ = await _run_until(session, "write", lambda e: e.type == "tool_call_start")
@@ -1403,13 +1240,11 @@ async def test_crash_between_permission_checkpoint_and_start_event_reruns_tool()
 
     run_store.drop_starts = False  # "restart" — the event log commits normally now
     restarted = _agent(
-        model="gpt-5",
         provider=ScriptProvider(tool_names=["WriteThing"]),
         tools=_registry(counts, "WriteThing", scope="write"),
         permissions={"mode": "default", "canUseTool": allow_callback},
         session_store=session_store,
         run_store=run_store,
-        cwd=".",
     )
     resumed = await restarted.session(id="s1")
     resume_events = await _collect(resumed.resume(run_id))
@@ -1430,13 +1265,11 @@ async def test_completed_tool_recovered_from_event_log_when_checkpoint_lacks_res
     run_store = _memory_run_store()
     counts: dict[str, int] = {}
     agent = _agent(
-        model="gpt-5",
         provider=ScriptProvider(tool_names=["A"]),
         tools=_registry(counts, "A"),
         permissions={"mode": "skip-dangerous"},
         session_store=session_store,
         run_store=run_store,
-        cwd=".",
     )
     session = await agent.session(id="s1")
     run_id, _ = await _run_until(session, "use tool", lambda e: e.type == "tool_call_end")
@@ -1552,11 +1385,9 @@ async def test_run_loop_aclose_at_worker_yield_finishes_invoke_agent_span() -> N
         ),
     )
     agent = _agent(
-        model="gpt-5",
         provider=ScriptProvider(),
         session_store=session_store,
         run_store=run_store,
-        cwd=".",
         context=context,
     )
     session = await agent.session(id="s1")
@@ -1612,11 +1443,9 @@ async def test_nonresumable_run_raises_without_side_effects(
     run_store = _memory_run_store()
     provider = ScriptProvider()
     agent = _agent(
-        model="gpt-5",
         provider=provider,
         session_store=session_store,
         run_store=run_store,
-        cwd=".",
     )
     session = await agent.session(id="s1")
     run = await run_store.create_run("s1", id=f"rejected-{status}")
@@ -1670,11 +1499,9 @@ async def test_nonresumable_run_raises_without_side_effects(
 async def test_unknown_run_resume_still_raises_key_error() -> None:
     provider = ScriptProvider(fail_on_call=True)
     session = await _agent(
-        model="gpt-5",
         provider=provider,
         session_store=_memory_session_store(),
         run_store=_memory_run_store(),
-        cwd=".",
     ).session(id="s1")
 
     with pytest.raises(KeyError, match="run not found: missing"):
@@ -1694,13 +1521,11 @@ async def test_postgres_session_and_run_store_resume_after_restart(
     run_store = PostgresRunStore(pg_dsn)
     try:
         agent = _agent(
-            model="gpt-5",
             provider=ScriptProvider(tool_names=["A"]),
             tools=_registry(counts, "A"),
             permissions={"mode": "skip-dangerous"},
             session_store=session_store,
             run_store=run_store,
-            cwd=".",
         )
         session = await agent.session(id="s1")
         run_id, _ = await _run_until(session, "use tool", lambda event: event.type == "assistant")
@@ -1712,13 +1537,11 @@ async def test_postgres_session_and_run_store_resume_after_restart(
     run_store = PostgresRunStore(pg_dsn)
     try:
         restarted = _agent(
-            model="gpt-5",
             provider=ScriptProvider(fail_on_call=True),
             tools=_registry(counts, "A"),
             permissions={"mode": "skip-dangerous"},
             session_store=session_store,
             run_store=run_store,
-            cwd=".",
         )
         resumed = await restarted.session(id="s1")
         events = await _collect_until(
@@ -1760,13 +1583,11 @@ async def test_permission_decision_persists_and_resume_skips_callback() -> None:
     allow_callback.__dict__["resume_policy_id"] = "test-allow"
 
     agent = _agent(
-        model="gpt-5",
         provider=ScriptProvider(tool_names=["WriteThing"]),
         tools=_registry(counts, "WriteThing", scope="write"),
         permissions={"mode": "default", "canUseTool": allow_callback},
         session_store=session_store,
         run_store=run_store,
-        cwd=".",
     )
     session = await agent.session(id="s1")
     # Stop just after ToolCallStartEvent: resolve() has fired and
@@ -1776,13 +1597,11 @@ async def test_permission_decision_persists_and_resume_skips_callback() -> None:
 
     # Simulate restart: fresh Agent + same stores.
     restarted = _agent(
-        model="gpt-5",
         provider=ScriptProvider(tool_names=["WriteThing"]),
         tools=_registry(counts, "WriteThing", scope="write"),
         permissions={"mode": "default", "canUseTool": allow_callback},
         session_store=session_store,
         run_store=run_store,
-        cwd=".",
     )
     resumed = await restarted.session(id="s1")
     resume_events = await _collect(resumed.resume(run_id))
@@ -1817,13 +1636,11 @@ async def test_persisted_deny_decision_replays_on_resume() -> None:
     deny_callback.__dict__["resume_policy_id"] = "test-deny"
 
     agent = _agent(
-        model="gpt-5",
         provider=ScriptProvider(tool_names=["WriteThing"]),
         tools=_registry(counts, "WriteThing", scope="write"),
         permissions={"mode": "default", "canUseTool": deny_callback},
         session_store=session_store,
         run_store=run_store,
-        cwd=".",
     )
     session = await agent.session(id="s1")
     # Stop just after ToolCallStartEvent: resolve() fired → deny stored in checkpoint.
@@ -1832,13 +1649,11 @@ async def test_persisted_deny_decision_replays_on_resume() -> None:
     assert counts == {}  # tool was denied in first run
 
     restarted = _agent(
-        model="gpt-5",
         provider=ScriptProvider(tool_names=["WriteThing"]),
         tools=_registry(counts, "WriteThing", scope="write"),
         permissions={"mode": "default", "canUseTool": deny_callback},
         session_store=session_store,
         run_store=run_store,
-        cwd=".",
     )
     resumed = await restarted.session(id="s1")
     resume_events = await _collect(resumed.resume(run_id))
@@ -1896,12 +1711,10 @@ async def test_permission_decision_cleared_each_turn() -> None:
         return {"behavior": "allow"}
 
     agent = _agent(
-        model="gpt-5",
         provider=TwoTurnProvider(),
         tools=_registry(counts, "WriteThing", scope="write"),
         permissions={"mode": "default", "canUseTool": allow_callback},
         session_store=_memory_session_store(),
-        cwd=".",
     )
     session = await agent.session(id="s1")
     await _collect(session.run("go"))
@@ -1925,8 +1738,11 @@ async def test_resume_total_cost_reflects_whole_run_not_just_post_resume() -> No
     strictly less than cost_usd(total_usage, model).
     """
     from linch.pricing import cost_usd
+    from linch.types import Usage
+    from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
 
     model = "claude-opus-4-8"  # priced model
+    usage = Usage(input_tokens=1000, output_tokens=500)
 
     session_store = _memory_session_store()
     run_store = _memory_run_store()
@@ -1934,12 +1750,11 @@ async def test_resume_total_cost_reflects_whole_run_not_just_post_resume() -> No
 
     agent = _agent(
         model=model,
-        provider=PricedScriptProvider(),
+        provider=ScriptedProvider([ToolUseTurn("A", {"value": "A"}, usage=usage)]),
         tools=_registry(counts, "A"),
         permissions={"mode": "skip-dangerous"},
         session_store=session_store,
         run_store=run_store,
-        cwd=".",
     )
     session = await agent.session(id="s1")
     # Stop after the first (priced) assistant tool-use turn — cost has accrued
@@ -1948,12 +1763,11 @@ async def test_resume_total_cost_reflects_whole_run_not_just_post_resume() -> No
 
     restarted = _agent(
         model=model,
-        provider=PricedScriptProvider(),
+        provider=ScriptedProvider([TextTurn("done", usage=usage)]),
         tools=_registry(counts, "A"),
         permissions={"mode": "skip-dangerous"},
         session_store=session_store,
         run_store=run_store,
-        cwd=".",
     )
     resumed = await restarted.session(id="s1")
     events = await _collect(resumed.resume(run_id))
@@ -1977,12 +1791,10 @@ async def test_contractless_resume_rejects_before_provider_or_tool_dispatch() ->
     store = _memory_run_store()
     counts: dict[str, int] = {}
     session = await _agent(
-        model="gpt-5",
         provider=ScriptProvider(fail_on_call=True),
         tools=_registry(counts, "A"),
         session_store=_memory_session_store(),
         run_store=store,
-        cwd=".",
     ).session(id="s1")
     await store.create_run("s1", id="contractless")
     await store.save_checkpoint(
@@ -2004,13 +1816,11 @@ async def test_tool_recovery_with_null_cursor_fails_before_side_effects() -> Non
     sessions = _memory_session_store()
     counts: dict[str, int] = {}
     session = await _agent(
-        model="gpt-5",
         provider=ScriptProvider(tool_names=["A"]),
         tools=_registry(counts, "A"),
         permissions={"mode": "skip-dangerous"},
         session_store=sessions,
         run_store=store,
-        cwd=".",
     ).session(id="s1")
     run_id, _ = await _run_until(session, "use tool", lambda event: event.type == "assistant")
     checkpoint = store._runs[run_id].checkpoint
@@ -2020,13 +1830,11 @@ async def test_tool_recovery_with_null_cursor_fails_before_side_effects() -> Non
         "worker": {"worker_id": "worker", "display_name": "worker", "status": "running"}
     }
     resumed = await _agent(
-        model="gpt-5",
         provider=ScriptProvider(fail_on_call=True),
         tools=_registry(counts, "A"),
         permissions={"mode": "skip-dangerous"},
         session_store=sessions,
         run_store=store,
-        cwd=".",
     ).session(id="s1")
     before = await store.load_events(run_id)
     with pytest.raises(ConfigError, match="cursor"):

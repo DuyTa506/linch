@@ -2,57 +2,12 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
 
-
-class _RepeatToolProvider:
-    id = "phase-repeat"
-
-    def __init__(self) -> None:
-        self.calls = 0
-
-    def context_window(self, model: str) -> int:
-        return 100_000
-
-    async def stream(self, req: Any) -> AsyncIterator[dict[str, object]]:
-        from linch.types import Usage
-
-        self.calls += 1
-        yield {"type": "message_start", "model": req.model}
-        yield {"type": "tool_use_start", "id": f"call-{self.calls}", "name": "Repeat"}
-        yield {
-            "type": "tool_use_input_delta",
-            "id": f"call-{self.calls}",
-            "json_delta": json.dumps({"value": "same"}),
-        }
-        yield {"type": "tool_use_end", "id": f"call-{self.calls}"}
-        yield {
-            "type": "message_end",
-            "stop_reason": "tool_use",
-            "usage": Usage(),
-        }
-
-
-class _FinalOnlyProvider:
-    id = "phase-repeat"
-
-    def __init__(self) -> None:
-        self.requests: list[Any] = []
-
-    def context_window(self, model: str) -> int:
-        return 100_000
-
-    async def stream(self, req: Any) -> AsyncIterator[dict[str, object]]:
-        from linch.types import Usage
-
-        self.requests.append(req)
-        yield {"type": "message_start", "model": req.model}
-        yield {"type": "text_delta", "text": "final"}
-        yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
+from tests.support.agents import make_agent
 
 
 class _AbortProvider:
@@ -92,29 +47,6 @@ class _BudgetProvider:
         yield  # pragma: no cover
 
 
-class _RepeatTool:
-    name = "Repeat"
-    description = "Repeat a harmless operation."
-    input_schema = {"type": "object", "properties": {"value": {"type": "string"}}}
-    scope = "read"
-    parallel = False
-    tags: tuple[str, ...] = ()
-
-    def validate(self, raw: dict[str, Any]) -> dict[str, Any]:
-        return raw
-
-    def summarize(self, input: dict[str, Any]) -> str:
-        return "repeat"
-
-    def resources(self, input: dict[str, Any]) -> list[Any]:
-        return []
-
-    async def execute(self, input: dict[str, Any], ctx: Any) -> Any:
-        from linch.tools import ToolResult
-
-        return ToolResult(content="ok")
-
-
 def _agent(
     provider: Any,
     *,
@@ -122,15 +54,14 @@ def _agent(
     run_store: Any,
     hooks: list[Any] | None = None,
 ) -> Any:
-    from linch import Agent
     from linch.config import FeatureFlags
     from linch.loop_guard import LoopGuard
-    from linch.tools.registry import empty_tools
+    from tests.support.tools import StubTool, tool_registry
 
-    return Agent(
+    return make_agent(
+        provider,
         model="test-model",
-        provider=provider,
-        tools=empty_tools(_RepeatTool()),
+        tools=tool_registry(StubTool("Repeat")),
         permissions={"mode": "skip-dangerous"},
         session_store=session_store,
         run_store=run_store,
@@ -141,7 +72,11 @@ def _agent(
 
 
 async def _leave_at_force_final_checkpoint(session_store: Any, run_store: Any) -> str:
-    provider = _RepeatToolProvider()
+    from tests.support.providers import ScriptedProvider, ToolUseTurn
+
+    provider = ScriptedProvider(
+        [ToolUseTurn("Repeat", {"value": "same"}, tool_id=f"call-{i}") for i in range(3)]
+    )
     agent = _agent(provider, session_store=session_store, run_store=run_store)
     session = await agent.session(id="phase-state")
     iterator = session.run("repeat until stopped").__aiter__()
@@ -171,7 +106,9 @@ async def test_force_final_checkpoint_survives_phase_state_transfer() -> None:
     run_store = InMemoryRunStore()
     run_id = await _leave_at_force_final_checkpoint(session_store, run_store)
 
-    provider = _FinalOnlyProvider()
+    from tests.support.providers import ScriptedProvider, TextTurn
+
+    provider = ScriptedProvider([TextTurn("final")])
     restarted = _agent(provider, session_store=session_store, run_store=run_store)
     session = await restarted.session(id="phase-state")
     events = [event async for event in session.resume(run_id)]
@@ -192,7 +129,9 @@ async def test_provider_checkpoint_clears_force_final_state_before_persist() -> 
     run_store = InMemoryRunStore()
     run_id = await _leave_at_force_final_checkpoint(session_store, run_store)
 
-    provider = _FinalOnlyProvider()
+    from tests.support.providers import ScriptedProvider, TextTurn
+
+    provider = ScriptedProvider([TextTurn("final")])
     restarted = _agent(provider, session_store=session_store, run_store=run_store)
     session = await restarted.session(id="phase-state")
     iterator = session.resume(run_id).__aiter__()
