@@ -368,6 +368,7 @@ async def map_wire_events(
 ) -> AsyncIterator[dict[str, Any]]:
     yield {"type": "message_start", "model": model}
     item_to_call_id: dict[str, str] = {}
+    nonempty_tool_inputs: set[str] = set()
     has_function_call = False
     stop_reason: StopReason = "end_turn"
     usage = Usage()
@@ -392,12 +393,22 @@ async def map_wire_events(
         elif typ == "response.function_call_arguments.delta":
             call_id = item_to_call_id.get(str(ev.get("item_id")))
             if call_id and ev.get("delta") is not None:
+                if ev["delta"].strip():
+                    nonempty_tool_inputs.add(call_id)
                 yield {"type": "tool_use_input_delta", "id": call_id, "json_delta": ev["delta"]}
         elif typ == "response.output_item.done":
             item = ev.get("item") or {}
             if item.get("type") == "function_call":
                 call_id = item_to_call_id.pop(str(item.get("id")), None)
                 if call_id:
+                    if call_id not in nonempty_tool_inputs:
+                        arguments = str(item.get("arguments") or "").strip() or "{}"
+                        yield {
+                            "type": "tool_use_input_delta",
+                            "id": call_id,
+                            "json_delta": arguments,
+                        }
+                    nonempty_tool_inputs.discard(call_id)
                     yield {"type": "tool_use_end", "id": call_id}
         elif typ in {"response.completed", "response.failed", "response.incomplete"}:
             response = ev.get("response") or {}

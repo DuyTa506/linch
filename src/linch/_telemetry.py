@@ -17,8 +17,9 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from opentelemetry import metrics, trace
 
 try:  # Private API; without it the default provider counts as active (slower, still correct).
-    from opentelemetry.metrics._internal import _ProxyMeterProvider
+    from opentelemetry.metrics._internal import _ProxyMeter, _ProxyMeterProvider
 except ImportError:  # pragma: no cover
+    _ProxyMeter = metrics.NoOpMeter
     _ProxyMeterProvider = metrics.NoOpMeterProvider
 
 from .types import Usage
@@ -95,6 +96,8 @@ def in_span(
         except BaseException as exc:
             if not isinstance(exc, GeneratorExit):
                 set_error(span, exc)
+                if run is not None and run.step is not None:
+                    set_error(run.step, exc)
             raise
         finally:
             try:
@@ -106,6 +109,8 @@ def in_span(
                         await close()
             except BaseException as exc:
                 set_error(span, exc)
+                if run is not None and run.step is not None:
+                    set_error(run.step, exc)
                 raise
             finally:
                 try:
@@ -125,22 +130,81 @@ class Telemetry:
 
     def __init__(self, context: Context) -> None:
         self._context = context
-        self.tracer: trace.Tracer = context.get("tracer") or trace.get_tracer(
-            "linch", tracer_provider=context.get("tracer_provider")
+        self._bindings: tuple[Any, ...] | None = None
+        self._refresh()
+
+    def _refresh(self) -> None:
+        context = self._context
+        tracer = context.get("tracer")
+        tracer_provider = context.get("tracer_provider")
+        meter = context.get("meter")
+        meter_provider = context.get("meter_provider")
+        global_tracer = (
+            trace.get_tracer_provider()
+            if isinstance(tracer, trace.ProxyTracer)
+            or (
+                tracer is None
+                and (
+                    tracer_provider is None
+                    or isinstance(tracer_provider, trace.ProxyTracerProvider)
+                )
+            )
+            else None
         )
-        meter: metrics.Meter = context.get("meter") or metrics.get_meter(
-            "linch", meter_provider=context.get("meter_provider")
+        global_meter = (
+            metrics.get_meter_provider()
+            if isinstance(meter, _ProxyMeter)
+            or (
+                meter is None
+                and (meter_provider is None or isinstance(meter_provider, _ProxyMeterProvider))
+            )
+            else None
         )
-        self.tokens = meter.create_histogram(TOKEN_USAGE, unit="{token}")
-        self.duration = meter.create_histogram(OPERATION_DURATION, unit="s")
-        self.store_duration = meter.create_histogram(STORE_DURATION, unit="s")
+        bindings = (tracer, tracer_provider, meter, meter_provider, global_tracer, global_meter)
+        if self._bindings is not None and all(
+            current is previous for current, previous in zip(bindings, self._bindings, strict=True)
+        ):
+            return
+        self._bindings = bindings
+        self.tracer: trace.Tracer = (
+            tracer
+            if tracer is not None
+            else trace.get_tracer("linch", tracer_provider=tracer_provider)
+        )
+        resolved_meter = (
+            meter
+            if meter is not None
+            else metrics.get_meter(
+                "linch",
+                meter_provider=(
+                    global_meter
+                    if isinstance(meter_provider, _ProxyMeterProvider)
+                    else meter_provider
+                ),
+            )
+        )
+        self.tokens = resolved_meter.create_histogram(TOKEN_USAGE, unit="{token}")
+        self.duration = resolved_meter.create_histogram(OPERATION_DURATION, unit="s")
+        self.store_duration = resolved_meter.create_histogram(STORE_DURATION, unit="s")
+
+    @property
+    def tracing_enabled(self) -> bool:
+        if isinstance(self.tracer, trace.NoOpTracer):
+            return False
+        if isinstance(self.tracer, trace.ProxyTracer):
+            return not isinstance(
+                trace.get_tracer_provider(), trace.NoOpTracerProvider | trace.ProxyTracerProvider
+            )
+        return True
 
     @property
     def metrics_enabled(self) -> bool:
         meter = self._context.get("meter")
-        if meter is not None:
+        if meter is not None and not isinstance(meter, _ProxyMeter):
             return not isinstance(meter, metrics.NoOpMeter)
-        provider = self._context.get("meter_provider") or metrics.get_meter_provider()
+        provider = self._context.get("meter_provider")
+        if provider is None or isinstance(provider, _ProxyMeterProvider) or meter is not None:
+            provider = metrics.get_meter_provider()
         # The API has no instrument enabled flag. Its deferred default provider
         # is inactive until a host installs one; recheck so late setup still works.
         return not isinstance(provider, metrics.NoOpMeterProvider | _ProxyMeterProvider)
@@ -149,6 +213,7 @@ class Telemetry:
         if not self.metrics_enabled:
             return await awaitable
         started = perf_counter()
+        duration = self.store_duration
         attributes = {STORE_OP: op}
         try:
             return await awaitable
@@ -156,7 +221,7 @@ class Telemetry:
             attributes[ERROR_TYPE] = type(exc).__name__
             raise
         finally:
-            self.store_duration.record(perf_counter() - started, attributes)
+            duration.record(perf_counter() - started, attributes)
 
 
 def telemetry_for(agent: Any) -> Telemetry:
@@ -165,6 +230,8 @@ def telemetry_for(agent: Any) -> Telemetry:
     if telemetry is None or telemetry._context is not context:
         telemetry = Telemetry(context)
         context.register("_linch_telemetry", telemetry)
+    else:
+        telemetry._refresh()
     return telemetry
 
 
@@ -229,6 +296,7 @@ class _RunTrace:
         self.step: trace.Span | None = None
         self.turn_index: int | None = None
         self.error: str | None = None
+        self.chat_error: str | None = None
 
     def observe(self, event: Any) -> None:
         if event.type == "error":
@@ -242,6 +310,8 @@ class _RunTrace:
             self.span.set_attribute(STOP_REASON, event.stop_reason)
             if event.subtype != "success" and self.error is None:
                 set_error(self.span, event.subtype)
+                if self.step is not None:
+                    set_error(self.step, event.subtype)
             if self.span.is_recording() and capture_content():
                 self.span.set_attribute(OUTPUT_MESSAGES, _json(event.final_text))
 
@@ -280,6 +350,8 @@ def start_run_span(session: Any, prompt: str, run_id: str, *, resumed: bool = Fa
         The span used for the run's instrumentation boundary.
     """
     telemetry = telemetry_for(session.agent)
+    if not telemetry.tracing_enabled:
+        return trace.INVALID_SPAN
     attrs = attributes(session, "invoke_agent")
     attrs[RUN_ID] = run_id
     attrs[RESUMED] = resumed
@@ -292,8 +364,12 @@ def start_run_span(session: Any, prompt: str, run_id: str, *, resumed: bool = Fa
 def start_step(session: Any, turn_index: int) -> None:
     state = getattr(session, "_telemetry_run", None)
     if state is not None:
+        state.chat_error = None
         state.turn_index = turn_index
-        state.step = telemetry_for(session.agent).tracer.start_span(
+        telemetry = telemetry_for(session.agent)
+        if not telemetry.tracing_enabled:
+            return
+        state.step = telemetry.tracer.start_span(
             "step",
             context=trace.set_span_in_context(state.span),
             attributes=attributes(session, "step"),
@@ -303,8 +379,11 @@ def start_step(session: Any, turn_index: int) -> None:
 def end_step(session: Any) -> None:
     state = getattr(session, "_telemetry_run", None)
     if state is not None and state.step is not None:
+        if state.chat_error is not None:
+            set_error(state.step, state.chat_error)
         state.step.end()
         state.step = None
+        state.chat_error = None
 
 
 class ChatCall:
@@ -328,12 +407,15 @@ class ChatCall:
                 kind=trace.SpanKind.CLIENT,
                 attributes=self.attrs,
             )
-            if self.telemetry
+            if self.telemetry is not None and self.telemetry.tracing_enabled
             else trace.INVALID_SPAN
         )
         self.capture = self.span.is_recording() and capture_content()
         if self.capture:
             self.span.set_attribute(INPUT_MESSAGES, _json(request.messages))
+        self.instruments = (
+            (self.telemetry.duration, self.telemetry.tokens) if self.telemetry is not None else None
+        )
         self.record_metrics = self.telemetry is not None and self.telemetry.metrics_enabled
         self.started = perf_counter() if self.record_metrics else 0
 
@@ -349,6 +431,15 @@ class ChatCall:
         self.finished = True
         if self.telemetry is None:
             return
+        run = getattr(self.session, "_telemetry_run", None)
+        if run is not None and run.step is not None:
+            # Retries own chat errors; only the last attempt determines the
+            # step's status when the loop closes it.
+            run.chat_error = (
+                type(error).__name__
+                if error is not None and not isinstance(error, GeneratorExit)
+                else None
+            )
         if not self.record_metrics and not self.span.is_recording():
             self.span.end()
             return
@@ -359,9 +450,6 @@ class ChatCall:
             if error is not None and not isinstance(error, GeneratorExit):
                 attrs[ERROR_TYPE] = type(error).__name__
                 set_error(self.span, error)
-                run = getattr(self.session, "_telemetry_run", None)
-                if run is not None and run.step is not None:
-                    set_error(run.step, error)
             if self.span.is_recording():
                 if result.actual_model:
                     self.span.set_attribute(RESPONSE_MODEL, result.actual_model)
@@ -377,13 +465,12 @@ class ChatCall:
                         if isinstance(content, bytes | bytearray):
                             content = content.decode("utf-8")
                     self.span.set_attribute(OUTPUT_MESSAGES, _json(content))
-            if self.record_metrics:
-                self.telemetry.duration.record(perf_counter() - self.started, attrs)
+            if self.record_metrics and self.instruments is not None:
+                duration, tokens = self.instruments
+                duration.record(perf_counter() - self.started, attrs)
                 if usage is not None:
-                    self.telemetry.tokens.record(usage.input_tokens, {**attrs, TOKEN_TYPE: "input"})
-                    self.telemetry.tokens.record(
-                        usage.output_tokens, {**attrs, TOKEN_TYPE: "output"}
-                    )
+                    tokens.record(usage.input_tokens, {**attrs, TOKEN_TYPE: "input"})
+                    tokens.record(usage.output_tokens, {**attrs, TOKEN_TYPE: "output"})
         finally:
             self.span.end()
 
@@ -391,9 +478,12 @@ class ChatCall:
 def trace_compaction(function: Any) -> Any:
     @wraps(function)
     async def wrapped(session: Any, agent: Any, signal: Any, strategy: Any, **kwargs: Any) -> Any:
+        telemetry = telemetry_for(agent)
+        if not telemetry.tracing_enabled:
+            return await function(session, agent, signal, strategy, **kwargs)
         attrs = attributes(session, "compaction", model=kwargs.get("model"))
         attrs[COMPACTION_STRATEGY] = strategy.id
-        span = telemetry_for(agent).tracer.start_span(
+        span = telemetry.tracer.start_span(
             "compaction", context=parent_context(session), attributes=attrs
         )
         if not span.get_span_context().is_valid:
@@ -421,6 +511,9 @@ def trace_tool(function: Any) -> Any:
     async def wrapped(
         call: Any, decision: Any, agent: Any, session: Any, signal: Any, **kwargs: Any
     ) -> Any:
+        telemetry = telemetry_for(agent)
+        if not telemetry.tracing_enabled:
+            return await function(call, decision, agent, session, signal, **kwargs)
         attrs = {
             OPERATION: "execute_tool",
             CONVERSATION_ID: session.id,
@@ -433,7 +526,7 @@ def trace_tool(function: Any) -> Any:
         turn_index = kwargs.get("turn_index")
         if turn_index is not None:
             attrs[TURN_INDEX] = turn_index
-        span = telemetry_for(agent).tracer.start_span(
+        span = telemetry.tracer.start_span(
             f"execute_tool {attrs[TOOL_NAME]}", context=parent_context(session), attributes=attrs
         )
         if not span.get_span_context().is_valid:
@@ -473,13 +566,7 @@ class _TelemetryProvider:
     def stream(self, request: Any) -> Any:
         iterator = self._provider.stream(request)
         telemetry = telemetry_for(self._session.agent)
-        if not telemetry.metrics_enabled and (
-            isinstance(telemetry.tracer, trace.NoOpTracer)
-            or (
-                isinstance(telemetry.tracer, trace.ProxyTracer)
-                and isinstance(trace.get_tracer_provider(), trace.ProxyTracerProvider)
-            )
-        ):
+        if not telemetry.metrics_enabled and not telemetry.tracing_enabled:
             return iterator
 
         async def activated() -> AsyncGenerator[Any, None]:

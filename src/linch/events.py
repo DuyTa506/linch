@@ -506,6 +506,9 @@ class SubagentEvent:
     event: Event
     type: Literal["subagent_event"] = "subagent_event"
 
+    def __post_init__(self) -> None:
+        _validate_nested_ignorable_event(self)
+
 
 @dataclass(slots=True)
 class BackgroundWorkerEvent:
@@ -775,9 +778,9 @@ _KNOWN_EVENT_TYPES = frozenset(
 
 
 def _validate_ignorable_event_envelope(
-    raw: dict[str, Any], *, original_type: str | None = None
+    raw: dict[str, Any], *, original_type: str | None = None, depth: int = 0
 ) -> str:
-    _validate_ignorable_json_value(raw, path="event")
+    _validate_ignorable_json_value(raw, path="event", depth=depth)
     typ = raw.get("type")
     if not isinstance(typ, str) or not typ:
         raise ValueError("ignorable event type must be a non-empty string")
@@ -833,8 +836,7 @@ def _check_ignorable_json_node(value: Any, path: str, active: set[int], depth: i
         raise ValueError(
             f"ignorable event {path} exceeds maximum nesting depth {IGNORABLE_MAX_DEPTH}"
         )
-    # Preserve the envelope validator's existing object-child depth policy.
-    return depth + 1 if isinstance(value, list) else 0
+    return depth + 1
 
 
 def _check_ignorable_json_key(key: Any, path: str) -> None:
@@ -1276,20 +1278,50 @@ def usage_from_dict(raw: dict[str, Any]) -> Usage:
     )
 
 
-def _json_safe(value: Any) -> Any:
+def _validate_nested_ignorable_event(event: Event) -> None:
+    depth = 0
+    active: set[int] = set()
+    while isinstance(event, SubagentEvent):
+        identity = id(event)
+        if identity in active:
+            raise ValueError("subagent event must not contain reference cycles")
+        active.add(identity)
+        depth += 1
+        event = event.event
+    if isinstance(event, IgnorableEvent):
+        _validate_ignorable_event_envelope(
+            event.raw, original_type=event.original_type, depth=depth
+        )
+
+
+def _json_safe(value: Any, *, active: set[int] | None = None, depth: int = 0) -> Any:
     if value is None or isinstance(value, str | int | float | bool):
         return value
-    if isinstance(value, list | tuple):
-        return [_json_safe(item) for item in value]
-    if isinstance(value, dict):
-        return {str(key): _json_safe(item) for key, item in value.items()}
-    return str(value)
+    if not isinstance(value, list | tuple | dict):
+        return str(value)
+    if active is None:
+        active = set()
+    identity = id(value)
+    if identity in active:
+        return "<recursion>"
+    if depth >= IGNORABLE_MAX_DEPTH:
+        return "<max-depth>"
+    active.add(identity)
+    try:
+        if isinstance(value, dict):
+            return {
+                str(key): _json_safe(item, active=active, depth=depth + 1)
+                for key, item in value.items()
+            }
+        return [_json_safe(item, active=active, depth=depth + 1) for item in value]
+    finally:
+        active.remove(identity)
 
 
 def _is_json_serializable(value: Any) -> bool:
     try:
         json.dumps(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, RecursionError):
         return False
     return True
 
@@ -1695,6 +1727,7 @@ def event_to_dict(event: Event) -> dict[str, Any]:
     if isinstance(event, SkillCompletedEvent):
         return {"type": event.type, "name": event.name, "is_error": event.is_error}
     if isinstance(event, SubagentEvent):
+        _validate_nested_ignorable_event(event)
         return {
             "type": event.type,
             "parent_session_id": event.parent_session_id,

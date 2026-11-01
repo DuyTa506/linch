@@ -963,14 +963,17 @@ def test_stream_does_not_prefix_normal_anthropic_tool_deltas_with_initial_input(
     ] == deltas
 
 
-@pytest.mark.parametrize("raw_delta", ["", "   "])
-def test_stream_preserves_empty_or_whitespace_anthropic_input_delta(raw_delta: str):
-    """A present malformed delta must reach the core parser unchanged and reject there."""
-    out = _collect_fake_anthropic_tool_stream({}, [raw_delta])
+@pytest.mark.parametrize("deltas", [[""], ["   "], ["", " ", "\n\t"]])
+@pytest.mark.parametrize("initial_input", [{}, {"value": "initial"}])
+def test_stream_normalizes_empty_or_whitespace_anthropic_input_delta(initial_input, deltas):
+    """Whitespace-only tool input falls back to the native initial object."""
+    import json
 
-    assert [event["json_delta"] for event in out if event["type"] == "tool_use_input_delta"] == [
-        raw_delta
-    ]
+    out = _collect_fake_anthropic_tool_stream(initial_input, deltas)
+    raw_input = "".join(
+        event["json_delta"] for event in out if event["type"] == "tool_use_input_delta"
+    )
+    assert json.loads(raw_input) == initial_input
 
 
 async def test_stream_maps_aborted_mid_stream_cancel_to_abort_error() -> None:

@@ -252,6 +252,12 @@ class OpenAIChatCompletionsProvider(BaseProvider):
                     for tid in list(tool_meta):
                         if tid not in tool_ended:
                             tool_ended.add(tid)
+                            if not tool_input[tid].strip():
+                                yield {
+                                    "type": "tool_use_input_delta",
+                                    "id": tid,
+                                    "json_delta": "{}",
+                                }
                             yield {"type": "tool_use_end", "id": tid}
                 elif finish_reason == "length":
                     stop_reason = "max_tokens"
@@ -279,6 +285,8 @@ class OpenAIChatCompletionsProvider(BaseProvider):
         for tid in list(tool_meta):
             if tid not in tool_ended:
                 tool_ended.add(tid)
+                if not tool_input[tid].strip():
+                    yield {"type": "tool_use_input_delta", "id": tid, "json_delta": "{}"}
                 yield {"type": "tool_use_end", "id": tid}
         if tool_meta:
             stop_reason = "tool_use"
