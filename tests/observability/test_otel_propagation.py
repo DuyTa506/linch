@@ -13,18 +13,16 @@ import pytest
 from opentelemetry import context as otel_context
 from opentelemetry import propagate, trace
 
+from tests.support.agents import make_agent
+from tests.support.providers import ScriptedProvider, TextTurn
+
 
 def _agent_for(context, *, provider=None):
-    from linch import Agent, FeatureFlags, InMemorySessionStore
-    from linch.ext.evals import ScriptedProvider, TextTurn
-
-    return Agent(
+    return make_agent(
+        provider or ScriptedProvider([TextTurn("offline answer")]),
         model="test-model",
-        provider=provider or ScriptedProvider([TextTurn("offline answer")]),
         context=context,
-        session_store=InMemorySessionStore(),
-        permissions={"mode": "skip-dangerous"},
-        features=FeatureFlags(skills=False, subagents=False, mcp=False),
+        run_store=None,
         loop_guard=None,
     )
 
@@ -132,7 +130,7 @@ def test_offline_subprocess_does_not_import_sdk():
         import sys
 
         from linch import Agent, FeatureFlags, InMemorySessionStore
-        from linch.ext.evals import ScriptedProvider, TextTurn
+        from tests.support.providers import ScriptedProvider, TextTurn
 
 
         async def main():

@@ -4,27 +4,15 @@ from typing import Any
 
 import pytest
 
+from tests.support.agents import make_agent as support_make_agent
+from tests.support.providers import ScriptedProvider, TextTurn
 
-class Provider:
-    id = "rag-test"
+
+class Provider(ScriptedProvider):
+    """Replay RAG answer text while retaining provider request inspection."""
 
     def __init__(self, answers: list[str] | None = None) -> None:
-        self.answers = answers or ["answer [doc:a]"]
-        self.requests: list[Any] = []
-
-    def context_window(self, model: str) -> int:
-        return 128_000
-
-    async def stream(self, request):
-        from linch import Usage
-
-        self.requests.append(request)
-        yield {"type": "message_start", "model": request.model}
-        yield {
-            "type": "text_delta",
-            "text": self.answers[min(len(self.requests) - 1, len(self.answers) - 1)],
-        }
-        yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
+        super().__init__([TextTurn(answer) for answer in (answers or ["answer [doc:a]"])])
 
 
 class Connector:
@@ -47,16 +35,10 @@ class Connector:
 
 
 def make_agent(provider=None, **kwargs):
-    from linch import Agent, FeatureFlags, InMemorySessionStore, ToolRegistry
+    """Build a non-durable RAG test agent."""
 
-    return Agent(
-        model="test",
-        provider=provider or Provider(),
-        tools=ToolRegistry(),
-        session_store=InMemorySessionStore(),
-        features=FeatureFlags(skills=False, subagents=False, mcp=False),
-        **kwargs,
-    )
+    kwargs.setdefault("run_store", None)
+    return support_make_agent(provider or Provider(), **kwargs)
 
 
 async def drain(session, prompt="original question"):
