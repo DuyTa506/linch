@@ -7,6 +7,7 @@ must retain their persistence/yield ordering.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -200,7 +201,15 @@ def restore_checkpointable_hooks(
 
 
 async def drain_pending_notifications(session: Session, run_id: str) -> AsyncIterator[Event]:
-    """Inject pending background-worker notifications into provider history."""
+    """Inject pending background-worker notifications into provider history.
+
+    Args:
+        session: Session whose queued notifications are delivered at the turn boundary.
+        run_id: Run receiving the persisted notification events.
+
+    Returns:
+        An async generator yielding notification events after their messages are logged.
+    """
     durability = getattr(session.agent, "durability", None)
     if getattr(durability, "durable_inbox", False):
         notifications = getattr(session, "pending_notifications", None)
@@ -215,17 +224,32 @@ async def drain_pending_notifications(session: Session, run_id: str) -> AsyncIte
                 "durable_inbox requires a SessionStore implementing "
                 "enqueue_inbox() and commit_inbox()"
             )
-        stored = await durable_call(
-            session,
-            "session.commit_inbox",
-            cast(Any, commit)(session.id, after_seq=session._last_seq),
+        commit_task = asyncio.create_task(
+            durable_call(
+                session,
+                "session.commit_inbox",
+                cast(Any, commit)(session.id, after_seq=session._last_seq),
+            )
         )
-        if not stored:
-            return
+        cancellation: asyncio.CancelledError | None = None
+        try:
+            stored = await asyncio.shield(commit_task)
+        except asyncio.CancelledError as exc:
+            cancellation = exc
+            while not commit_task.done():
+                try:
+                    await asyncio.shield(commit_task)
+                except BaseException:
+                    continue
+            stored = commit_task.result()
+        # The store commits the whole batch. Publish the same live projection
+        # before advancing its cursor or suspending delivery at an event yield.
+        session.session_log.append_many(row.message for row in stored)
         session._track_seqs(stored)
+        if cancellation is not None:
+            raise cancellation
         for row in stored:
             note = row.message
-            session.session_log.append(note)
             event: Event = UserEvent(message=note, subtype="notification")
             await _persist_event(session, run_id, event)
             yield event
@@ -234,9 +258,23 @@ async def drain_pending_notifications(session: Session, run_id: str) -> AsyncIte
     if not notifications:
         return
     to_drain = list(notifications)
-    notifications.clear()
     for note in to_drain:
-        await session.append([note])
+        append_task = asyncio.create_task(session.append([note]))
+        try:
+            await asyncio.shield(append_task)
+        except asyncio.CancelledError:
+            # A cancelled caller cannot tell whether the backend committed.
+            # Settle the append, including repeated cancellation, before acking
+            # the queue head so retry cannot discard or duplicate the message.
+            while not append_task.done():
+                try:
+                    await asyncio.shield(append_task)
+                except BaseException:
+                    continue
+            if not append_task.cancelled() and append_task.exception() is None:
+                notifications.pop(0)
+            raise
+        notifications.pop(0)
         event: Event = UserEvent(message=note, subtype="notification")
         await _persist_event(session, run_id, event)
         yield event
