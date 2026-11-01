@@ -215,6 +215,30 @@ async def test_current_updated_input_decision_is_not_replayed() -> None:
     assert tool.inputs == [final_input]
 
 
+async def test_permission_request_input_isolated_from_canonical_tool_input() -> None:
+    tool = _RecordingTool()
+
+    async def allow(_request: Any) -> dict[str, str]:
+        return {"behavior": "allow"}
+
+    events: list[Any] = []
+    stream = execute_tool_calls(
+        [ToolUseBlock(id="call", name="Write", input={"file_path": "safe.txt"})],
+        _agent(
+            tool,
+            PermissionEngine(mode="default", can_use_tool=allow),
+        ),
+        _session(),
+        AbortContext(),
+    )
+    async for event in stream:
+        events.append(event)
+        if isinstance(event, PermissionRequestEvent):
+            event.requests[0].input["file_path"] = "mutated-by-listener.txt"
+
+    assert tool.inputs == [{"file_path": "safe.txt"}]
+
+
 def test_matching_bash_ask_survives_all_permission_modes() -> None:
     for mode in ("default", "acceptEdits", "skip-dangerous"):
         engine = PermissionEngine(

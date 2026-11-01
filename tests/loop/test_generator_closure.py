@@ -36,12 +36,14 @@ class _ParallelToolProvider:
         return 100_000
 
     async def stream(self, req: Any) -> AsyncIterator[dict[str, object]]:
+        from linch.types import Usage
+
         yield {"type": "message_start", "model": req.model}
         for tool_id, name in (("fast-id", "Fast"), ("slow-id", "Slow")):
             yield {"type": "tool_use_start", "id": tool_id, "name": name}
             yield {"type": "tool_use_input_delta", "id": tool_id, "json_delta": "{}"}
             yield {"type": "tool_use_end", "id": tool_id}
-        yield {"type": "message_end", "stop_reason": "tool_use"}
+        yield {"type": "message_end", "stop_reason": "tool_use", "usage": Usage()}
 
 
 async def test_closing_after_one_parallel_tool_end_cancels_the_other_tool() -> None:
