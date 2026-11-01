@@ -10,6 +10,8 @@ from uuid import uuid4
 
 import pytest
 
+from tests.support.stores import pg_dsn  # noqa: F401
+
 _PG_SCHEMA = pytest.StashKey[tuple[str, str]]()
 
 
@@ -59,36 +61,3 @@ def pytest_sessionfinish(session: pytest.Session) -> None:
         asyncio.run(drop())
     finally:
         os.environ["AGENT_KIT_TEST_PG_DSN"] = dsn
-
-
-@pytest.fixture
-async def pg_dsn(request):
-    """Give durable cases a fresh schema; memory cases never require Postgres."""
-    params = getattr(getattr(request.node, "callspec", None), "params", {})
-    if any(
-        params.get(name) == "memory"
-        for name in ("kind", "inbox_store", "store_case", "lease_stores")
-    ):
-        yield ""
-        return
-    dsn = os.environ.get("AGENT_KIT_TEST_PG_DSN")
-    if not dsn:
-        pytest.skip("AGENT_KIT_TEST_PG_DSN not set")
-    asyncpg = pytest.importorskip("asyncpg")
-    conn = await asyncpg.connect(dsn)
-    try:
-        schema = f"linch_case_{uuid4().hex}"
-        await conn.execute(f'CREATE SCHEMA "{schema}"')
-        try:
-            parts = urlsplit(dsn)
-            query = [
-                (key, value)
-                for key, value in parse_qsl(parts.query, keep_blank_values=True)
-                if key != "search_path"
-            ]
-            query.append(("search_path", schema))
-            yield urlunsplit(parts._replace(query=urlencode(query)))
-        finally:
-            await conn.execute(f'DROP SCHEMA "{schema}" CASCADE')
-    finally:
-        await conn.close()
