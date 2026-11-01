@@ -320,7 +320,9 @@ class GeminiProvider(BaseProvider):
                     ):
                         stop_reason = "refusal"
                     elif candidate.finish_reason == types.FinishReason.MALFORMED_FUNCTION_CALL:
-                        stop_reason = "error"
+                        raise ProviderError(
+                            "Gemini returned a malformed function call", retryable=True
+                        )
                     for part in candidate.content.parts or [] if candidate.content else []:
                         fc = part.function_call
                         saved = part.model_dump(mode="json", exclude_none=True)
@@ -351,6 +353,8 @@ class GeminiProvider(BaseProvider):
                                     "type": "thinking_delta" if part.thought else "text_delta",
                                     "text": part.text,
                                 }
+        except LinchError:
+            raise
         except Exception as exc:
             raise _map_error(exc) from exc
         yield {
