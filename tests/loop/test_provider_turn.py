@@ -108,6 +108,31 @@ async def test_resumed_tool_results_keep_pending_skill_overlay(monkeypatch: Any)
 
 
 @pytest.mark.asyncio
+async def test_exact_pending_replay_restores_checkpoint_tool_allowlist(monkeypatch: Any) -> None:
+    """A frozen provider replay keeps the checkpoint execution allowlist."""
+    from linch.loop import provider_turn
+
+    checkpoint = SimpleNamespace(
+        phase="provider_pending",
+        turn_index=0,
+        assistant_message=None,
+        current_turn_allowed_tools=["OnlyThis"],
+    )
+    ctx = _preparation_context(resume_checkpoint=checkpoint)
+    ctx.exact_model_input = True
+
+    async def load_request(_signal: Any) -> Any:
+        return SimpleNamespace(tools=[{"name": "OnlyThis"}], tool_choice=None)
+
+    ctx.load_pending_provider_request = load_request
+    monkeypatch.setattr(provider_turn, "_build_context_result", _no_context)
+
+    [event async for event in provider_turn.prepare_provider_turn(ctx)]
+
+    assert ctx.session.current_turn_allowed_tools == ["OnlyThis"]
+
+
+@pytest.mark.asyncio
 async def test_force_final_turn_closes_execution_boundary(monkeypatch: Any) -> None:
     """A forced-final request also denies provider-emitted tool execution."""
     from linch.loop import provider_turn
@@ -219,6 +244,125 @@ async def test_closing_provider_parser_closes_raw_provider_stream() -> None:
     await iterator.aclose()
 
     assert provider.closed is True
+
+
+@pytest.mark.asyncio
+async def test_provider_stream_without_aclose_can_exhaust_normally() -> None:
+    """The provider contract permits async iterators without an ``aclose`` method."""
+    from linch.loop.streaming import _stream_turn
+    from linch.types import Usage
+
+    class IteratorWithoutClose:
+        def __init__(self) -> None:
+            self.events = iter(
+                (
+                    {"type": "message_start", "model": "model"},
+                    {"type": "text_delta", "text": "done"},
+                    {
+                        "type": "message_end",
+                        "stop_reason": "end_turn",
+                        "usage": Usage(),
+                    },
+                )
+            )
+
+        def __aiter__(self) -> Any:
+            return self
+
+        async def __anext__(self) -> Any:
+            try:
+                return next(self.events)
+            except StopIteration:
+                raise StopAsyncIteration from None
+
+    class Provider:
+        def stream(self, _req: Any) -> IteratorWithoutClose:
+            return IteratorWithoutClose()
+
+    session = SimpleNamespace(
+        agent=SimpleNamespace(include_partial_messages=False, provider=Provider())
+    )
+    events = [
+        event async for event in _stream_turn(session, SimpleNamespace(stream_partials=False))
+    ]
+
+    assert len(events) == 1
+
+
+@pytest.mark.asyncio
+async def test_force_final_context_recovery_keeps_tool_choice_disabled(
+    monkeypatch: Any,
+) -> None:
+    """Context-length recovery must preserve the forced-final no-tool choice."""
+    from linch.errors import ContextLengthError
+    from linch.loop import streaming
+
+    async def skip_forced_compaction(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(streaming, "run_forced_compaction", skip_forced_compaction)
+    monkeypatch.setattr(streaming, "_re_inject_skill_context", lambda *args, **kwargs: None)
+    monkeypatch.setattr(streaming, "build_compaction_event", lambda _session: "compacted")
+    monkeypatch.setattr(streaming, "_build_context_result", _no_context)
+
+    session = SimpleNamespace(
+        compaction_retry_used_this_turn=False,
+        current_turn_allowed_tools=[],
+    )
+
+    def mark_compaction_used() -> None:
+        session.compaction_retry_used_this_turn = True
+
+    session.mark_compaction_used = mark_compaction_used
+    request = SimpleNamespace(model="model", tools=[], tool_choice=None, signal=None)
+    rebuilt: list[Any] = []
+    prepared: list[Any] = []
+    dispatches = 0
+
+    async def fake_accounted(*args: Any, **kwargs: Any) -> Any:
+        nonlocal dispatches
+        dispatches += 1
+        if dispatches == 1:
+            raise ContextLengthError("forced final request too large")
+        yield "done"
+
+    def build_request(*args: Any, **kwargs: Any) -> Any:
+        value = SimpleNamespace(model="model", tools=[], tool_choice="required", signal=None)
+        rebuilt.append(value)
+        return value
+
+    async def prepare_provider_call(value: Any, _turn_index: int) -> Any:
+        prepared.append(value)
+        return value
+
+    async def no_op(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(streaming, "_accounted_primary_stream", fake_accounted)
+    monkeypatch.setattr(streaming, "_build_turn_request", build_request)
+    output = [
+        item
+        async for item in streaming._stream_turn_with_recovery(
+            session,
+            SimpleNamespace(),
+            SimpleNamespace(),
+            request,
+            turn_index=0,
+            signal=SimpleNamespace(),
+            ladder=SimpleNamespace(micro=False, max_forced_compactions=1),
+            forced_used=[0],
+            prepare_provider_call=prepare_provider_call,
+            start_provider_call=no_op,
+            end_provider_call=no_op,
+            ledger=SimpleNamespace(),
+            logical_call_id="call",
+            bind_active_primary=no_op,
+        )
+    ]
+
+    assert output == ["compacted", "done"]
+    assert prepared[1] is rebuilt[0]
+    assert rebuilt[0].tool_choice is None
 
 
 async def _no_compaction(*args: Any, **kwargs: Any) -> bool:

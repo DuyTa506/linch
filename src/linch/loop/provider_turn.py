@@ -7,7 +7,7 @@ turn choreographer.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import aclosing
 from dataclasses import dataclass
 from typing import Any
@@ -66,10 +66,10 @@ class ProviderTurnContext:
     end_provider_call: Callable[..., Awaitable[None]]
     bind_active_primary: Callable[..., Awaitable[None]]
     save_checkpoint: Callable[..., Awaitable[None]]
-    drain_auxiliary_usage: Callable[..., AsyncIterator[Event]]
-    emit_primary_usage: Callable[..., AsyncIterator[Event]]
-    emit_error_terminal: Callable[..., AsyncIterator[Event]]
-    emit_budget_exhausted: Callable[..., AsyncIterator[Event]]
+    drain_auxiliary_usage: Callable[..., AsyncGenerator[Event, None]]
+    emit_primary_usage: Callable[..., AsyncGenerator[Event, None]]
+    emit_error_terminal: Callable[..., AsyncGenerator[Event, None]]
+    emit_budget_exhausted: Callable[..., AsyncGenerator[Event, None]]
     dispatch_after_provider_call: Callable[..., Awaitable[Any]]
     persist_event: Callable[..., Awaitable[None]]
     flush_events: Callable[..., Awaitable[Any]]
@@ -116,9 +116,9 @@ class ProviderPreparationContext:
     load_pending_provider_request: Callable[[Any], Awaitable[ProviderRequest]]
     dispatch_before_provider_call: Callable[..., Awaitable[Any]]
     persist_event: Callable[[Event], Awaitable[None]]
-    drain_auxiliary_usage: Callable[[], AsyncIterator[Event]]
+    drain_auxiliary_usage: Callable[[], AsyncGenerator[Event, None]]
     save_checkpoint: Callable[..., Awaitable[None]]
-    emit_budget_exhausted: Callable[..., AsyncIterator[Event]]
+    emit_budget_exhausted: Callable[..., AsyncGenerator[Event, None]]
     maybe_save_provider_snapshot: Callable[..., Awaitable[None]]
     outcome_req: ProviderRequest | None = None
     outcome_context: Any = None
@@ -131,7 +131,7 @@ class ProviderPreparationContext:
     terminal: bool = False
 
 
-async def prepare_provider_turn(ctx: ProviderPreparationContext) -> AsyncIterator[Event]:
+async def prepare_provider_turn(ctx: ProviderPreparationContext) -> AsyncGenerator[Event, None]:
     """Prepare compaction, context, request, and BeforeProviderCall hooks."""
     pending = ctx.session.pending_skill_overlay
     model_override = None
@@ -274,7 +274,7 @@ async def prepare_provider_turn(ctx: ProviderPreparationContext) -> AsyncIterato
     ctx.outcome_model_override = model_override
 
 
-async def run_provider_turn(ctx: ProviderTurnContext) -> AsyncIterator[Event]:
+async def run_provider_turn(ctx: ProviderTurnContext) -> AsyncGenerator[Event, None]:
     """Stream and commit one provider response, preserving yield order."""
     session = ctx.session
     agent = ctx.agent
