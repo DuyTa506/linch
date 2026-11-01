@@ -17,11 +17,14 @@ returns `RetrievedChunk(id, source, text, score, metadata)` values. Install it
 with reversible registrations:
 
 ```python
-from linch import Agent, register_grounding_check, register_rag_connector
+from linch import Agent, Principal, RunOptions, register_grounding_check, register_rag_connector
 
 agent = Agent(...)
-retrieval = register_rag_connector(agent, connector, k=5, principal=host_principal)
+run_principal = Principal("acme", "user-42", {"reader"})
+retrieval = register_rag_connector(agent, connector, k=5, principal=run_principal)
 grounding = register_grounding_check(agent)
+session = await agent.session()
+events = session.run("question", RunOptions(principal=run_principal))
 # Later: await grounding.dispose(); await retrieval.dispose()
 ```
 
@@ -29,8 +32,11 @@ Only one connector may be active per agent. `k` must be a positive integer.
 Chunk ids must be nonempty strings without `]`, carriage returns or newlines.
 Each request renders `[doc:<id>]`, source and text into ephemeral system blocks.
 Retrieval uses the submitted user query across correction retries and durable
-resume; an alignment prompt replaces that query. The principal is passed through
-unchanged: the connector and host own access checks and knowledge scoping.
+resume; an alignment prompt replaces that query. The active principal from
+`RunOptions` is passed through unchanged. If registration supplies `principal`,
+it is an expected-identity guard only: a missing or different active principal
+fails before connector I/O. The connector and host own access checks and
+knowledge scoping.
 
 Grounding requires at least one citation to an id returned by the latest
 retrieval, and rejects any unknown cited id. It checks every final text block,
