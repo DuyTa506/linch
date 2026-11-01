@@ -446,6 +446,8 @@ async def continue_subagent(args: ContinueSubagentArgs) -> RunSubagentResult:
         if child_session._config_seed is not None
         else agent._run_config
     )
+    # Retained configuration survives runs; spending belongs to the current parent run.
+    child_session.inherited_budget = getattr(args.parent_session, "active_budget", None)
     hook_dispatcher = HookDispatcher(config.hooks)
     result: RunSubagentResult | None = None
     try:
