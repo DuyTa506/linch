@@ -118,19 +118,12 @@ def _turn_stopping_feedback_tail(ctx: ResumeContext) -> tuple[Message, ...]:
     if assistant is None:
         return ()
     history = list(ctx.session.full_history)
-    assistant_digest = _message_digest(assistant)
-    assistant_index = next(
-        (
-            index
-            for index in range(len(history) - 1, -1, -1)
-            if history[index].role == "assistant"
-            and _message_digest(history[index]) == assistant_digest
-        ),
-        -1,
-    )
-    if assistant_index < 0:
-        return ()
-    return tuple(history[assistant_index + 1 :])
+    base_count = resume_state.get("feedback_base_count")
+    if type(base_count) is not int or base_count <= 0 or base_count > len(history):
+        raise ConfigError("invalid turn-stopping feedback boundary")
+    if _message_digest(history[base_count - 1]) != _message_digest(assistant):
+        raise ConfigError("turn-stopping feedback boundary differs from its assistant")
+    return tuple(history[base_count:])
 
 
 async def recover_resume(ctx: ResumeContext) -> AsyncGenerator[Event, None]:
