@@ -243,7 +243,7 @@ class SubagentTool:
             signal=ctx.signal,
             emit=emit_fn,
             retain=self._retain_subagents,
-            run_options=RunOptions(principal=ctx.principal),
+            run_options=RunOptions(principal=ctx.principal, deps=ctx.deps),
         )
 
         if run_in_background:

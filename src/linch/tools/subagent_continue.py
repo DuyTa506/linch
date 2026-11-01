@@ -118,7 +118,7 @@ class SubagentContinueTool:
                 subagent_run_id=subagent_run_id,
                 signal=ctx.signal,
                 emit=emit_fn,
-                run_options=RunOptions(principal=ctx.principal),
+                run_options=RunOptions(principal=ctx.principal, deps=ctx.deps),
             )
         )
         result_text = result_text_for_caller(result)
