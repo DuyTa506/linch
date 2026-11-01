@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from linch.events import UserEvent
 from linch.run_store import InMemoryRunStore
 from linch.run_stores.postgres import PostgresRunStore
@@ -49,6 +51,22 @@ async def test_inmemory_append_events_honors_append_event_override() -> None:
     seqs = await store.append_events(run.id, _events("keep", "drop", "keep2"))
     assert seqs == [1, 0, 2]
     assert _labels(await store.load_events(run.id)) == ["keep", "keep2"]
+
+
+async def test_inmemory_event_batch_prevalidates_before_append_event_override() -> None:
+    calls = []
+
+    class Store(InMemoryRunStore):
+        async def append_event(self, run_id: str, event) -> int:
+            calls.append(event)
+            return await super().append_event(run_id, event)
+
+    store = Store()
+    run = await store.create_run("session")
+    with pytest.raises(ValueError):
+        await store.append_events(run.id, [*_events("valid"), object()])
+    assert calls == []
+    assert await store.load_events(run.id) == []
 
 
 async def test_postgres_append_events_atomic_and_contiguous(

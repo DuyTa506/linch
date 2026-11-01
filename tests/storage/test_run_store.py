@@ -1,17 +1,119 @@
+import errno
 import json
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
 from linch.events import ToolCallEndEvent
+from linch.kernel import Context
 from linch.run_store import (
     InMemoryRunStore,
     RunCheckpoint,
     _json_safe,
+    _StoreUnavailableError,
     canonical_json,
+    durable_call,
 )
 from linch.run_stores.postgres import PostgresRunStore
 from linch.tools import Citation, ToolResult
 from linch.types import ToolResultBlock, ToolUseBlock, Usage
+
+
+@pytest.mark.parametrize(
+    ("error", "transient"),
+    [
+        (PermissionError("certificate denied"), False),
+        (FileNotFoundError("certificate missing"), False),
+        (OSError("permanent failure"), False),
+        (OSError(errno.EIO, "device failure"), False),
+        (OSError(errno.ENETUNREACH, "network unreachable"), True),
+        (OSError(errno.EHOSTUNREACH, "host unreachable"), True),
+        (ConnectionError("connection lost"), True),
+        (TimeoutError("query timed out"), True),
+    ],
+)
+async def test_durable_call_classifies_os_failures(error, transient):
+    await _assert_durable_error(error, transient)
+
+
+@pytest.mark.parametrize(
+    ("name", "message", "transient"),
+    [
+        ("DataError", "invalid argument", False),
+        ("_base.DataError", "invalid client argument", False),
+        ("ClientConfigurationError", "invalid SSL configuration", False),
+        ("UnsupportedServerFeatureError", "unsupported server", False),
+        ("InterfaceError", "another operation is in progress", False),
+        ("InterfaceError", "connection is closed", True),
+        ("InterfaceError", "pool is closed", True),
+        ("InterfaceError", "pool is closing", True),
+        ("PostgresConnectionError", "connection lost", True),
+        ("AdminShutdownError", "server shutting down", True),
+        ("CrashShutdownError", "server crashed", True),
+        ("CannotConnectNowError", "server starting up", True),
+        ("TooManyConnectionsError", "server full", True),
+    ],
+)
+@pytest.mark.parametrize("wrapped", [False, True])
+async def test_durable_call_classifies_postgres_failures(name, message, transient, wrapped):
+    asyncpg = pytest.importorskip("asyncpg")
+    if name.startswith("_base."):
+        error = getattr(asyncpg.exceptions._base, name.removeprefix("_base."))(message)
+    else:
+        error = getattr(asyncpg, name)(message)
+    if wrapped:
+        wrapper = RuntimeError("store operation failed")
+        wrapper.__cause__ = error
+        error = wrapper
+    await _assert_durable_error(error, transient)
+
+
+async def _assert_durable_error(error, transient):
+    session = SimpleNamespace(
+        agent=SimpleNamespace(context=Context(), run_store=InMemoryRunStore()), active_run_id="run"
+    )
+
+    async def fail():
+        raise error
+
+    with pytest.raises(_StoreUnavailableError if transient else type(error)) as raised:
+        await durable_call(session, "write", fail())
+    if transient:
+        assert raised.value.__cause__ is error
+    else:
+        assert raised.value is error
+
+
+async def test_in_memory_event_batch_copies_once_and_fences_once():
+    import linch.run_store as run_store
+
+    store = run_store.InMemoryRunStore()
+    await store.create_run("session", id="batch")
+    await store.claim("batch", "owner", 30.0)
+    events = [
+        ToolCallEndEvent(
+            tool_use_id=f"call-{index}",
+            tool_name="Search",
+            result="ok",
+            tool_result=ToolResult(content="ok", metadata={"labels": ["original"]}),
+        )
+        for index in range(2)
+    ]
+    assert await store.append_event("batch", events[0]) == 1
+    with (
+        patch.object(run_store, "_copy_event", wraps=run_store._copy_event) as copy_event,
+        patch.object(store, "_check_lease", wraps=store._check_lease) as check_lease,
+    ):
+        assert await store.append_events("batch", events) == [2, 3]
+        assert (copy_event.call_count, check_lease.call_count) == (2, 1)
+        assert await store.append_events("missing", []) == []
+        assert (copy_event.call_count, check_lease.call_count) == (2, 1)
+    events[0].tool_result.metadata["labels"].append("mutated")
+    events.clear()
+    rows = await store.load_events("batch")
+    assert [row.seq for row in rows] == [1, 2, 3]
+    assert [row.event.tool_result.metadata["labels"] for row in rows] == [["original"]] * 3
 
 
 @pytest.mark.parametrize("kind", ["memory", "postgres"])

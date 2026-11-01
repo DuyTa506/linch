@@ -132,7 +132,7 @@ class PostgresSessionStore:
 
     Args:
         dsn: PostgreSQL connection string (e.g. "postgresql://user:pw@host/dbname").
-        pool: Pre-created asyncpg.Pool to reuse; when set, dsn is ignored.
+        pool: Host-owned asyncpg pool to reuse; when set, dsn is ignored.
         min_size: Minimum pool connections.
         max_size: Maximum pool connections.
     """
@@ -149,7 +149,7 @@ class PostgresSessionStore:
 
         Args:
             dsn: PostgreSQL connection string; ignored when ``pool`` is supplied.
-            pool: Optional pre-created asyncpg pool to reuse.
+            pool: Optional host-owned asyncpg pool; the store never closes it.
             min_size: Minimum size for a store-created connection pool.
             max_size: Maximum size for a store-created connection pool.
         """
@@ -157,6 +157,7 @@ class PostgresSessionStore:
         _import_asyncpg()  # fail fast with install hint if asyncpg missing
         self._dsn = dsn
         self._pool: Any = pool
+        self._owns_pool = pool is None
         self._min_size = min_size
         self._max_size = max_size
         self._initialized = False
@@ -639,7 +640,8 @@ class PostgresSessionStore:
             else:
                 rows = await conn.fetch(
                     "SELECT id, created_at, updated_at, meta, invoked_skills "
-                    "FROM sessions ORDER BY updated_at DESC"
+                    "FROM sessions ORDER BY updated_at DESC OFFSET $1",
+                    offset,
                 )
         return [_record(row) for row in rows]
 
@@ -972,11 +974,9 @@ class PostgresSessionStore:
                 return await _get_task_pg(conn, session_id, task_id)
 
     async def close(self) -> None:
-        """Close the pool held by this store.
+        """Close this store's owned pool.
 
-        Store-created pools and raw caller-supplied pools are closed. A
-        worker-supplied ``_BorrowedPool`` handle is retained for the worker or
-        host to close.
+        Caller-supplied pools are retained; their host owns their lifecycle.
         """
 
         await close_pool(self)

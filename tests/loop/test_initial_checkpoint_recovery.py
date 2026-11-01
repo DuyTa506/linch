@@ -588,7 +588,7 @@ async def test_blocked_prompt_marks_skills_seen_only_after_terminal_commit(termi
     class Store(InMemoryRunStore):
         async def mark_failed(self, *args, **kwargs):
             if terminal_failure:
-                raise OSError("terminal unavailable")
+                raise ConnectionResetError("terminal unavailable")
             return await super().mark_failed(*args, **kwargs)
 
     class BlockFirst:

@@ -52,8 +52,10 @@ class SchemaPool:
         self.closed = True
 
 
-def adapter(pool):
-    return SimpleNamespace(_pool=pool, _initialized=False, _init_lock=asyncio.Lock())
+def adapter(pool, *, owns_pool=False):
+    return SimpleNamespace(
+        _pool=pool, _owns_pool=owns_pool, _initialized=False, _init_lock=asyncio.Lock()
+    )
 
 
 async def verify(store, *, schema_key="run"):
@@ -92,15 +94,15 @@ async def test_failed_verification_preserves_borrowed_pool_and_retries(failure, 
     assert raw.calls == 2
 
 
-async def test_raw_pool_close_and_schema_failure_keep_existing_lifecycle():
+async def test_owned_pool_close_and_schema_failure_keep_existing_lifecycle():
     raw = SchemaPool()
-    store = adapter(raw)
+    store = adapter(raw, owns_pool=True)
     await verify(store)
     await close_pool(store, reset_initialized=True)
     assert raw.closed and store._pool is None and not store._initialized
     raw = SchemaPool()
     raw.failure = RuntimeError
-    store = adapter(raw)
+    store = adapter(raw, owns_pool=True)
     with pytest.raises(RuntimeError):
         await verify(store)
     assert raw.closed and store._pool is None and not store._initialized

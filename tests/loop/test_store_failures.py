@@ -117,7 +117,7 @@ class _FailModelCallJournalStore:
             getattr(event, "type", None) == "model_call" for event in events
         ):
             self.failed = True
-            raise OSError("model-call journal connection lost")
+            raise ConnectionResetError("model-call journal connection lost")
         return await self._inner.append_events(run_id, events)
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import errno
 import hashlib
 import json
 import math
@@ -261,14 +262,26 @@ def _is_transient_store_error(error: BaseException) -> bool:
     current: BaseException | None = error
     while current is not None and id(current) not in seen:
         seen.add(id(current))
-        if isinstance(current, (OSError, ConnectionError)):
+        if isinstance(current, (ConnectionError, TimeoutError)):
+            return True
+        if isinstance(current, OSError) and current.errno in (
+            errno.ENETDOWN,
+            errno.ENETUNREACH,
+            errno.EHOSTDOWN,
+            errno.EHOSTUNREACH,
+        ):
+            return True
+        if (
+            type(current).__module__.startswith("asyncpg.")
+            and type(current).__name__ == "InterfaceError"
+            and str(current) in ("connection is closed", "pool is closed", "pool is closing")
+        ):
             return True
         if any(
             base.__module__.startswith("asyncpg.")
             and base.__name__
             in (
                 "PostgresConnectionError",
-                "InterfaceError",
                 "AdminShutdownError",
                 "CrashShutdownError",
                 "CannotConnectNowError",
@@ -2155,7 +2168,16 @@ class InMemoryRunStore:
         if run_id not in self._runs:
             raise KeyError(f"run not found: {run_id}")
         copies = [_copy_event(event) for event in events]
-        return [await self.append_event(run_id, event) for event in copies]
+        if type(self).append_event is not InMemoryRunStore.append_event:
+            return [await self.append_event(run_id, event) for event in copies]
+        bucket = self._events.setdefault(run_id, [])
+        timestamp = now_iso()
+        seqs = list(range(len(bucket) + 1, len(bucket) + len(copies) + 1))
+        bucket.extend(
+            StoredRunEvent(seq=seq, appended_at=timestamp, event=event)
+            for seq, event in zip(seqs, copies, strict=True)
+        )
+        return seqs
 
     async def load_events(self, run_id: str, *, after_seq: int = 0) -> list[StoredRunEvent]:
         """Load detached events after an exclusive sequence watermark.

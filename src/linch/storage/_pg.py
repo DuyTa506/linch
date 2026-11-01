@@ -66,8 +66,21 @@ async def ensure_pool(
 ) -> Any:
     """Lazily initialize a store's pool and schema under its existing lock.
 
-    The store retains its lifecycle attributes and module-level driver import
-    hook. Supplied pools follow the same cleanup policy as created pools.
+    Store-created pools are closed on initialization failure. Caller-supplied
+    pools remain available for retries and other stores sharing them.
+
+    Args:
+        store: Adapter holding the pool, ownership flag, and initialization lock.
+        schema: DDL to execute after schema verification.
+        import_asyncpg: Adapter's driver import hook.
+        schema_key: Schema metadata key for this adapter.
+        tables: Tables that must not exist without matching schema metadata.
+        required_columns: Columns required in an existing versioned schema.
+        advisory_lock_key: Additional transaction lock for this adapter.
+        allow_missing_pool_on_error: Whether cleanup tolerates a missing owned pool.
+
+    Returns:
+        The initialized pool retained by the store.
     """
     if store._initialized:
         return store._pool
@@ -135,7 +148,7 @@ async def ensure_pool(
                         WIRE_VERSION,
                     )
         except Exception:
-            if borrowed is not None:
+            if not store._owns_pool:
                 raise
             pool, store._pool = store._pool, None
             if pool is not None or not allow_missing_pool_on_error:
@@ -148,8 +161,13 @@ async def ensure_pool(
 
 
 async def close_pool(store: Any, *, reset_initialized: bool = False) -> None:
-    """Close supplied raw pools; borrowed worker handles retain initialized stores."""
-    if isinstance(store._pool, _BorrowedPool):
+    """Close a store-owned pool while retaining caller-supplied pools.
+
+    Args:
+        store: Adapter holding the pool and its ownership flag.
+        reset_initialized: Whether closing an owned pool resets initialization.
+    """
+    if not store._owns_pool:
         return
     if store._pool is not None:
         await store._pool.close()
