@@ -26,6 +26,7 @@ The tables below group the 2.x removals and replacements by area.
 | `SessionLog.derive_messages()` | Read `session.provider_view`; append with `await session.append(...)` |
 | Mutation of `provider_view` / `full_history` | Detached sequence snapshots; append messages or record a logged projection |
 | `AgentMiddleware` and obsolete middleware dispatch/outcome helpers | Duck-typed hooks through `ToolMiddlewareHook`; `from linch import ToolMiddlewareHook` |
+| Built-in `Read`/`Write`/`Edit`/`Glob` argument aliases (`path`, `old`, `new`, `pattern`) | Canonical `file_path`, `old_string`, `new_string`, `glob_pattern`, and `target_directory` keys |
 | Background completion writing directly into notification lists | Custom sessions implement async `notify(...)` |
 | `parallel_safe` fallback | Declare `parallel`: read tools use a boolean opt-in; an input-aware predicate may also admit calls in another scope, such as a subagent restricted to read tools |
 | Ambiguous worker display names for `SubagentContinue` or `TaskStop` | Pass the unique `worker_id`; unique display names remain accepted |
