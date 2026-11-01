@@ -26,8 +26,9 @@ agent = Agent(model="gpt-5", session_store=sessions, run_store=runs)
 
 Close stores with `await store.close()` when their host shuts down.
 `PostgresRunStore` accepts `pool=`, `min_size=`, and `max_size=` like the
-Postgres session store. A supplied pool follows the store's lifecycle; closing
-the store closes that pool.
+Postgres session store. A supplied pool belongs to its host; stores never close
+it, including after initialization failure. The host closes it after all stores
+using it have stopped.
 
 Store-owned pools use asyncpg 0.32's `reset=` hook. The driver performs its
 internal rollback/cancellation cleanup on release, and the Linch callback
