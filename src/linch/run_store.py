@@ -233,6 +233,7 @@ class RunLease:
         owner: Unique worker or process identifier holding the lease.
         epoch: Monotonically increasing fencing token for the run.
         expires_at: Lease expiry as a Unix timestamp.
+        ttl_s: Renewal duration carried by this immutable token.
 
     Attributes:
         run_id: Run whose writes this lease may fence.
@@ -359,7 +360,7 @@ class RunLeaseStore(Protocol):
         """Extend a currently held lease without changing its epoch.
 
         Args:
-            lease: Lease returned by this store instance's latest claim.
+            lease: Immutable owner, epoch, and renewal-duration token.
 
         Returns:
             A lease with the same owner and epoch and a later expiry.
@@ -555,6 +556,7 @@ class RunStore(Protocol):
             id: Optional stable run identifier; a UUID is generated when omitted.
             meta: JSON-safe metadata to persist with the run.
             initial_checkpoint: Checkpoint to persist with the new running record.
+            lease: Explicit owner/epoch token for pending adoption; omit for an unleased creation.
 
         Returns:
             The detached running record.
@@ -593,13 +595,14 @@ class RunStore(Protocol):
             run_id: Run whose checkpoint should be replaced.
             checkpoint: Resumable state to persist.
             status: Status to store alongside the checkpoint.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
             The detached updated run record.
 
         Raises:
             KeyError: If the run does not exist.
-            LeaseLostError: If this instance's fencing lease is stale.
+            LeaseLostError: If the supplied lease token is stale or mismatched.
             TypeError: If checkpoint data cannot be encoded.
         """
 
@@ -621,6 +624,7 @@ class RunStore(Protocol):
             checkpoint: Resumable state to persist.
             events: Events to append in the supplied order.
             status: Status to store alongside the checkpoint.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
             The detached updated record and 1-based sequence numbers parallel to
@@ -628,7 +632,7 @@ class RunStore(Protocol):
 
         Raises:
             KeyError: If the run does not exist.
-            LeaseLostError: If this instance's fencing lease is stale.
+            LeaseLostError: If the supplied lease token is stale or mismatched.
             TypeError: If checkpoint or event data cannot be encoded.
         """
 
@@ -642,13 +646,14 @@ class RunStore(Protocol):
         Args:
             run_id: Run whose event log should receive the event.
             event: Typed event to persist.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
             The sequence number assigned to ``event``.
 
         Raises:
             KeyError: If the run does not exist.
-            LeaseLostError: If this instance's fencing lease is stale.
+            LeaseLostError: If the supplied lease token is stale or mismatched.
             TypeError: If an event cannot be encoded.
         """
 
@@ -675,13 +680,14 @@ class RunStore(Protocol):
         Args:
             run_id: Run to complete.
             checkpoint: Final checkpoint whose phase is set to ``completed``.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
             The detached completed record.
 
         Raises:
             KeyError: If the run does not exist.
-            LeaseLostError: If this instance's fencing lease is stale.
+            LeaseLostError: If the supplied lease token is stale or mismatched.
         """
 
         ...
@@ -702,13 +708,14 @@ class RunStore(Protocol):
             checkpoint: Optional final checkpoint whose phase becomes ``failed``.
             error: Optional JSON-safe error metadata appended to the run history.
             events: Terminal events to append with the failed state.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
             The detached failed record and 1-based sequence numbers for ``events``.
 
         Raises:
             KeyError: If the run does not exist.
-            LeaseLostError: If this instance's fencing lease is stale.
+            LeaseLostError: If the supplied lease token is stale or mismatched.
         """
 
         ...
@@ -730,10 +737,11 @@ class RunEventBatchStore(Protocol):
         Args:
             run_id: Run whose event log should receive the batch.
             events: Typed events to persist in order.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
             The assigned 1-based sequence numbers in input order; an empty
-            batch returns ``[]`` without run lookup or lease fencing.
+            batch returns ``[]``; a supplied lease is still validated before returning.
 
         Raises:
             KeyError: If a non-empty batch targets a missing run.
@@ -761,13 +769,14 @@ class ModelInputSnapshotStore(Protocol):
             run_id: Run that owns the pending provider request.
             provider_attempt: Positive attempt number associated with the request.
             request: Provider request to encode without its live abort signal.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
             The immutable encoded snapshot.
 
         Raises:
             KeyError: If the run does not exist.
-            LeaseLostError: If this instance's fencing lease is stale.
+            LeaseLostError: If the supplied lease token is stale or mismatched.
             ValueError: If ``provider_attempt`` is invalid.
             TypeError: If the request contains unsupported data.
             ModelInputSnapshotError: If the request cannot be encoded safely.
@@ -796,9 +805,10 @@ class ModelInputSnapshotStore(Protocol):
         Args:
             snapshot_id: Snapshot identifier to delete.
             run_id: Run that must own the snapshot.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Raises:
-            LeaseLostError: If this instance's fencing lease is stale.
+            LeaseLostError: If the supplied lease token is stale or mismatched.
 
         A snapshot belonging to another run, or an unknown snapshot, is not
         deleted. Backends may report an unknown run according to their storage
@@ -815,12 +825,13 @@ class ModelInputSnapshotStore(Protocol):
         Args:
             run_id: Run whose snapshots should be pruned.
             keep_ids: Snapshot identifiers to retain.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
             Number of snapshots deleted.
 
         Raises:
-            LeaseLostError: If this instance's fencing lease is stale.
+            LeaseLostError: If the supplied lease token is stale or mismatched.
 
         Backends may report an unknown run according to their storage semantics.
         """
@@ -1889,9 +1900,15 @@ def _lease_kwargs(method: Any, lease: RunLease | None) -> dict[str, Any]:
 
 
 def _validate_lease_run(run_id: str, lease: RunLease | None) -> None:
-    """Reject a token that names a different run before a mutation starts."""
-    if lease is not None and lease.run_id != run_id:
+    """Reject malformed or wrong-run tokens before a mutation starts."""
+    if lease is None:
+        return
+    if lease.run_id != run_id:
         raise LeaseLostError(f"lease run {lease.run_id} does not match target run {run_id}")
+    if not isinstance(lease.owner, str):
+        raise LeaseLostError(f"lease for run {run_id} has no valid owner")
+    if isinstance(lease.epoch, bool) or not isinstance(lease.epoch, int) or lease.epoch < 1:
+        raise LeaseLostError(f"lease for run {run_id} has no valid epoch")
 
 
 def _preflight_leased_store(
@@ -1961,6 +1978,7 @@ class InMemoryRunStore:
             id: Optional stable run identifier; a UUID is generated when omitted.
             meta: JSON-safe metadata to persist with the run.
             initial_checkpoint: Checkpoint to persist with the running record.
+            lease: Explicit owner/epoch token for pending adoption; omit for an unleased creation.
 
         Returns:
             A detached running record.
@@ -1976,9 +1994,10 @@ class InMemoryRunStore:
         rid = id or str(uuid4())
         existing = self._runs.get(rid)
         if existing is not None:
+            _validate_lease_run(rid, lease)
+            self._check_lease(rid, lease)
             if existing.status != "pending":
                 raise ValueError(f"run {rid} already exists")
-            self._check_lease(rid, lease)
             if existing.session_id != session_id:
                 raise ValueError(f"run {rid} belongs to session {existing.session_id}")
             incoming_meta = _safe_meta(meta)
@@ -2049,7 +2068,7 @@ class InMemoryRunStore:
         """Extend a held lease without changing its fencing epoch.
 
         Args:
-            lease: Lease returned by this store instance's latest claim.
+            lease: Immutable owner, epoch, and renewal-duration token.
 
         Returns:
             The same lease identity with a refreshed expiry timestamp.
@@ -2058,6 +2077,7 @@ class InMemoryRunStore:
             LeaseLostError: If the lease is stale, expired, or no longer held.
         """
 
+        _validate_lease_run(lease.run_id, lease)
         current_owner, expires_at, epoch = self._lease_state.get(lease.run_id, (None, None, 0))
         if (
             epoch != lease.epoch
@@ -2081,16 +2101,16 @@ class InMemoryRunStore:
             LeaseLostError: If the lease no longer matches the stored owner or epoch.
         """
 
+        _validate_lease_run(lease.run_id, lease)
         current_owner, _expires_at, epoch = self._lease_state.get(lease.run_id, (None, None, 0))
         if epoch != lease.epoch or current_owner != lease.owner:
             raise _lease_lost(lease.run_id, lease.epoch, epoch)
         self._lease_state[lease.run_id] = (None, None, lease.epoch + 1)
 
     def _check_lease(self, run_id: str, lease: RunLease | None = None) -> None:
+        _validate_lease_run(run_id, lease)
         if lease is None:
             return
-        if lease.run_id != run_id:
-            raise _lease_lost(run_id, lease.epoch)
         current = self._lease_state.get(run_id)
         if current is None:
             raise _lease_lost(run_id, lease.epoch)
@@ -2125,13 +2145,14 @@ class InMemoryRunStore:
             run_id: Run whose checkpoint should be replaced.
             checkpoint: Resumable state to persist.
             status: Status to store alongside the checkpoint.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
             A detached updated run record.
 
         Raises:
             KeyError: If the run does not exist.
-            LeaseLostError: If this instance's fencing lease is stale.
+            LeaseLostError: If the supplied lease token is stale or mismatched.
         """
 
         self._check_lease(run_id, lease)
@@ -2157,13 +2178,14 @@ class InMemoryRunStore:
             checkpoint: Resumable state to persist.
             events: Events to append in the supplied order.
             status: Status to store alongside the checkpoint.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
             The detached updated record and sequence numbers parallel to ``events``.
 
         Raises:
             KeyError: If the run does not exist.
-            LeaseLostError: If this instance's fencing lease is stale.
+            LeaseLostError: If the supplied lease token is stale or mismatched.
             TypeError: If an event or checkpoint cannot be encoded.
         """
 
@@ -2191,13 +2213,14 @@ class InMemoryRunStore:
         Args:
             run_id: Run whose event log should receive the event.
             event: Typed event to persist.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
             The sequence number assigned to ``event``.
 
         Raises:
             KeyError: If the run does not exist.
-            LeaseLostError: If this instance's fencing lease is stale.
+            LeaseLostError: If the supplied lease token is stale or mismatched.
             TypeError: If the event cannot be encoded.
         """
 
@@ -2217,10 +2240,11 @@ class InMemoryRunStore:
         Args:
             run_id: Run whose event log should receive the events.
             events: Typed events to append in input order.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
             Sequence numbers returned for each input event, in the same order;
-            an empty batch returns ``[]`` without run lookup or lease fencing.
+            an empty batch returns ``[]``; a supplied lease is still validated.
 
         Raises:
             KeyError: If a non-empty batch targets a missing run.
@@ -2281,13 +2305,14 @@ class InMemoryRunStore:
             run_id: Run that owns the pending provider request.
             provider_attempt: Positive, 1-based provider dispatch attempt.
             request: Provider request to encode without its live abort signal.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
             The immutable encoded snapshot.
 
         Raises:
             KeyError: If the run does not exist.
-            LeaseLostError: If this instance's fencing lease is stale.
+            LeaseLostError: If the supplied lease token is stale or mismatched.
             ValueError: If ``provider_attempt`` is invalid.
             TypeError: If the request contains unsupported data.
             ModelInputSnapshotError: If snapshot validation fails.
@@ -2322,9 +2347,10 @@ class InMemoryRunStore:
         Args:
             snapshot_id: Snapshot identifier to delete.
             run_id: Run that must own the snapshot.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Raises:
-            LeaseLostError: If this instance's fencing lease is stale.
+            LeaseLostError: If the supplied lease token is stale or mismatched.
         """
 
         self._check_lease(run_id, lease)
@@ -2341,12 +2367,13 @@ class InMemoryRunStore:
         Args:
             run_id: Run whose snapshots should be pruned.
             keep_ids: Snapshot identifiers to retain.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
             Number of snapshots deleted.
 
         Raises:
-            LeaseLostError: If this instance's fencing lease is stale.
+            LeaseLostError: If the supplied lease token is stale or mismatched.
         """
 
         self._check_lease(run_id, lease)
@@ -2368,18 +2395,24 @@ class InMemoryRunStore:
         Args:
             run_id: Run to complete.
             checkpoint: Final checkpoint whose phase is set to ``completed``.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
             A detached completed record.
 
         Raises:
             KeyError: If the run does not exist.
-            LeaseLostError: If this instance's fencing lease is stale.
+            LeaseLostError: If the supplied lease token is stale or mismatched.
         """
 
         self._check_lease(run_id, lease)
         checkpoint.phase = "completed"
-        return await self.save_checkpoint(run_id, checkpoint, status="completed", lease=lease)
+        return await self.save_checkpoint(
+            run_id,
+            checkpoint,
+            status="completed",
+            **_lease_kwargs(self.save_checkpoint, lease),
+        )
 
     async def mark_failed(
         self,
@@ -2397,13 +2430,14 @@ class InMemoryRunStore:
             checkpoint: Optional final checkpoint whose phase becomes ``failed``.
             error: Optional JSON-safe error metadata appended to the run history.
             events: Terminal events to append with the failed state.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
             The detached failed record and sequence numbers parallel to ``events``.
 
         Raises:
             KeyError: If the run does not exist.
-            LeaseLostError: If this instance's fencing lease is stale.
+            LeaseLostError: If the supplied lease token is stale or mismatched.
             TypeError: If a checkpoint or event cannot be encoded.
         """
 

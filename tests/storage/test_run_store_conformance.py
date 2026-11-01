@@ -257,6 +257,44 @@ async def test_event_batch_encoding_failure_is_atomic(store_case) -> None:
     assert await store.append_event(run_id, _event("after")) == 2
 
 
+async def test_leased_event_encoding_failure_is_atomic(store_case) -> None:
+    """A leased invalid batch cannot partially update the run or event log."""
+    store = store_case.store
+    run_id = f"leased-batch-encoding-{uuid4()}"
+    await store.create_run("session", id=run_id)
+    lease = await store.claim(run_id, "owner", 30.0)
+    await store.save_checkpoint(run_id, _checkpoint("before"), lease=lease)
+    await store.append_event(run_id, _event("before"), lease=lease)
+    before = await store.load_run(run_id)
+    before_events = await store.load_events(run_id)
+    with pytest.raises(ValueError):
+        await store.append_events(run_id, [_event("valid prefix"), object()], lease=lease)
+    with pytest.raises(ValueError):
+        await store.save_checkpoint_with_events(
+            run_id, _checkpoint("invalid phase"), [object()], lease=lease
+        )
+    assert await store.load_run(run_id) == before
+    assert await store.load_events(run_id) == before_events
+    await store.save_checkpoint(run_id, _checkpoint("after"), lease=lease)
+    await store.release(lease)
+
+
+async def test_leased_returned_records_are_detached(store_case: _StoreCase) -> None:
+    """A leased write returns an isolated record snapshot."""
+    store = store_case.store
+    run_id = f"leased-detached-{uuid4()}"
+    await store.create_run("session", id=run_id)
+    lease = await store.claim(run_id, "owner", 30.0)
+    saved = await store.save_checkpoint(run_id, _checkpoint("detached"), lease=lease)
+    assert saved.checkpoint is not None
+    saved.checkpoint.extension_state["nested"]["labels"].append("caller")
+    loaded = await store.load_run(run_id)
+    assert loaded is not None
+    assert loaded.checkpoint is not None
+    assert loaded.checkpoint.extension_state["nested"]["labels"] == ["a", "b"]
+    await store.release(lease)
+
+
 @pytest.mark.parametrize("staleness", ["epoch", "owner"])
 async def test_stale_release_preserves_current_local_lease(store_case, staleness) -> None:
     from dataclasses import replace
@@ -298,6 +336,56 @@ async def test_run_store_concurrent_claim_has_one_winner(store_case: _StoreCase)
     conflicts = [result for result in results if isinstance(result, RunLeaseConflictError)]
     assert len(winners) == 1
     assert len(conflicts) == 1
+
+
+async def test_unleased_public_delegates_support_legacy_override_signatures(
+    store_case: _StoreCase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Omitted leases stay compatible while supplied leases fail closed."""
+    store = store_case.store
+    run_id = f"legacy-delegates-{uuid4()}"
+    await store.create_run("session", id=run_id)
+    lease = await store.claim(run_id, "owner", 30.0)
+    if isinstance(store, PostgresRunStore):
+        original_phase = store.save_checkpoint_with_events
+
+        async def legacy_phase(run_id, checkpoint, events, *, status="running"):
+            return await original_phase(run_id, checkpoint, events, status=status)
+
+        monkeypatch.setattr(store, "save_checkpoint_with_events", legacy_phase)
+        await store.save_checkpoint(run_id, _checkpoint("unleased phase"))
+        with pytest.raises(TypeError, match="does not support lease"):
+            await store.save_checkpoint(run_id, _checkpoint("leased phase"), lease=lease)
+
+        original_batch = store.append_events
+
+        async def legacy_batch(run_id, events):
+            return await original_batch(run_id, events)
+
+        monkeypatch.setattr(store, "append_events", legacy_batch)
+        await store.append_event(run_id, _event("unleased event"))
+        with pytest.raises(TypeError, match="does not support lease"):
+            await store.append_event(run_id, _event("leased event"), lease=lease)
+
+        original_checkpoint = store.save_checkpoint
+
+        async def legacy_checkpoint(run_id, checkpoint, *, status="running"):
+            return await original_checkpoint(run_id, checkpoint, status=status)
+
+        monkeypatch.setattr(store, "save_checkpoint", legacy_checkpoint)
+        await store.mark_completed(run_id, _checkpoint("unleased complete"))
+        with pytest.raises(TypeError, match="does not support lease"):
+            await store.mark_completed(run_id, _checkpoint("leased complete"), lease=lease)
+    else:
+        original_checkpoint = store.save_checkpoint
+
+        async def legacy_checkpoint(run_id, checkpoint, *, status="running"):
+            return await original_checkpoint(run_id, checkpoint, status=status)
+
+        monkeypatch.setattr(store, "save_checkpoint", legacy_checkpoint)
+        await store.mark_completed(run_id, _checkpoint("unleased complete"))
+        with pytest.raises(TypeError, match="does not support lease"):
+            await store.mark_completed(run_id, _checkpoint("leased complete"), lease=lease)
 
 
 async def test_run_store_concurrent_create_same_id_rejects_existing_id(

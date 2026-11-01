@@ -26,7 +26,9 @@ from ..run_store import (
     _append_run_error,
     _json_safe,
     _json_safe_stored_event,
+    _lease_kwargs,
     _safe_meta,
+    _validate_lease_run,
     _validate_lease_ttl,
     _validate_model_input_snapshot,
     checkpoint_from_dict,
@@ -179,6 +181,7 @@ class PostgresRunStore:
             id: Optional stable run identifier; a UUID is generated when omitted.
             meta: JSON-safe metadata to persist with the run.
             initial_checkpoint: Checkpoint to commit with the running row.
+            lease: Explicit owner/epoch token for pending adoption; omit for an unleased creation.
 
         Returns:
             The detached running record.
@@ -200,35 +203,29 @@ class PostgresRunStore:
             else None
         )
         async with pool.acquire() as conn:
-            if lease is not None:
-                if lease.run_id != rid:
-                    raise LeaseLostError(f"lease lost for run {rid}")
-                exists = await conn.fetchval("SELECT 1 FROM runs WHERE id = $1", rid)
-                if exists is None:
-                    raise LeaseLostError(f"lease lost for run {rid}")
-            ts = now_iso()
-            row = await conn.fetchrow(
-                """
-                INSERT INTO runs
-                    (id, session_id, status, created_at, updated_at, checkpoint, meta)
-                VALUES ($1, $2, 'running', $3, $3, $5, $4)
-                ON CONFLICT (id) DO NOTHING
-                RETURNING id, session_id, status, created_at, updated_at, checkpoint, meta
-                """,
-                rid,
-                session_id,
-                ts,
-                json.dumps(safe_meta, allow_nan=False),
-                payload,
-            )
-            if row is not None:
-                if lease is not None:
-                    raise LeaseLostError(f"lease lost for run {rid}")
-                return _row_record(row)
+            if lease is None:
+                ts = now_iso()
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO runs
+                        (id, session_id, status, created_at, updated_at, checkpoint, meta)
+                    VALUES ($1, $2, 'running', $3, $3, $5, $4)
+                    ON CONFLICT (id) DO NOTHING
+                    RETURNING id, session_id, status, created_at, updated_at, checkpoint, meta
+                    """,
+                    rid,
+                    session_id,
+                    ts,
+                    json.dumps(safe_meta, allow_nan=False),
+                    payload,
+                )
+                if row is not None:
+                    return _row_record(row)
+            else:
+                _validate_lease_run(rid, lease)
 
-            # Adoption of a caller-created pending row is the conflict path.
-            # It needs a row lock while validating session/contract ownership;
-            # normal run creation above remains one autocommit statement.
+            # A conflicting caller-created row is adopted under a lock.  An
+            # explicit lease skips the INSERT fast path and must find its row.
             async with conn.transaction():
                 row = await conn.fetchrow(
                     "SELECT id, session_id, status, created_at, updated_at, checkpoint, meta, "
@@ -237,12 +234,14 @@ class PostgresRunStore:
                     rid,
                 )
                 if row is None:
+                    if lease is not None:
+                        raise LeaseLostError(f"lease lost for run {rid}")
                     raise KeyError(f"run not found: {rid}")
+                self._assert_fence(rid, row, lease)
                 if row["status"] != "pending":
                     raise ValueError(f"run {rid} already exists")
                 if str(row["session_id"]) != session_id:
                     raise ValueError(f"run {rid} belongs to session {row['session_id']}")
-                self._assert_fence(rid, row, lease)
                 stored_meta = _safe_meta(
                     json.loads(row["meta"]) if isinstance(row["meta"], str) else row["meta"]
                 )
@@ -264,7 +263,7 @@ class PostgresRunStore:
                     WHERE id = $3
                     RETURNING id, session_id, status, created_at, updated_at, checkpoint, meta
                     """,
-                    ts,
+                    now_iso(),
                     json.dumps(merged_meta, allow_nan=False),
                     rid,
                     payload,
@@ -349,6 +348,7 @@ class PostgresRunStore:
         return _row_record(row) if row is not None else None
 
     def _assert_fence(self, run_id: str, row: Any, lease: RunLease | None = None) -> None:
+        _validate_lease_run(run_id, lease)
         if lease is not None and (
             lease.run_id != run_id
             or int(row["lease_epoch"] or 0) != lease.epoch
@@ -360,6 +360,7 @@ class PostgresRunStore:
             )
 
     def _fence_values(self, run_id: str, lease: RunLease | None = None) -> tuple[str | None, int]:
+        _validate_lease_run(run_id, lease)
         if lease is None:
             return None, 0
         if lease.run_id != run_id:
@@ -374,6 +375,8 @@ class PostgresRunStore:
             run_id,
         )
         if row is None:
+            if lease is not None:
+                raise LeaseLostError(f"lease lost for run {run_id}")
             raise KeyError(f"run not found: {run_id}")
         if lease is not None:
             raise LeaseLostError(
@@ -396,17 +399,22 @@ class PostgresRunStore:
             run_id: Run whose checkpoint should be replaced.
             checkpoint: Resumable state to persist.
             status: Status to store alongside the checkpoint.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
             The detached updated run record.
 
         Raises:
             KeyError: If the run does not exist.
-            LeaseLostError: If this instance's fencing lease is stale.
+            LeaseLostError: If the supplied lease token is stale or mismatched.
         """
 
         record, _ = await self.save_checkpoint_with_events(
-            run_id, checkpoint, (), status=status, lease=lease
+            run_id,
+            checkpoint,
+            (),
+            status=status,
+            **_lease_kwargs(self.save_checkpoint_with_events, lease),
         )
         return record
 
@@ -418,16 +426,23 @@ class PostgresRunStore:
         Args:
             run_id: Run whose event log should receive the event.
             event: Typed event to persist.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
             The 1-based sequence number assigned to ``event``.
 
         Raises:
             KeyError: If the run does not exist.
-            LeaseLostError: If this instance's fencing lease is stale.
+            LeaseLostError: If the supplied lease token is stale or mismatched.
         """
 
-        return (await self.append_events(run_id, [event], lease=lease))[0]
+        return (
+            await self.append_events(
+                run_id,
+                [event],
+                **_lease_kwargs(self.append_events, lease),
+            )
+        )[0]
 
     async def _write_event_rows(
         self,
@@ -482,6 +497,7 @@ class PostgresRunStore:
             checkpoint: Resumable state to persist.
             events: Events to append in the supplied order.
             status: Status to store alongside the checkpoint.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
             The detached updated record and 1-based sequence numbers parallel to
@@ -489,7 +505,7 @@ class PostgresRunStore:
 
         Raises:
             KeyError: If the run does not exist.
-            LeaseLostError: If this instance's fencing lease is stale.
+            LeaseLostError: If the supplied lease token is stale or mismatched.
             TypeError: If checkpoint or event data cannot be encoded.
         """
 
@@ -525,11 +541,11 @@ class PostgresRunStore:
         Args:
             run_id: Run whose event log should receive the batch.
             events: Typed events to persist in input order.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
             Contiguous 1-based sequence numbers parallel to ``events``; an empty
-            input returns an empty list without a database lookup or lease
-            fence check.
+            input returns an empty list; a supplied lease is still validated.
 
         Raises:
             KeyError: If a non-empty batch targets a missing run.
@@ -590,15 +606,14 @@ class PostgresRunStore:
 
     async def _assert_current_lease(self, run_id: str, lease: RunLease) -> None:
         """Check an explicit token for no-op mutations before returning."""
-        if lease.run_id != run_id:
-            raise LeaseLostError(f"lease lost for run {run_id}")
+        _validate_lease_run(run_id, lease)
         pool = await self._ensure()
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT lease_owner, lease_epoch FROM runs WHERE id = $1", run_id
             )
         if row is None:
-            raise KeyError(f"run not found: {run_id}")
+            raise LeaseLostError(f"lease lost for run {run_id}")
         self._assert_fence(
             run_id,
             {
@@ -616,17 +631,23 @@ class PostgresRunStore:
         Args:
             run_id: Run to complete.
             checkpoint: Final checkpoint whose phase is set to ``completed``.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
             The detached completed record.
 
         Raises:
             KeyError: If the run does not exist.
-            LeaseLostError: If this instance's fencing lease is stale.
+            LeaseLostError: If the supplied lease token is stale or mismatched.
         """
 
         checkpoint.phase = "completed"
-        return await self.save_checkpoint(run_id, checkpoint, status="completed", lease=lease)
+        return await self.save_checkpoint(
+            run_id,
+            checkpoint,
+            status="completed",
+            **_lease_kwargs(self.save_checkpoint, lease),
+        )
 
     async def mark_failed(
         self,
@@ -644,6 +665,7 @@ class PostgresRunStore:
             checkpoint: Optional final checkpoint whose phase becomes ``failed``.
             error: Optional JSON-safe error metadata appended to the run history.
             events: Terminal events to append with the failed state.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
             The detached failed record and 1-based sequence numbers parallel to
@@ -651,7 +673,7 @@ class PostgresRunStore:
 
         Raises:
             KeyError: If the run does not exist.
-            LeaseLostError: If this instance's fencing lease is stale.
+            LeaseLostError: If the supplied lease token is stale or mismatched.
             TypeError: If checkpoint, error, or event data cannot be encoded.
         """
 
@@ -773,16 +795,17 @@ class PostgresRunStore:
         """Renew a matching live lease without changing its epoch.
 
         Args:
-            lease: Lease returned by this store instance's latest claim.
+            lease: Immutable owner, epoch, and renewal-duration token.
 
         Returns:
             The same lease identity with a refreshed expiry timestamp.
 
         Raises:
-            LeaseLostError: If the local lease is stale, expired, or no longer
-                matches the stored owner and epoch.
+            LeaseLostError: If the supplied lease token is stale, expired, or no
+                longer matches the stored owner and epoch.
         """
 
+        _validate_lease_run(lease.run_id, lease)
         ttl_s = _validate_lease_ttl(lease.ttl_s)
         pool = await self._ensure()
         async with pool.acquire() as conn:
@@ -816,6 +839,7 @@ class PostgresRunStore:
             LeaseLostError: If another holder has already changed the owner or epoch.
         """
 
+        _validate_lease_run(lease.run_id, lease)
         pool = await self._ensure()
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -848,13 +872,14 @@ class PostgresRunStore:
             run_id: Run that owns the pending provider request.
             provider_attempt: Positive, 1-based provider dispatch attempt.
             request: Provider request to encode without its live abort signal.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
             The immutable encoded snapshot.
 
         Raises:
             KeyError: If the run does not exist.
-            LeaseLostError: If this instance's fencing lease is stale.
+            LeaseLostError: If the supplied lease token is stale or mismatched.
             ValueError: If ``provider_attempt`` is invalid.
             TypeError: If the request contains unsupported data.
             ModelInputSnapshotError: If snapshot validation fails.
@@ -973,10 +998,11 @@ class PostgresRunStore:
         Args:
             snapshot_id: Snapshot identifier to delete.
             run_id: Run that must own the snapshot.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Raises:
             KeyError: If the run does not exist.
-            LeaseLostError: If this instance's fencing lease is stale.
+            LeaseLostError: If the supplied lease token is stale or mismatched.
         """
 
         await self._delete_snapshots(run_id, (snapshot_id,), "snapshots.id = $2", lease)
@@ -989,13 +1015,14 @@ class PostgresRunStore:
         Args:
             run_id: Run whose snapshots should be pruned.
             keep_ids: Snapshot identifiers to retain.
+            lease: Explicit owner/epoch token; omit for an unleased mutation.
 
         Returns:
             Number of snapshots deleted.
 
         Raises:
             KeyError: If the run does not exist.
-            LeaseLostError: If this instance's fencing lease is stale.
+            LeaseLostError: If the supplied lease token is stale or mismatched.
         """
 
         return await self._delete_snapshots(
