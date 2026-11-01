@@ -21,6 +21,7 @@ sequenceDiagram
 
     loop Each turn
         RL->>SK: inject skill context (if skill active)
+        Note over RL: sync_catalog persists prefix or tail reminders<br/>after completed tool batches, before context building
         RL->>CB: build_context(session, turn_index)
         CB-->>RL: ContextBuildResult
         RL-->>Caller: ContextBuildEvent
@@ -69,6 +70,13 @@ sequenceDiagram
 ```
 
 ## Typed lifecycle points
+
+Catalog synchronization uses the tool registry generation and the agent catalog
+revision as its unchanged fast path. Notifications are appended as user messages
+containing an internal `CatalogChangeBlock`, wrapped in `<system-reminder>` tags,
+before updating last-notified metadata. A crash between these writes can repeat a
+reminder but cannot lose it. All provider adapters render the block as text in
+this phase; schema changes use the existing `tool_set_changed` advisory.
 
 The sequence is backed by the catalog in [events.md](./events.md). Run, turn,
 provider, and security hooks use `hook` points such as `AgentStart`,

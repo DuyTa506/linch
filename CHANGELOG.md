@@ -5,6 +5,22 @@ Notable changes to `linch`. Versioning follows the contract in
 and persisted formats share a wire generation separate from the package version,
 reflected by `linch.RUN_SCHEMA_VERSION`.
 
+## Unreleased
+
+- Freeze each ordinary session's system blocks and ordered tool schemas in durable
+  metadata so stable catalogs and worker restarts preserve the provider prefix.
+  Skill listings move into the cacheable system prefix and are deduplicated in
+  requests that bypass snapshots.
+- Add async `Agent.reload_skills()` and preserve registry order when reloading
+  subagents. Catalog changes arrive as durable conversation reminders; tool
+  additions append schemas, schema edits retain their slot, and removed tools keep
+  their wire schema while execution reports the existing unknown-tool error.
+- Promote pending description edits and removals into a new prefix after
+  compaction, while retaining an unchanged prefix when the catalog has not
+  changed. Durable skill-notification deduplication and promotion after tool
+  additions/schema edits await clarification of the specified metadata shape;
+  see the [implementation notes](docs/superpowers/plans/2026-11-02-catalog-changes-phase-2.md#spec-items-awaiting-clarification).
+
 ## 3.0.0 — 2026-11-01
 
 ### Breaking and new features

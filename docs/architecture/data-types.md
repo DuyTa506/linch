@@ -75,6 +75,11 @@ classDiagram
 
 ## Design rationale
 
+`CatalogChangeBlock` is an internal message-content variant with reminder text and
+tuples of added and removed tool names. Message codecs preserve it through session
+store reloads. Providers and token estimators consume its text; it adds no public
+top-level name and no lifecycle event.
+
 - **`Agent` is immutable config; `Session` is mutable state.** Splitting them lets one
   `Agent` mint many concurrent sessions safely, and makes the config the single thing a
   host reasons about when wiring an agent.
