@@ -229,7 +229,7 @@ async def _stream_turn_with_recovery(
     auxiliary_caller: _AccountedAuxiliaryCaller | None = None,
     compaction_logical_call_id: str | None = None,
     config: Any = None,
-) -> AsyncIterator[Any]:
+) -> AsyncGenerator[Any, None]:
     """Recover provider turns with a per-turn retry or a per-run ladder budget.
 
     Default recovery includes its second prepare/dispatch inside the retryable
@@ -240,7 +240,7 @@ async def _stream_turn_with_recovery(
     micro_tried_this_turn = False
     same_model_retries = [0]
 
-    async def recover(exc: ContextLengthError) -> AsyncIterator[Any]:
+    async def recover(exc: ContextLengthError) -> AsyncGenerator[Any, None]:
         nonlocal req, micro_tried_this_turn
         if ladder is None and session.compaction_retry_used_this_turn:
             raise exc
@@ -302,7 +302,7 @@ async def _stream_turn_with_recovery(
             req.tools = []
             req.tool_choice = None
 
-    async def dispatch() -> AsyncIterator[Any]:
+    async def dispatch() -> AsyncGenerator[Any, None]:
         async with aclosing(
             _accounted_primary_stream(
                 session,
@@ -419,7 +419,7 @@ async def _accounted_primary_stream(
     logical_call_id: str,
     turn_index: int | None,
     bind_active_primary: Any,
-) -> AsyncIterator[_PrimaryPartial | _AccountedPrimaryAssembly]:
+) -> AsyncGenerator[_PrimaryPartial | _AccountedPrimaryAssembly, None]:
     """Settle exactly one receipt around the actual primary provider stream."""
     intent = ModelCallIntent(
         logical_call_id=logical_call_id,
@@ -521,8 +521,9 @@ async def _stream_turn(
     *,
     state: _PrimaryStreamState | None = None,
     stage_partials: bool = False,
-) -> AsyncIterator[
-    PartialAssistantEvent | _PrimaryPartial | AssistantAssembly | _ParsedPrimaryAssembly
+) -> AsyncGenerator[
+    PartialAssistantEvent | _PrimaryPartial | AssistantAssembly | _ParsedPrimaryAssembly,
+    None,
 ]:
     agent = session.agent
     stream_partials = (
