@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Iterable
+from contextlib import aclosing
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, cast
 
@@ -190,36 +192,37 @@ async def _drive_child(
     try:
         child_opts = replace(run_options or RunOptions(), signal=signal)
         child_events = child_session.run(prompt, child_opts)
-        async for event in child_events:
-            if emit is not None and callable(emit):
-                emit(
-                    SubagentEvent(
-                        parent_session_id=parent_session_id,
-                        subagent_run_id=subagent_run_id,
-                        subagent_type=subagent_type,
-                        display_name=display_name,
-                        event=event,
+        async with aclosing(child_events):
+            async for event in child_events:
+                if emit is not None and callable(emit):
+                    emit(
+                        SubagentEvent(
+                            parent_session_id=parent_session_id,
+                            subagent_run_id=subagent_run_id,
+                            subagent_type=subagent_type,
+                            display_name=display_name,
+                            event=event,
+                        )
                     )
-                )
-            if isinstance(event, AssistantEvent):
-                last_assistant_text = _last_assistant_text(event.message)
-            elif isinstance(event, ResultEvent) and event.subtype == "aborted":
-                aborted = True
-                if event.final_text is not None:
-                    last_assistant_text = event.final_text
-                structured_output = event.structured_output
-                structured_error = event.structured_error
-            elif isinstance(event, ResultEvent):
-                if event.final_text is not None:
-                    last_assistant_text = event.final_text
-                structured_output = event.structured_output
-                structured_error = event.structured_error
-            elif isinstance(event, ErrorEvent):
-                errored = True
-                last_error = {
-                    "name": event.error.get("name", "Error"),
-                    "message": event.error.get("message", ""),
-                }
+                if isinstance(event, AssistantEvent):
+                    last_assistant_text = _last_assistant_text(event.message)
+                elif isinstance(event, ResultEvent) and event.subtype == "aborted":
+                    aborted = True
+                    if event.final_text is not None:
+                        last_assistant_text = event.final_text
+                    structured_output = event.structured_output
+                    structured_error = event.structured_error
+                elif isinstance(event, ResultEvent):
+                    if event.final_text is not None:
+                        last_assistant_text = event.final_text
+                    structured_output = event.structured_output
+                    structured_error = event.structured_error
+                elif isinstance(event, ErrorEvent):
+                    errored = True
+                    last_error = {
+                        "name": event.error.get("name", "Error"),
+                        "message": event.error.get("message", ""),
+                    }
     except Exception as exc:
         errored = True
         last_error = {
@@ -270,9 +273,23 @@ async def run_subagent(args: RunSubagentArgs) -> RunSubagentResult:
     except BaseException:
         if child is not None:
             if not (args.detached and args.retain):
-                await args.parent_agent.release_session(child, force=True)
+                try:
+                    await args.parent_agent.release_session(child, force=True)
+                except BaseException as cleanup_error:
+                    # Preserve the child failure; cleanup is retried by agent
+                    # teardown and must not replace the primary exception.
+                    logging.getLogger(__name__).warning(
+                        "subagent cleanup failed for child %s", child.id, exc_info=cleanup_error
+                    )
         elif binding is not None:
-            await binding.release()
+            try:
+                await binding.release()
+            except BaseException as cleanup_error:
+                # Preserve the child failure; binding ownership is best-effort
+                # here and must not mask the original exception.
+                logging.getLogger(__name__).warning(
+                    "subagent configuration cleanup failed", exc_info=cleanup_error
+                )
         raise
 
 
@@ -378,6 +395,8 @@ async def _run_subagent_owned(
     merged_signal = any_signal(child_session._abort_controller, args.signal)
     hook_dispatcher = HookDispatcher(config.hooks)
     result: RunSubagentResult | None = None
+    primary_error: BaseException | None = None
+    cleanup_errors: list[BaseException] = []
     try:
         # Acquire an isolated working directory (if configured) inside the try so
         # the finally always releases it, even on a mid-run failure path.
@@ -411,33 +430,56 @@ async def _run_subagent_owned(
             signal=merged_signal,
             run_options=child_run_options,
         )
+    except BaseException as exc:
+        primary_error = exc
     finally:
         # Release the isolation cwd (unless kept) before other cleanup.
         if args.isolation is not None and child_session.cwd_override:
-            await args.isolation.release(child_session.cwd_override, keep=args.isolation_keep)
+            try:
+                await args.isolation.release(child_session.cwd_override, keep=args.isolation_keep)
+            except BaseException as exc:
+                cleanup_errors.append(exc)
         # Always release the merged-signal watcher task and dispatch
         # SUBAGENT_STOP so cleanup runs on all failure and cancellation paths.
-        merged_signal.close()
+        try:
+            merged_signal.close()
+        except BaseException as exc:
+            cleanup_errors.append(exc)
         if hook_dispatcher.active:
-            await hook_dispatcher.dispatch(
-                lifecycle.SUBAGENT_STOP,
-                SubagentStopContext(
-                    session=args.parent_session,
-                    run_id=args.parent_run_id
-                    or (binding.run_id if binding is not None else "unknown"),
-                    turn_index=None,
-                    deps=hook_deps,
-                    child_session_id=child_record.id,
-                    subagent_run_id=args.subagent_run_id,
-                    subagent_type=args.definition.frontmatter.name,
-                    display_name=args.display_name,
-                    result=result,
-                ),
-            )
+            try:
+                await hook_dispatcher.dispatch(
+                    lifecycle.SUBAGENT_STOP,
+                    SubagentStopContext(
+                        session=args.parent_session,
+                        run_id=args.parent_run_id
+                        or (binding.run_id if binding is not None else "unknown"),
+                        turn_index=None,
+                        deps=hook_deps,
+                        child_session_id=child_record.id,
+                        subagent_run_id=args.subagent_run_id,
+                        subagent_type=args.definition.frontmatter.name,
+                        display_name=args.display_name,
+                        result=result,
+                    ),
+                )
+            except BaseException as exc:
+                cleanup_errors.append(exc)
         if not args.retain:
-            await agent.release_session(child_record.id, force=True)
+            try:
+                await agent.release_session(child_record.id, force=True)
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+
+    for cleanup_error in cleanup_errors:
+        logging.getLogger(__name__).warning(
+            "subagent cleanup failed for child %s", child_record.id, exc_info=cleanup_error
+        )
+    if primary_error is not None:
+        raise primary_error
 
     assert result is not None  # _drive_child succeeded if we reach here
+    if cleanup_errors and not result.errored and not result.aborted:
+        raise cleanup_errors[0]
     return result
 
 
