@@ -33,7 +33,9 @@ flowchart TD
 
 Before its first ordinary provider request, a session persists a version-1 prefix
 at `session.meta["linch.prefix"]` through `session.update_meta`. It contains the
-ordered system blocks, tool schemas, skill digests, and last-notified catalog state.
+ordered `system` blocks, wire `tools`, and two catalog digest maps: immutable
+`base` and last-communicated `notified`. Both maps contain `tools`, `skills`, and
+`subagents`; tool and skill entries use names as keys.
 The skill listing is cacheable and follows the environment block before appended
 user instructions. Subsequent requests and restarted workers use these stored
 blocks without recomputing host OS, shell, or Python metadata. Per-turn context
@@ -52,9 +54,11 @@ an active request catalog bypass snapshots and retain live request assembly.
 Their skill reminder is inserted only when its exact text is absent from the
 provider view. No native provider catalog-change protocol is enabled here.
 
-The specified metadata has no last-notified skill digest field. Durable skill
-notification deduplication across worker restarts remains pending clarification;
-the frozen base is retained rather than overwritten with the live skill set.
+After compaction, `system` and `tools` stay byte-identical. Resetting `notified`
+to `base` makes the next synchronization consolidate all changes into one tail
+reminder. Persisted skill digests in `notified` prevent repeated notifications
+after a worker restart or an unrelated registry change. Only a new session
+absorbs the live catalog into its system prefix.
 
 **Invariant:** when the explicit `workspace_tools()` preset is registered and
 `replace_defaults=False`, selected software-workspace protocol clauses are pinned by

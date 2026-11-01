@@ -69,6 +69,7 @@ def make_mcp_tool(
     )
 
     class _McpTool:
+        is_mcp_tool = True
         scope = "read" if read_only else "write"
         parallel = read_only
         # Surfaced for the annotation→permission bridge (mcp_permission_rules):

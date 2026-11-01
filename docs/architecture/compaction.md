@@ -20,23 +20,21 @@ pairing, and do not assume a coding workspace. Missing or malformed current
 wire-3 snapshot caches can be rebuilt from `full_history`; incompatible snapshot
 versions are rejected rather than treated as cache misses.
 
-The skill reinjection seam also promotes catalog changes into the session prefix.
-When the last-notified catalog differs from the frozen base, compaction rebuilds
-the prefix from the live catalog and persists it before the next provider call.
-Catalog reminders disappear with the replaced provider view; the new prefix now
-contains their current content. If the catalog has not changed, compaction keeps
-the existing prefix byte-identical. A failure between projection replacement and
-metadata persistence is recovered by catalog synchronization on the next turn.
+Compaction never changes the stored `system` or `tools`. When `notified` differs
+from the immutable `base`, it resets `notified` to a copy of `base`, persists that
+metadata, and clears the catalog fast path. The next synchronization emits one
+consolidated reminder of the live catalog's differences from `base`, retaining
+existing wire tool rows. With no changes, compaction performs no catalog metadata
+write. A slow-path synchronization also performs the reset when `notified`
+differs from `base` but the provider view has no catalog reminder, recovering a
+crash between projection persistence and metadata reset.
 
 Skill listing fingerprints and compaction context come from the session's frozen
-prefix when present. Reloading skills therefore does not independently change a
-durable run's compaction contract.
-
-The current prefix shape retains the base needed to promote description edits
-and removals. Promotion after tool additions/schema edits awaits an original-base
-digest field: synchronization has already updated those schemas before compaction.
-The unresolved shape requirements are recorded in the
-[implementation notes](../superpowers/plans/2026-11-02-catalog-changes-phase-2.md#spec-items-awaiting-clarification).
+prefix when snapshots are enabled for the run. Reloading skills therefore does
+not independently change a durable run's compaction contract. Runs that bypass
+snapshots continue to reinject their live listing. Reinjected listing and invoked
+skill reminders are provider-view-only log entries (`historical=False`); they do
+not add duplicate skill bodies to `full_history`.
 
 The direct `summarize_with_provider(...)` helper remains available for
 standalone callers with its existing provider-stream behavior. The normal run

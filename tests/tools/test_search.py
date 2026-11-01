@@ -584,7 +584,7 @@ async def test_compaction_reinjects_only_deferred_skill_names():
     session.session_log.record_projection(
         [Message(role="user", content=[TextBlock(text="summary")])]
     )
-    await _re_inject_skill_context(session)
+    _re_inject_skill_context(session)
     text = "\n".join(
         b.text for m in session.provider_view for b in m.content if isinstance(b, TextBlock)
     )

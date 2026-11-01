@@ -138,7 +138,10 @@ async def test_reload_subagents_keeps_feature_off_behavior() -> None:
 
 @pytest.mark.asyncio
 async def test_reload_subagents_replaces_tools_without_moving_their_slots(tmp_path) -> None:
+    from mcp.types import Tool as McpToolDef
+
     from linch.config import FeatureFlags
+    from linch.mcp.tool import make_mcp_tool
 
     agents_dir = tmp_path / ".linch" / "agents"
     agents_dir.mkdir(parents=True)
@@ -153,7 +156,16 @@ async def test_reload_subagents_replaces_tools_without_moving_their_slots(tmp_pa
         features=FeatureFlags(skills=False, subagents=True, mcp=False),
     )
     await agent.connect_subagents()
-    agent.tools.register(StubTool("McpAfterSubagent"))
+    mcp_tool = make_mcp_tool(
+        "server",
+        McpToolDef(
+            name="after_subagent",
+            description="MCP tool registered after Subagent.",
+            inputSchema={"type": "object"},
+        ),
+        lambda *_args: None,
+    )
+    agent.tools.register(mcp_tool)
     before_names = [tool.name for tool in agent.tools.list()]
     before_subagent = agent.tools.get("Subagent")
     old_revision = agent._catalog_revision

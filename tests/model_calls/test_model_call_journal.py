@@ -1026,7 +1026,7 @@ async def test_repeated_paid_projection_preserves_later_skill_reminder_order(
     await _run_compaction_impl(
         session, agent, signal, strategy, auxiliary_caller=caller, logical_call_id="first"
     )
-    await _re_inject_skill_context(session)
+    _re_inject_skill_context(session)
     await session.append([Message(role="user", content=[TextBlock(text="before later skill")])])
     session.invoked_skills.append(
         InvokedSkillRecord(name="later", substituted_body="later skill body", invoked_at=1.0)
@@ -1034,7 +1034,7 @@ async def test_repeated_paid_projection_preserves_later_skill_reminder_order(
     await sessions.set_invoked_skills(
         "session", [{"name": "later", "substituted_body": "later skill body", "invoked_at": 1.0}]
     )
-    await _re_inject_skill_context(session)
+    _re_inject_skill_context(session)
     await session.append(
         [
             Message(role="assistant", content=[TextBlock(text="after later skill")]),
@@ -1051,7 +1051,7 @@ async def test_repeated_paid_projection_preserves_later_skill_reminder_order(
         await _run_compaction_impl(
             session, agent, signal, strategy, auxiliary_caller=caller, logical_call_id="second"
         )
-        await _re_inject_skill_context(session)
+        _re_inject_skill_context(session)
     assert len(agent.provider.calls) == 2
     checkpoint = RunCheckpoint(
         phase="user_appended",

@@ -300,8 +300,11 @@ async def test_force_final_context_recovery_keeps_tool_choice_disabled(
     async def skip_forced_compaction(*args: Any, **kwargs: Any) -> None:
         return None
 
+    def skip_skill_context(*args: Any, **kwargs: Any) -> None:
+        return None
+
     monkeypatch.setattr(streaming, "run_forced_compaction", skip_forced_compaction)
-    monkeypatch.setattr(streaming, "_re_inject_skill_context", _no_context)
+    monkeypatch.setattr(streaming, "_re_inject_skill_context", skip_skill_context)
     monkeypatch.setattr(streaming, "build_compaction_event", lambda _session: "compacted")
     monkeypatch.setattr(streaming, "_build_context_result", _no_context)
 

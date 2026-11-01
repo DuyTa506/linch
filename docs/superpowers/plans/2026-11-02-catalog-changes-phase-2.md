@@ -4,7 +4,7 @@
 
 **Goal:** Preserve a session's provider prefix while reporting live catalog changes durably at the conversation tail.
 
-**Architecture:** Store the frozen prefix in session metadata. One catalog synchronization step prepares each ordinary request, with adapters rendering durable catalog blocks as text. Reload APIs update live registries; compaction promotes accumulated changes into the prefix.
+**Architecture:** Store the frozen prefix and separate `base`/`notified` catalog digests in session metadata. One catalog synchronization step prepares each ordinary request, with adapters rendering durable catalog blocks as text. Reload APIs update live registries; compaction resets `notified` to `base` and preserves system/tool bytes, then synchronization consolidates changes at the conversation tail.
 
 **Tech Stack:** Existing async Python SDK, pytest, Ruff, Pyright; no dependencies.
 
@@ -14,7 +14,7 @@
 
 - About 500 lines in `src/`; no new dependency.
 - Only new public name: `Agent.reload_skills`.
-- New code uses Python 3.10-compatible constructs; existing package floor remains 3.11+.
+- Python 3.11+ per the SDK runtime contract.
 - Durable writes use `await session.append` and `session.update_meta`.
 - No in-place mutation of session projections or new provider capabilities/events.
 - Each new behavior gets a failing test before implementation.
@@ -51,8 +51,8 @@
 **Files:** Private catalog module, `session.py`, `loop/request.py`, `loop/provider_turn.py`, `loop/streaming.py`, `loop/contracts.py`, `compaction.py`, catalog tests.
 **Interface:** `sync_catalog(session, config, lease)` and internal helpers using `session.meta["linch.prefix"]`.
 
-- [ ] Write and observe failures for all applicable section 5 cases: stable/restarted bytes, listing once, skill invocation after reload, tool addition/removal/description/schema, persistence, compaction, append/write crash, durable resume, bypasses, and no-diff fast path.
-- [ ] Implement snapshot writes, tail notifications, request consumption, frozen contract/compaction listing, and promotion after compaction.
+- [x] Cover every section 5 case and observe review regressions failing before their fixes: stable/restarted bytes, listing once, skill invocation after reload, tool addition/removal/description/schema, persistence, compaction, append/write crash, durable resume, bypasses, and no-diff fast path.
+- [x] Implement snapshot writes, tail notifications, request consumption, frozen contract/compaction listing, and notification reset after compaction.
 - [x] Keep exact pending-request replay semantics and context selection intact.
 - [x] Run focused tests, update tests encoding deliberately changed listing behavior or private helper signatures, and commit the core change (`5c57e04`).
 
@@ -63,22 +63,71 @@
 - [x] Document snapshot lifetime, bypasses, reload APIs, durable notifications, and compaction.
 - [x] Independently review the complete diff against sections 4 and 5; resolve supported-scope findings.
 - [x] Run full pytest, Ruff lint/format, and Pyright using the requested venv and `PYTHONPATH=src`.
-- [ ] Report commits, check counts, changed existing tests, conflicts, and unfinished work.
+- [x] Report commits, check counts, changed existing tests, conflicts, and unfinished work.
 
-## Spec items awaiting clarification
+## Review corrections under the updated spec
 
-- The exact prefix shape at spec lines 62–66 contains frozen skill digests but no
-  last-notified skill digests. Sections 4.4 and 4.6 need both across restarts. The
-  implementation keeps the frozen base; durable skill-notification deduplication
-  awaits authorization to extend the private metadata.
-- Spec lines 122–123 update tool schemas in the prefix, while lines 156–163 later
-  require the original base to recognize pending changes after compaction. The
-  original digests are not in the specified shape. Promotion after additions or
-  schema edits awaits clarification; description edits and removals retain their
-  base and can be promoted.
-- The task requests Python 3.10 compatibility, but `pyproject.toml:10` and CLAUDE.md
-  require Python 3.11+. New constructs remain 3.10-compatible; downgrading the
-  existing SDK runtime is outside this work package.
+The updated sections 4.1, 4.4–4.6, and 5 resolve the former metadata and compaction
+gaps. `base` is immutable; `notified` contains tool, skill, and subagent digests.
+The live catalog is compared directly with `notified`. Compaction and its crash
+recovery reset notifications without rebuilding the prefix. No spec gap remains
+from the earlier implementation notes.
+
+The review also requires provider-view-only skill reinjection, snapshot bypass
+awareness during reinjection and compaction, description-bearing notifications
+with name-only MCP handling, exact environment-block placement, and durable
+resume coverage spanning skill reload, compaction, and a crash.
+
+Tool preview cannot be dropped: a durable run started after an addition or schema
+edit must fingerprint the tool rows its first catalog sync will send. The former
+`loop/contracts.py::_preview_snapshot_tools` is removed; both synchronization and
+contract construction share `catalog.snapshot_tools(snapshot, live_schemas)`.
+It ignores `notified` resets and description-only edits. Regression tests
+demonstrated that dropping preview breaks both addition and schema-edit contract
+identity.
+
+Skill-body changes remain detectable through their digest. The spec's restriction
+to skill names and descriptions applies to notification text; bodies stay private.
+Paid-compaction recovery also receives the effective run config, so a bypassed
+run retains its live listing reminder instead of treating it as frozen system
+context.
+
+## Review regression evidence
+
+- The first catalog regression run had **4 failures**: missing `base` and
+  `notified.skills`, absent description text/MCP handling, environment placement,
+  and missing crash recovery.
+- The first two reinjection regressions failed before restoring synchronous,
+  provider-view-only reminders. Bypass listing and contract fingerprint tests
+  were then added around the same corrected behavior.
+- A disposable archive of the original `HEAD` reproduced the strengthened
+  in-turn reload → compaction → crash regression: it failed with **0 catalog
+  reminders instead of 1**. The corrected runtime passes the test.
+
+## Section 5 coverage
+
+Paths below are relative to `tests/`; focused regression files supplement the
+original phase-2 cases rather than replace their assertions.
+
+| Required behavior | Coverage |
+|---|---|
+| One skill listing across two runs | `loop/test_catalog_requests.py` |
+| Stable system/tool bytes | `loop/test_catalog_requests.py` |
+| Restart with changed host platform | `loop/test_catalog_requests.py`, `loop/test_catalog_resume.py` |
+| Reload skills, notify once, invoke new skill | `loop/test_catalog_changes.py` |
+| Append tools in order with one advisory | `loop/test_catalog_requests.py` |
+| Retain removed schema and return unknown-tool error | `loop/test_catalog_requests.py` |
+| Description edits leave wire schemas unchanged | `loop/test_catalog_requests.py` |
+| Reload subagents with an MCP tool registered afterward | `test_catalog_reload.py` |
+| Persist notification through store reload | `loop/test_catalog_requests.py` |
+| Compaction consolidation and no-change/no-meta behavior | `loop/test_catalog_changes.py`, `loop/test_catalog_phase2_regressions.py` |
+| Resume after reload, compaction, and crash | `loop/test_catalog_resume.py` |
+| No repeated skill notice after restart or unrelated tool edit | `loop/test_catalog_phase2_regressions.py` |
+| New descriptions, including Subagent, with MCP name-only text | `loop/test_catalog_phase2_regressions.py` |
+| Append-before-meta crash repeats at most once | `loop/test_catalog_changes.py` |
+| Durable resume after skill reload | `loop/test_catalog_resume.py` |
+| Every bypass preserves live bytes and exact dedupe | `loop/test_catalog_bypasses.py`, `loop/test_catalog_skill_context.py` |
+| No snapshot diff on unchanged fast path | `loop/test_catalog_bypasses.py` |
 
 ## Process limitation
 
@@ -87,7 +136,44 @@ tests covered. Remaining cases were added and exercised afterward, so the strict
 per-test RED-before-implementation sequence was not fully maintained. No existing
 assertion was weakened to accommodate that draft.
 
-## Verification record
+## Final verification after review corrections
+
+All gates used `/home/duy/Downloads/duy_dev/agent_kit/.venv/bin` first on PATH
+and `PYTHONPATH=src`.
+
+- Full pytest: **3143 passed, 408 skipped**, in 158.95 seconds; no failures.
+- Ruff lint: passed. Ruff format check: **498 files** already formatted.
+- Pyright: **0 errors, 5 warnings**, the existing missing-source warnings for
+  `jsonschema` and `croniter`.
+- Documentation-reference checks after the plan edits: **2 passed**.
+- `git diff --check`: clean.
+- Phase-2 source growth relative to `b9a283f`: **622 added, 122 removed,
+  500 net lines**. No dependency or top-level export was added.
+
+The review adds **21 test cases** in total. New files
+`tests/loop/test_catalog_phase2_regressions.py` and
+`tests/loop/test_catalog_skill_context.py` cover the corrected state transitions,
+MCP descriptions, reinjection, and paid replay. Five new resume cases cover
+pre-sync tool changes, overlay fingerprints, and both persisted-view and in-turn
+reload/compaction/crash recovery.
+
+Existing tests changed in this review:
+
+- `tests/loop/test_catalog_changes.py` uses the exact snapshot shape, asserts
+  retained prefixes and consolidated reminders, and checks real compaction with
+  no catalog changes performs no metadata write.
+- `tests/loop/test_catalog_resume.py` adds the five contract/recovery cases above.
+- `tests/loop/test_provider_turn.py`,
+  `tests/model_calls/test_model_call_journal.py`, and
+  `tests/tools/test_search.py` restore synchronous helper calls/mocks.
+- `tests/test_catalog_reload.py` registers an actual MCP wrapper after `Subagent`
+  for the ordering regression.
+
+Every section 5 case is covered; no review item remains unfinished. The earlier
+verification and process limitation below describe the original implementation,
+not these review corrections.
+
+## Verification record before review corrections
 
 All checks used `/home/duy/Downloads/duy_dev/agent_kit/.venv/bin` first on PATH and
 `PYTHONPATH=src`.
@@ -102,7 +188,7 @@ All checks used `/home/duy/Downloads/duy_dev/agent_kit/.venv/bin` first on PATH 
 - Source growth: **690 added, 120 removed, 570 net lines**, above the approximate
   500-line target. No dependency was added.
 
-## Existing tests updated
+## Existing tests updated before review corrections
 
 - `tests/tools/test_search.py::test_skill_threshold_and_body_loading[50]` now
   expects the skill listing in the system prefix instead of the first user prompt.
