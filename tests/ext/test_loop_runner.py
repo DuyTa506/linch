@@ -3,10 +3,13 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import threading
+from dataclasses import replace
 
 import pytest
 
 from linch import ConfigError, OutputSchema, RunOptions
+from linch.ext import loop_runner as loop_runner_module
 from linch.ext.loop_runner import (
     FileLoopLeaseStore,
     InMemoryLoopLeaseStore,
@@ -16,7 +19,8 @@ from linch.ext.loop_runner import (
     LoopTrigger,
 )
 from tests.support.agents import make_agent
-from tests.support.providers import ScriptedProvider, TextTurn
+from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
+from tests.support.stores import memory_session_store
 
 
 def _agent(provider: ScriptedProvider, tmp_path):
@@ -228,6 +232,34 @@ async def test_file_lease_store_refresh_and_release(tmp_path) -> None:
     assert reacquired is not None
 
 
+async def test_file_lease_store_requires_owner_on_refresh_and_release(tmp_path) -> None:
+    store = FileLoopLeaseStore(root=tmp_path / "domains")
+    lease = await store.try_acquire("docs-loop", owner="owner", ttl_s=60)
+    assert lease is not None
+    forged = replace(lease, owner="other")
+
+    with pytest.raises(ConfigError, match="not held by this owner"):
+        await store.refresh(forged, ttl_s=60)
+    await store.release(forged)
+    assert await store.try_acquire("docs-loop", owner="other", ttl_s=60) is None
+
+    await store.release(lease)
+
+
+async def test_inmemory_lease_store_requires_owner_on_refresh_and_release() -> None:
+    store = InMemoryLoopLeaseStore()
+    lease = await store.try_acquire("docs-loop", owner="owner", ttl_s=60)
+    assert lease is not None
+    forged = replace(lease, owner="other")
+
+    with pytest.raises(ConfigError, match="not held by this owner"):
+        await store.refresh(forged, ttl_s=60)
+    await store.release(forged)
+    assert await store.try_acquire("docs-loop", owner="other", ttl_s=60) is None
+
+    await store.release(lease)
+
+
 async def test_file_lease_refresh_refuses_symlinked_lock(tmp_path) -> None:
     # Hardening: a symlink planted at the lock path must not let a refresh write
     # the lease JSON through it to an arbitrary target (O_NOFOLLOW). The refresh
@@ -261,6 +293,120 @@ async def test_file_lease_store_recovers_malformed_lock(tmp_path) -> None:
 
     assert lease is not None
     assert json.loads(lock.read_text(encoding="utf-8"))["owner"] == "owner"
+
+
+async def test_file_lease_store_does_not_steal_an_in_progress_acquisition(
+    tmp_path, monkeypatch
+) -> None:
+    store = FileLoopLeaseStore(root=tmp_path / "domains")
+    entered = threading.Event()
+    proceed = threading.Event()
+    original_fdopen = loop_runner_module.os.fdopen
+    first = True
+
+    def delayed_fdopen(*args, **kwargs):
+        nonlocal first
+        handle = original_fdopen(*args, **kwargs)
+        if first:
+            first = False
+            entered.set()
+            assert proceed.wait(timeout=2)
+        return handle
+
+    monkeypatch.setattr(loop_runner_module.os, "fdopen", delayed_fdopen)
+    first_task = asyncio.create_task(store.try_acquire("docs-loop", owner="first", ttl_s=60))
+    await asyncio.to_thread(entered.wait)
+    second_task = asyncio.create_task(store.try_acquire("docs-loop", owner="second", ttl_s=60))
+    try:
+        second = await asyncio.wait_for(asyncio.shield(second_task), timeout=0.1)
+    except TimeoutError:
+        second = None
+    proceed.set()
+    first = await first_task
+    if not second_task.done():
+        second = await second_task
+
+    assert first is not None
+    assert second is None
+
+
+async def test_file_lease_store_treats_empty_lock_as_held(tmp_path) -> None:
+    lock = tmp_path / "domains" / "docs-loop" / ".lock.json"
+    lock.parent.mkdir(parents=True)
+    lock.touch()
+    store = FileLoopLeaseStore(root=tmp_path / "domains")
+
+    assert await store.try_acquire("docs-loop", owner="second", ttl_s=60) is None
+
+
+async def test_file_lease_store_serializes_refresh_and_reclaim(tmp_path, monkeypatch) -> None:
+    store = FileLoopLeaseStore(root=tmp_path / "domains")
+    lease = await store.try_acquire("docs-loop", owner="first", ttl_s=60)
+    assert lease is not None
+    truncated = threading.Event()
+    proceed = threading.Event()
+    original_open = loop_runner_module.os.open
+
+    def delayed_open(path, flags, mode=0o777):
+        fd = original_open(path, flags, mode)
+        if flags & os.O_TRUNC:
+            truncated.set()
+            assert proceed.wait(timeout=2)
+        return fd
+
+    monkeypatch.setattr(loop_runner_module.os, "open", delayed_open)
+    refresh_task = asyncio.create_task(store.refresh(lease, ttl_s=60))
+    try:
+        await asyncio.wait_for(asyncio.to_thread(truncated.wait, 1), timeout=0.2)
+    except TimeoutError:
+        # The fixed implementation publishes via atomic replacement and never
+        # opens the live path with O_TRUNC.
+        refreshed = await refresh_task
+        assert refreshed.token == lease.token
+        assert await store.try_acquire("docs-loop", owner="second", ttl_s=60) is None
+        return
+    second_task = asyncio.create_task(store.try_acquire("docs-loop", owner="second", ttl_s=60))
+    try:
+        second = await asyncio.wait_for(asyncio.shield(second_task), timeout=0.1)
+    except TimeoutError:
+        second = None
+    proceed.set()
+    refreshed = await refresh_task
+    if not second_task.done():
+        second = await second_task
+
+    assert refreshed.token == lease.token
+    assert second is None
+
+
+async def test_run_once_releases_retained_subagent_sessions(tmp_path) -> None:
+    from linch.ext.deep_agent import create_deep_agent
+
+    provider = ScriptedProvider(
+        [
+            turn
+            for _ in range(3)
+            for turn in (
+                ToolUseTurn("Subagent", {"description": "helper", "prompt": "inspect"}),
+                TextTurn("child done"),
+                TextTurn("tick done"),
+            )
+        ]
+    )
+    agent = create_deep_agent(
+        model="gpt-5",
+        provider=provider,
+        session_store=memory_session_store(),
+        permissions={"mode": "skip-dangerous"},
+        cwd=str(tmp_path),
+        durable=False,
+    )
+    runner = LoopRunner(agent)
+
+    for _ in range(3):
+        await runner.run_once(_spec(tmp_path))
+
+    assert agent._sessions == {}
 
 
 async def test_run_failure_releases_durable_lease(tmp_path) -> None:
