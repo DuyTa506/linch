@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from .._token_estimation import custom_token_estimate
-from ..types import Message, SystemBlock, TextBlock
+from ..types import CatalogChangeBlock, Message, SystemBlock, TextBlock
 
 if TYPE_CHECKING:
     from ..hooks.contexts import AgentStopContext
@@ -334,7 +334,7 @@ def _estimate_one_message(message: Message, estimator: Any, model: str) -> int:
 def _estimate_message(message: Message) -> int:
     text = ""
     for block in message.content:
-        if isinstance(block, TextBlock):
+        if isinstance(block, (TextBlock, CatalogChangeBlock)):
             text += block.text
     return _estimate_text(text)
 
