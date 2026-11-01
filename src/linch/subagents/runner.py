@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from .. import lifecycle
 from ..abort import AbortContext, any_signal, throw_if_aborted
+from ..errors import ConfigError
 from ..events import (
     AssistantEvent,
     ErrorEvent,
@@ -24,6 +25,12 @@ from ..profiles import _base_run_config
 from ..session import RunOptions, Session
 from ..session_log import SessionLog
 from ..types import SystemBlock, TextBlock
+from .isolation import (
+    _bind_isolated_tools,
+    _continued_isolated_world,
+    _isolated_dependencies,
+    _isolated_world,
+)
 from .types import AgentDefinition
 
 if TYPE_CHECKING:
@@ -41,7 +48,7 @@ class RunSubagentArgs:
     display_name: str
     subagent_run_id: str
     mailbox_address: str | None = None
-    """Unique peer address assigned when mailbox delivery is enabled."""
+    """Unique peer address assigned to the child when mailbox delivery is enabled."""
     config_binding: Any = None
     """Originating configuration binding captured before scheduling child work."""
     parent_run_id: str | None = None
@@ -53,7 +60,7 @@ class RunSubagentArgs:
     """Per-child run options. The runner always overrides ``signal`` with the
     merged parent/child abort signal before calling ``Session.run``."""
     _deps_captured: bool = False
-    """Whether options capture the invoking tool deps, including None."""
+    """Whether options capture the invoking tool's deps, including None."""
     signal: AbortContext | None = None
     emit: Any = None
     retain: bool = False
@@ -93,7 +100,7 @@ class ContinueSubagentArgs:
     """Per-continuation run options. The runner always overrides ``signal`` with
     the merged parent/child abort signal before calling ``Session.run``."""
     _deps_captured: bool = False
-    """Whether options capture the invoking tool deps, including None."""
+    """Whether options capture the invoking tool's deps, including None."""
     signal: AbortContext | None = None
     emit: Any = None
 
@@ -133,7 +140,6 @@ def _child_run_options(parent_session: Session, options: RunOptions | None) -> R
     return replace(options, deps=deps) if options is not None else RunOptions(deps=deps)
 
 
-
 def _effective_child_deps(parent_session: Session, options: RunOptions | None) -> Any:
     """Resolve the dependency object the child run will actually receive."""
     if options is not None:
@@ -144,7 +150,6 @@ def _effective_child_deps(parent_session: Session, options: RunOptions | None) -
     return (
         deps if deps is not None else getattr(getattr(parent_session, "agent", None), "deps", None)
     )
-
 
 
 def _last_assistant_text(message: Any) -> str:
@@ -192,7 +197,8 @@ async def _drive_child(
     try:
         child_opts = replace(run_options or RunOptions(), signal=signal)
         child_events = child_session.run(prompt, child_opts)
-        async with aclosing(child_events):
+        # Session.run returns a native async generator, typed as AsyncIterator.
+        async with aclosing(cast(Any, child_events)):
             async for event in child_events:
                 if emit is not None and callable(emit):
                     emit(
@@ -296,6 +302,10 @@ async def run_subagent(args: RunSubagentArgs) -> RunSubagentResult:
 async def _run_subagent_owned(
     args: RunSubagentArgs, binding: Any, on_registered: Any
 ) -> RunSubagentResult:
+    # Resolve the child's invocation options before any await. Detached work can
+    # outlive the parent turn that launched it, so lifecycle hooks must retain
+    # the same dependency object as the child run rather than rereading the
+    # parent's mutable ``run_deps`` at stop time.
     child_run_options = args.run_options
     hook_deps = _effective_child_deps(args.parent_session, child_run_options)
     agent = args.parent_agent
@@ -361,10 +371,12 @@ async def _run_subagent_owned(
         store=store,
         session_log=SessionLog.seed(historical=[], visible=seed_view),
     )
-    # A unified execution world is agent-scoped. Child sessions must see the
-    # same filesystem half as their parent so Bash and filesystem tools do not
-    # drift into different worlds merely because work moved to a subagent.
-    child_session.filesystem = getattr(args.parent_session, "filesystem", None)
+    # A unified execution world is agent-scoped. Without isolation child
+    # sessions share the parent's filesystem; an isolated child gets a fresh
+    # disk backend rooted at its acquired cwd below.
+    child_session.filesystem = (
+        None if args.isolation is not None else getattr(args.parent_session, "filesystem", None)
+    )
     if args.fork:
         # Clone the parent's read-file tracker so the child skips re-reading files
         # the parent already loaded.
@@ -372,7 +384,9 @@ async def _run_subagent_owned(
             child_session.file_read_tracker.add(path)
     child_session.tools_override = child_tools
     child_session.system_blocks_override = child_system
-    # Labels are display-only; direct runner calls default to the unique child id.
+    # Give the worker a unique peer-mailbox address; no-op when the agent has
+    # no mailbox configured. Direct runner callers default to the child session
+    # id; tool callers can provide a stable worker id that they expose to the model.
     if config.context.get("mailbox") is not None:
         child_session.mailbox_address = args.mailbox_address or child_record.id
     # Child joins the parent's spending cap: same RunBudget object, so child
@@ -401,7 +415,30 @@ async def _run_subagent_owned(
         # Acquire an isolated working directory (if configured) inside the try so
         # the finally always releases it, even on a mid-run failure path.
         if args.isolation is not None:
-            child_session.cwd_override = await args.isolation.acquire()
+            isolated_cwd = await args.isolation.acquire()
+            child_session.cwd_override = isolated_cwd
+            child_execution, child_filesystem = _isolated_world(
+                args.parent_session,
+                agent,
+                isolated_cwd,
+                deps=hook_deps,
+            )
+            child_session.filesystem = child_filesystem
+            child_session.tools_override = _bind_isolated_tools(
+                child_tools,
+                execution=child_execution,
+                filesystem=child_filesystem,
+            )
+            isolated_deps = _isolated_dependencies(hook_deps, child_filesystem)
+            if child_run_options is None:
+                if isolated_deps is not None:
+                    child_run_options = RunOptions(deps=isolated_deps)
+            else:
+                child_run_options = replace(
+                    child_run_options,
+                    deps=isolated_deps,
+                )
+            hook_deps = isolated_deps
         if hook_dispatcher.active:
             await hook_dispatcher.dispatch(
                 lifecycle.SUBAGENT_START,
@@ -514,12 +551,32 @@ async def continue_subagent(args: ContinueSubagentArgs) -> RunSubagentResult:
     if args.signal is not None and args.signal.aborted:
         throw_if_aborted(args.signal)
 
+    # Capture continuation dependencies before any asynchronous hook or child
+    # work can observe a later parent run's dependency object.
     child_run_options = (
         args.run_options
         if args._deps_captured
         else _child_run_options(args.parent_session, args.run_options)
     )
     hook_deps = _effective_child_deps(args.parent_session, child_run_options)
+
+    if child_session.cwd_override is not None:
+        child_execution, child_filesystem = _continued_isolated_world(child_session, agent)
+        child_tools = child_session.tools_override
+        if child_tools is None:
+            raise ConfigError("isolated subagent continuation is missing its child tool registry")
+        child_session.tools_override = _bind_isolated_tools(
+            child_tools,
+            execution=child_execution,
+            filesystem=child_filesystem,
+        )
+        isolated_deps = _isolated_dependencies(hook_deps, child_filesystem)
+        if child_run_options is None:
+            if isolated_deps is not None:
+                child_run_options = RunOptions(deps=isolated_deps)
+        else:
+            child_run_options = replace(child_run_options, deps=isolated_deps)
+        hook_deps = isolated_deps
 
     # Re-establish the abort link for this continuation.
     merged_signal = any_signal(child_session._abort_controller, args.signal)
@@ -530,7 +587,8 @@ async def continue_subagent(args: ContinueSubagentArgs) -> RunSubagentResult:
         if child_session._config_seed is not None
         else agent._run_config
     )
-    # Retained configuration survives runs; spending belongs to the current parent run.
+    # A retained worker keeps its original configuration seed, but its budget
+    # belongs to the parent invocation that is driving this continuation.
     child_session.inherited_budget = getattr(args.parent_session, "active_budget", None)
     hook_dispatcher = HookDispatcher(config.hooks)
     result: RunSubagentResult | None = None

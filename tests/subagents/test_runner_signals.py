@@ -76,91 +76,58 @@ async def test_cancelled_unretained_subagent_releases_child_session() -> None:
     assert child_ids[0] not in agent._sessions
 
 
-@pytest.mark.parametrize("explicit_options", [False, True])
-async def test_direct_runner_call_inherits_parent_run_dependencies(explicit_options: bool) -> None:
-    from linch import RunOptions
+async def test_worker_mailbox_address_is_unique_to_child_session() -> None:
+    from linch import MailboxPlugin
+    from linch.coordination.mailbox import InMemoryMailbox, MailboxMessage
     from linch.subagents.default_agent import DEFAULT_AGENT
     from linch.subagents.runner import RunSubagentArgs, run_subagent
-    from tests.support.tools import StubTool, tool_registry
 
-    deps = object()
-    seen: list[Any] = []
-    tool = StubTool("inspect_deps", on_execute=lambda _input, ctx: seen.append(ctx.deps))
     agent = make_agent(
-        ScriptedProvider(
-            [ToolUseTurn("inspect_deps", {}), TextTurn("done")],
-        ),
+        ScriptedProvider([TextTurn("one"), TextTurn("two"), TextTurn("B"), TextTurn("A")]),
         model="gpt-5",
-        tools=tool_registry(tool),
+        retain_subagents=True,
     )
-    parent = await agent.session()
-    parent.run_deps = deps
+    mailbox = InMemoryMailbox()
+    await agent.use(MailboxPlugin(), mailbox)
+    parent_a = await agent.session(id="parent-a")
+    parent_b = await agent.session(id="parent-b")
 
-    result = await run_subagent(
+    result_a = await run_subagent(
         RunSubagentArgs(
-            parent_session=parent,
+            parent_session=parent_a,
             parent_agent=agent,
             definition=DEFAULT_AGENT,
-            prompt="inspect",
-            display_name="helper",
-            subagent_run_id="sa_direct_deps",
-            run_options=RunOptions(max_output_tokens=8) if explicit_options else None,
+            prompt="one",
+            display_name="Agent #1",
+            subagent_run_id="sa-mailbox-a",
+            retain=True,
+        )
+    )
+    result_b = await run_subagent(
+        RunSubagentArgs(
+            parent_session=parent_b,
+            parent_agent=agent,
+            definition=DEFAULT_AGENT,
+            prompt="two",
+            display_name="Agent #1",
+            subagent_run_id="sa-mailbox-b",
+            retain=True,
         )
     )
 
-    assert not result.errored
-    assert seen == [deps]
-    await agent.close()
-
-
-
-async def test_subagent_hooks_keep_the_child_invocation_dependencies() -> None:
-    from linch import RunOptions
-    from linch.subagents.default_agent import DEFAULT_AGENT
-    from linch.subagents.runner import RunSubagentArgs, run_subagent
-
-    deps_a = object()
-    deps_b = object()
-    parent_ref: dict[str, Any] = {}
-
-    class MutatingProvider(ScriptedProvider):
-        async def stream(self, req: Any):
-            parent_ref["session"].run_deps = deps_b
-            async for event in super().stream(req):
-                yield event
-
-    class Hooks:
-        resume_policy_id = "test.hooks"
-
-        def __init__(self) -> None:
-            self.deps: list[Any] = []
-
-        def on_subagent_start(self, ctx: Any) -> None:
-            self.deps.append(ctx.deps)
-
-        def on_subagent_stop(self, ctx: Any) -> None:
-            self.deps.append(ctx.deps)
-
-    hooks = Hooks()
-    agent = make_agent(MutatingProvider([TextTurn("done")]), model="gpt-5", hooks=[hooks])
-    parent = await agent.session()
-    parent_ref["session"] = parent
-    parent.run_deps = deps_a
-
-    result = await run_subagent(
-        RunSubagentArgs(
-            parent_session=parent,
-            parent_agent=agent,
-            definition=DEFAULT_AGENT,
-            prompt="do the thing",
-            display_name="helper",
-            subagent_run_id="sa_hook_deps",
-            run_options=RunOptions(deps=deps_a),
-        )
-    )
-
-    assert not result.errored
-    assert hooks.deps == [deps_a, deps_a]
+    address_a = agent._sessions[result_a.child_session_id].mailbox_address
+    address_b = agent._sessions[result_b.child_session_id].mailbox_address
+    assert address_a and address_b
+    assert address_a != address_b
+    assert address_a != "Agent #1"
+    assert address_b != "Agent #1"
+    await mailbox.send(MailboxMessage(sender="parent-a", recipient=address_a, content="A-secret"))
+    child_a = agent._sessions[result_a.child_session_id]
+    child_b = agent._sessions[result_b.child_session_id]
+    [_ async for _ in child_b.run("check messages")]
+    assert "A-secret" not in str(child_b.provider_view)
+    [_ async for _ in child_a.run("check messages")]
+    assert "A-secret" in str(child_a.provider_view)
     await agent.close()
 
 
@@ -216,6 +183,92 @@ async def test_isolation_release_failure_preserves_child_error_and_cleanup(caplo
     await agent.close()
 
 
+@pytest.mark.parametrize("explicit_options", [False, True])
+async def test_direct_runner_call_inherits_parent_run_dependencies(explicit_options: bool) -> None:
+    from linch import RunOptions
+    from linch.subagents.default_agent import DEFAULT_AGENT
+    from linch.subagents.runner import RunSubagentArgs, run_subagent
+    from tests.support.tools import StubTool, tool_registry
+
+    deps = object()
+    seen: list[Any] = []
+    tool = StubTool("inspect_deps", on_execute=lambda _input, ctx: seen.append(ctx.deps))
+    agent = make_agent(
+        ScriptedProvider(
+            [ToolUseTurn("inspect_deps", {}), TextTurn("done")],
+        ),
+        model="gpt-5",
+        tools=tool_registry(tool),
+    )
+    parent = await agent.session()
+    parent.run_deps = deps
+
+    result = await run_subagent(
+        RunSubagentArgs(
+            parent_session=parent,
+            parent_agent=agent,
+            definition=DEFAULT_AGENT,
+            prompt="inspect",
+            display_name="helper",
+            subagent_run_id="sa_direct_deps",
+            run_options=RunOptions(max_output_tokens=8) if explicit_options else None,
+        )
+    )
+
+    assert not result.errored
+    assert seen == [deps]
+    await agent.close()
+
+
+async def test_subagent_hooks_keep_the_child_invocation_dependencies() -> None:
+    from linch import RunOptions
+    from linch.subagents.default_agent import DEFAULT_AGENT
+    from linch.subagents.runner import RunSubagentArgs, run_subagent
+
+    deps_a = object()
+    deps_b = object()
+    parent_ref: dict[str, Any] = {}
+
+    class MutatingProvider(ScriptedProvider):
+        async def stream(self, req: Any):
+            parent_ref["session"].run_deps = deps_b
+            async for event in super().stream(req):
+                yield event
+
+    class Hooks:
+        resume_policy_id = "test.hooks"
+
+        def __init__(self) -> None:
+            self.deps: list[Any] = []
+
+        def on_subagent_start(self, ctx: Any) -> None:
+            self.deps.append(ctx.deps)
+
+        def on_subagent_stop(self, ctx: Any) -> None:
+            self.deps.append(ctx.deps)
+
+    hooks = Hooks()
+    agent = make_agent(MutatingProvider([TextTurn("done")]), model="gpt-5", hooks=[hooks])
+    parent = await agent.session()
+    parent_ref["session"] = parent
+    parent.run_deps = deps_a
+
+    result = await run_subagent(
+        RunSubagentArgs(
+            parent_session=parent,
+            parent_agent=agent,
+            definition=DEFAULT_AGENT,
+            prompt="do the thing",
+            display_name="helper",
+            subagent_run_id="sa_hook_deps",
+            run_options=RunOptions(deps=deps_a),
+        )
+    )
+
+    assert not result.errored
+    assert hooks.deps == [deps_a, deps_a]
+    await agent.close()
+
 
 async def test_registration_failure_logs_failed_child_cleanup(monkeypatch, caplog) -> None:
     from linch.subagents.default_agent import DEFAULT_AGENT
@@ -248,7 +301,6 @@ async def test_registration_failure_logs_failed_child_cleanup(monkeypatch, caplo
         assert "cleanup unavailable" in caplog.text
     finally:
         await agent.close()
-
 
 
 async def test_failed_child_event_delivery_closes_retained_run() -> None:
