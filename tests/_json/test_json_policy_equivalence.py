@@ -31,13 +31,13 @@ def test_strict_json_domains_and_depth_boundaries() -> None:
     _copy_json_object({"x": _nested(64)})
     with pytest.raises(_ModelCallError, match="bounded, finite JSON without cycles"):
         _copy_json_object({"x": _nested(65)})
-    # Tool output has no explicit bound. Ignorable objects historically reset
-    # the list-depth counter at each object child; retain that accepted domain.
+    # Tool output has no explicit bound. Ignorable events match the durable
+    # codec's container-depth limit for both objects and lists.
     normalize_json_value(_nested(150))
-    _validate_ignorable_json_value(_nested(150, mappings=True), path="event")
-    _validate_ignorable_json_value(_nested(100), path="event")
-    with pytest.raises(ValueError, match="maximum nesting depth 100"):
-        _validate_ignorable_json_value(_nested(101), path="event")
+    for mappings in (False, True):
+        _validate_ignorable_json_value(_nested(100, mappings=mappings), path="event")
+        with pytest.raises(ValueError, match="maximum nesting depth 100"):
+            _validate_ignorable_json_value(_nested(101, mappings=mappings), path="event")
 
 
 def test_journal_exact_scalars_key_error_order_and_deepcopy_aliases() -> None:
