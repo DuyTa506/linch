@@ -8,18 +8,7 @@ import pytest
 from linch.permissions import BashRule, PathRule, Principal, ToolRule
 from linch.permissions.engine import PendingToolCall, PermissionEngine
 from linch.permissions.ruleset import PermissionLayer, PermissionRuleSet
-
-
-class _Tool:
-    def __init__(self, name: str, scope: str = "write") -> None:
-        self.name = name
-        self.scope = scope
-
-    def validate(self, raw: dict[str, Any]) -> dict[str, Any]:
-        return dict(raw)
-
-    def summarize(self, inp: dict[str, Any]) -> str:
-        return self.name
+from tests.support.tools import StubTool
 
 
 def _call(
@@ -30,7 +19,7 @@ def _call(
 ) -> PendingToolCall:
     return PendingToolCall(
         tool_use_id="t",
-        tool=_Tool(name),
+        tool=StubTool(name, scope="write"),
         input=input or {"file_path": "notes.txt"},
         principal=principal,
     )
@@ -82,57 +71,43 @@ def test_rules_reject_blank_role_guards(rule_type: str, guard_name: str) -> None
             BashRule("echo *", "allow", **guard)  # type: ignore[arg-type]
 
 
-def test_tool_rule_role_guard() -> None:
-    engine = PermissionEngine(
-        mode="skip-dangerous",
-        rules=[ToolRule("Write", "deny", role="blocked")],
-    )
-
-    assert engine.evaluate(_call(principal=Principal("t", "u", {"blocked"}))).decision == "deny"
-    assert engine.evaluate(_call(principal=Principal("t", "u", {"writer"}))).decision == "allow"
-
-
-def test_path_rule_role_guard() -> None:
-    engine = PermissionEngine(
-        mode="skip-dangerous",
-        rules=[PathRule(["secrets/**"], "deny", ["Write"], role="blocked")],
-    )
-    call_input = {"file_path": "secrets/token.txt"}
-
+@pytest.mark.parametrize(
+    ("rule", "name", "call_input", "other_role"),
+    [
+        (ToolRule("Write", "deny", role="blocked"), "Write", {"file_path": "notes.txt"}, "writer"),
+        (
+            PathRule(["secrets/**"], "deny", ["Write"], role="blocked"),
+            "Write",
+            {"file_path": "secrets/token.txt"},
+            "writer",
+        ),
+        (
+            BashRule("rm -rf *", "deny", role="blocked"),
+            "Bash",
+            {"command": "rm -rf build"},
+            "operator",
+        ),
+    ],
+)
+def test_role_guard_matches_only_principal_role(
+    rule: Any, name: str, call_input: dict[str, str], other_role: str
+) -> None:
+    engine = PermissionEngine(mode="skip-dangerous", rules=[rule])
     assert (
         engine.evaluate(
-            _call(principal=Principal("t", "u", {"blocked"}), input=call_input)
-        ).decision
-        == "deny"
-    )
-    assert (
-        engine.evaluate(_call(principal=Principal("t", "u", {"writer"}), input=call_input)).decision
-        == "allow"
-    )
-
-
-def test_bash_rule_role_guard() -> None:
-    engine = PermissionEngine(
-        mode="skip-dangerous",
-        rules=[BashRule("rm -rf *", "deny", role="blocked")],
-    )
-    call_input = {"command": "rm -rf build"}
-
-    assert (
-        engine.evaluate(
-            _call("Bash", principal=Principal("t", "u", {"blocked"}), input=call_input)
+            _call(name, input=call_input, principal=Principal("t", "u", {"blocked"}))
         ).decision
         == "deny"
     )
     assert (
         engine.evaluate(
-            _call("Bash", principal=Principal("t", "u", {"operator"}), input=call_input)
+            _call(name, input=call_input, principal=Principal("t", "u", {other_role}))
         ).decision
         == "allow"
     )
 
 
-def test_required_and_excluded_roles_are_conjunctive() -> None:
+def test_role_guards_and_missing_principal_defaults() -> None:
     engine = PermissionEngine(
         mode="skip-dangerous",
         rules=[ToolRule("Write", "deny", role="operator", unless_role="suspended")],
@@ -145,8 +120,6 @@ def test_required_and_excluded_roles_are_conjunctive() -> None:
     )
     assert engine.evaluate(_call(principal=Principal("t", "u", {"writer"}))).decision == "allow"
 
-
-def test_missing_principal_has_empty_roles() -> None:
     role_rule_engine = PermissionEngine(
         mode="skip-dangerous",
         rules=[ToolRule("Write", "deny", role="admin")],
@@ -172,12 +145,13 @@ def test_malformed_pending_principal_is_rejected() -> None:
     assert decision.reason == "Invalid permission call: principal is invalid."
 
 
-def test_bash_composite_role_specific_deny_cannot_be_bypassed() -> None:
+@pytest.mark.parametrize(("deny_role", "expected"), [("runner", "deny"), ("admin", "allow")])
+def test_bash_composite_role_deny_filtering(deny_role: str, expected: str) -> None:
     engine = PermissionEngine(
         mode="skip-dangerous",
         rules=[
             BashRule("echo *", "allow", role="runner"),
-            BashRule("rm -rf *", "deny", role="runner"),
+            BashRule("rm -rf *", "deny", role=deny_role),
         ],
     )
     call = _call(
@@ -186,24 +160,7 @@ def test_bash_composite_role_specific_deny_cannot_be_bypassed() -> None:
         principal=Principal("t", "u", {"runner"}),
     )
 
-    assert engine.evaluate(call).decision == "deny"
-
-
-def test_bash_composite_deny_for_other_role_is_filtered() -> None:
-    engine = PermissionEngine(
-        mode="skip-dangerous",
-        rules=[
-            BashRule("echo *", "allow", role="runner"),
-            BashRule("rm -rf *", "deny", role="admin"),
-        ],
-    )
-    call = _call(
-        "Bash",
-        input={"command": "echo safe; rm -rf build"},
-        principal=Principal("t", "u", {"runner"}),
-    )
-
-    assert engine.evaluate(call).decision == "allow"
+    assert engine.evaluate(call).decision == expected
 
 
 def test_layered_policy_role_deny_overrides_runtime_allow() -> None:
