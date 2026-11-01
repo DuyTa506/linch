@@ -99,6 +99,29 @@ async def test_mailbox_contract_accepts_in_memory_mailbox() -> None:
     await assert_mailbox_contract(InMemoryMailbox)
 
 
+async def test_mailbox_contract_rejects_lossy_message_fields() -> None:
+    from dataclasses import replace
+
+    import pytest
+
+    from linch import MailboxMessage, assert_mailbox_contract
+
+    class LossyMailbox:
+        def __init__(self) -> None:
+            self._pending: list[MailboxMessage] = []
+
+        async def send(self, message: MailboxMessage) -> None:
+            self._pending.append(message)
+
+        async def drain(self, recipient: str) -> list[MailboxMessage]:
+            matched = [message for message in self._pending if message.recipient == recipient]
+            self._pending = [message for message in self._pending if message.recipient != recipient]
+            return [replace(message, content="corrupted") for message in matched]
+
+    with pytest.raises(AssertionError, match="message"):
+        await assert_mailbox_contract(LossyMailbox)
+
+
 def test_contract_helpers_are_public_top_level_api() -> None:
     import linch
 
