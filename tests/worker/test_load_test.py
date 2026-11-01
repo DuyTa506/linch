@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import importlib.util
 import json
 import os
 import signal
@@ -12,6 +13,17 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip("asyncpg")
+
+
+def _load_script(name, filename="load_test.py"):
+    """Load one harness script module for a focused unit test."""
+
+    script = Path(__file__).resolve().parents[2] / "scripts" / filename
+    spec = importlib.util.spec_from_file_location(name, script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_fractional_rtt_is_rejected_before_starting_processes():
@@ -28,13 +40,7 @@ def test_fractional_rtt_is_rejected_before_starting_processes():
 
 
 def test_pgbouncer_config_uses_transaction_pool_and_role_auth():
-    import importlib.util
-
-    script = Path(__file__).resolve().parents[2] / "scripts/load_test.py"
-    spec = importlib.util.spec_from_file_location("load_test", script)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = _load_script("load_test")
     config = module.pgbouncer_config(56432, "/tmp/pg.log", "/tmp/pg.pid", "/tmp/users")
     assert "pool_mode = transaction" in config
     assert "postgres = host=127.0.0.1 port=55432 dbname=postgres" in config
@@ -43,14 +49,9 @@ def test_pgbouncer_config_uses_transaction_pool_and_role_auth():
 
 
 def test_pgbouncer_pool_disables_statement_cache(monkeypatch):
-    import importlib.util
     from types import SimpleNamespace
 
-    script = Path(__file__).resolve().parents[2] / "scripts/load_test.py"
-    spec = importlib.util.spec_from_file_location("load_test_pool", script)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = _load_script("load_test_pool")
     captured = {}
 
     async def create_pool(dsn, **kwargs):
@@ -132,14 +133,9 @@ async def test_two_process_workers_finish_once_without_duplicate_notes(tmp_path)
 async def test_experiment_commands_keep_witness_readers_and_reach_high_rates(
     monkeypatch, command, readers
 ):
-    import importlib.util
     from types import SimpleNamespace
 
-    script = Path(__file__).resolve().parents[2] / "scripts/load_test.py"
-    spec = importlib.util.spec_from_file_location("load_grid", script)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = _load_script("load_grid")
     seen = []
 
     async def point(args):
@@ -157,28 +153,16 @@ async def test_experiment_commands_keep_witness_readers_and_reach_high_rates(
 
 @pytest.mark.parametrize("seconds,expected", [(None, False), (6.9, True), (7, True), (7.1, False)])
 def test_kill_recovery_gate_enforces_the_seven_second_deadline(seconds, expected):
-    import importlib.util
-
-    script = Path(__file__).resolve().parents[2] / "scripts/load_test.py"
-    spec = importlib.util.spec_from_file_location("load_recovery", script)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = _load_script("load_recovery")
     recovery = {"seconds": seconds} if seconds is not None else None
     assert module.recovered({"recovery": recovery}) is expected
 
 
 @pytest.mark.skipif(not os.getenv("AGENT_KIT_TEST_PG_DSN"), reason="Postgres DSN required")
 async def test_recovery_deadline_covers_every_orphan_not_only_the_selected_run():
-    import importlib.util
-
     import asyncpg
 
-    script = Path(__file__).resolve().parents[2] / "scripts/load_test.py"
-    spec = importlib.util.spec_from_file_location("load_orphans", script)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = _load_script("load_orphans")
     conn = await asyncpg.connect(os.environ["AGENT_KIT_TEST_PG_DSN"])
     try:
         await conn.execute(
@@ -212,14 +196,10 @@ async def test_recovery_deadline_covers_every_orphan_not_only_the_selected_run()
 
 
 def test_initialization_repro_selects_durable_started_victim(monkeypatch):
-    import importlib.util
     from types import SimpleNamespace
 
     script = Path(__file__).resolve().parents[2] / "scripts/repro_worker_initialization.py"
-    spec = importlib.util.spec_from_file_location("initialization_repro", script)
-    assert spec is not None and spec.loader is not None
-    repro = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(repro)
+    repro = _load_script("initialization_repro", script.name)
     captured = []
     victim = {"id": "initializing", "lease_owner": "worker-a", "lease_epoch": 1}
 
