@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any, cast
 
 from .. import lifecycle
+from .._telemetry import record_prompt_capture
 from ..events import Event, ResultEvent
 from ..hooks import (
     AfterProviderCallContext,
@@ -34,6 +35,7 @@ async def dispatch_user_prompt(
     source: str = "run",
 ) -> tuple[str, list[dict[str, str]] | None, list[Event], str | None]:
     if not hook_dispatcher.active:
+        record_prompt_capture(session, prompt_value)
         return prompt_value, images_value, [], None
     dispatched = await hook_dispatcher.dispatch(
         lifecycle.USER_PROMPT_SUBMIT,
@@ -49,14 +51,18 @@ async def dispatch_user_prompt(
     )
     result = dispatched.result
     if result.action == "mutate":
+        prompt = result.prompt if result.prompt is not None else prompt_value
+        record_prompt_capture(session, prompt)
         return (
-            result.prompt if result.prompt is not None else prompt_value,
+            prompt,
             result.images if result.images is not None else images_value,
             dispatched.events,
             None,
         )
     if result.action in {"block", "stop"}:
+        record_prompt_capture(session, prompt_value)
         return prompt_value, images_value, dispatched.events, result.reason or result.feedback
+    record_prompt_capture(session, prompt_value)
     return prompt_value, images_value, dispatched.events, None
 
 
