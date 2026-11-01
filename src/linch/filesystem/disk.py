@@ -24,17 +24,61 @@ route a subtree with :class:`CompositeFileBackend`.
 
 from __future__ import annotations
 
+import os
+import secrets
+import stat
+import threading
 from pathlib import Path
 
 from .._blocking import run_blocking
 from .backend import _slice_lines, normalize_path
 
 
+def _atomic_write(target: Path, content: str) -> None:
+    """Write UTF-8 content through a sibling temporary file."""
+    encoded = content.encode("utf-8")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    mode = stat.S_IMODE(target.stat().st_mode) if target.exists() else None
+    temporary: Path | None = None
+    file = None
+    try:
+        for _ in range(10):
+            candidate = target.with_name(f".{target.name}.{secrets.token_hex(8)}.tmp")
+            try:
+                descriptor = os.open(
+                    candidate,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o666,
+                )
+            except FileExistsError:
+                continue
+            temporary = candidate
+            file = os.fdopen(descriptor, "wb")
+            break
+        if file is None or temporary is None:
+            raise FileExistsError(f"could not create a temporary file beside {target}")
+        with file:
+            if mode is not None:
+                os.fchmod(file.fileno(), mode)
+            file.write(encoded)
+            file.flush()
+        os.replace(temporary, target)
+        temporary = None
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+
 class DiskFileBackend:
     """Map the virtual filesystem onto a real directory subtree.
 
     All file operations run through the repository's bounded blocking-I/O
-    helper, and every resolved path must remain below :attr:`root`.
+    helper, and every resolved path must remain below :attr:`root`. Mutations
+    on one backend instance are serialized; separate instances or processes
+    do not share this lock.
 
     Args:
         root: Directory used as the backend's confinement root. It is resolved
@@ -56,6 +100,7 @@ class DiskFileBackend:
         """
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
+        self._mutation_lock = threading.Lock()
 
     @property
     def resume_policy_config(self) -> dict[str, str]:
@@ -101,7 +146,8 @@ class DiskFileBackend:
         def _read() -> str:
             if not target.is_file():
                 raise FileNotFoundError(path)
-            return target.read_text(encoding="utf-8")
+            with target.open("r", encoding="utf-8", newline="") as file:
+                return file.read()
 
         text = await run_blocking(_read)
         return _slice_lines(text, offset, limit)
@@ -120,8 +166,8 @@ class DiskFileBackend:
         target = self._real_path(path)
 
         def _write() -> None:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content, encoding="utf-8")
+            with self._mutation_lock:
+                _atomic_write(target, content)
 
         await run_blocking(_write)
 
@@ -171,20 +217,22 @@ class DiskFileBackend:
         target = self._real_path(path)
 
         def _edit() -> int:
-            if not target.is_file():
-                raise FileNotFoundError(path)
-            text = target.read_text(encoding="utf-8")
-            count = text.count(old)
-            if count == 0:
-                raise ValueError(f"old string not found in {path}")
-            if count > 1 and not replace_all:
-                raise ValueError(
-                    f"old string is not unique in {path} ({count} matches); "
-                    "pass replace_all=true or include more context"
-                )
-            updated = text.replace(old, new) if replace_all else text.replace(old, new, 1)
-            target.write_text(updated, encoding="utf-8")
-            return count if replace_all else 1
+            with self._mutation_lock:
+                if not target.is_file():
+                    raise FileNotFoundError(path)
+                with target.open("r", encoding="utf-8", newline="") as file:
+                    text = file.read()
+                count = text.count(old)
+                if count == 0:
+                    raise ValueError(f"old string not found in {path}")
+                if count > 1 and not replace_all:
+                    raise ValueError(
+                        f"old string is not unique in {path} ({count} matches); "
+                        "pass replace_all=true or include more context"
+                    )
+                updated = text.replace(old, new) if replace_all else text.replace(old, new, 1)
+                _atomic_write(target, updated)
+                return count if replace_all else 1
 
         return await run_blocking(_edit)
 
@@ -217,7 +265,8 @@ class DiskFileBackend:
         target = self._real_path(path)
 
         def _delete() -> None:
-            if target.is_file():
-                target.unlink()
+            with self._mutation_lock:
+                if target.is_file():
+                    target.unlink()
 
         await run_blocking(_delete)

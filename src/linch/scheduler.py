@@ -1322,7 +1322,7 @@ async def _run_serial_batch(
         yield ToolCallStartEvent(
             tool_use_id=call.id,
             tool_name=_tool_name(call),
-            input=input,
+            input=copy.deepcopy(input),
             summary=call.summary,
         )
         running = _start_tool_execution(
@@ -1408,7 +1408,7 @@ async def _run_parallel_batch(
         yield ToolCallStartEvent(
             tool_use_id=call.id,
             tool_name=_tool_name(call),
-            input=input,
+            input=copy.deepcopy(input),
             summary=call.summary,
         )
 
@@ -1724,7 +1724,7 @@ async def execute_tool_calls(
             yield ToolCallStartEvent(
                 tool_use_id=call.id,
                 tool_name=tool_name,
-                input=input,
+                input=copy.deepcopy(input),
                 summary=call.summary,
             )
             task = asyncio.ensure_future(

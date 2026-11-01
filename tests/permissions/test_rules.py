@@ -90,6 +90,25 @@ def test_path_rule_resolves_symlinked_rule_pattern(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("tool_name", "input_key"),
+    [("write_file", "path"), ("edit_file", "path")],
+)
+def test_path_rule_covers_virtual_filesystem_writes(
+    tmp_path: Path, tool_name: str, input_key: str
+) -> None:
+    (tmp_path / "secrets").mkdir()
+    rule = PathRule(["secrets/**"], "deny")
+
+    assert match_path_rule(
+        rule,
+        tool_name,
+        {input_key: "/secrets/deploy.key"},
+        str(tmp_path),
+        str(tmp_path),
+    )
+
+
 def test_skill_tool_rule_matches_the_skill_tool_normalization() -> None:
     rule = ToolRule("Skill", "deny", arg="deploy-prod")
 

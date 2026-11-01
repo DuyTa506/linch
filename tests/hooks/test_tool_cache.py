@@ -340,3 +340,44 @@ async def test_resolve_action_short_circuits_dispatch() -> None:
     assert res.result.action == "resolve"
     assert res.result.tool_result is served
     assert later_ran["v"] is False  # short-circuited before the next hook
+
+
+async def test_cached_results_are_isolated_from_consumers() -> None:
+    """Mutating a returned legacy or canonical result must not poison its cache."""
+    from linch.hooks.contexts import PostToolUseContext
+    from linch.hooks.tool_cache import ToolCacheHook
+    from linch.tools import ToolOutput, ToolResult
+
+    hook = ToolCacheHook()
+    first = await hook.on_pre_tool_use(_pre("t1", "Search", "read", {"q": "x"}))
+    assert first is None
+    legacy = ToolResult(content="secret", metadata={"nested": {"value": 1}})
+    canonical = ToolOutput(value={"nested": {"value": 1}})
+    await hook.on_post_tool_use(
+        PostToolUseContext(
+            session=None,
+            run_id="r",
+            turn_index=0,
+            tool_use_id="t1",
+            tool_name="Search",
+            input={"q": "x"},
+            result=legacy,
+            tool_output=canonical,
+        )
+    )
+
+    legacy.content = "changed"
+    legacy.metadata["nested"]["value"] = 9
+    canonical.value["nested"]["value"] = 9
+
+    hit = await hook.on_pre_tool_use(_pre("t2", "Search", "read", {"q": "x"}))
+    assert hit is not None
+    assert hit.tool_result.content == "secret"
+    assert hit.tool_result.metadata == {"nested": {"value": 1}}
+    assert hit.tool_output.value == {"nested": {"value": 1}}
+
+    hit.tool_result.metadata["nested"]["value"] = 42
+    hit.tool_output.value["nested"]["value"] = 42
+    again = await hook.on_pre_tool_use(_pre("t3", "Search", "read", {"q": "x"}))
+    assert again.tool_result.metadata == {"nested": {"value": 1}}
+    assert again.tool_output.value == {"nested": {"value": 1}}

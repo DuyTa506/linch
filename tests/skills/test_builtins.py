@@ -143,3 +143,30 @@ def test_substitute_cases(
     out = substitute_skill_body(_skill(body, arguments), call_args, "sess-1")
     for fragment in expected:
         assert fragment in out
+
+
+def test_substitute_prefix_named_slots_independently() -> None:
+    """Replace a slot without consuming a longer slot sharing its prefix."""
+    out = substitute_skill_body(
+        _skill("Review $file against every entry in $file_list.", ["file", "file_list"]),
+        "main.py manifest.txt",
+        "sess-1",
+    )
+
+    assert "Review main.py against every entry in manifest.txt." in out
+
+
+def test_substitute_slot_values_are_not_reprocessed() -> None:
+    """Keep a literal slot marker supplied as a value instead of cascading it."""
+    out = substitute_skill_body(_skill("first=$a second=$b", ["a", "b"]), "$b final", "sess-1")
+
+    assert "first=$b second=final" in out
+
+
+def test_substitute_braced_runtime_placeholders_allow_adjacent_text() -> None:
+    """Expand braced runtime placeholders even when text follows the brace."""
+    out = substitute_skill_body(
+        _skill("dir=${LINCH_SKILL_DIR}suffix sid=${LINCH_SESSION_ID}suffix"), "", "sess-1"
+    )
+
+    assert "dir=/skills/demosuffix sid=sess-1suffix" in out

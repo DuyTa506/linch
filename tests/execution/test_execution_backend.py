@@ -109,6 +109,60 @@ async def test_local_fs_and_shell_share_workspace(tmp_path: Any) -> None:
     assert result.stdout == "content"
 
 
+@pytest.mark.parametrize("tool_name", ["write_file", "edit_file"])
+@pytest.mark.asyncio
+async def test_local_world_virtual_write_tools_honor_path_rule(
+    tmp_path: Any, tool_name: str
+) -> None:
+    from linch import FeatureFlags, LocalExecutionBackend, PathRule, ToolCallEndEvent
+    from linch.filesystem import filesystem_tools
+    from linch.tools.registry import workspace_tools
+
+    secret = tmp_path / "secrets" / "deploy.key"
+    secret.parent.mkdir()
+    secret.write_text("ORIGINAL", encoding="utf-8")
+    provider = ScriptedProvider(
+        [
+            ToolUseTurn(
+                tool_name=tool_name,
+                tool_input=(
+                    {"path": "/secrets/deploy.key", "content": "PWNED"}
+                    if tool_name == "write_file"
+                    else {
+                        "path": "/secrets/deploy.key",
+                        "old_string": "ORIGINAL",
+                        "new_string": "PWNED",
+                    }
+                ),
+            ),
+            TextTurn("done"),
+        ]
+    )
+    agent = _agent(
+        tmp_path,
+        provider=provider,
+        tools=workspace_tools(extra=filesystem_tools()),
+        features=FeatureFlags(filesystem=True),
+        execution_backend=LocalExecutionBackend(cwd=tmp_path),
+        permissions={
+            "mode": "skip-dangerous",
+            "rules": [PathRule(["secrets/**"], "deny")],
+        },
+        read_before_write=False,
+    )
+    session = await agent.session()
+    events = [event async for event in session.run("go")]
+    await agent.close()
+
+    end = next(
+        event
+        for event in events
+        if isinstance(event, ToolCallEndEvent) and event.tool_name == tool_name
+    )
+    assert end.is_error
+    assert secret.read_text(encoding="utf-8") == "ORIGINAL"
+
+
 class _FakeShell:
     async def run(self, command: str, *, cwd: str, timeout_s: float, signal: Any = None) -> Any:
         from linch.tools.execution import ExecResult
