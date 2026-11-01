@@ -7,7 +7,6 @@ import pytest
 from linch.kernel import EventBus
 
 
-@pytest.mark.asyncio
 async def test_fork_preserves_order_and_owns_independent_registrations() -> None:
     bus = EventBus()
     first = bus.on("evt", lambda: "first")
@@ -21,7 +20,6 @@ async def test_fork_preserves_order_and_owns_independent_registrations() -> None
     assert await fork.serial("evt") == "first"
 
 
-@pytest.mark.asyncio
 async def test_emit_isolates_throwing_listener() -> None:
     seen: list[str] = []
 
@@ -38,7 +36,6 @@ async def test_emit_isolates_throwing_listener() -> None:
     assert seen == ["ok:x"]
 
 
-@pytest.mark.asyncio
 async def test_serial_bails_on_first_truthy() -> None:
     bus = EventBus()
     bus.on("evt", lambda _p: None)
@@ -48,7 +45,6 @@ async def test_serial_bails_on_first_truthy() -> None:
     assert result == "stop"
 
 
-@pytest.mark.asyncio
 async def test_notification_attempts_all_listeners_before_raising() -> None:
     seen: list[str] = []
 
@@ -68,7 +64,6 @@ async def test_notification_attempts_all_listeners_before_raising() -> None:
     assert seen == ["boom", "sibling"]
 
 
-@pytest.mark.asyncio
 async def test_waterfall_composes_outer_to_inner() -> None:
     order: list[str] = []
 
@@ -103,7 +98,6 @@ async def test_waterfall_composes_outer_to_inner() -> None:
     ]
 
 
-@pytest.mark.asyncio
 async def test_waterfall_listener_can_veto_by_not_calling_next() -> None:
     reached: list[str] = []
 
@@ -127,7 +121,6 @@ async def test_waterfall_listener_can_veto_by_not_calling_next() -> None:
     assert reached == []
 
 
-@pytest.mark.asyncio
 async def test_waterfall_terminal_runs_with_no_listeners() -> None:
     bus = EventBus()
 
@@ -137,7 +130,6 @@ async def test_waterfall_terminal_runs_with_no_listeners() -> None:
     assert await bus.waterfall("wf", {}, next=terminal) == "terminal-only"
 
 
-@pytest.mark.asyncio
 async def test_waterfall_listener_mutates_payload_in_place() -> None:
     async def mutate(payload: dict, next) -> object:
         payload["seen"] = True
@@ -154,7 +146,6 @@ async def test_waterfall_listener_mutates_payload_in_place() -> None:
     assert payload["seen"] is True
 
 
-@pytest.mark.asyncio
 async def test_on_returns_disposer_that_unregisters() -> None:
     seen: list[str] = []
     bus = EventBus()
@@ -165,7 +156,6 @@ async def test_on_returns_disposer_that_unregisters() -> None:
     assert seen == ["a:1"]
 
 
-@pytest.mark.asyncio
 async def test_on_prepend_orders_before_existing() -> None:
     order: list[str] = []
     bus = EventBus()
@@ -175,7 +165,6 @@ async def test_on_prepend_orders_before_existing() -> None:
     assert order == ["first", "second"]
 
 
-@pytest.mark.asyncio
 async def test_disposer_removes_exact_duplicate_registration() -> None:
     order: list[str] = []
 
@@ -194,37 +183,22 @@ async def test_disposer_removes_exact_duplicate_registration() -> None:
     assert order == ["first", "shared", "middle", "last"]
 
 
-@pytest.mark.asyncio
-async def test_waterfall_next_is_single_use() -> None:
-    terminal_calls = 0
-
-    async def calls_twice(_payload: object, next) -> None:
-        await next()
-        await next()
-
-    async def terminal() -> None:
-        nonlocal terminal_calls
-        terminal_calls += 1
-
-    bus = EventBus()
-    bus.on("wf", calls_twice)
-
-    with pytest.raises(RuntimeError, match=r"next\(\) may only be called once"):
-        await bus.waterfall("wf", None, next=terminal)
-    assert terminal_calls == 1
-
-
-@pytest.mark.asyncio
-async def test_waterfall_concurrent_next_calls_only_dispatch_once() -> None:
+@pytest.mark.parametrize("concurrent", [False, True])
+async def test_waterfall_next_is_single_use(concurrent: bool) -> None:
     terminal_calls = 0
 
     async def calls_concurrently(_payload: object, next) -> None:
-        await asyncio.gather(next(), next())
+        if concurrent:
+            await asyncio.gather(next(), next())
+        else:
+            await next()
+            await next()
 
     async def terminal() -> None:
         nonlocal terminal_calls
         terminal_calls += 1
-        await asyncio.sleep(0)
+        if concurrent:
+            await asyncio.sleep(0)
 
     bus = EventBus()
     bus.on("wf", calls_concurrently)
@@ -234,7 +208,6 @@ async def test_waterfall_concurrent_next_calls_only_dispatch_once() -> None:
     assert terminal_calls == 1
 
 
-@pytest.mark.asyncio
 async def test_emit_propagates_synchronous_cancelled_error() -> None:
     reached: list[str] = []
 
@@ -250,7 +223,6 @@ async def test_emit_propagates_synchronous_cancelled_error() -> None:
     assert reached == []
 
 
-@pytest.mark.asyncio
 async def test_emit_async_cancelled_error_is_task_local(caplog: pytest.LogCaptureFixture) -> None:
     reached: list[str] = []
 

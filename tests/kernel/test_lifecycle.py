@@ -23,35 +23,29 @@ def test_catalog_points_have_names_payloads_and_modes() -> None:
     assert all(point.mode == "hook" for point in hook_points)
 
 
-@pytest.mark.asyncio
-async def test_event_bus_rejects_a_dispatch_mode_mismatch_without_listeners() -> None:
-    bus = EventBus()
-
-    with pytest.raises(ValueError, match="tools/execute.*waterfall"):
-        await bus.serial(TOOL_EXECUTE, object())
-
-    with pytest.raises(ValueError, match="tools/pre-execute.*waterfall"):
-        bus.emit(TOOL_PRE_EXECUTE, object())
-
-    with pytest.raises(ValueError, match="turn-stopping.*serial"):
-        bus.emit(TURN_STOPPING, object())
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("method", ["emit", "serial", "waterfall"])
-async def test_event_bus_rejects_hook_points_for_every_kernel_dispatcher(method: str) -> None:
+@pytest.mark.parametrize(
+    ("method", "point", "match"),
+    [
+        ("serial", TOOL_EXECUTE, "tools/execute.*waterfall"),
+        ("emit", TOOL_PRE_EXECUTE, "tools/pre-execute.*waterfall"),
+        ("emit", TURN_STOPPING, "turn-stopping.*serial"),
+        ("emit", AGENT_START, "AgentStart.*hook"),
+        ("serial", AGENT_START, "AgentStart.*hook"),
+        ("waterfall", AGENT_START, "AgentStart.*hook"),
+    ],
+)
+async def test_event_bus_rejects_invalid_dispatch(method: str, point: object, match: str) -> None:
     bus = EventBus()
     dispatch = getattr(bus, method)
-    with pytest.raises(ValueError, match="AgentStart.*hook"):
+    with pytest.raises(ValueError, match=match):
         if method == "emit":
-            dispatch(AGENT_START, object())
+            dispatch(point, object())
         elif method == "serial":
-            await dispatch(AGENT_START, object())
+            await dispatch(point, object())
         else:
-            await dispatch(AGENT_START, object(), next=lambda: None)
+            await dispatch(point, object(), next=lambda: None)
 
 
-@pytest.mark.asyncio
 async def test_event_bus_accepts_typed_serial_and_waterfall_points() -> None:
     bus = EventBus()
     seen: list[object] = []
@@ -60,7 +54,6 @@ async def test_event_bus_accepts_typed_serial_and_waterfall_points() -> None:
     assert seen == ["x"]
 
 
-@pytest.mark.asyncio
 async def test_hook_dispatcher_accepts_catalog_points_and_rejects_other_modes() -> None:
     dispatcher = HookDispatcher()
     context = AgentStartContext(session=None, run_id="r", turn_index=None)
