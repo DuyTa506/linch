@@ -33,7 +33,7 @@ class Disposable:
         fn: Optional synchronous or asynchronous cleanup callback.
     """
 
-    __slots__ = ("_fn", "_disposed", "_task")
+    __slots__ = ("_fn", "_disposed", "_task", "_scopes")
 
     def __init__(self, fn: DisposerFn | None = None) -> None:
         """Create a teardown handle around an optional cleanup callback.
@@ -44,6 +44,7 @@ class Disposable:
         self._fn = fn
         self._disposed = False
         self._task: asyncio.Task[None] | None = None
+        self._scopes: set[EffectScope] = set()
 
     @property
     def disposed(self) -> bool:
@@ -91,6 +92,11 @@ class Disposable:
         else:
             self._disposed = True
             self._fn = None  # let captured state be collected after success
+            self._task = None
+            scopes = tuple(self._scopes)
+            self._scopes.clear()
+            for scope in scopes:
+                scope._discard(self)
 
     def __call__(self) -> Awaitable[None]:
         """Return the awaitable for :meth:`dispose`.
@@ -144,8 +150,16 @@ class EffectScope:
         """Track an already-created disposer so the scope owns its teardown."""
         self.ensure_active()
         d = _coerce(disposer)
-        self._disposers.append(d)
+        self._track(d)
         return d
+
+    def _track(self, disposer: Disposable) -> None:
+        if not disposer.disposed:
+            self._disposers.append(disposer)
+            disposer._scopes.add(self)
+
+    def _discard(self, disposer: Disposable) -> None:
+        self._disposers[:] = [item for item in self._disposers if item is not disposer]
 
     def effect(self, fn: Callable[[], Any]) -> Disposable:
         """Run *fn* now and register the teardown it yields.
@@ -175,7 +189,8 @@ class EffectScope:
             # fn() already ran, so anything coerced before a rejected item is a
             # live registration. The scope must still own it or it can never be
             # torn down.
-            self._disposers.extend(group)
+            for disposer in group:
+                self._track(disposer)
         return Disposable(lambda: _dispose_reverse(group))
 
     async def dispose(self) -> None:
@@ -188,7 +203,7 @@ class EffectScope:
         # Retain the list until all entries finish. On failure, successfully
         # disposed entries are idempotent and failed entries are retried by the
         # next dispose() call.
-        await _dispose_reverse(self._disposers)
+        await _dispose_reverse(list(self._disposers))
         self._disposers.clear()
 
 
