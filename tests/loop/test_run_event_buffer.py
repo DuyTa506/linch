@@ -1,25 +1,19 @@
-"""Per-run event buffering (WS2, safe/observational-only design).
-
-Observational events are coalesced into batched `append_events` flushes;
-recovery-critical tool start/end events are flushed one-per-event so they stay
-durable at the yield boundary. Consumer-visible order and log completeness are
-unchanged.
-"""
-
 from __future__ import annotations
 
 from typing import Any
 
-from test_run_resume import ScriptProvider, _agent, _memory_session_store, _registry
+import pytest
 
 from linch.events import PartialAssistantEvent
 from linch.loop.checkpoint import RunEventBuffer
 from linch.run_store import InMemoryRunStore
+from tests.support.agents import make_agent
+from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
+from tests.support.stores import memory_session_store
+from tests.support.tools import StubTool, tool_registry
 
 
 class _RecordingRunStore(InMemoryRunStore):
-    """Records the event-type list of every append_events flush."""
-
     def __init__(self) -> None:
         super().__init__()
         self.batches: list[list[str]] = []
@@ -27,6 +21,12 @@ class _RecordingRunStore(InMemoryRunStore):
     async def append_events(self, run_id: str, events: list[Any]) -> list[int]:
         self.batches.append([event.type for event in events])
         return await super().append_events(run_id, events)
+
+    async def save_checkpoint_with_events(
+        self, run_id: str, checkpoint: Any, events: list[Any], *, status: str = "running"
+    ) -> tuple[Any, list[int]]:
+        self.batches.append([event.type for event in events])
+        return await super().save_checkpoint_with_events(run_id, checkpoint, events, status=status)
 
 
 class _FailOnceBatchStore:
@@ -59,6 +59,11 @@ class _FailSecondSingleStore:
         return len(self.events)
 
 
+async def _expect_flush_failure(buffer: RunEventBuffer) -> None:
+    with pytest.raises(OSError, match="temporary"):
+        await buffer.flush()
+
+
 async def test_failed_batch_flush_restores_pending_events_for_retry() -> None:
     store = _FailOnceBatchStore()
     buffer = RunEventBuffer(store, "r1")
@@ -66,11 +71,7 @@ async def test_failed_batch_flush_restores_pending_events_for_retry() -> None:
     for event in events:
         await buffer.append(event)
 
-    try:
-        await buffer.flush()
-        raise AssertionError("expected first flush to fail")
-    except OSError:
-        pass
+    await _expect_flush_failure(buffer)
 
     assert buffer.last_seq == 0
     assert buffer._pending == events
@@ -86,11 +87,7 @@ async def test_failed_single_event_flush_preserves_progress_and_requeues_unattem
     for event in events:
         await buffer.append(event)
 
-    try:
-        await buffer.flush()
-        raise AssertionError("expected first flush to fail")
-    except OSError:
-        pass
+    await _expect_flush_failure(buffer)
 
     assert buffer.last_seq == 1
     assert buffer._pending == [events[1], events[2], store.concurrent_event]
@@ -101,16 +98,14 @@ async def test_failed_single_event_flush_preserves_progress_and_requeues_unattem
 
 
 async def test_observational_events_batch_and_tool_events_flush_per_event() -> None:
-    session_store = _memory_session_store()
+    session_store = memory_session_store()
     run_store = _RecordingRunStore()
-    counts: dict[str, int] = {}
-    agent = _agent(
+    agent = make_agent(
+        ScriptedProvider([ToolUseTurn("A", {}), TextTurn("done")]),
         model="gpt-5",
-        provider=ScriptProvider(tool_names=["A"]),
         session_store=session_store,
         run_store=run_store,
-        tools=_registry(counts, "A"),
-        cwd=".",
+        tools=tool_registry(StubTool("A")),
     )
     session = await agent.session(id="s1")
 
@@ -120,18 +115,14 @@ async def test_observational_events_batch_and_tool_events_flush_per_event() -> N
             run_id = event.run_id
     assert run_id
 
-    # Completeness + order: the flushed batches, concatenated, equal the durable
-    # log exactly (nothing lost, nothing reordered).
     flat = [t for batch in run_store.batches for t in batch]
     durable = [row.event.type for row in await run_store.load_events(run_id)]
     assert flat == durable
     assert "tool_call_start" in durable and "tool_call_end" in durable
 
-    # Recovery-critical events are flushed one-per-event (durable at the yield).
     for batch in run_store.batches:
         for etype in ("tool_call_start", "tool_call_end"):
             if etype in batch:
                 assert batch == [etype], f"{etype} must flush alone, got {batch}"
 
-    # Observational coalescing actually happened: at least one multi-event flush.
     assert any(len(batch) > 1 for batch in run_store.batches), run_store.batches

@@ -11,103 +11,37 @@ message never lands between assistant(tool_use) and the tool-results message.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
 
-
-class _ToolThenTextProvider:
-    id = "alignment-durability-test"
-
-    def __init__(self) -> None:
-        self.calls = 0
-        self.requests: list[Any] = []
-
-    def context_window(self, model: str) -> int:
-        return 128_000
-
-    async def stream(self, req: Any) -> AsyncIterator[dict[str, Any]]:
-        from linch.types import Usage
-
-        self.calls += 1
-        self.requests.append(req)
-        yield {"type": "message_start", "model": req.model}
-        if self.calls == 1:
-            yield {"type": "tool_use_start", "id": "call_1", "name": "Wait"}
-            yield {"type": "tool_use_input_delta", "id": "call_1", "json_delta": "{}"}
-            yield {"type": "tool_use_end", "id": "call_1"}
-            yield {"type": "message_end", "stop_reason": "tool_use", "usage": Usage()}
-        else:
-            yield {"type": "text_delta", "text": "done"}
-            yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
+from tests.support.agents import make_agent
+from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
+from tests.support.runs import pin_run_contract
+from tests.support.stores import memory_run_store, memory_session_store
+from tests.support.tools import StubTool, tool_registry
 
 
-class _TextProvider:
-    """Always answers with text; records every request."""
-
-    id = "alignment-durability-text"
-
-    def __init__(self, *, fail_on_call: bool = False) -> None:
-        self.fail_on_call = fail_on_call
-        self.requests: list[Any] = []
-
-    def context_window(self, model: str) -> int:
-        return 128_000
-
-    async def stream(self, req: Any) -> AsyncIterator[dict[str, Any]]:
-        from linch.types import Usage
-
-        if self.fail_on_call:
-            raise AssertionError("provider should not be called")
-        self.requests.append(req)
-        yield {"type": "message_start", "model": req.model}
-        yield {"type": "text_delta", "text": "done"}
-        yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
+def _tool_then_text_provider() -> ScriptedProvider:
+    return ScriptedProvider([ToolUseTurn("Wait", {}), TextTurn("done")])
 
 
-class _WaitTool:
-    name = "Wait"
-    description = "Wait until released."
-    input_schema = {"type": "object", "properties": {}}
-    scope = "read"
-    parallel = False
+def _wait_tool() -> Any:
+    started = asyncio.Event()
+    release = asyncio.Event()
 
-    def __init__(self) -> None:
-        self.started = asyncio.Event()
-        self.release = asyncio.Event()
+    async def wait(_input: dict[str, Any], _ctx: Any) -> None:
+        started.set()
+        await release.wait()
 
-    def validate(self, raw: dict[str, Any]) -> dict[str, Any]:
-        return {}
-
-    def summarize(self, input: dict[str, Any]) -> str:
-        return "Wait"
-
-    async def execute(self, input: dict[str, Any], ctx: Any) -> Any:
-        from linch import ToolResult
-
-        self.started.set()
-        await self.release.wait()
-        return ToolResult(content="waited")
+    tool: Any = StubTool(name="Wait", output="waited", on_execute=wait)
+    tool.started = started
+    tool.release = release
+    return tool
 
 
-class _QuickTool:
-    name = "A"
-    description = "Returns immediately."
-    input_schema = {"type": "object", "properties": {}}
-    scope = "read"
-    parallel = False
-
-    def validate(self, raw: dict[str, Any]) -> dict[str, Any]:
-        return {}
-
-    def summarize(self, input: dict[str, Any]) -> str:
-        return "A"
-
-    async def execute(self, input: dict[str, Any], ctx: Any) -> Any:
-        from linch import ToolResult
-
-        return ToolResult(content="A-ok")
+def _quick_tool() -> StubTool:
+    return StubTool(name="A", output="A-ok")
 
 
 def _agent(
@@ -118,14 +52,11 @@ def _agent(
     run_store: Any,
     hooks: Any = None,
 ) -> Any:
-    from linch import Agent
     from linch.config import FeatureFlags
-    from linch.tools.registry import empty_tools
 
-    return Agent(
-        model="test-model",
-        provider=provider,
-        tools=empty_tools(tool),
+    return make_agent(
+        provider,
+        tools=tool_registry(tool),
         permissions={"mode": "skip-dangerous"},
         session_store=session_store,
         run_store=run_store,
@@ -137,15 +68,11 @@ def _agent(
 
 
 def _memory_session_store():
-    from linch.sessions import InMemorySessionStore
-
-    return InMemorySessionStore()
+    return memory_session_store()
 
 
 def _memory_run_store():
-    from linch.run_store import InMemoryRunStore
-
-    return InMemoryRunStore()
+    return memory_run_store()
 
 
 def _text_messages(req: Any) -> list[str]:
@@ -196,37 +123,15 @@ async def _crash_after_tool_result(session, tool, prompt="start"):
     return run_id, align_task
 
 
-async def test_checkpoint_snapshots_pending_alignment() -> None:
-    """An entry enqueued mid-run is durable at the next checkpoint save."""
-    from linch.errors import ConfigError
-
-    session_store = _memory_session_store()
-    run_store = _memory_run_store()
-    tool = _WaitTool()
-    agent = _agent(_ToolThenTextProvider(), tool, session_store=session_store, run_store=run_store)
-    session = await agent.session(id="s1")
-
-    run_id, align_task = await _crash_after_tool_result(session, tool)
-
-    run = await run_store.load_run(run_id)
-    assert run is not None and run.checkpoint is not None
-    assert run.checkpoint.pending_alignment == [{"prompt": "steer north", "images": None}]
-
-    await session.aclose(force=True)
-    with pytest.raises(ConfigError):
-        await align_task
-
-
 async def test_resume_restores_and_injects_pending_alignment() -> None:
     """A restored queue drains at the next turn boundary, exactly once."""
-    from linch import RunOptions
     from linch.run_store import RunCheckpoint
     from linch.types import Usage
 
     session_store = _memory_session_store()
     run_store = _memory_run_store()
-    provider = _TextProvider()
-    agent = _agent(provider, _QuickTool(), session_store=session_store, run_store=run_store)
+    provider = ScriptedProvider([TextTurn("done")])
+    agent = _agent(provider, _quick_tool(), session_store=session_store, run_store=run_store)
     session = await agent.session(id="s1")
 
     run = await run_store.create_run("s1", id="run-align")
@@ -241,7 +146,8 @@ async def test_resume_restores_and_injects_pending_alignment() -> None:
         ),
     )
 
-    events = await _collect(session.resume(run.id, RunOptions(allow_legacy_resume=True)))
+    await pin_run_contract(session, run.id)
+    events = await _collect(session.resume(run.id))
 
     assert len(_alignment_events(events)) == 1
     assert provider.requests and "steer north" in _text_messages(provider.requests[0])
@@ -253,24 +159,28 @@ async def test_resume_restores_and_injects_pending_alignment() -> None:
 
 async def test_crash_after_enqueue_before_drain_resume_injects() -> None:
     """Full crash/resume: a second agent on the same stores injects the intent."""
-    from linch import RunOptions
     from linch.errors import ConfigError
 
     session_store = _memory_session_store()
     run_store = _memory_run_store()
-    tool = _WaitTool()
-    agent = _agent(_ToolThenTextProvider(), tool, session_store=session_store, run_store=run_store)
+    tool = _wait_tool()
+    agent = _agent(
+        _tool_then_text_provider(), tool, session_store=session_store, run_store=run_store
+    )
     session = await agent.session(id="s1")
 
     run_id, align_task = await _crash_after_tool_result(session, tool)
+    run = await run_store.load_run(run_id)
+    assert run is not None and run.checkpoint is not None
+    assert run.checkpoint.pending_alignment == [{"prompt": "steer north", "images": None}]
     await session.aclose(force=True)
     with pytest.raises(ConfigError):
         await align_task
 
-    provider2 = _TextProvider()
-    agent2 = _agent(provider2, _WaitTool(), session_store=session_store, run_store=run_store)
+    provider2 = ScriptedProvider([TextTurn("done")])
+    agent2 = _agent(provider2, _wait_tool(), session_store=session_store, run_store=run_store)
     resumed = await agent2.session(id="s1")
-    events = await _collect(resumed.resume(run_id, RunOptions(allow_legacy_resume=True)))
+    events = await _collect(resumed.resume(run_id))
 
     assert len(_alignment_events(events)) == 1
     assert provider2.requests and "steer north" in _text_messages(provider2.requests[0])
@@ -279,14 +189,13 @@ async def test_crash_after_enqueue_before_drain_resume_injects() -> None:
 
 async def test_resume_mid_tool_batch_defers_alignment_after_tool_results() -> None:
     """A mid-turn resume never injects between assistant(tool_use) and tool results."""
-    from linch import RunOptions
     from linch.run_store import RunCheckpoint
     from linch.types import Message, TextBlock, ToolUseBlock, Usage
 
     session_store = _memory_session_store()
     run_store = _memory_run_store()
-    provider = _TextProvider()
-    agent = _agent(provider, _QuickTool(), session_store=session_store, run_store=run_store)
+    provider = ScriptedProvider([TextTurn("done")])
+    agent = _agent(provider, _quick_tool(), session_store=session_store, run_store=run_store)
     session = await agent.session(id="s1")
 
     user_msg = Message(role="user", content=[TextBlock(text="start")])
@@ -300,6 +209,7 @@ async def test_resume_mid_tool_batch_defers_alignment_after_tool_results() -> No
         run.id,
         RunCheckpoint(
             phase="tool_batch_pending",
+            tool_batch_event_after_seq=0,
             prompt="start",
             turn_index=0,
             total_usage=Usage(),
@@ -309,7 +219,8 @@ async def test_resume_mid_tool_batch_defers_alignment_after_tool_results() -> No
         ),
     )
 
-    events = await _collect(session.resume(run.id, RunOptions(allow_legacy_resume=True)))
+    await pin_run_contract(session, run.id)
+    events = await _collect(session.resume(run.id))
 
     assert len(_alignment_events(events)) == 1
     assert events[-1].type == "result" and events[-1].subtype == "success"
@@ -341,7 +252,7 @@ async def test_resume_mid_tool_batch_defers_alignment_after_tool_results() -> No
 
 
 async def test_resume_stop_success_closes_pending_tool_bracket_as_success() -> None:
-    from linch import HookResult, RunOptions
+    from linch import HookResult
     from linch.run_store import RunCheckpoint
     from linch.types import Message, TextBlock, ToolResultBlock, ToolUseBlock, Usage
 
@@ -355,8 +266,8 @@ async def test_resume_stop_success_closes_pending_tool_bracket_as_success() -> N
     session_store = _memory_session_store()
     run_store = _memory_run_store()
     agent = _agent(
-        _TextProvider(fail_on_call=True),
-        _QuickTool(),
+        ScriptedProvider([]),
+        _quick_tool(),
         session_store=session_store,
         run_store=run_store,
         hooks=[StopBeforeProvider()],
@@ -372,6 +283,7 @@ async def test_resume_stop_success_closes_pending_tool_bracket_as_success() -> N
         run.id,
         RunCheckpoint(
             phase="tool_batch_pending",
+            tool_batch_event_after_seq=0,
             prompt="go",
             turn_index=0,
             total_usage=Usage(),
@@ -381,7 +293,8 @@ async def test_resume_stop_success_closes_pending_tool_bracket_as_success() -> N
         ),
     )
 
-    events = await _collect(session.resume(run.id, RunOptions(allow_legacy_resume=True)))
+    await pin_run_contract(session, run.id)
+    events = await _collect(session.resume(run.id))
 
     assert events[-1].type == "result" and events[-1].subtype == "success"
     result = session.provider_view[-1].content[0]
@@ -393,14 +306,13 @@ async def test_resume_stop_success_closes_pending_tool_bracket_as_success() -> N
 async def test_resume_terminal_turn_drops_restored_alignment_silently() -> None:
     """A resumed turn that finalizes without another provider call drops the
     restored entries silently — no injection, no error (documented limitation)."""
-    from linch import RunOptions
     from linch.run_store import RunCheckpoint
     from linch.types import Message, TextBlock, Usage
 
     session_store = _memory_session_store()
     run_store = _memory_run_store()
-    provider = _TextProvider(fail_on_call=True)
-    agent = _agent(provider, _QuickTool(), session_store=session_store, run_store=run_store)
+    provider = ScriptedProvider([])
+    agent = _agent(provider, _quick_tool(), session_store=session_store, run_store=run_store)
     session = await agent.session(id="s1")
 
     user_msg = Message(role="user", content=[TextBlock(text="start")])
@@ -421,7 +333,8 @@ async def test_resume_terminal_turn_drops_restored_alignment_silently() -> None:
         ),
     )
 
-    events = await _collect(session.resume(run.id, RunOptions(allow_legacy_resume=True)))
+    await pin_run_contract(session, run.id)
+    events = await _collect(session.resume(run.id))
 
     assert not _alignment_events(events)
     assert not [e for e in events if getattr(e, "type", None) == "error"]

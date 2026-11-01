@@ -6,19 +6,12 @@ from typing import Any
 
 import pytest
 
-
-class _Provider:
-    id = "contract-provider"
-
-    def context_window(self, model: str) -> int:
-        return 128_000
-
-    async def stream(self, req: Any):
-        from linch.types import Usage
-
-        yield {"type": "message_start", "model": req.model}
-        yield {"type": "text_delta", "text": "done"}
-        yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
+from linch.errors import ConfigError
+from linch.run_store import InMemoryRunStore
+from linch.sessions import InMemorySessionStore
+from linch.tools import workspace_tools
+from tests.support.agents import make_agent
+from tests.support.providers import ScriptedProvider, TextTurn
 
 
 class _ContractShell:
@@ -98,34 +91,15 @@ def _agent(
     tools: Any = None,
     execution_backend: Any = None,
 ):
-    from linch import Agent
-    from linch.config import FeatureFlags
-    from linch.execution import RemoteExecutionBackend
-    from linch.tools.registry import empty_tools
-
-    if execution_backend is not None and not hasattr(execution_backend, "shell"):
-        # DockerBackend is the legacy shell transport; tests that exercise its
-        # durable identity still use it as the shell half of a coherent world.
-        shell_config = getattr(execution_backend, "resume_policy_config", None)
-        execution_backend = RemoteExecutionBackend(
-            shell=execution_backend,
-            fs=_ContractFs(),
-            resume_policy_id=getattr(execution_backend, "resume_policy_id", "test.shell"),
-            resume_policy_version=getattr(execution_backend, "resume_policy_version", "1"),
-            resume_policy_config={"shell": shell_config},
-        )
-
-    return Agent(
-        model="test-model",
-        provider=_Provider(),
-        tools=tools or empty_tools(),
+    return make_agent(
+        ScriptedProvider([TextTurn("done")]),
+        tools=tools,
         permissions=permissions or {"mode": "skip-dangerous"},
         session_store=session_store,
         run_store=run_store,
         hooks=hooks,
-        features=FeatureFlags(),
-        result_offload=None,
         execution_backend=execution_backend,
+        result_offload=None,
     )
 
 
@@ -138,10 +112,7 @@ async def _interrupt_after_first_event(session: Any) -> str:
 
 
 async def test_permission_rule_change_denies_resume() -> None:
-    from linch.errors import ConfigError
     from linch.permissions import PathRule
-    from linch.run_store import InMemoryRunStore
-    from linch.sessions import InMemorySessionStore
 
     run_store = InMemoryRunStore()
     session_store = InMemorySessionStore()
@@ -169,10 +140,6 @@ async def test_permission_rule_change_denies_resume() -> None:
 
 
 async def test_callback_policy_version_change_denies_resume() -> None:
-    from linch.errors import ConfigError
-    from linch.run_store import InMemoryRunStore
-    from linch.sessions import InMemorySessionStore
-
     class Callback:
         resume_policy_id = "approval-policy"
 
@@ -201,10 +168,6 @@ async def test_callback_policy_version_change_denies_resume() -> None:
 
 @pytest.mark.parametrize("kind", ["callback", "hook"])
 async def test_opaque_custom_policy_rejected_for_durable_run(kind: str) -> None:
-    from linch.errors import ConfigError
-    from linch.run_store import InMemoryRunStore
-    from linch.sessions import InMemorySessionStore
-
     class Callback:
         async def __call__(self, request: Any) -> dict[str, str]:
             return {"behavior": "allow"}
@@ -228,20 +191,29 @@ async def test_opaque_custom_policy_rejected_for_durable_run(kind: str) -> None:
         _ = [event async for event in session.run("go")]
 
 
-async def test_docker_backend_configuration_change_denies_resume() -> None:
-    from linch.errors import ConfigError
-    from linch.run_store import InMemoryRunStore
-    from linch.sessions import InMemorySessionStore
-    from linch.tools import workspace_tools
+def _docker_world(**kwargs: Any) -> Any:
+    from linch.execution import RemoteExecutionBackend
     from linch.tools.execution import DockerBackend
 
+    shell = DockerBackend(**kwargs)
+    return RemoteExecutionBackend(
+        shell=shell,
+        fs=_ContractFs(),
+        confinement=shell.confinement,
+        resume_policy_id="test.docker-world",
+        resume_policy_version="1",
+        resume_policy_config={"transport": "docker"},
+    )
+
+
+async def test_docker_backend_configuration_change_denies_resume() -> None:
     run_store = InMemoryRunStore()
     session_store = InMemorySessionStore()
     first = _agent(
         run_store=run_store,
         session_store=session_store,
         tools=workspace_tools(),
-        execution_backend=DockerBackend(docker_path="/opt/docker-v1", network="none"),
+        execution_backend=_docker_world(docker_path="/opt/docker-v1", network="none"),
     )
     run_id = await _interrupt_after_first_event(await first.session(id="s1"))
 
@@ -249,7 +221,7 @@ async def test_docker_backend_configuration_change_denies_resume() -> None:
         run_store=run_store,
         session_store=session_store,
         tools=workspace_tools(),
-        execution_backend=DockerBackend(docker_path="/opt/docker-v2", network="none"),
+        execution_backend=_docker_world(docker_path="/opt/docker-v2", network="none"),
     )
     with pytest.raises(ConfigError, match="docker_path"):
         _ = [event async for event in (await changed.session(id="s1")).resume(run_id)]
@@ -258,11 +230,6 @@ async def test_docker_backend_configuration_change_denies_resume() -> None:
 async def test_docker_path_lookup_does_not_change_durable_contract(monkeypatch: Any) -> None:
     import shutil
 
-    from linch.run_store import InMemoryRunStore
-    from linch.sessions import InMemorySessionStore
-    from linch.tools import workspace_tools
-    from linch.tools.execution import DockerBackend
-
     run_store = InMemoryRunStore()
     session_store = InMemorySessionStore()
     monkeypatch.setattr(shutil, "which", lambda _: "/host-a/docker")
@@ -270,7 +237,7 @@ async def test_docker_path_lookup_does_not_change_durable_contract(monkeypatch: 
         run_store=run_store,
         session_store=session_store,
         tools=workspace_tools(),
-        execution_backend=DockerBackend(docker_path=None, network="none"),
+        execution_backend=_docker_world(docker_path=None, network="none"),
     )
     run_id = await _interrupt_after_first_event(await first.session(id="s1"))
 
@@ -279,7 +246,7 @@ async def test_docker_path_lookup_does_not_change_durable_contract(monkeypatch: 
         run_store=run_store,
         session_store=session_store,
         tools=workspace_tools(),
-        execution_backend=DockerBackend(docker_path=None, network="none"),
+        execution_backend=_docker_world(docker_path=None, network="none"),
     )
     events = [event async for event in (await resumed.session(id="s1")).resume(run_id)]
 
@@ -290,12 +257,6 @@ async def test_docker_path_lookup_does_not_change_durable_contract(monkeypatch: 
 async def test_docker_backend_contract_hashes_environment_values() -> None:
     import json
 
-    from linch.errors import ConfigError
-    from linch.run_store import InMemoryRunStore
-    from linch.sessions import InMemorySessionStore
-    from linch.tools import workspace_tools
-    from linch.tools.execution import DockerBackend
-
     run_store = InMemoryRunStore()
     session_store = InMemorySessionStore()
     fingerprint_key = b"test-only-fingerprint-key"
@@ -303,7 +264,7 @@ async def test_docker_backend_contract_hashes_environment_values() -> None:
         run_store=run_store,
         session_store=session_store,
         tools=workspace_tools(),
-        execution_backend=DockerBackend(
+        execution_backend=_docker_world(
             docker_path="/opt/docker",
             image="python@sha256:fixture",
             env={"API_KEY": "do-not-store-raw"},
@@ -321,7 +282,7 @@ async def test_docker_backend_contract_hashes_environment_values() -> None:
         run_store=run_store,
         session_store=session_store,
         tools=workspace_tools(),
-        execution_backend=DockerBackend(
+        execution_backend=_docker_world(
             docker_path="/opt/docker",
             image="python@sha256:fixture",
             env={"API_KEY": "changed"},
@@ -338,18 +299,14 @@ async def test_durable_docker_environment_requires_fingerprint_key() -> None:
     Degrading it to "this shell has no resume_policy" names a symptom and
     hides the fix, and would let the env drop out of the durable fingerprint.
     """
-    from linch.run_store import InMemoryRunStore
-    from linch.sessions import InMemorySessionStore
-    from linch.tools import workspace_tools
-    from linch.tools.execution import DockerBackend
-
-    with pytest.raises(ValueError, match="requires resume_fingerprint_key"):
-        _agent(
-            run_store=InMemoryRunStore(),
-            session_store=InMemorySessionStore(),
-            tools=workspace_tools(),
-            execution_backend=DockerBackend(env={"STAGE": "dev"}),
-        )
+    agent = _agent(
+        run_store=InMemoryRunStore(),
+        session_store=InMemorySessionStore(),
+        tools=workspace_tools(),
+        execution_backend=_docker_world(env={"STAGE": "dev"}),
+    )
+    with pytest.raises(ConfigError, match="requires resume_fingerprint_key"):
+        _ = [event async for event in (await agent.session()).run("go")]
 
 
 async def test_durable_docker_environment_with_fingerprint_key_contributes_identity() -> None:
@@ -367,44 +324,25 @@ async def test_durable_docker_environment_with_fingerprint_key_contributes_ident
     assert dev["config"] != prod["config"], "env must reach the durable fingerprint"
 
 
-async def test_slots_only_custom_bash_backend_requires_stable_identity() -> None:
-    from linch.errors import ConfigError
-    from linch.run_store import InMemoryRunStore
-    from linch.sessions import InMemorySessionStore
-    from linch.tools import workspace_tools
-
+@pytest.mark.parametrize(
+    ("world", "message"),
+    [
+        (_OpaqueWorld(), "custom execution world.*resume_policy_id"),
+        (_IdOnlyWorld(), "custom execution world.*resume_policy_config"),
+    ],
+)
+async def test_custom_bash_backend_requires_stable_identity(world: Any, message: str) -> None:
     agent = _agent(
         run_store=InMemoryRunStore(),
         session_store=InMemorySessionStore(),
         tools=workspace_tools(),
-        execution_backend=_OpaqueWorld(),
+        execution_backend=world,
     )
-    with pytest.raises(ConfigError, match="custom execution world.*resume_policy_id"):
-        _ = [event async for event in (await agent.session()).run("go")]
-
-
-async def test_custom_bash_backend_requires_explicit_stable_config() -> None:
-    from linch.errors import ConfigError
-    from linch.run_store import InMemoryRunStore
-    from linch.sessions import InMemorySessionStore
-    from linch.tools import workspace_tools
-
-    agent = _agent(
-        run_store=InMemoryRunStore(),
-        session_store=InMemorySessionStore(),
-        tools=workspace_tools(),
-        execution_backend=_IdOnlyWorld(),
-    )
-    with pytest.raises(ConfigError, match="custom execution world.*resume_policy_config"):
+    with pytest.raises(ConfigError, match=message):
         _ = [event async for event in (await agent.session()).run("go")]
 
 
 async def test_custom_bash_backend_config_change_denies_resume() -> None:
-    from linch.errors import ConfigError
-    from linch.run_store import InMemoryRunStore
-    from linch.sessions import InMemorySessionStore
-    from linch.tools import workspace_tools
-
     run_store = InMemoryRunStore()
     session_store = InMemorySessionStore()
     first = _agent(
@@ -424,31 +362,15 @@ async def test_custom_bash_backend_config_change_denies_resume() -> None:
         _ = [event async for event in (await changed.session(id="s1")).resume(run_id)]
 
 
-async def test_policy_adapter_requires_host_stable_identity() -> None:
-    from linch.errors import ConfigError
+@pytest.mark.parametrize("kind", ["verifier", "checkpoint"])
+async def test_policy_adapter_requires_host_stable_identity(kind: str) -> None:
     from linch.hooks import FinalAnswerVerifierHook
-    from linch.run_store import InMemoryRunStore
-    from linch.sessions import InMemorySessionStore
 
     class Verifier:
         name = "opaque"
 
         def verify(self, ctx: Any) -> Any:
             return None
-
-    agent = _agent(
-        run_store=InMemoryRunStore(),
-        session_store=InMemorySessionStore(),
-        hooks=[FinalAnswerVerifierHook(Verifier())],
-    )
-    with pytest.raises(ConfigError, match="FinalAnswerVerifierHook.*resume_policy_id"):
-        _ = [event async for event in (await agent.session()).run("go")]
-
-
-async def test_checkpoint_key_does_not_replace_hook_policy_identity() -> None:
-    from linch.errors import ConfigError
-    from linch.run_store import InMemoryRunStore
-    from linch.sessions import InMemorySessionStore
 
     class CheckpointOnlyHook:
         checkpoint_key = "custom.state"
@@ -461,10 +383,12 @@ async def test_checkpoint_key_does_not_replace_hook_policy_identity() -> None:
         ) -> None:
             return None
 
-    agent = _agent(
-        run_store=InMemoryRunStore(),
-        session_store=InMemorySessionStore(),
-        hooks=[CheckpointOnlyHook()],
+    hook = FinalAnswerVerifierHook(Verifier()) if kind == "verifier" else CheckpointOnlyHook()
+    message = (
+        "FinalAnswerVerifierHook.*resume_policy_id"
+        if kind == "verifier"
+        else "checkpoint_key alone"
     )
-    with pytest.raises(ConfigError, match="checkpoint_key alone"):
+    agent = _agent(run_store=InMemoryRunStore(), session_store=InMemorySessionStore(), hooks=[hook])
+    with pytest.raises(ConfigError, match=message):
         _ = [event async for event in (await agent.session()).run("go")]
