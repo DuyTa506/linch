@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import aclosing
 from typing import Any
 
@@ -29,7 +29,7 @@ async def append_feedback(
     paired: bool = False,
     boundary: dict[str, Any] | None = None,
     decision: TurnStoppingDecision | None = None,
-) -> AsyncIterator[Event]:
+) -> AsyncGenerator[Event, None]:
     await _flush_events(session)
     prefix = 0
     if boundary is not None:
@@ -63,7 +63,7 @@ async def correct_invalid_response(
     assembly: AssistantAssembly,
     receipt: ModelCallReceipt,
     rejected_native: bool,
-) -> AsyncIterator[Event]:
+) -> AsyncGenerator[Event, None]:
     reason = "rejected_native_arguments" if rejected_native else None
     if reason is None and assembly.stop_reason == "end_turn":
         text = "".join(b.text for b in assembly.message.content if isinstance(b, TextBlock)).strip()

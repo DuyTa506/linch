@@ -4,7 +4,7 @@ import asyncio
 import copy
 import logging
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import aclosing
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal, cast
@@ -1327,7 +1327,7 @@ async def _run_serial_batch(
     hook_dispatcher: HookDispatcher,
     middleware_errors: dict[str, str],
     turn_index: int | None,
-) -> AsyncIterator[Event]:
+) -> AsyncGenerator[Event, None]:
     """Run a serial (one-call-at-a-time) batch, yielding skill + start/end events."""
     for call, _idx, decision in batch["calls"]:
         input = _effective_input(call, decision)
@@ -1409,7 +1409,7 @@ async def _run_parallel_batch(
     hook_dispatcher: HookDispatcher,
     middleware_errors: dict[str, str],
     turn_index: int | None,
-) -> AsyncIterator[Event]:
+) -> AsyncGenerator[Event, None]:
     """Run a parallel batch: emit all starts, gather concurrently, then all ends.
 
     On abort/cancel, synthesises an ``aborted`` end event for every call that
@@ -1557,7 +1557,7 @@ def _start_tool_execution(
     return _RunningTool(task=task, progress=progress)
 
 
-async def _drain_tool_execution(running: _RunningTool) -> AsyncIterator[ToolProgressEvent]:
+async def _drain_tool_execution(running: _RunningTool) -> AsyncGenerator[ToolProgressEvent, None]:
     """Yield bounded/coalesced progress live until the tool task settles."""
     while True:
         while not running.progress.empty():
@@ -1583,7 +1583,7 @@ async def _drain_tool_execution(running: _RunningTool) -> AsyncIterator[ToolProg
 async def _drain_parallel_progress_until(
     executions: list[_RunningTool],
     until: asyncio.Task[ToolExecutionOutcome],
-) -> AsyncIterator[ToolProgressEvent]:
+) -> AsyncGenerator[ToolProgressEvent, None]:
     while True:
         for execution in executions:
             while not execution.progress.empty():
@@ -1623,7 +1623,7 @@ async def execute_tool_calls(
     turn_index: int | None = None,
     on_permissions_resolved: Callable[[], Awaitable[None]] | None = None,
     run_config: Any = None,
-) -> AsyncIterator[Event]:
+) -> AsyncGenerator[Event, None]:
     """Execute a provider batch and yield its lifecycle events.
 
     Args:

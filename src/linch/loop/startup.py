@@ -8,7 +8,7 @@ main generator responsible for turn choreography only.
 from __future__ import annotations
 
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -63,7 +63,9 @@ def _prompt_message(ctx: RunStartupContext, prompt: str, images: Any) -> Any:
     return message
 
 
-async def _emit_prompt_block(ctx: RunStartupContext, block_reason: str) -> AsyncIterator[Event]:
+async def _emit_prompt_block(
+    ctx: RunStartupContext, block_reason: str
+) -> AsyncGenerator[Event, None]:
     """Emit the pre-loop terminal path for a blocked user prompt."""
     runtime = ctx.runtime
     startup = ctx.checkpoint.extension_state.get("linch.startup")
@@ -109,7 +111,7 @@ async def _emit_prompt_block(ctx: RunStartupContext, block_reason: str) -> Async
     )
 
 
-async def initialize_run(ctx: RunStartupContext) -> AsyncIterator[Event]:
+async def initialize_run(ctx: RunStartupContext) -> AsyncGenerator[Event, None]:
     """Persist run startup state and the initial user prompt."""
     runtime = ctx.runtime
     session = runtime.session
