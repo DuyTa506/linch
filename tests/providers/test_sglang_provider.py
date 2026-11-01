@@ -5,35 +5,7 @@ from types import SimpleNamespace
 from linch.providers import SGLangProvider, SGLangProviderOptions
 from linch.providers.sglang import _build_sglang_payload
 from linch.types import OutputSchema, ProviderRequest, Usage
-
-
-class _FakeStream:
-    def __init__(self, chunks: list[object]) -> None:
-        self._chunks = chunks
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self):
-        if not self._chunks:
-            raise StopAsyncIteration
-        return self._chunks.pop(0)
-
-
-class _FakeCompletions:
-    def __init__(self, chunks: list[object]) -> None:
-        self._chunks = chunks
-        self.payload: dict | None = None
-
-    async def create(self, **payload):
-        self.payload = payload
-        return _FakeStream(list(self._chunks))
-
-
-class _FakeClient:
-    def __init__(self, chunks: list[object]) -> None:
-        self.completions = _FakeCompletions(chunks)
-        self.chat = SimpleNamespace(completions=self.completions)
+from tests.support.providers import OpenAICompatibleFakeClient
 
 
 def _chunk(*, delta, finish_reason=None, usage=None):
@@ -136,7 +108,7 @@ async def test_sglang_stream_text_tool_reasoning_and_cache_usage() -> None:
         ),
     ]
     provider = SGLangProvider(SGLangProviderOptions(enable_cache_report=True))
-    provider._client = _FakeClient(chunks)
+    provider._client = OpenAICompatibleFakeClient(chunks)
 
     events = [
         event

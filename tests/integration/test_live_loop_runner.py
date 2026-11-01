@@ -77,14 +77,16 @@ needs_live_loop = pytest.mark.skipif(
 async def test_live_loop_runner_run_once_with_project_env(tmp_path) -> None:
     from linch import (
         Agent,
+        RunOptions,
+    )
+    from linch.config import FeatureFlags, SystemPromptConfig
+    from linch.ext.loop_runner import (
         FileLoopLeaseStore,
         LoopRunner,
         LoopSpec,
         LoopTickResult,
         LoopTrigger,
-        RunOptions,
     )
-    from linch.config import FeatureFlags, SystemPromptConfig
     from linch.providers import OpenAIChatCompletionsProvider, OpenAIChatProviderOptions
     from linch.sessions import InMemorySessionStore
     from linch.tools.registry import empty_tools
@@ -143,13 +145,13 @@ async def test_live_loop_runner_run_once_with_project_env(tmp_path) -> None:
                 ),
                 timeout=TIMEOUT_S,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pytest.xfail(f"live provider did not complete within {TIMEOUT_S}s")
     finally:
         await agent.close()
         try:
             await asyncio.wait_for(provider.aclose(), timeout=5)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
     assert result is not None

@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
 from typing import Any
 
-from linch._client_lifecycle import loop_changed, running_loop
+from linch._client_lifecycle import aclose_client, loop_changed, running_loop
 from linch._prompt_cache import openai_cached_tokens
 from linch.errors import AbortError, ProviderError
 from linch.openai_responses import map_openai_error
@@ -42,6 +41,27 @@ def _image_to_url(source: dict[str, str]) -> str:
 
 @dataclass(slots=True)
 class OpenAIChatProviderOptions:
+    """Configure the OpenAI Chat Completions or compatible adapter.
+
+    Args:
+        api_key: Optional client credential.
+        base_url: Optional OpenAI-compatible endpoint override.
+        default_headers: Headers added to client requests.
+        timeout: Optional client request timeout.
+        context_window: Optional model context override.
+        parallel_tool_calls: Optional parallel-call support declaration.
+        extra_body: Additional request fields merged into the payload.
+        include_stream_options: Whether to request usage in the final stream chunk.
+        json_mode: Whether structured output uses JSON-object mode instead of schema mode.
+
+    Attributes:
+        extra_body: Provider-specific fields merged into each request payload.
+        include_stream_options: Controls whether usage is requested in the final
+            streamed chunk.
+        json_mode: Selects JSON-object transport while Linch validates the result
+            against any requested output schema.
+    """
+
     api_key: str | None = None
     base_url: str | None = None
     default_headers: dict[str, str] | None = None
@@ -58,19 +78,47 @@ class OpenAIChatProviderOptions:
 
 
 class OpenAIChatCompletionsProvider(BaseProvider):
+    """Stream normalized events from OpenAI Chat Completions-compatible APIs.
+
+    Args:
+        options: Optional client credentials, endpoint, and wire behavior.
+    """
+
     id = "openai-chat"
 
     def __init__(self, options: OpenAIChatProviderOptions | None = None) -> None:
+        """Create an OpenAI Chat Completions provider.
+
+        Args:
+            options: Client credentials, endpoint, and wire behavior.
+        """
         self._options = options or OpenAIChatProviderOptions()
         self._client: Any | None = None
         self._client_loop: Any | None = None
 
     def context_window(self, model: ModelId) -> int:
+        """Return the configured or known context capacity for a model.
+
+        Args:
+            model: OpenAI or compatible model identifier.
+
+        Returns:
+            The explicit override or known capacity, with the adapter fallback
+            for unknown models.
+        """
         if self._options.context_window is not None:
             return self._options.context_window
         return _KNOWN_CONTEXT.get(model, 128_000)
 
     def capabilities(self, model: ModelId) -> ProviderCapabilities:
+        """Return capabilities advertised for a model.
+
+        Args:
+            model: OpenAI or compatible model identifier.
+
+        Returns:
+            Schema, cache, tool-choice, and parallel-call capabilities.
+        """
         return full_capabilities(
             self.context_window(model),
             parallel_tool_calls=self._options.parallel_tool_calls is not False,
@@ -104,17 +152,13 @@ class OpenAIChatCompletionsProvider(BaseProvider):
         return self._client
 
     async def aclose(self) -> None:
+        """Close the owned OpenAI client, if it has been initialized."""
         client = self._client
         self._client = None
         self._client_loop = None
         if client is None:
             return
-        closer = getattr(client, "aclose", None) or getattr(client, "close", None)
-        if closer is None:
-            return
-        result = closer()
-        if inspect.isawaitable(result):
-            await result
+        await aclose_client(client)
 
     def _build_payload(self, req: ProviderRequest) -> dict[str, Any]:
         return _build_openai_compatible_payload(
@@ -135,6 +179,14 @@ class OpenAIChatCompletionsProvider(BaseProvider):
         return None
 
     async def stream(self, req: ProviderRequest) -> AsyncIterator[dict[str, object]]:
+        """Yield normalized events for one Chat Completions request.
+
+        Args:
+            req: Request to send through the OpenAI-compatible client.
+
+        Returns:
+            An async iterator of normalized message, thinking, tool, and usage events.
+        """
         client = await self._get_client()
         payload = self._build_payload(req)
         yield {"type": "message_start", "model": req.model}

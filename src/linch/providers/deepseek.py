@@ -33,6 +33,23 @@ class DeepSeekProviderOptions:
     output schema is configured, this provider always uses DeepSeek's
     ``json_object`` mode; Linch then validates the returned JSON against the
     requested schema.
+
+    Args:
+        api_key: Optional DeepSeek credential.
+        base_url: DeepSeek or compatible endpoint URL.
+        default_headers: Headers added to client requests.
+        timeout: Optional client request timeout.
+        context_window: Optional context override for the model.
+        parallel_tool_calls: Optional support declaration for parallel calls.
+        thinking: Whether DeepSeek reasoning is enabled by default.
+        effort: Default shared reasoning effort mapped to DeepSeek's levels.
+        extra_body: Additional request fields merged into the provider payload.
+        include_stream_options: Whether to request usage in the final stream chunk.
+
+    Attributes:
+        thinking: Whether reasoning is enabled when a request does not override it.
+        effort: Shared Linch effort level mapped to DeepSeek's ``high`` or ``max``.
+        extra_body: Provider-specific fields merged into every request.
     """
 
     api_key: str | None = None
@@ -53,11 +70,19 @@ class DeepSeekProvider(OpenAIChatCompletionsProvider):
     The parent handles streaming and, importantly, preserves
     ``reasoning_content`` as :class:`~linch.types.ThinkingBlock` on assistant
     tool-call turns. This subclass only owns DeepSeek's request extensions.
+
+    Args:
+        options: Optional DeepSeek credentials and request behavior.
     """
 
     id = "deepseek"
 
     def __init__(self, options: DeepSeekProviderOptions | None = None) -> None:
+        """Create a DeepSeek provider with optional endpoint settings.
+
+        Args:
+            options: DeepSeek credentials and request behavior.
+        """
         opts = options or DeepSeekProviderOptions()
         self._deepseek_options = opts
         super().__init__(
@@ -111,7 +136,7 @@ def _effective_thinking(req: ProviderRequest, opts: DeepSeekProviderOptions) -> 
 def _effective_effort(
     req: ProviderRequest, opts: DeepSeekProviderOptions
 ) -> Literal["high", "max"] | None:
-    """Normalize Studio/SDK effort levels to the two DeepSeek-native values."""
+    """Normalize SDK effort levels to the two DeepSeek-native values."""
 
     configured = req.effort if req.effort is not None else opts.effort
     if configured is None or _effective_thinking(req, opts) == "disabled":

@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import pytest
 
+from tests.support.agents import make_agent
+from tests.support.providers import ScriptedProvider, TextTurn
+
 # ---------------------------------------------------------------------------
 # ProviderCapabilities dataclass defaults
 # ---------------------------------------------------------------------------
@@ -43,72 +46,70 @@ def test_capabilities_custom_values():
 # ---------------------------------------------------------------------------
 
 
-def test_openai_chat_capabilities():
-    from linch.providers import OpenAIChatCompletionsProvider
+@pytest.mark.parametrize(
+    "provider_key,model,expected_window,minimum_window,terminal,expected_id,expected_parallel",
+    [
+        ("openai-chat", "gpt-4o", 128_000, 0, False, "openai-chat", True),
+        ("openai-responses", "gpt-5", None, 1, False, "openai-responses", True),
+        ("vllm", "served-model", 65_536, 0, False, "vllm", False),
+        ("sglang", "served-model", 65_536, 0, False, "sglang", False),
+        ("anthropic", "claude-opus-4-8", 200_000, 0, False, "anthropic", True),
+        ("anthropic-compatible", "deepseek-v4-flash", 200_000, 0, True, "anthropic", True),
+        ("gemini-flash", "gemini-2.0-flash", None, 1_000_000, False, "gemini", True),
+        ("gemini-pro", "gemini-2.5-pro", None, 1_000_000, False, "gemini", True),
+        ("gemini-15", "gemini-1.5-pro", 2_000_000, 0, False, "gemini", True),
+        ("gemini-unknown", "gemini-unknown-xyz", None, 32_000, False, "gemini", True),
+    ],
+)
+def test_provider_capability_flags(
+    provider_key: str,
+    model: str,
+    expected_window: int | None,
+    minimum_window: int,
+    terminal: bool,
+    expected_id: str,
+    expected_parallel: bool,
+) -> None:
+    from linch.providers import (
+        AnthropicProvider,
+        AnthropicProviderOptions,
+        GeminiProvider,
+        OpenAIChatCompletionsProvider,
+        OpenAIResponsesProvider,
+        SGLangProvider,
+        SGLangProviderOptions,
+        VLLMProvider,
+        VLLMProviderOptions,
+    )
 
-    provider = OpenAIChatCompletionsProvider()
-    caps = provider.capabilities("gpt-4o")
+    providers = {
+        "openai-chat": OpenAIChatCompletionsProvider(),
+        "openai-responses": OpenAIResponsesProvider(),
+        "vllm": VLLMProvider(VLLMProviderOptions(context_window=65_536, parallel_tool_calls=False)),
+        "sglang": SGLangProvider(
+            SGLangProviderOptions(context_window=65_536, parallel_tool_calls=False)
+        ),
+        "anthropic": AnthropicProvider(),
+        "anthropic-compatible": AnthropicProvider(
+            AnthropicProviderOptions(base_url="https://api.deepseek.com/anthropic")
+        ),
+        "gemini-flash": GeminiProvider(),
+        "gemini-pro": GeminiProvider(),
+        "gemini-15": GeminiProvider(),
+        "gemini-unknown": GeminiProvider(),
+    }
+    caps = providers[provider_key].capabilities(model)
 
-    assert caps.context_window == 128_000
+    if expected_window is None:
+        assert caps.context_window >= minimum_window
+    else:
+        assert caps.context_window == expected_window
+    assert providers[provider_key].id == expected_id
+    assert caps.parallel_tool_calls is expected_parallel
     assert caps.structured_output is True
     assert caps.tool_choice is True
     assert caps.prompt_cache is True
-
-
-def test_openai_responses_capabilities():
-    from linch.providers import OpenAIResponsesProvider
-
-    provider = OpenAIResponsesProvider()
-    caps = provider.capabilities("gpt-5")
-
-    assert caps.context_window > 0
-    assert caps.structured_output is True
-    assert caps.tool_choice is True
-    assert caps.prompt_cache is True
-
-
-def test_vllm_capabilities():
-    from linch.providers import VLLMProvider, VLLMProviderOptions
-
-    provider = VLLMProvider(VLLMProviderOptions(context_window=65_536))
-    caps = provider.capabilities("served-model")
-
-    assert caps.context_window == 65_536
-    assert caps.structured_output is True
-    assert caps.tool_choice is True
-    assert caps.prompt_cache is True
-
-
-def test_sglang_capabilities():
-    from linch.providers import SGLangProvider, SGLangProviderOptions
-
-    provider = SGLangProvider(SGLangProviderOptions(context_window=65_536))
-    caps = provider.capabilities("served-model")
-
-    assert caps.context_window == 65_536
-    assert caps.structured_output is True
-    assert caps.tool_choice is True
-    assert caps.prompt_cache is True
-
-
-def test_anthropic_capabilities():
-    from linch.providers import AnthropicProvider
-
-    provider = AnthropicProvider()
-    caps = provider.capabilities("claude-opus-4-8")
-
-    assert caps.context_window == 200_000
-    assert caps.prompt_cache is True
-    assert caps.structured_output is True
-    assert caps.structured_output_terminal_tool is False
-    assert caps.tool_choice is True
-
-    from linch.providers import AnthropicProviderOptions
-
-    compatible = AnthropicProvider(
-        AnthropicProviderOptions(base_url="https://api.deepseek.com/anthropic")
-    ).capabilities("deepseek-v4-flash")
-    assert compatible.structured_output_terminal_tool is True
+    assert caps.structured_output_terminal_tool is terminal
 
 
 def test_base_provider_default_capabilities():
@@ -134,16 +135,6 @@ def test_base_provider_default_capabilities():
     assert caps.structured_output is True
 
 
-def test_scripted_provider_uses_terminal_tool_for_structured_output():
-    """The canonical fake represents a structured result as ``ToolUseTurn``."""
-    from linch.evals import ScriptedProvider
-
-    caps = ScriptedProvider([]).capabilities("test-model")
-
-    assert caps.structured_output is True
-    assert caps.structured_output_terminal_tool is True
-
-
 # ---------------------------------------------------------------------------
 # apply_provider_capabilities downgrade helper
 # ---------------------------------------------------------------------------
@@ -167,57 +158,27 @@ def _make_req(**overrides):
     return ProviderRequest(**defaults)
 
 
-def test_apply_clears_cache_when_not_supported():
+@pytest.mark.parametrize(
+    "caps_kwargs,expected",
+    [
+        ({"prompt_cache": False}, {"cache_prompt": None, "cache_ttl": None}),
+        ({"prompt_cache": True}, {"cache_prompt": True, "cache_ttl": "5m"}),
+        ({"tool_choice": False}, {"tool_choice": None}),
+        ({"structured_output": False}, {"output_schema": None}),
+    ],
+)
+def test_apply_provider_capability_downgrades(caps_kwargs: dict, expected: dict):
     from linch.loop import apply_provider_capabilities
     from linch.providers import ProviderCapabilities
 
     req = _make_req()
     assert req.cache_prompt is True
     assert req.cache_ttl == "5m"
-
-    caps = ProviderCapabilities(prompt_cache=False)
-    apply_provider_capabilities(req, caps)
-
-    assert req.cache_prompt is None
-    assert req.cache_ttl is None
-
-
-def test_apply_preserves_cache_when_supported():
-    from linch.loop import apply_provider_capabilities
-    from linch.providers import ProviderCapabilities
-
-    req = _make_req()
-    caps = ProviderCapabilities(prompt_cache=True)
-    apply_provider_capabilities(req, caps)
-
-    assert req.cache_prompt is True
-    assert req.cache_ttl == "5m"
-
-
-def test_apply_clears_tool_choice_when_not_supported():
-    from linch.loop import apply_provider_capabilities
-    from linch.providers import ProviderCapabilities
-
-    req = _make_req()
     assert req.tool_choice == "auto"
-
-    caps = ProviderCapabilities(tool_choice=False)
-    apply_provider_capabilities(req, caps)
-
-    assert req.tool_choice is None
-
-
-def test_apply_clears_output_schema_when_not_supported():
-    from linch.loop import apply_provider_capabilities
-    from linch.providers import ProviderCapabilities
-
-    req = _make_req()
     assert req.output_schema is not None
-
-    caps = ProviderCapabilities(structured_output=False)
-    apply_provider_capabilities(req, caps)
-
-    assert req.output_schema is None
+    apply_provider_capabilities(req, ProviderCapabilities(**caps_kwargs))
+    for attr, value in expected.items():
+        assert getattr(req, attr) == value
 
 
 def test_apply_preserves_cache_for_openai_chat():
@@ -264,11 +225,8 @@ def test_apply_no_downgrade_for_anthropic():
 # ---------------------------------------------------------------------------
 
 
-class CapRecordingProvider:
-    """Fake provider that records requests to verify capability downgrade."""
-
-    id = "cap-recording"
-    received_req = None
+class CapRecordingProvider(ScriptedProvider):
+    """Scripted provider that advertises unsupported request features."""
 
     def context_window(self, model: str) -> int:
         return 128_000
@@ -284,39 +242,15 @@ class CapRecordingProvider:
             tool_choice=True,
         )
 
-    async def stream(self, req):
-        from linch.types import Usage
-
-        CapRecordingProvider.received_req = req
-        yield {"type": "message_start", "model": req.model}
-        yield {"type": "text_delta", "text": "result"}
-        yield {
-            "type": "message_end",
-            "stop_reason": "end_turn",
-            "usage": Usage(),
-            "provider_metadata": None,
-        }
-
 
 @pytest.mark.asyncio
 async def test_build_turn_request_applies_capability_downgrade():
     """Run a full session and verify the provider received a downgraded request."""
-    from linch import Agent
-    from linch.config import FeatureFlags
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import empty_tools
     from linch.types import OutputSchema
 
-    CapRecordingProvider.received_req = None
-    provider = CapRecordingProvider()
-
-    agent = Agent(
-        model="test-model",
-        provider=provider,
-        tools=empty_tools(),
-        permissions={"mode": "skip-dangerous"},
-        session_store=InMemorySessionStore(),
-        features=FeatureFlags(skills=False, subagents=False, mcp=False),
+    provider = CapRecordingProvider([TextTurn("result")])
+    agent = make_agent(
+        provider,
         output_schema=OutputSchema(name="out", schema={"type": "object"}),
         loop_guard=None,
     )
@@ -324,8 +258,8 @@ async def test_build_turn_request_applies_capability_downgrade():
     async for _ in session.run("hello"):
         pass
 
-    req = CapRecordingProvider.received_req
-    assert req is not None, "provider.stream was never called"
+    assert provider.requests, "provider.stream was never called"
+    req = provider.requests[-1]
 
     # Capability downgrade applied: prompt_cache=False → cleared
     assert req.cache_prompt is None, "cache_prompt should be cleared for non-caching provider"

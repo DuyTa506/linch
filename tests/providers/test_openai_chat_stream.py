@@ -7,35 +7,7 @@ import pytest
 
 from linch.providers import OpenAIChatCompletionsProvider
 from linch.types import ProviderRequest
-
-
-class _FakeStream:
-    def __init__(self, chunks: list[object]) -> None:
-        self._chunks = chunks
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self):
-        if not self._chunks:
-            raise StopAsyncIteration
-        return self._chunks.pop(0)
-
-
-class _FakeCompletions:
-    def __init__(self, chunks: list[object]) -> None:
-        self._chunks = chunks
-        self.payload: dict | None = None
-
-    async def create(self, **payload):
-        self.payload = payload
-        return _FakeStream(list(self._chunks))
-
-
-class _FakeClient:
-    def __init__(self, chunks: list[object]) -> None:
-        self.completions = _FakeCompletions(chunks)
-        self.chat = SimpleNamespace(completions=self.completions)
+from tests.support.providers import OpenAICompatibleFakeClient
 
 
 def _chunk(*, delta, finish_reason=None, usage=None):
@@ -79,7 +51,7 @@ async def test_stream_flushes_tool_use_end_on_finish_reason_stop() -> None:
         ),
     ]
     provider = OpenAIChatCompletionsProvider()
-    provider._client = _FakeClient(chunks)
+    provider._client = OpenAICompatibleFakeClient(chunks)
 
     events = [
         event
@@ -114,7 +86,7 @@ async def test_stream_does_not_double_emit_on_finish_reason_tool_calls() -> None
         ),
     ]
     provider = OpenAIChatCompletionsProvider()
-    provider._client = _FakeClient(chunks)
+    provider._client = OpenAICompatibleFakeClient(chunks)
 
     events = [
         event
@@ -143,7 +115,7 @@ async def test_stream_text_only_unaffected() -> None:
         ),
     ]
     provider = OpenAIChatCompletionsProvider()
-    provider._client = _FakeClient(chunks)
+    provider._client = OpenAICompatibleFakeClient(chunks)
 
     events = [
         event
@@ -178,7 +150,7 @@ async def test_stream_captures_usage_from_final_empty_choices_chunk() -> None:
         ),
     ]
     provider = OpenAIChatCompletionsProvider()
-    provider._client = _FakeClient(chunks)
+    provider._client = OpenAICompatibleFakeClient(chunks)
 
     events = [
         event
@@ -280,3 +252,40 @@ async def test_stream_propagates_wait_for_timeout_instead_of_swallowing_it() -> 
 
     with pytest.raises(asyncio.TimeoutError):
         await asyncio.wait_for(consume(), timeout=0.05)
+
+
+@pytest.mark.parametrize("method", ["aclose", "close"])
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("fails", [False, True])
+async def test_chat_client_close_resets_fields_before_close_and_preserves_errors(
+    method: str, asynchronous: bool, fails: bool
+) -> None:
+    from types import SimpleNamespace
+
+    from linch.providers.openai_chat import OpenAIChatCompletionsProvider
+
+    provider = OpenAIChatCompletionsProvider()
+    calls = []
+
+    def close() -> None:
+        assert provider._client is None
+        assert provider._client_loop is None
+        calls.append(method)
+        if fails:
+            raise RuntimeError("close failed")
+
+    async def aclose() -> None:
+        close()
+
+    client = SimpleNamespace(**{method: aclose if asynchronous else close})
+    if method == "aclose":
+        client.close = lambda: pytest.fail("aclose must take precedence")
+    provider._client = client
+    provider._client_loop = object()
+    if fails:
+        with pytest.raises(RuntimeError, match="close failed"):
+            await provider.aclose()
+    else:
+        await provider.aclose()
+    await provider.aclose()
+    assert calls == [method]
