@@ -394,11 +394,11 @@ isolated by default: the script includes the provider name in the stable prefix.
 Pass `--shared-prefix` only when you intentionally want to test whether two
 endpoints share the same backend prompt cache.
 
-The benchmark normalizes prompt-cache percentages across provider accounting:
-OpenAI-compatible usage reports cached prompt tokens inside `input_tokens`,
-while Anthropic-compatible usage reports cached input separately. Use the
-per-call `cache_read` columns when in doubt; warm calls near the full prompt size
-mean the cache is working.
+All adapters normalize prompt-cache usage into separate token buckets:
+they report uncached prompt tokens in `input_tokens` and cache hits in
+`cache_read_tokens` (with cache writes in `cache_creation_tokens`). Use the
+per-call `cache_read` columns when in doubt; warm calls near the full prompt
+size mean the cache is working.
 
 To measure cache behavior through the real Linch agent loop and tool-result
 turns, use:

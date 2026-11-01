@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
+
+from tests.support.providers import OpenAICompatibleFakeClient
 
 
 def _request(**overrides):
@@ -112,3 +116,31 @@ def test_deepseek_disabled_thinking_allows_forced_tool_choice() -> None:
         "type": "function",
         "function": {"name": "search_docs"},
     }
+
+
+async def test_deepseek_stream_normalizes_recorded_prompt_cache_fields() -> None:
+    from linch.providers import DeepSeekProvider
+    from linch.types import Usage
+
+    provider = DeepSeekProvider()
+    provider._client = OpenAICompatibleFakeClient(
+        [
+            SimpleNamespace(
+                choices=[],
+                usage=SimpleNamespace(
+                    prompt_tokens=1000,
+                    completion_tokens=10,
+                    prompt_cache_hit_tokens=900,
+                    prompt_cache_miss_tokens=100,
+                ),
+            )
+        ]
+    )
+
+    events = [event async for event in provider.stream(_request())]
+
+    assert events[-1]["usage"] == Usage(
+        input_tokens=100,
+        output_tokens=10,
+        cache_read_tokens=900,
+    )
