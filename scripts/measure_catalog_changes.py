@@ -10,7 +10,8 @@ Payloads are plain JSON so this measures the wire, not Linch's adapters.
         --base-url http://127.0.0.1:8000/v1
     python scripts/measure_catalog_changes.py --provider chat --dry-run --model m
 
-Credentials come from ANTHROPIC_API_KEY or OPENAI_API_KEY. A local server needs none.
+Credentials come from ANTHROPIC_API_KEY, or --api-key-env for OpenAI-style servers.
+Use --provider chat for DeepSeek, vLLM, SGLang, and llama.cpp.
 """
 
 from __future__ import annotations
@@ -253,7 +254,12 @@ def cached_tokens(provider: str, body: dict[str, Any]) -> tuple[int, int]:
         return int(details.get("cached_tokens") or 0), int(usage.get("input_tokens") or 0)
     details = usage.get("prompt_tokens_details") or {}
     timings = body.get("timings") or {}
-    cached = int(timings.get("cache_n") or details.get("cached_tokens") or 0)
+    cached = int(
+        timings.get("cache_n")
+        or details.get("cached_tokens")
+        or usage.get("prompt_cache_hit_tokens")
+        or 0
+    )
     if timings:
         return cached, cached + int(timings.get("prompt_n") or 0)
     return cached, int(usage.get("prompt_tokens") or 0)
@@ -271,7 +277,7 @@ def _endpoint(args: argparse.Namespace, payload: dict[str, Any]) -> tuple[str, d
         if "tool_addition" in rendered or "tool_removal" in rendered:
             headers["anthropic-beta"] = ANTHROPIC_BETA
         return f"{base}/messages", headers
-    if key := os.environ.get("OPENAI_API_KEY"):
+    if key := os.environ.get(args.api_key_env):
         headers["authorization"] = f"Bearer {key}"
     base = args.base_url or "https://api.openai.com/v1"
     return f"{base}/{'responses' if args.provider == 'responses' else 'chat/completions'}", headers
@@ -304,11 +310,20 @@ def run_scenario(args: argparse.Namespace, scenario: str) -> dict[str, Any]:
         for payload in payloads[:-1]:
             _send(args, payload)
             time.sleep(args.delay)
-        cached, total = cached_tokens(args.provider, _send(args, payloads[-1]))
+        started = time.monotonic()
+        body = _send(args, payloads[-1])
+        seconds = round(time.monotonic() - started, 2)
+        cached, total = cached_tokens(args.provider, body)
     except urllib.error.HTTPError as exc:
         return {"scenario": scenario, "error": exc.code, "detail": exc.read().decode()[:500]}
     share = round(cached / total, 3) if total else 0.0
-    return {"scenario": scenario, "cached": cached, "total": total, "share": share}
+    return {
+        "scenario": scenario,
+        "cached": cached,
+        "total": total,
+        "share": share,
+        "seconds": seconds,
+    }
 
 
 def main() -> int:
@@ -322,6 +337,7 @@ def main() -> int:
     parser.add_argument("--model", required=True)
     parser.add_argument("--base-url")
     parser.add_argument("--scenario", action="append", help="repeatable; default: all")
+    parser.add_argument("--api-key-env", default="OPENAI_API_KEY")
     parser.add_argument("--padding", type=int, default=400)
     parser.add_argument("--delay", type=float, default=2.0)
     parser.add_argument("--timeout", type=float, default=120.0)

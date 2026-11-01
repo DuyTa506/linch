@@ -59,13 +59,14 @@ A session gets one snapshot, durable at `session.meta["linch.prefix"]`, written 
     "version": 1,
     "system": [{"text": str, "cacheable": bool}, ...],  # after the skill block
     "tools": [{"name": str, "description": str, "input_schema": dict}, ...],  # wire order
-    "skills": {name: digest},
-    "notified": {
-        "tools": {name: digest},
-        "subagents": str | None,
-    },
+    "base": {"tools": {name: digest}, "skills": {name: digest}, "subagents": str | None},
+    "notified": {"tools": {name: digest}, "skills": {name: digest}, "subagents": str | None},
 }
 ```
+
+`base` is what the frozen `system` text describes and never changes. `notified` is what the
+model has been told so far. `tools` is the wire list: it grows or changes on append-only
+providers, and it stays fixed on positional ones in phase 3.
 
 - `_build_turn_request` uses `snapshot["system"]` and `snapshot["tools"]` in place of
   freshly built values, then applies existing context selection, `allowed_tools`, and
@@ -122,6 +123,10 @@ point the view ends in a user turn or tool results, so tool batches are complete
 | Tool added | Notification text, append to `snapshot["tools"]` |
 | Tool `input_schema` changed | Notification text, replace in place in `snapshot["tools"]` |
 
+Appending keeps earlier tools in place but limits the miss only on some templates.
+Measured on 2026-11-02: DeepSeek keeps hits up to the change, vLLM and SGLang lose all of
+them. Treat a tool change on those servers as a full miss.
+
 Tool additions and schema edits change `tools`, so the existing `tool_set_changed`
 advisory fires on its own. Do not add a new event.
 
@@ -144,8 +149,10 @@ class CatalogChangeBlock:
 - In phase 2 every adapter renders it as text. Audit every `isinstance(block, TextBlock)`
   site in `providers/`, `openai_responses.py`, compaction, and token estimators: a block
   that is silently dropped is a defect.
-- MCP-provided descriptions and instructions are third-party text. The notification
-  states the tool's name only. On positional providers this is required, because
+- A description-only change must carry the new description, or the model learns nothing.
+  This also applies to `Subagent`, whose description lists agent types.
+- MCP-provided descriptions and instructions are third-party text. For an MCP tool the
+  notification states the name only. On positional providers this is required, because
   phase 3 renders notifications as system messages with operator authority.
 
 Order: append the message, then update `notified`. A crash between the two repeats a
@@ -153,14 +160,19 @@ notification, which is harmless. The reverse order loses one, which is not.
 
 ### 4.6 Compaction
 
-If `notified` differs from the snapshot's base after compaction, rebuild the snapshot
-from the live catalog, reset `notified`, and persist before the next provider call. The
-notifications are gone with the replaced view and the new prefix now contains their
-content. If nothing changed, keep the snapshot so the cached prefix survives.
+Compaction never changes `system` or `tools`. A changed prefix would discard a cache that
+compaction leaves valid, and would break the durable run contract on resume.
 
-Both compaction paths call `_re_inject_skill_context`, so that is the seam. A crash after
-the projection and before the snapshot write is recovered by 4.4 on the next turn, which
-re-detects the difference.
+After a compaction, when `notified` differs from `base`, set `notified` to a copy of `base`
+and persist. Clear the session's fast-path values so the next `sync_catalog` runs. It then
+emits one consolidated notification of everything that differs from `base`. Existing
+tool rows stay in place, so this writes no `tools` change.
+
+Crash recovery: at the start of a slow-path `sync_catalog`, if `notified` differs from
+`base` and the provider view holds no `catalog_change` block, apply the same reset.
+
+A new session picks up the live catalog in its own snapshot. That is the only way the
+prefix absorbs changes.
 
 ### 4.7 Reload APIs
 
@@ -173,6 +185,8 @@ catalog change for no benefit.
 
 `reload_subagents()` keeps each tool's slot through `replace`, so order survives, and
 increments `_catalog_revision`. When the feature is off it keeps today's behavior.
+
+Measurements: `docs/superpowers/measurements/2026-11-02-catalog-changes.md`.
 
 ## 5. Required tests
 
@@ -189,8 +203,11 @@ Write each failing first.
 - Description-only change: `tools` unchanged.
 - `reload_subagents()` with an MCP tool registered after `Subagent`: order unchanged.
 - Notification survives reload from a session store.
-- Compaction with pending changes: new snapshot contains them, no notification left in
-  the view. Compaction with none: snapshot unchanged.
+- Compaction with pending changes: `system` and `tools` bytes unchanged, one consolidated
+  notification follows. Compaction with none: no notification, no meta write.
+- Resume after `reload_skills()`, a compaction, and a crash passes contract validation.
+- A skill notification is not repeated after a restart or an unrelated tool change.
+- A description-only change's notification contains the new description, except for MCP.
 - Crash between message append and `notified` write: one repeat at most, never a loss.
 - Durable resume after `reload_skills()` passes contract validation.
 - Each bypass condition in 4.1 keeps 3.0 request bytes, except dedupe.
@@ -212,7 +229,7 @@ Write each failing first.
   non-deferred tool stays in `tools`.
 - OpenAI Responses: `additional_tools` with role `developer`, keep the item in place on
   round-trips, restrict with `tool_choice.allowed_tools`.
-- Compaction must promote native additions as in 4.6, or they vanish with the history.
+- After compaction, 4.6 re-emits native additions and removals in the consolidated message.
 - Test Sonnet 5.5 and Haiku 5.5 specifically: the docs warn they may distrust a system
   message after a tool result.
 
