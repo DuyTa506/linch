@@ -654,6 +654,41 @@ async def test_run_once_drains_session_release_after_repeated_cancellation(
     assert not returned_early, "run_once returned before session release drained"
 
 
+async def test_run_once_releases_lease_if_acquisition_is_cancelled(tmp_path) -> None:
+    acquired = asyncio.Event()
+    allow_return = asyncio.Event()
+    released = asyncio.Event()
+
+    class GatedAcquireStore(InMemoryLoopLeaseStore):
+        async def try_acquire(self, loop_id, *, owner, ttl_s):
+            lease = await super().try_acquire(loop_id, owner=owner, ttl_s=ttl_s)
+            acquired.set()
+            await allow_return.wait()
+            return lease
+
+        async def release(self, lease) -> None:
+            released.set()
+            await super().release(lease)
+
+    store = GatedAcquireStore()
+    runner = LoopRunner(
+        _agent(ScriptedProvider([TextTurn("done")]), tmp_path),
+        leases=store,
+        lease_owner="runner",
+    )
+    task = asyncio.create_task(runner.run_once(_spec(tmp_path)))
+    await asyncio.wait_for(acquired.wait(), timeout=1)
+    task.cancel()
+    allow_return.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert released.is_set()
+    probe = await store.try_acquire("docs-loop", owner="other", ttl_s=60)
+    assert probe is not None
+    await store.release(probe)
+
+
 async def test_run_failure_releases_durable_lease(tmp_path) -> None:
     lease_store = InMemoryLoopLeaseStore()
     provider = ScriptedProvider([])

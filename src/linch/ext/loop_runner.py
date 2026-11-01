@@ -533,11 +533,18 @@ class LoopRunner:
         lease: LoopLease | None = None
         try:
             if self.leases is not None:
-                lease = await self.leases.try_acquire(
-                    spec.id,
-                    owner=self.lease_owner,
-                    ttl_s=self.lease_ttl_s,
+                acquire_task = asyncio.create_task(
+                    self.leases.try_acquire(
+                        spec.id,
+                        owner=self.lease_owner,
+                        ttl_s=self.lease_ttl_s,
+                    )
                 )
+                try:
+                    await _drain_task(acquire_task)
+                finally:
+                    if acquire_task.done() and not acquire_task.cancelled():
+                        lease = acquire_task.result()
                 if lease is None:
                     raise ConfigError(f"Loop {spec.id!r} already has an active lease")
             if lease is None or self.leases is None:
