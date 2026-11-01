@@ -14,7 +14,7 @@ from pathlib import Path
 
 from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
 
-_EXAMPLES = Path(__file__).resolve().parents[1] / "examples" / "coordination"
+_EXAMPLES = Path(__file__).resolve().parents[2] / "examples" / "coordination"
 
 
 def _load(name: str):

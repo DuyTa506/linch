@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.agents import make_worker_agent as make_agent
+
 
 def test_core_import_does_not_load_worker_dependencies():
     root = Path(__file__).resolve().parents[2]
@@ -44,21 +46,6 @@ async def running(*workers):
         for worker in workers:
             worker.stop()
         await asyncio.wait_for(asyncio.gather(*tasks), 10)
-
-
-def make_agent(job, provider=None, context=None):
-    from linch import Agent, empty_tools
-    from linch.ext.evals import ScriptedProvider, TextTurn
-
-    return Agent(
-        model="m",
-        provider=provider or ScriptedProvider([TextTurn("done")]),
-        session_store=job.session_store,
-        run_store=job.run_store,
-        tools=empty_tools(),
-        context=context,
-        permissions={"mode": "skip-dangerous"},
-    )
 
 
 async def test_enqueue_is_atomic_pending_and_idempotent(pool):

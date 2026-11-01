@@ -16,20 +16,9 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-
-def _agent(provider: Any, tools: Any, **kwargs: Any) -> Any:
-    from linch import Agent
-    from linch.sessions import InMemorySessionStore
-
-    return Agent(
-        model="m",
-        provider=provider,
-        session_store=InMemorySessionStore(),
-        permissions={"mode": "skip-dangerous"},
-        cwd=".",
-        tools=tools,
-        **kwargs,
-    )
+from tests.support.agents import make_agent
+from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
+from tests.support.tools import tool_registry
 
 
 def _texts(message: Any) -> str:
@@ -37,8 +26,7 @@ def _texts(message: Any) -> str:
 
 
 async def test_background_tool_returns_immediate_ack_then_notifies() -> None:
-    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
-    from linch.tools import ToolRegistry, tool
+    from linch.tools import tool
 
     gate = asyncio.Event()
     started = asyncio.Event()
@@ -50,8 +38,7 @@ async def test_background_tool_returns_immediate_ack_then_notifies() -> None:
         await gate.wait()
         return "tool-finished"
 
-    tools = ToolRegistry()
-    tools.register(slow)
+    tools = tool_registry(slow)
     provider = ScriptedProvider(
         [
             ToolUseTurn(tool_name="slow", tool_input={"run_in_background": True}),
@@ -59,7 +46,9 @@ async def test_background_tool_returns_immediate_ack_then_notifies() -> None:
             TextTurn(text="all-done"),
         ]
     )
-    agent = _agent(provider, tools, enable_background_tools=True)
+    agent = make_agent(
+        provider, model="m", tools=tools, run_store=None, enable_background_tools=True
+    )
     session = await agent.session()
 
     events1 = [event async for event in session.run("go")]
@@ -86,8 +75,7 @@ async def test_background_tool_returns_immediate_ack_then_notifies() -> None:
 
 
 async def test_background_disabled_runs_inline() -> None:
-    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
-    from linch.tools import ToolRegistry, tool
+    from linch.tools import tool
 
     ran = asyncio.Event()
 
@@ -97,8 +85,7 @@ async def test_background_disabled_runs_inline() -> None:
         ran.set()
         return "inline-result"
 
-    tools = ToolRegistry()
-    tools.register(quick)
+    tools = tool_registry(quick)
     provider = ScriptedProvider(
         [
             ToolUseTurn(tool_name="quick", tool_input={"run_in_background": True}),
@@ -106,7 +93,7 @@ async def test_background_disabled_runs_inline() -> None:
         ]
     )
     # No enable_background_tools → byte-identical: the hint is passed through.
-    agent = _agent(provider, tools)
+    agent = make_agent(provider, model="m", tools=tools, run_store=None)
     session = await agent.session()
 
     events = [event async for event in session.run("go")]
@@ -118,8 +105,7 @@ async def test_background_disabled_runs_inline() -> None:
 
 
 async def test_abort_cancels_background_tool() -> None:
-    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
-    from linch.tools import ToolRegistry, tool
+    from linch.tools import tool
 
     gate = asyncio.Event()
     started = asyncio.Event()
@@ -131,15 +117,16 @@ async def test_abort_cancels_background_tool() -> None:
         await gate.wait()
         return "never"
 
-    tools = ToolRegistry()
-    tools.register(hang)
+    tools = tool_registry(hang)
     provider = ScriptedProvider(
         [
             ToolUseTurn(tool_name="hang", tool_input={"run_in_background": True}),
             TextTurn(text="ack"),
         ]
     )
-    agent = _agent(provider, tools, enable_background_tools=True)
+    agent = make_agent(
+        provider, model="m", tools=tools, run_store=None, enable_background_tools=True
+    )
     session = await agent.session()
 
     [event async for event in session.run("go")]

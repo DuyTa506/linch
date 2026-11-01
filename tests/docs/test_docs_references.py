@@ -4,7 +4,7 @@ import ast
 import re
 from pathlib import Path
 
-_ROOT = Path(__file__).resolve().parents[1]
+_ROOT = Path(__file__).resolve().parents[2]
 _PACKAGE = _ROOT / "src/linch"
 _NAME = r"[A-Za-z_]\w*"
 _IMPORT = re.compile(

@@ -16,7 +16,7 @@ import pytest
 
 from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
 
-_RECIPE = Path(__file__).resolve().parents[1] / "examples" / "recipes" / "ralph_loop.py"
+_RECIPE = Path(__file__).resolve().parents[2] / "examples" / "recipes" / "ralph_loop.py"
 
 
 def _load():

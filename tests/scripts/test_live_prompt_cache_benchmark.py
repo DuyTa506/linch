@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 def _load_script():
-    path = Path(__file__).resolve().parents[1] / "scripts" / "benchmark_live_prompt_cache.py"
+    path = Path(__file__).resolve().parents[2] / "scripts" / "benchmark_live_prompt_cache.py"
     spec = importlib.util.spec_from_file_location("live_prompt_cache_benchmark_script", path)
     assert spec is not None
     module = importlib.util.module_from_spec(spec)
