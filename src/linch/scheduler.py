@@ -1008,7 +1008,12 @@ async def _dispatch_post_tool_use(
             block_result=block_result,
             tool_output=outcome.tool_output,
         )
-    record_tool_result(session, call.id, final.tool_result.content, run_id=run_id)
+    record_tool_result(
+        session,
+        call.id,
+        final.tool_result.content,
+        run_id=run_id or getattr(call, "_run_id", None),
+    )
     # PostToolUseFailure: an observational notification fired only when the final
     # (post-mutation) result is an error, so a failure-watcher hook need not
     # re-derive "did this fail?" from every PostToolUse.

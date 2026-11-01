@@ -50,8 +50,9 @@ async def dispatch_user_prompt(
         ),
     )
     result = dispatched.result
+    processed_prompt = getattr(dispatched.context, "prompt", prompt_value)
     if result.action == "mutate":
-        prompt = result.prompt if result.prompt is not None else prompt_value
+        prompt = result.prompt if result.prompt is not None else processed_prompt
         record_prompt_capture(session, prompt)
         return (
             prompt,
@@ -60,9 +61,9 @@ async def dispatch_user_prompt(
             None,
         )
     if result.action in {"block", "stop"}:
-        record_prompt_capture(session, prompt_value)
+        record_prompt_capture(session, processed_prompt)
         return prompt_value, images_value, dispatched.events, result.reason or result.feedback
-    record_prompt_capture(session, prompt_value)
+    record_prompt_capture(session, processed_prompt)
     return prompt_value, images_value, dispatched.events, None
 
 
