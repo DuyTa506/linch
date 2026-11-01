@@ -61,7 +61,7 @@ async def dispatch_user_prompt(
             None,
         )
     if result.action in {"block", "stop"}:
-        record_prompt_capture(session, processed_prompt)
+        # Rejection short-circuits the hook chain, including later redaction.
         return prompt_value, images_value, dispatched.events, result.reason or result.feedback
     record_prompt_capture(session, processed_prompt)
     return prompt_value, images_value, dispatched.events, None

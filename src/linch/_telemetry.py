@@ -606,13 +606,14 @@ def _run_trace_for(session: Any, run_id: str | None = None) -> Any:
     return telemetry._runs.get((session.id, resolved_run_id))
 
 
-def register_background_task(session: Any, task: Any, *, run_id: str) -> None:
+def register_background_task(session: Any, task: Any, *, run_id: str, tool_use_id: str) -> None:
     """Retain the originating run until its detached task finishes.
 
     Args:
         session: Session owning the detached task.
         task: Newly scheduled background task.
         run_id: Explicit originating run identifier.
+        tool_use_id: Tool call whose deferred span belongs to this task.
     """
     state = _run_trace_for(session, run_id)
     if state is None:
@@ -621,6 +622,11 @@ def register_background_task(session: Any, task: Any, *, run_id: str) -> None:
 
     def finished(done: Any) -> None:
         state.background_tasks.remove(done)
+        # Cancellation or post-processing failure can skip record_tool_result.
+        # End only this task's span, without capturing its unprocessed result.
+        span_info = state.tool_spans.pop(tool_use_id, None)
+        if span_info is not None:
+            span_info[0].end()
         _release_closed_run(session, state)
 
     task.add_done_callback(finished)
