@@ -1,10 +1,3 @@
-"""Compaction ladder tests — micro-compact, reactive recovery, circuit breaker.
-
-linch imports happen inside test functions / provider methods (not at module
-level) because tests/loop/test_hardening.py pops all ``linch*`` modules from
-``sys.modules``.
-"""
-
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
@@ -56,6 +49,12 @@ def test_micro_compact_elides_old_tool_results_only() -> None:
     from linch.types import ToolResultBlock
 
     messages = _history(12, result_size=500)
+    original_contents = [
+        block.content
+        for msg in messages
+        for block in msg.content
+        if isinstance(block, ToolResultBlock)
+    ]
 
     new_messages, n_elided = micro_compact(messages, keep_recent_turns=10)
 
@@ -70,23 +69,7 @@ def test_micro_compact_elides_old_tool_results_only() -> None:
     # tool_use_id pairing preserved for every result.
     assert [r.tool_use_id for r in results] == [f"call_{i}" for i in range(12)]
 
-
-def test_micro_compact_does_not_mutate_input_messages() -> None:
-    from linch.compaction import micro_compact
-    from linch.types import ToolResultBlock
-
-    messages = _history(12, result_size=500)
-    original_contents = [
-        block.content
-        for msg in messages
-        for block in msg.content
-        if isinstance(block, ToolResultBlock)
-    ]
-
-    new_messages, n_elided = micro_compact(messages, keep_recent_turns=10)
-
     assert n_elided == 2
-    # Input messages and blocks are untouched (projections use independent copies).
     after_contents = [
         block.content
         for msg in messages
@@ -94,13 +77,18 @@ def test_micro_compact_does_not_mutate_input_messages() -> None:
         if isinstance(block, ToolResultBlock)
     ]
     assert after_contents == original_contents
-    # Untouched messages are reused by identity; changed ones are new objects.
     assert new_messages[0] is messages[0]
     assert new_messages[-1] is messages[-1]
 
 
 def test_micro_compact_noop_returns_zero() -> None:
-    from linch.compaction import micro_compact
+    from linch.compaction import (
+        CompactionLadder,
+        DetailedCompaction,
+        last_n_turn_boundaries,
+        micro_compact,
+    )
+    from linch.types import ToolResultBlock, ToolUseBlock
 
     messages = _history(3, result_size=500)
 
@@ -116,10 +104,6 @@ def test_micro_compact_noop_returns_zero() -> None:
     assert n2 == 0
     assert twice is once
 
-
-def test_compaction_configs_reject_zero_recent_turns() -> None:
-    from linch.compaction import CompactionLadder, DetailedCompaction, micro_compact
-
     with pytest.raises(ValueError, match=r"compaction_ladder\.keep_recent_turns must be >= 1"):
         CompactionLadder(keep_recent_turns=0)
     with pytest.raises(ValueError, match=r"detailed_compaction\.keep_recent_turns must be >= 1"):
@@ -127,15 +111,8 @@ def test_compaction_configs_reject_zero_recent_turns() -> None:
     with pytest.raises(ValueError, match=r"micro_compact\.keep_recent_turns must be >= 1"):
         micro_compact(_history(2), keep_recent_turns=0)
 
-
-def test_boundary_defensively_keeps_pair_when_n_is_zero() -> None:
-    from linch.compaction import last_n_turn_boundaries
-    from linch.types import ToolResultBlock, ToolUseBlock
-
     messages = _history(2)
-
     recent = last_n_turn_boundaries(messages, 0)
-
     assert recent is messages
     uses = {
         block.id
@@ -282,22 +259,11 @@ def _char_estimator(messages: list[Any], model: str) -> int:
 
 
 def _make_agent(provider: Any, **kwargs: Any) -> Any:
-    from linch import Agent
-    from linch.sessions import InMemorySessionStore
-    from linch.tools import ToolRegistry
+    from tests.support.agents import make_agent
+    from tests.support.tools import tool_registry
 
-    tools = ToolRegistry()
-    tools.register(BigTool())
-    provided_store = kwargs.pop("session_store", None)
-    session_store = InMemorySessionStore() if provided_store is None else provided_store
-    return Agent(
-        model="gpt-5",
-        provider=provider,
-        session_store=session_store,
-        permissions={"mode": "skip-dangerous"},
-        cwd=".",
-        tools=tools,
-        **kwargs,
+    return make_agent(
+        provider, model="gpt-5", tools=tool_registry(BigTool()), run_store=None, **kwargs
     )
 
 
@@ -361,7 +327,8 @@ async def test_maybe_compact_falls_through_to_full_strategy_when_micro_insuffici
     assert events[-1].subtype == "success"
 
 
-async def test_forced_compaction_resets_read_tracker() -> None:
+@pytest.mark.parametrize("ladder_enabled", [False, True])
+async def test_forced_compaction_resets_read_tracker(ladder_enabled: bool) -> None:
     from linch import DetailedCompaction
     from linch.compaction import CompactionLadder
 
@@ -369,13 +336,14 @@ async def test_forced_compaction_resets_read_tracker() -> None:
         [("tool", 500), ("tool", 9_000), ("text", 0)],
         window=10_000,
     )
-    agent = _make_agent(
-        provider,
-        compaction_ladder=CompactionLadder(keep_recent_turns=1),
-        compaction=DetailedCompaction(keep_recent_turns=1),
-        token_estimator=_char_estimator,
-        max_output_tokens=10,
-    )
+    kwargs: dict[str, Any] = {
+        "compaction": DetailedCompaction(keep_recent_turns=1),
+        "token_estimator": _char_estimator,
+        "max_output_tokens": 10,
+    }
+    if ladder_enabled:
+        kwargs["compaction_ladder"] = CompactionLadder(keep_recent_turns=1)
+    agent = _make_agent(provider, **kwargs)
     session = await agent.session()
     session.file_read_tracker.add("/seen.py")
 
@@ -386,33 +354,7 @@ async def test_forced_compaction_resets_read_tracker() -> None:
     assert [e.strategy for e in events if e.type == "compaction"] == [
         "detailed-continuation-keep-recent-10"
     ]
-    assert "/seen.py" not in session.file_read_tracker
-
-
-async def test_compaction_without_ladder_keeps_read_tracker() -> None:
-    from linch import DetailedCompaction
-
-    # Same forcing setup, but no ladder configured → default byte-identical:
-    # the read tracker survives the compaction untouched.
-    provider = LadderProvider(
-        [("tool", 500), ("tool", 9_000), ("text", 0)],
-        window=10_000,
-    )
-    agent = _make_agent(
-        provider,
-        compaction=DetailedCompaction(keep_recent_turns=1),
-        token_estimator=_char_estimator,
-        max_output_tokens=10,
-    )
-    session = await agent.session()
-    session.file_read_tracker.add("/seen.py")
-
-    events = [event async for event in session.run("go")]
-
-    assert [e.strategy for e in events if e.type == "compaction"] == [
-        "detailed-continuation-keep-recent-10"
-    ]
-    assert "/seen.py" in session.file_read_tracker
+    assert ("/seen.py" not in session.file_read_tracker) is ladder_enabled
 
 
 # ── integration: reactive rungs on ContextLengthError ────────────────────────
@@ -431,6 +373,7 @@ async def test_reactive_micro_then_forced_on_context_length_error() -> None:
         compaction=DetailedCompaction(keep_recent_turns=1),
     )
     session = await agent.session()
+    session.file_read_tracker.add("/seen.py")
 
     events = [event async for event in session.run("go")]
 
@@ -442,6 +385,32 @@ async def test_reactive_micro_then_forced_on_context_length_error() -> None:
     assert provider.summarize_calls == 1
     assert events[-1].type == "result"
     assert events[-1].subtype == "success"
+    assert "/seen.py" not in session.file_read_tracker
+
+
+async def test_ladder_disabled_is_byte_identical() -> None:
+    from linch import DetailedCompaction
+
+    # Single forced retry succeeds (existing behavior).
+    provider = LadderProvider([("tool", 100), ("raise_cle", 0), ("text", 0)])
+    agent = _make_agent(provider, compaction=DetailedCompaction(keep_recent_turns=1))
+    session = await agent.session()
+
+    events = [event async for event in session.run("go")]
+    compactions = [e for e in events if e.type == "compaction"]
+    assert [e.strategy for e in compactions] == ["detailed-continuation-keep-recent-10"]
+    assert events[-1].subtype == "success"
+
+    # Second ContextLengthError in the same turn surfaces (existing behavior).
+    provider2 = LadderProvider([("tool", 100), ("raise_cle", 0), ("raise_cle", 0)])
+    agent2 = _make_agent(provider2, compaction=DetailedCompaction(keep_recent_turns=1))
+    session2 = await agent2.session()
+
+    events2 = [event async for event in session2.run("go")]
+    compactions2 = [e for e in events2 if e.type == "compaction"]
+    assert len(compactions2) == 1
+    assert events2[-1].type == "result"
+    assert events2[-1].subtype == "error"
 
 
 @pytest.mark.parametrize("use_ladder", [False, True])
@@ -497,31 +466,6 @@ async def test_reactive_compaction_snapshot_restores_exact_post_compaction_view(
     assert [message_to_dict(message) for message in restored.provider_view] == expected
 
 
-async def test_reactive_compaction_resets_read_tracker() -> None:
-    from linch import DetailedCompaction
-    from linch.compaction import CompactionLadder
-
-    provider = LadderProvider(
-        [("tool", 100), ("tool", 100), ("raise_cle", 0), ("raise_cle", 0), ("text", 0)]
-    )
-    agent = _make_agent(
-        provider,
-        compaction_ladder=CompactionLadder(keep_recent_turns=1),
-        compaction=DetailedCompaction(keep_recent_turns=1),
-    )
-    session = await agent.session()
-    session.file_read_tracker.add("/seen.py")
-
-    events = [event async for event in session.run("go")]
-
-    # Reactive recovery ran (micro then forced); the tracker reset on the way out.
-    assert [e.strategy for e in events if e.type == "compaction"] == [
-        "micro",
-        "detailed-continuation-keep-recent-10",
-    ]
-    assert "/seen.py" not in session.file_read_tracker
-
-
 async def test_circuit_breaker_surfaces_error_after_max_forced() -> None:
     from linch import DetailedCompaction
     from linch.compaction import CompactionLadder
@@ -547,34 +491,6 @@ async def test_circuit_breaker_surfaces_error_after_max_forced() -> None:
     assert any(e.error.get("name") == "ContextLengthError" for e in error_events)
     assert events[-1].type == "result"
     assert events[-1].subtype == "error"
-
-
-# ── regression pin: ladder disabled is byte-identical ─────────────────────────
-
-
-async def test_ladder_disabled_is_byte_identical() -> None:
-    from linch import DetailedCompaction
-
-    # Single forced retry succeeds (existing behavior).
-    provider = LadderProvider([("tool", 100), ("raise_cle", 0), ("text", 0)])
-    agent = _make_agent(provider, compaction=DetailedCompaction(keep_recent_turns=1))
-    session = await agent.session()
-
-    events = [event async for event in session.run("go")]
-    compactions = [e for e in events if e.type == "compaction"]
-    assert [e.strategy for e in compactions] == ["detailed-continuation-keep-recent-10"]
-    assert events[-1].subtype == "success"
-
-    # Second ContextLengthError in the same turn surfaces (existing behavior).
-    provider2 = LadderProvider([("tool", 100), ("raise_cle", 0), ("raise_cle", 0)])
-    agent2 = _make_agent(provider2, compaction=DetailedCompaction(keep_recent_turns=1))
-    session2 = await agent2.session()
-
-    events2 = [event async for event in session2.run("go")]
-    compactions2 = [e for e in events2 if e.type == "compaction"]
-    assert len(compactions2) == 1
-    assert events2[-1].type == "result"
-    assert events2[-1].subtype == "error"
 
 
 @pytest.mark.parametrize("ladder_enabled", [False, True])

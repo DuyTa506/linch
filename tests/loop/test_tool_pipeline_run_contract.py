@@ -2,39 +2,19 @@
 
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
-
-class _Provider:
-    id = "tool-pipeline-contract-provider"
-
-    def context_window(self, model: str) -> int:
-        return 128_000
-
-    async def stream(self, req: Any):
-        from linch.types import Usage
-
-        yield {"type": "message_start", "model": req.model}
-        yield {"type": "text_delta", "text": "done"}
-        yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
+from tests.support.agents import make_agent
+from tests.support.providers import ScriptedProvider, TextTurn
 
 
 def _agent(run_store: Any, session_store: Any, pipeline: Any) -> Any:
-    from linch import Agent
-    from linch.config import FeatureFlags
-    from linch.tools.registry import empty_tools
-
-    return Agent(
-        model="test-model",
-        provider=cast(Any, _Provider()),
-        tools=empty_tools(),
-        permissions={"mode": "skip-dangerous"},
+    return make_agent(
+        ScriptedProvider([TextTurn("done")]),
         session_store=session_store,
         run_store=run_store,
-        features=FeatureFlags(),
-        result_offload=None,
         tool_pipeline=pipeline,
     )
 

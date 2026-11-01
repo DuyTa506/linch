@@ -181,28 +181,24 @@ async def test_invalid_normalized_stream_never_fabricates_usage(fault: str):
     from linch.types import Usage
 
     events = _events()
-    if fault == "missing-model":
-        del events[0]["model"]
-    elif fault == "blank-model":
-        events[0]["model"] = "   "
-    elif fault == "invalid-model":
-        events[0]["model"] = 42
-    elif fault == "no-start":
-        events.pop(0)
-    elif fault == "duplicate-start":
-        events.insert(1, events[0].copy())
-    elif fault == "no-end":
-        events.pop()
-    elif fault == "missing-usage":
-        del events[-1]["usage"]
-    elif fault == "invalid-usage":
-        events[-1]["usage"] = {"input_tokens": 111, "output_tokens": 22}
-    elif fault == "negative-usage":
-        events[-1]["usage"] = Usage(-1, 22)
-    elif fault == "boolean-usage":
-        events[-1]["usage"] = Usage(True, 22)
-    elif fault == "delta-before-tool":
-        events.insert(1, {"type": "tool_use_input_delta", "id": "missing", "json_delta": "{}"})
+    mutations = {
+        "missing-model": lambda: events[0].pop("model"),
+        "blank-model": lambda: events[0].update(model="   "),
+        "invalid-model": lambda: events[0].update(model=42),
+        "no-start": lambda: events.pop(0),
+        "duplicate-start": lambda: events.insert(1, events[0].copy()),
+        "no-end": lambda: events.pop(),
+        "missing-usage": lambda: events[-1].pop("usage"),
+        "invalid-usage": lambda: events[-1].update(
+            usage={"input_tokens": 111, "output_tokens": 22}
+        ),
+        "negative-usage": lambda: events[-1].update(usage=Usage(-1, 22)),
+        "boolean-usage": lambda: events[-1].update(usage=Usage(True, 22)),
+        "delta-before-tool": lambda: events.insert(
+            1, {"type": "tool_use_input_delta", "id": "missing", "json_delta": "{}"}
+        ),
+    }
+    mutations[fault]()
     _, ledger, limiter, caller = _setup(provider=_Provider(events))
     with pytest.raises(ProviderError, match="normalized provider stream"):
         await _text(caller)
@@ -224,29 +220,37 @@ async def test_reported_usage_retains_all_buckets_and_is_copied() -> None:
     assert result.receipt.cost_usd == pytest.approx(0.0002263)
 
 
-async def test_predispatch_abort_is_unbilled_abandonment() -> None:
+@pytest.mark.parametrize("mode", ["abort", "budget"])
+async def test_model_call_admission_rejections(mode: str) -> None:
     from linch.abort import AbortContext
     from linch.budget import RunBudget
     from linch.errors import AbortError
+    from linch.model_calls import _ModelCallError
 
-    signal = AbortContext()
-    signal.abort()
-    budget = RunBudget(max_tokens=1000)
     journal: list[Any] = []
 
     async def persist(event: Any) -> None:
         journal.append(event)
 
+    budget = RunBudget(max_tokens=0 if mode == "budget" else 1000)
+    signal = AbortContext()
+    if mode == "abort":
+        signal.abort()
     provider, ledger, limiter, caller = _setup(budget=budget, persist=persist)
-    with pytest.raises(AbortError):
+    expected = AbortError if mode == "abort" else _ModelCallError
+    with pytest.raises(expected) as raised:
         await _text(caller, signal=signal)
     assert provider.requests == []
     assert ledger.usage_complete
     assert budget.spent_tokens == 0
     assert ledger.receipts() == []
-    assert journal[-1].record_kind == "abandoned"
-    assert journal[-1].record["usage_status"] == "not_dispatched"
     assert limiter.held == 0
+    if mode == "abort":
+        assert journal[-1].record_kind == "abandoned"
+        assert journal[-1].record["usage_status"] == "not_dispatched"
+    else:
+        assert raised.value.code == "budget_exceeded"
+        assert limiter.acquired == limiter.released == ["requested-model"]
 
 
 @pytest.mark.parametrize("cancel_task", [False, True])
@@ -341,11 +345,13 @@ def _compaction_fixture(*, strategy: Any, provider: Any, limiter: Any):
     )
 
     class Session:
-        session_log = SessionLog.seed(historical=messages)
         active_run_id = "run-fixture"
         id = "session-fixture"
         active_model = None
         last_compaction_info = None
+
+        def __init__(self) -> None:
+            self.session_log = SessionLog.seed(historical=messages)
 
         @property
         def provider_view(self):
@@ -481,51 +487,35 @@ async def test_abort_while_waiting_for_slot_abandons_without_dispatch_or_fence(c
     _ModelCallLedger("sibling", budget=budget).assert_may_start()
 
 
-async def test_admission_denial_is_unbilled_and_releases_slot() -> None:
-    from linch.budget import RunBudget
-    from linch.model_calls import _ModelCallError
-
-    provider, ledger, limiter, caller = _setup(budget=RunBudget(max_tokens=0))
-    with pytest.raises(_ModelCallError) as exc:
-        await _text(caller)
-    assert exc.value.code == "budget_exceeded"
-    assert provider.requests == []
-    assert ledger.usage_complete
-    assert ledger.receipts() == []
-    assert limiter.acquired == limiter.released == ["requested-model"]
-
-
-async def test_transport_failure_keeps_unknown_use_and_closes_stream() -> None:
+@pytest.mark.parametrize("failure", ["transport", "invalid-end"])
+async def test_provider_failure_preserves_usage(failure: str) -> None:
     from linch.errors import ProviderError
+    from linch.types import Usage
 
-    provider, ledger, limiter, caller = _setup(
-        provider=_Provider(
+    if failure == "transport":
+        provider = _Provider(
             [
                 {"type": "message_start", "model": "actual-model"},
                 ProviderError("transport disconnected", retryable=True),
             ]
         )
-    )
-    with pytest.raises(ProviderError, match="transport disconnected"):
+        provider, ledger, limiter, caller = _setup(provider=provider)
+        expected = "transport disconnected"
+    else:
+        events = _events()
+        events[-1]["stop_reason"] = "invalid-stop"
+        provider, ledger, limiter, caller = _setup(provider=_Provider(events))
+        expected = "normalized provider stream"
+    with pytest.raises(ProviderError, match=expected):
         await _text(caller)
+    if failure == "transport":
+        assert not ledger.usage_complete
+        assert ledger.receipts()[0].disposition == "failed"
+    else:
+        assert ledger.total_usage == Usage(111, 22)
+        assert ledger.usage_complete
+        assert ledger.receipts()[0].disposition == "rejected"
     assert provider.closed == 1
-    assert limiter.held == 0
-    assert not ledger.usage_complete
-    assert ledger.receipts()[0].disposition == "failed"
-
-
-async def test_valid_usage_is_preserved_when_end_structure_is_invalid() -> None:
-    from linch.errors import ProviderError
-    from linch.types import Usage
-
-    events = _events()
-    events[-1]["stop_reason"] = "invalid-stop"
-    _, ledger, limiter, caller = _setup(provider=_Provider(events))
-    with pytest.raises(ProviderError, match="normalized provider stream"):
-        await _text(caller)
-    assert ledger.total_usage == Usage(111, 22)
-    assert ledger.usage_complete
-    assert ledger.receipts()[0].disposition == "rejected"
     assert limiter.held == 0
 
 
@@ -606,55 +596,48 @@ async def test_valid_end_followed_by_invalid_tail_is_charged_once_and_rejected(t
     assert limiter.held == 0
 
 
-async def test_abort_after_observed_end_preserves_known_usage_and_rejects_output() -> None:
+@pytest.mark.parametrize("mode", ["tail", "completion"])
+async def test_abort_after_end_rejects_paid_output(mode: str) -> None:
     from linch.abort import AbortContext
-    from linch.errors import AbortError
-    from linch.types import Usage
-
-    tail_waiting = asyncio.Event()
-
-    class TailHangs(_Provider):
-        async def stream(self, request: Any) -> AsyncIterator[dict[str, Any]]:
-            try:
-                for event in _events():
-                    yield event
-                tail_waiting.set()
-                await asyncio.Event().wait()
-            finally:
-                self.closed += 1
-
-    provider, ledger, limiter, caller = _setup(provider=TailHangs())
-    signal = AbortContext()
-    task = asyncio.create_task(_text(caller, signal=signal))
-    await asyncio.wait_for(tail_waiting.wait(), timeout=1)
-    signal.abort()
-    with pytest.raises(AbortError):
-        await asyncio.wait_for(task, timeout=1)
-    assert ledger.total_usage == Usage(111, 22)
-    assert ledger.usage_complete
-    assert ledger.receipts()[0].disposition == "rejected"
-    assert provider.closed == 1
-    assert limiter.held == 0
-
-
-async def test_abort_on_clean_completion_rejects_paid_output_and_charges_once() -> None:
     from linch.budget import RunBudget
     from linch.errors import AbortError
     from linch.types import Usage
 
-    class AbortOnCompletion(_Provider):
-        async def stream(self, request: Any) -> AsyncIterator[dict[str, Any]]:
-            try:
-                for event in _events():
-                    yield event
-                request.signal.abort()
-            finally:
-                self.closed += 1
+    if mode == "tail":
+        tail_waiting = asyncio.Event()
 
-    budget = RunBudget(max_tokens=1000)
-    provider, ledger, limiter, caller = _setup(provider=AbortOnCompletion(), budget=budget)
-    with pytest.raises(AbortError):
-        await _text(caller)
+        class TailHangs(_Provider):
+            async def stream(self, request: Any) -> AsyncIterator[dict[str, Any]]:
+                try:
+                    for event in _events():
+                        yield event
+                    tail_waiting.set()
+                    await asyncio.Event().wait()
+                finally:
+                    self.closed += 1
+
+        provider, ledger, limiter, caller = _setup(provider=TailHangs())
+        signal = AbortContext()
+        task = asyncio.create_task(_text(caller, signal=signal))
+        await asyncio.wait_for(tail_waiting.wait(), timeout=1)
+        signal.abort()
+        with pytest.raises(AbortError):
+            await asyncio.wait_for(task, timeout=1)
+    else:
+
+        class AbortOnCompletion(_Provider):
+            async def stream(self, request: Any) -> AsyncIterator[dict[str, Any]]:
+                try:
+                    for event in _events():
+                        yield event
+                    request.signal.abort()
+                finally:
+                    self.closed += 1
+
+        budget = RunBudget(max_tokens=1000)
+        provider, ledger, limiter, caller = _setup(provider=AbortOnCompletion(), budget=budget)
+        with pytest.raises(AbortError):
+            await _text(caller)
 
     receipts = ledger.receipts()
     assert len(receipts) == 1
@@ -664,7 +647,8 @@ async def test_abort_on_clean_completion_rejects_paid_output_and_charges_once() 
     assert receipts[0].accepted_text_sha256 is None
     assert ledger.total_usage == Usage(111, 22)
     assert ledger.usage_complete
-    assert budget.spent_tokens == 133
+    if mode == "completion":
+        assert budget.spent_tokens == 133
     assert provider.closed == 1
     assert limiter.acquired == limiter.released == ["requested-model"]
     assert limiter.held == 0
