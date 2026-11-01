@@ -77,6 +77,9 @@ containing an internal `CatalogChangeBlock`, wrapped in `<system-reminder>` tags
 before updating last-notified metadata. A crash between these writes can repeat a
 reminder but cannot lose it. All provider adapters render the block as text in
 this phase; schema changes use the existing `tool_set_changed` advisory.
+Synchronization compares the live catalog directly with persisted `notified`
+digests, including skills. Compaction resets these digests to immutable `base`
+without changing the request prefix, so the next turn consolidates changes.
 
 The sequence is backed by the catalog in [events.md](./events.md). Run, turn,
 provider, and security hooks use `hook` points such as `AgentStart`,

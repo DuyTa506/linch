@@ -8,7 +8,6 @@ from dataclasses import replace
 from typing import Any, Literal, cast
 
 from ..catalog import (
-    rebuild_catalog_snapshot,
     snapshot_enabled,
     snapshot_for,
     snapshot_system,
@@ -18,7 +17,6 @@ from ..context import ContextBuildResult, apply_context_budget
 from ..profiles import _base_run_config
 from ..session import RunOptions, Session
 from ..types import (
-    CatalogChangeBlock,
     ContentBlock,
     ImageBlock,
     Message,
@@ -70,38 +68,16 @@ def final_text(message: Message) -> str | None:
     return None
 
 
-async def _re_inject_skill_context(session: Session, *, config: Any = None) -> None:
+def _re_inject_skill_context(session: Session, *, config: Any = None) -> None:
     agent = session.agent
     config = config or _base_run_config(session)
-    snapshot = snapshot_for(session)
-    if snapshot is not None:
-        if await rebuild_catalog_snapshot(session, config):
-            filtered = [
-                replace(
-                    message,
-                    content=cast(
-                        list[ContentBlock],
-                        [
-                            block
-                            for block in message.content
-                            if not isinstance(block, CatalogChangeBlock)
-                        ],
-                    ),
-                )
-                for message in session.provider_view
-                if any(not isinstance(block, CatalogChangeBlock) for block in message.content)
-            ]
-            session.session_log.record_projection(filtered, reason="catalog-rebuild")
-            snapshot = snapshot_for(session)
+    snapshot_allowed = snapshot_enabled(session, config)
     listing = None
-    if snapshot is None:
+    if not snapshot_allowed:
         listing = agent.skill_listing_text
-        if snapshot_enabled(session, config):
-            listing = None
-        else:
-            catalog = config.context.get("request_catalog")
-            if catalog is not None:
-                listing = catalog.skill_listing(session, listing)
+        catalog = config.context.get("request_catalog")
+        if catalog is not None:
+            listing = catalog.skill_listing(session, listing)
     reminders = [listing] if listing else []
     reminders.extend(
         f"Below is the body of a previously invoked skill named '{rec.name}'.\n\n"
@@ -127,7 +103,10 @@ async def _re_inject_skill_context(session: Session, *, config: Any = None) -> N
     for reminder in reminders:
         text = wrap_in_system_reminder(reminder)
         if text not in present_text:
-            await session.append([Message(role="user", content=[TextBlock(text=text)])])
+            session.session_log.append(
+                Message(role="user", content=[TextBlock(text=text)]),
+                historical=False,
+            )
             present_text.add(text)
 
 

@@ -18,6 +18,7 @@ the private `_telemetry.py` adapter.
 | `agent.py` | `Agent` configuration, per-agent `Context`, registries, session lifecycle, provider preparation, permissions, hooks, filesystem setup, and default `ReliabilityPolicy()`. |
 | `session.py` | `Session`, `RunOptions`, session lifecycle, run/resume admission, append-only history access, per-run dependencies, principals, and background work. |
 | `session_log.py` | Append-only `SessionLog`; `provider_view` and `full_history` projections; logged compaction projections and history fingerprints. |
+| `catalog.py` | Private session prefix snapshots, immutable base and notified catalog digests, durable change reminders, and compaction/crash notification resets. |
 | `profiles.py` | Immutable, versioned `Profile` composition, plugin rows, tool restrictions, output schemas, budgets, and resume content hashes. |
 | `lifecycle.py` | Typed lifecycle-point descriptors and dispatch modes used by the event catalog and kernel bus. |
 | `kernel/` | Dependency-free `Context`, reversible `Disposable` effects, `EffectScope`, and `EventBus`. See [kernel.md](./kernel.md). |

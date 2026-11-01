@@ -6,7 +6,6 @@ no dependency on turn orchestration.
 
 from __future__ import annotations
 
-import copy
 import json
 from typing import Any, cast
 
@@ -326,27 +325,6 @@ def _execution_backend_contract(tools: list[Any], configured_backend: Any) -> di
     }
 
 
-def _preview_snapshot_tools(
-    snapshot: dict[str, Any],
-    live_schemas: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Preview the next catalog sync without mutating the persisted snapshot."""
-    preview = snapshot_tools(snapshot)
-    positions = {str(item.get("name", "")): index for index, item in enumerate(preview)}
-    notified_names = set((snapshot.get("notified") or {}).get("tools", {}))
-    for live in live_schemas:
-        name = str(live.get("name", ""))
-        index = positions.get(name)
-        if index is None:
-            positions[name] = len(preview)
-            preview.append(copy.deepcopy(live))
-        elif name not in notified_names or preview[index].get("input_schema") != live.get(
-            "input_schema"
-        ):
-            preview[index] = copy.deepcopy(live)
-    return preview
-
-
 def _build_run_contract(session: Session, prompt: str, opts: RunOptions) -> Any:
     """Build the normalized, resume-safe identity for one run."""
     agent = session.agent
@@ -368,9 +346,7 @@ def _build_run_contract(session: Session, prompt: str, opts: RunOptions) -> Any:
     live_by_name = {str(getattr(tool, "name", "")): tool for tool in tools}
     tool_schemas: list[dict[str, Any]] = []
     source_schemas = (
-        _preview_snapshot_tools(prefix, registry.schemas())
-        if prefix is not None
-        else registry.schemas()
+        snapshot_tools(prefix, registry.schemas()) if prefix is not None else registry.schemas()
     )
     for schema in source_schemas:
         tool = live_by_name.get(str(schema.get("name", "")))
@@ -432,7 +408,8 @@ def _build_run_contract(session: Session, prompt: str, opts: RunOptions) -> Any:
         "runtime_version": get_version(),
         "model_call_accounting": _accounting_contract(),
         "compaction_skill_listing_fingerprint": _skill_listing_fingerprint(
-            frozen_listing, session=session
+            frozen_listing,
+            session=session if prefix is not None else None,
         ),
         "compaction_replay_config": _builtin_compaction_config(getattr(agent, "compaction", None)),
         "permissions": _permission_policy_contract(config, freeze_skills=prefix is not None),

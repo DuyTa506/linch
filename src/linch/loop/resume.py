@@ -136,9 +136,13 @@ async def recover_resume(ctx: ResumeContext) -> AsyncGenerator[Event, None]:
         ctx.agent,
         ctx.ledger,
         ctx.checkpoint.turn_index,
+        config=ctx.config,
     )
     if ctx.state.recovered_compaction:
         await ctx.maybe_save_provider_snapshot(ctx.session)
+        from ..catalog import reset_catalog_notifications
+
+        await reset_catalog_notifications(ctx.session, ctx.config)
 
     if ctx.checkpoint.phase in {"provider_pending", "assistant_appended"}:
         await _reconcile_active_primary(ctx)

@@ -60,6 +60,12 @@ class _Session:
         self.system_blocks_override = None
         self.appended: list[Any] = []
 
+        class _Log:
+            def append(inner, message: Any, *, historical: bool = True) -> None:
+                self.provider_view.append(message)
+
+        self.session_log = _Log()
+
     async def append(self, messages: list[Any]) -> None:
         self.appended.extend(messages)
         self.provider_view.extend(messages)
@@ -92,7 +98,7 @@ async def test_sync_catalog_creates_durable_prefix_snapshot() -> None:
     snapshot = session.meta["linch.prefix"]
     assert snapshot["version"] == 1
     assert [tool["name"] for tool in snapshot["tools"]] == ["first"]
-    assert set(snapshot["skills"]) == {"demo"}
+    assert set(snapshot["base"]["skills"]) == {"demo"}
 
 
 @pytest.mark.asyncio
@@ -145,8 +151,8 @@ def test_snapshot_request_uses_frozen_system_and_tools() -> None:
         "version": 1,
         "system": [{"text": "frozen", "cacheable": True}],
         "tools": [{"name": "old", "description": "old", "input_schema": {"type": "object"}}],
-        "skills": {},
-        "notified": {"tools": {}, "subagents": None},
+        "base": {"tools": {"old": "digest"}, "skills": {}, "subagents": None},
+        "notified": {"tools": {"old": "digest"}, "skills": {}, "subagents": None},
     }
     session.agent = SimpleNamespace(
         model="model",
@@ -207,8 +213,8 @@ async def test_catalog_sync_repeats_at_most_once_after_meta_write_crash() -> Non
 
 
 @pytest.mark.asyncio
-async def test_compaction_snapshot_rebuild_clears_pending_catalog_notice() -> None:
-    from linch.catalog import sync_catalog
+async def test_compaction_keeps_prefix_and_sync_reemits_pending_catalog_notice() -> None:
+    from linch.catalog import reset_catalog_notifications, sync_catalog
     from linch.compaction import _run_compaction_impl
     from linch.loop.request import _re_inject_skill_context
     from linch.profiles import _base_run_config
@@ -250,17 +256,13 @@ async def test_compaction_snapshot_rebuild_clears_pending_catalog_notice() -> No
         strategy=_DropNotice(),
         _run_config=config,
     )
-    await _re_inject_skill_context(session, config=config)
+    _re_inject_skill_context(session, config=config)
+    await reset_catalog_notifications(session, config)
+    await sync_catalog(session, config, None)
 
     promoted = session.meta["linch.prefix"]["tools"]
-    assert promoted == [
-        {
-            "name": "first",
-            "description": "new description",
-            "input_schema": {"type": "object"},
-        }
-    ]
-    assert not any(
+    assert promoted == before
+    assert any(
         isinstance(block, CatalogChangeBlock)
         for message in session.provider_view
         for block in message.content
@@ -268,7 +270,7 @@ async def test_compaction_snapshot_rebuild_clears_pending_catalog_notice() -> No
 
 
 @pytest.mark.asyncio
-async def test_reinject_is_durable_and_skips_listing_for_a_prefix_snapshot() -> None:
+async def test_reinject_is_transient_and_skips_listing_for_a_prefix_snapshot() -> None:
     from linch.loop.request import _re_inject_skill_context
     from linch.types import InvokedSkillRecord
 
@@ -279,25 +281,26 @@ async def test_reinject_is_durable_and_skips_listing_for_a_prefix_snapshot() -> 
         "version": 1,
         "system": [{"text": "- demo: a demo skill", "cacheable": True}],
         "tools": [],
-        "skills": {},
-        "notified": {"tools": {}, "subagents": None},
+        "base": {"tools": {}, "skills": {}, "subagents": None},
+        "notified": {"tools": {}, "skills": {}, "subagents": None},
     }
     session.invoked_skills = [
         InvokedSkillRecord(name="demo", substituted_body="demo body", invoked_at=1.0)
     ]
 
-    await _re_inject_skill_context(session, config=_config(registry))
+    _re_inject_skill_context(session, config=_config(registry))
 
-    assert len(session.appended) == 1
-    assert "demo body" in session.appended[0].content[0].text
-    assert "- demo: a demo skill" not in session.appended[0].content[0].text
+    assert len(session.provider_view) == 1
+    assert "demo body" in session.provider_view[0].content[0].text
+    assert "- demo: a demo skill" not in session.provider_view[0].content[0].text
 
 
 @pytest.mark.asyncio
-async def test_compaction_with_stable_catalog_keeps_snapshot_bytes() -> None:
+async def test_compaction_with_stable_catalog_keeps_snapshot_bytes(monkeypatch) -> None:
     from linch.catalog import sync_catalog
     from linch.compaction import _run_compaction_impl
     from linch.profiles import _base_run_config
+    from linch.types import CatalogChangeBlock, Message, TextBlock
     from tests.support.agents import make_agent
     from tests.support.providers import ScriptedProvider
     from tests.support.tools import StubTool, tool_registry
@@ -308,22 +311,42 @@ async def test_compaction_with_stable_catalog_keeps_snapshot_bytes() -> None:
     config = _base_run_config(session)
     await sync_catalog(session, config, None)
     before = repr(session.meta["linch.prefix"])
+    await session.append(
+        [
+            Message(role="user", content=[TextBlock(text="old request")]),
+            Message(role="assistant", content=[TextBlock(text="old answer")]),
+        ]
+    )
+    updates: list[dict[str, Any]] = []
+    update_meta = type(session).update_meta
 
-    class _Noop:
-        id = "noop"
+    async def spy(self: Any, patch: dict[str, Any]) -> None:
+        updates.append(patch)
+        await update_meta(self, patch)
+
+    monkeypatch.setattr(type(session), "update_meta", spy)
+
+    class _Summary:
+        id = "summary"
 
         async def compact(self, ctx, _provider):
-            return ctx.messages
+            return [Message(role="user", content=[TextBlock(text="summary")])]
 
     await _run_compaction_impl(
         session,
         agent,
         signal=__import__("linch.abort", fromlist=["AbortContext"]).AbortContext(),
-        strategy=_Noop(),
+        strategy=_Summary(),
         _run_config=config,
     )
 
     assert repr(session.meta["linch.prefix"]) == before
+    assert updates == []
+    assert not any(
+        isinstance(block, CatalogChangeBlock)
+        for message in session.provider_view
+        for block in message.content
+    )
 
 
 @pytest.mark.asyncio

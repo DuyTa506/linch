@@ -18,7 +18,9 @@ keeps the registered `Skill` tool, even when the new mapping is empty. Existing
 sessions retain their prefix and receive a durable catalog reminder; new skills
 can be invoked on the next provider request. Reminders reference skill names and
 descriptions, never skill bodies. Durable resume and compaction use the frozen
-listing when a prefix exists.
+listing when snapshots are enabled. A run that bypasses its existing snapshot
+continues to reinject the live listing. Invoked-skill reinjection remains a
+provider-view-only reminder and does not append to `full_history`.
 
 **Subagents** are defined in `.linch/agents/*.md`; built-in named agents
 such as `verification` are also registered unless a disk agent uses the same
@@ -29,7 +31,9 @@ not copied from the parent. Gated by `FeatureFlags(subagents=True)`.
 `reload_subagents()` replaces existing tool registrations in their original slots,
 preserving the order of tools registered afterward, including MCP tools. Reloads
 advance the agent's catalog revision so sessions detect changes before their next
-context build. Tool notifications include names only, keeping third-party MCP
+context build. Description edits include the new description, including the
+`Subagent` description's available agent types. MCP tools are identified by their
+wrapper identity and receive name-only notifications, keeping third-party
 descriptions and instructions out of the reminder's operator text.
 
 The bare SDK agent also leaves `subagents`, `mcp`, and `filesystem` disabled.

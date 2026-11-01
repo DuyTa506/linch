@@ -15,11 +15,10 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
   subagents. Catalog changes arrive as durable conversation reminders; tool
   additions append schemas, schema edits retain their slot, and removed tools keep
   their wire schema while execution reports the existing unknown-tool error.
-- Promote pending description edits and removals into a new prefix after
-  compaction, while retaining an unchanged prefix when the catalog has not
-  changed. Durable skill-notification deduplication and promotion after tool
-  additions/schema edits await clarification of the specified metadata shape;
-  see the [implementation notes](docs/superpowers/plans/2026-11-02-catalog-changes-phase-2.md#spec-items-awaiting-clarification).
+- Preserve system and tool bytes through compaction and consolidate accumulated
+  catalog changes into one subsequent reminder. Persist separate base and
+  notified digests, including skills, for restart deduplication and crash recovery.
+  Description changes carry the new description; MCP notifications use names only.
 
 ## 3.0.0 — 2026-11-01
 

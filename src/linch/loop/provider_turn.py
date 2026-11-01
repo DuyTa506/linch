@@ -218,8 +218,11 @@ async def prepare_provider_turn(ctx: ProviderPreparationContext) -> AsyncGenerat
         # its session mutation order without pulling runner state into this phase.
         from .request import _re_inject_skill_context
 
-        await _re_inject_skill_context(ctx.session, config=ctx.config)
+        _re_inject_skill_context(ctx.session, config=ctx.config)
         await ctx.maybe_save_provider_snapshot(ctx.session)
+        from ..catalog import reset_catalog_notifications
+
+        await reset_catalog_notifications(ctx.session, ctx.config)
         event = build_compaction_event(ctx.session)
         await ctx.persist_event(event)
         yield event

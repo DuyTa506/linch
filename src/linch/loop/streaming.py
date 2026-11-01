@@ -278,7 +278,13 @@ async def _stream_turn_with_recovery(
             )
         if ladder is not None:
             reset_read_tracker_after_compaction(session, agent)
-        await _re_inject_skill_context(session, config=config)
+        _re_inject_skill_context(session, config=config)
+        from ..catalog import reset_catalog_notifications
+        from .runtime import maybe_save_provider_snapshot
+
+        if getattr(session, "store", None) is not None:
+            await maybe_save_provider_snapshot(session)
+        await reset_catalog_notifications(session, config)
         await sync_catalog(session, config, None)
         # The runner snapshots the final provider view while suspended here.
         yield build_compaction_event(session)

@@ -11,7 +11,7 @@ from uuid import uuid4
 from ._telemetry import _TelemetryProvider, trace_compaction
 from ._token_estimation import custom_token_estimate
 from .abort import AbortContext
-from .catalog import snapshot_for, snapshot_skill_listing
+from .catalog import snapshot_enabled, snapshot_for, snapshot_skill_listing
 from .errors import ConfigError, ProviderError
 from .events import CompactionEvent
 from .model_calls import (
@@ -623,12 +623,15 @@ def _source_message_fingerprints(messages: Sequence[Message]) -> list[str]:
     return [_model_call_fingerprint(message_to_dict(message)) for message in messages]
 
 
-def _skill_listing_fingerprint(text: str | None, *, session: Any = None) -> str | None:
+def _skill_listing_fingerprint(
+    text: str | None, *, session: Any = None, config: Any = None
+) -> str | None:
     """Fingerprint the canonical provider-only reminder, including its wrapper."""
     if session is not None:
-        snapshot = snapshot_for(session)
-        if snapshot is not None:
-            text = snapshot_skill_listing(snapshot)
+        if config is None or snapshot_enabled(session, config):
+            snapshot = snapshot_for(session)
+            if snapshot is not None:
+                text = snapshot_skill_listing(snapshot)
     if not text:
         return None
     from .skills.system_reminder import wrap_in_system_reminder
@@ -637,12 +640,14 @@ def _skill_listing_fingerprint(text: str | None, *, session: Any = None) -> str 
     return _source_message_fingerprints([message])[0]
 
 
-def _skill_context_messages(session: Any, agent: Any) -> list[Message]:
+def _skill_context_messages(session: Any, agent: Any, *, config: Any = None) -> list[Message]:
     """Content registry only; recipe digests determine historical reminder order."""
     from .skills.system_reminder import wrap_in_system_reminder
 
     texts = []
-    snapshot = snapshot_for(session)
+    snapshot = (
+        snapshot_for(session) if config is None or snapshot_enabled(session, config) else None
+    )
     listing = snapshot_skill_listing(snapshot) if snapshot is not None else None
     if snapshot is None:
         listing = getattr(agent, "skill_listing_text", "")
@@ -794,6 +799,8 @@ async def _reconcile_paid_compactions(
     agent: Any,
     ledger: _ModelCallLedger,
     turn_index: int,
+    *,
+    config: Any = None,
 ) -> bool:
     """Rebuild built-in projections from receipt text and verified durable history.
 
@@ -801,9 +808,9 @@ async def _reconcile_paid_compactions(
     to paid-result application, including when either store is ahead of the other.
     """
     strategy = getattr(agent, "compaction", None) or default_compaction
-    config = _builtin_compaction_config(strategy)
+    strategy_config = _builtin_compaction_config(strategy)
     projections = ledger.projections("compaction")
-    if config is None:
+    if strategy_config is None:
         if projections:
             raise ConfigError("paid compaction projection has no deterministic strategy seam")
         return False
@@ -813,7 +820,7 @@ async def _reconcile_paid_compactions(
     sources = {
         record["delivery_attempt_id"]: record for record in ledger.projections("compaction_source")
     }
-    reminder_messages = _skill_context_messages(session, agent)
+    reminder_messages = _skill_context_messages(session, agent, config=config)
     reminders = dict(
         zip(_source_message_fingerprints(reminder_messages), reminder_messages, strict=True)
     )
@@ -835,7 +842,7 @@ async def _reconcile_paid_compactions(
         if count < previous_count or count > len(history):
             raise ConfigError("paid compaction durable source boundary does not match")
         if (
-            recipe["strategy_config"] != config
+            recipe["strategy_config"] != strategy_config
             or _context_fingerprint(history[:count]) != recipe["full_history_base_fingerprint"]
         ):
             raise ConfigError("paid compaction durable source or configuration does not match")
@@ -864,7 +871,7 @@ async def _reconcile_paid_compactions(
         )
         assert receipt.accepted_text is not None
         target = (
-            _builtin_paid_view(source, receipt.accepted_text, config)
+            _builtin_paid_view(source, receipt.accepted_text, strategy_config)
             if source is not None
             else _paid_target_from_recipe(
                 recipe, history[:count], reminders, receipt.accepted_text, ladder
@@ -877,7 +884,7 @@ async def _reconcile_paid_compactions(
             raise ConfigError("paid compaction target or projection identity does not match")
         if record is None:
             await ledger.record_projection(derived)
-        frozen_listing = _skill_listing_fingerprint(None, session=session)
+        frozen_listing = _skill_listing_fingerprint(None, session=session, config=config)
         skip_digests = {frozen_listing} if frozen_listing is not None else set()
         previous = _with_recorded_reminders(
             target,
@@ -1032,7 +1039,7 @@ async def _run_compaction_impl(
             "full_history_base_fingerprint": _context_fingerprint(session.session_log.full_history),
             "source_message_fingerprints": _source_message_fingerprints(snapshot),
             "reminder_fingerprints": _source_message_fingerprints(
-                _skill_context_messages(session, agent)
+                _skill_context_messages(session, agent, config=_run_config)
             ),
         }
     caller = (

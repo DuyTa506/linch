@@ -1355,7 +1355,7 @@ class Agent:
 
         async def _load() -> None:
             loaded, listing = await self._scan_skills()
-            self._apply_skills(loaded, listing, ensure_tool=bool(loaded), increment=False)
+            self._apply_skills(loaded, listing)
 
         self._skills_connect = _load()
         try:
@@ -1382,14 +1382,7 @@ class Agent:
         )
         return loaded, listing
 
-    def _apply_skills(
-        self,
-        loaded: list[Any],
-        listing: str | None,
-        *,
-        ensure_tool: bool,
-        increment: bool,
-    ) -> None:
+    def _apply_skills(self, loaded: list[Any], listing: str | None) -> None:
         from .tools.skill import SkillTool
 
         self.skills.clear()
@@ -1399,7 +1392,7 @@ class Agent:
             current = self.tools.get("Skill")
             if isinstance(current, SkillTool):
                 self._skill_tool = current
-            elif ensure_tool:
+            elif loaded:
                 self._skill_tool = SkillTool(
                     skills=self.skills,
                     session_registry=self._sessions,
@@ -1427,8 +1420,6 @@ class Agent:
 
         self.skill_listing_text = listing
         self._refresh_system_blocks()
-        if increment:
-            self._catalog_revision += 1
 
     async def reload_skills(self) -> None:
         """Rescan skills and refresh the live skill catalog atomically."""
@@ -1437,7 +1428,8 @@ class Agent:
         if self._skills_connect is not None and not self._skills_loaded:
             await self._skills_connect
         loaded, listing = await self._scan_skills()
-        self._apply_skills(loaded, listing, ensure_tool=bool(loaded), increment=True)
+        self._apply_skills(loaded, listing)
+        self._catalog_revision += 1
 
     async def connect_subagents(self) -> None:
         """Load configured subagent definitions and register subagent tools once."""
@@ -1524,9 +1516,7 @@ class Agent:
     def _register_subagent_tool(self, tool: Tool) -> None:
         """Register or replace one orchestration tool while preserving slots on reload."""
         current = self.tools.get(tool.name)
-        if current is None:
-            self.tools.register(tool)
-        elif self._subagents_reloading:
+        if self._subagents_reloading and current is not None:
             self.tools.replace(tool)
         else:
             # Preserve the historical collision error during initial discovery.
