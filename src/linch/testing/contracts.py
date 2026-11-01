@@ -119,6 +119,9 @@ async def assert_mailbox_contract(
     pytest suites in adapter packages: ``await assert_mailbox_contract(lambda:
     MyMailbox(...))``.
 
+    Delivery checks compare complete ``MailboxMessage`` values, including their
+    type and request/reply correlation fields, rather than only message IDs.
+
     Args:
         factory: Zero-argument callable returning a fresh mailbox, either
             directly or through an awaitable.
@@ -132,11 +135,19 @@ async def assert_mailbox_contract(
     try:
         assert await box.drain("missing") == [], "drain of an unknown recipient must be empty"
 
-        isolated = MailboxMessage(sender="alice", recipient="bob", content="for-bob")
+        isolated = MailboxMessage(
+            sender="alice",
+            recipient="bob",
+            content="for-bob",
+            type="request",
+            request_id="request-1",
+            in_reply_to="prior-1",
+            id="isolated",
+        )
         await box.send(isolated)
         assert await box.drain("carol") == [], "drain must be isolated per recipient"
         drained = await box.drain("bob")
-        assert [message.id for message in drained] == [isolated.id], "sent message was not drained"
+        assert drained == [isolated], "sent message fields were not preserved"
         assert await box.drain("bob") == [], "drain must be destructive"
 
         fifo = [
@@ -146,10 +157,7 @@ async def assert_mailbox_contract(
         for message in fifo:
             await box.send(message)
         drained = await box.drain("bob")
-        assert {message.id for message in drained} == {message.id for message in fifo}, (
-            "drain must return all sequentially sent messages exactly once"
-        )
-        assert len(drained) == len(fifo), "drain must not duplicate sequential messages"
+        assert drained == fifo, "drain must preserve sequential message fields and order"
 
         concurrent = [
             MailboxMessage(sender="alice", recipient="bob", content=str(index))
@@ -160,6 +168,10 @@ async def assert_mailbox_contract(
         assert {message.id for message in drained} == {message.id for message in concurrent}, (
             "concurrent sends must not drop messages"
         )
+        by_id = {message.id: message for message in concurrent}
+        assert all(message == by_id[message.id] for message in drained), (
+            "concurrent sends must preserve all message fields"
+        )
 
         once = [
             MailboxMessage(sender="alice", recipient="bob", content=f"once-{index}")
@@ -168,9 +180,14 @@ async def assert_mailbox_contract(
         for message in once:
             await box.send(message)
         first, second = await asyncio.gather(box.drain("bob"), box.drain("bob"))
-        drained_ids = [message.id for message in first + second]
+        drained_messages = first + second
+        drained_ids = [message.id for message in drained_messages]
         assert sorted(drained_ids) == sorted(message.id for message in once), (
             "concurrent drains must deliver each message exactly once"
+        )
+        by_id = {message.id: message for message in once}
+        assert all(message == by_id[message.id] for message in drained_messages), (
+            "concurrent drains must preserve all message fields"
         )
     finally:
         await _maybe_close(box)
