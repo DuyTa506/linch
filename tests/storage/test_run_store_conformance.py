@@ -144,6 +144,33 @@ async def test_run_store_preserves_cyclic_tool_metadata_as_markers(store_case: _
     assert rows[0].event.tool_result.metadata == {"labels": ["stable"], "cycle": "<recursion>"}
 
 
+async def test_run_store_bounds_deep_acyclic_tool_metadata(store_case: _StoreCase) -> None:
+    from typing import Any
+
+    from linch.events import IGNORABLE_MAX_DEPTH, ToolCallEndEvent
+    from linch.tools.base import ToolResult
+
+    payload: Any = "leaf"
+    for _ in range(IGNORABLE_MAX_DEPTH + 1000):
+        payload = [payload]
+    event = ToolCallEndEvent(
+        tool_use_id="tool-1",
+        tool_name="Lookup",
+        tool_result=ToolResult(content="done", metadata={"payload": payload}),
+    )
+    store = store_case.store
+    run_id = f"conformance-{uuid4()}"
+    await store.create_run("session-1", id=run_id)
+
+    await store.append_event(run_id, event)
+    rows = await store.load_events(run_id)
+
+    node = rows[0].event.tool_result.metadata["payload"]
+    while isinstance(node, list):
+        node = node[0]
+    assert node == "<max-depth>"
+
+
 @pytest.mark.parametrize("kind", ["dict", "list", "mixed"])
 @pytest.mark.parametrize("wrappers", [0, 1, 2])
 async def test_run_store_preserves_opaque_event_at_exact_depth_boundary(

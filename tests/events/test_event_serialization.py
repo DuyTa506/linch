@@ -34,3 +34,24 @@ def test_tool_metadata_cycles_are_replaced_on_the_active_path(container: str) ->
         "right": {"labels": ["stable"]},
     }
     assert event_to_dict(event_from_dict(encoded)) == encoded
+
+
+@pytest.mark.parametrize("container", ["dict", "list"])
+def test_tool_metadata_deep_acyclic_containers_stop_at_the_codec_depth(container: str) -> None:
+    from linch.events import IGNORABLE_MAX_DEPTH
+
+    payload: Any = "leaf"
+    for _ in range(IGNORABLE_MAX_DEPTH + 1000):
+        payload = {"next": payload} if container == "dict" else [payload]
+    event = ToolCallEndEvent(
+        tool_use_id="tool-1",
+        tool_name="Lookup",
+        tool_result=ToolResult(content="done", metadata={"payload": payload}),
+    )
+
+    encoded = event_to_dict(event)
+
+    node = encoded["tool_result"]["metadata"]["payload"]
+    for _ in range(IGNORABLE_MAX_DEPTH - 1):
+        node = node["next"] if container == "dict" else node[0]
+    assert node == "<max-depth>"

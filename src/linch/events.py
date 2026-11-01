@@ -1289,7 +1289,7 @@ def _validate_nested_ignorable_event(event: Event) -> None:
         )
 
 
-def _json_safe(value: Any, *, active: set[int] | None = None) -> Any:
+def _json_safe(value: Any, *, active: set[int] | None = None, depth: int = 0) -> Any:
     if value is None or isinstance(value, str | int | float | bool):
         return value
     if not isinstance(value, list | tuple | dict):
@@ -1299,11 +1299,16 @@ def _json_safe(value: Any, *, active: set[int] | None = None) -> Any:
     identity = id(value)
     if identity in active:
         return "<recursion>"
+    if depth >= IGNORABLE_MAX_DEPTH:
+        return "<max-depth>"
     active.add(identity)
     try:
         if isinstance(value, dict):
-            return {str(key): _json_safe(item, active=active) for key, item in value.items()}
-        return [_json_safe(item, active=active) for item in value]
+            return {
+                str(key): _json_safe(item, active=active, depth=depth + 1)
+                for key, item in value.items()
+            }
+        return [_json_safe(item, active=active, depth=depth + 1) for item in value]
     finally:
         active.remove(identity)
 
