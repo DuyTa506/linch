@@ -60,6 +60,18 @@ def test_strict_json_normalizer_rejects_cycles() -> None:
         normalize_json_value(value)
 
 
+@pytest.mark.parametrize("mappings", [False, True], ids=["lists", "dicts"])
+def test_strict_json_normalizer_rejects_excessive_nesting(mappings: bool) -> None:
+    from linch.tools import normalize_json_value
+
+    value: object = "leaf"
+    for _ in range(1500):
+        value = {"child": value} if mappings else [value]
+
+    with pytest.raises(ValueError, match="maximum nesting depth"):
+        normalize_json_value(value)
+
+
 def test_tool_output_normalizes_attachment_references_without_dropping_them() -> None:
     from linch.tools import ToolAttachment, ToolOutput, normalize_tool_output
 
