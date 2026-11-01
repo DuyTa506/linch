@@ -7,6 +7,9 @@ from types import SimpleNamespace
 from opentelemetry import context as otel_context
 from opentelemetry import trace
 
+from tests.support.agents import make_agent
+from tests.support.providers import ScriptedProvider, TextTurn
+
 
 def _metric_points(reader, name):
     data = reader.get_metrics_data()
@@ -21,15 +24,11 @@ def _metric_points(reader, name):
 
 
 def _agent_for(context, provider):
-    from linch import Agent, FeatureFlags, InMemorySessionStore
-
-    return Agent(
+    return make_agent(
+        provider,
         model="test-model",
-        provider=provider,
         context=context,
-        session_store=InMemorySessionStore(),
-        permissions={"mode": "skip-dangerous"},
-        features=FeatureFlags(skills=False, subagents=False, mcp=False),
+        run_store=None,
         loop_guard=None,
         include_partial_messages=True,
     )
@@ -119,7 +118,6 @@ async def test_metrics_survive_noop_tracer_without_use_span(monkeypatch):
     from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
     from linch import Context, Usage
-    from linch.ext.evals import ScriptedProvider, TextTurn
 
     def forbidden(*args, **kwargs):
         raise AssertionError("non-recording telemetry must not enter trace.use_span")
