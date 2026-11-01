@@ -946,6 +946,12 @@ class Agent:
     ) -> None:
         self.skills: dict[str, Any] = {}
         self.skill_listing_text: str | None = None
+        # Monotonic catalog revision consumed by the provider-turn catalog
+        # synchronizer.  Initial discovery happens before a session request;
+        # explicit reloads advance this value for live sessions.
+        self._catalog_revision = 0
+        self._skill_tool: Any = None
+        self._skill_permission_rules: list[PermissionRule] = []
         self._sessions: dict[str, Session] = {}
         self.subagent_registry: Any = None
         self.subagent_run_counters: dict[str, int] = {}
@@ -958,6 +964,7 @@ class Agent:
         self._skills_loaded: bool = False
         self._subagents_connect: Any = None
         self._subagents_loaded: bool = False
+        self._subagents_reloading = False
         # Coordinator mode can expose a restricted registry to the parent while
         # retaining a fuller catalog for workers.  ``None`` preserves the
         # historical behavior: children derive tools directly from
@@ -1344,7 +1351,7 @@ class Agent:
         """Load configured skills and register the skill tool once."""
         if self._skills_loaded:
             return
-        if self._skills_connect is not None:
+        if self._skills_connect is not None and not self._skills_loaded:
             await self._skills_connect
             return
 
@@ -1352,7 +1359,6 @@ class Agent:
             from .skills.builtins import merge_builtin_skills
             from .skills.listing import build_skill_listing
             from .skills.loader import load_skills_from_dir
-            from .tools.skill import SkillTool
 
             builtin_names = {t.name for t in self.tools.list()}
             # Disk scan + frontmatter parsing is blocking I/O; keep it off the loop.
@@ -1360,40 +1366,14 @@ class Agent:
                 load_skills_from_dir, self._config_dir, builtin_names
             )
             loaded = merge_builtin_skills(disk_skills)
-            for s in loaded:
-                self.skills[s.name] = s
-
-            if self.skills:
-                skill_tool = SkillTool(
-                    skills=self.skills,
-                    session_registry=self._sessions,
-                    get_session_model=lambda _sid: self.model,
+            listing = (
+                build_skill_listing(
+                    skills=loaded,
+                    context_window_tokens=self.context_window(),
                 )
-                self.tools.register(cast("Tool", skill_tool))
-                if (
-                    self._subagent_tool_registry is not None
-                    and self._subagent_tool_registry.get(skill_tool.name) is None
-                ):
-                    self._subagent_tool_registry.register(cast("Tool", skill_tool))
-                self._refresh_system_blocks()
-
-                for s in loaded:
-                    if not s.frontmatter.allowed_tools and not s.frontmatter.model:
-                        self.permission_engine.rules.append(
-                            ToolRule(
-                                tool="Skill",
-                                decision="allow",
-                                arg=s.name,
-                            )
-                        )
-
-                self.skill_listing_text = (
-                    build_skill_listing(
-                        skills=loaded,
-                        context_window_tokens=self.context_window(),
-                    )
-                    or None
-                )
+                or None
+            )
+            self._apply_skills(loaded, listing, ensure_tool=bool(loaded), increment=False)
 
         self._skills_connect = _load()
         try:
@@ -1402,6 +1382,82 @@ class Agent:
         except Exception:
             self._skills_connect = None
             raise
+
+    def _apply_skills(
+        self,
+        loaded: list[Any],
+        listing: str | None,
+        *,
+        ensure_tool: bool,
+        increment: bool,
+    ) -> None:
+        """Apply one fully scanned skill catalog without an await boundary."""
+        from .tools.skill import SkillTool
+
+        self.skills.clear()
+        self.skills.update({skill.name: skill for skill in loaded})
+
+        if self._skill_tool is None:
+            current = self.tools.get("Skill")
+            if isinstance(current, SkillTool):
+                self._skill_tool = current
+            elif ensure_tool:
+                self._skill_tool = SkillTool(
+                    skills=self.skills,
+                    session_registry=self._sessions,
+                    get_session_model=lambda _sid: self.model,
+                )
+                self.tools.register(cast("Tool", self._skill_tool))
+                if (
+                    self._subagent_tool_registry is not None
+                    and self._subagent_tool_registry.get(self._skill_tool.name) is None
+                ):
+                    self._subagent_tool_registry.register(cast("Tool", self._skill_tool))
+
+        # Remove only rules derived by this agent's skill loader; caller-owned
+        # permission rules must survive a reload unchanged.
+        if self._skill_permission_rules:
+            generated = {id(rule) for rule in self._skill_permission_rules}
+            self.permission_engine.rules[:] = [
+                rule for rule in self.permission_engine.rules if id(rule) not in generated
+            ]
+            self._skill_permission_rules.clear()
+        for skill in loaded:
+            if not skill.frontmatter.allowed_tools and not skill.frontmatter.model:
+                rule = ToolRule(tool="Skill", decision="allow", arg=skill.name)
+                self.permission_engine.rules.append(rule)
+                self._skill_permission_rules.append(rule)
+
+        self.skill_listing_text = listing
+        self._refresh_system_blocks()
+        if increment:
+            self._catalog_revision += 1
+
+    async def reload_skills(self) -> None:
+        """Rescan skills and refresh the live skill catalog atomically."""
+        if not self.features.skills:
+            return
+        if self._skills_connect is not None and not self._skills_loaded:
+            await self._skills_connect
+
+        from .skills.builtins import merge_builtin_skills
+        from .skills.listing import build_skill_listing
+        from .skills.loader import load_skills_from_dir
+
+        builtin_names = {t.name for t in self.tools.list()}
+        disk_skills, _ = await run_blocking(load_skills_from_dir, self._config_dir, builtin_names)
+        loaded = merge_builtin_skills(disk_skills)
+        listing = (
+            build_skill_listing(
+                skills=loaded,
+                context_window_tokens=self.context_window(),
+            )
+            or None
+        )
+        # Everything above is the off-loop scan/preparation.  This synchronous
+        # step swaps the mapping and derived state together, so SkillTool keeps
+        # its identity while seeing the new contents immediately.
+        self._apply_skills(loaded, listing, ensure_tool=bool(loaded), increment=True)
 
     async def connect_subagents(self) -> None:
         """Load configured subagent definitions and register subagent tools once."""
@@ -1455,13 +1511,13 @@ class Agent:
                 retain_subagents=self.retain_subagents,
                 enable_background_subagents=self.enable_background_subagents,
             )
-            self.tools.register(cast("Tool", subagent_tool))
+            self._register_subagent_tool(cast("Tool", subagent_tool))
             # SubagentTool itself is deliberately excluded from the worker registry:
             # build_child_tools() strips it from every child regardless, so workers
             # cannot recursively spawn their own sub-subagents by default.
             if self.enable_worker_tools:
                 continue_tool = SubagentContinueTool(get_session=get_session)
-                self.tools.register(cast("Tool", continue_tool))
+                self._register_subagent_tool(cast("Tool", continue_tool))
                 if (
                     self._subagent_tool_registry is not None
                     and self._subagent_tool_registry.get(continue_tool.name) is None
@@ -1469,7 +1525,7 @@ class Agent:
                     self._subagent_tool_registry.register(cast("Tool", continue_tool))
             if self.enable_task_stop:
                 stop_tool = TaskStopTool(get_session=get_session)
-                self.tools.register(cast("Tool", stop_tool))
+                self._register_subagent_tool(cast("Tool", stop_tool))
                 if (
                     self._subagent_tool_registry is not None
                     and self._subagent_tool_registry.get(stop_tool.name) is None
@@ -1485,19 +1541,38 @@ class Agent:
             self._subagents_connect = None
             raise
 
+    def _register_subagent_tool(self, tool: Tool) -> None:
+        """Register or replace one orchestration tool while preserving slots on reload."""
+        current = self.tools.get(tool.name)
+        if current is None:
+            self.tools.register(tool)
+        elif self._subagents_reloading:
+            self.tools.replace(tool)
+        else:
+            # Preserve the historical collision error during initial discovery.
+            self.tools.register(tool)
+
     async def reload_subagents(self) -> None:
         """Reload disk-backed subagents and refresh orchestration tools."""
+        if not self.features.subagents:
+            self.tools.unregister("Subagent")
+            self.tools.unregister("SubagentContinue")
+            self.tools.unregister("TaskStop")
+            self.subagent_registry = None
+            self._subagents_connect = None
+            self._subagents_loaded = False
+            self._refresh_system_blocks()
+            return
 
-        self.tools.unregister("Subagent")
-        self.tools.unregister("SubagentContinue")
-        self.tools.unregister("TaskStop")
         self.subagent_registry = None
         self._subagents_connect = None
         self._subagents_loaded = False
-        if self.features.subagents:
+        self._subagents_reloading = True
+        try:
             await self.connect_subagents()
-        else:
-            self._refresh_system_blocks()
+        finally:
+            self._subagents_reloading = False
+        self._catalog_revision += 1
 
     def _next_default_display_name(self, session_id: str) -> str:
         cur = self.subagent_run_counters.get(session_id, 0)

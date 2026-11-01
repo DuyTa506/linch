@@ -189,6 +189,17 @@ def test_all_names_resolve() -> None:
     assert unresolved == [], f"__all__ names with no attribute: {unresolved}"
 
 
+def test_reload_skills_is_the_only_catalog_reload_public_name() -> None:
+    import inspect
+
+    from linch.agent import Agent
+
+    assert hasattr(Agent, "reload_skills")
+    assert inspect.iscoroutinefunction(Agent.reload_skills)
+    assert "CatalogChangeBlock" not in linch.__all__
+    assert not hasattr(linch, "CatalogChangeBlock")
+
+
 def test_all_has_no_duplicates() -> None:
     dupes = [name for name, count in Counter(linch.__all__).items() if count > 1]
     assert dupes == [], f"duplicate __all__ entries: {dupes}"
