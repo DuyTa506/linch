@@ -103,6 +103,37 @@ async def test_file_backend_ls_treats_prefix_metacharacters_literally(
             await backend.close()
 
 
+@pytest.mark.parametrize(
+    ("kind", "store_case"),
+    [("memory", "memory"), ("disk", "memory"), ("postgres", "postgres")],
+    ids=["memory", "disk", "postgres"],
+)
+async def test_file_backend_serializes_concurrent_distinct_edits(
+    kind: str, store_case: str, tmp_path, pg_dsn
+) -> None:
+    del store_case
+    backend = _filesystem(kind, tmp_path, pg_dsn)
+    try:
+        lines = [f"line-{index:02d}=old\n" for index in range(16)]
+        await backend.write("/concurrent.txt", "".join(lines))
+        results = await asyncio.gather(
+            *(
+                backend.edit(
+                    "/concurrent.txt",
+                    line.rstrip("\n"),
+                    line.rstrip("\n").replace("old", "new"),
+                )
+                for line in lines
+            )
+        )
+        assert results == [1] * len(lines)
+        expected = "".join(line.replace("old", "new") for line in lines)
+        assert await backend.read("/concurrent.txt") == expected
+    finally:
+        if kind == "postgres":
+            await backend.close()
+
+
 async def test_disk_write_failure_leaves_original_file_intact(tmp_path, monkeypatch) -> None:
     backend = DiskFileBackend(tmp_path)
     await backend.write("/file.txt", "original\r\n")

@@ -27,6 +27,7 @@ from __future__ import annotations
 import os
 import secrets
 import stat
+import threading
 from pathlib import Path
 
 from .._blocking import run_blocking
@@ -75,7 +76,9 @@ class DiskFileBackend:
     """Map the virtual filesystem onto a real directory subtree.
 
     All file operations run through the repository's bounded blocking-I/O
-    helper, and every resolved path must remain below :attr:`root`.
+    helper, and every resolved path must remain below :attr:`root`. Mutations
+    on one backend instance are serialized; separate instances or processes
+    do not share this lock.
 
     Args:
         root: Directory used as the backend's confinement root. It is resolved
@@ -97,6 +100,7 @@ class DiskFileBackend:
         """
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
+        self._mutation_lock = threading.Lock()
 
     @property
     def resume_policy_config(self) -> dict[str, str]:
@@ -162,7 +166,8 @@ class DiskFileBackend:
         target = self._real_path(path)
 
         def _write() -> None:
-            _atomic_write(target, content)
+            with self._mutation_lock:
+                _atomic_write(target, content)
 
         await run_blocking(_write)
 
@@ -212,21 +217,22 @@ class DiskFileBackend:
         target = self._real_path(path)
 
         def _edit() -> int:
-            if not target.is_file():
-                raise FileNotFoundError(path)
-            with target.open("r", encoding="utf-8", newline="") as file:
-                text = file.read()
-            count = text.count(old)
-            if count == 0:
-                raise ValueError(f"old string not found in {path}")
-            if count > 1 and not replace_all:
-                raise ValueError(
-                    f"old string is not unique in {path} ({count} matches); "
-                    "pass replace_all=true or include more context"
-                )
-            updated = text.replace(old, new) if replace_all else text.replace(old, new, 1)
-            _atomic_write(target, updated)
-            return count if replace_all else 1
+            with self._mutation_lock:
+                if not target.is_file():
+                    raise FileNotFoundError(path)
+                with target.open("r", encoding="utf-8", newline="") as file:
+                    text = file.read()
+                count = text.count(old)
+                if count == 0:
+                    raise ValueError(f"old string not found in {path}")
+                if count > 1 and not replace_all:
+                    raise ValueError(
+                        f"old string is not unique in {path} ({count} matches); "
+                        "pass replace_all=true or include more context"
+                    )
+                updated = text.replace(old, new) if replace_all else text.replace(old, new, 1)
+                _atomic_write(target, updated)
+                return count if replace_all else 1
 
         return await run_blocking(_edit)
 
@@ -259,7 +265,8 @@ class DiskFileBackend:
         target = self._real_path(path)
 
         def _delete() -> None:
-            if target.is_file():
-                target.unlink()
+            with self._mutation_lock:
+                if target.is_file():
+                    target.unlink()
 
         await run_blocking(_delete)
