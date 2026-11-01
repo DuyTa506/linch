@@ -170,11 +170,11 @@ def _response_from_value(value: Any) -> AskUserResponse:
     if isinstance(value, AskUserResponse):
         return value
     if isinstance(value, dict):
+        if set(value) - {"accepted", "answers", "note"}:
+            return AskUserResponse(accepted=False, answers={})
         answers_raw = value.get("answers", {})
         answers = dict(answers_raw) if isinstance(answers_raw, dict) else {}
         accepted = value.get("accepted")
-        if accepted is None:
-            accepted = value.get("ok", value.get("confirmed"))
         if accepted is None:
             # No explicit acceptance signal: infer from whether the user
             # actually provided answers; otherwise fail closed (declined) rather

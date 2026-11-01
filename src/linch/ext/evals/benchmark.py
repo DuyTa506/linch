@@ -194,7 +194,9 @@ def _scorer_from_spec(raw: Any, idx: int) -> Scorer:
     data = _mapping(raw, f"scorers[{idx}]")
     kind = _required_string(data.get("type"), f"scorers[{idx}].type")
     if kind == "text_contains":
-        value = data.get("substring", data.get("text", data.get("contains", "{expected}")))
+        if "text" in data or "contains" in data:
+            raise ValueError(f"scorers[{idx}].text_contains only supports the 'substring' field")
+        value = data.get("substring", "{expected}")
         return text_contains(_required_string(value, f"scorers[{idx}].substring"))
     if kind == "tool_called":
         return tool_called(_required_string(data.get("tool"), f"scorers[{idx}].tool"))

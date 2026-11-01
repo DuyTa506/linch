@@ -58,11 +58,8 @@ _CLOSED = "closed"
 
 async def _close_mcp_connection(connection: Any, primary: BaseException) -> None:
     """Close a newly connected MCP connection while preserving its failure."""
-    close = getattr(connection, "close", None)
-    if not callable(close):
-        return
     try:
-        close_task = asyncio.create_task(close())
+        close_task = asyncio.create_task(connection.close())
     except BaseException as exc:
         primary.add_note(f"MCP connection cleanup failed: {type(exc).__name__}: {exc}")
         return
@@ -1625,7 +1622,8 @@ class Agent:
             The live session registered on this agent.
 
         Raises:
-            ConfigError: If the agent is closed or closing, or a live session is closing.
+            ConfigError: If the agent is closed or closing, a live session is closing,
+                or stored skill metadata is malformed.
         """
         from .session import Session
         from .session_log import SessionLog

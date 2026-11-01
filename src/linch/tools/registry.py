@@ -45,6 +45,9 @@ def _check_tool_shape(tool: Any) -> None:
     for method in _REQUIRED_METHODS:
         if not callable(getattr(tool, method, None)):
             raise ConfigError(f"tool {name!r} is missing a callable {method!r} method")
+    input_schema = getattr(tool, "input_schema", None)
+    if not isinstance(input_schema, dict):
+        raise ConfigError(f"tool {name!r}.input_schema must be a dict")
     output_schema = getattr(tool, "output_schema", None)
     renderer = getattr(tool, "render_output", None)
     renderer_id = getattr(tool, "renderer_id", None)
@@ -313,7 +316,7 @@ class ToolRegistry:
             {
                 "name": tool.name,
                 "description": tool.description,
-                "input_schema": getattr(tool, "schema", getattr(tool, "input_schema", {})),
+                "input_schema": tool.input_schema,
             }
             for tool in self.list()
         ]
