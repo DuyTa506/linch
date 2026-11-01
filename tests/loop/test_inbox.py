@@ -52,7 +52,7 @@ class _FailInboxAppendStore:
         )
         if is_inbox and not self.failed:
             self.failed = True
-            raise OSError("inbox append connection lost")
+            raise ConnectionResetError("inbox append connection lost")
         return await self._inner.append_messages(session_id, messages)
 
 

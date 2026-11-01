@@ -345,6 +345,44 @@ async def test_failed_terminal_encoding_failure_changes_neither_status_nor_log(s
     assert await store.load_events(run_id) == before_events
 
 
+@pytest.mark.parametrize(
+    ("meta", "error", "history"),
+    [
+        ({"prompt": "before\0after"}, {"message": "failed"}, []),
+        ({"prompt\0key": "value"}, {"message": "failed"}, []),
+        (
+            {"errors": [{"message": "old\0failure"}]},
+            {"message": "failed"},
+            [{"message": "old\0failure"}],
+        ),
+        ({"errors": [{"old\0key": "failure"}]}, {"message": "failed"}, [{"old\0key": "failure"}]),
+        ({}, {"message": "failed\0again", "key\0": "value"}, []),
+        ({"errors": ["malformed\0history"]}, {"message": "failed"}, []),
+        ({"errors": {"malformed\0key": "value"}}, {"message": "failed"}, []),
+    ],
+)
+async def test_mark_failed_preserves_nul_metadata_and_error_history(
+    store_case, meta, error, history
+):
+    store = store_case.store
+    run_id = f"failed-nul-{uuid4()}"
+    await store.create_run("session", id=run_id, meta=meta)
+    assert await store.append_event(run_id, _event("before")) == 1
+    failed, seqs = await store.mark_failed(
+        run_id, _checkpoint("failed\0prompt"), error, events=[_event("terminal\0event")]
+    )
+    assert failed.status == "failed"
+    assert failed.checkpoint.phase == "failed"
+    assert failed.checkpoint.prompt == "failed\0prompt"
+    assert failed.meta == {**meta, "errors": [*history, error]}
+    assert await store.load_run(run_id) == failed
+    assert seqs == [2]
+    assert [row.event for row in await store.load_events(run_id)] == [
+        _event("before"),
+        _event("terminal\0event"),
+    ]
+
+
 async def test_create_run_atomically_detaches_initial_checkpoint(store_case):
     store = store_case.store
     rid = f"initial-{uuid4()}"

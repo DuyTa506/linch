@@ -26,8 +26,9 @@ agent = Agent(model="gpt-5", session_store=sessions, run_store=runs)
 
 Close stores with `await store.close()` when their host shuts down.
 `PostgresRunStore` accepts `pool=`, `min_size=`, and `max_size=` like the
-Postgres session store. A supplied pool follows the store's lifecycle; closing
-the store closes that pool.
+Postgres session store. A supplied pool belongs to its host; stores never close
+it, including after initialization failure. The host closes it after all stores
+using it have stopped.
 
 Store-owned pools use asyncpg 0.32's `reset=` hook. The driver performs its
 internal rollback/cancellation cleanup on release, and the Linch callback
@@ -163,9 +164,11 @@ database I/O asynchronously.
 During an active resumable run, transient connection failures reaching the loop's
 recovery boundary interrupt the attempt without terminal events or a failed status. The loop stops
 background work and skips buffered writes and snapshot cleanup, preserving the
-last durable checkpoint for worker retry or lease takeover. This covers asyncpg
-connection/interface and availability errors, `OSError` (including connection
-and timeout errors), and explicit causes wrapped by a store. Provider/tool
+last durable checkpoint for worker retry or lease takeover. This covers connection
+and timeout errors, network-unreachable/down errors, asyncpg connection and server
+availability errors, closed/closing asyncpg connection or pool errors, and explicit
+causes wrapped by a store. Permanent OS, configuration, and query-argument errors
+keep their ordinary failure behavior. Provider/tool
 errors and agents without a run store keep their ordinary failure behavior.
 
 The store calls inside `Session.notify` (durable inbox), `Session.append`, and
