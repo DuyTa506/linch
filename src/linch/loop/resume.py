@@ -7,7 +7,7 @@ boundaries; it does not buffer or reorder them.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import aclosing
 from dataclasses import dataclass
 from typing import Any
@@ -16,7 +16,7 @@ from ..compaction import _reconcile_paid_compactions
 from ..errors import ConfigError
 from ..events import ErrorEvent, Event
 from ..model_calls import _ModelCallLedger, _primary_request_fingerprint
-from ..types import Message, ProviderRequest, TextBlock
+from ..types import Message, ProviderRequest, TextBlock, ToolResultBlock, ToolUseBlock
 from .checkpoint import (
     _message_digest,
     _primary_control_message,
@@ -52,6 +52,7 @@ class ResumeContext:
     config: Any
     run_id: str
     run_record: Any
+    stored_events: list[Any]
     checkpoint: Any
     resume_checkpoint: Any
     ledger: _ModelCallLedger
@@ -61,14 +62,78 @@ class ResumeContext:
     load_pending_provider_request: Callable[[Any], Awaitable[ProviderRequest]]
     maybe_save_provider_snapshot: Callable[..., Awaitable[None]]
     persist_event: Callable[[Event], Awaitable[None]]
-    emit_error_terminal: Callable[..., AsyncIterator[Event]]
-    drain_auxiliary_usage: Callable[[], AsyncIterator[Event]]
+    emit_error_terminal: Callable[..., AsyncGenerator[Event, None]]
+    drain_auxiliary_usage: Callable[[], AsyncGenerator[Event, None]]
     save_checkpoint: Callable[..., Awaitable[None]]
     turn_stopping: Any
     state: ResumeState
 
 
-async def recover_resume(ctx: ResumeContext) -> AsyncIterator[Event]:
+def _hook_retry_was_recorded(ctx: ResumeContext, assistant: Message) -> bool:
+    """Identify a persisted BeforeFinalAnswer retry for the resumed assistant."""
+    assistant_digest = _message_digest(assistant)
+    assistant_index = -1
+    for index, row in enumerate(ctx.stored_events):
+        event = getattr(row, "event", row)
+        if (
+            getattr(event, "type", None) == "assistant"
+            and getattr(event, "message", None) is not None
+            and _message_digest(event.message) == assistant_digest
+        ):
+            assistant_index = index
+    if assistant_index < 0:
+        return False
+    return any(
+        getattr(getattr(row, "event", row), "type", None) == "hook"
+        and getattr(getattr(row, "event", row), "event", None) == "BeforeFinalAnswer"
+        and getattr(getattr(row, "event", row), "action", None) in {"retry", "force_continue"}
+        for row in ctx.stored_events[assistant_index + 1 :]
+    )
+
+
+def _is_final_tool_ack(message: Message, assistant: Message) -> bool:
+    """Return whether *message* acknowledges a terminal tool in *assistant*."""
+    tool_ids = {block.id for block in assistant.content if isinstance(block, ToolUseBlock)}
+    if not tool_ids:
+        return False
+    results = [block for block in message.content if isinstance(block, ToolResultBlock)]
+    return bool(results) and all(
+        block.tool_use_id in tool_ids
+        and block.content == "Final answer captured by the host."
+        and not block.is_error
+        for block in results
+    )
+
+
+def _turn_stopping_feedback_tail(ctx: ResumeContext) -> tuple[Message, ...]:
+    """Recover feedback after a checkpointed assistant turn-stopping decision."""
+    if ctx.checkpoint.phase != "assistant_appended":
+        return ()
+    resume_state = ctx.checkpoint.extension_state.get("linch.resume", {})
+    if not (
+        isinstance(resume_state, dict) and resume_state.get("feedback_origin") == "turn_stopping"
+    ):
+        return ()
+    assistant = ctx.checkpoint.assistant_message
+    if assistant is None:
+        return ()
+    history = list(ctx.session.full_history)
+    assistant_digest = _message_digest(assistant)
+    assistant_index = next(
+        (
+            index
+            for index in range(len(history) - 1, -1, -1)
+            if history[index].role == "assistant"
+            and _message_digest(history[index]) == assistant_digest
+        ),
+        -1,
+    )
+    if assistant_index < 0:
+        return ()
+    return tuple(history[assistant_index + 1 :])
+
+
+async def recover_resume(ctx: ResumeContext) -> AsyncGenerator[Event, None]:
     """Reconcile a resumed run, yielding recovery events in durable order."""
     if ctx.resume_checkpoint is None:
         return
@@ -84,6 +149,8 @@ async def recover_resume(ctx: ResumeContext) -> AsyncIterator[Event]:
 
     if ctx.checkpoint.phase in {"provider_pending", "assistant_appended"}:
         await _reconcile_active_primary(ctx)
+        if ctx.active_primary is None:
+            ctx.state.replayed_feedback = _turn_stopping_feedback_tail(ctx)
         if ctx.state.terminal_kind in {"invalid_text", "rejected_native"}:
             decision = await ctx.turn_stopping.dispatch(
                 TurnStopping(ctx.session, ctx.run_id, ctx.checkpoint.turn_index, "invalid_response")
@@ -210,7 +277,24 @@ async def _reconcile_active_primary(ctx: ResumeContext) -> None:
     history = list(ctx.session.full_history)
     base = active_primary["full_history_base_count"]
     if ctx.checkpoint.phase == "assistant_appended" and len(history) > base + len(expected):
-        ctx.state.replayed_feedback = tuple(history[base + len(expected) :])
+        replayed_tail = tuple(history[base + len(expected) :])
+        assistant = ctx.checkpoint.assistant_message
+        resume_state = ctx.checkpoint.extension_state.get("linch.resume", {})
+        turn_stopping_pending = (
+            isinstance(resume_state, dict)
+            and resume_state.get("feedback_origin") == "turn_stopping"
+        )
+        if assistant is not None:
+            replayed_tail = tuple(
+                message for message in replayed_tail if not _is_final_tool_ack(message, assistant)
+            )
+        if not turn_stopping_pending and (
+            assistant is None
+            or ctx.checkpoint.pending_truncation_feedback is not None
+            or _hook_retry_was_recorded(ctx, assistant)
+        ):
+            replayed_tail = ()
+        ctx.state.replayed_feedback = replayed_tail
         history = history[: base + len(expected)]
     ctx.state.recovered_primary_prefix = _receipt_message_prefix(
         history,

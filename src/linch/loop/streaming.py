@@ -5,9 +5,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
-from contextlib import aclosing
+from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass
+from inspect import isawaitable
 from time import monotonic
 from typing import Any, cast, get_args
 from uuid import uuid4
@@ -65,6 +66,19 @@ from .request import (
 # doesn't hammer the server.
 _SAME_MODEL_RETRY_OPTIONS = RetryOptions(base_delay_ms=100, max_delay_ms=2000, jitter=0.2)
 _STOP_REASONS = frozenset(get_args(StopReason))
+
+
+@asynccontextmanager
+async def _provider_stream_context(stream: Any) -> AsyncIterator[Any]:
+    """Close a provider iterator when it exposes an optional async closer."""
+    try:
+        yield stream
+    finally:
+        close = getattr(stream, "aclose", None)
+        if callable(close):
+            result = close()
+            if isawaitable(result):
+                await result
 
 
 @dataclass(slots=True)
@@ -284,6 +298,9 @@ async def _stream_turn_with_recovery(
             config=config,
             model_override=req.model,
         )
+        if getattr(session, "current_turn_allowed_tools", None) == []:
+            req.tools = []
+            req.tool_choice = None
 
     async def dispatch() -> AsyncIterator[Any]:
         async with aclosing(
@@ -544,7 +561,7 @@ async def _stream_turn(
         event = PartialAssistantEvent(delta=delta)
         return _PrimaryPartial(event) if stage_partials else event
 
-    async with aclosing(agent.provider.stream(req)) as provider_stream:
+    async with _provider_stream_context(agent.provider.stream(req)) as provider_stream:
         async for event in provider_stream:
             if not isinstance(event, dict):
                 raise protocol_error(f"event must be a dict, got {type(event).__name__}")
