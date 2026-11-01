@@ -589,3 +589,61 @@ async def test_relevant_withdrawal_joins_a_busy_dependent_cleanup() -> None:
     await provider_removal
     assert order == ["dependent", "provider"]
     await dependent.dispose()
+
+
+async def test_requirement_returning_during_cleanup_reactivates_plugin() -> None:
+    agent = _agent()
+    dependency = agent.context.register("dep", object())
+    started = asyncio.Event()
+    release = asyncio.Event()
+    activations = 0
+
+    class RebindingPlugin:
+        name = "rebinding"
+        version = "1"
+        provides = ("out",)
+        requires = ("dep",)
+
+        def setup(self, ctx: Context, config: Any) -> Disposable:
+            nonlocal activations
+            activations += 1
+            registration = ctx.register("out", object())
+
+            async def cleanup() -> None:
+                started.set()
+                await release.wait()
+                await registration.dispose()
+
+            return Disposable(cleanup)
+
+    mounted = await agent.use(RebindingPlugin())
+    removal = asyncio.create_task(dependency.dispose())
+    await started.wait()
+    replacement = agent.context.register("dep", object())
+    await asyncio.sleep(0)
+    release.set()
+    await removal
+    await _settle()
+
+    assert activations == 2
+    assert agent.context.get("out") is not None
+    await replacement.dispose()
+    await mounted.dispose()
+
+
+async def test_agent_close_does_not_reactivate_plugin_on_closing_context() -> None:
+    from linch.kernel.plugins import _PluginMount
+
+    parent = Context()
+    parent.register("x", object())
+    agent = _agent(context=parent)
+    dependent = _Plugin(name="dependent", provides=("out",), requires=("x",))
+    provider = _Plugin(name="provider", provides=("x",))
+
+    mount = _PluginMount(agent.context, dependent, None)
+    await mount.start()
+    await agent.use(provider)
+    await mount._reconcile()
+    assert dependent.calls == 2
+
+    await agent.close()
