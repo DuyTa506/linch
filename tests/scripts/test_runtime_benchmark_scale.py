@@ -129,6 +129,23 @@ async def test_scale_smoke_uses_one_shared_store_and_validates_five_runs(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_scale_subprocess_hard_deadline_reports_observed_work():
+    benchmark = _load_script()
+    started = time.monotonic()
+    result = await asyncio.wait_for(
+        benchmark.run_scale_subprocess(
+            benchmark.ScaleCase("timeout_smoke", "memory", sessions=1, turns=4), timeout_s=0.001
+        ),
+        timeout=0.5,
+    )
+    assert time.monotonic() - started < 5
+    assert result["timed_out"] is True
+    assert result["correct"] is False
+    assert result["completed"] == 0
+    assert "timeout" in result["errors"][0].lower()
+
+
+@pytest.mark.asyncio
 async def test_measured_store_preserves_capabilities_and_counts_terminal_payloads(pg_dsn):
     benchmark = _load_script()
     import asyncpg
@@ -213,23 +230,6 @@ async def test_scale_subprocess_has_fresh_pid_and_reports_tiny_case():
     assert result["pid"] != os.getpid()
     assert result["completed"] == 1
     assert result["timed_out"] is False
-
-
-@pytest.mark.asyncio
-async def test_scale_subprocess_hard_deadline_reports_observed_work():
-    benchmark = _load_script()
-    started = time.monotonic()
-    result = await asyncio.wait_for(
-        benchmark.run_scale_subprocess(
-            benchmark.ScaleCase("timeout_smoke", "memory", sessions=1, turns=4), timeout_s=0.001
-        ),
-        timeout=0.5,
-    )
-    assert time.monotonic() - started < 5
-    assert result["timed_out"] is True
-    assert result["correct"] is False
-    assert result["completed"] == 0
-    assert "timeout" in result["errors"][0].lower()
 
 
 @pytest.mark.asyncio

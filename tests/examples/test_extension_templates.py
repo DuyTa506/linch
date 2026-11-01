@@ -1,25 +1,18 @@
 from __future__ import annotations
 
-import importlib.util
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+from tests.support.modules import load_module
 
 ROOT = Path(__file__).resolve().parents[2]
 TEMPLATES = ROOT / "examples" / "extensions"
 
 
 def _load(name: str):
-    path = TEMPLATES / f"{name}.py"
-    spec = importlib.util.spec_from_file_location(name, path)
-    assert spec is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
+    return load_module(TEMPLATES / f"{name}.py", name)
 
 
 @pytest.mark.asyncio
