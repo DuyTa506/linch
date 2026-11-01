@@ -286,15 +286,18 @@ async def _stream_turn_with_recovery(
         )
 
     async def dispatch() -> AsyncIterator[Any]:
-        async for item in _accounted_primary_stream(
-            session,
-            req,
-            ledger=ledger,
-            logical_call_id=logical_call_id,
-            turn_index=turn_index,
-            bind_active_primary=bind_active_primary,
-        ):
-            yield item
+        async with aclosing(
+            _accounted_primary_stream(
+                session,
+                req,
+                ledger=ledger,
+                logical_call_id=logical_call_id,
+                turn_index=turn_index,
+                bind_active_primary=bind_active_primary,
+            )
+        ) as primary_stream:
+            async for item in primary_stream:
+                yield item
 
     prepared = request_prepared
     while True:
@@ -305,17 +308,20 @@ async def _stream_turn_with_recovery(
         await start_provider_call(turn_index, req.model)
         try:
             try:
-                async for item in dispatch():
-                    yield item
+                async with aclosing(dispatch()) as dispatch_stream:
+                    async for item in dispatch_stream:
+                        yield item
             except ContextLengthError as exc:
                 if ladder is not None:
                     raise
-                async for item in recover(exc):
-                    yield item
+                async with aclosing(recover(exc)) as recovery_stream:
+                    async for item in recovery_stream:
+                        yield item
                 req = await prepare_provider_call(req, turn_index)
                 await start_provider_call(turn_index, req.model)
-                async for item in dispatch():
-                    yield item
+                async with aclosing(dispatch()) as dispatch_stream:
+                    async for item in dispatch_stream:
+                        yield item
         except ProviderError as exc:
             if not getattr(exc, "retryable", False):
                 raise
@@ -330,8 +336,9 @@ async def _stream_turn_with_recovery(
         except ContextLengthError as exc:
             if ladder is None:
                 raise
-            async for item in recover(exc):
-                yield item
+            async with aclosing(recover(exc)) as recovery_stream:
+                async for item in recovery_stream:
+                    yield item
             continue
         return
 
