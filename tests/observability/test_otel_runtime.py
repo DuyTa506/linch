@@ -566,3 +566,71 @@ async def test_custom_standalone_compaction_records_physical_call(otel, tracing)
         } == {("input", 7), ("output", 4)}
     finally:
         await agent.close()
+
+
+async def test_recovered_provider_attempt_does_not_fail_step_or_run(otel):
+    from linch import ProviderError, Usage
+
+    class RetryOnceProvider:
+        id = "retry-once"
+
+        def __init__(self):
+            self.calls = 0
+
+        def context_window(self, model):
+            return 128_000
+
+        async def stream(self, request):
+            self.calls += 1
+            yield {"type": "message_start", "model": request.model}
+            if self.calls == 1:
+                raise ProviderError("retry me", retryable=True)
+            yield {"type": "text_delta", "text": "recovered"}
+            yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
+
+    context, exporter, _ = otel
+    provider = RetryOnceProvider()
+    agent = agent_for(context, provider=provider, max_retries=1)
+    try:
+        events = await collect(await agent.session())
+        assert events[-1].subtype == "success"
+        assert provider.calls == 2
+        chats = operation_spans(exporter, "chat")
+        assert [span.status.status_code for span in chats] == [
+            trace.StatusCode.ERROR,
+            trace.StatusCode.UNSET,
+        ]
+        for operation in ("step", "invoke_agent"):
+            (span,) = operation_spans(exporter, operation)
+            assert span.status.status_code is trace.StatusCode.UNSET
+            assert "error.type" not in span.attributes
+    finally:
+        await agent.close()
+
+
+async def test_failure_after_closed_step_only_fails_run(otel):
+    from types import SimpleNamespace
+
+    from linch._telemetry import end_step, start_step, trace_run
+
+    context, exporter, _ = otel
+    agent = agent_for(context)
+    session = await agent.session()
+
+    @trace_run
+    async def run(session, prompt, opts, **kwargs):
+        start_step(session, 0)
+        end_step(session)
+        yield SimpleNamespace(type="notice")
+        raise RuntimeError("between turns")
+
+    try:
+        with pytest.raises(RuntimeError, match="between turns"):
+            async for _ in run(session, "go", None, run_id="run", resume_checkpoint=None):
+                pass
+        (step,) = operation_spans(exporter, "step")
+        (run_span,) = operation_spans(exporter, "invoke_agent")
+        assert step.status.status_code is trace.StatusCode.UNSET
+        assert run_span.status.status_code is trace.StatusCode.ERROR
+    finally:
+        await agent.close()

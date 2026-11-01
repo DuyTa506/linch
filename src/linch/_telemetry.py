@@ -96,6 +96,8 @@ def in_span(
         except BaseException as exc:
             if not isinstance(exc, GeneratorExit):
                 set_error(span, exc)
+                if run is not None and run.step is not None:
+                    set_error(run.step, exc)
             raise
         finally:
             try:
@@ -107,6 +109,8 @@ def in_span(
                         await close()
             except BaseException as exc:
                 set_error(span, exc)
+                if run is not None and run.step is not None:
+                    set_error(run.step, exc)
                 raise
             finally:
                 try:
@@ -292,6 +296,7 @@ class _RunTrace:
         self.step: trace.Span | None = None
         self.turn_index: int | None = None
         self.error: str | None = None
+        self.chat_error: str | None = None
 
     def observe(self, event: Any) -> None:
         if event.type == "error":
@@ -305,6 +310,8 @@ class _RunTrace:
             self.span.set_attribute(STOP_REASON, event.stop_reason)
             if event.subtype != "success" and self.error is None:
                 set_error(self.span, event.subtype)
+                if self.step is not None:
+                    set_error(self.step, event.subtype)
             if self.span.is_recording() and capture_content():
                 self.span.set_attribute(OUTPUT_MESSAGES, _json(event.final_text))
 
@@ -357,6 +364,7 @@ def start_run_span(session: Any, prompt: str, run_id: str, *, resumed: bool = Fa
 def start_step(session: Any, turn_index: int) -> None:
     state = getattr(session, "_telemetry_run", None)
     if state is not None:
+        state.chat_error = None
         state.turn_index = turn_index
         telemetry = telemetry_for(session.agent)
         if not telemetry.tracing_enabled:
@@ -371,8 +379,11 @@ def start_step(session: Any, turn_index: int) -> None:
 def end_step(session: Any) -> None:
     state = getattr(session, "_telemetry_run", None)
     if state is not None and state.step is not None:
+        if state.chat_error is not None:
+            set_error(state.step, state.chat_error)
         state.step.end()
         state.step = None
+        state.chat_error = None
 
 
 class ChatCall:
@@ -420,6 +431,15 @@ class ChatCall:
         self.finished = True
         if self.telemetry is None:
             return
+        run = getattr(self.session, "_telemetry_run", None)
+        if run is not None and run.step is not None:
+            # Retries own chat errors; only the last attempt determines the
+            # step's status when the loop closes it.
+            run.chat_error = (
+                type(error).__name__
+                if error is not None and not isinstance(error, GeneratorExit)
+                else None
+            )
         if not self.record_metrics and not self.span.is_recording():
             self.span.end()
             return
@@ -430,9 +450,6 @@ class ChatCall:
             if error is not None and not isinstance(error, GeneratorExit):
                 attrs[ERROR_TYPE] = type(error).__name__
                 set_error(self.span, error)
-                run = getattr(self.session, "_telemetry_run", None)
-                if run is not None and run.step is not None:
-                    set_error(run.step, error)
             if self.span.is_recording():
                 if result.actual_model:
                     self.span.set_attribute(RESPONSE_MODEL, result.actual_model)
