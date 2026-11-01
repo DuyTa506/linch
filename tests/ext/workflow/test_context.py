@@ -230,6 +230,44 @@ async def test_step_rejects_non_json_serializable_value() -> None:
         await wf.step("bad", object)
 
 
+def test_workflow_fingerprint_canonicalizes_sets() -> None:
+    from linch.ext.workflow.context import _fingerprint_value
+
+    assert _fingerprint_value({"items": {"beta", "alpha"}}) == {"items": ["alpha", "beta"]}
+
+
+@pytest.mark.parametrize(
+    "value",
+    [object(), float("nan"), float("inf"), [None]],
+    ids=["object", "nan", "infinity", "cycle"],
+)
+def test_workflow_fingerprint_rejects_non_canonical_values(value: Any) -> None:
+    from linch.errors import ConfigError
+    from linch.ext.workflow.context import _fingerprint_value
+
+    if value == [None]:
+        value.append(value)
+    with pytest.raises(ConfigError, match="not JSON-serializable|cyclic"):
+        _fingerprint_value(value)
+
+
+def test_workflow_fingerprint_rejects_non_string_mapping_keys() -> None:
+    from linch.errors import ConfigError
+    from linch.ext.workflow.context import _fingerprint_value
+
+    with pytest.raises(ConfigError, match="mapping keys must be strings"):
+        _fingerprint_value({1: "one", "1": "string-one"})
+
+
+def test_workflow_options_fingerprint_rejects_unencodable_deps() -> None:
+    from linch.errors import ConfigError
+    from linch.ext.workflow.context import _run_options_fingerprint
+    from linch.session import RunOptions
+
+    with pytest.raises(ConfigError, match="not JSON-serializable"):
+        _run_options_fingerprint(RunOptions(deps=object()))
+
+
 async def test_step_key_argument_distinguishes_calls() -> None:
     seen: list[Any] = []
     wf = _make_context(on_event=seen.append)

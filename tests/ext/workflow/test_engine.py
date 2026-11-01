@@ -187,6 +187,78 @@ async def test_wf_agent_tool_filter_is_part_of_replay_key() -> None:
     assert provider.calls == 2
 
 
+async def test_wf_agent_explicit_key_replays_unencodable_dependencies() -> None:
+    from linch import InMemoryRunStore, RunOptions
+
+    store = InMemoryRunStore()
+    provider1 = CountingTextProvider()
+    agent1 = _make_agent(provider1, run_store=store)
+
+    async def flow(wf: Any) -> str:
+        return await wf.agent(
+            "charge",
+            key="tenant-acme-v1",
+            run_options=RunOptions(deps=object()),
+        )
+
+    assert await _run_workflow(agent1, flow, run_id="wf-explicit-key") == "result-1"
+    assert provider1.calls == 1
+
+    provider2 = CountingTextProvider()
+    agent2 = _make_agent(provider2, run_store=store)
+    seen: list[Any] = []
+    assert (
+        await _run_workflow(agent2, flow, run_id="wf-explicit-key", on_event=seen.append)
+        == "result-1"
+    )
+    assert provider2.calls == 0
+    assert [event.kind for event in seen if event.type == "workflow"] == ["agent_replayed"]
+
+    async def flow_with_changed_tools(wf: Any) -> str:
+        return await wf.agent(
+            "charge",
+            key="tenant-acme-v1",
+            tools=[],
+            run_options=RunOptions(deps=object()),
+        )
+
+    assert (
+        await _run_workflow(agent2, flow_with_changed_tools, run_id="wf-explicit-key") == "result-1"
+    )
+    assert provider2.calls == 1
+
+
+async def test_wf_agent_rejects_unencodable_dependencies_without_key() -> None:
+    from linch import InMemoryRunStore, RunOptions
+    from linch.errors import ConfigError
+
+    agent = _make_agent(CountingTextProvider(), run_store=InMemoryRunStore())
+
+    async def flow(wf: Any) -> str:
+        return await wf.agent("charge", run_options=RunOptions(deps=object()))
+
+    with pytest.raises(ConfigError, match="not JSON-serializable"):
+        await _run_workflow(agent, flow, run_id="wf-no-explicit-key")
+
+
+async def test_step_replays_when_rebuilt_set_key_has_different_insertion_order() -> None:
+    from linch import InMemoryRunStore
+
+    store = InMemoryRunStore()
+    agent = _make_agent(CountingTextProvider(), run_store=store)
+    calls: list[str] = []
+
+    def flow_for(order: tuple[int, ...]) -> Any:
+        async def flow(wf: Any) -> str:
+            return await wf.step("publish", lambda: calls.append("ran") or "ok", key=set(order))
+
+        return flow
+
+    assert await _run_workflow(agent, flow_for((0, 8, 16)), run_id="wf-set-replay") == "ok"
+    assert await _run_workflow(agent, flow_for((16, 0, 8)), run_id="wf-set-replay") == "ok"
+    assert calls == ["ran"]
+
+
 async def test_wf_agent_inherited_subagent_tool_filter_is_part_of_replay_key() -> None:
     from linch import InMemoryRunStore
     from linch.subagents.registry import AgentRegistry
