@@ -4,6 +4,7 @@ from html import escape
 from typing import Any
 from uuid import uuid4
 
+from ..run_store import _lease_kwargs
 from ..session import RunOptions
 from .base import ToolContext, ToolResult, ToolScope
 
@@ -242,6 +243,8 @@ class SubagentTool:
         # Use the session emit channel so SubagentEvents reach pending_child_events.
         emit_list = getattr(session, "pending_child_events", None)
         emit_fn = emit_list.append if emit_list is not None else getattr(ctx, "emit", None)
+        origin_run_id = ctx.run_id
+        origin_lease = getattr(getattr(session, "_event_journal", None), "lease", None)
 
         runner_args = RunSubagentArgs(
             parent_session=session,
@@ -384,7 +387,12 @@ class SubagentTool:
                 run_store = getattr(session.agent, "run_store", None)
                 if run_store is not None:
                     try:
-                        await run_store.append_event(ctx.run_id, completion_event)
+                        method = run_store.append_event
+                        await method(
+                            origin_run_id,
+                            completion_event,
+                            **_lease_kwargs(method, origin_lease),
+                        )
                     except Exception:
                         pass
 

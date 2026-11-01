@@ -50,8 +50,6 @@ async def lease_stores(request: pytest.FixtureRequest, pg_dsn: str) -> AsyncIter
     if request.param == "memory":
         first = InMemoryRunStore()
         second = copy.copy(first)
-        for name in ("_held_leases", "_lease_ttls", "_lease_owners"):
-            setattr(second, name, dict(getattr(first, name)))
     else:
         first = PostgresRunStore(pg_dsn)
         second = PostgresRunStore(pg_dsn)
@@ -121,8 +119,11 @@ class _Takeover:
                     if not session and name == "create_run":
                         record = await method(*args, **kwargs)
                         state.run_id = record.id
-                        state.lease = await state.first.claim(record.id, "holder-a", 0.001)
+                        if state.lease is None:
+                            state.lease = await state.first.claim(record.id, "holder-a", 0.001)
                         return record
+                    if not session and state.lease is not None:
+                        kwargs.setdefault("lease", state.lease)
                     # Secondary terminal loss must replace the original non-transient
                     # completion error while preserving the fencing assertion.
                     # tail, whether detected by flush or failed-status persistence.
@@ -209,6 +210,17 @@ async def test_takeover_stops_all_later_writes_and_preserves_winner(
         durability=DurabilityOptions(exact_model_input=True),
     )
     session = await agent.session()
+    from linch.session import RunOptions
+
+    state.run_id = "lease-loop-run"
+    if hasattr(first, "_runs"):
+        await first.create_run(session.id, id=state.run_id)
+        first._runs[state.run_id].status = "pending"
+    else:
+        pool = await first._ensure()
+        async with pool.acquire() as conn:
+            await first.create_pending_run(conn, session.id, id=state.run_id)
+    state.lease = await first.claim(state.run_id, "holder-a", 0.001)
     started = asyncio.Event()
     cancelled_and_awaited = asyncio.Event()
 
@@ -224,7 +236,13 @@ async def test_takeover_stops_all_later_writes_and_preserves_winner(
     session.background_tasks.append(task)
     await started.wait()
     try:
-        events = [event async for event in session.run("hello")]
+        events = [
+            event
+            async for event in session.run(
+                "hello",
+                RunOptions(run_id=state.run_id, lease=state.lease),
+            )
+        ]
         assert state.lost, f"target {target} never exercised real fencing"
         assert state.after_loss == [], (state.first_loss, state.after_loss)
         assert cancelled_and_awaited.is_set() and task.done()

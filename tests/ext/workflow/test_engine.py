@@ -61,6 +61,89 @@ async def test_run_workflow_returns_function_value() -> None:
     assert result == {"answer": 42}
 
 
+async def test_run_workflow_uses_supplied_lease_for_every_durable_write() -> None:
+    from linch import InMemoryRunStore
+    from linch._wire import WIRE_VERSION
+    from linch.run_store import RunLease
+
+    class TrackingStore(InMemoryRunStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.claims = 0
+            self.seen: list[tuple[str, str, object | None]] = []
+
+        async def claim(self, run_id: str, owner: str, ttl_s: float) -> RunLease:
+            self.claims += 1
+            return await super().claim(run_id, owner, ttl_s)
+
+        async def append_event(self, run_id: str, event: Any, *, lease: Any = None) -> int:
+            self.seen.append(("append_event", run_id, lease))
+            return await super().append_event(run_id, event, lease=lease)
+
+        async def save_checkpoint(
+            self, run_id: str, checkpoint: Any, *, status: str = "running", lease: Any = None
+        ) -> Any:
+            self.seen.append(("save_checkpoint", run_id, lease))
+            return await super().save_checkpoint(run_id, checkpoint, status=status, lease=lease)
+
+        async def save_checkpoint_with_events(
+            self,
+            run_id: str,
+            checkpoint: Any,
+            events: list[Any],
+            *,
+            status: str = "running",
+            lease: Any = None,
+        ) -> Any:
+            self.seen.append(("save_checkpoint_with_events", run_id, lease))
+            return await super().save_checkpoint_with_events(
+                run_id, checkpoint, events, status=status, lease=lease
+            )
+
+        async def mark_completed(self, run_id: str, checkpoint: Any, *, lease: Any = None) -> Any:
+            self.seen.append(("mark_completed", run_id, lease))
+            return await super().mark_completed(run_id, checkpoint, lease=lease)
+
+        async def release(self, lease: RunLease) -> None:
+            self.seen.append(("release", lease.run_id, lease))
+            await super().release(lease)
+
+    store = TrackingStore()
+    await store.create_run(
+        "workflow-session", id="wf-leased", meta={"schema_version": WIRE_VERSION}
+    )
+    lease = await store.claim("wf-leased", "workflow-owner", 30.0)
+    agent = _make_agent(CountingTextProvider(), run_store=store)
+
+    async def flow(wf: Any) -> str:
+        await wf.phase("leased")
+        return await wf.step("answer", lambda: wf.agent("child"))
+
+    assert (
+        await _run_workflow(
+            agent,
+            flow,
+            run_id="wf-leased",
+            lease=lease,
+            journal_snapshot_every=1,
+        )
+        == "result-1"
+    )
+    assert store.claims == 1
+    parent_writes = [
+        entry for entry in store.seen if entry[1] == "wf-leased" and entry[0] != "release"
+    ]
+    assert parent_writes
+    assert all(seen_lease == lease for _, _, seen_lease in parent_writes)
+    child_terminal_writes = [
+        entry
+        for entry in store.seen
+        if entry[1] != "wf-leased" and entry[0] in {"mark_completed", "save_checkpoint_with_events"}
+    ]
+    assert child_terminal_writes
+    assert all(seen_lease is None for _, _, seen_lease in child_terminal_writes)
+
+
 class SchemaNameProvider:
     """Returns JSON derived from the requested output schema name."""
 
@@ -346,7 +429,8 @@ async def test_cancelled_claim_releases_lease_acquired_before_return() -> None:
         store.allow_claim_return.set()
         with pytest.raises(asyncio.CancelledError):
             await task
-        assert store._held_leases == {}
+        owner, _expires_at, _epoch = store._lease_state["wf-claim-cancel"]
+        assert owner is None
         assert agent._sessions == {}
     finally:
         store.allow_claim_return.set()
@@ -489,11 +573,11 @@ async def test_cancelled_step_append_is_drained_before_resume(kind: str, pg_dsn:
         def __getattr__(self, name: str) -> Any:
             return getattr(self.inner, name)
 
-        async def append_event(self, run_id: str, event: Any) -> int:
+        async def append_event(self, run_id: str, event: Any, *, lease: Any = None) -> int:
             if getattr(event, "kind", None) == "step_end":
                 self.append_started.set()
                 await self.allow_append.wait()
-            return await self.inner.append_event(run_id, event)
+            return await self.inner.append_event(run_id, event, lease=lease)
 
     store = DelayedEndStore(inner_store)
     agent = _make_agent(CountingTextProvider(), run_store=store)
@@ -613,11 +697,11 @@ async def test_repeated_cancellation_cannot_cancel_step_end_append() -> None:
             self.append_started = asyncio.Event()
             self.allow_append = asyncio.Event()
 
-        async def append_event(self, run_id: str, event: Any) -> int:
+        async def append_event(self, run_id: str, event: Any, *, lease: Any = None) -> int:
             if getattr(event, "kind", None) == "step_end":
                 self.append_started.set()
                 await self.allow_append.wait()
-            return await super().append_event(run_id, event)
+            return await super().append_event(run_id, event, lease=lease)
 
     store = DelayedEndStore()
     agent = _make_agent(CountingTextProvider(), run_store=store)
@@ -739,6 +823,25 @@ async def test_lease_heartbeat_covers_slow_terminal_status_write(monkeypatch: An
     assert await _run_workflow(agent, flow, run_id="wf-slow-terminal") == "done"
     assert store.terminal_started.is_set()
     assert store.renew_calls >= 1
+
+
+async def test_supplied_workflow_lease_ttl_controls_heartbeat(monkeypatch: Any) -> None:
+    from linch.ext.workflow import engine as workflow_engine
+    from linch.run_store import RunLease
+
+    delays: list[float] = []
+
+    async def sleep(delay: float) -> None:
+        delays.append(delay)
+        raise asyncio.CancelledError
+
+    lease = RunLease("wf-ttl", "owner", 1, 100.0, 0.6)
+    monkeypatch.setattr(workflow_engine.asyncio, "sleep", sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await workflow_engine._renew_workflow_lease(object(), [lease])
+
+    assert delays == pytest.approx([0.2])
 
 
 async def test_wf_agent_inherited_subagent_tool_filter_is_part_of_replay_key() -> None:

@@ -21,7 +21,12 @@ from ..events import (
     UsageEvent,
 )
 from ..model_calls import _context_fingerprint, _model_call_fingerprint
-from ..run_store import RunCheckpoint, _require_tool_recovery_cursor, durable_call
+from ..run_store import (
+    RunCheckpoint,
+    _lease_kwargs,
+    _require_tool_recovery_cursor,
+    durable_call,
+)
 from ..session import Session
 from ..types import (
     Message,
@@ -43,6 +48,18 @@ _ACTIVE_PRIMARY_FIELDS = {
     "full_history_base_count",
     "full_history_base_fingerprint",
 }
+
+
+def _same_lease_identity(left: Any, right: Any) -> bool:
+    """Compare the fencing identity without treating renewal metadata as authority."""
+    if left is right:
+        return True
+    if left is None or right is None:
+        return False
+    return all(
+        getattr(left, name, None) == getattr(right, name, None)
+        for name in ("run_id", "owner", "epoch")
+    )
 
 
 def _model_call_runtime_from_extension(
@@ -184,14 +201,29 @@ class RunEventBuffer:
     the session for one run), never process-global.
     """
 
-    __slots__ = ("store", "run_id", "_pending", "_last_seq", "session", "_atomic_write_failed")
+    __slots__ = (
+        "store",
+        "run_id",
+        "lease",
+        "_pending",
+        "_last_seq",
+        "session",
+        "_atomic_write_failed",
+    )
 
     def __init__(
-        self, store: Any, run_id: str, *, initial_seq: int = 0, session: Any = None
+        self,
+        store: Any,
+        run_id: str,
+        *,
+        lease: Any = None,
+        initial_seq: int = 0,
+        session: Any = None,
     ) -> None:
         self.store = store
         self.session = session
         self.run_id = run_id
+        self.lease = lease
         self._pending: list[Event] = []
         self._last_seq = max(0, initial_seq)
         self._atomic_write_failed = False
@@ -218,13 +250,24 @@ class RunEventBuffer:
         pending, self._pending = self._pending, []
         try:
             operation = "mark_failed" if status == "failed" else "save_checkpoint_with_events"
-            write = (
-                self.store.mark_failed(self.run_id, checkpoint, error=error, events=pending)
-                if status == "failed"
-                else self.store.save_checkpoint_with_events(
-                    self.run_id, checkpoint, pending, status=status
+            if status == "failed":
+                method = self.store.mark_failed
+                write = method(
+                    self.run_id,
+                    checkpoint,
+                    error=error,
+                    events=pending,
+                    **_lease_kwargs(method, self.lease),
                 )
-            )
+            else:
+                method = self.store.save_checkpoint_with_events
+                write = method(
+                    self.run_id,
+                    checkpoint,
+                    pending,
+                    status=status,
+                    **_lease_kwargs(method, self.lease),
+                )
             _, seqs = await durable_call(self.session, f"run.{operation}", write)
         except BaseException:
             self._pending = pending + self._pending
@@ -243,7 +286,9 @@ class RunEventBuffer:
         if appender is not None:
             try:
                 seqs = await durable_call(
-                    self.session, "run.append_events", appender(self.run_id, pending)
+                    self.session,
+                    "run.append_events",
+                    appender(self.run_id, pending, **_lease_kwargs(appender, self.lease)),
                 )
             except BaseException:
                 self._pending = pending + self._pending
@@ -252,10 +297,15 @@ class RunEventBuffer:
             seqs = []
             for index, event in enumerate(pending):
                 try:
+                    method = self.store.append_event
                     seq = await durable_call(
                         self.session,
                         "run.append_event",
-                        self.store.append_event(self.run_id, event),
+                        method(
+                            self.run_id,
+                            event,
+                            **_lease_kwargs(method, self.lease),
+                        ),
                     )
                 except BaseException:
                     self._pending = pending[index:] + self._pending
@@ -269,17 +319,26 @@ class RunEventBuffer:
         return self._last_seq
 
 
-async def _persist_event(session: Session, run_id: str, event: Event) -> None:
+async def _persist_event(session: Session, run_id: str, event: Event, *, lease: Any = None) -> None:
     if isinstance(event, SystemEvent) or isinstance(event, ResultEvent):
         if event.trace_id is None:
             event.trace_id = trace_id_for(run_id)
     buf = getattr(session, "_event_journal", None)
-    if buf is not None and buf.run_id == run_id:
+    if (
+        buf is not None
+        and buf.run_id == run_id
+        and (lease is None or _same_lease_identity(buf.lease, lease))
+    ):
         await buf.append(event)
         return
     store = session.agent.run_store
     if store is not None:
-        await durable_call(session, "run.append_event", store.append_event(run_id, event))
+        method = store.append_event
+        await durable_call(
+            session,
+            "run.append_event",
+            method(run_id, event, **_lease_kwargs(method, lease)),
+        )
 
 
 async def _flush_events(session: Session) -> None:

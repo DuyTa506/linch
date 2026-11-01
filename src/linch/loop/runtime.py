@@ -51,6 +51,7 @@ from ..run_store import (
     ModelInputSnapshotError,
     RunCheckpoint,
     RunRecord,
+    _lease_kwargs,
     _StoreUnavailableError,
     decode_model_input_snapshot,
     durable_call,
@@ -69,6 +70,7 @@ from .checkpoint import (
     _model_call_runtime_from_extension,
     _model_call_runtime_to_extension,
     _persist_event,
+    _same_lease_identity,
     _skill_overlay_to_dict,
 )
 from .dispatch import (
@@ -533,6 +535,7 @@ class RunRuntime:
         self.prompt = prompt
         self.opts = opts
         self.run_id = run_id
+        self.lease = getattr(opts, "lease", None)
         self.run_record = run_record
         self.resume_checkpoint = resume_checkpoint
         self.started = 0.0
@@ -659,6 +662,7 @@ class RunRuntime:
         session._event_journal = RunEventBuffer(
             agent.run_store,
             run_id,
+            lease=runtime.lease,
             initial_seq=initial_event_seq,
             session=session,
         )
@@ -838,7 +842,7 @@ class RunRuntime:
             await self.run_registration.dispose()
 
     async def persist_model_call(self, event: ModelCallEvent) -> None:
-        await _persist_event(self.session, self.run_id, event)
+        await _persist_event(self.session, self.run_id, event, lease=self.lease)
         buf = self.session._event_journal
         if self.checkpoint.phase == "started" and buf is not None:
             # Preserve startup progress without snapshotting a partially run hook.
@@ -895,7 +899,7 @@ class RunRuntime:
                 logical_call_id=receipt.logical_call_id,
                 model=receipt.actual_model,
             )
-            await _persist_event(self.session, self.run_id, event)
+            await _persist_event(self.session, self.run_id, event, lease=self.lease)
             yield event
             async for warning in self._emit_budget_warning():
                 yield warning
@@ -912,7 +916,7 @@ class RunRuntime:
             cost_usd=receipt.cost_usd,
             cumulative_cost_usd=self.running_cost,
         )
-        await _persist_event(self.session, self.run_id, event)
+        await _persist_event(self.session, self.run_id, event, lease=self.lease)
         yield event
         async for warning in self._emit_budget_warning():
             yield warning
@@ -927,7 +931,7 @@ class RunRuntime:
             max_tokens=self.budget.max_tokens,
             max_cost_usd=self.budget.max_cost_usd,
         )
-        await _persist_event(self.session, self.run_id, warning)
+        await _persist_event(self.session, self.run_id, warning, lease=self.lease)
         yield warning
 
     async def emit_budget_exhausted(self) -> AsyncGenerator[Event, None]:
@@ -974,7 +978,7 @@ class RunRuntime:
         )
         failure = await self._attempt(
             "event append",
-            lambda event=event: _persist_event(self.session, self.run_id, event),
+            lambda event=event: _persist_event(self.session, self.run_id, event, lease=self.lease),
             original,
         )
         if failure is None and self.run_record is not None and self.agent.run_store is not None:
@@ -1006,10 +1010,16 @@ class RunRuntime:
             lambda: (
                 buf.flush_with_checkpoint(self.checkpoint, status="failed", error=error)
                 if buf is not None
+                and (self.lease is None or _same_lease_identity(buf.lease, self.lease))
                 else durable_call(
                     self.session,
                     "run.mark_failed",
-                    store.mark_failed(self.run_id, self.checkpoint, error=error),
+                    store.mark_failed(
+                        self.run_id,
+                        self.checkpoint,
+                        error=error,
+                        **_lease_kwargs(store.mark_failed, self.lease),
+                    ),
                 )
             ),
             original or RuntimeError("terminal failed-status persistence"),
@@ -1051,7 +1061,9 @@ class RunRuntime:
         for event in (error_event, result_event):
             await self._attempt(
                 "event append",
-                lambda event=event: _persist_event(self.session, self.run_id, event),
+                lambda event=event: _persist_event(
+                    self.session, self.run_id, event, lease=self.lease
+                ),
                 original,
             )
         await self.persist_failed(error, original=original)
@@ -1081,7 +1093,11 @@ class RunRuntime:
                 await durable_call(
                     self.session,
                     "run.delete",
-                    self.model_input_store.delete(snapshot_id, run_id=self.run_id),
+                    self.model_input_store.delete(
+                        snapshot_id,
+                        run_id=self.run_id,
+                        **_lease_kwargs(self.model_input_store.delete, self.lease),
+                    ),
                 )
             except LeaseLostError:
                 raise
@@ -1093,7 +1109,11 @@ class RunRuntime:
             await durable_call(
                 self.session,
                 "run.prune",
-                self.model_input_store.prune(self.run_id, keep_ids=keep_ids),
+                self.model_input_store.prune(
+                    self.run_id,
+                    keep_ids=keep_ids,
+                    **_lease_kwargs(self.model_input_store.prune, self.lease),
+                ),
             )
         except LeaseLostError:
             raise
@@ -1219,7 +1239,12 @@ class RunRuntime:
             await durable_call(
                 self.session,
                 "run.save_checkpoint",
-                store.save_checkpoint(self.run_id, self.checkpoint, status=status),
+                store.save_checkpoint(
+                    self.run_id,
+                    self.checkpoint,
+                    status=status,
+                    **_lease_kwargs(store.save_checkpoint, self.lease),
+                ),
             )
         if completed_snapshot_id is not None:
             await self.best_effort_snapshot_cleanup(
@@ -1242,7 +1267,12 @@ class RunRuntime:
         snapshot = await durable_call(
             self.session,
             "run.save",
-            self.model_input_store.save(self.run_id, provider_attempt, request),
+            self.model_input_store.save(
+                self.run_id,
+                provider_attempt,
+                request,
+                **_lease_kwargs(self.model_input_store.save, self.lease),
+            ),
         )
         if (
             not isinstance(getattr(snapshot, "id", None), str)

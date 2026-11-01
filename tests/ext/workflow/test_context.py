@@ -268,6 +268,37 @@ def test_workflow_options_fingerprint_rejects_unencodable_deps() -> None:
         _run_options_fingerprint(RunOptions(deps=object()))
 
 
+def test_workflow_options_fingerprint_omits_lease_state() -> None:
+    from linch.ext.workflow.context import _run_options_fingerprint
+    from linch.run_store import RunLease
+    from linch.session import RunOptions
+
+    assert (
+        _run_options_fingerprint(RunOptions(lease=RunLease("run-1", "owner", 1, 100.0, 30.0))) == ""
+    )
+
+
+async def test_workflow_context_forwards_explicit_lease_to_journal() -> None:
+    from linch.ext.workflow.context import WorkflowContext
+    from linch.run_store import RunLease
+
+    class Store:
+        def __init__(self) -> None:
+            self.leases: list[object] = []
+
+        async def append_event(self, run_id: str, event: Any, *, lease: Any = None) -> int:
+            self.leases.append(lease)
+            return 1
+
+    store = Store()
+    lease = RunLease("run-1", "owner", 1, 100.0, 30.0)
+    workflow = WorkflowContext(object(), object(), store=store, run_id="run-1", lease=lease)
+
+    await workflow.phase("leased")
+
+    assert store.leases == [lease]
+
+
 async def test_step_key_argument_distinguishes_calls() -> None:
     seen: list[Any] = []
     wf = _make_context(on_event=seen.append)

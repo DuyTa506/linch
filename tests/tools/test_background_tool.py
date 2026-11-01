@@ -230,3 +230,62 @@ async def test_background_post_tool_use_keeps_origin_run_id_after_run_settles() 
     await asyncio.gather(*session.background_tasks)
 
     assert seen_run_ids == ["origin-run"]
+
+
+async def test_background_tool_completion_uses_captured_origin_lease() -> None:
+    """A detached completion must not write with a lease adopted later."""
+    from types import SimpleNamespace
+
+    from linch.abort import AbortContext
+    from linch.events import BackgroundWorkerEvent
+    from linch.run_store import InMemoryRunStore
+    from linch.scheduler import execute_tool_calls
+    from linch.tools import ToolRegistry, tool
+    from linch.types import ToolUseBlock
+    from tests.support.scheduler import scheduler_agent, scheduler_session
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    @tool
+    async def slow() -> str:
+        """Wait until the test releases the detached completion."""
+        started.set()
+        await release.wait()
+        return "done"
+
+    registry = ToolRegistry()
+    registry.register(slow)
+    store = InMemoryRunStore()
+    await store.create_run("s1", id="origin-run")
+    origin_lease = await store.claim("origin-run", "origin-worker", 30.0)
+    agent = scheduler_agent(
+        registry,
+        run_store=store,
+        enable_background_tools=True,
+    )
+    session = scheduler_session(
+        run_id="origin-run",
+        _event_journal=SimpleNamespace(lease=origin_lease),
+    )
+
+    [
+        event
+        async for event in execute_tool_calls(
+            [ToolUseBlock(id="call", name="slow", input={"run_in_background": True})],
+            agent,
+            session,
+            AbortContext(),
+        )
+    ]
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+
+    await store.release(origin_lease)
+    replacement_lease = await store.claim("origin-run", "later-worker", 30.0)
+    session.active_run_id = "later-run"
+    session._event_journal = SimpleNamespace(lease=replacement_lease)
+    release.set()
+    await asyncio.gather(*session.background_tasks)
+
+    rows = await store.load_events("origin-run")
+    assert not any(isinstance(row.event, BackgroundWorkerEvent) for row in rows)
