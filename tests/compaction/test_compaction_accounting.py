@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
@@ -46,14 +47,29 @@ def _events(text: str = " Paid summary. ", *, usage: Any = None) -> list[dict[st
 class _Provider:
     id = "normalized-fixture"
 
-    def __init__(self, events: list[Any] | None = None, *, trace: list[str] | None = None):
+    def __init__(
+        self,
+        events: list[Any] | None = None,
+        *,
+        trace: list[str] | None = None,
+        can_disable_thinking: bool = False,
+    ):
         self.events = _events() if events is None else events
         self.trace = [] if trace is None else trace
+        self.can_disable_thinking = can_disable_thinking
         self.requests: list[Any] = []
         self.closed = 0
 
     def context_window(self, model: str) -> int:
         return 1024
+
+    def capabilities(self, model: str) -> Any:
+        from linch.providers import ProviderCapabilities
+
+        return ProviderCapabilities(
+            context_window=self.context_window(model),
+            can_disable_thinking=self.can_disable_thinking,
+        )
 
     async def stream(self, request: Any) -> AsyncIterator[dict[str, Any]]:
         self.trace.append("advanced")
@@ -121,7 +137,57 @@ async def test_gateway_settles_before_return_and_gates_only_one_delivery() -> No
     assert UUID(receipt.delivery_attempt_id).version == 4
 
 
-@pytest.mark.parametrize("output", ["", "  ", "tool", "thinking", "oversized", "native-json"])
+@pytest.mark.parametrize("reasoning", ["thinking_delta", "redacted_thinking"])
+async def test_summary_ignores_reasoning_content(reasoning: str) -> None:
+    from linch.types import Usage
+
+    events = _events()
+    events.insert(1, {"type": reasoning, "text": "private reasoning"})
+    events.insert(3, {"type": reasoning, "text": "later reasoning"})
+    provider, ledger, _, caller = _setup(provider=_Provider(events))
+
+    result = await _text(caller)
+
+    assert result.text == "Paid summary."
+    assert result.receipt.disposition == "accepted"
+    assert result.receipt.usage_status == "reported"
+    assert ledger.total_usage == Usage(111, 22)
+    assert provider.requests[0].thinking is None
+
+
+@pytest.mark.parametrize("accounted", [False, True])
+@pytest.mark.parametrize("can_disable_thinking", [None, False, True])
+async def test_summary_request_disables_thinking_only_when_supported(
+    accounted: bool, can_disable_thinking: bool | None
+) -> None:
+    from linch.abort import AbortContext
+    from linch.compaction import summarize_with_provider
+    from linch.types import Message, TextBlock
+
+    events = _events()
+    events.insert(1, {"type": "thinking_delta", "text": "private reasoning"})
+    backing_provider = _Provider(events, can_disable_thinking=bool(can_disable_thinking))
+    provider: Any = (
+        backing_provider
+        if can_disable_thinking is not None
+        else SimpleNamespace(stream=backing_provider.stream)
+    )
+    _, _, _, caller = _setup(provider=provider)
+    if accounted:
+        result = await _text(caller)
+        assert result.text == "Paid summary."
+        assert result.receipt.disposition == "accepted"
+    else:
+        result = await summarize_with_provider(
+            provider, "requested-model", [Message("user", [TextBlock("Earlier.")])], AbortContext()
+        )
+        assert result == "Paid summary."
+
+    expected = {"type": "disabled"} if can_disable_thinking else None
+    assert backing_provider.requests[0].thinking == expected
+
+
+@pytest.mark.parametrize("output", ["", "  ", "tool", "oversized", "native-json"])
 async def test_valid_final_usage_is_charged_when_output_is_rejected(output: str) -> None:
     from linch.types import Usage
 
@@ -137,8 +203,6 @@ async def test_valid_final_usage_is_charged_when_output_is_rejected(output: str)
             {"type": "tool_use_end", "id": "tool-1"},
         ]
         events[-1]["stop_reason"] = "tool_use"
-    elif output == "thinking":
-        events.insert(1, {"type": "thinking_delta", "text": "private reasoning"})
     elif output == "oversized":
         events[1:2] = [
             {"type": "text_delta", "text": "é" * 262144},
@@ -251,6 +315,51 @@ async def test_model_call_admission_rejections(mode: str) -> None:
     else:
         assert raised.value.code == "budget_exceeded"
         assert limiter.acquired == limiter.released == ["requested-model"]
+
+
+@pytest.mark.parametrize("mode", ["abort", "budget"])
+@pytest.mark.parametrize("resume_budget", ["same", "fresh"])
+async def test_post_marker_rejection_resumes_without_unknown_usage(
+    mode: str, resume_budget: str
+) -> None:
+    from linch.abort import AbortContext
+    from linch.budget import RunBudget
+    from linch.errors import AbortError
+    from linch.model_calls import _AccountedAuxiliaryCaller, _ModelCallError, _ModelCallLedger
+    from linch.types import Usage
+
+    journal: list[Any] = []
+    signal = AbortContext()
+    budget = RunBudget(max_tokens=1000)
+
+    async def persist(event: Any) -> None:
+        journal.append(event)
+        if event.record_kind == "dispatch_started":
+            await asyncio.sleep(0)
+            if mode == "abort":
+                signal.abort()
+            else:
+                budget.charge(Usage(1000), None)
+
+    provider, ledger, limiter, caller = _setup(budget=budget, persist=persist)
+    with pytest.raises(AbortError if mode == "abort" else _ModelCallError):
+        await _text(caller, signal=signal)
+
+    assert provider.requests == []
+    assert limiter.held == 0
+    assert journal[-1].record_kind == "abandoned"
+    assert journal[-1].record["usage_status"] == "not_dispatched"
+    assert ledger.usage_complete
+
+    restored_budget = budget if resume_budget == "same" else RunBudget()
+    restored_budget.max_tokens = 2000
+    restored = _ModelCallLedger(ledger.run_id, budget=restored_budget)
+    await restored.restore(journal)
+    restored.assert_may_start()
+    assert restored.usage_complete
+    result = await _text(_AccountedAuxiliaryCaller(provider, restored))
+    assert result.text == "Paid summary."
+    assert len(provider.requests) == 1
 
 
 @pytest.mark.parametrize("cancel_task", [False, True])

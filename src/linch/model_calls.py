@@ -14,7 +14,7 @@ from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequen
 from copy import deepcopy
 from dataclasses import asdict, dataclass, fields
 from time import monotonic
-from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast, get_args
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast, get_args, get_type_hints
 from uuid import uuid4
 
 from ._json import walk_json
@@ -22,12 +22,12 @@ from ._telemetry import ChatCall, in_span
 from ._wire import WIRE_VERSION, require_wire_version
 from .abort import AbortContext
 from .errors import AbortError, ProviderError
+from .events import ModelCallEvent
 from .run_store import LeaseLostError
 from .types import Message, ProviderRequest, StopReason, SystemBlock, Usage, message_to_dict
 
 if TYPE_CHECKING:
     from .budget import RunBudget
-    from .events import ModelCallEvent
 
 ModelCallKind = Literal["primary", "compaction"]
 UsageStatus = Literal["reported", "unknown", "not_dispatched"]
@@ -38,7 +38,7 @@ CallDisposition = Literal[
 _VERSION = WIRE_VERSION
 _ACCEPTED_TEXT_MAX_BYTES = 1024 * 1024
 _USAGE_FIELDS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens")
-_RECORD_KINDS = frozenset({"intent", "dispatch_started", "receipt", "abandoned", "projection"})
+_RECORD_KINDS = frozenset(get_args(get_type_hints(ModelCallEvent)["record_kind"]))
 
 
 class _ModelCallError(RuntimeError):
@@ -178,7 +178,7 @@ _IDENTITY_FIELDS = (
 def _validate_identity(raw: Mapping[str, Any]) -> None:
     for name in ("logical_call_id", "delivery_attempt_id", "run_id", "request_fingerprint"):
         _string(raw[name], name)
-    if raw["kind"] not in ("primary", "compaction"):
+    if raw["kind"] not in get_args(ModelCallKind):
         raise _invalid("unsupported model-call kind")
     if raw["turn_index"] is not None:
         _integer(raw["turn_index"], "turn_index")
@@ -207,17 +207,10 @@ def receipt_from_dict(raw: Mapping[str, Any]) -> ModelCallReceipt:
     _versioned(raw, _RECEIPT_FIELDS)
     _validate_identity(raw)
     status = raw["usage_status"]
-    if status not in ("reported", "unknown", "not_dispatched"):
+    if status not in get_args(UsageStatus):
         raise _invalid("unsupported usage status")
     disposition = raw["disposition"]
-    if disposition not in (
-        "accepted",
-        "rejected",
-        "rejected_native",
-        "cancelled",
-        "failed",
-        "not_dispatched",
-    ):
+    if disposition not in get_args(CallDisposition):
         raise _invalid("unsupported call disposition")
     _string(raw["actual_model"], "actual_model", empty=status != "reported")
     _integer(raw["duration_ms"], "duration_ms")
@@ -602,7 +595,7 @@ class _ModelCallLedger:
         self._abandoned: set[str] = set()
         self._receipts: dict[str, ModelCallReceipt] = {}
         self._consumed_auxiliary_receipt_ids: set[str] = set()
-        self._journal: list[ModelCallEvent] = []
+        self._journal_count = 0
         self._projections: dict[str, dict[str, Any]] = {}
         self._total_usage = Usage()
         self._total_cost_usd: float | None = None
@@ -621,6 +614,10 @@ class _ModelCallLedger:
     @property
     def usage_complete(self) -> bool:
         return not self._has_unknown_usage
+
+    @property
+    def journal_count(self) -> int:
+        return self._journal_count
 
     def _healthy(self) -> None:
         if self._persistence_failed:
@@ -650,7 +647,8 @@ class _ModelCallLedger:
 
     def _pending(self, intent: ModelCallIntent) -> ModelCallIntent:
         owned = self._intent(intent)
-        if self._intents.get(owned.delivery_attempt_id) != owned:
+        delivery_id = owned.delivery_attempt_id
+        if self._intents.get(delivery_id) != owned or delivery_id in self._receipts:
             raise _ModelCallError("identity_mismatch", "intent was not admitted by this ledger")
         return owned
 
@@ -662,14 +660,7 @@ class _ModelCallLedger:
         )
         if self._persist is not None:
             try:
-                await self._persist(
-                    ModelCallEvent(
-                        event.run_id,
-                        event.record_kind,
-                        event.record,
-                        budget_owner_id=event.budget_owner_id,
-                    )
-                )
+                await self._persist(event)
             except LeaseLostError:
                 raise
             except BaseException as exc:
@@ -679,7 +670,7 @@ class _ModelCallLedger:
                 raise _ModelCallError(
                     "persistence_failed", "model-call journal durability failed"
                 ) from exc
-        self._journal.append(event)
+        self._journal_count += 1
 
     async def begin(self, intent: ModelCallIntent) -> None:
         async with self._lock:
@@ -736,18 +727,31 @@ class _ModelCallLedger:
             self._has_unknown_usage |= owned.usage_status == "unknown"
             await self._write("receipt", receipt_to_dict(owned))
             self._receipts[delivery_id] = owned
-            del self._intents[delivery_id]
             self._started.remove(delivery_id)
             return True
 
-    async def abandon(self, intent: ModelCallIntent, *, reason: str) -> None:
+    async def abandon(
+        self, intent: ModelCallIntent, *, reason: str, not_dispatched: bool = False
+    ) -> None:
+        """Close an intent without a provider receipt.
+
+        Args:
+            intent: Admitted delivery being closed.
+            reason: Audit explanation for ending the delivery.
+            not_dispatched: Whether the provider was never invoked, even if its
+                dispatch marker was already written.
+        """
         async with self._lock:
             self._healthy()
             owned = self._pending(intent)
             delivery_id = owned.delivery_attempt_id
             if delivery_id in self._abandoned:
                 raise _ModelCallError("invalid_state", "delivery already abandoned")
-            status = "unknown" if delivery_id in self._started else "not_dispatched"
+            status = (
+                "unknown"
+                if delivery_id in self._started and not not_dispatched
+                else "not_dispatched"
+            )
             record = {
                 "version": _VERSION,
                 "intent": intent_to_dict(owned),
@@ -762,6 +766,8 @@ class _ModelCallLedger:
                 if self._budget is not None:
                     self._budget._register_unresolved_delivery(delivery_id)
             await self._write("abandoned", record)
+            if status == "not_dispatched":
+                self._started.discard(delivery_id)
             self._abandoned.add(delivery_id)
 
     def receipts(self) -> list[ModelCallReceipt]:
@@ -780,12 +786,7 @@ class _ModelCallLedger:
 
     def intent_for(self, delivery_id: str) -> ModelCallIntent | None:
         value = self._intents.get(delivery_id)
-        if value is not None:
-            return value
-        for event in self._journal:
-            if event.record_kind == "intent" and event.record["delivery_attempt_id"] == delivery_id:
-                return intent_from_dict(event.record)
-        return None
+        return value
 
     async def record_projection(self, record: dict[str, Any]) -> None:
         async with self._lock:
@@ -834,7 +835,6 @@ class _ModelCallLedger:
         async with self._lock:
             self._healthy()
             recovery = _LedgerRecovery(self.run_id, self._budget_owner_id)
-            recovery.prepare_source_replay(journal)
             for event in journal:
                 recovery.apply(event)
             consumed_ids = list(consumed_auxiliary_receipt_ids)
@@ -859,15 +859,13 @@ class _ModelCallLedger:
                 self._budget._restore_unresolved_deliveries(unknown, fresh=mode == "fresh_adopted")
             self._budget_owner_id = recovery.owner_id
             self._receipts = recovery.receipts
-            self._intents = {
-                key: value for key, value in recovery.intents.items() if key not in self._receipts
-            }
+            self._intents = recovery.intents
             self._started = recovery.started - self._receipts.keys()
             self._abandoned = recovery.abandoned
             self._consumed_auxiliary_receipt_ids = recovery.consumed
             self._has_unknown_usage = bool(unknown)
             self._total_usage, self._total_cost_usd = total_usage, total_cost
-            self._journal = list(recovery.journal)
+            self._journal_count = len(journal)
             self._projections = recovery.projections
 
 
@@ -882,67 +880,9 @@ class _LedgerRecovery:
         self.started: set[str] = set()
         self.abandoned: set[str] = set()
         self.consumed: set[str] = set()
-        self.journal: list[ModelCallEvent] = []
         self.abandoned_records: dict[str, dict[str, Any]] = {}
         self.projections: dict[str, dict[str, Any]] = {}
-        self._checkpoint_late_deliveries: set[str] = set()
-        self._source_replay_proofs: set[str] = set()
-        self._journal_intents: set[str] = set()
         self._journal_late_deliveries: set[str] = set()
-
-    def prepare_source_replay(self, journal: Sequence[ModelCallEvent]) -> None:
-        """Prove historical source order independently of a checkpoint's final phase.
-
-        A repeated intent alone cannot rewind a started checkpoint. Its source
-        must precede matching checkpoint-phase records later in the full journal.
-        Encountered journal phases remain monotonic during the forward replay.
-        """
-        from .events import ModelCallEvent
-
-        self._checkpoint_late_deliveries = self.started | self.receipts.keys() | self.abandoned
-        if not self._checkpoint_late_deliveries:
-            return
-        following: dict[str, set[str]] = {}
-        for event in reversed(journal):
-            if not isinstance(event, ModelCallEvent):
-                raise _invalid("accounting journal must contain ModelCallEvent records")
-            event = ModelCallEvent(
-                event.run_id,
-                event.record_kind,
-                event.record,
-                budget_owner_id=event.budget_owner_id,
-                schema_version=event.schema_version,
-            )
-            raw, kind = event.record, event.record_kind
-            if kind == "receipt":
-                receipt = receipt_from_dict(raw)
-                if receipt.delivery_attempt_id in self.receipts and raw == receipt_to_dict(
-                    self.receipts[receipt.delivery_attempt_id]
-                ):
-                    following.setdefault(receipt.delivery_attempt_id, set()).add(kind)
-            elif kind in {"dispatch_started", "abandoned"}:
-                intent = intent_from_dict(raw["intent"] if kind == "abandoned" else raw)
-                delivery_id = intent.delivery_attempt_id
-                if intent != self.intents.get(delivery_id):
-                    continue
-                if kind == "abandoned" and raw["usage_status"] != (
-                    "unknown" if delivery_id in self.started else "not_dispatched"
-                ):
-                    continue
-                following.setdefault(delivery_id, set()).add(kind)
-            elif kind == "projection" and raw["projection_kind"] == "compaction_source":
-                delivery_id = raw["delivery_attempt_id"]
-                required = {
-                    phase
-                    for phase, present in (
-                        ("dispatch_started", delivery_id in self.started),
-                        ("receipt", delivery_id in self.receipts),
-                        ("abandoned", delivery_id in self.abandoned),
-                    )
-                    if present
-                }
-                if required <= following.get(delivery_id, set()):
-                    self._source_replay_proofs.add(raw["projection_id"])
 
     def _owner(self, owner: str | None) -> None:
         if owner is None:
@@ -1001,7 +941,6 @@ class _LedgerRecovery:
                 _match(intent, self.receipts[delivery_id])
             if kind == "intent":
                 self.intents[delivery_id] = intent
-                self._journal_intents.add(delivery_id)
             else:
                 if previous_intent is None:
                     raise _ModelCallError("invalid_state", "journal marker lacks its intent")
@@ -1014,14 +953,15 @@ class _LedgerRecovery:
                         raise _ModelCallError(
                             "invalid_state", "settled delivery cannot be abandoned"
                         )
-                    status = "unknown" if delivery_id in self.started else "not_dispatched"
-                    if raw["usage_status"] != status:
+                    if raw["usage_status"] == "unknown" and delivery_id not in self.started:
                         raise _invalid("abandonment status disagrees with dispatch state")
                     if (
                         delivery_id in self.abandoned_records
                         and self.abandoned_records[delivery_id] != raw
                     ):
                         raise _ModelCallError("conflicting_delivery", "abandonment payload differs")
+                    if raw["usage_status"] == "not_dispatched":
+                        self.started.discard(delivery_id)
                     self.abandoned.add(delivery_id)
                     self.abandoned_records[delivery_id] = raw
                 self._journal_late_deliveries.add(delivery_id)
@@ -1032,17 +972,10 @@ class _LedgerRecovery:
                 raise _invalid("conflicting projection payload")
             if raw["projection_kind"] == "compaction_source" and key not in self.projections:
                 delivery_id = raw["delivery_attempt_id"]
-                if delivery_id in self._journal_late_deliveries or (
-                    delivery_id in self._checkpoint_late_deliveries
-                    and (
-                        delivery_id not in self._journal_intents
-                        or key not in self._source_replay_proofs
-                    )
-                ):
+                if delivery_id in self._journal_late_deliveries:
                     raise _invalid("compaction source must precede its delivery phase")
             _check_projection_conflict(raw, self.projections)
             self.projections[key] = raw
-        self.journal.append(event)
 
 
 _T = TypeVar("_T")
@@ -1174,9 +1107,7 @@ class _AuxiliaryResponse:
             text = event.get("text")
             if not isinstance(text, str):
                 raise _auxiliary_protocol_error(f"{typ}.text must be a string")
-            if typ == "thinking_delta":
-                self.reject("non_text_output")
-            elif self.rejection_reason is None:
+            if typ == "text_delta" and self.rejection_reason is None:
                 remaining = _ACCEPTED_TEXT_MAX_BYTES - len(self.text)
                 if len(text) > remaining:
                     self.reject("oversized_output")
@@ -1191,7 +1122,7 @@ class _AuxiliaryResponse:
                         else:
                             self.text.extend(encoded)
         elif typ == "redacted_thinking":
-            self.reject("non_text_output")
+            pass
         elif typ == "tool_use_start":
             tool_id, name = event.get("id"), event.get("name")
             if not isinstance(tool_id, str) or not tool_id or tool_id in self.seen_tools:
@@ -1309,6 +1240,10 @@ class _AccountedAuxiliaryCaller:
             messages=messages,
             max_output_tokens=max_output_tokens,
             signal=signal,
+            thinking={"type": "disabled"}
+            if hasattr(self._provider, "capabilities")
+            and self._provider.capabilities(model).can_disable_thinking
+            else None,
         )
         delivery = _AuxiliaryDelivery(self, request, logical_call_id, signal)
         stream = delivery.stream()
@@ -1413,11 +1348,11 @@ class _AuxiliaryDelivery:
             self.signal.throw_if_aborted()
             ledger.assert_may_start()
             await ledger.mark_dispatch_started(self.intent)
-            started = True
             # No await between these rechecks and the physical stream invocation.
             self.signal.throw_if_aborted()
             ledger.assert_may_start()
             chat = ChatCall(self.caller._session, self.request, self.response)
+            started = True
             iterator = in_span(
                 self.caller._provider.stream(self.request), chat.span, end_on_exit=False
             ).__aiter__()
@@ -1467,7 +1402,9 @@ class _AuxiliaryDelivery:
                 if ledger._persistence_failed:
                     pass
                 elif not started:
-                    await ledger.abandon(self.intent, reason="delivery_not_dispatched")
+                    await ledger.abandon(
+                        self.intent, reason="delivery_not_dispatched", not_dispatched=True
+                    )
                 else:
                     cancelled = isinstance(exc, (AbortError, asyncio.CancelledError, GeneratorExit))
                     if self.response.usage is not None:

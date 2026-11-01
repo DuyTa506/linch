@@ -793,7 +793,7 @@ class RunRuntime:
         _model_call_runtime_to_extension(
             self.checkpoint.extension_state,
             active_primary=self.active_primary,
-            journal_count=len(self.ledger._journal),
+            journal_count=self.ledger.journal_count,
         )
         self.checkpoint.total_usage = self.total
 

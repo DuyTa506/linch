@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from linch.errors import ProviderError
-from linch.providers.base import EffortLevel
+from linch.providers.base import EffortLevel, ProviderCapabilities
 from linch.providers.openai_chat import (
     OpenAIChatCompletionsProvider,
     OpenAIChatProviderOptions,
@@ -99,6 +99,19 @@ class DeepSeekProvider(OpenAIChatCompletionsProvider):
 
     def _build_payload(self, req: ProviderRequest) -> dict[str, Any]:
         return _build_deepseek_payload(req, self._deepseek_options)
+
+    def capabilities(self, model: str) -> ProviderCapabilities:
+        """Return DeepSeek capabilities, including its native thinking switch.
+
+        Args:
+            model: DeepSeek model identifier.
+
+        Returns:
+            Capability flags for the selected model.
+        """
+        caps = super().capabilities(model)
+        caps.can_disable_thinking = True
+        return caps
 
 
 def _build_deepseek_payload(

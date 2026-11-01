@@ -40,6 +40,9 @@ class ProviderCapabilities:
             ``cache_prompt``) or with provider-native automatic prefix/session
             caching plus usage reporting (OpenAI/Gemini). When ``False``,
             those fields are cleared before the provider sees the request.
+        can_disable_thinking: Whether the provider supports an explicit
+            request-level switch that disables its reasoning/thinking mode for
+            every model it serves.
 
     Args:
         context_window: Maximum context size supported for the selected model.
@@ -48,6 +51,7 @@ class ProviderCapabilities:
         structured_output_terminal_tool: Whether structured output uses a terminal tool call.
         tool_choice: Whether the provider honors tool-choice hints.
         prompt_cache: Whether request-level prompt-cache controls are supported.
+        can_disable_thinking: Whether request-level thinking can be disabled safely.
     """
 
     context_window: int = 128_000
@@ -56,6 +60,7 @@ class ProviderCapabilities:
     structured_output_terminal_tool: bool = False
     tool_choice: bool = True
     prompt_cache: bool = False
+    can_disable_thinking: bool = False
 
 
 def full_capabilities(
@@ -63,6 +68,7 @@ def full_capabilities(
     *,
     parallel_tool_calls: bool = True,
     structured_output_terminal_tool: bool = False,
+    can_disable_thinking: bool = False,
 ) -> ProviderCapabilities:
     """Build capabilities for providers with schema/output and prompt-cache support
     APIs (Anthropic, OpenAI Chat/Responses, Gemini, and OpenAI-compatible local
@@ -79,6 +85,7 @@ def full_capabilities(
         parallel_tool_calls: Whether parallel tool calls are supported.
         structured_output_terminal_tool: Whether structured output is represented as
             a terminal tool.
+        can_disable_thinking: Whether request-level thinking can be disabled safely.
 
     Returns:
         Capability flags for a provider that opts into its adapter-specific
@@ -91,6 +98,7 @@ def full_capabilities(
         structured_output_terminal_tool=structured_output_terminal_tool,
         tool_choice=True,
         prompt_cache=True,
+        can_disable_thinking=can_disable_thinking,
     )
 
 
