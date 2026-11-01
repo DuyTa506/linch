@@ -75,9 +75,9 @@ external infrastructure can implement the `Mailbox` protocol — see
 [Extending](./extending.md).
 
 Host adapters supporting durable inbox mode use the optional `ClaimableMailbox` lease protocol instead
-of destructive drain: claim → enqueue by `mailbox:<message-id>` → acknowledge.
-A crash before enqueue permits reclaim; a crash after enqueue is deduplicated by
-the session inbox receipt. Legacy `send()`/`drain()` behavior remains unchanged.
+of destructive drain: claim → enqueue by `mailbox:<message-id>` → commit the inbox/live log →
+acknowledge. A crash before acknowledgement permits reclaim; a crash after enqueue is
+deduplicated by the session inbox receipt. Legacy `send()`/`drain()` behavior remains unchanged.
 
 The generic Context inbox seam distinguishes uncommitted `Message` values from
 already history-committed `Event` values. Register producers on the agent's

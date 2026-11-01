@@ -245,7 +245,10 @@ async def test_durable_mailbox_releases_unacknowledged_claims_on_error() -> None
 
     assert any(event.type == "error" for event in failed)
     assert box.released == 1
-    assert any(event.type == "user" and event.subtype == "notification" for event in recovered)
+    assert not any(
+        event.type == "user" and event.subtype == "notification" for event in (*failed, *recovered)
+    )
+    assert sum("retry-me" in _texts(message) for message in session.full_history) == 1
 
 
 @pytest.mark.parametrize("configured", [True, False])

@@ -39,7 +39,7 @@ async def pg_dsn(request: Any) -> AsyncIterator[str]:
     params = getattr(getattr(request.node, "callspec", None), "params", {})
     if any(
         params.get(name) == "memory"
-        for name in ("kind", "inbox_store", "store_case", "lease_stores")
+        for name in ("kind", "inbox_store", "store_case", "lease_stores", "delivery_store")
     ):
         yield ""
         return
