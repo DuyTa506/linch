@@ -32,6 +32,63 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
 See [Migrating to 3.0](docs/migration-3.0.md) for replacement imports,
 removed compatibility paths, and required durable-state changes.
 
+### Fixed
+
+Found by the 3.0 release reviews. 3.0 fixes them all; there is no 2.x backport.
+
+#### Present in 2.0
+
+- **Security.** Grep no longer lets the model pass ripgrep flags through
+  `pattern`; the Glob/Grep fallbacks without ripgrep no longer escape `cwd`;
+  a windowed Read no longer grants Edit on unseen regions; isolated subagents
+  run filesystem tools in the isolation directory, not the parent workspace.
+- **Files.** Edit/Write are atomic and keep line endings; `DiskFileBackend`
+  keeps CRLF/CR; `PostgresFileBackend.edit` no longer loses concurrent updates
+  and `ls` escapes `_`/`%` in prefixes; isolation cleanup covers copy failure,
+  cancellation and outside symlinks.
+- **Loop and resume.** Resume no longer turns a final-tool ack, hook retry or
+  truncation nudge into a failed run; closing a run closes nested provider
+  streams, tool batches and limiter slots; skill tool restrictions survive
+  resume; the loop-guard force-final turn cannot execute tools; the recovery
+  hint follows the tool result; a failed terminal write no longer records two
+  results.
+- **Subagents and mailbox.** Continued workers charge the current run's budget;
+  mailboxes are addressed by unique worker id and ambiguous display names are
+  rejected; subagents inherit the run's `deps`; a background subagent that
+  fails before starting reports its failure; `align(timeout_s=...)` never
+  applies a message it reported as timed out; notifications and mailbox
+  messages are not lost when a run closes mid-delivery.
+- **Providers.** Anthropic tool calls with no arguments work; Gemini
+  `MALFORMED_FUNCTION_CALL` is an error, image attachments are sent, identical
+  parallel calls keep separate ids, and server retry delays are honored (a
+  delay above `max_delay_ms` fails instead of being shortened).
+- **Other.** MCP attachment is all-or-nothing and closes the connection on
+  failure; workflow replay keys no longer embed object reprs; `run_workflow`
+  closes its host session on setup failure; the Redis mailbox recipe keeps
+  `type`/`in_reply_to`; the mem0 recipe adds only the new run; cyclic or
+  deeply nested tool metadata no longer crashes persistence.
+
+#### Introduced during 3.0 development
+
+- **Profiles.** A run `Profile` is now a per-run overlay: profile plugins,
+  tools, permissions and prompts no longer leak to the Agent or other runs,
+  forked children keep working, and breaking out of a stream on the final
+  `ResultEvent` no longer leaves the session busy.
+- **Durable runs and workers.** Run-store writes carry an explicit lease, so a
+  worker that lost its lease can no longer write; backend parity fixes for
+  leases, checkpoints and snapshots; snapshot pruning waits for the committing
+  checkpoint; the shared Postgres pool stays open across worker teardown;
+  duplicate-note and outage harness checks are real.
+- **Identity, retrieval and telemetry.** RAG retrieval uses the run's
+  `Principal`; telemetry captures prompt and tool content only after
+  redaction, keeps the no-SDK fast path, follows service changes, and leaves
+  recovered provider steps out of ERROR.
+- **Accounting.** `Usage.input_tokens` excludes cache read/creation tokens on
+  every provider; auxiliary calls disable thinking only where the provider
+  allows it; compaction recovery keeps integrity after crashes.
+- **Events.** `IgnorableEvent` validates with the codec's limits; attachments
+  deeper than the limit are dropped on every Python version.
+
 ### Development entries
 
 - Interrupt resumable runs on transient durable-store connection failures without
