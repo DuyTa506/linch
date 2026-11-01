@@ -2168,6 +2168,8 @@ class InMemoryRunStore:
         if run_id not in self._runs:
             raise KeyError(f"run not found: {run_id}")
         copies = [_copy_event(event) for event in events]
+        if type(self).append_event is not InMemoryRunStore.append_event:
+            return [await self.append_event(run_id, event) for event in copies]
         bucket = self._events.setdefault(run_id, [])
         timestamp = now_iso()
         seqs = list(range(len(bucket) + 1, len(bucket) + len(copies) + 1))
