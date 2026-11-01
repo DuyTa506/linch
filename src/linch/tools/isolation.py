@@ -106,7 +106,8 @@ class TempDirIsolation:
             Path to a fresh isolated directory.
 
         Raises:
-            ValueError: If the temporary root is inside the source directory.
+            ValueError: If the temporary root is inside the source directory, or
+                a copied symlink would point outside the isolated directory.
         """
 
         if self._source and self._root and Path(self._root).is_relative_to(Path(self._source)):
@@ -137,7 +138,10 @@ class TempDirIsolation:
             raise ValueError("root must not be inside source")
         try:
             if self._source:
-                shutil.copytree(self._source, path, dirs_exist_ok=True)
+                shutil.copytree(self._source, path, dirs_exist_ok=True, symlinks=True)
+                for entry in path.rglob("*"):
+                    if entry.is_symlink() and not entry.resolve().is_relative_to(path):
+                        raise ValueError("source symlink points outside the isolated root")
         except BaseException:
             shutil.rmtree(path, ignore_errors=True)
             raise
