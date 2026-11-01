@@ -61,6 +61,7 @@ class ProviderCapabilities:
     tool_choice: bool = True
     prompt_cache: bool = False
     can_disable_thinking: bool = False
+    catalog_changes: Literal["append_only", "positional"] = "append_only"
 
 
 def full_capabilities(

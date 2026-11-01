@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .._prompt_cache import prompt_cache_advisories, tool_signature
-from ..catalog import sync_catalog
+from ..catalog import positional_catalog, snapshot_for, sync_catalog
 from ..compaction import build_compaction_event, reset_read_tracker_after_compaction
 from ..context import context_budget_to_dict
 from ..errors import ConfigError
@@ -227,8 +227,15 @@ async def prepare_provider_turn(ctx: ProviderPreparationContext) -> AsyncGenerat
         await ctx.persist_event(event)
         yield event
 
+    defer_catalog = bool(
+        not ctx.resumed_assistant
+        and not ctx.frozen_pending_resume
+        and snapshot_for(ctx.session) is not None
+        and positional_catalog(ctx.session, ctx.config, model_override)
+    )
     if not ctx.resumed_assistant and not ctx.exact_pending_replay:
-        await sync_catalog(ctx.session, ctx.config, None)
+        if not defer_catalog:
+            await sync_catalog(ctx.session, ctx.config, None, model=model_override)
         try:
             ctx.ledger.assert_may_start()
         except _ModelCallError as exc:
@@ -245,6 +252,10 @@ async def prepare_provider_turn(ctx: ProviderPreparationContext) -> AsyncGenerat
         if ctx.resumed_assistant or ctx.frozen_pending_resume
         else await _build_context_result(ctx.session, ctx.turn_index, config=ctx.config)
     )
+    if defer_catalog:
+        await sync_catalog(
+            ctx.session, ctx.config, None, context=context_result, model=model_override
+        )
     if context_result is not None:
         from ..events import ContextBuildEvent
 
@@ -273,6 +284,7 @@ async def prepare_provider_turn(ctx: ProviderPreparationContext) -> AsyncGenerat
     if req is not None and ctx.force_final_pending and not ctx.exact_pending_replay:
         req.tools = []
         req.tool_choice = None
+        req._native_catalog_changes = False
 
     ctx.outcome_req = req
     ctx.outcome_context = context_result

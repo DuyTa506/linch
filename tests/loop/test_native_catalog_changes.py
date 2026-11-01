@@ -95,9 +95,9 @@ def inert_agent(provider: Any, *, tools: Any = None, **options: Any) -> Any:
     from linch.config import FeatureFlags
 
     options.setdefault("run_store", None)
+    options.setdefault("model", "claude-opus-5")
     return make_agent(
         provider,
-        model="claude-opus-5",
         tools=tools if tools is not None else tool_registry(StubTool("base")),
         features=FeatureFlags(skills=False, subagents=False, mcp=False),
         **options,
@@ -380,31 +380,53 @@ async def test_pause_turn_terminates_without_continuing_provider_request(enabled
     await agent.close()
 
 
-async def test_durable_resume_after_native_addition_replays_exact_pending_payload():
+@pytest.mark.parametrize(
+    "default_model,turn_model,positional",
+    [
+        ("claude-opus-5", "claude-opus-5", True),
+        ("claude-sonnet-5", "claude-opus-5", True),
+        ("claude-opus-5", "claude-sonnet-5", False),
+    ],
+)
+async def test_durable_resume_after_native_addition_replays_exact_pending_payload(
+    default_model, turn_model, positional
+):
+    from linch.durability import DurabilityOptions
     from linch.run_store import InMemoryRunStore
     from linch.sessions import InMemorySessionStore
+    from linch.types import SkillOverlay
 
     class Crash(BaseException):
         pass
 
     sessions, runs = InMemorySessionStore(), InMemoryRunStore()
     transport = WireTransport(text_turn(), Crash("after durable provider_pending"))
-    agent = inert_agent(native_provider(transport), session_store=sessions, run_store=runs)
+    agent = inert_agent(
+        native_provider(transport),
+        model=default_model,
+        session_store=sessions,
+        run_store=runs,
+        durability=DurabilityOptions(exact_model_input=True),
+    )
     session = await agent.session(id="native-resume")
     await run(session)
     agent.tools.register(StubTool("new"))
+    session.pending_skill_overlay = SkillOverlay(model_override=turn_model)
     run_id = None
     with pytest.raises(Crash):
         async for event in session.run("add then crash"):
             run_id = getattr(event, "run_id", run_id)
     assert run_id is not None
     expected = json.dumps(transport.calls[-1], separators=(",", ":")).encode()
-    assert [tool["name"] for tool in transport.calls[-1]["tools"]] == ["base"]
-    assert len(native_tool_blocks(transport.calls[-1])) == 1
+    expected_names = ["base"] if positional else ["base", "new"]
+    assert [tool["name"] for tool in transport.calls[-1]["tools"]] == expected_names
+    assert bool(native_tool_blocks(transport.calls[-1])) is positional
 
     resumed_transport = WireTransport(text_turn("resumed"))
     resumed_agent = inert_agent(
         native_provider(resumed_transport),
+        model=default_model,
+        durability=DurabilityOptions(exact_model_input=True),
         tools=tool_registry(StubTool("base"), StubTool("new")),
         session_store=sessions,
         run_store=runs,
@@ -413,7 +435,7 @@ async def test_durable_resume_after_native_addition_replays_exact_pending_payloa
     events = [event async for event in restored.resume(run_id)]
     assert events[-1].subtype == "success"
     assert json.dumps(resumed_transport.calls[0], separators=(",", ":")).encode() == expected
-    assert notices(restored)[0].tool_definitions[0]["name"] == "new"
+    assert bool(notices(restored)[0].tool_definitions) is positional
     await resumed_agent.close()
     await agent.close()
 
@@ -604,4 +626,136 @@ async def test_responses_real_session_addition_and_removal_keep_prefix_tools():
         "mode": "auto",
         "tools": [{"type": "function", "name": "new"}],
     }
+    await agent.close()
+
+
+@pytest.mark.parametrize(
+    "default_model,turn_model,positional",
+    [
+        ("claude-opus-5", "claude-sonnet-5", False),
+        ("claude-sonnet-5", "claude-opus-5", True),
+    ],
+)
+@pytest.mark.parametrize("retry", [False, True])
+async def test_skill_model_override_controls_catalog_sync(
+    default_model, turn_model, positional, retry
+):
+    from linch.config import FeatureFlags
+    from linch.types import Message, SkillOverlay, TextBlock
+
+    class ContextOverflow(Exception):
+        status_code = 400
+
+    class Compact:
+        id = "native-model-overlay-compaction"
+
+        async def compact(self, ctx, _provider):
+            return [Message(role="user", content=[TextBlock("summary")]), *ctx.messages[2:]]
+
+    turns = [text_turn()]
+    if retry:
+        turns.append(ContextOverflow("prompt is too long"))
+    transport = WireTransport(*turns, text_turn())
+    agent = make_agent(
+        native_provider(transport),
+        model=default_model,
+        tools=tool_registry(StubTool("base")),
+        features=FeatureFlags(skills=False, subagents=False, mcp=False),
+        run_store=None,
+        **({"compaction": Compact()} if retry else {}),
+    )
+    session = await agent.session()
+    await run(session)
+    agent.tools.register(StubTool("new"))
+    session.pending_skill_overlay = SkillOverlay(model_override=turn_model)
+
+    await run(session)
+
+    assert transport.calls[-1]["model"] == turn_model
+    expected_names = ["base"] if positional else ["base", "new"]
+    assert [tool["name"] for tool in session.meta["linch.prefix"]["tools"]] == expected_names
+    assert [tool["name"] for tool in transport.calls[-1]["tools"]] == expected_names
+    assert bool(notices(session)[-1].tool_definitions) is positional
+    assert bool(native_tool_blocks(transport.calls[-1])) is positional
+    await agent.close()
+
+
+@pytest.mark.parametrize("compact", [False, True])
+async def test_exact_resume_native_addition_from_skill_model_after_tool_batch(compact):
+    from linch.durability import DurabilityOptions
+    from linch.run_store import InMemoryRunStore
+    from linch.sessions import InMemorySessionStore
+    from linch.types import SkillOverlay
+
+    class Crash(BaseException):
+        pass
+
+    def stage_overlay(*_):
+        agent.tools.register(StubTool("new"))
+        session.pending_skill_overlay = SkillOverlay(model_override="claude-opus-5")
+
+    sessions, runs = InMemorySessionStore(), InMemoryRunStore()
+    transport = WireTransport(tool_turn("base"), Crash())
+    registry = tool_registry(StubTool("base", on_execute=stage_overlay))
+    agent = inert_agent(
+        native_provider(transport),
+        model="claude-sonnet-5",
+        tools=registry,
+        session_store=sessions,
+        run_store=runs,
+        durability=DurabilityOptions(exact_model_input=True),
+    )
+    session = await agent.session(id="native-overlay-batch")
+    run_id = None
+    with pytest.raises(Crash):
+        async for event in session.run("stage native addition"):
+            run_id = getattr(event, "run_id", run_id)
+    assert run_id is not None
+    expected = json.dumps(transport.calls[-1], separators=(",", ":")).encode()
+    assert transport.calls[-1]["model"] == "claude-opus-5"
+    assert [tool["name"] for tool in transport.calls[-1]["tools"]] == ["base"]
+    assert len(native_tool_blocks(transport.calls[-1])) == 1
+
+    if compact:
+        from linch.abort import AbortContext
+        from linch.catalog import reset_catalog_notifications
+        from linch.compaction import _run_compaction_impl
+        from linch.profiles import _base_run_config
+
+        class DropNotices:
+            id = "native-overlay-drop-notices"
+
+            async def compact(self, ctx, _provider):
+                return [
+                    message
+                    for message in ctx.messages
+                    if not any(block.type == "catalog_change" for block in message.content)
+                ]
+
+        config = _base_run_config(session)
+        assert await _run_compaction_impl(
+            session, agent, AbortContext(), DropNotices(), _run_config=config
+        )
+        await reset_catalog_notifications(session, config)
+        from linch.loop.runtime import maybe_save_provider_snapshot
+
+        await maybe_save_provider_snapshot(session)
+        assert notices(session) == []
+
+    resumed_transport = WireTransport(text_turn("resumed"))
+    resumed_agent = inert_agent(
+        native_provider(resumed_transport),
+        model="claude-sonnet-5",
+        tools=tool_registry(StubTool("base"), StubTool("new")),
+        session_store=sessions,
+        run_store=runs,
+        durability=DurabilityOptions(exact_model_input=True),
+    )
+    restored = await resumed_agent.session(id="native-overlay-batch")
+    if compact:
+        assert notices(restored) == []
+    events = [event async for event in restored.resume(run_id)]
+    assert events[-1].subtype == "success"
+    assert json.dumps(resumed_transport.calls[0], separators=(",", ":")).encode() == expected
+    await resumed_agent.close()
     await agent.close()

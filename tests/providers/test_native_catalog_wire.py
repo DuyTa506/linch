@@ -170,6 +170,24 @@ def test_anthropic_gating(model, options, expected):
     )
 
 
+@pytest.mark.parametrize("base_url", [None, "https://api.anthropic.com"])
+async def test_anthropic_environment_endpoint_gates_native_catalog(monkeypatch, base_url):
+    from linch.providers.anthropic import AnthropicProvider, AnthropicProviderOptions
+
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://proxy.invalid")
+    options = AnthropicProviderOptions(native_catalog_changes=True, base_url=base_url)
+    expected = "append_only" if base_url is None else "positional"
+    assert AnthropicProvider(options).capabilities("claude-opus-5").catalog_changes == expected
+    wire = await capture_anthropic(
+        request([Message(role="user", content=[change(added=("new",), definitions=(NEW,))])]),
+        base_url=base_url,
+    )
+    assert any(message["role"] == "system" for message in wire["messages"]) == bool(base_url)
+    assert (
+        "inline-tools-2026-09-15" in wire.get("extra_headers", {}).get("anthropic-beta", "")
+    ) == bool(base_url)
+
+
 @pytest.mark.parametrize(
     "model,expected",
     [
@@ -299,6 +317,18 @@ async def test_anthropic_definition_limit():
     from linch.errors import ConfigError
 
     huge = {**NEW, "description": "x" * 4_194_305}
+    with pytest.raises(ConfigError, match="(?i)(tool|4|limit)"):
+        await capture_anthropic(
+            request([Message(role="user", content=[change(added=("new",), definitions=(huge,))])])
+        )
+
+
+async def test_anthropic_definition_limit_counts_utf8_bytes():
+    from linch.errors import ConfigError
+
+    # Under 4 MiB in characters, over it as an actual UTF-8 tool definition.
+    huge = {**NEW, "description": "界" * 1_400_000}
+    assert len(json.dumps(huge, ensure_ascii=False)) < 4_194_304
     with pytest.raises(ConfigError, match="(?i)(tool|4|limit)"):
         await capture_anthropic(
             request([Message(role="user", content=[change(added=("new",), definitions=(huge,))])])
@@ -540,10 +570,11 @@ async def test_anthropic_definition_limit_is_aggregate_and_pretransport():
     assert transport.calls == []
 
 
-async def test_anthropic_beta_merges_existing_header():
+@pytest.mark.parametrize("header", ["anthropic-beta", "Anthropic-Beta"])
+async def test_anthropic_beta_merges_existing_header(header):
     wire = await capture_anthropic(
         request([Message(role="user", content=[TextBlock("hi")])]),
-        default_headers={"anthropic-beta": "existing-beta"},
+        default_headers={header: "existing-beta"},
     )
     assert set(wire["extra_headers"]["anthropic-beta"].split(",")) == {
         "existing-beta",

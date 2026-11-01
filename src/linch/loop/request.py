@@ -8,6 +8,7 @@ from dataclasses import replace
 from typing import Any, Literal, cast
 
 from ..catalog import (
+    positional_catalog,
     snapshot_enabled,
     snapshot_for,
     snapshot_system,
@@ -248,8 +249,15 @@ def _build_turn_request(
     if context and context.messages:
         messages.extend(context.messages)
 
+    model = model_override or getattr(session, "active_model", None) or agent.model
+    positional = bool(
+        snapshot
+        and snapshot["tools"]
+        and positional_catalog(session, config, model)
+        and (context is None or context.selected_tools is None)
+    )
     if snapshot is not None:
-        frozen_tools = snapshot_tools(snapshot)
+        frozen_tools = snapshot_tools(snapshot, None if positional else config.tools.schemas())
         allowed = getattr(session, "current_turn_allowed_tools", None)
         selected_names: set[str] | None = None
         if allowed is not None:
@@ -276,7 +284,8 @@ def _build_turn_request(
     req = ProviderRequest(
         # A run-level fallback (set by the model-fallback recovery path) overrides
         # agent.model for the rest of the run; an explicit model_override wins.
-        model=model_override or getattr(session, "active_model", None) or agent.model,
+        model=model,
+        _native_catalog_changes=positional,
         system=base_system,
         tools=wire_tools,
         messages=messages,
