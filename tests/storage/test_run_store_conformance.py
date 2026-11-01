@@ -144,6 +144,37 @@ async def test_run_store_preserves_cyclic_tool_metadata_as_markers(store_case: _
     assert rows[0].event.tool_result.metadata == {"labels": ["stable"], "cycle": "<recursion>"}
 
 
+@pytest.mark.parametrize("kind", ["dict", "list", "mixed"])
+@pytest.mark.parametrize("wrappers", [0, 1, 2])
+async def test_run_store_preserves_opaque_event_at_exact_depth_boundary(
+    store_case: _StoreCase, kind: str, wrappers: int
+) -> None:
+    from typing import Any
+
+    from linch.events import IGNORABLE_MAX_DEPTH, IgnorableEvent, SubagentEvent, event_to_dict
+
+    payload: Any = "leaf"
+    for index in range(IGNORABLE_MAX_DEPTH - 1 - wrappers):
+        payload = (
+            {"next": payload} if kind == "dict" or (kind == "mixed" and index % 2) else [payload]
+        )
+    event = IgnorableEvent(
+        original_type="future_event",
+        raw={"type": "future_event", "ignorable": True, "payload": payload},
+    )
+    for _ in range(wrappers):
+        event = SubagentEvent("parent", "child", "worker", "Worker", event)
+    expected = event_to_dict(event)
+    store = store_case.store
+    run_id = f"conformance-{uuid4()}"
+    await store.create_run("session-1", id=run_id)
+
+    await store.append_event(run_id, event)
+    rows = await store.load_events(run_id)
+
+    assert event_to_dict(rows[0].event) == expected
+
+
 async def test_run_store_event_sequence_is_monotonic_under_concurrent_appends(
     store_case: _StoreCase,
 ) -> None:
