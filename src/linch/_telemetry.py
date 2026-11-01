@@ -125,11 +125,22 @@ def in_span(
                                 tool_span.end()
                         run.tool_spans.clear()
                         run.closed = True
-                        telemetry = telemetry_for(session.agent)
-                        if not any(
-                            not task.done() for task in getattr(session, "background_tasks", ())
-                        ):
-                            telemetry._runs.pop((session.id, run.run_id), None)
+                        pending = tuple(
+                            task
+                            for task in getattr(session, "background_tasks", ())
+                            if not task.done()
+                        )
+                        if pending:
+                            for task in pending:
+                                add_done_callback = getattr(task, "add_done_callback", None)
+                                if callable(add_done_callback):
+                                    add_done_callback(
+                                        lambda _done, *, _session=session, _run=run: (
+                                            _release_closed_run(_session, _run)
+                                        )
+                                    )
+                        else:
+                            _release_closed_run(session, run)
                         session._telemetry_run = previous
                     if end_on_exit:
                         span.end()
@@ -606,6 +617,14 @@ def _run_trace_for(session: Any, run_id: str | None = None) -> Any:
     return telemetry._runs.get((session.id, resolved_run_id))
 
 
+def _release_closed_run(session: Any, state: Any) -> None:
+    if not state.closed or state.tool_spans:
+        return
+    if any(not task.done() for task in getattr(session, "background_tasks", ())):
+        return
+    telemetry_for(session.agent)._runs.pop((session.id, state.run_id), None)
+
+
 def record_tool_result(
     session: Any, tool_use_id: str, result: Any, *, run_id: str | None = None
 ) -> None:
@@ -622,13 +641,13 @@ def record_tool_result(
         return
     span_info = state.tool_spans.pop(tool_use_id, None)
     if span_info is None:
+        _release_closed_run(session, state)
         return
     span, capture = span_info
     if capture and span.is_recording():
         span.set_attribute(TOOL_RESULT, str(result))
     span.end()
-    if state.closed and not state.tool_spans:
-        telemetry_for(session.agent)._runs.pop((session.id, state.run_id), None)
+    _release_closed_run(session, state)
 
 
 class _TelemetryProvider:
