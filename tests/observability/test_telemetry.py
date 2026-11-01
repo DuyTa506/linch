@@ -270,6 +270,99 @@ async def test_detached_tool_span_uses_originating_run_state(otel, monkeypatch):
     span_b.end()
 
 
+async def test_overlapping_detached_tools_keep_origin_registry_until_both_finish(otel, monkeypatch):
+    """One completed background tool must not retire a sibling's run registry."""
+    from types import SimpleNamespace
+
+    from linch._telemetry import _RunTrace, record_tool_result, telemetry_for, trace_tool
+
+    monkeypatch.setenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", "true")
+    context, exporter, _ = otel
+    agent = SimpleNamespace(context=context)
+    pending_tasks = [SimpleNamespace(done=lambda: False), SimpleNamespace(done=lambda: False)]
+    session = SimpleNamespace(
+        id="session",
+        agent=agent,
+        active_run_id="B",
+        _telemetry_run=None,
+        background_tasks=pending_tasks,
+    )
+    telemetry = telemetry_for(agent)
+    owner_span = telemetry.tracer.start_span("invoke_agent A")
+    owner = _RunTrace(owner_span, "A")
+    owner.closed = True
+    telemetry._runs[(session.id, "A")] = owner
+
+    @trace_tool
+    async def execute(call, *_args, **_kwargs):
+        return SimpleNamespace(
+            block=SimpleNamespace(content=f"raw-{call.id}", is_error=False), error_type=None
+        )
+
+    def call(call_id):
+        return SimpleNamespace(
+            id=call_id,
+            _run_id="A",
+            block=SimpleNamespace(name="echo"),
+            input={},
+        )
+
+    first, second = call("first"), call("second")
+    await execute(first, None, agent, session, None, run_id="A")
+    record_tool_result(session, first.id, "redacted-first", run_id="A")
+    await execute(second, None, agent, session, None, run_id="A")
+    assert len(owner.tool_spans) == 1
+    record_tool_result(session, second.id, "redacted-second", run_id="A")
+    assert (session.id, "A") in telemetry._runs
+    pending_tasks[0].done = lambda: True
+    pending_tasks[1].done = lambda: True
+    record_tool_result(session, "no-span", "ignored", run_id="A")
+    assert (session.id, "A") not in telemetry._runs
+    assert {
+        span.attributes.get("gen_ai.tool.call.result")
+        for span in exporter.get_finished_spans()
+        if span.attributes.get("gen_ai.operation.name") == "execute_tool"
+    } == {"redacted-first", "redacted-second"}
+    owner_span.end()
+
+
+async def test_capture_off_releases_closed_run_registry_after_background_tasks_finish(
+    otel, monkeypatch
+):
+    """Capture-off runs must not retain a registry after detached work drains."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from linch._telemetry import in_span, telemetry_for
+
+    monkeypatch.delenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", raising=False)
+    context, _, _ = otel
+    agent = SimpleNamespace(context=context)
+    release = asyncio.Event()
+    task = asyncio.create_task(release.wait())
+    session = SimpleNamespace(
+        id="session",
+        agent=agent,
+        active_run_id="run",
+        _telemetry_run=None,
+        background_tasks=[task],
+    )
+    telemetry = telemetry_for(agent)
+    run_span = telemetry.tracer.start_span("invoke_agent")
+
+    async def events():
+        yield SimpleNamespace(type="system")
+
+    iterator = in_span(events(), run_span, session=session, run_id="run")
+    await anext(iterator)
+    await iterator.aclose()
+    assert (session.id, "run") in telemetry._runs
+    release.set()
+    await task
+    await asyncio.sleep(0)
+    assert (session.id, "run") not in telemetry._runs
+
+
 async def test_provider_services_are_isolated_and_errors_are_private(otel):
     from linch._telemetry import Telemetry, set_error
 
