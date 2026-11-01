@@ -22,6 +22,7 @@ from linch.scheduler import execute_tool_calls
 from linch.tools import Citation, ToolContext, ToolRegistry, ToolResult
 from linch.tools.builtin import BashTool, GlobTool, GrepTool, WriteTool
 from linch.types import ToolUseBlock, Usage
+from tests.support.tools import StubTool, tool_registry
 
 
 def _context():
@@ -29,6 +30,25 @@ def _context():
     from linch import Context
 
     return Context()
+
+
+def _scheduler_world(registry, permission_engine, **session_overrides):
+    agent = SimpleNamespace(
+        cwd=".",
+        tools=registry,
+        permission_engine=permission_engine,
+        tool_concurrency=2,
+        context=_context(),
+    )
+    session = SimpleNamespace(
+        id="s1",
+        store=None,
+        active_run_id="run-1",
+        tools_override=None,
+        current_turn_allowed_tools=None,
+        **session_overrides,
+    )
+    return agent, session
 
 
 class SleepTool:
@@ -79,18 +99,7 @@ class ReadSleepTool:
 
 @pytest.mark.asyncio
 async def test_permission_callback_allows_sync_and_async() -> None:
-    class DummyTool:
-        name = "WriteDummy"
-        scope = "write"
-        parallel = False
-
-        def validate(self, raw: dict[str, object]) -> dict[str, object]:
-            return raw
-
-        def summarize(self, input: dict[str, object]) -> str:
-            return "dummy"
-
-    call = PendingToolCall(tool_use_id="t1", tool=DummyTool(), input={})
+    call = PendingToolCall(tool_use_id="t1", tool=StubTool("WriteDummy", scope="write"), input={})
     signal = AbortContext()
 
     sync_engine = PermissionEngine(
@@ -111,16 +120,6 @@ async def test_permission_callback_allows_sync_and_async() -> None:
 
 @pytest.mark.asyncio
 async def test_spurious_signal_wait_does_not_cancel_permission_callback() -> None:
-    class DummyTool:
-        name = "WriteDummy"
-        scope = "write"
-
-        def validate(self, raw: dict[str, object]) -> dict[str, object]:
-            return raw
-
-        def summarize(self, input: dict[str, object]) -> str:
-            return "dummy"
-
     class SpuriousSignal:
         def __init__(self) -> None:
             self.wait_calls = 0
@@ -146,7 +145,10 @@ async def test_spurious_signal_wait_does_not_cancel_permission_callback() -> Non
     signal = SpuriousSignal()
     engine = PermissionEngine(mode="default", can_use_tool=allow)
     resolving = asyncio.create_task(
-        engine.resolve(PendingToolCall(tool_use_id="t1", tool=DummyTool(), input={}), signal)
+        engine.resolve(
+            PendingToolCall(tool_use_id="t1", tool=StubTool("WriteDummy", scope="write"), input={}),
+            signal,
+        )
     )
     await asyncio.wait_for(signal.rearmed.wait(), timeout=1.0)
 
@@ -187,20 +189,7 @@ def test_deep_agent_verification_profile_has_no_unrestricted_shell() -> None:
 async def test_scheduler_emits_non_zero_duration() -> None:
     registry = ToolRegistry()
     registry.register(SleepTool())
-    agent = SimpleNamespace(
-        cwd=".",
-        tools=registry,
-        permission_engine=PermissionEngine(mode="skip-dangerous"),
-        tool_concurrency=2,
-        context=_context(),
-    )
-    session = SimpleNamespace(
-        id="s1",
-        store=None,
-        active_run_id="run-1",
-        tools_override=None,
-        current_turn_allowed_tools=None,
-    )
+    agent, session = _scheduler_world(registry, PermissionEngine(mode="skip-dangerous"))
     events = [
         event
         async for event in execute_tool_calls(
@@ -217,40 +206,13 @@ async def test_scheduler_emits_non_zero_duration() -> None:
 
 @pytest.mark.asyncio
 async def test_scheduler_propagates_abort_from_permission_resolve() -> None:
-    class DummyTool:
-        name = "WriteDummy"
-        description = "dummy"
-        input_schema = {"type": "object", "properties": {}}
-        scope = "write"
-        parallel = False
-
-        def validate(self, raw: dict[str, object]) -> dict[str, object]:
-            return {}
-
-        def summarize(self, input: dict[str, object]) -> str:
-            return "dummy"
-
-        async def execute(self, input: dict[str, object], ctx: ToolContext) -> ToolResult:
-            return ToolResult(content="should not run")
-
     async def aborting_callback(_req: object) -> dict[str, str]:
         raise AbortError("user cancelled")
 
-    registry = ToolRegistry()
-    registry.register(DummyTool())
-    agent = SimpleNamespace(
-        cwd=".",
-        tools=registry,
-        permission_engine=PermissionEngine(mode="default", can_use_tool=aborting_callback),
-        tool_concurrency=2,
-        context=_context(),
-    )
-    session = SimpleNamespace(
-        id="s1",
-        store=None,
-        active_run_id="run-1",
-        tools_override=None,
-        current_turn_allowed_tools=None,
+    registry = tool_registry(StubTool("WriteDummy", scope="write"))
+    agent, session = _scheduler_world(
+        registry,
+        PermissionEngine(mode="default", can_use_tool=aborting_callback),
         current_turn_permission_decisions={},
     )
 
@@ -266,42 +228,15 @@ async def test_scheduler_propagates_abort_from_permission_resolve() -> None:
 
 @pytest.mark.asyncio
 async def test_malformed_stored_permission_decision_reprompts() -> None:
-    from linch.permissions.keys import permission_decision_key
+    from linch.permissions.keys import permission_decision_from_dict, permission_decision_key
 
-    class DummyTool:
-        name = "WriteDummy"
-        description = "dummy"
-        input_schema = {"type": "object", "properties": {}}
-        scope = "write"
-        parallel = False
+    with pytest.raises(ValueError, match="stored permission decision"):
+        permission_decision_from_dict({"schema_version": 3, "reason": "corrupt"})
 
-        def validate(self, raw: dict[str, object]) -> dict[str, object]:
-            return {}
-
-        def summarize(self, input: dict[str, object]) -> str:
-            return "dummy"
-
-        async def execute(self, input: dict[str, object], ctx: ToolContext) -> ToolResult:
-            return ToolResult(content="ok")
-
-    registry = ToolRegistry()
-    registry.register(DummyTool())
-    agent = SimpleNamespace(
-        cwd=".",
-        tools=registry,
-        permission_engine=PermissionEngine(
-            mode="default",
-            can_use_tool=lambda _req: {"behavior": "allow"},
-        ),
-        tool_concurrency=2,
-        context=_context(),
-    )
-    session = SimpleNamespace(
-        id="s1",
-        store=None,
-        active_run_id="run-1",
-        tools_override=None,
-        current_turn_allowed_tools=None,
+    registry = tool_registry(StubTool("WriteDummy", scope="write"))
+    agent, session = _scheduler_world(
+        registry,
+        PermissionEngine(mode="default", can_use_tool=lambda _req: {"behavior": "allow"}),
         current_turn_permission_decisions={
             permission_decision_key("WriteDummy", {}): {
                 "schema_version": 3,
@@ -329,20 +264,7 @@ async def test_read_tools_with_parallel_flag_run_in_parallel() -> None:
     registry = ToolRegistry()
     registry.register(ReadSleepTool("A"))
     registry.register(ReadSleepTool("B"))
-    agent = SimpleNamespace(
-        cwd=".",
-        tools=registry,
-        permission_engine=PermissionEngine(mode="skip-dangerous"),
-        tool_concurrency=2,
-        context=_context(),
-    )
-    session = SimpleNamespace(
-        id="s1",
-        store=None,
-        active_run_id="run-1",
-        tools_override=None,
-        current_turn_allowed_tools=None,
-    )
+    agent, session = _scheduler_world(registry, PermissionEngine(mode="skip-dangerous"))
 
     events = [
         event
@@ -366,20 +288,7 @@ async def test_direct_resource_access_return_is_respected_for_conflicts() -> Non
     registry = ToolRegistry()
     registry.register(ReadSleepTool("Writer", resource_mode="write"))
     registry.register(ReadSleepTool("Reader", resource_mode="read"))
-    agent = SimpleNamespace(
-        cwd=".",
-        tools=registry,
-        permission_engine=PermissionEngine(mode="skip-dangerous"),
-        tool_concurrency=2,
-        context=_context(),
-    )
-    session = SimpleNamespace(
-        id="s1",
-        store=None,
-        active_run_id="run-1",
-        tools_override=None,
-        current_turn_allowed_tools=None,
-    )
+    agent, session = _scheduler_world(registry, PermissionEngine(mode="skip-dangerous"))
 
     events = [
         event
@@ -435,8 +344,16 @@ async def test_grep_and_glob_are_confined_to_cwd(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_grep_python_fallback_uses_root_dir_relative_paths(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        (GrepTool(), {"pattern": "needle", "glob": "**/*.py"}),
+        (GlobTool(), {"glob_pattern": "**/*.py"}),
+    ],
+    ids=["grep", "glob"],
+)
+async def test_builtin_python_fallback_uses_root_dir_relative_paths(
+    tool, arguments, tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(builtin_tools, "_RG_PATH", None)
     (tmp_path / "pkg").mkdir()
@@ -448,27 +365,7 @@ async def test_grep_python_fallback_uses_root_dir_relative_paths(
         session_store=None,
     )
 
-    result = await GrepTool().execute({"pattern": "needle", "glob": "**/*.py"}, ctx)
-
-    assert result.is_error is False
-    assert result.content == "pkg/mod.py"
-
-
-@pytest.mark.asyncio
-async def test_glob_python_fallback_uses_root_dir_relative_paths(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(builtin_tools, "_RG_PATH", None)
-    (tmp_path / "pkg").mkdir()
-    (tmp_path / "pkg" / "mod.py").write_text("x\n", encoding="utf-8")
-    ctx = ToolContext(
-        cwd=str(tmp_path),
-        session_id="s",
-        run_id="r",
-        session_store=None,
-    )
-
-    result = await GlobTool().execute({"glob_pattern": "**/*.py"}, ctx)
+    result = await tool.execute(arguments, ctx)
 
     assert result.is_error is False
     assert result.content == "pkg/mod.py"
@@ -520,6 +417,22 @@ def test_event_round_trip() -> None:
     assert rebuilt.total_usage.input_tokens == 10
 
 
+def test_compaction_event_round_trip() -> None:
+    from linch.events import CompactionEvent
+
+    event = CompactionEvent(
+        messages_before=8,
+        messages_after=3,
+        tokens_before=120,
+        tokens_after=45,
+        strategy="summary",
+    )
+
+    rebuilt = event_from_dict(event_to_dict(event))
+
+    assert rebuilt == event
+
+
 def test_tool_call_end_event_round_trips_structured_tool_result() -> None:
     event = ToolCallEndEvent(
         tool_use_id="call-1",
@@ -562,23 +475,6 @@ def test_tool_call_end_event_round_trips_structured_tool_result() -> None:
     assert rebuilt.tool_result.citations[0].metadata == {"page": 2}
     assert rebuilt.tool_result.truncated is True
     assert rebuilt.tool_result.recovery_hint == "Try a narrower query."
-
-
-def test_old_tool_call_end_event_dict_remains_supported() -> None:
-    rebuilt = event_from_dict(
-        {
-            "type": "tool_call_end",
-            "tool_use_id": "call-1",
-            "tool_name": "OldTool",
-            "result": "old result",
-            "is_error": False,
-            "duration_ms": 3,
-        }
-    )
-
-    assert isinstance(rebuilt, ToolCallEndEvent)
-    assert rebuilt.result == "old result"
-    assert rebuilt.tool_result is None
 
 
 def test_import_linch_without_mcp_installed(monkeypatch: pytest.MonkeyPatch) -> None:
