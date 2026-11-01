@@ -1,26 +1,22 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from types import MappingProxyType
 from typing import Any
 
 import pytest
 
+from tests.support.agents import make_agent
+from tests.support.providers import ScriptedProvider
 
-def _provider() -> Any:
-    from linch.providers import BaseProvider
 
-    class _Provider(BaseProvider):
-        id = "fork-test"
-
-        def context_window(self, model: str) -> int:
-            return 100_000
-
-        async def stream(self, req: Any) -> AsyncIterator[dict[str, object]]:
-            if False:  # pragma: no cover - the fork tests never call the provider
-                yield {}
-
-    return _Provider()
+def _agent(store: Any) -> Any:
+    """Build the inert agent shared by fork scenarios."""
+    return make_agent(
+        ScriptedProvider([]),
+        session_store=store,
+        run_store=None,
+        model="test",
+    )
 
 
 def _history() -> list[Any]:
@@ -70,13 +66,12 @@ async def _seed(agent: Any, store: Any) -> Any:
 
 
 async def test_memory_tail_fork_is_independent_and_copies_no_transient_state() -> None:
-    from linch import Agent
     from linch.sessions import InMemorySessionStore, ProviderViewSnapshot
     from linch.sessions.fork import fork_session
     from linch.types import Message, TextBlock, message_to_dict
 
     store = InMemorySessionStore()
-    agent = Agent(model="test", provider=_provider(), session_store=store, cwd=".")
+    agent = _agent(store)
     source = await _seed(agent, store)
     await store.save_provider_snapshot(
         source.id,
@@ -128,13 +123,12 @@ async def test_memory_tail_fork_is_independent_and_copies_no_transient_state() -
 
 
 async def test_earlier_fork_filters_skills_and_rejects_dangling_tool_use() -> None:
-    from linch import Agent
     from linch.errors import ConfigError
     from linch.sessions import InMemorySessionStore
     from linch.sessions.fork import fork_session
 
     store = InMemorySessionStore()
-    agent = Agent(model="test", provider=_provider(), session_store=store, cwd=".")
+    agent = _agent(store)
     source = await _seed(agent, store)
 
     child = await fork_session(agent, "source", before_seq=5, id="early-fork")
@@ -159,7 +153,6 @@ async def test_earlier_fork_filters_skills_and_rejects_dangling_tool_use() -> No
 
 
 async def test_custom_id_requires_positive_atomic_ownership() -> None:
-    from linch import Agent
     from linch.errors import ConfigError
     from linch.sessions import InMemorySessionStore
     from linch.sessions.fork import fork_session
@@ -187,7 +180,7 @@ async def test_custom_id_requires_positive_atomic_ownership() -> None:
             await super().delete(id)
 
     store = RaceLosingStore()
-    agent = Agent(model="test", provider=_provider(), session_store=store, cwd=".")
+    agent = _agent(store)
     source = await _seed(agent, store)
 
     with pytest.raises(ConfigError, match="already exists"):
@@ -212,7 +205,6 @@ async def test_custom_id_requires_positive_atomic_ownership() -> None:
 async def test_fork_handoff_does_not_evict_or_delete_concurrent_active_session() -> None:
     import asyncio
 
-    from linch import Agent
     from linch.sessions import InMemorySessionStore
     from linch.sessions.fork import fork_session
 
@@ -235,7 +227,7 @@ async def test_fork_handoff_does_not_evict_or_delete_concurrent_active_session()
             await super().delete(id)
 
     store = HandoffStore()
-    agent = Agent(model="test", provider=_provider(), session_store=store, cwd=".")
+    agent = _agent(store)
     source = await _seed(agent, store)
     forking = asyncio.create_task(fork_session(agent, source, id="handoff-target"))
     await store.target_ready.wait()
@@ -258,7 +250,6 @@ async def test_fork_handoff_does_not_evict_or_delete_concurrent_active_session()
 async def test_failed_partial_fork_cleanup_is_logged(caplog: Any) -> None:
     import logging
 
-    from linch import Agent
     from linch.sessions import InMemorySessionStore
     from linch.sessions.fork import fork_session
     from linch.types import Message
@@ -275,7 +266,7 @@ async def test_failed_partial_fork_cleanup_is_logged(caplog: Any) -> None:
             await super().delete(id)
 
     store = CleanupFailingStore()
-    agent = Agent(model="test", provider=_provider(), session_store=store, cwd=".")
+    agent = _agent(store)
     source = await _seed(agent, store)
 
     with caplog.at_level(logging.WARNING, logger="linch.sessions.fork"):
@@ -289,14 +280,13 @@ async def test_failed_partial_fork_cleanup_is_logged(caplog: Any) -> None:
 async def test_postgres_fork_survives_restart_without_snapshot_or_tasks(
     pg_dsn,
 ) -> None:
-    from linch import Agent
     from linch.sessions import ProviderViewSnapshot
     from linch.sessions.fork import fork_session
     from linch.sessions.postgres import PostgresSessionStore
     from linch.types import Message, TextBlock, message_to_dict
 
     first_store = PostgresSessionStore(pg_dsn)
-    first_agent = Agent(model="test", provider=_provider(), session_store=first_store, cwd=".")
+    first_agent = _agent(first_store)
     source = await _seed(first_agent, first_store)
     await first_store.save_provider_snapshot(
         source.id,
@@ -314,7 +304,7 @@ async def test_postgres_fork_survives_restart_without_snapshot_or_tasks(
     await first_agent.close()
 
     second_store = PostgresSessionStore(pg_dsn)
-    second_agent = Agent(model="test", provider=_provider(), session_store=second_store, cwd=".")
+    second_agent = _agent(second_store)
     reopened = await second_agent.session(id="postgres-fork")
 
     assert len(reopened.full_history) == 4

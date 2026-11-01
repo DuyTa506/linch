@@ -37,6 +37,17 @@ def _texts(messages: list[Message]) -> list[str]:
     return [b.text for m in messages for b in m.content if isinstance(b, TextBlock)]
 
 
+def _snapshot_agent(store: Any) -> Any:
+    """Build the inert agent used by store-backed snapshot tests."""
+    return make_agent(
+        ScriptedProvider([TextTurn("ok")], context_window=100_000),
+        session_store=store,
+        run_store=None,
+        model="gpt-5",
+        result_offload=None,
+    )
+
+
 # ── store-level snapshot round-trip ──────────────────────────────────────────
 
 
@@ -117,13 +128,7 @@ def test_snapshot_from_dict_defaults_missing_keys() -> None:
 
 async def test_reload_restores_compacted_view_plus_newer_messages() -> None:
     store = InMemorySessionStore()
-    agent = make_agent(
-        ScriptedProvider([TextTurn("ok")], context_window=100_000),
-        session_store=store,
-        run_store=None,
-        model="gpt-5",
-        result_offload=None,
-    )
+    agent = _snapshot_agent(store)
     session = await agent.session(id="s1")
     await session.append([_msg("m1"), _msg("m2"), _msg("m3")])  # seq 1..3
 
@@ -134,13 +139,7 @@ async def test_reload_restores_compacted_view_plus_newer_messages() -> None:
     )
     await session.append([_msg("m4")])  # seq 4, newer than the snapshot watermark
 
-    reloaded = await make_agent(
-        ScriptedProvider([TextTurn("ok")], context_window=100_000),
-        session_store=store,
-        run_store=None,
-        model="gpt-5",
-        result_offload=None,
-    ).session(id="s1")
+    reloaded = await _snapshot_agent(store).session(id="s1")
 
     assert _texts(reloaded.full_history) == ["m1", "m2", "m3", "m4"]  # audit log intact
     assert _texts(reloaded.provider_view) == ["SUMMARY", "m3", "m4"]  # view + newer msgs
@@ -149,23 +148,11 @@ async def test_reload_restores_compacted_view_plus_newer_messages() -> None:
 
 async def test_reload_without_snapshot_rebuilds_from_full_history() -> None:
     store = InMemorySessionStore()
-    agent = make_agent(
-        ScriptedProvider([TextTurn("ok")], context_window=100_000),
-        session_store=store,
-        run_store=None,
-        model="gpt-5",
-        result_offload=None,
-    )
+    agent = _snapshot_agent(store)
     session = await agent.session(id="s1")
     await session.append([_msg("m1"), _msg("m2")])
 
-    reloaded = await make_agent(
-        ScriptedProvider([TextTurn("ok")], context_window=100_000),
-        session_store=store,
-        run_store=None,
-        model="gpt-5",
-        result_offload=None,
-    ).session(id="s1")
+    reloaded = await _snapshot_agent(store).session(id="s1")
     assert _texts(reloaded.provider_view) == ["m1", "m2"]
     assert reloaded.provider_view is not reloaded.full_history
     assert _texts(reloaded.provider_view) == _texts(reloaded.full_history)
@@ -200,13 +187,7 @@ async def test_custom_store_without_snapshot_methods_falls_back() -> None:
     store._seed("s1", [_msg("m1"), _msg("m2")])
     assert not hasattr(store, "load_provider_snapshot")
 
-    reloaded = await make_agent(
-        ScriptedProvider([TextTurn("ok")], context_window=100_000),
-        session_store=store,
-        run_store=None,
-        model="gpt-5",
-        result_offload=None,
-    ).session(id="s1")
+    reloaded = await _snapshot_agent(store).session(id="s1")
     assert _texts(reloaded.provider_view) == ["m1", "m2"]  # rebuilt from full history
 
 
@@ -217,13 +198,7 @@ async def test_maybe_save_provider_snapshot_persists_current_view() -> None:
     from linch.loop.runner import _maybe_save_provider_snapshot
 
     store = InMemorySessionStore()
-    session = await make_agent(
-        ScriptedProvider([TextTurn("ok")], context_window=100_000),
-        session_store=store,
-        run_store=None,
-        model="gpt-5",
-        result_offload=None,
-    ).session(id="s1")
+    session = await _snapshot_agent(store).session(id="s1")
     await session.append([_msg("a"), _msg("b")])  # full_history == 2
     session.session_log.record_projection([_msg("SUM")], reason="test-compaction")
 
@@ -244,23 +219,11 @@ async def test_reload_falls_back_when_snapshot_loader_raises() -> None:
             raise RuntimeError("corrupt snapshot blob")
 
     store = _RaisingStore()
-    agent = make_agent(
-        ScriptedProvider([TextTurn("ok")], context_window=100_000),
-        session_store=store,
-        run_store=None,
-        model="gpt-5",
-        result_offload=None,
-    )
+    agent = _snapshot_agent(store)
     session = await agent.session(id="s1")
     await session.append([_msg("m1"), _msg("m2")])
 
-    reloaded = await make_agent(
-        ScriptedProvider([TextTurn("ok")], context_window=100_000),
-        session_store=store,
-        run_store=None,
-        model="gpt-5",
-        result_offload=None,
-    ).session(id="s1")
+    reloaded = await _snapshot_agent(store).session(id="s1")
     # A raising loader must not abort the reload — rebuild from full history.
     assert _texts(reloaded.provider_view) == ["m1", "m2"]
 
@@ -277,76 +240,27 @@ async def test_reload_propagates_incompatible_snapshot_version() -> None:
             raise UnsupportedWireVersionError("state was written by Linch < 3.0; start a new run")
 
     store = _IncompatibleStore()
-    agent = make_agent(
-        ScriptedProvider([TextTurn("ok")], context_window=100_000),
-        session_store=store,
-        run_store=None,
-        model="gpt-5",
-        result_offload=None,
-    )
+    agent = _snapshot_agent(store)
     session = await agent.session(id="s1")
     await session.append([_msg("m1")])
     store.raise_incompatible = True
 
     with pytest.raises(UnsupportedWireVersionError, match="start a new run"):
-        await make_agent(
-            ScriptedProvider([TextTurn("ok")], context_window=100_000),
-            session_store=store,
-            run_store=None,
-            model="gpt-5",
-            result_offload=None,
-        ).session(id="s1")
+        await _snapshot_agent(store).session(id="s1")
 
 
-async def test_reload_falls_back_on_out_of_range_watermark() -> None:
+@pytest.mark.parametrize("watermark", [999, -5], ids=["too-large", "negative"])
+async def test_reload_falls_back_on_invalid_watermark(watermark: int) -> None:
     store = InMemorySessionStore()
-    agent = make_agent(
-        ScriptedProvider([TextTurn("ok")], context_window=100_000),
-        session_store=store,
-        run_store=None,
-        model="gpt-5",
-        result_offload=None,
-    )
+    agent = _snapshot_agent(store)
     session = await agent.session(id="s1")
     await session.append([_msg("m1"), _msg("m2"), _msg("m3")])  # seq 1..3
-    # A watermark past the last stored seq would drop real messages from the view.
     await store.save_provider_snapshot(
-        "s1", ProviderViewSnapshot(provider_view=[_msg("SUMMARY")], covers_seq=999)
+        "s1", ProviderViewSnapshot(provider_view=[_msg("SUMMARY")], covers_seq=watermark)
     )
 
-    reloaded = await make_agent(
-        ScriptedProvider([TextTurn("ok")], context_window=100_000),
-        session_store=store,
-        run_store=None,
-        model="gpt-5",
-        result_offload=None,
-    ).session(id="s1")
-    assert _texts(reloaded.provider_view) == ["m1", "m2", "m3"]  # fell back to full history
-
-
-async def test_reload_falls_back_on_negative_watermark() -> None:
-    store = InMemorySessionStore()
-    agent = make_agent(
-        ScriptedProvider([TextTurn("ok")], context_window=100_000),
-        session_store=store,
-        run_store=None,
-        model="gpt-5",
-        result_offload=None,
-    )
-    session = await agent.session(id="s1")
-    await session.append([_msg("m1"), _msg("m2")])
-    await store.save_provider_snapshot(
-        "s1", ProviderViewSnapshot(provider_view=[_msg("SUMMARY")], covers_seq=-5)
-    )
-
-    reloaded = await make_agent(
-        ScriptedProvider([TextTurn("ok")], context_window=100_000),
-        session_store=store,
-        run_store=None,
-        model="gpt-5",
-        result_offload=None,
-    ).session(id="s1")
-    assert _texts(reloaded.provider_view) == ["m1", "m2"]
+    reloaded = await _snapshot_agent(store).session(id="s1")
+    assert _texts(reloaded.provider_view) == ["m1", "m2", "m3"]
 
 
 async def test_snapshot_caching_disabled_when_store_seqs_non_monotonic() -> None:
@@ -358,13 +272,7 @@ async def test_snapshot_caching_disabled_when_store_seqs_non_monotonic() -> None
             return [StoredMessage(seq=1, appended_at="t", message=m) for m in messages]
 
     store = _NonMonotonicStore()
-    session = await make_agent(
-        ScriptedProvider([TextTurn("ok")], context_window=100_000),
-        session_store=store,
-        run_store=None,
-        model="gpt-5",
-        result_offload=None,
-    ).session(id="s1")
+    session = await _snapshot_agent(store).session(id="s1")
     await session.append([_msg("a")])
     await session.append([_msg("b")])  # seq 1 again → non-increasing
     assert session._seq_cacheable is False
@@ -391,13 +299,7 @@ async def test_snapshot_watermark_tolerates_gapped_seqs() -> None:
             return out
 
     store = _GappedStore()
-    session = await make_agent(
-        ScriptedProvider([TextTurn("ok")], context_window=100_000),
-        session_store=store,
-        run_store=None,
-        model="gpt-5",
-        result_offload=None,
-    ).session(id="s1")
+    session = await _snapshot_agent(store).session(id="s1")
     await session.append([_msg("a"), _msg("b")])  # seq 10, 20
     assert session._seq_cacheable is True
     assert session._last_seq == 20
