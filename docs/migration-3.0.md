@@ -28,6 +28,7 @@ The tables below group the 2.x removals and replacements by area.
 | `AgentMiddleware` and obsolete middleware dispatch/outcome helpers | Duck-typed hooks through `ToolMiddlewareHook`; `from linch import ToolMiddlewareHook` |
 | Background completion writing directly into notification lists | Custom sessions implement async `notify(...)` |
 | `parallel_safe` fallback | Declare `parallel`: read tools use a boolean opt-in; an input-aware predicate may also admit calls in another scope, such as a subagent restricted to read tools |
+| Ambiguous worker display names for `SubagentContinue` or `TaskStop` | Pass the unique `worker_id`; unique display names remain accepted |
 | `Agent(mailbox=...)` | Mount the plugin: `await agent.use(MailboxPlugin(), mailbox)`; `from linch import MailboxPlugin` |
 | `Agent(ask_user=...)` | Mount the plugin: `await agent.use(AskUserPlugin(), handler)`; `from linch import AskUserPlugin` |
 | Large tool or skill catalogs | `ToolSearchPlugin` is mounted by default; use `await agent.tool_search.dispose()` to restore the unfiltered catalog, or mount `ToolSearchPlugin(max_tools=..., max_skills=...)` explicitly |
