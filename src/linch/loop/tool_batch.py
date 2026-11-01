@@ -8,7 +8,7 @@ runner remains responsible for the turn boundary around the batch.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import aclosing
 from dataclasses import dataclass
 from typing import Any
@@ -64,13 +64,13 @@ class ToolBatchContext:
     flush_events: Callable[[], Awaitable[None]]
     persist_event: Callable[[Event], Awaitable[None]]
     dispatch_lifecycle: Callable[..., Awaitable[None]]
-    emit_error_terminal: Callable[..., AsyncIterator[Event]]
+    emit_error_terminal: Callable[..., AsyncGenerator[Event, None]]
     observe_results: Callable[[list[ToolUseBlock], dict[str, ToolResultBlock]], None] | None = None
     force_final_pending: bool = False
     terminal: bool = False
 
 
-async def run_tool_batch(ctx: ToolBatchContext) -> AsyncIterator[Event]:
+async def run_tool_batch(ctx: ToolBatchContext) -> AsyncGenerator[Event, None]:
     """Execute one assistant tool-use batch and yield its durable projection."""
     session = ctx.session
     resuming_turn = (

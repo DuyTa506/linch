@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -130,7 +130,7 @@ async def _budget_exhausted_tail(
     duration_ms: int,
     running_cost: float | None,
     usage_complete: bool = True,
-) -> AsyncIterator[Event]:
+) -> AsyncGenerator[Event, None]:
     """Emit the graceful-stop event sequence for an exhausted RunBudget."""
     event: Event = BudgetEvent(
         kind="exceeded",
@@ -186,7 +186,7 @@ async def _stop_when_tail(
     duration_ms: int,
     running_cost: float | None,
     usage_complete: bool = True,
-) -> AsyncIterator[Event]:
+) -> AsyncGenerator[Event, None]:
     """Emit the graceful-stop event sequence for a met stop_when predicate."""
     event: Event = ResultEvent(
         subtype="success",
@@ -215,7 +215,7 @@ async def _error_result_tail(
     running_cost: float | None,
     final_text_value: str | None = None,
     usage_complete: bool = True,
-) -> AsyncIterator[Event]:
+) -> AsyncGenerator[Event, None]:
     """Emit the error ResultEvent and mark the run failed.
 
     Shared by the loop-guard hard stop and the verifier ``stop`` verdict."""
@@ -257,7 +257,7 @@ async def _success_result_tail(
     structured_output: dict[str, Any] | None = None,
     structured_error: str | None = None,
     usage_complete: bool = True,
-) -> AsyncIterator[Event]:
+) -> AsyncGenerator[Event, None]:
     """Emit the success ResultEvent and mark the run completed.
 
     Shared by the final-text and final-tool terminal paths."""
@@ -290,7 +290,7 @@ async def _max_turns_tail(
     duration_ms: int,
     running_cost: float | None,
     usage_complete: bool = True,
-) -> AsyncIterator[Event]:
+) -> AsyncGenerator[Event, None]:
     """Emit the guard/error/result sequence for an exhausted max_turns."""
     turn_error = {
         "name": "TurnLimitError",
@@ -336,7 +336,7 @@ async def _gate_retry_tail(
     *,
     run_id: str,
     feedback: str,
-) -> AsyncIterator[Event]:
+) -> AsyncGenerator[Event, None]:
     """Inject gate *feedback* as a system-reminder user message."""
     from ..skills.system_reminder import wrap_in_system_reminder
 
@@ -353,7 +353,7 @@ async def _final_tool_retry_tail(
     final_id: str,
     feedback: str,
     final_is_error: bool = True,
-) -> AsyncIterator[Event]:
+) -> AsyncGenerator[Event, None]:
     """Bounce a final-tool answer back into the loop with *feedback*.
 
     Unlike :func:`_gate_retry_tail`, the assistant message that triggered this

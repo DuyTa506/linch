@@ -11,7 +11,7 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import aclosing
 from dataclasses import replace
 from functools import partial
@@ -200,7 +200,7 @@ def restore_checkpointable_hooks(
             raise RuntimeError(f"checkpointable hook {key!r} failed to restore state") from exc
 
 
-async def drain_pending_notifications(session: Session, run_id: str) -> AsyncIterator[Event]:
+async def drain_pending_notifications(session: Session, run_id: str) -> AsyncGenerator[Event, None]:
     """Inject pending background-worker notifications into provider history.
 
     Args:
@@ -290,7 +290,9 @@ async def drain_pending_notifications(session: Session, run_id: str) -> AsyncIte
         yield event
 
 
-async def drain_inbox(session: Session, run_id: str, *, config: Any = None) -> AsyncIterator[Event]:
+async def drain_inbox(
+    session: Session, run_id: str, *, config: Any = None
+) -> AsyncGenerator[Event, None]:
     """Consume context inbox producers at the top of a turn."""
     producers = tuple(session.agent.context._inbox or ())
     if config is not None and config.context is not session.agent.context:
@@ -319,7 +321,7 @@ async def drain_alignment(
         [str, list[dict[str, str]] | None, str],
         Awaitable[tuple[str, list[dict[str, str]] | None, list[Event], str | None]],
     ],
-) -> AsyncIterator[Event]:
+) -> AsyncGenerator[Event, None]:
     """Apply queued steering prompts at the top-of-turn boundary."""
     queue = getattr(session, "alignment_queue", None)
     if not queue:
@@ -369,7 +371,7 @@ async def drain_alignment(
             raise
 
 
-async def drain_child_events(session: Session, run_id: str) -> AsyncIterator[Event]:
+async def drain_child_events(session: Session, run_id: str) -> AsyncGenerator[Event, None]:
     """Surface accumulated subagent events at the top-of-turn boundary."""
     pending = getattr(session, "pending_child_events", None)
     if not pending:
@@ -877,7 +879,7 @@ class RunRuntime:
             error=error,
         )
 
-    async def drain_auxiliary_usage(self) -> AsyncIterator[Event]:
+    async def drain_auxiliary_usage(self) -> AsyncGenerator[Event, None]:
         """Project settled auxiliary receipts before the next primary call."""
         for receipt in self.ledger.consume_auxiliary_receipts():
             self.sync_ledger_totals()
@@ -898,7 +900,7 @@ class RunRuntime:
             async for warning in self._emit_budget_warning():
                 yield warning
 
-    async def emit_primary_usage(self, receipt: Any) -> AsyncIterator[Event]:
+    async def emit_primary_usage(self, receipt: Any) -> AsyncGenerator[Event, None]:
         """Publish the compatibility-shaped primary usage line."""
         self.sync_ledger_totals()
         if receipt.usage is None:
@@ -915,7 +917,7 @@ class RunRuntime:
         async for warning in self._emit_budget_warning():
             yield warning
 
-    async def _emit_budget_warning(self) -> AsyncIterator[Event]:
+    async def _emit_budget_warning(self) -> AsyncGenerator[Event, None]:
         if self.budget is None or not self.budget.take_warning():
             return
         warning: Event = BudgetEvent(
@@ -928,7 +930,7 @@ class RunRuntime:
         await _persist_event(self.session, self.run_id, warning)
         yield warning
 
-    async def emit_budget_exhausted(self) -> AsyncIterator[Event]:
+    async def emit_budget_exhausted(self) -> AsyncGenerator[Event, None]:
         """Emit the legacy budget tail with ledger-owned totals."""
         self.sync_checkpoint_accounting()
         if self.budget is None:
@@ -952,7 +954,7 @@ class RunRuntime:
 
     async def emit_abort_terminal(
         self, *, close_active_spans: Callable[..., Awaitable[None]]
-    ) -> AsyncIterator[Event]:
+    ) -> AsyncGenerator[Event, None]:
         """Persist and project the abort terminal while preserving event order."""
         await cancel_background_workers(self.session)
         duration_ms = int((time.time() - self.started) * 1000)
@@ -1021,7 +1023,7 @@ class RunRuntime:
         exc: Exception,
         *,
         close_active_spans: Callable[..., Awaitable[None]] | None = None,
-    ) -> AsyncIterator[Event]:
+    ) -> AsyncGenerator[Event, None]:
         """Persist the typed error pair before making failed status visible."""
         await cancel_background_workers(self.session)
         if isinstance(self.lease_lost, _StoreUnavailableError):
