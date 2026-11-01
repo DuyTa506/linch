@@ -608,6 +608,145 @@ async def test_resume_repeated_final_tool_hook_crashes_keep_ack_boundary() -> No
     )
 
 
+@pytest.mark.parametrize("checkpointed_listener", [False, True])
+async def test_resume_after_replay_checkpoint_commit_preserves_accepted_tail(
+    checkpointed_listener: bool,
+) -> None:
+    """A second crash after the replay write must preserve an accepted decision."""
+    from linch import HookResult, SystemEvent
+    from linch.types import ToolResultBlock
+    from tests.support.providers import ScriptedProvider, ToolUseTurn
+
+    class RetryAndCountAcceptedTurns:
+        resume_policy_id = "test.resume-accepted-tail"
+        resume_policy_version = "1"
+        checkpoint_key = "test.accepted-turns"
+
+        def __init__(self) -> None:
+            self.hook_calls = 0
+            self.accepted_turns: list[int] = []
+
+        def __call__(self, event: Any) -> None:
+            self.accepted_turns.append(event.turn_index)
+
+        def on_before_final_answer(self, _ctx: Any) -> Any:
+            self.hook_calls += 1
+            return HookResult.retry("please revise") if self.hook_calls == 1 else None
+
+        def checkpoint_state(self, _session: Any, _run_id: str) -> dict[str, Any]:
+            return {"accepted_turns": list(self.accepted_turns)}
+
+        def restore_checkpoint_state(
+            self, state: dict[str, Any], _session: Any, _run_id: str
+        ) -> None:
+            self.accepted_turns = list(state["accepted_turns"])
+
+    class CrashAfterReplayCheckpoint:
+        def __init__(self, store: Any) -> None:
+            self.store = store
+            self.committed = False
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self.store, name)
+
+        def _crash_after_commit(self, checkpoint: Any) -> None:
+            if checkpoint.phase == "assistant_appended":
+                self.committed = True
+                raise _Crash("after-replay-checkpoint-commit")
+
+        async def save_checkpoint(self, run_id: str, checkpoint: Any, **kwargs: Any) -> Any:
+            result = await self.store.save_checkpoint(run_id, checkpoint, **kwargs)
+            self._crash_after_commit(checkpoint)
+            return result
+
+        async def save_checkpoint_with_events(
+            self, run_id: str, checkpoint: Any, events: list[Any], **kwargs: Any
+        ) -> Any:
+            result = await self.store.save_checkpoint_with_events(
+                run_id, checkpoint, events, **kwargs
+            )
+            self._crash_after_commit(checkpoint)
+            return result
+
+    base_session_store = _memory_session_store()
+    session_store = _CrashAfterSessionMessageStore(base_session_store, "please revise")
+    run_store = _memory_run_store()
+    first_hook = RetryAndCountAcceptedTurns()
+    agent = _agent(
+        provider=ScriptedProvider(
+            [ToolUseTurn(tool_name="answer", tool_input={"value": 1}, tool_id="final-1")]
+        ),
+        final_tool_name="answer",
+        hooks=[first_hook],
+        session_store=session_store,
+        run_store=run_store,
+    )
+    if checkpointed_listener:
+        agent.on_turn_stopping(first_hook)
+    session = await agent.session(id="s1")
+    run_id = ""
+    with pytest.raises(_Crash, match="after-message:please revise"):
+        async for event in session.run("hello"):
+            if isinstance(event, SystemEvent):
+                run_id = event.run_id
+    assert run_id
+    await agent.close()
+
+    second_run_store = CrashAfterReplayCheckpoint(run_store)
+    second_hook = RetryAndCountAcceptedTurns()
+    second = _agent(
+        provider=ScriptedProvider([]),
+        final_tool_name="answer",
+        hooks=[second_hook],
+        session_store=base_session_store,
+        run_store=second_run_store,
+    )
+    if checkpointed_listener:
+        second.on_turn_stopping(second_hook)
+    second_session = await second.session(id="s1")
+    with pytest.raises(_Crash, match="after-replay-checkpoint-commit"):
+        await _collect(second_session.resume(run_id))
+    assert second_run_store.committed
+    await second.close()
+
+    final_hook = RetryAndCountAcceptedTurns()
+    resumed_provider = ScriptedProvider(
+        [ToolUseTurn(tool_name="answer", tool_input={"value": 2}, tool_id="final-2")]
+    )
+    restarted = _agent(
+        provider=resumed_provider,
+        final_tool_name="answer",
+        hooks=[final_hook],
+        session_store=base_session_store,
+        run_store=run_store,
+    )
+    if checkpointed_listener:
+        restarted.on_turn_stopping(final_hook)
+    resumed = await restarted.session(id="s1")
+    events = await _collect(resumed.resume(run_id))
+
+    assert events[-1].type == "result"
+    assert events[-1].subtype == "success"
+    assert events[-1].structured_output == {"value": 2}
+    assert len(resumed_provider.requests) == 1
+    assert final_hook.accepted_turns == ([0, 1] if checkpointed_listener else [])
+    assert (
+        sum(
+            isinstance(block, ToolResultBlock) and block.tool_use_id == "final-1"
+            for message in resumed.full_history
+            for block in message.content
+        )
+        == 1
+    )
+    assert (
+        sum(
+            any("please revise" in getattr(block, "text", "") for block in message.content)
+            for message in resumed.full_history
+        )
+        == 1
+    )
+
+
 async def test_resume_after_before_final_answer_retry_does_not_replay_as_turn_feedback() -> None:
     """A hook retry persisted after the assistant checkpoint is not turn feedback."""
     from linch import HookResult
