@@ -14,7 +14,7 @@ from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequen
 from copy import deepcopy
 from dataclasses import asdict, dataclass, fields
 from time import monotonic
-from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast, get_args
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast, get_args, get_type_hints
 from uuid import uuid4
 
 from ._json import walk_json
@@ -22,12 +22,12 @@ from ._telemetry import ChatCall, in_span
 from ._wire import WIRE_VERSION, require_wire_version
 from .abort import AbortContext
 from .errors import AbortError, ProviderError
+from .events import ModelCallEvent
 from .run_store import LeaseLostError
 from .types import Message, ProviderRequest, StopReason, SystemBlock, Usage, message_to_dict
 
 if TYPE_CHECKING:
     from .budget import RunBudget
-    from .events import ModelCallEvent
 
 ModelCallKind = Literal["primary", "compaction"]
 UsageStatus = Literal["reported", "unknown", "not_dispatched"]
@@ -38,7 +38,7 @@ CallDisposition = Literal[
 _VERSION = WIRE_VERSION
 _ACCEPTED_TEXT_MAX_BYTES = 1024 * 1024
 _USAGE_FIELDS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens")
-_RECORD_KINDS = frozenset({"intent", "dispatch_started", "receipt", "abandoned", "projection"})
+_RECORD_KINDS = frozenset(get_args(get_type_hints(ModelCallEvent)["record_kind"]))
 
 
 class _ModelCallError(RuntimeError):
@@ -178,7 +178,7 @@ _IDENTITY_FIELDS = (
 def _validate_identity(raw: Mapping[str, Any]) -> None:
     for name in ("logical_call_id", "delivery_attempt_id", "run_id", "request_fingerprint"):
         _string(raw[name], name)
-    if raw["kind"] not in ("primary", "compaction"):
+    if raw["kind"] not in get_args(ModelCallKind):
         raise _invalid("unsupported model-call kind")
     if raw["turn_index"] is not None:
         _integer(raw["turn_index"], "turn_index")
@@ -207,17 +207,10 @@ def receipt_from_dict(raw: Mapping[str, Any]) -> ModelCallReceipt:
     _versioned(raw, _RECEIPT_FIELDS)
     _validate_identity(raw)
     status = raw["usage_status"]
-    if status not in ("reported", "unknown", "not_dispatched"):
+    if status not in get_args(UsageStatus):
         raise _invalid("unsupported usage status")
     disposition = raw["disposition"]
-    if disposition not in (
-        "accepted",
-        "rejected",
-        "rejected_native",
-        "cancelled",
-        "failed",
-        "not_dispatched",
-    ):
+    if disposition not in get_args(CallDisposition):
         raise _invalid("unsupported call disposition")
     _string(raw["actual_model"], "actual_model", empty=status != "reported")
     _integer(raw["duration_ms"], "duration_ms")
@@ -602,7 +595,7 @@ class _ModelCallLedger:
         self._abandoned: set[str] = set()
         self._receipts: dict[str, ModelCallReceipt] = {}
         self._consumed_auxiliary_receipt_ids: set[str] = set()
-        self._journal: list[ModelCallEvent] = []
+        self._journal_count = 0
         self._projections: dict[str, dict[str, Any]] = {}
         self._total_usage = Usage()
         self._total_cost_usd: float | None = None
@@ -621,6 +614,10 @@ class _ModelCallLedger:
     @property
     def usage_complete(self) -> bool:
         return not self._has_unknown_usage
+
+    @property
+    def journal_count(self) -> int:
+        return self._journal_count
 
     def _healthy(self) -> None:
         if self._persistence_failed:
@@ -650,7 +647,8 @@ class _ModelCallLedger:
 
     def _pending(self, intent: ModelCallIntent) -> ModelCallIntent:
         owned = self._intent(intent)
-        if self._intents.get(owned.delivery_attempt_id) != owned:
+        delivery_id = owned.delivery_attempt_id
+        if self._intents.get(delivery_id) != owned or delivery_id in self._receipts:
             raise _ModelCallError("identity_mismatch", "intent was not admitted by this ledger")
         return owned
 
@@ -662,14 +660,7 @@ class _ModelCallLedger:
         )
         if self._persist is not None:
             try:
-                await self._persist(
-                    ModelCallEvent(
-                        event.run_id,
-                        event.record_kind,
-                        event.record,
-                        budget_owner_id=event.budget_owner_id,
-                    )
-                )
+                await self._persist(event)
             except LeaseLostError:
                 raise
             except BaseException as exc:
@@ -679,7 +670,7 @@ class _ModelCallLedger:
                 raise _ModelCallError(
                     "persistence_failed", "model-call journal durability failed"
                 ) from exc
-        self._journal.append(event)
+        self._journal_count += 1
 
     async def begin(self, intent: ModelCallIntent) -> None:
         async with self._lock:
@@ -736,7 +727,6 @@ class _ModelCallLedger:
             self._has_unknown_usage |= owned.usage_status == "unknown"
             await self._write("receipt", receipt_to_dict(owned))
             self._receipts[delivery_id] = owned
-            del self._intents[delivery_id]
             self._started.remove(delivery_id)
             return True
 
@@ -796,12 +786,7 @@ class _ModelCallLedger:
 
     def intent_for(self, delivery_id: str) -> ModelCallIntent | None:
         value = self._intents.get(delivery_id)
-        if value is not None:
-            return value
-        for event in self._journal:
-            if event.record_kind == "intent" and event.record["delivery_attempt_id"] == delivery_id:
-                return intent_from_dict(event.record)
-        return None
+        return value
 
     async def record_projection(self, record: dict[str, Any]) -> None:
         async with self._lock:
@@ -850,7 +835,6 @@ class _ModelCallLedger:
         async with self._lock:
             self._healthy()
             recovery = _LedgerRecovery(self.run_id, self._budget_owner_id)
-            recovery.prepare_source_replay(journal)
             for event in journal:
                 recovery.apply(event)
             consumed_ids = list(consumed_auxiliary_receipt_ids)
@@ -875,15 +859,13 @@ class _ModelCallLedger:
                 self._budget._restore_unresolved_deliveries(unknown, fresh=mode == "fresh_adopted")
             self._budget_owner_id = recovery.owner_id
             self._receipts = recovery.receipts
-            self._intents = {
-                key: value for key, value in recovery.intents.items() if key not in self._receipts
-            }
+            self._intents = recovery.intents
             self._started = recovery.started - self._receipts.keys()
             self._abandoned = recovery.abandoned
             self._consumed_auxiliary_receipt_ids = recovery.consumed
             self._has_unknown_usage = bool(unknown)
             self._total_usage, self._total_cost_usd = total_usage, total_cost
-            self._journal = list(recovery.journal)
+            self._journal_count = len(journal)
             self._projections = recovery.projections
 
 
@@ -898,67 +880,9 @@ class _LedgerRecovery:
         self.started: set[str] = set()
         self.abandoned: set[str] = set()
         self.consumed: set[str] = set()
-        self.journal: list[ModelCallEvent] = []
         self.abandoned_records: dict[str, dict[str, Any]] = {}
         self.projections: dict[str, dict[str, Any]] = {}
-        self._checkpoint_late_deliveries: set[str] = set()
-        self._source_replay_proofs: set[str] = set()
-        self._journal_intents: set[str] = set()
         self._journal_late_deliveries: set[str] = set()
-
-    def prepare_source_replay(self, journal: Sequence[ModelCallEvent]) -> None:
-        """Prove historical source order independently of a checkpoint's final phase.
-
-        A repeated intent alone cannot rewind a started checkpoint. Its source
-        must precede matching checkpoint-phase records later in the full journal.
-        Encountered journal phases remain monotonic during the forward replay.
-        """
-        from .events import ModelCallEvent
-
-        self._checkpoint_late_deliveries = self.started | self.receipts.keys() | self.abandoned
-        if not self._checkpoint_late_deliveries:
-            return
-        following: dict[str, set[str]] = {}
-        for event in reversed(journal):
-            if not isinstance(event, ModelCallEvent):
-                raise _invalid("accounting journal must contain ModelCallEvent records")
-            event = ModelCallEvent(
-                event.run_id,
-                event.record_kind,
-                event.record,
-                budget_owner_id=event.budget_owner_id,
-                schema_version=event.schema_version,
-            )
-            raw, kind = event.record, event.record_kind
-            if kind == "receipt":
-                receipt = receipt_from_dict(raw)
-                if receipt.delivery_attempt_id in self.receipts and raw == receipt_to_dict(
-                    self.receipts[receipt.delivery_attempt_id]
-                ):
-                    following.setdefault(receipt.delivery_attempt_id, set()).add(kind)
-            elif kind in {"dispatch_started", "abandoned"}:
-                intent = intent_from_dict(raw["intent"] if kind == "abandoned" else raw)
-                delivery_id = intent.delivery_attempt_id
-                if intent != self.intents.get(delivery_id):
-                    continue
-                if kind == "abandoned" and raw["usage_status"] != (
-                    "unknown" if delivery_id in self.started else "not_dispatched"
-                ):
-                    continue
-                following.setdefault(delivery_id, set()).add(kind)
-            elif kind == "projection" and raw["projection_kind"] == "compaction_source":
-                delivery_id = raw["delivery_attempt_id"]
-                required = {
-                    phase
-                    for phase, present in (
-                        ("dispatch_started", delivery_id in self.started),
-                        ("receipt", delivery_id in self.receipts),
-                        ("abandoned", delivery_id in self.abandoned),
-                    )
-                    if present
-                }
-                if required <= following.get(delivery_id, set()):
-                    self._source_replay_proofs.add(raw["projection_id"])
 
     def _owner(self, owner: str | None) -> None:
         if owner is None:
@@ -1017,7 +941,6 @@ class _LedgerRecovery:
                 _match(intent, self.receipts[delivery_id])
             if kind == "intent":
                 self.intents[delivery_id] = intent
-                self._journal_intents.add(delivery_id)
             else:
                 if previous_intent is None:
                     raise _ModelCallError("invalid_state", "journal marker lacks its intent")
@@ -1049,17 +972,10 @@ class _LedgerRecovery:
                 raise _invalid("conflicting projection payload")
             if raw["projection_kind"] == "compaction_source" and key not in self.projections:
                 delivery_id = raw["delivery_attempt_id"]
-                if delivery_id in self._journal_late_deliveries or (
-                    delivery_id in self._checkpoint_late_deliveries
-                    and (
-                        delivery_id not in self._journal_intents
-                        or key not in self._source_replay_proofs
-                    )
-                ):
+                if delivery_id in self._journal_late_deliveries:
                     raise _invalid("compaction source must precede its delivery phase")
             _check_projection_conflict(raw, self.projections)
             self.projections[key] = raw
-        self.journal.append(event)
 
 
 _T = TypeVar("_T")
