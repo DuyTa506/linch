@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -115,3 +116,42 @@ class ScriptedProvider:
             "usage": turn.usage,
             "provider_metadata": None,
         }
+
+
+class _OpenAICompatibleStream:
+    def __init__(self, chunks: Sequence[object]) -> None:
+        self._chunks = list(chunks)
+
+    def __aiter__(self) -> _OpenAICompatibleStream:
+        return self
+
+    async def __anext__(self) -> object:
+        if not self._chunks:
+            raise StopAsyncIteration
+        return self._chunks.pop(0)
+
+
+class _OpenAICompatibleCompletions:
+    def __init__(self, chunks: Sequence[object]) -> None:
+        self._chunks = list(chunks)
+        self.payload: dict[str, Any] | None = None
+
+    async def create(self, **payload: Any) -> _OpenAICompatibleStream:
+        self.payload = payload
+        return _OpenAICompatibleStream(self._chunks)
+
+
+class OpenAICompatibleFakeClient:
+    """Provide a deterministic ``chat.completions`` transport for adapter tests.
+
+    Args:
+        chunks: SDK-like chunks returned by the next ``create`` call.
+
+    Returns:
+        A client exposing both ``chat.completions`` and ``completions`` along
+        with the captured request payload.
+    """
+
+    def __init__(self, chunks: Sequence[object]) -> None:
+        self.completions = _OpenAICompatibleCompletions(chunks)
+        self.chat = SimpleNamespace(completions=self.completions)
