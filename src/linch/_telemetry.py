@@ -130,6 +130,7 @@ def in_span(
                             for task in getattr(session, "background_tasks", ())
                             if not task.done()
                         )
+                        run.background_tasks = pending
                         if pending:
                             for task in pending:
                                 add_done_callback = getattr(task, "add_done_callback", None)
@@ -324,6 +325,7 @@ class _RunTrace:
         self.tool_spans: dict[str, tuple[trace.Span, bool]] = {}
         self.prompt_captured = False
         self.closed = False
+        self.background_tasks: tuple[Any, ...] = ()
 
     def observe(self, event: Any) -> None:
         if event.type == "error":
@@ -613,16 +615,21 @@ def _run_trace_for(session: Any, run_id: str | None = None) -> Any:
     resolved_run_id = run_id or getattr(session, "active_run_id", None)
     if resolved_run_id is None:
         return current
-    telemetry = telemetry_for(session.agent)
+    agent = getattr(session, "agent", None)
+    if agent is None:
+        return None
+    telemetry = telemetry_for(agent)
     return telemetry._runs.get((session.id, resolved_run_id))
 
 
 def _release_closed_run(session: Any, state: Any) -> None:
     if not state.closed or state.tool_spans:
         return
-    if any(not task.done() for task in getattr(session, "background_tasks", ())):
+    if any(not task.done() for task in state.background_tasks):
         return
-    telemetry_for(session.agent)._runs.pop((session.id, state.run_id), None)
+    agent = getattr(session, "agent", None)
+    if agent is not None:
+        telemetry_for(agent)._runs.pop((session.id, state.run_id), None)
 
 
 def record_tool_result(

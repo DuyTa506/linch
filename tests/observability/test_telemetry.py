@@ -291,6 +291,7 @@ async def test_overlapping_detached_tools_keep_origin_registry_until_both_finish
     owner_span = telemetry.tracer.start_span("invoke_agent A")
     owner = _RunTrace(owner_span, "A")
     owner.closed = True
+    owner.background_tasks = tuple(pending_tasks)
     telemetry._runs[(session.id, "A")] = owner
 
     @trace_tool
@@ -324,6 +325,47 @@ async def test_overlapping_detached_tools_keep_origin_registry_until_both_finish
         if span.attributes.get("gen_ai.operation.name") == "execute_tool"
     } == {"redacted-first", "redacted-second"}
     owner_span.end()
+
+
+async def test_closed_run_cleanup_ignores_later_run_background_tasks(otel, monkeypatch):
+    """Run A cleanup must not wait on background work admitted by run B."""
+    from types import SimpleNamespace
+
+    from linch._telemetry import _RunTrace, record_tool_result, telemetry_for
+
+    monkeypatch.delenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", raising=False)
+    context, _, _ = otel
+    agent = SimpleNamespace(context=context)
+    task_a = SimpleNamespace(done=lambda: False)
+    task_b = SimpleNamespace(done=lambda: False)
+    session = SimpleNamespace(
+        id="session",
+        agent=agent,
+        active_run_id="B",
+        background_tasks=[task_a, task_b],
+        _telemetry_run=None,
+    )
+    telemetry = telemetry_for(agent)
+    owner_span = telemetry.tracer.start_span("invoke_agent A")
+    owner = _RunTrace(owner_span, "A")
+    owner.closed = True
+    owner.background_tasks = (task_a,)
+    telemetry._runs[(session.id, "A")] = owner
+
+    task_a.done = lambda: True
+    record_tool_result(session, "no-span", "ignored", run_id="A")
+    assert (session.id, "A") not in telemetry._runs
+    assert (session.id, "B") not in telemetry._runs
+    owner_span.end()
+
+
+async def test_record_tool_result_ignores_unbound_scheduler_session():
+    """Telemetry cleanup is optional for lightweight scheduler sessions."""
+    from types import SimpleNamespace
+
+    from linch._telemetry import record_tool_result
+
+    record_tool_result(SimpleNamespace(id="session", active_run_id="run"), "tool", "result")
 
 
 async def test_capture_off_releases_closed_run_registry_after_background_tasks_finish(

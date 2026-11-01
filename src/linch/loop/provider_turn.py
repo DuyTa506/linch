@@ -171,6 +171,10 @@ async def prepare_provider_turn(ctx: ProviderPreparationContext) -> AsyncIterato
         and ctx.checkpoint.phase == "provider_pending"
     )
     ctx.exact_pending_replay = ctx.frozen_pending_resume and not ctx.resumed_assistant
+    if ctx.frozen_pending_resume:
+        # Replaying a frozen request must retain the checkpointed execution
+        # boundary even when the staged skill overlay was already consumed.
+        ctx.session.current_turn_allowed_tools = ctx.checkpoint.current_turn_allowed_tools
     if ctx.force_final_pending:
         # The provider request is not the execution boundary: a provider may
         # still emit an unoffered tool call.  Keep the scheduler's availability
