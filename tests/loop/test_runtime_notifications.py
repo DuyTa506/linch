@@ -32,6 +32,7 @@ class _NotificationAppendStore:
         self.fail_next = False
         self.pause = False
         self.after_commit = False
+        self.commit_error: Exception | None = None
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
 
@@ -58,6 +59,8 @@ class _NotificationAppendStore:
         if self.pause:
             self.entered.set()
             await self.release.wait()
+        if self.commit_error is not None:
+            raise self.commit_error
         return stored
 
 
@@ -199,5 +202,46 @@ async def test_cancelled_inbox_commit_remains_visible_next_run(inbox_store: Any)
         assert list(session.full_history) == [
             row.message for row in await store.load_messages(session.id)
         ]
+    finally:
+        await agent.close()
+
+
+@pytest.mark.parametrize("failure", ["connection", "store-unavailable"])
+async def test_cancelled_inbox_commit_preserves_cancellation_after_store_error(
+    inbox_store: Any, failure: str
+) -> None:
+    """A late commit failure must not replace the caller's original cancellation."""
+    from linch import DurabilityOptions
+    from linch.loop.runtime import drain_pending_notifications
+    from linch.run_store import _StoreUnavailableError
+    from linch.types import Message, TextBlock
+
+    store = _NotificationAppendStore(inbox_store)
+    agent = make_agent(
+        ScriptedProvider([]),
+        session_store=store,
+        run_store=None,
+        durability=DurabilityOptions(durable_inbox=True),
+    )
+    try:
+        session = await agent.session()
+        await session.notify(Message(role="user", content=[TextBlock(text="durable-note")]))
+        store.pause = True
+        store.commit_error = (
+            ConnectionError("commit response failed")
+            if failure == "connection"
+            else _StoreUnavailableError("commit response unavailable")
+        )
+        drain = drain_pending_notifications(session, "delivery")
+        task = asyncio.create_task(anext(drain))
+        await asyncio.wait_for(store.entered.wait(), timeout=1)
+        task.cancel("caller cancelled delivery")
+        await asyncio.sleep(0)
+        task.cancel("caller cancelled again")
+        await asyncio.sleep(0)
+        store.release.set()
+        with pytest.raises(asyncio.CancelledError, match="caller cancelled delivery"):
+            await task
+        await drain.aclose()
     finally:
         await agent.close()

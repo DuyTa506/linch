@@ -241,7 +241,17 @@ async def drain_pending_notifications(session: Session, run_id: str) -> AsyncIte
                     await asyncio.shield(commit_task)
                 except BaseException:
                     continue
-            stored = commit_task.result()
+            try:
+                stored = commit_task.result()
+            except _StoreUnavailableError:
+                raise cancellation from None
+            except LeaseLostError:
+                # Preserve the fencing signal so run cleanup cannot write.
+                raise
+            except BaseException:
+                # Observe a late store failure without replacing the caller's
+                # original cancellation with its subsequent backend error.
+                raise cancellation from None
         # The store commits the whole batch. Publish the same live projection
         # before advancing its cursor or suspending delivery at an event yield.
         session.session_log.append_many(row.message for row in stored)
