@@ -10,12 +10,21 @@ from uuid import uuid4
 
 from ..._wire import WIRE_VERSION, require_wire_version
 from ...errors import ConfigError, WorkflowSuspended, WorkflowTimeoutError
-from ...events import Event
+from ...events import ErrorEvent, Event
 from ...run_store import LeaseLostError
 from .context import SNAPSHOT_NAMESPACE, WorkflowContext, workflow_checkpoint
 from .journal import WorkflowJournal
 
 _WORKFLOW_LEASE_TTL_S = 300.0
+
+
+def _workflow_error_payload(exc: BaseException) -> dict[str, object]:
+    """Build the durable error envelope for a failed workflow."""
+    return {
+        "name": type(exc).__name__,
+        "message": str(exc),
+        "retryable": getattr(exc, "retryable", False),
+    }
 
 
 async def run_workflow(
@@ -102,7 +111,7 @@ async def run_workflow(
         journal = WorkflowJournal()
         if store is not None and run_id is not None:
             if existing is not None:
-                lease_ref[0] = await _claim_workflow_run(store, run_id)
+                await _claim_workflow_run(store, run_id, lease_ref)
                 snapshot, after_seq = _stored_snapshot(existing)
                 journal = WorkflowJournal.from_stored_events(
                     await store.load_events(run_id, after_seq=after_seq),
@@ -110,7 +119,7 @@ async def run_workflow(
                 )
             else:
                 await store.create_run(host.id, id=run_id, meta={"schema_version": WIRE_VERSION})
-                lease_ref[0] = await _claim_workflow_run(store, run_id)
+                await _claim_workflow_run(store, run_id, lease_ref)
 
         resolved_budget = budget if budget is not None else getattr(agent, "budget", None)
         # Subagent children inherit the budget from the host session's
@@ -159,9 +168,20 @@ async def run_workflow(
                 raise
             else:
                 if store is not None and run_id is not None:
-                    await store.mark_completed(
-                        run_id, workflow_checkpoint(workflow_name, "completed")
-                    )
+                    try:
+                        await store.mark_completed(
+                            run_id, workflow_checkpoint(workflow_name, "completed")
+                        )
+                    except (asyncio.CancelledError, LeaseLostError):
+                        raise
+                    except BaseException as exc:
+                        error = _workflow_error_payload(exc)
+                        await store.mark_failed(
+                            run_id,
+                            error=error,
+                            events=[ErrorEvent(error=error)],
+                        )
+                        raise
                 return result
 
         return await _run_claimed_workflow(drive, store, lease_ref, lease_lost_ref)
@@ -175,7 +195,7 @@ async def run_workflow(
                     await _drain_awaitable(store.release(lease_ref[0]))
 
 
-async def _claim_workflow_run(store: Any, run_id: str) -> Any:
+async def _claim_workflow_run(store: Any, run_id: str, lease_ref: list[Any]) -> Any:
     """Claim a durable workflow run when the store supports optional leases."""
     claim = getattr(store, "claim", None)
     renew = getattr(store, "renew", None)
@@ -185,7 +205,19 @@ async def _claim_workflow_run(store: Any, run_id: str) -> Any:
     if not all(callable(method) for method in (claim, renew, release)):
         raise ConfigError("run store lease capability requires claim, renew, release")
     claim_fn = cast(Callable[..., Awaitable[Any]], claim)
-    return await claim_fn(run_id, owner=f"workflow:{uuid4().hex}", ttl_s=_WORKFLOW_LEASE_TTL_S)
+
+    async def execute_claim() -> Any:
+        return await claim_fn(run_id, owner=f"workflow:{uuid4().hex}", ttl_s=_WORKFLOW_LEASE_TTL_S)
+
+    claim_task = asyncio.create_task(execute_claim())
+    try:
+        lease = await asyncio.shield(claim_task)
+    except asyncio.CancelledError:
+        lease = await _drain_task_result(claim_task)
+        lease_ref[0] = lease
+        raise
+    lease_ref[0] = lease
+    return lease
 
 
 async def _run_claimed_workflow(
@@ -281,6 +313,16 @@ async def _drain_awaitable(awaitable: Awaitable[Any], *, suppress_errors: bool =
 
     task = asyncio.create_task(execute())
     await _drain_task(task, suppress_errors=suppress_errors)
+
+
+async def _drain_task_result(task: asyncio.Task[Any]) -> Any:
+    """Drain a task through caller cancellation and return its result."""
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+    return task.result()
 
 
 async def _run_to_deadline(
