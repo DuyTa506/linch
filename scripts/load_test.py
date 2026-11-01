@@ -521,7 +521,10 @@ async def run_point(a: argparse.Namespace) -> dict[str, Any]:
         for identity in [*(f"w-{i}" for i in range(a.workers)), "api"]:
             command = [sys.executable, __file__, "__child__", str(config), identity]
             await spawn(identity, command)
-        root = psutil.Process(await pool.fetchval("SELECT pg_backend_pid()")).parent()
+        try:
+            root = psutil.Process(await pool.fetchval("SELECT pg_backend_pid()")).parent()
+        except psutil.NoSuchProcess:
+            root = None  # server in another PID namespace (container); no CPU sampling
         previous: dict[int, float] = {}
         cpu: dict[str, float] = defaultdict(float)
         waits: Counter[str] = Counter()
