@@ -5,13 +5,14 @@ import copy
 import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import aclosing
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal, cast
 from uuid import uuid4
 from xml.sax.saxutils import escape
 
 from . import lifecycle
-from ._telemetry import trace_tool
+from ._telemetry import record_tool_result, trace_tool
 from ._wire import UnsupportedWireVersionError
 from .abort import AbortContext, throw_if_aborted
 from .errors import AbortError, ToolExecutionError, ToolTimeoutError
@@ -1007,6 +1008,7 @@ async def _dispatch_post_tool_use(
             block_result=block_result,
             tool_output=outcome.tool_output,
         )
+    record_tool_result(session, call.id, final.tool_result.content)
     # PostToolUseFailure: an observational notification fired only when the final
     # (post-mutation) result is an error, so a failure-watcher hook need not
     # re-derive "did this fail?" from every PostToolUse.
@@ -1347,8 +1349,9 @@ async def _run_serial_batch(
             middleware_error=middleware_errors.get(call.id),
         )
         try:
-            async for progress in _drain_tool_execution(running):
-                yield progress
+            async with aclosing(_drain_tool_execution(running)) as progress_stream:
+                async for progress in progress_stream:
+                    yield progress
             outcome = running.task.result()
             outcome, hook_events = await _dispatch_post_tool_use(
                 hook_dispatcher,
@@ -1443,8 +1446,11 @@ async def _run_parallel_batch(
             # While waiting for the next provider-ordered result, multiplex
             # every call's bounded progress queue. A later tool can therefore
             # update live without allowing its final end bracket to overtake.
-            async for progress in _drain_parallel_progress_until(running, execution.task):
-                yield progress
+            async with aclosing(
+                _drain_parallel_progress_until(running, execution.task)
+            ) as progress_stream:
+                async for progress in progress_stream:
+                    yield progress
             outcome = execution.task.result()
             input = _effective_input(call, decision)
             outcome, hook_events = await _dispatch_post_tool_use(
@@ -1704,7 +1710,7 @@ async def execute_tool_calls(
                 PermissionRequestItem(
                     tool_use_id=call.id,
                     tool_name=_tool_name(call),
-                    input=call.input,
+                    input=copy.deepcopy(call.input),
                     summary=call.summary,
                 )
             )
@@ -1798,19 +1804,16 @@ async def execute_tool_calls(
     for batch in batches:
         throw_if_aborted(signal)
         lane = _run_serial_batch if not batch["parallel"] else _run_parallel_batch
-        lane_events = lane(
-            batch,
-            agent=agent,
-            session=session,
-            signal=signal,
-            hook_dispatcher=hook_dispatcher,
-            middleware_errors=middleware_errors,
-            turn_index=turn_index,
-        )
-        try:
+        async with aclosing(
+            lane(
+                batch,
+                agent=agent,
+                session=session,
+                signal=signal,
+                hook_dispatcher=hook_dispatcher,
+                middleware_errors=middleware_errors,
+                turn_index=turn_index,
+            )
+        ) as lane_events:
             async for event in lane_events:
                 yield event
-        finally:
-            # Async-generator delegation does not automatically close the
-            # delegated iterator when this outer stream is abandoned.
-            await cast(Any, lane_events).aclose()
