@@ -5,7 +5,7 @@ execution, guards, gates, budgets, and durable checkpoints."""
 from __future__ import annotations
 
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import aclosing
 from dataclasses import replace
 from typing import Any
@@ -298,7 +298,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
     run_id: str,
     run_record: RunRecord | None,
     resume_checkpoint: RunCheckpoint | None,
-) -> AsyncIterator[Event]:
+) -> AsyncGenerator[Event, None]:
     from ..loop_guard import LoopGuardState
 
     _runtime = await RunRuntime.create(
@@ -485,7 +485,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             final_text_value: str | None = None,
             duration_ms: int | None = None,
             end_provider_call_usage: Usage | None = None,
-        ) -> AsyncIterator[Event]:
+        ) -> AsyncGenerator[Event, None]:
             """Error exit shared by provider, hooks, and guard hard-stop paths."""
             nonlocal _final_result
             async with aclosing(
@@ -499,7 +499,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                     yield event
             _final_result = _finalization.result
 
-        async def _finalize_answer(turn_index: int, **answer: Any) -> AsyncIterator[Event]:
+        async def _finalize_answer(turn_index: int, **answer: Any) -> AsyncGenerator[Event, None]:
             nonlocal _final_result, active_primary
             active_primary = None
             _runtime.active_primary = None
@@ -521,7 +521,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         _drain_auxiliary_usage = _runtime.drain_auxiliary_usage
         _emit_primary_usage = _runtime.emit_primary_usage
 
-        async def _emit_budget_exhausted() -> AsyncIterator[Event]:
+        async def _emit_budget_exhausted() -> AsyncGenerator[Event, None]:
             nonlocal _final_result
             async with aclosing(_runtime.emit_budget_exhausted()) as budget_events:
                 async for event in budget_events:
@@ -545,6 +545,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             config=_runtime.config,
             run_id=run_id,
             run_record=run_record,
+            stored_events=_runtime.stored_events,
             checkpoint=checkpoint,
             resume_checkpoint=resume_checkpoint,
             ledger=ledger,
@@ -653,6 +654,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                         async for event in retry_events:
                             yield event
                 _pending_truncation_feedback = None
+                _runtime.replayed_feedback = ()
                 await _end_active_turn()
                 await _save_checkpoint("turn_complete", turn_index=turn_index)
                 continue

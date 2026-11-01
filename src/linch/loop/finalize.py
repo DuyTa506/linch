@@ -15,7 +15,7 @@ the flag to choose between ``return`` and ``continue``."""
 from __future__ import annotations
 
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import aclosing
 from dataclasses import dataclass
 from typing import Any
@@ -24,7 +24,7 @@ from ..errors import ProviderError
 from ..events import Event, ResultEvent
 from ..hooks.contexts import _AgentResult
 from ..session import Session
-from ..types import AssistantAssembly, Message, TextBlock, ToolUseBlock, Usage
+from ..types import AssistantAssembly, Message, TextBlock, ToolResultBlock, ToolUseBlock, Usage
 from .checkpoint import _message_digest, _persist_event, _primary_control_message
 from .feedback import append_feedback
 from .request import final_text
@@ -97,7 +97,7 @@ class RunFinalization:
         final_text_value: str | None = None,
         duration_ms: int | None = None,
         end_provider_call_usage: Usage | None = None,
-    ) -> AsyncIterator[Event]:
+    ) -> AsyncGenerator[Event, None]:
         self.runtime.sync_checkpoint_accounting()
         outcome = TerminalOutcome()
         async with aclosing(
@@ -117,7 +117,7 @@ class RunFinalization:
 
     async def finalize(
         self, turn_index: int, forced_final_turn: bool, **answer: Any
-    ) -> AsyncIterator[Event]:
+    ) -> AsyncGenerator[Event, None]:
         forced = forced_final_turn
         tool_blocks = answer.get("tool_blocks", ())
         final_block = answer.get("final_block")
@@ -141,14 +141,16 @@ class RunFinalization:
             )
             messages = (paired, *messages)
         replayed = self.runtime.replayed_feedback
-        if (
-            replayed
-            and decision.action != "accept"
-            and list(map(_message_digest, replayed)) != list(map(_message_digest, messages))
+        if replayed and list(map(_message_digest, replayed)) != list(
+            map(_message_digest, messages)
         ):
             raise ValueError("replayed turn feedback differs from its decision")
         self.runtime.replayed_feedback = ()
         if decision.action != "accept":
+            self.ctx.checkpoint.extension_state["linch.resume"] = {
+                "feedback_origin": "turn_stopping"
+            }
+            await self.ctx.save_checkpoint("assistant_appended", turn_index=turn_index)
             async with aclosing(
                 append_feedback(
                     self.ctx.session,
@@ -160,6 +162,7 @@ class RunFinalization:
             ) as feedback_events:
                 async for event in feedback_events:
                     yield event
+            self.ctx.checkpoint.extension_state.pop("linch.resume", None)
             await self.ctx.end_active_turn()
             await self.ctx.save_checkpoint("turn_complete", turn_index=turn_index)
             return
@@ -208,6 +211,27 @@ def last_user_message_is_feedback(session: Session, feedback: str) -> bool:
     return any(isinstance(block, TextBlock) and block.text == expected for block in message.content)
 
 
+def _final_tool_ack_present(session: Session, final_id: str) -> bool:
+    """Return whether the current final-tool use already has its host result."""
+    history = list(session.full_history)
+    assistant_index = -1
+    for index, message in enumerate(history):
+        if message.role == "assistant" and any(
+            isinstance(block, ToolUseBlock) and block.id == final_id for block in message.content
+        ):
+            assistant_index = index
+    if assistant_index < 0:
+        return False
+    return any(
+        isinstance(block, ToolResultBlock)
+        and block.tool_use_id == final_id
+        and block.content == "Final answer captured by the host."
+        and not block.is_error
+        for message in history[assistant_index + 1 :]
+        for block in message.content
+    )
+
+
 def build_run_result(
     *,
     run_id: str,
@@ -242,7 +266,7 @@ async def emit_error_terminal(
     final_text_value: str | None = None,
     duration_ms: int | None = None,
     end_provider_call_usage: Usage | None = None,
-) -> AsyncIterator[Event]:
+) -> AsyncGenerator[Event, None]:
     """Record the error result on *outcome*, close spans, and emit the error tail.
 
     ``duration_ms`` defaults to a fresh wall-clock reading; pass it explicitly
@@ -284,7 +308,7 @@ async def emit_success_terminal(
     running_cost: float | None,
     outcome: TerminalOutcome,
     duration_ms: int,
-) -> AsyncIterator[Event]:
+) -> AsyncGenerator[Event, None]:
     """Record the success result on *outcome*, close the turn span, and emit the
     success tail from a hook-approved ``proposed`` ResultEvent."""
     outcome.result = build_run_result(
@@ -327,7 +351,7 @@ async def finalize_final_tool_answer(
     running_cost: float | None,
     forced_final_turn: bool,
     outcome: TerminalOutcome,
-) -> AsyncIterator[Event]:
+) -> AsyncGenerator[Event, None]:
     """Terminal final-tool path: treat the tool input as structured output, run
     the schema/verifier/stop gates, then emit the success or error tail."""
     if len(tool_blocks) != 1:
@@ -352,18 +376,19 @@ async def finalize_final_tool_answer(
     # histories still require every assistant tool_use to have a matching
     # user tool_result.  Persist the acknowledgement before any terminal gate
     # so success, stop, and crash paths all leave a reusable session.
-    async with aclosing(
-        _final_tool_retry_tail(
-            ctx.session,
-            run_id=ctx.run_id,
-            tool_blocks=tool_blocks,
-            final_id=final_block.id,
-            feedback="Final answer captured by the host.",
-            final_is_error=False,
-        )
-    ) as ack_events:
-        async for event in ack_events:
-            yield event
+    if not _final_tool_ack_present(ctx.session, final_block.id):
+        async with aclosing(
+            _final_tool_retry_tail(
+                ctx.session,
+                run_id=ctx.run_id,
+                tool_blocks=tool_blocks,
+                final_id=final_block.id,
+                feedback="Final answer captured by the host.",
+                final_is_error=False,
+            )
+        ) as ack_events:
+            async for event in ack_events:
+                yield event
 
     raw_structured_output = dict(final_block.input)
     structured_output: dict[str, Any] | None = raw_structured_output
@@ -506,7 +531,7 @@ async def finalize_text_answer(
     running_cost: float | None,
     forced_final_turn: bool,
     outcome: TerminalOutcome,
-) -> AsyncIterator[Event]:
+) -> AsyncGenerator[Event, None]:
     """Terminal plain-text path: parse/validate structured output, run the
     schema/verifier/stop gates, then emit the success or error tail."""
     ft = final_text(assembly.message)
