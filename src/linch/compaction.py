@@ -319,6 +319,7 @@ async def summarize_with_provider(
         messages=older,
         max_output_tokens=max_output_tokens,
         signal=signal,
+        thinking={"type": "disabled"},
     )
 
     text = ""

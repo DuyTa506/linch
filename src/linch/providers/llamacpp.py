@@ -169,6 +169,11 @@ def _build_llamacpp_payload(
     extra_body = dict(opts.extra_body or {})
     if opts.chat_template_kwargs is not None:
         extra_body["chat_template_kwargs"] = opts.chat_template_kwargs
+    if req.thinking is not None and req.thinking.get("type") == "disabled":
+        extra_body["chat_template_kwargs"] = {
+            **extra_body.get("chat_template_kwargs", {}),
+            "enable_thinking": False,
+        }
     if opts.reasoning_format is not None:
         extra_body["reasoning_format"] = opts.reasoning_format
     if opts.reasoning_control is not None:
