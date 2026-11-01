@@ -6,13 +6,7 @@ import os
 
 import pytest
 
-from linch import (
-    Agent,
-    ConfigError,
-    OutputSchema,
-    RunOptions,
-)
-from linch.ext.evals import ScriptedProvider, TextTurn
+from linch import ConfigError, OutputSchema, RunOptions
 from linch.ext.loop_runner import (
     FileLoopLeaseStore,
     InMemoryLoopLeaseStore,
@@ -21,16 +15,12 @@ from linch.ext.loop_runner import (
     LoopTickResult,
     LoopTrigger,
 )
-from linch.sessions import InMemorySessionStore
+from tests.support.agents import make_agent
+from tests.support.providers import ScriptedProvider, TextTurn
 
 
-def _agent(provider: ScriptedProvider, tmp_path) -> Agent:
-    return Agent(
-        model="gpt-5",
-        provider=provider,
-        session_store=InMemorySessionStore(),
-        cwd=str(tmp_path),
-    )
+def _agent(provider: ScriptedProvider, tmp_path):
+    return make_agent(provider, model="gpt-5", cwd=str(tmp_path), run_store=None)
 
 
 def _spec(tmp_path, loop_id: str = "docs-loop") -> LoopSpec:
@@ -44,18 +34,24 @@ def _spec(tmp_path, loop_id: str = "docs-loop") -> LoopSpec:
 
 
 async def test_run_once_creates_fresh_session_report_and_artifacts(tmp_path) -> None:
-    provider = ScriptedProvider([TextTurn(text="done")])
+    provider = ScriptedProvider([TextTurn(text="done"), TextTurn(text="next")])
     runner = LoopRunner(_agent(provider, tmp_path))
     spec = _spec(tmp_path)
 
     result = await runner.run_once(spec, LoopTrigger(source="manual", payload="tick"))
+    second = await runner.run_once(spec)
 
     domain = tmp_path / "domains" / spec.id
     assert result.status == "completed"
     assert result.final_text == "done"
     assert result.report.session_id
+    assert second.iteration == 2
+    assert second.report.session_id != result.report.session_id
+    assert second.final_text == "next"
     assert (domain / "README.md").read_text(encoding="utf-8").startswith("# Loop Domain")
-    assert "Tick 1" in (domain / "LOG.md").read_text(encoding="utf-8")
+    log = (domain / "LOG.md").read_text(encoding="utf-8")
+    assert "Tick 1" in log
+    assert "Tick 2" in log
     assert len(result.artifact_paths) == 2
     assert (domain / "artifacts" / "runs" / f"{result.run_id}.md").exists()
     report_json = json.loads(
@@ -119,7 +115,7 @@ async def test_predicates_can_mark_done_from_report_summary(tmp_path) -> None:
 async def test_failed_verifier_marks_not_done_and_logs_failure(tmp_path) -> None:
     provider = ScriptedProvider([TextTurn(text="draft")])
 
-    def verify(_result: LoopTickResult) -> bool:
+    async def verify(_result: LoopTickResult) -> bool:
         return False
 
     runner = LoopRunner(_agent(provider, tmp_path), verify=verify)
@@ -129,6 +125,7 @@ async def test_failed_verifier_marks_not_done_and_logs_failure(tmp_path) -> None
 
     assert result.done is False
     assert result.status == "verification_failed"
+    assert result.report.status == "verification_failed"
     log = (tmp_path / "domains" / spec.id / "LOG.md").read_text(encoding="utf-8")
     assert "verification_error: verify returned False" in log
 
@@ -277,16 +274,6 @@ async def test_run_failure_releases_durable_lease(tmp_path) -> None:
 
     assert result.status == "error"
     assert reacquired is not None
-
-
-async def test_agent_run_errors_still_write_log_and_report(tmp_path) -> None:
-    provider = ScriptedProvider([])
-    runner = LoopRunner(_agent(provider, tmp_path))
-    spec = _spec(tmp_path)
-
-    result = await runner.run_once(spec)
-
-    assert result.status == "error"
     domain = tmp_path / "domains" / spec.id
     log = (domain / "LOG.md").read_text(encoding="utf-8")
     assert f"Tick {result.iteration}" in log
@@ -341,20 +328,7 @@ async def test_refresh_rejects_expired_lease(tmp_path) -> None:
     store = FileLoopLeaseStore(root=tmp_path / "domains")
     lease = await store.try_acquire("docs-loop", owner="owner", ttl_s=0.01)
     assert lease is not None
-    await asyncio.sleep(0.02)  # let the lease expire
+    await asyncio.sleep(0.02)
 
     with pytest.raises(ConfigError, match="expired"):
         await store.refresh(lease, ttl_s=60)
-
-
-async def test_verification_failure_marks_report_status(tmp_path) -> None:
-    provider = ScriptedProvider([TextTurn(text="done")])
-
-    async def verify(_result) -> bool:
-        return False
-
-    runner = LoopRunner(_agent(provider, tmp_path), verify=verify)
-    result = await runner.run_once(_spec(tmp_path))
-
-    assert result.status == "verification_failed"
-    assert result.report.status == "verification_failed"  # persisted report stays consistent

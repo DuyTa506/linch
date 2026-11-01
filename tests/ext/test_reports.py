@@ -3,9 +3,21 @@ from __future__ import annotations
 import pytest
 
 
+def _context_event(*, system_blocks, messages, selected_tools, budget, metadata):
+    """Build a context event with the fields shared by report scenarios."""
+    from linch.events import ContextBuildEvent
+
+    return ContextBuildEvent(
+        system_blocks=system_blocks,
+        messages=messages,
+        selected_tools=selected_tools,
+        budget=budget,
+        metadata=metadata,
+    )
+
+
 def test_build_run_report_summarizes_events():
     from linch.events import (
-        ContextBuildEvent,
         LoopGuardEvent,
         PermissionRequestEvent,
         PermissionRequestItem,
@@ -28,7 +40,7 @@ def test_build_run_report_summarizes_events():
             permission_mode="default",
             cwd=".",
         ),
-        ContextBuildEvent(
+        _context_event(
             system_blocks=1,
             messages=3,
             selected_tools=["Search"],
@@ -251,12 +263,11 @@ def test_run_report_summarizes_failed_tools_by_name_and_event_order():
     ],
 )
 def test_context_utilization_maps_to_pressure_labels(budget, pressure):
-    from linch.events import ContextBuildEvent
     from linch.ext.reports import build_run_report
 
     report = build_run_report(
         [
-            ContextBuildEvent(
+            _context_event(
                 system_blocks=1,
                 messages=1,
                 selected_tools=[],
@@ -270,12 +281,11 @@ def test_context_utilization_maps_to_pressure_labels(budget, pressure):
 
 
 def test_context_pressure_uses_raw_utilization_before_rounding():
-    from linch.events import ContextBuildEvent
     from linch.ext.reports import build_run_report
 
     report = build_run_report(
         [
-            ContextBuildEvent(
+            _context_event(
                 system_blocks=1,
                 messages=1,
                 selected_tools=[],
@@ -293,12 +303,12 @@ def test_non_finite_budget_value_does_not_crash_report_building():
     # Regression: report building is a non-throwing read model. A NaN/Infinity
     # numeric field (json.loads accepts these, so they survive a persisted-event
     # round-trip) must be dropped, not int()-coerced into a ValueError/OverflowError.
-    from linch.events import ContextBuildEvent, ResultEvent
+    from linch.events import ResultEvent, ToolCallEndEvent
     from linch.ext.reports import build_run_report
     from linch.types import Usage
 
     events = [
-        ContextBuildEvent(
+        _context_event(
             system_blocks=1,
             messages=1,
             selected_tools=[],
@@ -312,20 +322,6 @@ def test_non_finite_budget_value_does_not_crash_report_building():
             duration_ms=float("nan"),
             final_text="done",
         ),
-    ]
-
-    report = build_run_report(events)  # must not raise
-
-    # Non-finite budget value is dropped, not coerced.
-    assert report.summary["context"]["max_used_tokens"] in (0, None)
-    assert "Summary" in report.to_markdown()
-
-
-def test_report_diagnostics_ignore_missing_and_non_finite_values():
-    from linch.events import ToolCallEndEvent
-    from linch.ext.reports import build_run_report
-
-    events = [
         ToolCallEndEvent(
             tool_use_id="nan",
             tool_name="BadDuration",
@@ -339,8 +335,10 @@ def test_report_diagnostics_ignore_missing_and_non_finite_values():
         ),
     ]
 
-    report = build_run_report(events)
+    report = build_run_report(events)  # must not raise
 
+    # Non-finite budget value is dropped, not coerced.
+    assert report.summary["context"]["max_used_tokens"] in (0, None)
     assert report.summary["tools"]["top_slowest"] == [
         {
             "tool_use_id": "default",
@@ -364,11 +362,11 @@ def test_report_diagnostics_ignore_missing_and_non_finite_values():
             "duration_ms": 0,
         },
     ]
+    assert "Summary" in report.to_markdown()
 
 
 def test_build_run_report_includes_long_run_context_and_recovery_signals():
     from linch.events import (
-        ContextBuildEvent,
         ResultEvent,
         ToolCallEndEvent,
         ToolCallStartEvent,
@@ -378,14 +376,14 @@ def test_build_run_report_includes_long_run_context_and_recovery_signals():
     from linch.types import Usage
 
     events = [
-        ContextBuildEvent(
+        _context_event(
             system_blocks=2,
             messages=8,
             selected_tools=["SearchDocs", "read_file"],
             budget={"max_tokens": 1000, "used_tokens": 900, "remaining_tokens": 100},
             metadata={"source": "docs"},
         ),
-        ContextBuildEvent(
+        _context_event(
             system_blocks=1,
             messages=5,
             selected_tools=["SearchDocs"],
