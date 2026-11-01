@@ -37,11 +37,12 @@ async def test_effect_group_disposer_is_scoped() -> None:
     assert order == ["inner", "outer"]
 
 
-async def test_scope_drops_disposed_disposers_after_repeated_cycles() -> None:
+@pytest.mark.parametrize("via_effect", [False, True])
+async def test_scope_drops_disposed_disposers_after_repeated_cycles(via_effect: bool) -> None:
     scope = EffectScope()
 
     for _ in range(100):
-        disposer = scope.add(Disposable())
+        disposer = scope.effect(lambda: Disposable()) if via_effect else scope.add(Disposable())
         await disposer.dispose()
 
     assert scope._disposers == []
