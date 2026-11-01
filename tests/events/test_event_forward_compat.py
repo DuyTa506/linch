@@ -1,9 +1,4 @@
-"""Event forward-compat (Phase 1): unknown-but-ignorable events survive decode.
-
-Ports dsh's "required-on-read unless the envelope is ignorable" rule: a durable
-event written by a newer schema is kept as an ``IgnorableEvent`` sentinel when it
-carries ``ignorable: true``, and still rejected otherwise.
-"""
+"""Keep unknown-but-ignorable event envelopes forward-compatible."""
 
 from __future__ import annotations
 
@@ -23,16 +18,6 @@ from linch.ext.reports import build_run_report
 from linch.run_store import InMemoryRunStore
 from linch.run_stores.postgres import PostgresRunStore
 from linch.types import Message
-
-
-def test_unknown_ignorable_event_decodes_to_sentinel() -> None:
-    raw = {"type": "future_event", "ignorable": True, "payload": {"k": 1}}
-    event = event_from_dict(raw)
-    assert isinstance(event, IgnorableEvent)
-    assert is_ignorable_event(event)
-    assert event.original_type == "future_event"
-    assert event.type == "future_event"
-    assert event.raw == raw
 
 
 def test_unknown_without_flag_still_raises() -> None:
@@ -82,6 +67,11 @@ def test_event_envelope_must_be_an_object() -> None:
 def test_ignorable_event_round_trips() -> None:
     raw = {"type": "future_event", "ignorable": True, "payload": {"k": 1}}
     event = event_from_dict(raw)
+    assert isinstance(event, IgnorableEvent)
+    assert is_ignorable_event(event)
+    assert event.original_type == "future_event"
+    assert event.type == "future_event"
+    assert event.raw == raw
     encoded = event_to_dict(event)
     assert encoded == raw
     again = event_from_dict(encoded)
@@ -93,6 +83,7 @@ def test_ignorable_event_isolates_nested_input_and_encoded_output() -> None:
     payload = {"nested": ["stable", {"count": 1}]}
     raw = {"type": "future_event", "ignorable": True, "payload": payload}
     event = event_from_dict(raw)
+    assert isinstance(event, IgnorableEvent)
 
     payload["nested"][1]["count"] = 99
     encoded = event_to_dict(event)
@@ -208,49 +199,41 @@ def test_known_event_is_not_ignorable() -> None:
 
 
 def test_known_event_type_cannot_claim_ignorable() -> None:
-    """``ignorable`` is reserved for unknown types; a known type must be rejected.
-
-    The envelope validator already forbids this, but it was unreachable: the
-    ignorable branch only runs after every known type has decoded, so a known
-    type carrying the flag silently decoded as itself.
-    """
-    from linch.events import event_from_dict
-
     with pytest.raises(ValueError, match="known event type cannot be wrapped as ignorable"):
         event_from_dict({"type": "system", "subtype": "x", "message": "hi", "ignorable": True})
 
 
-def test_unknown_prompt_cache_reason_is_rejected_not_coerced() -> None:
-    """Strict decoding: an unsupported discriminator must fail, not silently default."""
-    from linch.events import event_from_dict
-
-    with pytest.raises(ValueError, match="unknown reason"):
-        event_from_dict({"type": "prompt_cache_advisory", "reason": "from_the_future"})
-
-
-def test_prompt_cache_advisory_without_reason_keeps_legacy_default() -> None:
-    """A legacy row that never wrote ``reason`` must still decode."""
-    from linch.events import event_from_dict
-
-    event = event_from_dict({"type": "prompt_cache_advisory", "detail": "d"})
-    assert event.reason == "tool_set_changed"  # type: ignore[union-attr]
-
-
-def test_known_prompt_cache_reasons_still_decode() -> None:
-    from linch.events import event_from_dict
-
-    for reason in ("tool_set_changed", "model_changed"):
-        event = event_from_dict({"type": "prompt_cache_advisory", "reason": reason, "detail": "d"})
-        assert event.reason == reason  # type: ignore[union-attr]
+@pytest.mark.parametrize(
+    ("raw", "expected", "error"),
+    [
+        (
+            {"type": "prompt_cache_advisory", "reason": "from_the_future"},
+            None,
+            "unknown reason",
+        ),
+        (
+            {"type": "prompt_cache_advisory", "detail": "d"},
+            "tool_set_changed",
+            None,
+        ),
+        *(
+            ({"type": "prompt_cache_advisory", "reason": reason, "detail": "d"}, reason, None)
+            for reason in ("tool_set_changed", "model_changed")
+        ),
+    ],
+)
+def test_prompt_cache_reason_decoding(
+    raw: dict[str, object], expected: str | None, error: str | None
+) -> None:
+    if error:
+        with pytest.raises(ValueError, match=error):
+            event_from_dict(raw)
+    else:
+        event = event_from_dict(raw)
+        assert event.reason == expected  # type: ignore[union-attr]
 
 
 def test_ignorable_event_rejects_nesting_deeper_than_persistence_allows() -> None:
-    """Depth the durable codec would truncate breaks the verbatim round trip.
-
-    Persistence encodes events with ``_json_safe(..., strict=False)``, which
-    substitutes ``"<max-depth>"`` past its limit. Accepting deeper values here
-    would let an ignorable event be stored as something it is not.
-    """
     from linch.events import IGNORABLE_MAX_DEPTH
 
     payload: Any = "leaf"
