@@ -405,13 +405,13 @@ async def test_transient_checkpoint_store_error_stops_without_terminal_and_resum
         if error_kind == "connection_lost":
             return asyncpg.ConnectionDoesNotExistError("database connection lost")
         if error_kind == "interface":
-            return asyncpg.InterfaceError("database connection interface lost")
+            return asyncpg.InterfaceError("connection is closed")
         if error_kind == "os_error":
-            return OSError("database socket lost")
+            return ConnectionResetError("database socket lost")
         if error_kind == "connection_error":
             return ConnectionError("database connection lost")
         wrapped = RuntimeError("store wrapper")
-        wrapped.__cause__ = OSError("database socket lost")
+        wrapped.__cause__ = ConnectionResetError("database socket lost")
         return wrapped
 
     session_store = _memory_session_store()
