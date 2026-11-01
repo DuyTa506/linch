@@ -13,6 +13,8 @@ from .rules import (
     PathRule,
     PermissionRule,
     ToolRule,
+    _contains_unparsed_shell_construct,
+    _match_unparsed_bash_rule,
     evaluate_bash_rules,
     match_path_rule,
     match_tool_rule,
@@ -297,6 +299,14 @@ def evaluate_rule_list(
     A matched ``passthrough`` rule abstains: scanning continues past it (so a
     layer can carve out exceptions that defer to the next source) and the list
     yields ``None`` if nothing else matches.
+
+    Args:
+        rules: Ordered permission rules to evaluate.
+        call: Pending tool invocation under evaluation.
+        project_root: Root used to resolve relative path patterns.
+
+    Returns:
+        The first applicable decision, or ``None`` when every rule abstains.
     """
     tool_name = call.tool.name
     for idx, rule in enumerate(rules):
@@ -305,6 +315,12 @@ def evaluate_rule_list(
             and _rule_applies(rule, call.principal)
             and match_tool_rule(rule, tool_name, call.input)
         ):
+            if rule.decision == "allow" and tool_name == "Bash":
+                command = call.input.get("command")
+                if isinstance(command, str) and _contains_unparsed_shell_construct(command):
+                    floor = _unparsed_bash_floor(rules, idx + 1, call.principal, command)
+                    if floor is not None:
+                        return _rule_outcome(floor, rule.kind, tool_name)
             decision = rule.decision
             if decision == "passthrough":
                 continue
@@ -388,6 +404,27 @@ def _bash_rules_from(
         for rule in rules[start_index:]
         if isinstance(rule, BashRule) and _rule_applies(rule, principal)
     ]
+
+
+def _unparsed_bash_floor(
+    rules: list[PermissionRule],
+    start_index: int,
+    principal: Principal | None,
+    command: str,
+) -> Literal["allow", "deny", "ask"] | None:
+    for rule in rules[start_index:]:
+        if not _rule_applies(rule, principal):
+            continue
+        if isinstance(rule, BashRule) and rule.decision == "deny":
+            if _match_unparsed_bash_rule(rule, command.strip()):
+                return "deny"
+            return "ask"
+        if isinstance(rule, ToolRule) and match_tool_rule(rule, "Bash", {"command": command}):
+            if rule.decision == "deny":
+                return "deny"
+            if rule.decision == "ask":
+                return "ask"
+    return None
 
 
 _EMPTY_ROLES: frozenset[str] = frozenset()
