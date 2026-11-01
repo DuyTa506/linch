@@ -382,7 +382,7 @@ RAG recall can share the exact backends your tools use — see
 
 Permissions gate every tool call *before* execution. Rules are evaluated in
 order; a matching `deny` blocks the call, and anything not auto-approved either
-prompts via `canUseTool` or pauses the loop with a `PermissionRequestEvent`.
+prompts via `can_use_tool` or pauses the loop with a `PermissionRequestEvent`.
 
 ```python
 from linch.permissions import ToolRule, PathRule, BashRule
@@ -396,7 +396,7 @@ agent = Agent(
             PathRule(paths=["/secrets/**"], decision="deny"),    # block secret paths
             BashRule(patterns=["rm -rf*"], decision="deny"),     # block dangerous commands
         ],
-        "canUseTool": my_approval_callback,   # async or sync
+        "can_use_tool": my_approval_callback,   # async or sync
     },
 )
 ```
@@ -415,7 +415,7 @@ The three rule types target different things:
 - `"acceptEdits"` — auto-allow file edits, prompt for the rest (e.g. Bash).
 - `"skip-dangerous"` — allow all (use only for trusted, headless runs).
 
-`canUseTool` is your interactive approval callback (sync or async). When a tool
+`can_use_tool` is your interactive approval callback (sync or async). When a tool
 call is not auto-approved and no callback resolves it, the loop emits a
 `PermissionRequestEvent` and pauses until the caller responds — see
 [Events](./events.md). Resolved allow/deny decisions are persisted into the run

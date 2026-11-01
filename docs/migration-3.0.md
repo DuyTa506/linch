@@ -22,6 +22,7 @@ The tables below group the 2.x removals and replacements by area.
 | `BashTool(backend=...)` | `BashTool(execution=...)`; `from linch.tools.builtin import BashTool` |
 | `coding_tools`, `default_tools`, `defaultTools`, `tools_from_defaults` | `workspace_tools(exclude=..., extra=...)`; `from linch import workspace_tools` |
 | `ToolRegistry.add/remove` | `register/unregister`; `register` and `replace` return reversible `Disposable` handles; `from linch import ToolRegistry` |
+| `permissions["canUseTool"]` and `.canUseTool` | `permissions["can_use_tool"]` and `.can_use_tool` |
 | `Session(provider_view=..., full_history=...)` | `session_log=SessionLog.seed(historical=..., visible=...)`; `from linch import Session, SessionLog` |
 | `SessionLog.derive_messages()` | Read `session.provider_view`; append with `await session.append(...)` |
 | Mutation of `provider_view` / `full_history` | Detached sequence snapshots; append messages or record a logged projection |
@@ -36,6 +37,7 @@ The tables below group the 2.x removals and replacements by area.
 | `Agent(tools=registry)` sharing later caller mutations | Each agent copies `registry` at construction; register later tools on `agent.tools` to keep agent registrations isolated |
 | `ToolActivation`, `ToolSurfaceReaderGuard`, `tool_activations`, and discovery codecs/capability gates | Removed; unknown content-block types and tool-result fields are rejected |
 | Missing-`jsonschema` validation bypass | `jsonschema` is core; configured output schemas are always validated |
+| Persisted skill fields `substitutedBody` and `invokedAt` | Canonical `substituted_body` and `invoked_at`; malformed records are rejected |
 
 Constructor aliases now use these exact spellings:
 
