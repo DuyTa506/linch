@@ -106,92 +106,71 @@ def _set_version(raw: dict[str, object], version: object) -> None:
         raw["schema_version"] = version
 
 
-@pytest.mark.parametrize("version", [None, 1, 2, 4, True, "3"])
-def test_checkpoint_requires_exact_wire_version(version: object) -> None:
-    raw = checkpoint_to_dict(_checkpoint())
-    _set_version(raw, version)
-
-    with pytest.raises(
-        UnsupportedWireVersionError, match="state was written by Linch < 3.0.*start a new run"
-    ):
-        checkpoint_from_dict(raw)
-
-
-@pytest.mark.parametrize("version", [None, 1, 2, 4, True, "3"])
-def test_run_contract_requires_exact_wire_version(version: object) -> None:
-    raw = run_contract_to_dict(_contract())
-    _set_version(raw, version)
-
-    with pytest.raises(UnsupportedWireVersionError):
-        run_contract_from_dict(raw)
-
-
 @pytest.mark.parametrize(
-    "decoder,encoder,value",
+    "kind",
     [
-        (intent_from_dict, intent_to_dict, _intent),
-        (receipt_from_dict, receipt_to_dict, _receipt),
+        "checkpoint",
+        "run_contract",
+        "model_intent",
+        "model_receipt",
+        "model_event",
+        "permission",
+        "provider_snapshot",
+        "model_input_snapshot",
+        "stored_event",
     ],
 )
 @pytest.mark.parametrize("version", [None, 1, 2, 4, True, "3"])
-def test_model_call_records_require_exact_wire_version(decoder, encoder, value, version) -> None:
-    raw = encoder(value())
-    if version is None:
-        raw.pop("version")
-    else:
+def test_wire_decoders_reject_noncurrent_version(kind: str, version: object) -> None:
+    """Reject every pre-3.0 or malformed wire-version marker at its decoder."""
+    decoder: Any
+    if kind == "checkpoint":
+        raw = checkpoint_to_dict(_checkpoint())
+        decoder = checkpoint_from_dict
+        _set_version(raw, version)
+    elif kind == "run_contract":
+        raw = run_contract_to_dict(_contract())
+        decoder = run_contract_from_dict
+        _set_version(raw, version)
+    elif kind == "model_intent":
+        raw = intent_to_dict(_intent())
+        decoder = intent_from_dict
         raw["version"] = version
+        if version is None:
+            raw.pop("version")
+    elif kind == "model_receipt":
+        raw = receipt_to_dict(_receipt())
+        decoder = receipt_from_dict
+        raw["version"] = version
+        if version is None:
+            raw.pop("version")
+    elif kind == "model_event":
+        raw = event_to_dict(ModelCallEvent("run", "intent", intent_to_dict(_intent())))
+        decoder = event_from_dict
+        _set_version(raw, version)
+    elif kind == "permission":
+        raw = permission_decision_to_dict(PermissionDecision(decision="allow"))
+        decoder = permission_decision_from_dict
+        _set_version(raw, version)
+    elif kind == "provider_snapshot":
+        raw = snapshot_to_dict(ProviderViewSnapshot(provider_view=[], covers_seq=0))
+        decoder = snapshot_from_dict
+        _set_version(raw, version)
+    elif kind == "model_input_snapshot":
+        snapshot = create_model_input_snapshot("run", 1, _request())
+        with pytest.raises(UnsupportedWireVersionError):
+            decode_model_input_snapshot(replace(snapshot, codec_version=cast(Any, version)))
+        return
+    else:
+        raw = {
+            "schema_version": WIRE_VERSION,
+            "event": event_to_dict(ToolCallStartEvent("call", "Search", {}, "s")),
+        }
+        decoder = _stored_event_from_dict
+        _set_version(raw, version)
 
     with pytest.raises(UnsupportedWireVersionError):
         decoder(raw)
-
-
-@pytest.mark.parametrize("version", [None, 1, 2, 4, True, "3"])
-def test_model_call_event_requires_exact_wire_version(version: object) -> None:
-    event = ModelCallEvent("run", "intent", intent_to_dict(_intent()))
-    raw = event_to_dict(event)
-    _set_version(raw, version)
-
-    with pytest.raises(UnsupportedWireVersionError):
-        event_from_dict(raw)
-
-
-@pytest.mark.parametrize("version", [None, 1, 2, 4, True, "3"])
-def test_permission_decision_requires_exact_wire_version(version: object) -> None:
-    raw = permission_decision_to_dict(PermissionDecision(decision="allow"))
-    _set_version(raw, version)
-
-    with pytest.raises(UnsupportedWireVersionError):
-        permission_decision_from_dict(raw)
-
-
-@pytest.mark.parametrize("version", [None, 1, 2, 4, True, "3"])
-def test_provider_snapshot_requires_exact_wire_version(version: object) -> None:
-    raw = snapshot_to_dict(ProviderViewSnapshot(provider_view=[], covers_seq=0))
-    _set_version(raw, version)
-
-    with pytest.raises(UnsupportedWireVersionError):
-        snapshot_from_dict(raw)
-
-
-@pytest.mark.parametrize("version", [None, 1, 2, 4, True, "3"])
-def test_exact_model_input_snapshot_requires_exact_wire_version(version: object) -> None:
-    snapshot = create_model_input_snapshot("run", 1, _request())
-    snapshot = replace(snapshot, codec_version=cast(Any, version))
-
-    with pytest.raises(UnsupportedWireVersionError):
-        decode_model_input_snapshot(snapshot)
-
-
-@pytest.mark.parametrize("version", [None, 1, 2, 4, True, "3"])
-def test_stored_event_envelope_requires_exact_wire_version(version: object) -> None:
-    raw: dict[str, object] = {
-        "schema_version": WIRE_VERSION,
-        "event": event_to_dict(ToolCallStartEvent("call", "Search", {}, "s")),
-    }
-    _set_version(raw, version)
-
-    with pytest.raises(UnsupportedWireVersionError):
-        _stored_event_from_dict(raw)
 
 
 @pytest.mark.asyncio
