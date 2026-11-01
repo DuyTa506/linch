@@ -38,11 +38,38 @@
 **Files:** New focused files under `tests/providers/` and `tests/loop/`; reuse existing test support.
 **Interface:** Fake SDK transports capture actual `messages.create` / `responses.create` kwargs. Real session/catalog/request code drives lifecycle tests.
 
-- [ ] Write tests for option-off byte identity with and without definitions; exact model/endpoint gating; addition placement and unchanged prefix; parallel results; abort/new prompt; prefix-tool restore/removal; duplicate addition after compaction; schema edit; fallback; run and context narrowing; 4 MiB bound; every-request beta; pause-turn termination; Responses round-trip/previous-response position and allowed/forced choices; durable resume; MCP name-only notification text.
-- [ ] Assert literal wire shapes and stable order; compare phase-2 payload bytes against hand-derived fixtures or frozen baseline captures, never the same builder against itself.
-- [ ] Run every new test before any implementation. Record per-test failures and explain any existing-behavior test that is already green.
-- [ ] Stop and report any test requiring a contradictory or unspecified wire shape.
-- [ ] Commit test coverage with the RED evidence in this plan.
+- [x] Write tests for option-off byte identity with and without definitions; exact model/endpoint gating; addition placement and unchanged prefix; parallel results; abort/new prompt; prefix-tool restore/removal; duplicate addition after compaction; schema edit; fallback; run and context narrowing; 4 MiB bound; every-request beta; pause-turn termination; Responses round-trip/previous-response position and allowed/forced choices; durable resume; MCP name-only notification text.
+- [x] Assert literal wire shapes and stable order; compare phase-2 payload bytes against hand-derived fixtures or frozen baseline captures, never the same builder against itself.
+- [x] Run every new test before any implementation. Record per-test failures and explain any existing-behavior test that is already green.
+- [x] Stop and report any test requiring a contradictory or unspecified wire shape.
+- [x] Commit test coverage with the RED evidence in this plan.
+
+#### Task 1 RED evidence (updated section 6.3 contract)
+
+- Added **75 cases** in `tests/providers/test_native_catalog_wire.py` (57) and
+  `tests/loop/test_native_catalog_changes.py` (18). Fake SDK transports capture
+  actual adapter kwargs; lifecycle cases run real sessions, synchronization,
+  request assembly, tool execution, compaction, fallback, and durable resume.
+- Ran every case before any source implementation with
+  `PATH=/home/duy/Downloads/duy_dev/agent_kit/.venv/bin:$PATH PYTHONPATH=src pytest -q tests/providers/test_native_catalog_wire.py tests/loop/test_native_catalog_changes.py --tb=short --junitxml=/tmp/catalog-phase3-red.xml`.
+  Final result: **72 failed, 3 passed in 1.33s**, exit 1. All failures are expected
+  missing phase-3 constructor fields/options or the default capability field.
+  No tests were skipped, and no source files were edited.
+- The three already-green cases independently pin frozen phase-2 Anthropic and
+  Responses payload bytes and existing `pause_turn` termination. They protect
+  existing behavior; they are not presented as proof of new native behavior.
+- Temporary `/tmp` runtime fixture probes ignored only absent constructor kwargs
+  to exercise existing transport/lifecycle setup before handoff. They validated
+  all four option-off fixture variants and caught a copied-registry fixture
+  issue, which was corrected. No probe or shim is part of the tracked suite.
+- Focused `ruff check` and `ruff format --check` pass. The full gates belong to
+  Tasks 2/3; this deliberately red test commit does not claim a passing suite.
+- The updated by-value removal/restoration rule resolves the earlier section 6.3
+  blocker. No currently contradictory wire shape was needed. A tool restored
+  with a different schema (including after compaction drops its original notice)
+  is covered via the phase-2 prefix path.
+- Full per-case RED/green reasons, coverage mapping, fixture-probe evidence,
+  commands, and concerns: `.superpowers/sdd/2026-11-02-catalog-changes-phase-3/task-1-report.md`.
 
 ### Task 2: Core and native adapters
 
