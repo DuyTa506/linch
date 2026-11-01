@@ -579,6 +579,12 @@ def _builtin_paid_view(
     recent = last_n_turn_boundaries(messages, config["keep_recent_turns"])
     if len(recent) == len(messages):
         raise ConfigError("paid compaction source has no summarizable prefix")
+    return _paid_view_from_recent(recent, text, config)
+
+
+def _paid_view_from_recent(
+    recent: list[Message], text: str, config: dict[str, Any]
+) -> list[Message]:
     label = (
         "summary of earlier conversation"
         if config["implementation"] == "default_v1"
@@ -594,24 +600,20 @@ def _builtin_paid_view(
 
 def _paid_projection(
     receipt: Any,
-    config: dict[str, Any],
-    source: list[Message],
+    recipe: dict[str, Any],
     target: list[Message],
-    history: list[Message],
-    *,
-    reminder_fingerprints: Sequence[str] = (),
 ) -> dict[str, Any]:
     return _projection_record(
         projection_kind="compaction",
         source_receipt_ids=[receipt.delivery_attempt_id],
         strategy_id=receipt.strategy_id,
-        strategy_config=config,
-        source_context_fingerprint=_context_fingerprint(source),
+        strategy_config=recipe["strategy_config"],
+        source_context_fingerprint=recipe["source_context_fingerprint"],
         target_context_fingerprint=_context_fingerprint(target),
-        full_history_base_count=len(history),
-        full_history_base_fingerprint=_context_fingerprint(history),
-        source_message_fingerprints=_source_message_fingerprints(source),
-        reminder_fingerprints=list(reminder_fingerprints),
+        full_history_base_count=recipe["full_history_base_count"],
+        full_history_base_fingerprint=recipe["full_history_base_fingerprint"],
+        source_message_fingerprints=recipe["source_message_fingerprints"],
+        reminder_fingerprints=recipe["reminder_fingerprints"],
     )
 
 
@@ -684,13 +686,20 @@ def _with_recorded_reminders(
     reminders: dict[str, Message],
 ) -> list[Message]:
     result = list(messages)
-    present = set(_source_message_fingerprints(result))
+    present = {
+        block.text
+        for message in result
+        for block in message.content
+        if isinstance(block, TextBlock)
+    }
     for digest in digests:
         if digest not in reminders:
             raise ConfigError("paid compaction reminder body is not durably resolvable")
-        if digest not in present:
-            result.append(reminders[digest])
-            present.add(digest)
+        reminder = reminders[digest]
+        texts = {block.text for block in reminder.content if isinstance(block, TextBlock)}
+        if not texts <= present:
+            result.append(reminder)
+            present.update(texts)
     return result
 
 
@@ -712,6 +721,54 @@ def _ordered_compaction_source(
         else:
             return None
     return result if index == len(base) else None
+
+
+def _paid_target_from_recipe(
+    recipe: dict[str, Any],
+    history: list[Message],
+    reminders: dict[str, Message],
+    text: str,
+    ladder: CompactionLadder | None,
+) -> list[Message] | None:
+    """Resolve only the retained suffix when an earlier run's summary is unavailable."""
+    candidates = [history, strip_response_chaining(history)]
+    if ladder is not None and ladder.micro:
+        micro, _ = micro_compact(history, keep_recent_turns=ladder.keep_recent_turns)
+        candidates.extend([micro, strip_response_chaining(micro)])
+    variants = [(_source_message_fingerprints(candidate), candidate) for candidate in candidates]
+    selected_reminders = {}
+    for digest in recipe["reminder_fingerprints"]:
+        if digest not in reminders:
+            raise ConfigError("paid compaction reminder body is not durably resolvable")
+        selected_reminders[digest] = reminders[digest]
+    recent: list[Message] = []
+    history_index = len(history) - 1
+    remaining = recipe["strategy_config"]["keep_recent_turns"]
+    for digest in reversed(recipe["source_message_fingerprints"]):
+        message = next(
+            (
+                candidate[history_index]
+                for fingerprints, candidate in variants
+                if history_index >= 0 and fingerprints[history_index] == digest
+            ),
+            None,
+        )
+        if message is not None:
+            history_index -= 1
+        else:
+            message = selected_reminders.get(digest)
+        if message is None:
+            return None
+        recent.append(message)
+        if message.role == "assistant":
+            remaining -= 1
+            if remaining == 0:
+                if len(recent) == len(recipe["source_message_fingerprints"]):
+                    return None
+                return _paid_view_from_recent(
+                    list(reversed(recent)), text, recipe["strategy_config"]
+                )
+    return None
 
 
 async def _reconcile_paid_compactions(
@@ -768,7 +825,8 @@ async def _reconcile_paid_compactions(
         candidates = [source]
         ladder = getattr(agent, "compaction_ladder", None)
         if ladder is not None and ladder.micro:
-            candidates.append(micro_compact(source, keep_recent_turns=ladder.keep_recent_turns)[0])
+            micro, elided = micro_compact(source, keep_recent_turns=ladder.keep_recent_turns)
+            candidates.append(strip_response_chaining(micro) if elided else micro)
         tail_count = len(history) - count
         cached_source = current[:-tail_count] if tail_count else current
         candidates.append(cached_source)
@@ -786,33 +844,53 @@ async def _reconcile_paid_compactions(
             ),
             None,
         )
-        if source is None:
-            raise ConfigError("paid compaction source context does not match durable history")
         assert receipt.accepted_text is not None
-        target = _builtin_paid_view(source, receipt.accepted_text, config)
-        derived = _paid_projection(
-            receipt,
-            config,
-            source,
-            target,
-            history[:count],
-            reminder_fingerprints=recipe["reminder_fingerprints"],
+        target = (
+            _builtin_paid_view(source, receipt.accepted_text, config)
+            if source is not None
+            else _paid_target_from_recipe(
+                recipe, history[:count], reminders, receipt.accepted_text, ladder
+            )
         )
+        if target is None:
+            raise ConfigError("paid compaction source context does not match durable history")
+        derived = _paid_projection(receipt, recipe, target)
         if record is not None and derived != record:
             raise ConfigError("paid compaction target or projection identity does not match")
         if record is None:
             await ledger.record_projection(derived)
         previous = _with_recorded_reminders(target, recipe["reminder_fingerprints"], reminders)
         for view in (source, target, previous):
-            replay_fingerprints.add(_context_fingerprint([*view, *history[count:]]))
+            if view is not None:
+                replay_fingerprints.add(_context_fingerprint([*view, *history[count:]]))
         previous_count = count
         last_record = derived
     if last_record is not None:
         rebuilt = [*previous, *history[previous_count:]]
+        ladder = getattr(agent, "compaction_ladder", None)
+        current_fingerprint = _context_fingerprint(current)
+        if (
+            ladder is not None
+            and ladder.micro
+            and current_fingerprint not in replay_fingerprints
+            and len(current) == len(rebuilt)
+        ):
+            # The saved micro projection may precede later durable appends.
+            # Replay at each possible boundary, leaving that later tail intact.
+            for boundary in range(len(history), previous_count - 1, -1):
+                prefix = [*previous, *history[previous_count:boundary]]
+                micro, elided = micro_compact(prefix, keep_recent_turns=ladder.keep_recent_turns)
+                if not elided:
+                    continue
+                candidate = [*strip_response_chaining(micro), *history[boundary:]]
+                if current_fingerprint == _context_fingerprint(candidate):
+                    rebuilt = candidate
+                    replay_fingerprints.add(current_fingerprint)
+                    break
         # A cache is either an exact verified source/target (with the durable
         # tail) or absent and reconstructed from full history. Other views are
         # not overwritten with a stale paid result.
-        if _context_fingerprint(current) not in replay_fingerprints:
+        if current_fingerprint not in replay_fingerprints:
             raise ConfigError("paid compaction recovery has an unexpected provider-view suffix")
         session.session_log.record_projection(rebuilt, reason="paid-compaction-recovery")
         session.last_compaction_info = {"projection_id": last_record["projection_id"]}
@@ -972,16 +1050,8 @@ async def _run_compaction_impl(
             expected = _builtin_paid_view(snapshot, receipt.accepted_text, config)
             if _context_fingerprint(expected) != _context_fingerprint(compacted):
                 raise ConfigError("built-in compaction result differs from its deterministic seam")
-            record = _paid_projection(
-                receipt,
-                config,
-                snapshot,
-                compacted,
-                list(session.session_log.full_history),
-                reminder_fingerprints=source_recipe["reminder_fingerprints"]
-                if source_recipe is not None
-                else (),
-            )
+            assert source_recipe is not None
+            record = _paid_projection(receipt, source_recipe, compacted)
             await caller._ledger.record_projection(record)
             projection_id = record["projection_id"]
 
