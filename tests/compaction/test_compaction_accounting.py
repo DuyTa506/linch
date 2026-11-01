@@ -285,6 +285,51 @@ async def test_model_call_admission_rejections(mode: str) -> None:
         assert limiter.acquired == limiter.released == ["requested-model"]
 
 
+@pytest.mark.parametrize("mode", ["abort", "budget"])
+@pytest.mark.parametrize("resume_budget", ["same", "fresh"])
+async def test_post_marker_rejection_resumes_without_unknown_usage(
+    mode: str, resume_budget: str
+) -> None:
+    from linch.abort import AbortContext
+    from linch.budget import RunBudget
+    from linch.errors import AbortError
+    from linch.model_calls import _AccountedAuxiliaryCaller, _ModelCallError, _ModelCallLedger
+    from linch.types import Usage
+
+    journal: list[Any] = []
+    signal = AbortContext()
+    budget = RunBudget(max_tokens=1000)
+
+    async def persist(event: Any) -> None:
+        journal.append(event)
+        if event.record_kind == "dispatch_started":
+            await asyncio.sleep(0)
+            if mode == "abort":
+                signal.abort()
+            else:
+                budget.charge(Usage(1000), None)
+
+    provider, ledger, limiter, caller = _setup(budget=budget, persist=persist)
+    with pytest.raises(AbortError if mode == "abort" else _ModelCallError):
+        await _text(caller, signal=signal)
+
+    assert provider.requests == []
+    assert limiter.held == 0
+    assert journal[-1].record_kind == "abandoned"
+    assert journal[-1].record["usage_status"] == "not_dispatched"
+    assert ledger.usage_complete
+
+    restored_budget = budget if resume_budget == "same" else RunBudget()
+    restored_budget.max_tokens = 2000
+    restored = _ModelCallLedger(ledger.run_id, budget=restored_budget)
+    await restored.restore(journal)
+    restored.assert_may_start()
+    assert restored.usage_complete
+    result = await _text(_AccountedAuxiliaryCaller(provider, restored))
+    assert result.text == "Paid summary."
+    assert len(provider.requests) == 1
+
+
 @pytest.mark.parametrize("cancel_task", [False, True])
 async def test_abort_during_hanging_stream_records_unknown_and_releases_slot(cancel_task: bool):
     from linch.abort import AbortContext
