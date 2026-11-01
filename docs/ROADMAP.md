@@ -53,10 +53,11 @@ the embedder supplies the domain implementation. For example,
 - Duck-typed protocols do not gain required methods in a minor release. New
   protocol capabilities are detected with `getattr` or `hasattr` and have a
   compatibility fallback.
-- Persisted wire formats remain forward-tolerant. Breaking shapes require an
-  explicit schema-version migration.
-- Python 3.10 remains supported. Do not use newer runtime primitives without a
-  compatible implementation or backport.
+- Core reads only current wire-3 persisted formats; pre-3.0, missing, and
+  unknown versions are rejected. Start new runs and use fresh databases;
+  built-in stores do not upgrade old schemas.
+- Python 3.11 is the minimum supported runtime. Use its standard-library
+  primitives directly; do not add compatibility fallbacks for older Python.
 - The core dependency graph stays small. Heavy integrations belong in extras,
   examples, or separate packages.
 - Linch remains embeddable inside a host service. It does not become a daemon,
@@ -73,7 +74,7 @@ Linch already contains the main runtime substrate:
   providers.
 - Tools, MCP wrapping, permissions, retries, timeouts, resource-aware
   scheduling, isolation, and background execution.
-- Context builders, compaction, memory stores, virtual filesystems, and result
+- Context builders, compaction, file memory, virtual filesystems, and result
   offload.
 - Durable sessions, run checkpoints, workflow journals, run reports, and resume.
 - Subagents, retained workers, workflows, mailbox coordination, and scheduling.
@@ -115,7 +116,7 @@ work.
 | Provider warm-up | Optional duck-typed `provider.prepare()` coalesced once before the first run; llama.cpp context discovery leaves the event loop | [architecture/provider-contract.md](./architecture/provider-contract.md) |
 | Session lifecycle | `agent.release_session(...)`, `session.aclose(force=...)`, and `Session` as an async context manager | [usage/agent.md](./usage/agent.md#releasing-a-single-session) |
 | Linear context trimming | Trimming is linear over message count; retained messages, order, estimator calls, and `ContextBudget` fields unchanged | [architecture/compaction.md](./architecture/compaction.md) |
-| Scalable reference memory | Namespace-partitioned in-memory store, chunked cooperative yields, bounded top-k, off-loop SQLite/Postgres scoring | [usage/context-and-memory.md](./usage/context-and-memory.md) |
+| File memory | Run-scoped `/memories/MEMORY.md` index, bounded to 200 lines and loaded once through `FileMemoryContextBuilder` | [usage/context-and-memory.md](./usage/context-and-memory.md) |
 | Scheduler parallelism | Provider-order results without the full-batch barrier; opt-in maximal-compatible batching, greedy default unchanged | [architecture/tool-protocol.md](./architecture/tool-protocol.md) |
 | Provider conformance | `assert_provider_contract` (`linch.testing`), transport `aclose()` on Anthropic/OpenAI Responses, Gemini tool-choice mapping | [architecture/provider-contract.md](./architecture/provider-contract.md) |
 | Lazy public exports | PEP 562 lazy export map keeps `import linch` off MCP/Uvicorn/unused provider SDKs; `linch.__all__` and star imports unchanged | `docs/versioning.md` |
@@ -123,17 +124,17 @@ work.
 | Idempotent integration seam | Stable `ToolContext.idempotency_key` (run id + tool-use id) for at-least-once reconciliation | [architecture/tool-protocol.md](./architecture/tool-protocol.md) |
 | Off-loop discovery | Skill and subagent disk discovery run on the blocking bridge, off the event loop | [architecture/skills-subagents.md](./architecture/skills-subagents.md) |
 | Durable steering | `session.align()` queue snapshotted into every run checkpoint and restored on resume: in-order, at-least-once delivery across crash/resume; mid-turn resumes defer the drain past the re-executed tool batch | [usage/agent.md](./usage/agent.md#steering-an-in-flight-run) |
-| GenAI semconv traces | `OpenTelemetryObserver` emits `gen_ai.*` semantic-convention attributes (operation, provider, conversation, cache tokens, tool call) alongside unchanged `linch.*` names | [usage/hooks.md](./usage/hooks.md#genai-semantic-conventions) |
+| GenAI semconv traces | Direct OpenTelemetry source instrumentation emits `gen_ai.*` semantic-convention attributes (operation, provider, conversation, cache tokens, tool call) alongside `linch.*` names; hosts own SDK/exporter setup | [usage/hooks.md](./usage/hooks.md#opentelemetry) |
 | Scaffolding CLI | Stdlib-only `linch new` / `linch add tool` console script; generated projects run and test offline; core import graph untouched | [usage/cli.md](./usage/cli.md) |
 | Proactive provider gate | Optional `Agent(limiter=...)` / `max_provider_concurrency=N` held around every live provider call (turn stream and compaction), released across retry backoff; cached provider clients rebuild when the event loop changes | [usage/extending.md](./usage/extending.md#limiter--gate-every-live-provider-call) |
 | SDK-neutral defaults | Bare `Agent` has no implicit workspace tools or project-resource discovery; `workspace_tools()` and deep-agent profiles are explicit opt-ins; prompt identity is domain-neutral | [migration-2.0.md](./migration-2.0.md) |
 | Canonical permission boundary | Pre-tool transforms are revalidated before rules/callback approval; `updatedInput` is rejected instead of executing post-approval mutation | [migration-2.0.md](./migration-2.0.md#tool-permissions-and-hooks) |
 | Strict provider stream | Normalized event vocabulary and required fields are enforced at the adapter boundary | [architecture/provider-contract.md](./architecture/provider-contract.md) |
 | Tool progress | Best-effort `ToolContext.report_progress()` and `ToolProgressEvent` provide transient UI/telemetry updates without entering provider history or the durable run event log | [usage/events.md](./usage/events.md) |
-| Durable run contract | Canonical execution inputs are fingerprinted and compared on resume; legacy runs require an explicit unsafe migration policy | [migration-2.0.md](./migration-2.0.md#durable-runs-and-legacy-records) |
+| Durable run contract | Canonical execution inputs are fingerprinted and compared on resume; current wire-3 state and a verified contract are required, and old runs must start anew | [migration-3.0.md](./migration-3.0.md) |
 | Portable session forks | Validated message-prefix forks preserve relevant metadata while rejecting unsafe tool-exchange boundaries; live work is not copied | [migration-2.0.md](./migration-2.0.md#session-forks) |
 | Provider-neutral compaction | Compaction and durable snapshots preserve pairing and fall back safely to full history when cache state is malformed | [architecture/compaction.md](./architecture/compaction.md) |
-| Concurrent storage allocation | Session/run allocation is transaction-safe under concurrent creators in SQLite and Postgres | [migration-2.0.md](./migration-2.0.md#compaction-and-storage-fixes) |
+| Concurrent storage allocation | Session/run allocation is transaction-safe under concurrent creators in Postgres | [migration-2.0.md](./migration-2.0.md#compaction-and-storage-fixes) |
 
 ### Deferred: central-loop structural split
 
@@ -210,7 +211,7 @@ pyright
 
 CI expands to:
 
-- Correctness on Python 3.10, 3.11, 3.12, and 3.13.
+- Correctness on Python 3.11, 3.12, and 3.13.
 - A minimal-core installation that proves optional integrations remain lazy.
 - An all-extras smoke installation for MCP, Anthropic, Gemini, Postgres, and
   OpenTelemetry.
@@ -234,8 +235,8 @@ verified independently from speed.
 | Hosted dashboard, daemon, or supervisor | Host service, deployment platform, or separate event/report consumer. |
 | Skill/tool marketplace | External registry or package manager with its own trust policy. |
 | Large SaaS, cloud, browser, database, or shell tool bundles | Optional tool packages or MCP servers. |
-| Vector database and embedding SDK dependencies | External `MemoryStore` adapters; examples may demonstrate the seam. |
-| Domain-specific memory formats and prompts | Host-owned memory adapters, context builders, or presets. |
+| Vector database and embedding SDK dependencies | External semantic-recall recipes such as mem0; examples may demonstrate the seam. |
+| Domain-specific memory formats and prompts | Host-owned file-memory layouts, context builders, or presets. |
 | Distributed queue, lease, or retry policy | Deployment-specific implementations behind existing protocols. |
 | Default PII, PHI, or security classifier | Host governance hooks and verifiers. |
 | Vendor-specific observability and authentication bundles | OpenTelemetry or external integration packages. |

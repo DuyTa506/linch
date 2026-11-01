@@ -19,5 +19,12 @@ Start at the [architecture index](./architecture/README.md), or go directly to a
 | 11. [Compaction](./architecture/compaction.md) | Compaction: when and how old context is summarized |
 | 12. [Skills and Subagents](./architecture/skills-subagents.md) | Skills (slash commands) and subagents (roles, workers, fork/continue) |
 | 13. [Key Invariants](./architecture/invariants.md) | Key invariants the whole system upholds |
+| [Plugins and profiles](./architecture/kernel.md#plugins) | `agent.use`, dependency activation, scoped effects, and per-run configuration |
+| [Tool search](./architecture/tool-protocol.md#deferred-tool-search) | Deferred schemas and persistent discovery state |
+| [Lifecycle catalog and trace IDs](./architecture/events.md#typed-lifecycle-catalog) | Typed dispatch modes, producers/consumers, and trace correlation |
+| [Principal/RBAC](./usage/tools.md#per-run-principals-and-role-rules) | Per-run identity, role-conditioned permissions, and resume checks |
+| [RAG and grounding](./usage/context-and-memory.md#sourced-retrieval-and-grounding) | Sourced retrieval and citation checks on the finalization seam |
+| [Worker fleet](./usage/production.md#scale-out) | PgQueuer dispatch and leased durable execution |
+| [Explicit extensions](./architecture/overview.md#extensions) | The `linch.ext` boundary |
 
 For *how to use* these features, see the [usage guide](./usage/README.md).
