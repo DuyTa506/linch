@@ -233,7 +233,6 @@ async def test_subagent_result_exposes_unique_mailbox_address(
         await agent.close()
 
 
-
 async def test_subagent_tool_returns_structured_output_as_json_text(tmp_path: Any) -> None:
     from linch.ext.deep_agent import create_deep_agent
 
@@ -341,6 +340,168 @@ async def test_background_subagent_returns_ack_immediately(tmp_path: Any) -> Non
     assert "<status>" in text
     assert "<result>" in text
     assert "</task-notification>" in text
+
+
+async def test_background_subagent_pre_drive_failure_notifies(tmp_path: Any, monkeypatch) -> None:
+    import contextlib
+
+    agent, session = await _make_agent_and_session(tmp_path)
+
+    async def fail_create(**kwargs):
+        raise ConnectionError("child store unavailable")
+
+    monkeypatch.setattr(session.store, "create", fail_create)
+    try:
+        result = await _spawn(
+            agent, session, description="failing child", prompt="go", run_in_background=True
+        )
+        assert not result.is_error
+        handle = next(iter(session.workers.values()))
+        with contextlib.suppress(ConnectionError):
+            await handle.task
+        assert handle.status == "failed"
+        assert len(session.pending_notifications) == 1
+        text = session.pending_notifications[0].content[0].text
+        assert "<status>failed</status>" in text
+        assert "ConnectionError: child store unavailable" in text
+    finally:
+        await agent.close()
+
+
+async def test_background_subagent_cancelled_before_start_marks_killed(tmp_path: Any) -> None:
+    import asyncio
+
+    agent, session = await _make_agent_and_session(tmp_path)
+    try:
+        await _spawn(agent, session, description="worker", prompt="go", run_in_background=True)
+        handle = next(iter(session.workers.values()))
+        handle.task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await handle.task
+        assert handle.status == "killed"
+        assert set(agent._sessions) == {session.id}
+    finally:
+        await agent.close()
+
+
+async def test_background_subagent_notification_uses_post_tool_redaction(tmp_path: Any) -> None:
+    from linch import RedactionConfig, RedactionHook, RedactionRule
+
+    agent, session = await _make_agent_and_session(
+        tmp_path, ScriptedProvider([TextTurn("SECRET_VALUE")])
+    )
+    agent.hooks.append(
+        RedactionHook(
+            RedactionConfig(
+                rules=(RedactionRule("SECRET_VALUE", "[REDACTED]"),),
+                redact_final_answer=False,
+            )
+        )
+    )
+    try:
+        await _spawn(agent, session, description="worker", prompt="go", run_in_background=True)
+        await next(iter(session.workers.values())).task
+        text = session.pending_notifications[0].content[0].text
+        assert "SECRET_VALUE" not in text
+        assert "[REDACTED]" in text
+    finally:
+        await agent.close()
+
+
+async def test_background_subagent_completion_keeps_origin_profile_and_deps(tmp_path: Any) -> None:
+    import asyncio
+    from dataclasses import replace
+
+    from linch import Disposable, HookResult, Profile, RunOptions
+    from linch.config import FeatureFlags
+    from tests.support.agents import make_agent
+
+    started, release = asyncio.Event(), asyncio.Event()
+    completion_calls = []
+
+    class RedactOrigin:
+        def on_post_tool_use(self, ctx):
+            if "SECRET_VALUE" in ctx.result.content:
+                completion_calls.append((ctx.run_id, ctx.deps))
+                return HookResult.mutate(tool_result=replace(ctx.result, content="origin-redacted"))
+
+    class OriginPolicy:
+        name, version = "origin-policy", "1"
+        requires = provides = ()
+
+        def setup(self, ctx, config=None):
+            hooks, hook = ctx.run_config.hooks, RedactOrigin()
+            hooks.append(hook)
+            return Disposable(lambda: hooks.remove(hook))
+
+    class PausedChild(ScriptedProvider):
+        async def stream(self, req):
+            if any(getattr(block, "text", "") == "child work" for block in req.messages[0].content):
+                started.set()
+                await release.wait()
+                async for event in child_provider.stream(req):
+                    yield event
+            else:
+                async for event in super().stream(req):
+                    yield event
+
+    child_provider = ScriptedProvider([TextTurn("SECRET_VALUE")])
+    provider = PausedChild(
+        [
+            ToolUseTurn(
+                "Subagent",
+                {"description": "worker", "prompt": "child work", "run_in_background": True},
+            ),
+            TextTurn("parent A"),
+            TextTurn("parent B"),
+        ]
+    )
+    agent = make_agent(
+        provider,
+        cwd=str(tmp_path),
+        run_store=None,
+        features=FeatureFlags(subagents=True),
+        enable_background_subagents=True,
+    )
+    session = await agent.session()
+    deps = {"tenant": "A"}
+    profile = Profile("origin", "1", plugins={"policy": (OriginPolicy(), {})})
+    try:
+        events = [_ async for _ in session.run("A", RunOptions(profile=profile, deps=deps))]
+        origin_run_id = events[0].run_id
+        await asyncio.wait_for(started.wait(), 5)
+        [_ async for _ in session.run("B", RunOptions(deps={"tenant": "B"}))]
+        release.set()
+        await next(iter(session.workers.values())).task
+        assert session.pending_notifications[0].content[0].text == "origin-redacted"
+        assert completion_calls == [(origin_run_id, deps)]
+    finally:
+        release.set()
+        await agent.close()
+
+
+@pytest.mark.parametrize("action", ["block", "stop"])
+async def test_background_subagent_notification_honors_post_tool_veto(
+    tmp_path: Any, action
+) -> None:
+    from linch import HookResult
+
+    class VetoCompletion:
+        def on_post_tool_use(self, ctx):
+            return HookResult(action=action, reason="completion withheld")
+
+    agent, session = await _make_agent_and_session(
+        tmp_path, ScriptedProvider([TextTurn("PRIVATE_RESULT")])
+    )
+    agent.hooks.append(VetoCompletion())
+    try:
+        await _spawn(agent, session, description="worker", prompt="go", run_in_background=True)
+        await next(iter(session.workers.values())).task
+        text = session.pending_notifications[0].content[0].text
+        assert "PRIVATE_RESULT" not in text
+        assert "completion withheld" in text
+    finally:
+        await agent.close()
 
 
 async def test_background_subagent_completion_is_audited_on_origin_run(tmp_path: Any) -> None:
