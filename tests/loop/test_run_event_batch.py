@@ -1,11 +1,6 @@
-"""Optional batch-append capability on run stores (WS2).
-
-`append_events` amortizes the per-event SELECT-MAX + INSERT + COMMIT into one
-atomic batch, returning the 1-based seqs it assigned. `RunStore` itself is
-unchanged; the method is an optional duck-typed capability.
-"""
-
 from __future__ import annotations
+
+from typing import Any
 
 from linch.events import UserEvent
 from linch.run_store import InMemoryRunStore
@@ -23,16 +18,17 @@ def _labels(rows: list) -> list[str]:
     return [row.event.message.content[0].text for row in rows]
 
 
-async def test_inmemory_append_events_returns_contiguous_seqs() -> None:
-    store = InMemoryRunStore()
+async def _assert_contiguous(store: Any) -> None:
     run = await store.create_run("s1")
-    seqs = await store.append_events(run.id, _events("a", "b", "c"))
-    assert seqs == [1, 2, 3]
-    # A following batch continues the sequence.
-    more = await store.append_events(run.id, _events("d", "e"))
-    assert more == [4, 5]
-    stored = await store.load_events(run.id)
-    assert [row.seq for row in stored] == [1, 2, 3, 4, 5]
+    assert await store.append_events(run.id, _events("a", "b", "c")) == [1, 2, 3]
+    assert await store.append_events(run.id, _events("d", "e")) == [4, 5]
+    rows = await store.load_events(run.id)
+    assert [row.seq for row in rows] == [1, 2, 3, 4, 5]
+    assert _labels(rows) == ["a", "b", "c", "d", "e"]
+
+
+async def test_inmemory_append_events_returns_contiguous_seqs() -> None:
+    await _assert_contiguous(InMemoryRunStore())
 
 
 async def test_append_events_empty_is_noop() -> None:
@@ -42,8 +38,6 @@ async def test_append_events_empty_is_noop() -> None:
 
 
 async def test_inmemory_append_events_honors_append_event_override() -> None:
-    # Recovery tests subclass InMemoryRunStore and override append_event to drop a
-    # start; the batch path must route through the override, not bypass it.
     class _DropMarkedAppend(InMemoryRunStore):
         async def append_event(self, run_id: str, event) -> int:  # type: ignore[override]
             if event.message.content[0].text == "drop":
@@ -53,7 +47,7 @@ async def test_inmemory_append_events_honors_append_event_override() -> None:
     store = _DropMarkedAppend()
     run = await store.create_run("s1")
     seqs = await store.append_events(run.id, _events("keep", "drop", "keep2"))
-    assert seqs == [1, 0, 2]  # override honored: the dropped event returns 0
+    assert seqs == [1, 0, 2]
     assert _labels(await store.load_events(run.id)) == ["keep", "keep2"]
 
 
@@ -62,13 +56,6 @@ async def test_postgres_append_events_atomic_and_contiguous(
 ) -> None:
     store = PostgresRunStore(pg_dsn)
     try:
-        run = await store.create_run("s1")
-        seqs = await store.append_events(run.id, _events("a", "b", "c"))
-        assert seqs == [1, 2, 3]
-        more = await store.append_events(run.id, _events("d", "e"))
-        assert more == [4, 5]
-        rows = await store.load_events(run.id)
-        assert [row.seq for row in rows] == [1, 2, 3, 4, 5]
-        assert _labels(rows) == ["a", "b", "c", "d", "e"]
+        await _assert_contiguous(store)
     finally:
         await store.close()

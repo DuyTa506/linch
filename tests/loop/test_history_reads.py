@@ -3,24 +3,24 @@ from __future__ import annotations
 from collections import Counter
 
 import pytest
-from test_run_resume import ScriptProvider, _registry
+
+from tests.support.agents import make_agent
+from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
+from tests.support.stores import memory_run_store, memory_session_store
+from tests.support.tools import StubTool, tool_registry
 
 
 async def test_primary_turns_do_not_snapshot_audit_history(monkeypatch: pytest.MonkeyPatch) -> None:
-    from linch import Agent, InMemoryRunStore
     from linch.events import ResultEvent
     from linch.session_log import SessionLog
-    from linch.sessions import InMemorySessionStore
 
-    provider = ScriptProvider(tool_names=["search"])
-    agent = Agent(
+    provider = ScriptedProvider([ToolUseTurn("search", {}), TextTurn("done")])
+    agent = make_agent(
+        provider,
         model="offline-model",
-        provider=provider,
-        tools=_registry({}, "search"),
-        session_store=InMemorySessionStore(),
-        run_store=InMemoryRunStore(),
-        permissions={"mode": "skip-dangerous"},
-        cwd=".",
+        tools=tool_registry(StubTool("search")),
+        session_store=memory_session_store(),
+        run_store=memory_run_store(),
     )
     session = await agent.session()
     reads: Counter[str] = Counter()
@@ -39,7 +39,7 @@ async def test_primary_turns_do_not_snapshot_audit_history(monkeypatch: pytest.M
 
     events = [event async for event in session.run("hello")]
 
-    assert provider.calls == 2
+    assert len(provider.requests) == 2
     assert any(isinstance(event, ResultEvent) and event.subtype == "success" for event in events)
     assert reads["full_history"] == 0
     assert reads["provider_view"] == 4
