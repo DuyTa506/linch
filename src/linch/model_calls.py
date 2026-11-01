@@ -740,14 +740,28 @@ class _ModelCallLedger:
             self._started.remove(delivery_id)
             return True
 
-    async def abandon(self, intent: ModelCallIntent, *, reason: str) -> None:
+    async def abandon(
+        self, intent: ModelCallIntent, *, reason: str, not_dispatched: bool = False
+    ) -> None:
+        """Close an intent without a provider receipt.
+
+        Args:
+            intent: Admitted delivery being closed.
+            reason: Audit explanation for ending the delivery.
+            not_dispatched: Whether the provider was never invoked, even if its
+                dispatch marker was already written.
+        """
         async with self._lock:
             self._healthy()
             owned = self._pending(intent)
             delivery_id = owned.delivery_attempt_id
             if delivery_id in self._abandoned:
                 raise _ModelCallError("invalid_state", "delivery already abandoned")
-            status = "unknown" if delivery_id in self._started else "not_dispatched"
+            status = (
+                "unknown"
+                if delivery_id in self._started and not not_dispatched
+                else "not_dispatched"
+            )
             record = {
                 "version": _VERSION,
                 "intent": intent_to_dict(owned),
@@ -762,6 +776,8 @@ class _ModelCallLedger:
                 if self._budget is not None:
                     self._budget._register_unresolved_delivery(delivery_id)
             await self._write("abandoned", record)
+            if status == "not_dispatched":
+                self._started.discard(delivery_id)
             self._abandoned.add(delivery_id)
 
     def receipts(self) -> list[ModelCallReceipt]:
@@ -1014,14 +1030,15 @@ class _LedgerRecovery:
                         raise _ModelCallError(
                             "invalid_state", "settled delivery cannot be abandoned"
                         )
-                    status = "unknown" if delivery_id in self.started else "not_dispatched"
-                    if raw["usage_status"] != status:
+                    if raw["usage_status"] == "unknown" and delivery_id not in self.started:
                         raise _invalid("abandonment status disagrees with dispatch state")
                     if (
                         delivery_id in self.abandoned_records
                         and self.abandoned_records[delivery_id] != raw
                     ):
                         raise _ModelCallError("conflicting_delivery", "abandonment payload differs")
+                    if raw["usage_status"] == "not_dispatched":
+                        self.started.discard(delivery_id)
                     self.abandoned.add(delivery_id)
                     self.abandoned_records[delivery_id] = raw
                 self._journal_late_deliveries.add(delivery_id)
@@ -1412,11 +1429,11 @@ class _AuxiliaryDelivery:
             self.signal.throw_if_aborted()
             ledger.assert_may_start()
             await ledger.mark_dispatch_started(self.intent)
-            started = True
             # No await between these rechecks and the physical stream invocation.
             self.signal.throw_if_aborted()
             ledger.assert_may_start()
             chat = ChatCall(self.caller._session, self.request, self.response)
+            started = True
             iterator = in_span(
                 self.caller._provider.stream(self.request), chat.span, end_on_exit=False
             ).__aiter__()
@@ -1466,7 +1483,9 @@ class _AuxiliaryDelivery:
                 if ledger._persistence_failed:
                     pass
                 elif not started:
-                    await ledger.abandon(self.intent, reason="delivery_not_dispatched")
+                    await ledger.abandon(
+                        self.intent, reason="delivery_not_dispatched", not_dispatched=True
+                    )
                 else:
                     cancelled = isinstance(exc, (AbortError, asyncio.CancelledError, GeneratorExit))
                     if self.response.usage is not None:
