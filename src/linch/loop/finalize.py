@@ -131,6 +131,11 @@ class RunFinalization:
             final_block,
             forced,
         )
+        self.ctx.checkpoint.extension_state["linch.resume"] = {
+            "feedback_origin": "turn_stopping",
+            "feedback_base_count": len(self.ctx.session.full_history),
+        }
+        await self.ctx.save_checkpoint("assistant_appended", turn_index=turn_index)
         decision = await self.ctx.turn_stopping.dispatch(candidate)
         messages = decision.feedback
         if final_block is not None and decision.action != "accept":
@@ -147,10 +152,6 @@ class RunFinalization:
             raise ValueError("replayed turn feedback differs from its decision")
         self.runtime.replayed_feedback = ()
         if decision.action != "accept":
-            self.ctx.checkpoint.extension_state["linch.resume"] = {
-                "feedback_origin": "turn_stopping"
-            }
-            await self.ctx.save_checkpoint("assistant_appended", turn_index=turn_index)
             async with aclosing(
                 append_feedback(
                     self.ctx.session,
@@ -166,6 +167,8 @@ class RunFinalization:
             await self.ctx.end_active_turn()
             await self.ctx.save_checkpoint("turn_complete", turn_index=turn_index)
             return
+        self.ctx.checkpoint.extension_state.pop("linch.resume", None)
+        await self.ctx.save_checkpoint("assistant_appended", turn_index=turn_index)
         self.runtime.sync_checkpoint_accounting()
         outcome = TerminalOutcome()
         finalize = finalize_final_tool_answer if final_block else finalize_text_answer
