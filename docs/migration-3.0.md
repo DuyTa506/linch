@@ -143,6 +143,13 @@ Custom store implementations must follow these changed contracts:
   capabilities fence writes with owner/epoch; workers drive renewal. Import
   `RunLease`, `RunLeaseStore`, `RunLeaseConflictError`, and `LeaseLostError`
   from `linch` when implementing ownership handling.
+- Leases are carried per write, not held by the store. Every run-store
+  mutation takes an explicit `lease=` token; pass the claimed `RunLease`
+  through `RunOptions(lease=...)` when driving a leased run yourself.
+  Stores no longer remember which leases they hold. A custom leased store
+  must accept `lease=` on every mutation and validate run, owner and epoch in
+  the same operation as the write. `RunLease` gains `ttl_s`, used for renewal.
+  Unleased writes stay supported for in-process runs.
 
 Writes remain durable before guarded side effects. Lease loss ends execution
 without further writes. Transient durable-store connection failures interrupt
