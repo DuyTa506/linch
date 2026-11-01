@@ -18,6 +18,8 @@ if TYPE_CHECKING:
 JsonValue: TypeAlias = None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
 RenderOutput: TypeAlias = Callable[[JsonValue], str]
 
+_STRICT_JSON_MAX_DEPTH = 100
+
 ToolScope = Literal["read", "write", "exec"]
 ResourceMode = Literal["read", "write"]
 
@@ -295,7 +297,9 @@ def normalize_json_value(value: Any) -> JsonValue:
 
     Unlike ``json.dumps(default=str)``, this never coerces foreign objects or
     mapping keys. It also rejects cycles and non-finite floats, which JSON's
-    default Python encoder otherwise accepts as non-standard tokens.
+    default Python encoder otherwise accepts as non-standard tokens. Containers
+    may be nested up to 100 levels; deeper values are rejected before recursive
+    traversal can hit Python's recursion limit.
 
     Args:
         value: Value to validate and isolate.
@@ -325,6 +329,8 @@ def _check_tool_json_node(value: Any, path: str, active: set[int], depth: int) -
         raise ValueError(f"{path} contains non-JSON value {type(value).__name__}")
     if id(value) in active:
         raise ValueError(f"{path} contains a cycle")
+    if depth >= _STRICT_JSON_MAX_DEPTH:
+        raise ValueError(f"{path} exceeds maximum nesting depth {_STRICT_JSON_MAX_DEPTH}")
     return depth + 1
 
 
