@@ -11,6 +11,7 @@ import json
 import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import aclosing
 from dataclasses import replace
 from functools import partial
 from typing import Any, cast
@@ -886,17 +887,20 @@ class RunRuntime:
             raise RuntimeError("budget terminal requested without a budget")
         duration_ms = int((time.time() - self.started) * 1000)
         self.terminal_result = self.build_run_result("error", "error", duration_ms=duration_ms)
-        async for event in _budget_exhausted_tail(
-            self.session,
-            runtime=self,
-            run_id=self.run_id,
-            budget=self.budget,
-            total=self.total,
-            duration_ms=duration_ms,
-            running_cost=self.running_cost,
-            usage_complete=self.ledger.usage_complete,
-        ):
-            yield event
+        async with aclosing(
+            _budget_exhausted_tail(
+                self.session,
+                runtime=self,
+                run_id=self.run_id,
+                budget=self.budget,
+                total=self.total,
+                duration_ms=duration_ms,
+                running_cost=self.running_cost,
+                usage_complete=self.ledger.usage_complete,
+            )
+        ) as events:
+            async for event in events:
+                yield event
 
     async def emit_abort_terminal(
         self, *, close_active_spans: Callable[..., Awaitable[None]]
@@ -932,8 +936,9 @@ class RunRuntime:
             if failure is None:
                 self.session._event_journal = None
         if failure is not None:
-            async for item in self.emit_exception_terminal(failure):
-                yield item
+            async with aclosing(self.emit_exception_terminal(failure)) as events:
+                async for item in events:
+                    yield item
         else:
             yield event
 
