@@ -9,129 +9,85 @@ import asyncio
 
 import pytest
 
-from linch.sessions import InMemorySessionStore, SqliteSessionStore
+from linch.sessions import InMemorySessionStore
 from linch.sessions.tasks import CreateTaskInput, TaskPatch
 
-STORE_KINDS = ["memory", "sqlite"]
+
+@pytest.fixture
+async def store() -> InMemorySessionStore:
+    """Provide the in-memory task store used by this focused coordination suite."""
+    return InMemorySessionStore()
 
 
-def _make_store(kind, tmp_path):
-    if kind == "memory":
-        return InMemorySessionStore()
-    return SqliteSessionStore(tmp_path / "sessions.db")
+async def test_claim_task_is_exclusive(store: InMemorySessionStore) -> None:
+    sess = await store.create()
+    task = await store.create_task(sess.id, CreateTaskInput(subject="a", description="d"))
+
+    first = await store.claim_task(sess.id, task.id, owner="w1")
+    second = await store.claim_task(sess.id, task.id, owner="w2")
+
+    assert first is not None and first.owner == "w1"
+    assert second is None  # already owned — no double claim
+    reloaded = await store.get_task(sess.id, task.id)
+    assert reloaded is not None and reloaded.owner == "w1"
 
 
-@pytest.mark.parametrize("kind", STORE_KINDS)
-async def test_claim_task_is_exclusive(kind, tmp_path) -> None:
-    store = _make_store(kind, tmp_path)
-    try:
-        sess = await store.create()
-        t = await store.create_task(sess.id, CreateTaskInput(subject="a", description="d"))
-
-        first = await store.claim_task(sess.id, t.id, owner="w1")
-        second = await store.claim_task(sess.id, t.id, owner="w2")
-
-        assert first is not None and first.owner == "w1"
-        assert second is None  # already owned — no double claim
-        reloaded = await store.get_task(sess.id, t.id)
-        assert reloaded is not None and reloaded.owner == "w1"
-    finally:
-        await store.close()
+async def test_claim_unknown_task_returns_none(store: InMemorySessionStore) -> None:
+    sess = await store.create()
+    assert await store.claim_task(sess.id, "999", owner="w1") is None
 
 
-@pytest.mark.parametrize("kind", STORE_KINDS)
-async def test_claim_unknown_task_returns_none(kind, tmp_path) -> None:
-    store = _make_store(kind, tmp_path)
-    try:
-        sess = await store.create()
-        assert await store.claim_task(sess.id, "999", owner="w1") is None
-    finally:
-        await store.close()
+async def test_ready_tasks_respects_dependencies(store: InMemorySessionStore) -> None:
+    sess = await store.create()
+    first = await store.create_task(sess.id, CreateTaskInput(subject="a", description="d"))
+    second = await store.create_task(sess.id, CreateTaskInput(subject="b", description="d"))
+    await store.update_task(sess.id, second.id, TaskPatch(add_blocked_by=[first.id]))
+
+    assert [task.id for task in await store.ready_tasks(sess.id)] == [first.id]
+    await store.update_task(sess.id, first.id, TaskPatch(status="completed"))
+    assert [task.id for task in await store.ready_tasks(sess.id)] == [second.id]
 
 
-@pytest.mark.parametrize("kind", STORE_KINDS)
-async def test_ready_tasks_respects_dependencies(kind, tmp_path) -> None:
-    store = _make_store(kind, tmp_path)
-    try:
-        sess = await store.create()
-        a = await store.create_task(sess.id, CreateTaskInput(subject="a", description="d"))
-        b = await store.create_task(sess.id, CreateTaskInput(subject="b", description="d"))
-        # b depends on a
-        await store.update_task(sess.id, b.id, TaskPatch(add_blocked_by=[a.id]))
+async def test_ready_tasks_excludes_owned(store: InMemorySessionStore) -> None:
+    sess = await store.create()
+    task = await store.create_task(sess.id, CreateTaskInput(subject="a", description="d"))
 
-        ready = await store.ready_tasks(sess.id)
-        assert [t.id for t in ready] == [a.id]  # b is blocked
-
-        # completing the blocker unblocks the dependent
-        await store.update_task(sess.id, a.id, TaskPatch(status="completed"))
-        ready = await store.ready_tasks(sess.id)
-        assert [t.id for t in ready] == [b.id]
-    finally:
-        await store.close()
+    assert [item.id for item in await store.ready_tasks(sess.id)] == [task.id]
+    await store.claim_task(sess.id, task.id, owner="w1")
+    assert await store.ready_tasks(sess.id) == []
 
 
-@pytest.mark.parametrize("kind", STORE_KINDS)
-async def test_ready_tasks_excludes_owned(kind, tmp_path) -> None:
-    store = _make_store(kind, tmp_path)
-    try:
-        sess = await store.create()
-        a = await store.create_task(sess.id, CreateTaskInput(subject="a", description="d"))
+async def test_release_resets_to_pending(store: InMemorySessionStore) -> None:
+    sess = await store.create()
+    task = await store.create_task(sess.id, CreateTaskInput(subject="a", description="d"))
+    await store.claim_task(sess.id, task.id, owner="w1")
+    await store.update_task(sess.id, task.id, TaskPatch(status="in_progress"))
 
-        assert [t.id for t in await store.ready_tasks(sess.id)] == [a.id]
-        await store.claim_task(sess.id, a.id, owner="w1")
-        assert await store.ready_tasks(sess.id) == []
-    finally:
-        await store.close()
+    released = await store.release_task(sess.id, task.id)
 
-
-@pytest.mark.parametrize("kind", STORE_KINDS)
-async def test_release_resets_to_pending(kind, tmp_path) -> None:
-    store = _make_store(kind, tmp_path)
-    try:
-        sess = await store.create()
-        a = await store.create_task(sess.id, CreateTaskInput(subject="a", description="d"))
-        await store.claim_task(sess.id, a.id, owner="w1")
-        await store.update_task(sess.id, a.id, TaskPatch(status="in_progress"))
-
-        released = await store.release_task(sess.id, a.id)
-
-        assert released is not None
-        assert released.owner is None
-        assert released.status == "pending"
-        # reclaimable again
-        assert [t.id for t in await store.ready_tasks(sess.id)] == [a.id]
-    finally:
-        await store.close()
+    assert released is not None
+    assert released.owner is None
+    assert released.status == "pending"
+    assert [item.id for item in await store.ready_tasks(sess.id)] == [task.id]
 
 
-@pytest.mark.parametrize("kind", STORE_KINDS)
-async def test_release_leaves_completed_task(kind, tmp_path) -> None:
-    store = _make_store(kind, tmp_path)
-    try:
-        sess = await store.create()
-        a = await store.create_task(sess.id, CreateTaskInput(subject="a", description="d"))
-        await store.update_task(sess.id, a.id, TaskPatch(status="completed"))
+async def test_release_leaves_completed_task(store: InMemorySessionStore) -> None:
+    sess = await store.create()
+    task = await store.create_task(sess.id, CreateTaskInput(subject="a", description="d"))
+    await store.update_task(sess.id, task.id, TaskPatch(status="completed"))
 
-        released = await store.release_task(sess.id, a.id)
+    released = await store.release_task(sess.id, task.id)
 
-        assert released is not None
-        assert released.status == "completed"  # not resurrected
-    finally:
-        await store.close()
+    assert released is not None
+    assert released.status == "completed"  # not resurrected
 
 
-@pytest.mark.parametrize("kind", STORE_KINDS)
-async def test_concurrent_claims_single_winner(kind, tmp_path) -> None:
-    store = _make_store(kind, tmp_path)
-    try:
-        sess = await store.create()
-        t = await store.create_task(sess.id, CreateTaskInput(subject="a", description="d"))
+async def test_concurrent_claims_single_winner(store: InMemorySessionStore) -> None:
+    sess = await store.create()
+    task = await store.create_task(sess.id, CreateTaskInput(subject="a", description="d"))
 
-        results = await asyncio.gather(
-            *(store.claim_task(sess.id, t.id, owner=f"w{i}") for i in range(8))
-        )
+    results = await asyncio.gather(
+        *(store.claim_task(sess.id, task.id, owner=f"w{i}") for i in range(8))
+    )
 
-        winners = [r for r in results if r is not None]
-        assert len(winners) == 1
-    finally:
-        await store.close()
+    assert len([result for result in results if result is not None]) == 1

@@ -1,4 +1,4 @@
-"""asyncpg import guard and connection-pool factory.
+"""Shared asyncpg import guard and Postgres pool lifecycle.
 
 Used by all Postgres-backed store implementations.  Follows the repo's
 established optional-dependency pattern: import guard at call-time, clear
@@ -11,7 +11,33 @@ Install::
 
 from __future__ import annotations
 
-from typing import Any
+import asyncio
+from collections.abc import Callable
+from typing import Any, cast
+
+from .._wire import WIRE_VERSION, require_wire_version
+
+# All store types share metadata DDL, so lock before inspecting or creating it.
+_SCHEMA_LOCK_KEY = 0x4C494E4348534348
+
+
+class _BorrowedPool:
+    """Host-owned pool with schema verification for a fixed database/search_path."""
+
+    def __init__(self, pool: Any) -> None:
+        self._pool = pool
+        self._init_lock = asyncio.Lock()
+        self._verified: set[tuple[Any, ...]] = set()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._pool, name)
+
+    async def close(self) -> None:
+        pass
+
+
+async def _reset_connection(_connection: Any) -> None:
+    """Keep asyncpg's internal rollback cleanup without the default reset SQL."""
 
 
 def _import_asyncpg() -> Any:
@@ -27,12 +53,106 @@ def _import_asyncpg() -> Any:
         ) from exc
 
 
-async def make_pool(
-    dsn: str,
+async def ensure_pool(
+    store: Any,
+    schema: str,
+    import_asyncpg: Callable[[], Any],
     *,
-    min_size: int = 1,
-    max_size: int = 10,
+    schema_key: str,
+    tables: tuple[str, ...],
+    required_columns: dict[str, tuple[str, ...]] | None = None,
+    advisory_lock_key: int | None = None,
+    allow_missing_pool_on_error: bool = False,
 ) -> Any:
-    """Create and return an ``asyncpg.Pool`` for *dsn*."""
-    asyncpg = _import_asyncpg()
-    return await asyncpg.create_pool(dsn, min_size=min_size, max_size=max_size)
+    """Lazily initialize a store's pool and schema under its existing lock.
+
+    The store retains its lifecycle attributes and module-level driver import
+    hook. Supplied pools follow the same cleanup policy as created pools.
+    """
+    if store._initialized:
+        return store._pool
+    borrowed = store._pool if isinstance(store._pool, _BorrowedPool) else None
+    contract = (schema_key, WIRE_VERSION, schema, tables, tuple((required_columns or {}).items()))
+    async with borrowed._init_lock if borrowed is not None else store._init_lock:
+        if store._initialized:
+            return store._pool
+        if borrowed is not None and contract in borrowed._verified:
+            store._initialized = True
+            return borrowed
+        asyncpg = import_asyncpg()
+        if store._pool is None:
+            store._pool = await asyncpg.create_pool(
+                store._dsn,
+                min_size=store._min_size,
+                max_size=store._max_size,
+                reset=_reset_connection,
+            )
+        try:
+            async with store._pool.acquire() as conn:
+                async with conn.transaction():
+                    await conn.execute("SELECT pg_advisory_xact_lock($1::bigint)", _SCHEMA_LOCK_KEY)
+                    if advisory_lock_key is not None:
+                        await conn.execute(
+                            "SELECT pg_advisory_xact_lock($1::bigint)", advisory_lock_key
+                        )
+                    meta_exists = await conn.fetchval(
+                        "SELECT to_regclass('linch_schema_meta') IS NOT NULL"
+                    )
+                    metadata = None
+                    if meta_exists:
+                        metadata = await conn.fetchrow(
+                            "SELECT version FROM linch_schema_meta WHERE store = $1", schema_key
+                        )
+                    if metadata is None:
+                        for table in tables:
+                            if await conn.fetchval("SELECT to_regclass($1) IS NOT NULL", table):
+                                require_wire_version(None)
+                    else:
+                        require_wire_version(metadata["version"])
+                        for table, columns in (required_columns or {}).items():
+                            present = await conn.fetchval(
+                                """
+                                SELECT count(*) = cardinality($2::text[])
+                                FROM pg_attribute
+                                WHERE attrelid = to_regclass($1::text)
+                                  AND attnum > 0 AND NOT attisdropped
+                                  AND attname = ANY($2::text[])
+                                """,
+                                table,
+                                list(columns),
+                            )
+                            if not present:
+                                require_wire_version(None)
+                    await conn.execute(
+                        "CREATE TABLE IF NOT EXISTS linch_schema_meta "
+                        "(store TEXT PRIMARY KEY, version INTEGER NOT NULL)"
+                    )
+                    await conn.execute(schema)
+                    await conn.execute(
+                        "INSERT INTO linch_schema_meta (store, version) VALUES ($1, $2) "
+                        "ON CONFLICT (store) DO NOTHING",
+                        schema_key,
+                        WIRE_VERSION,
+                    )
+        except Exception:
+            if borrowed is not None:
+                raise
+            pool, store._pool = store._pool, None
+            if pool is not None or not allow_missing_pool_on_error:
+                await cast(Any, pool).close()
+            raise
+        if borrowed is not None:
+            borrowed._verified.add(contract)
+        store._initialized = True
+    return store._pool
+
+
+async def close_pool(store: Any, *, reset_initialized: bool = False) -> None:
+    """Close supplied raw pools; borrowed worker handles retain initialized stores."""
+    if isinstance(store._pool, _BorrowedPool):
+        return
+    if store._pool is not None:
+        await store._pool.close()
+        store._pool = None
+        if reset_initialized:
+            store._initialized = False
