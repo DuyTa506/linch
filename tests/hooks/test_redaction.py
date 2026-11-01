@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import pytest
+
+from linch import RedactionRule
+from tests.support.agents import make_agent
+from tests.support.providers import ScriptedProvider, TextTurn
+from tests.support.stores import memory_session_store
 
 
 def _post_ctx(result: Any) -> Any:
@@ -56,15 +62,10 @@ async def test_empty_config_is_a_no_op_on_every_surface() -> None:
 
     hook = RedactionHook()  # no rules
 
+    assert hook.redact("anything user@x.com") == "anything user@x.com"
     assert await hook.on_post_tool_use(_post_ctx(ToolResult(content="user@x.com"))) is None
     assert await hook.on_before_final_answer(_final_ctx("user@x.com")) is None
     assert await hook.on_user_prompt_submit(_prompt_ctx("user@x.com")) is None
-
-
-async def test_redact_returns_text_unchanged_when_no_rules() -> None:
-    from linch import RedactionHook
-
-    assert RedactionHook().redact("anything user@x.com") == "anything user@x.com"
 
 
 # ── Tool result scrubbing (PostToolUse) ───────────────────────────────────────
@@ -96,90 +97,89 @@ async def test_post_tool_use_scrubs_content_summary_and_recovery_hint() -> None:
     assert result.content == "reach me at a@b.com"
 
 
-async def test_post_tool_use_returns_none_when_nothing_matches() -> None:
+@pytest.mark.parametrize(
+    "result, config",
+    [
+        ("no secrets here", {}),
+        ("a@b.com", {"redact_tool_results": False}),
+        (None, {}),
+    ],
+)
+async def test_post_tool_use_no_mutation_cases(result: str | None, config: dict[str, Any]) -> None:
     from linch import ToolResult
 
-    hook = _email_hook()
-    assert await hook.on_post_tool_use(_post_ctx(ToolResult(content="no secrets here"))) is None
-
-
-async def test_post_tool_use_respects_disable_toggle() -> None:
-    from linch import ToolResult
-
-    hook = _email_hook(redact_tool_results=False)
-    assert await hook.on_post_tool_use(_post_ctx(ToolResult(content="a@b.com"))) is None
-
-
-async def test_post_tool_use_handles_missing_result() -> None:
-    hook = _email_hook()
-    assert await hook.on_post_tool_use(_post_ctx(None)) is None
+    assert (
+        await _email_hook(**config).on_post_tool_use(
+            _post_ctx(None if result is None else ToolResult(content=result))
+        )
+        is None
+    )
 
 
 # ── Final answer scrubbing (BeforeFinalAnswer) ────────────────────────────────
 
 
-async def test_before_final_answer_scrubs_text() -> None:
-    hook = _email_hook()
-    out = await hook.on_before_final_answer(_final_ctx("contact me@here.com please"))
-
-    assert out is not None and out.action == "mutate"
-    assert out.final_text == "contact [EMAIL] please"
-
-
-async def test_before_final_answer_returns_none_when_clean_or_empty() -> None:
-    hook = _email_hook()
-    assert await hook.on_before_final_answer(_final_ctx("nothing sensitive")) is None
-    assert await hook.on_before_final_answer(_final_ctx("")) is None
-    assert await hook.on_before_final_answer(_final_ctx(None)) is None
-
-
-async def test_before_final_answer_respects_disable_toggle() -> None:
-    hook = _email_hook(redact_final_answer=False)
-    assert await hook.on_before_final_answer(_final_ctx("a@b.com")) is None
+@pytest.mark.parametrize(
+    "final_text, config, expected",
+    [
+        ("contact me@here.com please", {}, "contact [EMAIL] please"),
+        ("nothing sensitive", {}, None),
+        ("", {}, None),
+        (None, {}, None),
+        ("a@b.com", {"redact_final_answer": False}, None),
+    ],
+)
+async def test_before_final_answer_cases(
+    final_text: str | None, config: dict[str, Any], expected: str | None
+) -> None:
+    out = await _email_hook(**config).on_before_final_answer(_final_ctx(final_text))
+    if expected is None:
+        assert out is None
+    else:
+        assert out is not None and out.action == "mutate"
+        assert out.final_text == expected
 
 
 # ── Prompt scrubbing (UserPromptSubmit) — off by default ──────────────────────
 
 
-async def test_user_prompt_not_scrubbed_by_default() -> None:
-    hook = _email_hook()  # redact_user_prompt defaults False
-    assert await hook.on_user_prompt_submit(_prompt_ctx("a@b.com")) is None
-
-
-async def test_user_prompt_scrubbed_when_enabled() -> None:
-    hook = _email_hook(redact_user_prompt=True)
-    out = await hook.on_user_prompt_submit(_prompt_ctx("from a@b.com"))
-    assert out is not None and out.action == "mutate"
-    assert out.prompt == "from [EMAIL]"
+@pytest.mark.parametrize(
+    "prompt, enabled, expected",
+    [("a@b.com", False, None), ("from a@b.com", True, "from [EMAIL]")],
+)
+async def test_user_prompt_redaction_cases(
+    prompt: str, enabled: bool, expected: str | None
+) -> None:
+    out = await _email_hook(redact_user_prompt=enabled).on_user_prompt_submit(_prompt_ctx(prompt))
+    if expected is None:
+        assert out is None
+    else:
+        assert out is not None and out.action == "mutate"
+        assert out.prompt == expected
 
 
 # ── Rule semantics ────────────────────────────────────────────────────────────
 
 
-async def test_multiple_rules_apply_in_order() -> None:
-    from linch import RedactionConfig, RedactionHook, RedactionRule
+@pytest.mark.parametrize(
+    "rules, text, expected",
+    [
+        (
+            (RedactionRule(r"secret", "[S]"), RedactionRule(r"\[S\]-token", "[TOKEN]")),
+            "the secret-token here",
+            "the [TOKEN] here",
+        ),
+        (
+            (RedactionRule(r"password", "[PW]", flags=re.IGNORECASE),),
+            "PASSWORD and password",
+            "[PW] and [PW]",
+        ),
+    ],
+)
+async def test_rule_replacement_cases(rules: tuple[Any, ...], text: str, expected: str) -> None:
+    from linch import RedactionConfig, RedactionHook
 
-    hook = RedactionHook(
-        RedactionConfig(
-            rules=(
-                RedactionRule(r"secret", "[S]"),
-                RedactionRule(r"\[S\]-token", "[TOKEN]"),
-            )
-        )
-    )
-    # First rule turns "secret-token" into "[S]-token", second collapses it.
-    assert hook.redact("the secret-token here") == "the [TOKEN] here"
-
-
-async def test_rule_flags_are_honored() -> None:
-    import re
-
-    from linch import RedactionConfig, RedactionHook, RedactionRule
-
-    hook = RedactionHook(
-        RedactionConfig(rules=(RedactionRule(r"password", "[PW]", flags=re.IGNORECASE),))
-    )
-    assert hook.redact("PASSWORD and password") == "[PW] and [PW]"
+    assert RedactionHook(RedactionConfig(rules=rules)).redact(text) == expected
 
 
 async def test_invalid_pattern_raises_at_construction() -> None:
@@ -205,21 +205,18 @@ def test_redaction_symbols_are_public() -> None:
 
 
 async def test_final_answer_is_redacted_end_to_end(tmp_path: Any) -> None:
-    from linch import Agent, RedactionConfig, RedactionHook, RedactionRule, ResultEvent
-    from linch.config import FeatureFlags
-    from linch.evals import ScriptedProvider, TextTurn
-    from linch.sessions import InMemorySessionStore
+    from linch import RedactionConfig, RedactionHook, ResultEvent
 
     hook = RedactionHook(
         RedactionConfig(rules=(RedactionRule(r"[\w.+-]+@[\w-]+\.[\w.-]+", "[EMAIL]"),))
     )
-    agent = Agent(
+    agent = make_agent(
         model="m",
         provider=ScriptedProvider([TextTurn("Done — ping me at agent@corp.com")]),
         cwd=str(tmp_path),
         permissions={"mode": "skip-dangerous"},
-        session_store=InMemorySessionStore(),
-        features=FeatureFlags(skills=False, subagents=False, mcp=False),
+        session_store=memory_session_store(),
+        run_store=None,
         hooks=[hook],
     )
 

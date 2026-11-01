@@ -1,75 +1,36 @@
-from linch.permissions.rules import (
-    BashRule,
-    PathRule,
-    match_bash_rule,
-    match_path_rule,
+from __future__ import annotations
+
+import pytest
+
+from linch.permissions.rules import BashRule, PathRule, match_bash_rule, match_path_rule
+
+
+@pytest.mark.parametrize(
+    ("pattern", "action", "command", "matches"),
+    [
+        ("rm -rf /tmp", "allow", "rm -rf /tmp", True),
+        ("rm -rf /tmp", "allow", "rm -rf /tmp/../etc", False),
+        ("ls", "allow", "ls", True),
+        ("ls", "allow", "lsof -i :8080", False),
+        ("npm install", "allow", "npm install lodash", True),
+        ("git *", "allow", "git status", True),
+        ("rm -rf /", "deny", "rm -rf /", True),
+    ],
 )
+def test_bash_rule_matching(pattern: str, action: str, command: str, matches: bool) -> None:
+    assert match_bash_rule(BashRule(pattern, action), command) is matches
 
 
-def test_bash_allow_does_not_match_substring_extension() -> None:
-    rule = BashRule("rm -rf /tmp", "allow")
-    assert match_bash_rule(rule, "rm -rf /tmp")
-    assert not match_bash_rule(rule, "rm -rf /tmp/../etc")
-
-
-def test_bash_allow_does_not_match_command_prefix_substring() -> None:
-    rule = BashRule("ls", "allow")
-    assert match_bash_rule(rule, "ls")
-    assert not match_bash_rule(rule, "lsof -i :8080")
-
-
-def test_bash_allow_matches_true_token_prefix() -> None:
-    rule = BashRule("npm install", "allow")
-    assert match_bash_rule(rule, "npm install lodash")
-
-
-def test_bash_allow_matches_glob() -> None:
-    rule = BashRule("git *", "allow")
-    assert match_bash_rule(rule, "git status")
-
-
-def test_bash_deny_still_works() -> None:
-    rule = BashRule("rm -rf /", "deny")
-    assert match_bash_rule(rule, "rm -rf /")
-
-
-def test_path_single_star_does_not_cross_slash() -> None:
-    rule = PathRule(["config/*.json"], "allow", ["Write"])
-    project_root = "/project"
-    cwd = "/project"
-    assert match_path_rule(
-        rule,
-        "Write",
-        {"file_path": "config/app.json"},
-        project_root,
-        cwd,
-    )
-    assert not match_path_rule(
-        rule,
-        "Write",
-        {"file_path": "config/prod/secrets.json"},
-        project_root,
-        cwd,
-    )
-
-
-def test_path_double_star_crosses_slash() -> None:
-    rule = PathRule(["config/**/*.json"], "allow", ["Write"])
-    project_root = "/project"
-    cwd = "/project"
-    assert match_path_rule(
-        rule,
-        "Write",
-        {"file_path": "config/prod/secrets.json"},
-        project_root,
-        cwd,
-    )
-    # ``**/`` matches zero directories too — ``config/**/*.json`` must match a
-    # file directly under ``config/`` (gitignore/glob semantics).
-    assert match_path_rule(
-        rule,
-        "Write",
-        {"file_path": "config/app.json"},
-        project_root,
-        cwd,
-    )
+@pytest.mark.parametrize(
+    ("pattern", "matches", "nonmatches"),
+    [
+        ("config/*.json", ["config/app.json"], ["config/prod/secrets.json"]),
+        ("config/**/*.json", ["config/prod/secrets.json", "config/app.json"], []),
+    ],
+)
+def test_path_rule_matching(pattern: str, matches: list[str], nonmatches: list[str]) -> None:
+    rule = PathRule([pattern], "allow", ["Write"])
+    for path in matches:
+        assert match_path_rule(rule, "Write", {"file_path": path}, "/project", "/project")
+    for path in nonmatches:
+        assert not match_path_rule(rule, "Write", {"file_path": path}, "/project", "/project")

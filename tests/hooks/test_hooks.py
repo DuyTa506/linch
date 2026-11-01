@@ -5,6 +5,10 @@ from typing import Any
 
 import pytest
 
+from tests.support.agents import make_agent
+from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
+from tests.support.tools import tool_registry
+
 
 class RecordingTool:
     name = "Record"
@@ -32,23 +36,7 @@ class RecordingTool:
         return ToolResult(content=f"tool:{inp.get('value', '')}")
 
 
-def _agent(provider: Any, *, hooks: Any = None, tools: Any = None):
-
-    from linch import Agent
-    from linch.config import FeatureFlags
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import empty_tools
-
-    return Agent(
-        model="test-model",
-        provider=provider,
-        tools=tools or empty_tools(),
-        permissions={"mode": "skip-dangerous"},
-        session_store=InMemorySessionStore(),
-        hooks=hooks,
-        features=FeatureFlags(skills=False, subagents=False, mcp=False),
-        result_offload=None,
-    )
+_AGENT_OPTIONS = {"run_store": None, "result_offload": None}
 
 
 async def _collect(session: Any, prompt: str = "go") -> list[Any]:
@@ -93,18 +81,7 @@ async def test_hook_dispatcher_orders_sync_async_and_isolates_errors() -> None:
 @pytest.mark.asyncio
 async def test_prompt_and_request_hooks_mutate_provider_request() -> None:
     from linch import HookResult, TextBlock
-    from linch.evals import ScriptedProvider, TextTurn
     from linch.types import SystemBlock
-
-    class CaptureProvider(ScriptedProvider):
-        def __init__(self) -> None:
-            super().__init__([TextTurn(text="done")])
-            self.requests: list[Any] = []
-
-        async def stream(self, req):
-            self.requests.append(req)
-            async for event in super().stream(req):
-                yield event
 
     class Hooks:
         def on_user_prompt_submit(self, ctx):
@@ -115,8 +92,8 @@ async def test_prompt_and_request_hooks_mutate_provider_request() -> None:
             ctx.request.system.append(SystemBlock(text="HOOK_SYSTEM"))
             return HookResult.mutate(request=ctx.request)
 
-    provider = CaptureProvider()
-    agent = _agent(provider, hooks=[Hooks()])
+    provider = ScriptedProvider([TextTurn(text="done")])
+    agent = make_agent(provider, hooks=[Hooks()], **_AGENT_OPTIONS)
     session = await agent.session()
     events = await _collect(session, "hello")
 
@@ -134,12 +111,10 @@ async def test_prompt_and_request_hooks_mutate_provider_request() -> None:
 
 @pytest.mark.asyncio
 async def test_tool_hooks_rewrite_input_block_and_result() -> None:
-    from linch import HookResult, ToolCallEndEvent, ToolCallStartEvent, ToolRegistry
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch import HookResult, ToolCallEndEvent, ToolCallStartEvent
 
     tool = RecordingTool()
-    registry = ToolRegistry()
-    registry.add(tool)
+    registry = tool_registry(tool)
 
     class Hooks:
         def on_pre_tool_use(self, ctx):
@@ -153,7 +128,7 @@ async def test_tool_hooks_rewrite_input_block_and_result() -> None:
     provider = ScriptedProvider(
         [ToolUseTurn(tool_name="Record", tool_input={"value": "raw"}), TextTurn(text="done")]
     )
-    agent = _agent(provider, hooks=[Hooks()], tools=registry)
+    agent = make_agent(provider, hooks=[Hooks()], tools=registry, **_AGENT_OPTIONS)
     session = await agent.session()
     events = await _collect(session)
 
@@ -166,12 +141,10 @@ async def test_tool_hooks_rewrite_input_block_and_result() -> None:
 
 @pytest.mark.asyncio
 async def test_tool_hook_can_block_execution() -> None:
-    from linch import HookResult, ToolCallEndEvent, ToolRegistry
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch import HookResult, ToolCallEndEvent
 
     tool = RecordingTool()
-    registry = ToolRegistry()
-    registry.add(tool)
+    registry = tool_registry(tool)
 
     class Hooks:
         def on_pre_tool_use(self, ctx):
@@ -180,7 +153,7 @@ async def test_tool_hook_can_block_execution() -> None:
     provider = ScriptedProvider(
         [ToolUseTurn(tool_name="Record", tool_input={"value": "raw"}), TextTurn(text="done")]
     )
-    agent = _agent(provider, hooks=[Hooks()], tools=registry)
+    agent = make_agent(provider, hooks=[Hooks()], tools=registry, **_AGENT_OPTIONS)
     session = await agent.session()
     events = await _collect(session)
 
@@ -191,9 +164,9 @@ async def test_tool_hook_can_block_execution() -> None:
 
 
 @pytest.mark.asyncio
-async def test_final_answer_hook_retries_then_mutates_final_text() -> None:
+@pytest.mark.parametrize("mode", ["retry_mutate", "force_continue"])
+async def test_final_answer_action_cases(mode: str) -> None:
     from linch import HookResult
-    from linch.evals import ScriptedProvider, TextTurn
 
     class Hooks:
         def __init__(self) -> None:
@@ -202,50 +175,33 @@ async def test_final_answer_hook_retries_then_mutates_final_text() -> None:
         def on_before_final_answer(self, ctx):
             self.calls += 1
             if self.calls == 1:
-                return HookResult.retry("try again")
-            return HookResult.mutate(final_text=f"{ctx.final_text}!")
+                return (
+                    HookResult.retry("try again")
+                    if mode == "retry_mutate"
+                    else HookResult.force_continue("again")
+                )
+            return (
+                HookResult.mutate(final_text=f"{ctx.final_text}!")
+                if mode == "retry_mutate"
+                else None
+            )
 
     hooks = Hooks()
-    provider = ScriptedProvider([TextTurn(text="draft"), TextTurn(text="final")])
-    agent = _agent(provider, hooks=[hooks])
-    session = await agent.session()
-    events = await _collect(session)
+    turns = (
+        [TextTurn(text="draft"), TextTurn(text="final")]
+        if mode == "retry_mutate"
+        else [TextTurn(text="first"), TextTurn(text="second")]
+    )
+    agent = make_agent(provider=ScriptedProvider(turns), hooks=[hooks], **_AGENT_OPTIONS)
+    events = await _collect(await agent.session())
 
     assert events[-1].type == "result"
-    assert events[-1].final_text == "final!"
-    assert hooks.calls == 2
-
-
-@pytest.mark.asyncio
-async def test_stop_hook_force_continue_counts_as_another_turn() -> None:
-    from linch import HookResult
-    from linch.evals import ScriptedProvider, TextTurn
-
-    class Hooks:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        def on_stop(self, ctx):
-            self.calls += 1
-            if self.calls == 1:
-                return HookResult.force_continue("continue once")
-            return None
-
-    hooks = Hooks()
-    provider = ScriptedProvider([TextTurn(text="first"), TextTurn(text="second")])
-    agent = _agent(provider, hooks=[hooks])
-    session = await agent.session()
-    events = await _collect(session)
-
-    assert events[-1].type == "result"
-    assert events[-1].final_text == "second"
+    assert events[-1].final_text == ("final!" if mode == "retry_mutate" else "second")
     assert hooks.calls == 2
 
 
 @pytest.mark.asyncio
 async def test_agent_lifecycle_and_event_hooks_fire() -> None:
-    from linch.evals import ScriptedProvider, TextTurn
-
     calls: list[str] = []
 
     class Hooks:
@@ -272,7 +228,7 @@ async def test_agent_lifecycle_and_event_hooks_fire() -> None:
             calls.append(f"agent_stop:{ctx.result.subtype}")
 
     provider = ScriptedProvider([TextTurn(text="done")])
-    agent = _agent(provider, hooks=[Hooks()])
+    agent = make_agent(provider, hooks=[Hooks()], **_AGENT_OPTIONS)
     session = await agent.session()
     events = await _collect(session, "hello")
 
@@ -292,13 +248,11 @@ async def test_agent_lifecycle_and_event_hooks_fire() -> None:
 async def test_tool_middleware_raising_before_call_fails_closed() -> None:
     """Regression: a before_tool_call middleware that raises must block the
     tool (fail closed), not let it run with the original input."""
-    from linch import ToolCallEndEvent, ToolRegistry
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch import ToolCallEndEvent
     from linch.hooks import ToolMiddlewareHook
 
     tool = RecordingTool()
-    registry = ToolRegistry()
-    registry.add(tool)
+    registry = tool_registry(tool)
 
     class VetoMiddleware:
         def before_tool_call(self, call, ctx):
@@ -307,7 +261,9 @@ async def test_tool_middleware_raising_before_call_fails_closed() -> None:
     provider = ScriptedProvider(
         [ToolUseTurn(tool_name="Record", tool_input={"value": "raw"}), TextTurn(text="done")]
     )
-    agent = _agent(provider, hooks=[ToolMiddlewareHook(VetoMiddleware())], tools=registry)
+    agent = make_agent(
+        provider, hooks=[ToolMiddlewareHook(VetoMiddleware())], tools=registry, **_AGENT_OPTIONS
+    )
     session = await agent.session()
     events = await _collect(session)
 
@@ -320,13 +276,11 @@ async def test_tool_middleware_raising_before_call_fails_closed() -> None:
 async def test_tool_middleware_raising_after_result_fails_closed() -> None:
     """Regression: an after_tool_result middleware that raises must yield an
     error result, not let the original (unredacted) result pass through."""
-    from linch import ToolCallEndEvent, ToolRegistry
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch import ToolCallEndEvent
     from linch.hooks import ToolMiddlewareHook
 
     tool = RecordingTool()
-    registry = ToolRegistry()
-    registry.add(tool)
+    registry = tool_registry(tool)
 
     class BoomMiddleware:
         def after_tool_result(self, call, result, ctx):
@@ -335,7 +289,9 @@ async def test_tool_middleware_raising_after_result_fails_closed() -> None:
     provider = ScriptedProvider(
         [ToolUseTurn(tool_name="Record", tool_input={"value": "secret"}), TextTurn(text="done")]
     )
-    agent = _agent(provider, hooks=[ToolMiddlewareHook(BoomMiddleware())], tools=registry)
+    agent = make_agent(
+        provider, hooks=[ToolMiddlewareHook(BoomMiddleware())], tools=registry, **_AGENT_OPTIONS
+    )
     session = await agent.session()
     events = await _collect(session)
 
@@ -349,7 +305,6 @@ async def test_blocked_prompt_still_dispatches_agent_stop() -> None:
     """Regression: a UserPromptSubmit block returns before the main
     try/finally, but AgentStop/on_run_end must still fire."""
     from linch import HookResult
-    from linch.evals import ScriptedProvider, TextTurn
 
     stops: list[str] = []
 
@@ -361,7 +316,7 @@ async def test_blocked_prompt_still_dispatches_agent_stop() -> None:
             stops.append(ctx.result.subtype)
 
     provider = ScriptedProvider([TextTurn(text="unreached")])
-    agent = _agent(provider, hooks=[Hooks()])
+    agent = make_agent(provider, hooks=[Hooks()], **_AGENT_OPTIONS)
     session = await agent.session()
     events = await _collect(session)
 
@@ -372,54 +327,25 @@ async def test_blocked_prompt_still_dispatches_agent_stop() -> None:
 
 
 @pytest.mark.asyncio
-async def test_before_final_answer_force_continue_retries() -> None:
-    """Regression: force_continue at BeforeFinalAnswer must bounce the loop,
-    not be silently ignored."""
+@pytest.mark.parametrize("method", ["on_stop", "on_after_provider_call"])
+async def test_force_continue_hook_points(method: str) -> None:
+    """Force-continue retries at both terminal hook points."""
     from linch import HookResult
-    from linch.evals import ScriptedProvider, TextTurn
 
-    class Hooks:
-        def __init__(self) -> None:
-            self.calls = 0
+    def _continue(self: Any, ctx: Any):
+        self.calls += 1
+        return HookResult.force_continue("again") if self.calls == 1 else None
 
-        def on_before_final_answer(self, ctx):
-            self.calls += 1
-            if self.calls == 1:
-                return HookResult.force_continue("again")
-            return None
+    Hooks = type(
+        "Hooks",
+        (),
+        {"__init__": lambda self: setattr(self, "calls", 0), method: _continue},
+    )
 
     hooks = Hooks()
     provider = ScriptedProvider([TextTurn(text="first"), TextTurn(text="second")])
-    agent = _agent(provider, hooks=[hooks])
-    session = await agent.session()
-    events = await _collect(session)
-
-    assert events[-1].final_text == "second"
-    assert hooks.calls == 2
-
-
-@pytest.mark.asyncio
-async def test_after_provider_call_force_continue_retries() -> None:
-    """Regression: retry/force_continue at AfterProviderCall must bounce the
-    loop instead of being dropped."""
-    from linch import HookResult
-    from linch.evals import ScriptedProvider, TextTurn
-
-    class Hooks:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        def on_after_provider_call(self, ctx):
-            self.calls += 1
-            if self.calls == 1:
-                return HookResult.force_continue("again")
-            return None
-
-    hooks = Hooks()
-    provider = ScriptedProvider([TextTurn(text="first"), TextTurn(text="second")])
-    agent = _agent(provider, hooks=[hooks])
-    session = await agent.session()
-    events = await _collect(session)
+    agent = make_agent(provider, hooks=[hooks], **_AGENT_OPTIONS)
+    events = await _collect(await agent.session())
 
     assert events[-1].type == "result"
     assert events[-1].final_text == "second"
@@ -431,7 +357,6 @@ async def test_after_provider_call_mutation_keeps_provider_usage() -> None:
     """Regression: an AfterProviderCall mutation that rebuilds the assembly with
     fresh Usage() must not undercharge — accounting uses the provider's usage."""
     from linch import HookResult
-    from linch.evals import ScriptedProvider, TextTurn
     from linch.events import UsageEvent
     from linch.types import AssistantAssembly, Message, TextBlock, Usage
 
@@ -449,7 +374,7 @@ async def test_after_provider_call_mutation_keeps_provider_usage() -> None:
     provider = ScriptedProvider(
         [TextTurn(text="secret", usage=Usage(input_tokens=10, output_tokens=5))]
     )
-    agent = _agent(provider, hooks=[Hooks()])
+    agent = make_agent(provider, hooks=[Hooks()], **_AGENT_OPTIONS)
     session = await agent.session()
     events = await _collect(session)
 
@@ -462,18 +387,14 @@ async def test_after_provider_call_mutation_keeps_provider_usage() -> None:
 @pytest.mark.asyncio
 async def test_stop_when_runs_through_before_provider_hook() -> None:
     from linch import HookEventRecord
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.hooks import StopPredicateHook
 
     provider = ScriptedProvider(
         [ToolUseTurn(tool_name="Record", tool_input={"value": "raw"}), TextTurn(text="never")]
     )
     tool = RecordingTool()
-    from linch import ToolRegistry
-
-    registry = ToolRegistry()
-    registry.add(tool)
-    agent = _agent(provider, tools=registry)
+    registry = tool_registry(tool)
+    agent = make_agent(provider, tools=registry, **_AGENT_OPTIONS)
     session = await agent.session()
 
     def saw_tool_result(sess) -> bool:
@@ -525,15 +446,12 @@ async def test_pre_tool_hook_allow_cannot_bypass_config_deny() -> None:
     # Allow-invariant: PreToolUse runs before final permission evaluation so its
     # canonical input can be checked; a configured deny still wins and the hook
     # cannot resurrect the tool.
-    from linch import Agent, HookResult, ToolCallEndEvent, ToolRegistry
+    from linch import HookResult, ToolCallEndEvent
     from linch.config import FeatureFlags
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.permissions.rules import ToolRule
-    from linch.sessions import InMemorySessionStore
 
     tool = RecordingTool()
-    registry = ToolRegistry()
-    registry.add(tool)
+    registry = tool_registry(tool)
 
     hook_ran: list[str] = []
 
@@ -545,15 +463,13 @@ async def test_pre_tool_hook_allow_cannot_bypass_config_deny() -> None:
     provider = ScriptedProvider(
         [ToolUseTurn(tool_name="Record", tool_input={"value": "raw"}), TextTurn(text="done")]
     )
-    agent = Agent(
-        model="test-model",
-        provider=provider,
+    agent = make_agent(
+        provider,
         tools=registry,
         permissions={"mode": "default", "rules": [ToolRule("Record", "deny")]},
-        session_store=InMemorySessionStore(),
         hooks=[Hooks()],
         features=FeatureFlags(skills=False, subagents=False, mcp=False),
-        result_offload=None,
+        **_AGENT_OPTIONS,
     )
     session = await agent.session()
     events = await _collect(session)
@@ -566,14 +482,9 @@ async def test_pre_tool_hook_allow_cannot_bypass_config_deny() -> None:
 
 @pytest.mark.asyncio
 async def test_post_tool_use_failure_hook_fires_only_on_error() -> None:
-    from linch import ToolRegistry
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
-
     failing = FailingTool()
     ok = RecordingTool()
-    registry = ToolRegistry()
-    registry.add(failing)
-    registry.add(ok)
+    registry = tool_registry(failing, ok)
 
     failures: list[tuple[str, bool]] = []
     post_calls: list[str] = []
@@ -594,7 +505,7 @@ async def test_post_tool_use_failure_hook_fires_only_on_error() -> None:
             TextTurn(text="done"),
         ]
     )
-    agent = _agent(provider, hooks=[Hooks()], tools=registry)
+    agent = make_agent(provider, hooks=[Hooks()], tools=registry, **_AGENT_OPTIONS)
     session = await agent.session()
     await _collect(session)
 
@@ -607,10 +518,8 @@ async def test_post_tool_use_failure_hook_fires_only_on_error() -> None:
 async def test_before_final_answer_reentry_guard_caps_retries() -> None:
     # A hook that *always* asks to retry must not loop forever: the re-entry
     # guard honors the retry once, then accepts the answer as-is.
-    from linch import Agent, HookResult
+    from linch import HookResult
     from linch.config import FeatureFlags
-    from linch.evals import ScriptedProvider, TextTurn
-    from linch.sessions import InMemorySessionStore
 
     class Hooks:
         def __init__(self) -> None:
@@ -623,15 +532,13 @@ async def test_before_final_answer_reentry_guard_caps_retries() -> None:
     hooks = Hooks()
     # Plenty of turns available; the guard, not exhaustion, must stop the loop.
     provider = ScriptedProvider([TextTurn(text=f"draft-{i}") for i in range(8)])
-    agent = Agent(
-        model="test-model",
-        provider=provider,
+    agent = make_agent(
+        provider,
         permissions={"mode": "skip-dangerous"},
-        session_store=InMemorySessionStore(),
         hooks=[hooks],
         max_turns=20,
         features=FeatureFlags(skills=False, subagents=False, mcp=False),
-        result_offload=None,
+        **_AGENT_OPTIONS,
     )
     session = await agent.session()
     events = await _collect(session)
@@ -662,7 +569,6 @@ async def test_hook_exception_at_lifecycle_chokepoint_does_not_crash_run(method:
     """Embedding gate: a hook that raises at any lifecycle chokepoint must not
     crash the run loop — the exception is isolated and the run still completes
     successfully."""
-    from linch.evals import ScriptedProvider, TextTurn
 
     def _raise(self: Any, ctx: Any) -> None:
         raise RuntimeError("hook boom")
@@ -670,7 +576,7 @@ async def test_hook_exception_at_lifecycle_chokepoint_does_not_crash_run(method:
     Boom = type("Boom", (), {"name": "boom", method: _raise})
 
     provider = ScriptedProvider([TextTurn(text="done")])
-    agent = _agent(provider, hooks=[Boom()])
+    agent = make_agent(provider, hooks=[Boom()], **_AGENT_OPTIONS)
     session = await agent.session()
     events = await _collect(session, "hello")
 
@@ -685,7 +591,6 @@ async def test_provider_path_hook_exception_is_surfaced_as_error_event(method: s
     """On the per-turn provider path the isolated hook error is also forwarded to
     the event stream as a ``HookEventRecord`` with ``action='error'``."""
     from linch import HookEventRecord
-    from linch.evals import ScriptedProvider, TextTurn
 
     def _raise(self: Any, ctx: Any) -> None:
         raise RuntimeError("hook boom")
@@ -693,7 +598,7 @@ async def test_provider_path_hook_exception_is_surfaced_as_error_event(method: s
     Boom = type("Boom", (), {"name": "boom", method: _raise})
 
     provider = ScriptedProvider([TextTurn(text="done")])
-    agent = _agent(provider, hooks=[Boom()])
+    agent = make_agent(provider, hooks=[Boom()], **_AGENT_OPTIONS)
     session = await agent.session()
     events = await _collect(session, "hello")
 
@@ -711,15 +616,13 @@ async def test_lifecycle_hook_exception_is_logged(caplog: Any) -> None:
     never swallowed silently."""
     import logging
 
-    from linch.evals import ScriptedProvider, TextTurn
-
     def _raise(self: Any, ctx: Any) -> None:
         raise RuntimeError("hook boom")
 
     Boom = type("Boom", (), {"name": "boom", "on_turn_start": _raise})
 
     provider = ScriptedProvider([TextTurn(text="done")])
-    agent = _agent(provider, hooks=[Boom()])
+    agent = make_agent(provider, hooks=[Boom()], **_AGENT_OPTIONS)
     session = await agent.session()
     with caplog.at_level(logging.WARNING, logger="linch.observability"):
         events = await _collect(session, "hello")
@@ -736,12 +639,10 @@ async def test_post_tool_use_hook_exception_does_not_crash_tool_loop() -> None:
     """A raising PostToolUse hook is isolated: the tool's result still flows and
     the run completes (the unmutated result is used, since the hook never
     returned a mutation)."""
-    from linch import HookEventRecord, ToolCallEndEvent, ToolRegistry
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch import HookEventRecord, ToolCallEndEvent
 
     tool = RecordingTool()
-    registry = ToolRegistry()
-    registry.add(tool)
+    registry = tool_registry(tool)
 
     class Boom:
         name = "boom"
@@ -752,7 +653,7 @@ async def test_post_tool_use_hook_exception_does_not_crash_tool_loop() -> None:
     provider = ScriptedProvider(
         [ToolUseTurn(tool_name="Record", tool_input={"value": "raw"}), TextTurn(text="done")]
     )
-    agent = _agent(provider, hooks=[Boom()], tools=registry)
+    agent = make_agent(provider, hooks=[Boom()], tools=registry, **_AGENT_OPTIONS)
     session = await agent.session()
     events = await _collect(session)
 
@@ -791,13 +692,21 @@ async def test_compaction_dispatches_pre_and_post_compact_hooks() -> None:
         def on_post_compact(self, ctx):
             recorder.append(("post", ctx.messages_before, ctx.messages_after))
 
+    class Provider:
+        id = "fake-provider"
+
     class FakeAgent:
         model = "m"
-        provider = object()
+        provider = Provider()
         hooks = [Hooks()]
         compaction = FakeStrategy()
         token_estimator = None
         max_output_tokens = None
+
+        def __init__(self) -> None:
+            from linch import Context
+
+            self.context = Context()
 
     class FakeSession:
         active_run_id = "r"
@@ -809,13 +718,17 @@ async def test_compaction_dispatches_pre_and_post_compact_hooks() -> None:
                 ]
             )
             self.last_compaction_info: dict[str, Any] | None = None
+            self.id = "fake-session"
+            self.active_model = None
 
         @property
         def provider_view(self) -> Sequence[Message]:
-            return self.session_log.derive_messages()
+            return self.session_log.provider_view
 
     session = FakeSession()
-    await run_forced_compaction(session, FakeAgent(), AbortContext())
+    agent = FakeAgent()
+    session.agent = agent
+    await run_forced_compaction(session, agent, AbortContext())
 
     assert [r[0] for r in recorder] == ["pre", "post"]
     assert recorder[0][1] == 5  # pre: messages observed before compaction
