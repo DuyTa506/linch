@@ -76,6 +76,60 @@ It checks the provider id, a positive context window, the capability shape
 callable when present, and that closing twice is idempotent. A provider must not
 advertise a capability its request builder ignores.
 
+## Native catalog rendering
+
+`ProviderCapabilities.catalog_changes` is `Literal["append_only", "positional"]`,
+defaulting to `"append_only"`, including in `full_capabilities`.
+`AnthropicProviderOptions.native_catalog_changes` and
+`OpenAIResponsesProviderOptions.native_catalog_changes` both default to `False`.
+**Native behavior is UNVERIFIED against live endpoints**; coverage uses fake
+transports. Disabled options preserve phase-2 payload bytes, including historical
+catalog blocks carrying definitions. Exact model and endpoint gates are listed in
+[provider usage](../usage/providers.md#native-catalog-changes-opt-in).
+
+Eligibility uses the effective per-turn model, including skill overrides, and
+requires a nonempty snapshot tool prefix without run/context tool narrowing or a
+snapshot bypass. A private request decision survives exact model-input replay;
+forced-final requests that strip tools also suppress historical native definitions.
+A fallback to append-only expands eligible historical frozen definitions into the
+tool list, preserving existing rows and the offered-tool boundary.
+
+Catalog reminder text always stays user-role. Only provider-native tool structures
+receive system/developer roles:
+
+- Anthropic buffers `tool_addition`/`tool_removal` blocks in a tool-only system
+  message immediately before the next assistant message or at the array end,
+  never as the first entry or between a tool call and its merged user results.
+  A new definition uses `{"type": "tool_definition", "definition": ...}` inside
+  `tool_addition.tool`; restoring/removing declared prefix tools uses
+  `{"type": "tool_reference", "name": ...}`. Active-name tracking skips duplicate
+  additions and inactive removals. A by-value removal stays text-only, and restore
+  sends no second definition. Historical by-value provenance keeps removals
+  text-only after schema promotion; once compaction drops that definition from
+  the provider view, a promoted prefix name can use its declared reference.
+  Only an unfinished trailing tool-system message can move after an abort and a
+  subsequent user prompt; completed historical placement stays fixed. The last
+  user message retains the cache breakpoint. `pause_turn` ends the Linch turn
+  and is not resumed.
+- Every positional Anthropic request includes `inline-tools-2026-09-15`, merged
+  with existing beta headers case-insensitively, even without a tool block.
+  Translated inline definition JSON is counted in UTF-8 bytes across the request;
+  more than 4,194,304 bytes raises actionable `ConfigError` before dispatch.
+- Responses emits `{"type": "additional_tools", "role": "developer", "tools": ...}`
+  at each catalog block's position, without `prompt_cache_breakpoint`. Active names
+  and duplicate definitions are computed from the whole history before
+  `previous_response_id` suffix slicing. Only additions in that suffix are sent;
+  names promoted into prefix tools skip stale additional definitions. When tools
+  have changed and choice is automatic, `tool_choice` becomes
+  `{"type": "allowed_tools", "mode": "auto", "tools": [...]}` in stable name order.
+  Forced and `"none"` choices remain unchanged.
+
+Schema edits take the phase-2 replacement path; the adapters do not invent native
+redefinition semantics. Compaction retains the prefix, resets notification digests,
+and uses existing synchronization to consolidate changes. Audit history retains
+native provenance for schema comparisons and durable contract validation even when
+the compacted provider view no longer contains the original notice.
+
 ## Design rationale
 
 - **Three methods, nothing more.** A provider only has to answer "how big is the

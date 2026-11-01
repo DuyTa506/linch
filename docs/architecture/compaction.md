@@ -27,7 +27,13 @@ consolidated reminder of the live catalog's differences from `base`, retaining
 existing wire tool rows. With no changes, compaction performs no catalog metadata
 write. A slow-path synchronization also performs the reset when `notified`
 differs from `base` but the provider view has no catalog reminder, recovering a
-crash between projection persistence and metadata reset.
+crash between projection persistence and metadata reset. Opt-in positional adapters
+suppress duplicate native additions if an earlier block survives alongside the
+consolidated notice. Frozen definitions and historical native provenance remain in
+the audit log for durable contract/schema comparisons even when compaction drops
+them from the provider view. An Anthropic by-value removal stays text-only while
+its provenance is in that view; a promoted prefix name can use a declared reference
+once its original definition is absent.
 
 Skill listing fingerprints and compaction context come from the session's frozen
 prefix when snapshots are enabled for the run. Reloading skills therefore does

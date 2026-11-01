@@ -361,6 +361,67 @@ schema-repair retries work — live in
 
 ---
 
+## Native catalog changes (opt-in)
+
+`AnthropicProviderOptions(native_catalog_changes=True)` and
+`OpenAIResponsesProviderOptions(native_catalog_changes=True)` enable positional
+catalog changes on supported models. **Both options default to `False` and are
+UNVERIFIED against live Anthropic and OpenAI endpoints.** Payload tests use fake
+transports. With the option off, provider payloads retain phase-2 behavior.
+
+For example, pass `native_catalog_changes=True` alongside `api_key` in either
+provider's options, then use a supported model. The provider reports
+`ProviderCapabilities.catalog_changes="positional"` only when eligible; the
+capability otherwise defaults to `"append_only"`.
+
+- Anthropic requires the first-party Claude API, effective `api_mode="native"`,
+  and an exact model name from this allowlist: `claude-fable-5-1`,
+  `claude-mythos-5-1`, `claude-fable-5`, `claude-mythos-5`, `claude-opus-5-5`,
+  `claude-opus-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`, `claude-opus-4-8`.
+  There is no prefix matching: `claude-sonnet-5` stays append-only. Explicit
+  `base_url` takes precedence over `ANTHROPIC_BASE_URL`; the effective URL must
+  have hostname `api.anthropic.com` (or use the default endpoint). Setting
+  `api_mode="native"` does not enable proxies. Bedrock and Google Cloud remain
+  append-only. Every positional request includes `inline-tools-2026-09-15`.
+- Responses requires a GPT model name identifying version 5.4 or later, including
+  dated/variant suffixes. Unknown names and `gpt-5.3` stay append-only. This is a
+  conservative bound from `tool_search` documentation, rather than a published
+  `additional_tools` model list.
+
+Each ordinary session freezes its system prefix and initial tool definitions in
+persisted metadata. Native additions travel in durable conversation blocks while
+that tool prefix stays fixed. Notification text remains in user-role messages,
+including MCP name-only notices; it never gains system/developer authority.
+Anthropic sends tool-only system messages containing `tool_addition` definitions
+or declared-prefix references and `tool_removal` references. Responses sends
+`additional_tools` items at their log positions and maintains an active-name
+`allowed_tools` choice for automatic selection. Forced choices and `"none"` are
+preserved.
+
+On Anthropic, removing a tool introduced by value is text-only: its wire
+availability remains, and invoking it returns the existing unknown-tool error.
+Restoring it does not resend its definition. Retained historical by-value
+provenance keeps this rule even after a schema promotion. Duplicate additions
+are suppressed after compaction. Anthropic rejects more than 4,194,304 aggregate
+UTF-8 bytes of translated inline definitions locally with `ConfigError`; start a
+new session or disable the option if this limit is reached.
+
+Input-schema edits, an empty initial tool prefix, run-level `allowed_tools`, and
+context tool narrowing use the phase-2 path, accepting a cache miss when tool
+schemas change. Profile overlays, session tool overrides, effective system-block
+overrides, and active request catalogs keep their existing snapshot bypasses.
+Switching to an append-only fallback includes previously added native definitions
+in its tool list. A new session adopts the current catalog into its own prefix;
+compaction keeps existing prefix bytes and consolidates notices.
+
+For an enabled native run with an existing snapshot, catalog synchronization waits
+until context selection is known. Context hooks can therefore run before the new
+notice is appended. Initial snapshot creation and option-off ordering are unchanged.
+See the [provider contract](../architecture/provider-contract.md#native-catalog-rendering)
+for wire placement and replay details.
+
+---
+
 ## Prompt caching
 
 Every direct provider reports `prompt_cache=True`, but the wire mechanism

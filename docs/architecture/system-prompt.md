@@ -42,17 +42,23 @@ blocks without recomputing host OS, shell, or Python metadata. Per-turn context
 blocks follow the frozen prefix with `cacheable=False`; tool selection,
 `allowed_tools`, and provider capability downgrades still apply.
 
-Catalog synchronization runs before context building. Description edits, skill
+Catalog synchronization normally runs before context building. Enabled native
+runs with an existing snapshot defer synchronization until context selection is
+known, so context hooks may run before the next notice. Description edits, skill
 changes, and removals produce durable reminders at the conversation tail while
-preserving the frozen prefix. Added tools append their schemas; edited input
-schemas replace their existing slot. Removed schemas remain in the prefix, and
-calling a removed tool follows the existing unknown-tool error path. Tool changes
+preserving the frozen prefix. On append-only paths, added tools append their
+schemas; edited input schemas replace their existing slot. Eligible opt-in positional paths instead
+carry new definitions in durable catalog blocks and retain the initial tool list.
+Schema edits, empty prefixes, and run/context tool narrowing use the append-only
+phase-2 path. An append-only fallback includes tools previously added natively.
+Removed schemas remain in the prefix, and calling a removed tool follows the existing unknown-tool error path. Tool changes
 that alter the offered schemas trigger the existing cache advisory.
 
 Profile overlays, session tool overrides, effective system-block overrides, and
 an active request catalog bypass snapshots and retain live request assembly.
 Their skill reminder is inserted only when its exact text is absent from the
-provider view. No native provider catalog-change protocol is enabled here.
+provider view. Native provider protocols are off by default and UNVERIFIED against
+live endpoints; see [provider usage](../usage/providers.md#native-catalog-changes-opt-in).
 
 After compaction, `system` and `tools` stay byte-identical. Resetting `notified`
 to `base` makes the next synchronization consolidate all changes into one tail
