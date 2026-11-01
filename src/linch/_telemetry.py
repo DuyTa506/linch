@@ -125,15 +125,59 @@ class Telemetry:
 
     def __init__(self, context: Context) -> None:
         self._context = context
-        self.tracer: trace.Tracer = context.get("tracer") or trace.get_tracer(
-            "linch", tracer_provider=context.get("tracer_provider")
+        self._bindings: tuple[Any, ...] | None = None
+        self._refresh()
+
+    def _refresh(self) -> None:
+        context = self._context
+        tracer = context.get("tracer")
+        tracer_provider = context.get("tracer_provider")
+        meter = context.get("meter")
+        meter_provider = context.get("meter_provider")
+        global_tracer = (
+            trace.get_tracer_provider()
+            if isinstance(tracer, trace.ProxyTracer)
+            or (
+                tracer is None
+                and (
+                    tracer_provider is None
+                    or isinstance(tracer_provider, trace.ProxyTracerProvider)
+                )
+            )
+            else None
         )
-        meter: metrics.Meter = context.get("meter") or metrics.get_meter(
-            "linch", meter_provider=context.get("meter_provider")
+        global_meter = (
+            metrics.get_meter_provider() if meter is None and meter_provider is None else None
         )
-        self.tokens = meter.create_histogram(TOKEN_USAGE, unit="{token}")
-        self.duration = meter.create_histogram(OPERATION_DURATION, unit="s")
-        self.store_duration = meter.create_histogram(STORE_DURATION, unit="s")
+        bindings = (tracer, tracer_provider, meter, meter_provider, global_tracer, global_meter)
+        if self._bindings is not None and all(
+            current is previous for current, previous in zip(bindings, self._bindings, strict=True)
+        ):
+            return
+        self._bindings = bindings
+        self.tracer: trace.Tracer = (
+            tracer
+            if tracer is not None
+            else trace.get_tracer("linch", tracer_provider=tracer_provider)
+        )
+        resolved_meter = (
+            meter
+            if meter is not None
+            else metrics.get_meter("linch", meter_provider=meter_provider)
+        )
+        self.tokens = resolved_meter.create_histogram(TOKEN_USAGE, unit="{token}")
+        self.duration = resolved_meter.create_histogram(OPERATION_DURATION, unit="s")
+        self.store_duration = resolved_meter.create_histogram(STORE_DURATION, unit="s")
+
+    @property
+    def tracing_enabled(self) -> bool:
+        if isinstance(self.tracer, trace.NoOpTracer):
+            return False
+        if isinstance(self.tracer, trace.ProxyTracer):
+            return not isinstance(
+                trace.get_tracer_provider(), trace.NoOpTracerProvider | trace.ProxyTracerProvider
+            )
+        return True
 
     @property
     def metrics_enabled(self) -> bool:
@@ -165,6 +209,8 @@ def telemetry_for(agent: Any) -> Telemetry:
     if telemetry is None or telemetry._context is not context:
         telemetry = Telemetry(context)
         context.register("_linch_telemetry", telemetry)
+    else:
+        telemetry._refresh()
     return telemetry
 
 
@@ -280,6 +326,8 @@ def start_run_span(session: Any, prompt: str, run_id: str, *, resumed: bool = Fa
         The span used for the run's instrumentation boundary.
     """
     telemetry = telemetry_for(session.agent)
+    if not telemetry.tracing_enabled:
+        return trace.INVALID_SPAN
     attrs = attributes(session, "invoke_agent")
     attrs[RUN_ID] = run_id
     attrs[RESUMED] = resumed
@@ -293,7 +341,10 @@ def start_step(session: Any, turn_index: int) -> None:
     state = getattr(session, "_telemetry_run", None)
     if state is not None:
         state.turn_index = turn_index
-        state.step = telemetry_for(session.agent).tracer.start_span(
+        telemetry = telemetry_for(session.agent)
+        if not telemetry.tracing_enabled:
+            return
+        state.step = telemetry.tracer.start_span(
             "step",
             context=trace.set_span_in_context(state.span),
             attributes=attributes(session, "step"),
@@ -328,7 +379,7 @@ class ChatCall:
                 kind=trace.SpanKind.CLIENT,
                 attributes=self.attrs,
             )
-            if self.telemetry
+            if self.telemetry is not None and self.telemetry.tracing_enabled
             else trace.INVALID_SPAN
         )
         self.capture = self.span.is_recording() and capture_content()
@@ -391,9 +442,12 @@ class ChatCall:
 def trace_compaction(function: Any) -> Any:
     @wraps(function)
     async def wrapped(session: Any, agent: Any, signal: Any, strategy: Any, **kwargs: Any) -> Any:
+        telemetry = telemetry_for(agent)
+        if not telemetry.tracing_enabled:
+            return await function(session, agent, signal, strategy, **kwargs)
         attrs = attributes(session, "compaction", model=kwargs.get("model"))
         attrs[COMPACTION_STRATEGY] = strategy.id
-        span = telemetry_for(agent).tracer.start_span(
+        span = telemetry.tracer.start_span(
             "compaction", context=parent_context(session), attributes=attrs
         )
         if not span.get_span_context().is_valid:
@@ -421,6 +475,9 @@ def trace_tool(function: Any) -> Any:
     async def wrapped(
         call: Any, decision: Any, agent: Any, session: Any, signal: Any, **kwargs: Any
     ) -> Any:
+        telemetry = telemetry_for(agent)
+        if not telemetry.tracing_enabled:
+            return await function(call, decision, agent, session, signal, **kwargs)
         attrs = {
             OPERATION: "execute_tool",
             CONVERSATION_ID: session.id,
@@ -433,7 +490,7 @@ def trace_tool(function: Any) -> Any:
         turn_index = kwargs.get("turn_index")
         if turn_index is not None:
             attrs[TURN_INDEX] = turn_index
-        span = telemetry_for(agent).tracer.start_span(
+        span = telemetry.tracer.start_span(
             f"execute_tool {attrs[TOOL_NAME]}", context=parent_context(session), attributes=attrs
         )
         if not span.get_span_context().is_valid:
@@ -473,13 +530,7 @@ class _TelemetryProvider:
     def stream(self, request: Any) -> Any:
         iterator = self._provider.stream(request)
         telemetry = telemetry_for(self._session.agent)
-        if not telemetry.metrics_enabled and (
-            isinstance(telemetry.tracer, trace.NoOpTracer)
-            or (
-                isinstance(telemetry.tracer, trace.ProxyTracer)
-                and isinstance(trace.get_tracer_provider(), trace.ProxyTracerProvider)
-            )
-        ):
+        if not telemetry.metrics_enabled and not telemetry.tracing_enabled:
             return iterator
 
         async def activated() -> AsyncGenerator[Any, None]:
