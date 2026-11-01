@@ -108,7 +108,7 @@ async def test_vllm_stream_reuses_openai_compatible_parser() -> None:
     assert {"type": "tool_use_end", "id": "call_1"} in events
     assert events[-1]["stop_reason"] == "tool_use"
     assert events[-1]["usage"] == Usage(
-        input_tokens=3,
+        input_tokens=1,
         output_tokens=5,
         cache_read_tokens=2,
     )

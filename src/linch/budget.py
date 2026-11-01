@@ -5,10 +5,10 @@ after every provider turn and checks :attr:`RunBudget.exceeded` before each
 provider call; subagent child runs inherit the *same object* from their parent
 session, so one budget caps the whole tree (parent + all workers).
 
-Token counts sum all four :class:`~linch.types.Usage` buckets (input, output,
-cache read, cache creation), matching ``Usage.add`` semantics.  USD cost comes
-from :func:`linch.pricing.cost_usd`; unknown models cost ``None`` and charge
-``0.0`` — for unpriced models only the token limit binds.
+Token counts sum all four normalized :class:`~linch.types.Usage` buckets (where
+input excludes cache reads and writes), matching ``Usage.add`` semantics.  USD
+cost comes from :func:`linch.pricing.cost_usd`; unknown models cost ``None`` and
+charge ``0.0`` — for unpriced models only the token limit binds.
 
 The event loop is single-threaded, so plain counters are safe — no locks.
 """
@@ -44,7 +44,7 @@ class RunBudget:
             internal field is exposed by the generated dataclass constructor.
 
     Attributes:
-        max_tokens: Cap on total tokens (all four ``Usage`` buckets summed),
+        max_tokens: Cap on total tokens (all four normalized ``Usage`` buckets summed),
             or ``None`` for no token limit.
         max_cost_usd: Cap on accumulated USD cost, or ``None`` for no limit.
         warn_ratio: Fraction of either limit at which :meth:`take_warning`
@@ -76,6 +76,7 @@ class RunBudget:
     def charge(self, usage: Usage, cost_usd: float | None) -> None:
         """Record one turn's spending.
 
+        Normalized usage contributes all four non-overlapping token buckets.
         Unknown-model usage with ``cost_usd=None`` still contributes tokens but
         contributes zero dollars.
 

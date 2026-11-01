@@ -127,7 +127,55 @@ async def test_stream_text_only_unaffected() -> None:
     assert {"type": "text_delta", "text": "hi"} in events
     assert not any(e.get("type") == "tool_use_end" for e in events)
     assert events[-1]["stop_reason"] == "end_turn"
+    assert events[-1]["usage"].input_tokens == 4
     assert events[-1]["usage"].cache_read_tokens == 6
+
+
+async def test_stream_usage_without_cache_keeps_total_prompt_tokens() -> None:
+    chunks = [
+        SimpleNamespace(
+            choices=[],
+            usage=SimpleNamespace(prompt_tokens=100, completion_tokens=10),
+        )
+    ]
+    provider = OpenAIChatCompletionsProvider()
+    provider._client = OpenAICompatibleFakeClient(chunks)
+
+    events = [
+        event
+        async for event in provider.stream(
+            ProviderRequest(model="gpt-4o", system=[], tools=[], messages=[])
+        )
+    ]
+
+    assert events[-1]["usage"].input_tokens == 100
+    assert events[-1]["usage"].output_tokens == 10
+    assert events[-1]["usage"].cache_read_tokens == 0
+
+
+async def test_stream_usage_clamps_uncached_prompt_tokens_at_zero() -> None:
+    chunks = [
+        SimpleNamespace(
+            choices=[],
+            usage=SimpleNamespace(
+                prompt_tokens=100,
+                completion_tokens=10,
+                prompt_tokens_details=SimpleNamespace(cached_tokens=900),
+            ),
+        )
+    ]
+    provider = OpenAIChatCompletionsProvider()
+    provider._client = OpenAICompatibleFakeClient(chunks)
+
+    events = [
+        event
+        async for event in provider.stream(
+            ProviderRequest(model="gpt-4o", system=[], tools=[], messages=[])
+        )
+    ]
+
+    assert events[-1]["usage"].input_tokens == 0
+    assert events[-1]["usage"].cache_read_tokens == 900
 
 
 async def test_stream_captures_usage_from_final_empty_choices_chunk() -> None:
@@ -161,7 +209,7 @@ async def test_stream_captures_usage_from_final_empty_choices_chunk() -> None:
 
     end = events[-1]
     assert end["type"] == "message_end"
-    assert end["usage"].input_tokens == 37
+    assert end["usage"].input_tokens == 26
     assert end["usage"].output_tokens == 512
     assert end["usage"].cache_read_tokens == 11
 

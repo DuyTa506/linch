@@ -404,10 +404,10 @@ async def _accounted_primary_stream(
             _throw_if_aborted(req.signal)
             ledger.assert_may_start()
             await ledger.mark_dispatch_started(intent)
-            started = True
             # The marker is durable before the physical iterator can advance.
             _throw_if_aborted(req.signal)
             ledger.assert_may_start()
+            started = True
             parsed: _ParsedPrimaryAssembly | None = None
             with ChatCall(session, req, state) as chat:
                 async with aclosing(
@@ -448,7 +448,7 @@ async def _accounted_primary_stream(
             if ledger._persistence_failed:
                 pass
             elif not started:
-                await ledger.abandon(intent, reason="delivery_not_dispatched")
+                await ledger.abandon(intent, reason="delivery_not_dispatched", not_dispatched=True)
             else:
                 cancelled = isinstance(exc, (AbortError, asyncio.CancelledError, GeneratorExit))
                 if state.usage is not None:
