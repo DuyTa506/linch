@@ -8,13 +8,15 @@ from typing import Any
 
 import pytest
 
+from tests.support.agents import make_agent
+from tests.support.providers import ScriptedProvider, TextTurn
+
 
 def _agent(**kwargs: Any) -> Any:
-    from linch import Agent
-    from linch.ext.evals import ScriptedProvider, TextTurn
-
-    kwargs.setdefault("provider", ScriptedProvider([TextTurn(text="done")] * 20))
-    return Agent(model="m", **kwargs)
+    kwargs.setdefault("provider", ScriptedProvider([TextTurn("done")] * 20))
+    kwargs.setdefault("model", "m")
+    kwargs.setdefault("run_store", None)
+    return make_agent(**kwargs)
 
 
 async def _run(session: Any) -> None:
@@ -157,28 +159,26 @@ async def test_background_delivery_is_retained_until_the_next_run(notification: 
 
 
 async def test_concurrent_runs_are_protected_until_they_finish() -> None:
-    from linch.types import Usage
-
-    started = asyncio.Event()
-    gate = asyncio.Event()
-
-    class BlockingProvider:
+    class BlockingProvider(ScriptedProvider):
         id = "blocking"
-        calls = 0
 
-        def context_window(self, model: str) -> int:
-            return 100_000
+        def __init__(self) -> None:
+            super().__init__([TextTurn("done")] * 2)
+            self.started = asyncio.Event()
+            self.gate = asyncio.Event()
+            self.calls = 0
 
         async def stream(self, req: Any):
             self.calls += 1
             if self.calls == 2:
                 started.set()
-            await gate.wait()
-            yield {"type": "message_start", "model": req.model}
-            yield {"type": "text_delta", "text": "done"}
-            yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
+            await self.gate.wait()
+            async for event in super().stream(req):
+                yield event
 
-    agent = _agent(provider=BlockingProvider(), max_idle_sessions=0)
+    provider = BlockingProvider()
+    started, gate = provider.started, provider.gate
+    agent = _agent(provider=provider, max_idle_sessions=0)
     a = await agent.session(id="a")
     b = await agent.session(id="b")
     tasks = [asyncio.create_task(_run(session)) for session in (a, b)]

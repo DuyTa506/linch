@@ -1,30 +1,15 @@
-"""Smoke tests for the coordination examples (examples/coordination/).
-
-Drive both examples with a deterministic ScriptedProvider (no live key) to prove
-they wire up:
-
-  * team_mailbox — one peer addresses another via send_message; the message drains
-    into the recipient's next turn; the Correlator resolves a request/response pair.
-"""
-
 from __future__ import annotations
 
-import importlib.util
 from pathlib import Path
 
-from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
+from tests.support.modules import load_module
+from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
 
 _EXAMPLES = Path(__file__).resolve().parents[2] / "examples" / "coordination"
 
 
 def _load(name: str):
-    spec = importlib.util.spec_from_file_location(
-        f"coordination_example_{name}", _EXAMPLES / f"{name}.py"
-    )
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return load_module(_EXAMPLES / f"{name}.py", f"coordination_example_{name}")
 
 
 async def test_team_mailbox_peer_messaging_and_correlator() -> None:

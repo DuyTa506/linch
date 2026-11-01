@@ -13,6 +13,14 @@ import builtins
 
 import pytest
 
+from tests.support.agents import make_agent
+
+
+def _eval_agent(provider, *, tools=None, run_store=None):
+    """Build the inert agent shared by end-to-end evaluator cases."""
+    return make_agent(provider, model="fake-model", tools=tools, run_store=run_store)
+
+
 # ---------------------------------------------------------------------------
 # Unit: ScriptedProvider
 # ---------------------------------------------------------------------------
@@ -142,76 +150,64 @@ def test_eval_result_report_exports():
 # ---------------------------------------------------------------------------
 
 
-def test_text_contains_scorer_pass():
-    """text_contains scorer passes when expected substring is in output."""
+@pytest.mark.parametrize(
+    ("needle", "output", "expected"),
+    [
+        ("Paris", "The capital is Paris.", True),
+        ("Paris", "The capital is London.", False),
+        ("paris", "The capital is PARIS.", True),
+    ],
+)
+def test_text_contains_scorer_pass(needle, output, expected):
+    """text_contains handles matches, misses, and case-insensitive output."""
     from linch.ext.evals import text_contains
 
-    scorer = text_contains("Paris")
-    assert scorer("The capital is Paris.") is True
+    assert text_contains(needle)(output) is expected
 
 
-def test_text_contains_scorer_fail():
-    from linch.ext.evals import text_contains
-
-    scorer = text_contains("Paris")
-    assert scorer("The capital is London.") is False
-
-
-def test_text_contains_case_insensitive():
-    """text_contains is case-insensitive by default."""
-    from linch.ext.evals import text_contains
-
-    scorer = text_contains("paris")
-    assert scorer("The capital is PARIS.") is True
-
-
-def test_tool_called_scorer_pass():
-    """tool_called scorer passes when the expected tool name appears in events."""
+@pytest.mark.parametrize("events_present", [True, False])
+def test_tool_called_scorer_pass(events_present):
+    """tool_called reports whether the requested tool appears in events."""
     from linch.events import ToolCallStartEvent
     from linch.ext.evals import tool_called
 
-    scorer = tool_called("Read")
-    events = [ToolCallStartEvent(tool_use_id="t1", tool_name="Read", input={}, summary="Read()")]
-    assert scorer(events=events) is True
+    events = (
+        [ToolCallStartEvent(tool_use_id="t1", tool_name="Read", input={}, summary="Read()")]
+        if events_present
+        else []
+    )
+    assert tool_called("Read")(events=events) is events_present
 
 
-def test_tool_called_scorer_fail():
-    from linch.ext.evals import tool_called
-
-    scorer = tool_called("Read")
-    assert scorer(events=[]) is False
-
-
-def test_schema_valid_scorer_pass():
-    """schema_valid scorer passes when output is valid JSON matching the schema."""
+@pytest.mark.parametrize(
+    ("schema", "output", "expected"),
+    [
+        (
+            {
+                "type": "object",
+                "properties": {"capital": {"type": "string"}},
+                "required": ["capital"],
+            },
+            '{"capital": "Paris"}',
+            True,
+        ),
+        (
+            {
+                "type": "object",
+                "properties": {"capital": {"type": "string"}},
+                "required": ["capital"],
+            },
+            '{"city": "Paris"}',
+            False,
+        ),
+        ({"type": "object"}, "not json at all", False),
+    ],
+)
+def test_schema_valid_scorer_pass(schema, output, expected):
+    """schema_valid handles valid, incomplete, and malformed JSON output."""
     from linch.ext.evals import schema_valid
 
-    schema = {
-        "type": "object",
-        "properties": {"capital": {"type": "string"}},
-        "required": ["capital"],
-    }
-    scorer = schema_valid(schema)
-    assert scorer('{"capital": "Paris"}') is True
-
-
-def test_schema_valid_scorer_fail_missing_key():
-    from linch.ext.evals import schema_valid
-
-    schema = {
-        "type": "object",
-        "properties": {"capital": {"type": "string"}},
-        "required": ["capital"],
-    }
-    scorer = schema_valid(schema)
-    assert scorer('{"city": "Paris"}') is False
-
-
-def test_schema_valid_scorer_fail_not_json():
-    from linch.ext.evals import schema_valid
-
-    scorer = schema_valid({"type": "object"})
-    assert scorer("not json at all") is False
+    assert schema_valid(schema)(output) is expected
 
 
 def test_schema_valid_scorer_fails_closed_without_jsonschema(monkeypatch):
@@ -237,54 +233,24 @@ def test_schema_valid_scorer_rejects_invalid_schema():
     assert scorer('{"capital": "Paris"}') is False
 
 
-def test_cost_under_scorer_pass():
-    """cost_under scorer passes when total_cost_usd is below the budget."""
+@pytest.mark.parametrize(
+    ("limit", "cost", "expected"),
+    [(0.10, 0.01, True), (0.01, 0.05, False), (0.10, None, None)],
+)
+def test_cost_under_scorer_pass(limit, cost, expected):
+    """cost_under reports under-budget, over-budget, and unknown costs."""
     from linch.events import ResultEvent
     from linch.ext.evals import cost_under
     from linch.types import Usage
 
-    scorer = cost_under(0.10)
     result_event = ResultEvent(
         subtype="success",
         stop_reason="end_turn",
         total_usage=Usage(),
         duration_ms=100,
-        total_cost_usd=0.01,
+        total_cost_usd=cost,
     )
-    assert scorer(result_event=result_event) is True
-
-
-def test_cost_under_scorer_fail():
-    from linch.events import ResultEvent
-    from linch.ext.evals import cost_under
-    from linch.types import Usage
-
-    scorer = cost_under(0.01)
-    result_event = ResultEvent(
-        subtype="success",
-        stop_reason="end_turn",
-        total_usage=Usage(),
-        duration_ms=100,
-        total_cost_usd=0.05,
-    )
-    assert scorer(result_event=result_event) is False
-
-
-def test_cost_under_scorer_none_cost():
-    """cost_under returns None (unknown) when total_cost_usd is None."""
-    from linch.events import ResultEvent
-    from linch.ext.evals import cost_under
-    from linch.types import Usage
-
-    scorer = cost_under(0.10)
-    result_event = ResultEvent(
-        subtype="success",
-        stop_reason="end_turn",
-        total_usage=Usage(),
-        duration_ms=100,
-        total_cost_usd=None,
-    )
-    assert scorer(result_event=result_event) is None
+    assert cost_under(limit)(result_event=result_event) is expected
 
 
 def test_long_run_context_scorers():
@@ -355,63 +321,43 @@ def test_scorer_factories_have_distinct_names():
 
 
 @pytest.mark.asyncio
-async def test_run_eval_single_case_text_match():
-    """run_eval with a single case and text_contains scorer returns EvalResult."""
-    from linch import Agent
+@pytest.mark.parametrize(
+    ("texts", "case_specs", "total", "passed", "pass_rate"),
+    [
+        (
+            ["The capital is Paris."],
+            [("What is the capital of France?", "Paris")],
+            1,
+            1,
+            1.0,
+        ),
+        (
+            ["Paris", "Paris"],
+            [("Capital of France?", "Paris"), ("Capital of Germany?", "Berlin")],
+            2,
+            1,
+            0.5,
+        ),
+    ],
+)
+async def test_run_eval_cases_aggregate(texts, case_specs, total, passed, pass_rate):
+    """run_eval handles one and multiple cases with the expected aggregate."""
     from linch.ext.evals import EvalCase, ScriptedProvider, TextTurn, run_eval, text_contains
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import empty_tools
 
-    provider = ScriptedProvider(turns=[TextTurn(text="The capital is Paris.")])
-    agent = Agent(
-        model="fake-model",
-        provider=provider,
-        tools=empty_tools(),
-        session_store=InMemorySessionStore(),
-        permissions={"mode": "skip-dangerous"},
-    )
+    provider = ScriptedProvider(turns=[TextTurn(text=text) for text in texts])
+    agent = _eval_agent(provider)
 
-    cases = [EvalCase(prompt="What is the capital of France?", expected="Paris")]
+    cases = [EvalCase(prompt=prompt, expected=expected) for prompt, expected in case_specs]
     result = await run_eval(agent, cases, scorers=[text_contains("{expected}")])
 
-    assert result.total == 1
-    assert result.passed == 1
-    assert result.pass_rate == 1.0
-
-
-@pytest.mark.asyncio
-async def test_run_eval_multiple_cases():
-    """run_eval over multiple cases aggregates pass/fail correctly."""
-    from linch import Agent
-    from linch.ext.evals import EvalCase, ScriptedProvider, TextTurn, run_eval, text_contains
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import empty_tools
-
-    # Provider always says "Paris" — first case passes, second fails
-    provider = ScriptedProvider(turns=[TextTurn(text="Paris"), TextTurn(text="Paris")])
-    agent = Agent(
-        model="fake-model",
-        provider=provider,
-        tools=empty_tools(),
-        session_store=InMemorySessionStore(),
-        permissions={"mode": "skip-dangerous"},
-    )
-
-    cases = [
-        EvalCase(prompt="Capital of France?", expected="Paris"),
-        EvalCase(prompt="Capital of Germany?", expected="Berlin"),
-    ]
-    result = await run_eval(agent, cases, scorers=[text_contains("{expected}")])
-
-    assert result.total == 2
-    assert result.passed == 1
-    assert result.pass_rate == 0.5
+    assert result.total == total
+    assert result.passed == passed
+    assert result.pass_rate == pass_rate
 
 
 @pytest.mark.asyncio
 async def test_run_eval_tool_called_scorer():
     """run_eval with tool_called scorer detects tool invocation."""
-    from linch import Agent
     from linch.ext.evals import (
         EvalCase,
         ScriptedProvider,
@@ -420,29 +366,9 @@ async def test_run_eval_tool_called_scorer():
         run_eval,
         tool_called,
     )
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import ToolRegistry
+    from tests.support.tools import StubTool, tool_registry
 
-    class _EchoTool:
-        name = "Echo"
-        description = "Echoes input."
-        input_schema = {"type": "object", "properties": {"text": {"type": "string"}}}
-        scope = "read"
-        parallel = True
-
-        def validate(self, raw):
-            return raw
-
-        async def execute(self, input, ctx):
-            from linch.tools.base import ToolResult
-
-            return ToolResult(content=input.get("text", ""))
-
-        def summarize(self, input):
-            return "Echo()"
-
-    reg = ToolRegistry()
-    reg.register(_EchoTool())
+    reg = tool_registry(StubTool("Echo", output="hello", parallel=True))
 
     provider = ScriptedProvider(
         turns=[
@@ -450,13 +376,7 @@ async def test_run_eval_tool_called_scorer():
             TextTurn(text="done"),
         ]
     )
-    agent = Agent(
-        model="fake-model",
-        provider=provider,
-        tools=reg,
-        session_store=InMemorySessionStore(),
-        permissions={"mode": "skip-dangerous"},
-    )
+    agent = _eval_agent(provider, tools=reg)
 
     cases = [EvalCase(prompt="Echo hello", expected="Echo")]
     result = await run_eval(agent, cases, scorers=[tool_called("Echo")])
@@ -472,19 +392,10 @@ async def test_run_eval_colliding_scorer_names_not_lost():
     ``__name__``, a naive ``scores[name] = verdict`` would drop the failing
     verdict and report the case as passing. The case must be reported FAILED.
     """
-    from linch import Agent
     from linch.ext.evals import EvalCase, ScriptedProvider, TextTurn, run_eval, schema_valid
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import empty_tools
 
     provider = ScriptedProvider(turns=[TextTurn(text='{"capital": "Paris"}')])
-    agent = Agent(
-        model="fake-model",
-        provider=provider,
-        tools=empty_tools(),
-        session_store=InMemorySessionStore(),
-        permissions={"mode": "skip-dangerous"},
-    )
+    agent = _eval_agent(provider)
 
     # Both factories hardcode __name__ == "schema_valid".
     failing = schema_valid(
@@ -508,21 +419,12 @@ async def test_run_eval_colliding_scorer_names_not_lost():
 @pytest.mark.asyncio
 async def test_run_eval_releases_sessions_per_case():
     """run_eval must not accumulate one session per case in agent._sessions (Bug B)."""
-    from linch import Agent
     from linch.ext.evals import EvalCase, ScriptedProvider, TextTurn, run_eval
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import empty_tools
 
     provider = ScriptedProvider(
         turns=[TextTurn(text="ok"), TextTurn(text="ok"), TextTurn(text="ok")]
     )
-    agent = Agent(
-        model="fake-model",
-        provider=provider,
-        tools=empty_tools(),
-        session_store=InMemorySessionStore(),
-        permissions={"mode": "skip-dangerous"},
-    )
+    agent = _eval_agent(provider)
 
     baseline = len(agent._sessions)
     cases = [

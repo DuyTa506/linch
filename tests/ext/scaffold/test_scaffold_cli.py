@@ -90,7 +90,7 @@ def test_module_entrypoint():
     assert "new" in proc.stdout
 
 
-def test_new_creates_project_tree(tmp_path):
+def test_new_creates_project_tree(tmp_path, capsys):
     proj = _new_project(tmp_path)
     expected = [
         "pyproject.toml",
@@ -105,10 +105,6 @@ def test_new_creates_project_tree(tmp_path):
     ]
     for rel in expected:
         assert (proj / rel).is_file(), rel
-
-
-def test_new_prints_created_files(tmp_path, capsys):
-    _new_project(tmp_path)
     out = capsys.readouterr().out
     for fragment in (
         "my-agent/pyproject.toml",
@@ -120,6 +116,10 @@ def test_new_prints_created_files(tmp_path, capsys):
     ):
         assert fragment in out
     assert "cd my-agent" in out
+    text = (proj / "pyproject.toml").read_text(encoding="utf-8")
+    assert 'name = "my-agent"' in text
+    assert 'packages = ["src/my_agent"]' in text
+    assert (proj / "src" / "my_agent").is_dir()
 
 
 def test_new_generated_python_parses(tmp_path):
@@ -128,22 +128,10 @@ def test_new_generated_python_parses(tmp_path):
     assert len(py_files) == 6
     for path in py_files:
         ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-
-
-def test_new_generated_python_uses_only_top_level_linch_imports(tmp_path):
-    proj = _new_project(tmp_path)
     linch_consumers = [path for path in proj.rglob("*.py") if "from linch" in path.read_text()]
     assert linch_consumers
     for path in linch_consumers:
         _assert_only_top_level_linch_imports(path)
-
-
-def test_new_kebab_maps_to_snake(tmp_path):
-    proj = _new_project(tmp_path)
-    text = (proj / "pyproject.toml").read_text(encoding="utf-8")
-    assert 'name = "my-agent"' in text
-    assert 'packages = ["src/my_agent"]' in text
-    assert (proj / "src" / "my_agent").is_dir()
 
 
 @pytest.mark.parametrize("name", ["1bad", "Class", "class", "linch", "has space", "-leading"])
@@ -179,7 +167,7 @@ async def test_generated_greet_tool_passes_contract(tmp_path):
 
 
 async def test_generated_agent_runs_offline(tmp_path, monkeypatch):
-    from linch.ext.evals import ScriptedProvider, TextTurn
+    from tests.support.providers import ScriptedProvider, TextTurn
 
     proj = _new_project(tmp_path, "offline-proof")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -198,7 +186,7 @@ async def test_generated_agent_runs_offline(tmp_path, monkeypatch):
 
 
 async def test_generated_agent_tool_wiring(tmp_path, monkeypatch):
-    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
 
     proj = _new_project(tmp_path, "wiring-proof")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)

@@ -11,19 +11,21 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+from tests.support.agents import make_agent
+from tests.support.providers import ScriptedProvider, TextTurn
+from tests.support.tools import tool_registry
+
 
 def agent_for(context, turns=None, **kwargs):
-    from linch import Agent, FeatureFlags, InMemorySessionStore
-    from linch.ext.evals import ScriptedProvider, TextTurn
-
-    return Agent(
+    provider = kwargs.pop("provider", None)
+    if provider is None:
+        provider = ScriptedProvider(turns or [TextTurn("private pong")])
+        provider.id = "scripted"
+    return make_agent(
+        provider,
         model="test-model",
-        provider=kwargs.pop("provider", None)
-        or ScriptedProvider(turns or [TextTurn("private pong")]),
         context=context,
-        session_store=InMemorySessionStore(),
-        permissions={"mode": "skip-dangerous"},
-        features=FeatureFlags(skills=False, subagents=False, mcp=False),
+        run_store=kwargs.pop("run_store", None),
         loop_guard=None,
         **kwargs,
     )
@@ -55,7 +57,7 @@ def metric_points(reader, name):
 
 async def test_text_run_tree_usage_metrics_and_caller_context(otel):
     from linch import Usage
-    from linch.ext.evals import TextTurn
+    from tests.support.providers import TextTurn
 
     context, exporter, reader = otel
     agent = agent_for(context, [TextTurn("private pong", usage=Usage(11, 5, 3, 2))])
@@ -107,8 +109,8 @@ async def test_text_run_tree_usage_metrics_and_caller_context(otel):
 
 @pytest.mark.parametrize("capture", [False, True])
 async def test_tool_tree_and_content_switch(otel, monkeypatch, capture):
-    from linch import ToolRegistry, tool
-    from linch.ext.evals import TextTurn, ToolUseTurn
+    from linch import tool
+    from tests.support.providers import TextTurn, ToolUseTurn
 
     if capture:
         monkeypatch.setenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", "true")
@@ -121,8 +123,7 @@ async def test_tool_tree_and_content_switch(otel, monkeypatch, capture):
         """Echo the input."""
         return "private result " + secret
 
-    tools = ToolRegistry()
-    tools.register(echo)
+    tools = tool_registry(echo)
     agent = agent_for(
         context,
         [ToolUseTurn("echo", {"secret": "private argument"}), TextTurn("private pong")],
@@ -153,8 +154,8 @@ async def test_tool_tree_and_content_switch(otel, monkeypatch, capture):
 
 @pytest.mark.parametrize("failure", ["raise", "result"])
 async def test_failing_tool_sets_error_status(otel, failure):
-    from linch import ToolRegistry, ToolResult, tool
-    from linch.ext.evals import TextTurn, ToolUseTurn
+    from linch import ToolResult, tool
+    from tests.support.providers import TextTurn, ToolUseTurn
 
     context, exporter, _ = otel
 
@@ -165,8 +166,7 @@ async def test_failing_tool_sets_error_status(otel, failure):
             raise ValueError("private tool error")
         return ToolResult(content="private tool error", is_error=True)
 
-    tools = ToolRegistry()
-    tools.register(fail)
+    tools = tool_registry(fail)
     agent = agent_for(context, [ToolUseTurn("fail", {}), TextTurn("recovered")], tools=tools)
     events = await collect(await agent.session())
     assert events[-1].subtype == "success"
@@ -268,10 +268,10 @@ async def test_resumed_run_keeps_run_identity_and_current_parent(otel):
 
 
 async def test_real_subagent_is_nested_under_parent_tool_and_run(otel):
-    from linch import ToolRegistry, tool
-    from linch.ext.evals import TextTurn, ToolUseTurn
+    from linch import tool
     from linch.subagents.default_agent import DEFAULT_AGENT
     from linch.subagents.runner import RunSubagentArgs, run_subagent
+    from tests.support.providers import TextTurn, ToolUseTurn
 
     context, exporter, _ = otel
     parent = None
@@ -292,8 +292,7 @@ async def test_real_subagent_is_nested_under_parent_tool_and_run(otel):
         )
         return result.final_text
 
-    tools = ToolRegistry()
-    tools.register(delegate)
+    tools = tool_registry(delegate)
     agent = agent_for(
         context,
         [ToolUseTurn("delegate", {}), TextTurn("child done"), TextTurn("parent done")],
@@ -313,7 +312,7 @@ async def test_real_subagent_is_nested_under_parent_tool_and_run(otel):
 
 async def test_compaction_has_span_and_accounted_chat_child(otel):
     from linch import DefaultCompaction, Message, TextBlock
-    from linch.ext.evals import TextTurn
+    from tests.support.providers import TextTurn
 
     context, exporter, _ = otel
     agent = agent_for(
@@ -343,7 +342,7 @@ async def test_compaction_has_span_and_accounted_chat_child(otel):
 
 async def test_subagent_definition_provider_call_uses_agent_context(otel):
     from linch import generate_subagent_definition
-    from linch.ext.evals import TextTurn
+    from tests.support.providers import TextTurn
 
     context, exporter, reader = otel
     definition = {
@@ -364,7 +363,7 @@ async def test_standalone_compaction_chat_is_injected_and_nested(otel):
     from linch import DefaultCompaction, Message, TextBlock
     from linch.abort import AbortContext
     from linch.compaction import run_forced_compaction
-    from linch.ext.evals import TextTurn
+    from tests.support.providers import TextTurn
 
     context, exporter, reader = otel
     agent = agent_for(context, [TextTurn("summary")], compaction=DefaultCompaction())
@@ -463,7 +462,7 @@ async def test_child_context_overrides_ancestor_cached_instruments(otel):
     from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
     from linch import Usage
-    from linch.ext.evals import TextTurn
+    from tests.support.providers import TextTurn
 
     context, exporter, reader = otel
     parent = agent_for(context, [TextTurn("parent", usage=Usage(1, 1))])
@@ -530,8 +529,8 @@ async def test_custom_standalone_compaction_records_physical_call(otel, tracing)
     from linch import Message, TextBlock, Usage
     from linch.abort import AbortContext
     from linch.compaction import run_forced_compaction
-    from linch.ext.evals import TextTurn
     from linch.types import ProviderRequest
+    from tests.support.providers import TextTurn
 
     class DirectStreamCompaction:
         id = "direct-stream"

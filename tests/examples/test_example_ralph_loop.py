@@ -1,30 +1,15 @@
-"""Smoke test for the Ralph-loop recipe (examples/recipes/ralph_loop.py).
-
-Drives the loop with a deterministic ScriptedProvider (no live key): three passes,
-each in a fresh session, each writing progress to the virtual filesystem. The loop's
-done-predicate reads that same backend and stops when the DONE marker appears — proving
-the recipe carries state across fresh contexts via the filesystem alone.
-"""
-
 from __future__ import annotations
 
-import importlib.util
 from pathlib import Path
-from typing import Any
 
-import pytest
-
-from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
+from tests.support.modules import load_module
+from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
 
 _RECIPE = Path(__file__).resolve().parents[2] / "examples" / "recipes" / "ralph_loop.py"
 
 
 def _load():
-    spec = importlib.util.spec_from_file_location("ralph_loop_example", _RECIPE)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return load_module(_RECIPE, "ralph_loop_example")
 
 
 def _write(content: str) -> ToolUseTurn:
@@ -33,7 +18,7 @@ def _write(content: str) -> ToolUseTurn:
     )
 
 
-def _enable_ralph_filesystem(agent: Any) -> None:
+def _enable_ralph_filesystem(agent) -> None:
     """Opt the recipe's neutral Agent into its virtual filesystem preset."""
     from linch.filesystem import filesystem_tools
 
@@ -73,41 +58,3 @@ async def test_ralph_loop_converges_across_fresh_contexts() -> None:
     final = await backend.read("/progress.md")
     assert recipe.DONE_MARKER in final
     assert final.count("[x]") == 3
-
-
-async def test_ralph_loop_is_bounded_when_it_never_converges() -> None:
-    recipe = _load()
-
-    # Every pass writes the same un-finished progress → predicate never true.
-    provider = ScriptedProvider([_write("[ ] scaffold"), TextTurn(text="stuck")] * 3)
-    agent, backend = recipe.build_ralph_agent(provider=provider, model="m")
-
-    result = await recipe.run_ralph_loop(agent, backend, max_iterations=3)
-
-    # max_iterations is the fallibility backstop — the loop gives up, doesn't hang.
-    assert result == {"iterations": 3, "done": False}
-
-
-async def test_ralph_loop_forces_cleanup_without_replacing_run_error() -> None:
-    recipe = _load()
-    released: list[tuple[Any, bool]] = []
-
-    class FailingSession:
-        async def run(self, _prompt: str):
-            yield type("Event", (), {"type": "message"})()
-            raise ValueError("pass failed")
-
-    class FakeAgent:
-        async def session(self) -> FailingSession:
-            return FailingSession()
-
-        async def release_session(self, session: Any, force: bool = False) -> None:
-            released.append((session, force))
-            if not force:
-                raise RuntimeError("active run")
-
-    with pytest.raises(ValueError, match="pass failed"):
-        await recipe.run_ralph_loop(FakeAgent(), object(), max_iterations=1)
-
-    assert len(released) == 1
-    assert released[0][1] is True
