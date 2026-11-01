@@ -172,6 +172,41 @@ async def test_alignment_runs_user_prompt_hooks_with_source() -> None:
     assert "change hooked" in _text_messages(provider.requests[1])
 
 
+@pytest.mark.asyncio
+async def test_timed_out_alignment_is_not_applied_after_slow_hook() -> None:
+    """A deadline during alignment hooks must prevent the queued message."""
+    from linch.errors import ConfigError
+
+    hook_entered = asyncio.Event()
+    release_hook = asyncio.Event()
+
+    class SlowAlignmentHook:
+        async def on_user_prompt_submit(self, ctx: Any) -> None:
+            if ctx.source == "align":
+                hook_entered.set()
+                await release_hook.wait()
+
+    provider = _tool_then_text_provider()
+    tool = _wait_tool()
+    session = await _agent(provider, tool, hooks=[SlowAlignmentHook()]).session()
+
+    async def collect() -> list[Any]:
+        return [event async for event in session.run("start")]
+
+    run_task = asyncio.create_task(collect())
+    await tool.started.wait()
+    align_task = asyncio.create_task(session.align("change", timeout_s=0.05))
+    tool.release.set()
+    await hook_entered.wait()
+    with pytest.raises(ConfigError, match="timed out before it was applied"):
+        await align_task
+    release_hook.set()
+    events = await run_task
+
+    assert not any(getattr(event, "subtype", None) == "alignment" for event in events)
+    assert "change" not in _text_messages(provider.requests[1])
+
+
 def test_user_event_subtype_serializes() -> None:
     from linch.events import UserEvent, event_from_dict, event_to_dict
     from linch.types import Message, TextBlock
@@ -232,3 +267,38 @@ async def test_align_times_out_when_run_never_reaches_boundary() -> None:
         assert session.alignment_queue == []
     finally:
         session._active = False
+
+
+async def test_alignment_deadline_after_append_starts_waits_for_truthful_completion():
+    from linch.sessions import InMemorySessionStore
+
+    append_started, append_release = asyncio.Event(), asyncio.Event()
+
+    class HeldAppendStore(InMemorySessionStore):
+        async def append_messages(self, session_id, messages, **kwargs):
+            if any("change" in str(message) for message in messages):
+                append_started.set()
+                await append_release.wait()
+            return await super().append_messages(session_id, messages, **kwargs)
+
+    provider, tool = _tool_then_text_provider(), _wait_tool()
+    agent = _agent(provider, tool)
+    agent.session_store = HeldAppendStore()
+    session = await agent.session()
+
+    async def collect():
+        return [event async for event in session.run("start")]
+
+    running = asyncio.create_task(collect())
+    await tool.started.wait()
+    aligning = asyncio.create_task(session.align("change", timeout_s=0.02))
+    tool.release.set()
+    await asyncio.wait_for(append_started.wait(), 1)
+    await asyncio.sleep(0.04)
+    assert not aligning.done()
+    append_release.set()
+    await aligning
+    events = await running
+    assert sum(getattr(event, "subtype", None) == "alignment" for event in events) == 1
+    assert "change" in _text_messages(provider.requests[1])
+    await agent.close()

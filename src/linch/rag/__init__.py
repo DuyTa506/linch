@@ -84,6 +84,9 @@ class _Retrieval(ContextInjectionHook):
     async def build(self, turn: Any) -> ContextBuildResult:
         if turn.session.agent is not self.agent:
             return ContextBuildResult()
+        config = turn._run_config or self.agent._run_config
+        if config.context.get("rag_connector") is not self:
+            return ContextBuildResult()
         key = (turn.session.id, turn.session.active_run_id)
         state = self.state(turn.session, key[1])
         chunks = await self.connector.retrieve(state["query"], k=self.k, principal=self.principal)
@@ -123,7 +126,7 @@ class _Retrieval(ContextInjectionHook):
         self.runs[(session.id, run_id)] = {**state, "ids": list(state["ids"])}
 
 
-def _install(agent: Agent, hook: Any, service: Disposable) -> Disposable:
+def _install(agent: Any, hook: Any, service: Disposable, *, scope: Any = None) -> Disposable:
     agent.hooks.append(hook)
 
     async def remove() -> None:
@@ -132,7 +135,7 @@ def _install(agent: Agent, hook: Any, service: Disposable) -> Disposable:
         if isinstance(hook, _Retrieval):
             hook.runs.clear()
 
-    return agent.context.effect(lambda: Disposable(remove))
+    return (scope or agent.context).effect(lambda: Disposable(remove))
 
 
 def register_rag_connector(
@@ -152,10 +155,37 @@ def register_rag_connector(
     Raises:
         ValueError: If ``k`` is not a positive integer.
     """
+    return _register_rag_connector(
+        agent._run_config, agent.context, connector, k=k, principal=principal
+    )
+
+
+def _register_rag_connector(
+    config: Any, scope: Any, connector: RagConnector, *, k: int = 5, principal: Any = None
+) -> Disposable:
     if type(k) is not int or k <= 0:
         raise ValueError("k must be a positive int")
-    hook = _Retrieval(agent, connector, k, principal)
-    return _install(agent, hook, agent.context.register("rag_connector", hook))
+    hook = _Retrieval(config._owner, connector, k, principal)
+    installed = _install(config, hook, scope.register("rag_connector", hook), scope=scope)
+    inherited = (
+        [
+            (index, item)
+            for index, item in enumerate(config.hooks)
+            if isinstance(item, _Retrieval) and item is not hook
+        ]
+        if config._values is not None
+        else []
+    )
+    for _, item in inherited:
+        config.hooks.remove(item)
+
+    async def remove() -> None:
+        await installed.dispose()
+        for index, item in inherited:
+            if item not in config.hooks:
+                config.hooks.insert(index, item)
+
+    return Disposable(remove)
 
 
 class _Grounding:
@@ -167,7 +197,16 @@ class _Grounding:
         self.resume_policy_config = {"required": required}
 
     def __call__(self, event: TurnStopping) -> TurnStoppingDecision | None:
-        hook = self.agent.context.get("rag_connector")
+        if event.session.agent is not self.agent:
+            return None
+        from ..profiles import _effective_run_config
+
+        config = (
+            _effective_run_config(event.session, event.run_id)
+            if event.session._active
+            else self.agent._run_config
+        )
+        hook = config.context.get("rag_connector")
         if (
             not self.resume_policy_config["required"]
             or not isinstance(hook, _Retrieval)

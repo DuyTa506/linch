@@ -37,6 +37,19 @@ async def test_effect_group_disposer_is_scoped() -> None:
     assert order == ["inner", "outer"]
 
 
+async def test_scope_tracks_disposers_by_identity_without_rebuilding() -> None:
+    """Disposed entries leave an insertion-ordered identity index in place."""
+    scope = EffectScope()
+    first = Disposable()
+    second = Disposable()
+    scope.add(first)
+    scope.add(second)
+
+    assert list(scope._disposers) == [id(first), id(second)]
+    await first.dispose()
+    assert list(scope._disposers) == [id(second)]
+
+
 @pytest.mark.parametrize("via_effect", [False, True])
 async def test_scope_drops_disposed_disposers_after_repeated_cycles(via_effect: bool) -> None:
     scope = EffectScope()
@@ -45,7 +58,7 @@ async def test_scope_drops_disposed_disposers_after_repeated_cycles(via_effect: 
         disposer = scope.effect(lambda: Disposable()) if via_effect else scope.add(Disposable())
         await disposer.dispose()
 
-    assert scope._disposers == []
+    assert scope._disposers == {}
 
 
 async def test_effect_accepts_iterable_of_disposers() -> None:

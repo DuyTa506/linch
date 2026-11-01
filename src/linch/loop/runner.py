@@ -23,6 +23,7 @@ from ..model_calls import (
     ModelCallIntent,
     _AccountedAuxiliaryCaller,
 )
+from ..profiles import _effective_run_config
 from ..run_store import (
     LeaseLostError,
     RunCheckpoint,
@@ -136,10 +137,12 @@ def _adopt_pending_identity(record: RunRecord, opts: RunOptions) -> RunOptions:
     return opts
 
 
-async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIterator[Event]:
+async def run_loop(
+    session: Session, prompt: str, opts: RunOptions, *, _adopt_run_id: bool = True
+) -> AsyncIterator[Event]:
     opts = replace(opts)
     store = session.agent.run_store
-    if store is not None and opts.run_id is not None:
+    if store is not None and opts.run_id is not None and _adopt_run_id:
         existing = await durable_call(session, "run.load_run", store.load_run(opts.run_id))
         if existing is not None:
             if "run_contract" in existing.meta:
@@ -176,14 +179,16 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
                         total_usage=Usage(),
                         extension_state={
                             **_checkpoint_extension_state(
-                                _checkpointable_hooks(list(session.agent.hooks or [])),
+                                _checkpointable_hooks(
+                                    list(_effective_run_config(session, run_id).hooks or [])
+                                ),
                                 session,
                                 run_id,
                             ),
                             "linch.startup": {
                                 "preparation_required": any(
                                     callable(getattr(hook, name, None))
-                                    for hook in session.agent.hooks or ()
+                                    for hook in _effective_run_config(session, run_id).hooks or ()
                                     for name in (
                                         "on_hook",
                                         "on_agent_start",
@@ -398,7 +403,9 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
     from ..abort import any_signal, throw_if_aborted
 
     # Startup persistence shares the turn loop's signal and cleanup.
-    max_turns = int(agent.max_turns) if isinstance(agent.max_turns, int) else 10**9
+    max_turns = (
+        int(_runtime.config.max_turns) if isinstance(_runtime.config.max_turns, int) else 10**9
+    )
     signal = (
         any_signal(session._abort_controller, opts.signal)
         if opts.signal is not None
@@ -450,6 +457,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         _fctx = FinalizeCtx(
             session=session,
             agent=agent,
+            config=_runtime.config,
             run_id=run_id,
             run_record=run_record,
             checkpoint=checkpoint,
@@ -526,6 +534,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         _resume_ctx = ResumeContext(
             session=session,
             agent=agent,
+            config=_runtime.config,
             run_id=run_id,
             run_record=run_record,
             checkpoint=checkpoint,
@@ -582,8 +591,10 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             if not _replaying_frozen_attempt:
                 async for note_event in _drain_pending_notifications(session, run_id):
                     yield note_event
-                if session.agent.context._inbox:
-                    async with aclosing(_drain_inbox(session, run_id)) as inbox:
+                if session.agent.context._inbox or _runtime.config.context._inbox:
+                    async with aclosing(
+                        _drain_inbox(session, run_id, config=_runtime.config)
+                    ) as inbox:
                         async for inbox_event in inbox:
                             yield inbox_event
             # Bubble accumulated subagent events (incl. child PermissionRequests).
@@ -655,6 +666,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             _prep_ctx = ProviderPreparationContext(
                 session=session,
                 agent=agent,
+                config=_runtime.config,
                 opts=opts,
                 turn_index=turn_index,
                 run_id=run_id,
@@ -795,6 +807,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             _provider_ctx = ProviderTurnContext(
                 session=session,
                 agent=agent,
+                config=_runtime.config,
                 opts=opts,
                 turn_index=turn_index,
                 run_id=run_id,
@@ -952,6 +965,7 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             _tool_ctx = ToolBatchContext(
                 session=session,
                 agent=agent,
+                config=_runtime.config,
                 signal=signal,
                 run_id=run_id,
                 turn_index=turn_index,

@@ -197,6 +197,9 @@ async def test_terminal_close_preserves_agent_stop_result(
     run_record = await run_store.load_run(run.id)
     assert run_record is not None
     opts = RunOptions(budget=RunBudget(max_tokens=0)) if case == "budget" else RunOptions()
+    from linch.profiles import _RunBinding
+
+    session._run_bindings[run.id] = _RunBinding(session, run.id, agent._run_config)
     agen = _run_loop_impl(
         session,
         "close at terminal tail",
@@ -212,6 +215,7 @@ async def test_terminal_close_preserves_agent_stop_result(
             terminal_event = event
             break
     await agen.aclose()
+    await session._run_bindings[run.id].release()
 
     assert terminal_event is not None
     assert observer.results

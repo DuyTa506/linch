@@ -121,7 +121,7 @@ class AskUserPlugin:
         Returns:
             A disposer that restores the tool registry state before mounting.
         """
-        return ctx.agent.tools.replace(AskUserTool(config))
+        return ctx.run_config.tools.replace(AskUserTool(config))
 
 
 def _option_from_raw(raw: Any) -> AskUserOption:

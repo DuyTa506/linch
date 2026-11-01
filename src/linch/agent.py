@@ -373,6 +373,158 @@ def _build_tool_protocol_lines(
     return lines
 
 
+def _system_blocks_signature_for(
+    *,
+    tools: Any,
+    tool_names: list[str],
+    tool_sections: list[Any],
+    system_prompt: str | None,
+    system_prompt_config: Any,
+    permission_mode: str,
+    bash_security: str,
+) -> tuple[Any, ...]:
+    cfg = system_prompt_config
+    cfg_sections = tuple(
+        (
+            getattr(section, "name", None),
+            getattr(section, "text", None),
+            getattr(section, "cacheable", None),
+            getattr(section, "placement", None),
+        )
+        for section in ((cfg.sections or []) if cfg is not None else [])
+    )
+    contributed = tuple(
+        (section.name, section.text, section.cacheable, section.placement)
+        for section in tool_sections
+    )
+    cfg_blocks = tuple(
+        (getattr(block, "text", None), getattr(block, "cacheable", None))
+        for block in ((cfg.blocks or []) if cfg is not None else [])
+    )
+    return (
+        tools.generation,
+        tuple(tool_names),
+        contributed,
+        cfg_sections,
+        cfg_blocks,
+        getattr(cfg, "replace_defaults", False),
+        getattr(cfg, "append", None),
+        system_prompt,
+        permission_mode,
+        bash_security,
+    )
+
+
+def _build_system_blocks_for(
+    *,
+    tool_names: list[str],
+    tool_sections: list[Any] | None,
+    cwd: str,
+    bash_security: str,
+    permission_mode: str,
+    system_prompt: str | None,
+    system_prompt_config: Any,
+) -> list[SystemBlock]:
+    names = ", ".join(sorted(tool_names))
+    shell = os.environ.get("SHELL", os.environ.get("COMSPEC", "unknown"))
+    py_ver = platform.python_version()
+    os_info = f"{platform.system()} {platform.release()} ({platform.machine()})"
+
+    # ── Tool-aware protocol block ────────────────────────────────────────
+    # Only include clauses for the tools that are actually present so
+    # non-SWE agents (RAG, SQL, …) aren't given misleading instructions.
+    present = set(tool_names)
+    has_swe_tools = bool(present & _SWE_TOOL_FAMILIES)
+    protocol_lines = _build_tool_protocol_lines(
+        present,
+        has_swe_tools=has_swe_tools,
+        bash_security=bash_security,
+    )
+
+    # ── env block (always included) ──────────────────────────────────────
+    env_lines = [
+        "Runtime:",
+        "",
+        f"- Linch version: {get_version()}",
+        f"- Permission mode: {permission_mode}",
+        f"- Tools available: {names or 'none'}",
+    ]
+    if has_swe_tools:
+        env_lines.extend(
+            [
+                f"- Working directory: {cwd}",
+                f"- OS: {os_info}",
+                f"- Shell: {shell}",
+                f"- Python: {py_ver}",
+            ]
+        )
+    env_text = "\n".join(env_lines)
+
+    cfg = system_prompt_config
+
+    # ── Assemble blocks ──────────────────────────────────────────────────
+    blocks: list[SystemBlock] = []
+    section_blocks = _system_prompt_section_blocks(cfg, tool_sections)
+
+    if cfg is not None and cfg.replace_defaults:
+        # Custom-identity / non-SWE mode: skip built-in identity + protocol
+        blocks.extend(section_blocks["before_defaults"])
+        if cfg.blocks:
+            blocks.extend(cfg.blocks)
+        blocks.extend(section_blocks["after_defaults"])
+    else:
+        # Neutral SDK mode: caller/tool blocks surround a generic identity.
+        blocks.extend(section_blocks["before_defaults"])
+        if cfg is not None and cfg.blocks:
+            blocks.extend(cfg.blocks)
+        blocks.append(SystemBlock(text=_CORE_IDENTITY, cacheable=True))
+        if has_swe_tools and protocol_lines:
+            protocol = "Tool use protocol:\n\n" + "\n".join(protocol_lines)
+            blocks.append(SystemBlock(text=protocol, cacheable=True))
+        elif protocol_lines:
+            # Non-SWE tools present: include the generic concurrency hint only
+            protocol = "Tool use protocol:\n\n" + protocol_lines[-1]
+            blocks.append(SystemBlock(text=protocol, cacheable=True))
+        blocks.extend(section_blocks["after_defaults"])
+
+    # ── Virtual filesystem block ─────────────────────────────────────────
+    # Present whenever the filesystem tools are available, in both default
+    # and replace_defaults modes — offloaded RAG/search results are useless
+    # if the model doesn't know how to recover them.
+    if {"read_file", "ls", "write_file", "edit_file"} & present:
+        fs_lines = [
+            "Virtual filesystem:",
+            "",
+            "- You have a virtual filesystem, separate from the real workspace, "
+            "accessed via ls, read_file, write_file, and edit_file.",
+            "- Large tool results may be automatically offloaded here: instead of the "
+            "full output you will see a short preview plus a file path. Call "
+            "read_file(path, offset, limit) to read the parts you need — do not "
+            "assume the preview is the whole result.",
+            "- Use write_file as a scratchpad for notes, plans, or intermediate "
+            "results you want to keep across turns without bloating the conversation.",
+        ]
+        blocks.append(SystemBlock(text="\n".join(fs_lines), cacheable=True))
+
+    # env_text is always present
+    blocks.append(SystemBlock(text=env_text, cacheable=True))
+    blocks.extend(section_blocks["after_env"])
+
+    # User-provided instructions (from system_prompt or SystemPromptConfig.append)
+    append_text = system_prompt
+    if cfg is not None and cfg.append is not None:
+        append_text = cfg.append
+    if append_text:
+        blocks.append(
+            SystemBlock(
+                text=f"User-provided instructions:\n\n{append_text}",
+                cacheable=True,
+            )
+        )
+
+    return blocks
+
+
 class Agent:
     """Own long-lived provider, tool, policy, context, and session configuration.
 
@@ -749,6 +901,10 @@ class Agent:
         if self.execution_backend is not None:
             self.context.register("execution", self.execution_backend)
         self.context.register("agent", self)
+        from .profiles import _RunConfig
+
+        self._run_config = _RunConfig(self)
+        self.context.register("run_config", self._run_config)
         self.tool_search = Disposable()
         self._tool_search_mounted = False
 
@@ -961,45 +1117,16 @@ class Agent:
         self._cached_system_blocks_signature = None
 
     def _system_blocks_signature(
-        self,
-        tool_names: list[str],
-        tool_sections: list[Any],
+        self, tool_names: list[str], tool_sections: list[Any]
     ) -> tuple[Any, ...]:
-        """Return the stable identity of every static prompt input.
-
-        Tool-contributed section content is part of this key, so changing a
-        dynamic contribution invalidates the cached provider prefix even when
-        the registered tool names and JSON schemas did not change.
-        """
-        cfg = self._system_prompt_config
-        cfg_sections = tuple(
-            (
-                getattr(section, "name", None),
-                getattr(section, "text", None),
-                getattr(section, "cacheable", None),
-                getattr(section, "placement", None),
-            )
-            for section in ((cfg.sections or []) if cfg is not None else [])
-        )
-        contributed = tuple(
-            (section.name, section.text, section.cacheable, section.placement)
-            for section in tool_sections
-        )
-        cfg_blocks = tuple(
-            (getattr(block, "text", None), getattr(block, "cacheable", None))
-            for block in ((cfg.blocks or []) if cfg is not None else [])
-        )
-        return (
-            self.tools.generation,
-            tuple(tool_names),
-            contributed,
-            cfg_sections,
-            cfg_blocks,
-            getattr(cfg, "replace_defaults", False),
-            getattr(cfg, "append", None),
-            self.system_prompt,
-            self.permission_engine.mode,
-            self._bash_security_mode(),
+        return _system_blocks_signature_for(
+            tools=self.tools,
+            tool_names=tool_names,
+            tool_sections=tool_sections,
+            system_prompt=self.system_prompt,
+            system_prompt_config=self._system_prompt_config,
+            permission_mode=self.permission_engine.mode,
+            bash_security=self._bash_security_mode(),
         )
 
     def _bash_security_mode(self) -> str:
@@ -1149,109 +1276,17 @@ class Agent:
             self._refresh_context_window_derived()
 
     def _build_system_blocks(
-        self,
-        tool_names: list[str],
-        *,
-        tool_sections: list[Any] | None = None,
+        self, tool_names: list[str], *, tool_sections: list[Any] | None = None
     ) -> list[SystemBlock]:
-        names = ", ".join(sorted(tool_names))
-        shell = os.environ.get("SHELL", os.environ.get("COMSPEC", "unknown"))
-        py_ver = platform.python_version()
-        os_info = f"{platform.system()} {platform.release()} ({platform.machine()})"
-
-        # ── Tool-aware protocol block ────────────────────────────────────────
-        # Only include clauses for the tools that are actually present so
-        # non-SWE agents (RAG, SQL, …) aren't given misleading instructions.
-        present = set(tool_names)
-        has_swe_tools = bool(present & _SWE_TOOL_FAMILIES)
-        protocol_lines = _build_tool_protocol_lines(
-            present,
-            has_swe_tools=has_swe_tools,
+        return _build_system_blocks_for(
+            tool_names=tool_names,
+            tool_sections=tool_sections,
+            cwd=self.cwd,
             bash_security=self._bash_security_mode(),
+            permission_mode=self.permission_engine.mode,
+            system_prompt=self.system_prompt,
+            system_prompt_config=self._system_prompt_config,
         )
-
-        # ── env block (always included) ──────────────────────────────────────
-        env_lines = [
-            "Runtime:",
-            "",
-            f"- Linch version: {get_version()}",
-            f"- Permission mode: {self.permission_engine.mode}",
-            f"- Tools available: {names or 'none'}",
-        ]
-        if has_swe_tools:
-            env_lines.extend(
-                [
-                    f"- Working directory: {self.cwd}",
-                    f"- OS: {os_info}",
-                    f"- Shell: {shell}",
-                    f"- Python: {py_ver}",
-                ]
-            )
-        env_text = "\n".join(env_lines)
-
-        cfg = self._system_prompt_config
-
-        # ── Assemble blocks ──────────────────────────────────────────────────
-        blocks: list[SystemBlock] = []
-        section_blocks = _system_prompt_section_blocks(cfg, tool_sections)
-
-        if cfg is not None and cfg.replace_defaults:
-            # Custom-identity / non-SWE mode: skip built-in identity + protocol
-            blocks.extend(section_blocks["before_defaults"])
-            if cfg.blocks:
-                blocks.extend(cfg.blocks)
-            blocks.extend(section_blocks["after_defaults"])
-        else:
-            # Neutral SDK mode: caller/tool blocks surround a generic identity.
-            blocks.extend(section_blocks["before_defaults"])
-            if cfg is not None and cfg.blocks:
-                blocks.extend(cfg.blocks)
-            blocks.append(SystemBlock(text=_CORE_IDENTITY, cacheable=True))
-            if has_swe_tools and protocol_lines:
-                protocol = "Tool use protocol:\n\n" + "\n".join(protocol_lines)
-                blocks.append(SystemBlock(text=protocol, cacheable=True))
-            elif protocol_lines:
-                # Non-SWE tools present: include the generic concurrency hint only
-                protocol = "Tool use protocol:\n\n" + protocol_lines[-1]
-                blocks.append(SystemBlock(text=protocol, cacheable=True))
-            blocks.extend(section_blocks["after_defaults"])
-
-        # ── Virtual filesystem block ─────────────────────────────────────────
-        # Present whenever the filesystem tools are available, in both default
-        # and replace_defaults modes — offloaded RAG/search results are useless
-        # if the model doesn't know how to recover them.
-        if {"read_file", "ls", "write_file", "edit_file"} & present:
-            fs_lines = [
-                "Virtual filesystem:",
-                "",
-                "- You have a virtual filesystem, separate from the real workspace, "
-                "accessed via ls, read_file, write_file, and edit_file.",
-                "- Large tool results may be automatically offloaded here: instead of the "
-                "full output you will see a short preview plus a file path. Call "
-                "read_file(path, offset, limit) to read the parts you need — do not "
-                "assume the preview is the whole result.",
-                "- Use write_file as a scratchpad for notes, plans, or intermediate "
-                "results you want to keep across turns without bloating the conversation.",
-            ]
-            blocks.append(SystemBlock(text="\n".join(fs_lines), cacheable=True))
-
-        # env_text is always present
-        blocks.append(SystemBlock(text=env_text, cacheable=True))
-        blocks.extend(section_blocks["after_env"])
-
-        # User-provided instructions (from system_prompt or SystemPromptConfig.append)
-        append_text = self.system_prompt
-        if cfg is not None and cfg.append is not None:
-            append_text = cfg.append
-        if append_text:
-            blocks.append(
-                SystemBlock(
-                    text=f"User-provided instructions:\n\n{append_text}",
-                    cacheable=True,
-                )
-            )
-
-        return blocks
 
     def build_system_blocks_for_tool_names(self, tool_names: list[str]) -> list[SystemBlock]:
         """Build system blocks for an arbitrary tool name set (used by subagents).
@@ -1369,6 +1404,10 @@ class Agent:
                 # registries strip Subagent, so they do not disable sibling work.
                 for session in self._sessions.values():
                     override = session.tools_override
+                    if session.active_run_id is not None:
+                        binding = session._run_bindings.get(session.active_run_id)
+                        if binding is not None and binding.config._values is not None:
+                            override = binding.config.tools
                     if (
                         session._active
                         and override is not None

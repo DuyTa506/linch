@@ -47,6 +47,7 @@ class FinalizeCtx:
     session: Session
     runtime: Any
     agent: Any
+    config: Any
     run_id: str
     run_record: Any
     checkpoint: Any
@@ -344,7 +345,7 @@ async def finalize_final_tool_answer(
     raw_structured_output = dict(final_block.input)
     structured_output: dict[str, Any] | None = raw_structured_output
     structured_error: str | None = None
-    effective_schema = ctx.opts.output_schema or getattr(ctx.agent, "output_schema", None)
+    effective_schema = ctx.opts.output_schema or ctx.config.output_schema
     if effective_schema is not None:
         structured_error = _validate_structured_output(raw_structured_output, effective_schema)
         if structured_error is not None:
@@ -466,7 +467,7 @@ async def finalize_text_answer(
     ft = final_text(assembly.message)
     structured_output: dict[str, Any] | None = None
     structured_error: str | None = None
-    effective_schema = ctx.opts.output_schema or getattr(ctx.agent, "output_schema", None)
+    effective_schema = ctx.opts.output_schema or ctx.config.output_schema
     if effective_schema is not None:
         # Empty assistant content is still an attempted structured response;
         # surface/repair its parse error instead of silently returning success

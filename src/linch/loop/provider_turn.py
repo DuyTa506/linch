@@ -46,6 +46,7 @@ from .streaming import (
 class ProviderTurnContext:
     session: Any
     agent: Any
+    config: Any
     opts: Any
     turn_index: int
     run_id: str
@@ -91,6 +92,7 @@ class ProviderPreparationContext:
 
     session: Any
     agent: Any
+    config: Any
     opts: Any
     turn_index: int
     run_id: str
@@ -175,6 +177,7 @@ async def prepare_provider_turn(ctx: ProviderPreparationContext) -> AsyncIterato
                 ctx.session,
                 ctx.agent,
                 ctx.signal,
+                config=ctx.config,
                 model=model_override or ctx.session.active_model or ctx.agent.model,
                 auxiliary_caller=ctx.auxiliary_caller,
                 logical_call_id=ctx.proactive_compaction_logical_call_id,
@@ -196,7 +199,7 @@ async def prepare_provider_turn(ctx: ProviderPreparationContext) -> AsyncIterato
         # its session mutation order without pulling runner state into this phase.
         from .request import _re_inject_skill_context
 
-        _re_inject_skill_context(ctx.session)
+        _re_inject_skill_context(ctx.session, config=ctx.config)
         await ctx.maybe_save_provider_snapshot(ctx.session)
         event = build_compaction_event(ctx.session)
         await ctx.persist_event(event)
@@ -216,7 +219,7 @@ async def prepare_provider_turn(ctx: ProviderPreparationContext) -> AsyncIterato
     context_result = (
         None
         if ctx.resumed_assistant or ctx.frozen_pending_resume
-        else await _build_context_result(ctx.session, ctx.turn_index)
+        else await _build_context_result(ctx.session, ctx.turn_index, config=ctx.config)
     )
     if context_result is not None:
         from ..events import ContextBuildEvent
@@ -239,6 +242,7 @@ async def prepare_provider_turn(ctx: ProviderPreparationContext) -> AsyncIterato
         req = _build_turn_request(
             ctx.session,
             ctx.opts,
+            config=ctx.config,
             context=context_result,
             model_override=model_override,
         )
@@ -315,6 +319,7 @@ async def run_provider_turn(ctx: ProviderTurnContext) -> AsyncIterator[Event]:
             bind_active_primary=ctx.bind_active_primary,
             auxiliary_caller=auxiliary_caller,
             compaction_logical_call_id=forced_compaction_logical_call_id,
+            config=ctx.config,
         )
         try:
             async for item in _provider_stream:

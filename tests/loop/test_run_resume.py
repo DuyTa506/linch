@@ -1397,6 +1397,9 @@ async def test_run_loop_aclose_at_worker_yield_finishes_invoke_agent_span() -> N
     # Drive _run_loop_impl directly so aclose() hits its own yield (a direct
     # aclose runs the generator's finally synchronously; nested async-for
     # wrappers defer it to the async-gen finalizer instead).
+    from linch.profiles import _RunBinding
+
+    session._run_bindings[run_record.id] = _RunBinding(session, run_record.id, agent._run_config)
     agen = _run_loop_impl(
         session,
         run_record.checkpoint.prompt,
@@ -1411,6 +1414,7 @@ async def test_run_loop_aclose_at_worker_yield_finishes_invoke_agent_span() -> N
             saw_worker = True
             break
     await agen.aclose()
+    await session._run_bindings[run_record.id].release()
 
     assert saw_worker
     spans = exporter.get_finished_spans()
