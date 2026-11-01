@@ -33,6 +33,7 @@ def _preparation_context(
         current_turn_permission_decisions={},
         active_model=None,
     )
+
     async def empty_events() -> Any:
         if False:
             yield None
