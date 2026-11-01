@@ -200,9 +200,8 @@ class EffectScope:
         await self._teardown.dispose()
 
     async def _dispose_all(self) -> None:
-        # Retain the list until all entries finish. On failure, successfully
-        # disposed entries are idempotent and failed entries are retried by the
-        # next dispose() call.
+        # Snapshot because successful entries remove themselves while teardown
+        # runs; failed entries remain tracked for the next dispose() call.
         await _dispose_reverse(list(self._disposers))
         self._disposers.clear()
 
