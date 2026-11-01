@@ -45,7 +45,9 @@ def _encode(message: MailboxMessage) -> str:
             "sender": message.sender,
             "recipient": message.recipient,
             "content": message.content,
+            "type": message.type,
             "request_id": message.request_id,
+            "in_reply_to": message.in_reply_to,
         }
     )
 
@@ -58,7 +60,9 @@ def _decode(raw: str | bytes) -> MailboxMessage:
         sender=data["sender"],
         recipient=data["recipient"],
         content=data["content"],
+        type=data["type"],
         request_id=data.get("request_id"),
+        in_reply_to=data["in_reply_to"],
         id=data["id"],
     )
 
