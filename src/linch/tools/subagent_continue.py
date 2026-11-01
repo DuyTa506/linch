@@ -65,6 +65,15 @@ class SubagentContinueTool:
         return f"Continue worker: {input.get('to', '?')}"
 
     async def execute(self, input: dict[str, object], ctx: ToolContext) -> ToolResult:
+        """Continue a worker using the invoking run's dependencies and budget.
+
+        Args:
+            input: Validated worker target and follow-up message.
+            ctx: Invoking call's captured capabilities and authorization identity.
+
+        Returns:
+            The worker's answer or an error explaining why it could not continue.
+        """
         from ..subagents.runner import (
             ContinueSubagentArgs,
             continue_subagent,
