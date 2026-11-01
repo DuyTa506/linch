@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from linch.errors import ToolExecutionError
+from linch.filesystem.disk import _atomic_write
 
 from .base import ResourceAccess, ToolContext, ToolResult, ToolScope, require_str
 
@@ -103,20 +104,22 @@ class ReadTool:
 
         path = resolve_under(ctx.cwd, str(input["file_path"]))
         try:
-            text = path.read_text(encoding="utf-8")
+            text = path.read_bytes().decode("utf-8")
         except Exception as exc:
             raise ToolExecutionError(str(exc)) from exc
 
-        if ctx.file_read_tracker is not None:
-            ctx.file_read_tracker.mark_read(str(path))
-
         lines = text.split("\n")
-        offset = _to_int(input.get("offset"), 1) or 1
+        offset = _to_int(input.get("offset"), 1)
+        offset = offset if offset > 0 else 1
         limit = _to_int(input.get("limit"), 2000) or 2000
-        if offset > 0 or limit > 0:
-            start = max(0, offset - 1) if offset > 0 else 0
-            end = start + limit if limit > 0 else len(lines)
-            lines = lines[start:end]
+        start_index = min(offset - 1, len(lines))
+        end_index = min(start_index + limit, len(lines)) if limit > 0 else len(lines)
+        lines = lines[start_index:end_index]
+        if ctx.file_read_tracker is not None and start_index < end_index:
+            if start_index == 0 and end_index == len(text.split("\n")):
+                ctx.file_read_tracker.mark_read(str(path))
+            else:
+                ctx.file_read_tracker.mark_read(str(path), start_index + 1, end_index)
         numbered = [f"{idx + offset}\t{line}" for idx, line in enumerate(lines)]
         text = "\n".join(numbered) if numbered else "<file is empty>"
         return ToolResult(content=text, summary=f"Read {path}")
@@ -209,7 +212,7 @@ class WriteTool:
 
         path = resolve_under(ctx.cwd, str(input["file_path"]))
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(str(input["content"]), encoding="utf-8")
+        _atomic_write(path, str(input["content"]))
         return ToolResult(content=f"Wrote {path}", summary=f"Wrote {path}")
 
     def summarize(self, input: dict[str, object]) -> str:
@@ -310,17 +313,48 @@ class EditTool:
         """
 
         path = resolve_under(ctx.cwd, str(input["file_path"]))
-        if ctx.file_read_tracker is not None and not ctx.file_read_tracker.has_read(str(path)):
-            return ToolResult(
-                content="Error: You must Read this file before editing it.",
-                summary=self.summarize(input),
-                is_error=True,
-            )
-        text = path.read_text(encoding="utf-8")
+        text = path.read_bytes().decode("utf-8")
         old = str(input["old_string"])
+        replace_all = bool(input.get("replace_all", False))
+        match_starts: list[int] = []
+        if old == "":
+            match_starts.append(0)
+        else:
+            cursor = 0
+            while (match_start := text.find(old, cursor)) >= 0:
+                match_starts.append(match_start)
+                cursor = match_start + len(old)
+        if ctx.file_read_tracker is not None:
+            if not match_starts:
+                if not ctx.file_read_tracker.has_read(str(path)):
+                    return ToolResult(
+                        content="Error: You must Read this file before editing it.",
+                        summary=self.summarize(input),
+                        is_error=True,
+                    )
+            elif old == "" and replace_all:
+                fully_read = ctx.file_read_tracker.has_read_range(
+                    str(path), 1, len(text.split("\n"))
+                )
+                if not fully_read:
+                    return ToolResult(
+                        content="Error: You must Read this file before editing it.",
+                        summary=self.summarize(input),
+                        is_error=True,
+                    )
+            else:
+                checks = match_starts if replace_all else match_starts[:1]
+                for match_start in checks:
+                    start_line = text.count("\n", 0, match_start) + 1
+                    end_line = start_line + old.count("\n") - int(old.endswith("\n"))
+                    if not ctx.file_read_tracker.has_read_range(str(path), start_line, end_line):
+                        return ToolResult(
+                            content="Error: You must Read this file before editing it.",
+                            summary=self.summarize(input),
+                            is_error=True,
+                        )
         if old not in text:
             raise ToolExecutionError("old text not found")
-        replace_all = bool(input.get("replace_all", False))
         if not replace_all and text.count(old) > 1:
             return ToolResult(
                 content=(
@@ -334,7 +368,9 @@ class EditTool:
             new_text = text.replace(old, str(input["new_string"]))
         else:
             new_text = text.replace(old, str(input["new_string"]), 1)
-        path.write_text(new_text, encoding="utf-8")
+        _atomic_write(path, new_text)
+        if ctx.file_read_tracker is not None:
+            ctx.file_read_tracker.invalidate_ranges(str(path))
         return ToolResult(content=f"Edited {path}", summary=f"Edited {path}")
 
     def summarize(self, input: dict[str, object]) -> str:
@@ -696,14 +732,29 @@ def _grep_fallback(
 
 
 def _glob_files(root: str, pattern: str) -> list[str]:
+    _validate_glob_pattern(pattern)
+    root_path = Path(root).resolve()
     paths = glob.glob(pattern, root_dir=root, recursive=True)
     result: list[str] = []
     for p in paths:
         path = Path(p)
-        rel = str(path if not path.is_absolute() else path.relative_to(root))
+        candidate = path if path.is_absolute() else root_path / path
+        try:
+            rel = candidate.resolve().relative_to(root_path).as_posix()
+        except ValueError:
+            continue
         if rel and not rel.startswith("."):
             result.append(rel)
     return sorted(result)
+
+
+def _validate_glob_pattern(pattern: str) -> None:
+    """Reject glob patterns that can escape their search root."""
+
+    if Path(pattern).is_absolute():
+        raise ToolExecutionError("glob pattern must be relative to the search root")
+    if any(segment == ".." for segment in pattern.replace("\\", "/").split("/")):
+        raise ToolExecutionError("glob pattern cannot contain parent-directory segments")
 
 
 class GrepTool:
@@ -889,10 +940,10 @@ class GrepTool:
                 if ctx_b > 0:
                     args.extend(["-B", str(ctx_b)])
             if glob_filter:
-                args.extend(["--glob", glob_filter])
+                args.append(f"--glob={glob_filter}")
             if type_filter:
-                args.extend(["--type", type_filter])
-            args.extend([pattern, search_root])
+                args.append(f"--type={type_filter}")
+            args.extend(["-e", pattern, "--", search_root])
             try:
                 raw_out, rg_code, rg_err = await _run_grep_via_rg_async(args, search_root)
             except Exception as exc:
@@ -911,18 +962,25 @@ class GrepTool:
                     is_error=True,
                 )
         else:
-            raw_out = _grep_fallback(
-                pattern,
-                search_root,
-                output_mode=output_mode,
-                ignore_case=ignore_case,
-                multiline=multiline,
-                show_line_numbers=show_ln,
-                glob_filter=glob_filter or None,
-                type_filter=type_filter or None,
-                context_before=ctx_c or ctx_b,
-                context_after=ctx_c or ctx_a,
-            )
+            try:
+                raw_out = _grep_fallback(
+                    pattern,
+                    search_root,
+                    output_mode=output_mode,
+                    ignore_case=ignore_case,
+                    multiline=multiline,
+                    show_line_numbers=show_ln,
+                    glob_filter=glob_filter or None,
+                    type_filter=type_filter or None,
+                    context_before=ctx_c or ctx_b,
+                    context_after=ctx_c or ctx_a,
+                )
+            except ToolExecutionError as exc:
+                return ToolResult(
+                    content=f"Grep error: {exc}",
+                    summary="grep error",
+                    is_error=True,
+                )
 
         if not raw_out or raw_out.strip() == "":
             return ToolResult(content="No matches found.", summary="no matches")
@@ -1061,10 +1119,14 @@ class GlobTool:
         include_dotfiles = _pattern_targets_dotfiles(pattern)
 
         if _RG_PATH:
-            args = ["--files", "--glob", pattern]
+            try:
+                _validate_glob_pattern(pattern)
+            except ToolExecutionError as exc:
+                return ToolResult(content=f"Glob error: {exc}", summary="glob error", is_error=True)
+            args = ["--files", f"--glob={pattern}"]
             if not include_dotfiles:
-                args.extend(["--glob", "!.*"])
-            args.append(root)
+                args.append("--glob=!.*")
+            args.extend(["--", root])
             try:
                 raw_out, _, _ = await _run_grep_via_rg_async(args, root)
             except Exception as exc:
@@ -1075,11 +1137,24 @@ class GlobTool:
                 )
             files = [line.strip() for line in raw_out.split("\n") if line.strip()]
         else:
-            entries = glob.glob(pattern, root_dir=root, recursive=True)
+            try:
+                _validate_glob_pattern(pattern)
+                entries = glob.glob(pattern, root_dir=root, recursive=True)
+            except ToolExecutionError as exc:
+                return ToolResult(content=f"Glob error: {exc}", summary="glob error", is_error=True)
+            root_path = Path(root).resolve()
+            safe_entries: list[str] = []
+            for entry in entries:
+                candidate = Path(entry)
+                candidate = candidate if candidate.is_absolute() else root_path / candidate
+                try:
+                    safe_entries.append(candidate.resolve().relative_to(root_path).as_posix())
+                except ValueError:
+                    continue
             if include_dotfiles:
-                files = sorted(entries)
+                files = sorted(safe_entries)
             else:
-                files = sorted(p for p in entries if not p.startswith("."))
+                files = sorted(p for p in safe_entries if not p.startswith("."))
 
         if not files:
             return ToolResult(content="No matches found.", summary="no matches")

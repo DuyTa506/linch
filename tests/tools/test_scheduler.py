@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import time
 from typing import Any
 
 import pytest
 
 from linch.abort import AbortContext
-from linch.events import ToolCallEndEvent
+from linch.events import ToolCallEndEvent, ToolCallStartEvent
 from linch.permissions import PermissionEngine
 from linch.scheduler import execute_tool_calls
 from linch.tools import (
@@ -20,6 +21,7 @@ from linch.tools import (
 )
 from linch.types import ToolUseBlock
 from tests.support.scheduler import scheduler_agent, scheduler_session
+from tests.support.tools import StubTool, tool_registry
 
 
 class Recorder:
@@ -154,6 +156,43 @@ async def run_calls(registry: ToolRegistry, blocks: list[ToolUseBlock], *, limit
         )
     ]
     return events
+
+
+@pytest.mark.parametrize("mode", ["serial", "parallel", "background"])
+async def test_start_event_input_mutation_does_not_change_execution(mode: str) -> None:
+    seen: list[dict[str, Any]] = []
+    registry = tool_registry(
+        StubTool(
+            "Record",
+            parallel=mode == "parallel",
+            on_execute=lambda input, _ctx: seen.append(copy.deepcopy(input)),
+        )
+    )
+    count = 2 if mode == "parallel" else 1
+    blocks = [
+        ToolUseBlock(
+            id=str(i),
+            name="Record",
+            input={
+                "payload": {"text": "approved"},
+                **({"run_in_background": True} if mode == "background" else {}),
+            },
+        )
+        for i in range(count)
+    ]
+    session = scheduler_session()
+    async for event in execute_tool_calls(
+        blocks,
+        scheduler_agent(registry, enable_background_tools=mode == "background"),
+        session,
+        AbortContext(),
+    ):
+        if isinstance(event, ToolCallStartEvent):
+            event.input["payload"]["text"] = "[redacted]"
+    await asyncio.gather(*session.background_tasks)
+
+    assert len(seen) == count
+    assert [input["payload"]["text"] for input in seen] == ["approved"] * count
 
 
 @pytest.mark.asyncio
