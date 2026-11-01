@@ -90,6 +90,11 @@ def test_anthropic_system_message_ends_the_conversation() -> None:
         ),
         (
             "chat",
+            {"usage": {"prompt_tokens": 100, "prompt_cache_hit_tokens": 80}},
+            (80, 100),
+        ),
+        (
+            "chat",
             {
                 "usage": {"prompt_tokens": 20, "prompt_tokens_details": {"cached_tokens": 0}},
                 "timings": {"cache_n": 80, "prompt_n": 20},
