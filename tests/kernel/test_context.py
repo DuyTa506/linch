@@ -43,6 +43,10 @@ async def test_context_registration_and_scopes() -> None:
     assert ctx.get("nope", "fallback") == "fallback"
     with pytest.raises(AttributeError):
         _ = ctx.missing
+    handle = ctx.register("svc", _Svc("a"))
+    assert ctx.get("svc") is not None
+    await handle.dispose()
+    assert ctx.get("svc") is None
     ctx.register("svc", _Svc("a"))
     with pytest.raises(ConfigError):
         ctx.register("svc", _Svc("b"))

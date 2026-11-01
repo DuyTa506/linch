@@ -543,3 +543,14 @@ def test_legacy_parallel_safe_does_not_authorize_parallel_execution() -> None:
         is_immediate_error=False,
     )
     assert not _tool_parallel(call)
+
+
+def test_permission_writer_records_only_current_decision_fields() -> None:
+    from linch.permissions.engine import PermissionDecision
+    from linch.permissions.keys import permission_decision_to_dict
+
+    assert permission_decision_to_dict(PermissionDecision(decision="allow", reason="approved")) == {
+        "schema_version": 3,
+        "decision": "allow",
+        "reason": "approved",
+    }

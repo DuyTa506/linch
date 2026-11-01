@@ -6,19 +6,19 @@ from linch.permissions.rules import BashRule, PathRule, match_bash_rule, match_p
 
 
 @pytest.mark.parametrize(
-    ("pattern", "command", "matches"),
+    ("pattern", "action", "command", "matches"),
     [
-        ("rm -rf /tmp", "rm -rf /tmp", True),
-        ("rm -rf /tmp", "rm -rf /tmp/../etc", False),
-        ("ls", "ls", True),
-        ("ls", "lsof -i :8080", False),
-        ("npm install", "npm install lodash", True),
-        ("git *", "git status", True),
-        ("rm -rf /", "rm -rf /", True),
+        ("rm -rf /tmp", "allow", "rm -rf /tmp", True),
+        ("rm -rf /tmp", "allow", "rm -rf /tmp/../etc", False),
+        ("ls", "allow", "ls", True),
+        ("ls", "allow", "lsof -i :8080", False),
+        ("npm install", "allow", "npm install lodash", True),
+        ("git *", "allow", "git status", True),
+        ("rm -rf /", "deny", "rm -rf /", True),
     ],
 )
-def test_bash_rule_matching(pattern: str, command: str, matches: bool) -> None:
-    assert match_bash_rule(BashRule(pattern, "allow"), command) is matches
+def test_bash_rule_matching(pattern: str, action: str, command: str, matches: bool) -> None:
+    assert match_bash_rule(BashRule(pattern, action), command) is matches
 
 
 @pytest.mark.parametrize(
