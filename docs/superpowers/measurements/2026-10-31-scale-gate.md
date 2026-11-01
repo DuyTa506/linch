@@ -74,3 +74,19 @@ The known notification gap is reproduced by [repro_pgbouncer_listen.py](../../..
 **2,450 tests passed, 18 skipped** with the specified socket DSN; Ruff check/format (434 files) and Pyright (explicit venv Python path, zero errors/warnings) pass. Final static checks include the standalone reproduction. Across 34 full/quick/comparison points, **49,840 durable runs completed**, with zero failed runs or note conflicts. No new SDK defect was found; the transaction-pooling notification limitation above remains intentionally unfixed.
 
 Teardown audit: zero experiment schemas on both Postgres servers, temporary roles, app connections or experiment processes; system PgBouncer PID remains untouched. Raw JSON/logs stay in `/tmp/wp18-scale-gate-20261031`; **no generated JSON is committed**. The baseline report receives only a pointer here; production guidance uses these current measurements.
+
+## Fencing phase 2 acceptance (2026-11-01)
+
+Explicit lease per write, commit `79a1108`, same M4 configuration as above
+(4 workers, 19.6 runs/s, RTT 1 ms, pool 16, 1 reader, lease TTL 4 s, stall
+timeout 6 s).
+
+| Scenario | Completed | Failed | Notes |
+|---|---|---|---|
+| Kill | 1,495/1,495 | 0 | 24 orphans reclaimed in 5.94 s (limit 7 s) |
+| 3-second blip | 1,451/1,451 | 0 | Zero worker exits |
+| Drain | 1,440/1,440 | 0 | Zero post-signal claims |
+| Blip repro (`repro_worker_db_blip.py`) | 22/22 | 0 | |
+
+All invariant counters were zero, including writer mismatches, duplicate notes,
+sequence gaps and failed-without-error runs. Raw artifacts are outside git.
