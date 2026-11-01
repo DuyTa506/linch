@@ -90,9 +90,9 @@ class _PluginMount:
         if changed_key is not None and not self._change_relevant(changed or self.host, changed_key):
             return
         if self._busy:
+            self._pending = True
             if self._pending_cleanup is not None:
                 await self._finish_deactivation(self._pending_cleanup)
-            self._pending = self._pending_cleanup is None
             return
         self._busy = True
         try:
@@ -105,7 +105,12 @@ class _PluginMount:
                 requirements_changed = self._active is not None and not all(
                     old is new for old, new in zip(self._active[1], requirements, strict=True)
                 )
-                if ready and self._active is None and not self._closed:
+                if (
+                    ready
+                    and self._active is None
+                    and not self._closed
+                    and not self.host._scope.closed
+                ):
                     await self._activate(requirements)
                 elif (not ready or requirements_changed) and self._active is not None:
                     activation = self._active

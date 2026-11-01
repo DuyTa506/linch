@@ -597,14 +597,6 @@ class Agent:
 
         if context is not None and not isinstance(context, Context):
             raise ConfigError("context must be a linch.Context or None")
-        # A supplied Context is a parent/host scope, never transferred into the
-        # Agent. Each Agent owns a child so two agents can share host services
-        # without one Agent.close() disposing the other's branch.
-        self.context: Context = (
-            context.scope(label=f"agent:{model}")
-            if context is not None
-            else Context(label=f"agent:{model}")
-        )
         self.tool_pipeline: ToolPipeline = tool_pipeline or ToolPipeline()
         if reliability is not None and not isinstance(reliability, ReliabilityPolicy):
             raise ConfigError("reliability must be ReliabilityPolicy or None")
@@ -739,6 +731,16 @@ class Agent:
             hooks=hooks,
             read_before_write=read_before_write,
             tool_cache=tool_cache,
+        )
+        # A supplied Context is a parent/host scope, never transferred into the
+        # Agent. Each Agent owns a child so two agents can share host services
+        # without one Agent.close() disposing the other's branch. Delay creating
+        # that owned child until configuration has succeeded so failed
+        # construction cannot leave an orphaned child on the host.
+        self.context: Context = (
+            context.scope(label=f"agent:{model}")
+            if context is not None
+            else Context(label=f"agent:{model}")
         )
         if self.reliability is not None and self.reliability.prerequisites:
             self.context.effect(lambda: PrerequisiteHook(self).install(self))

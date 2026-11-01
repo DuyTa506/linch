@@ -33,7 +33,7 @@ class Disposable:
         fn: Optional synchronous or asynchronous cleanup callback.
     """
 
-    __slots__ = ("_fn", "_disposed", "_task")
+    __slots__ = ("_fn", "_disposed", "_task", "_scopes")
 
     def __init__(self, fn: DisposerFn | None = None) -> None:
         """Create a teardown handle around an optional cleanup callback.
@@ -44,6 +44,7 @@ class Disposable:
         self._fn = fn
         self._disposed = False
         self._task: asyncio.Task[None] | None = None
+        self._scopes: set[EffectScope] = set()
 
     @property
     def disposed(self) -> bool:
@@ -91,6 +92,11 @@ class Disposable:
         else:
             self._disposed = True
             self._fn = None  # let captured state be collected after success
+            self._task = None
+            scopes = tuple(self._scopes)
+            self._scopes.clear()
+            for scope in scopes:
+                scope._discard(self)
 
     def __call__(self) -> Awaitable[None]:
         """Return the awaitable for :meth:`dispose`.
@@ -141,11 +147,32 @@ class EffectScope:
             raise RuntimeError("effect scope is disposing or disposed")
 
     def add(self, disposer: Disposable | DisposerFn) -> Disposable:
-        """Track an already-created disposer so the scope owns its teardown."""
+        """Track a disposer so this scope owns its teardown.
+
+        Successfully disposed handles are not retained. A handle whose cleanup
+        fails remains owned by the scope so a later teardown can retry it.
+
+        Args:
+            disposer: An existing disposable or cleanup callback to track.
+
+        Returns:
+            The disposable tracked by this scope.
+
+        Raises:
+            RuntimeError: If teardown has begun and the scope is closed.
+        """
         self.ensure_active()
         d = _coerce(disposer)
-        self._disposers.append(d)
+        self._track(d)
         return d
+
+    def _track(self, disposer: Disposable) -> None:
+        if not disposer.disposed:
+            self._disposers.append(disposer)
+            disposer._scopes.add(self)
+
+    def _discard(self, disposer: Disposable) -> None:
+        self._disposers[:] = [item for item in self._disposers if item is not disposer]
 
     def effect(self, fn: Callable[[], Any]) -> Disposable:
         """Run *fn* now and register the teardown it yields.
@@ -153,6 +180,18 @@ class EffectScope:
         *fn* may return ``None``, a single disposer (a :class:`Disposable` or a
         zero-arg callable), or an iterable of disposers. The returned composite
         disposes only this effect's group, in reverse, and is idempotent.
+        Successfully disposed handles are not retained; failed handles remain
+        owned by the scope for a later retry.
+
+        Args:
+            fn: Callback that runs immediately and yields cleanup handles.
+
+        Returns:
+            A composite disposable for this effect's cleanup group.
+
+        Raises:
+            RuntimeError: If teardown has begun and the scope is closed.
+            TypeError: If the callback yields an unsupported value.
         """
         self.ensure_active()
         result = fn()
@@ -175,7 +214,8 @@ class EffectScope:
             # fn() already ran, so anything coerced before a rejected item is a
             # live registration. The scope must still own it or it can never be
             # torn down.
-            self._disposers.extend(group)
+            for disposer in group:
+                self._track(disposer)
         return Disposable(lambda: _dispose_reverse(group))
 
     async def dispose(self) -> None:
@@ -185,10 +225,9 @@ class EffectScope:
         await self._teardown.dispose()
 
     async def _dispose_all(self) -> None:
-        # Retain the list until all entries finish. On failure, successfully
-        # disposed entries are idempotent and failed entries are retried by the
-        # next dispose() call.
-        await _dispose_reverse(self._disposers)
+        # Snapshot because successful entries remove themselves while teardown
+        # runs; failed entries remain tracked for the next dispose() call.
+        await _dispose_reverse(list(self._disposers))
         self._disposers.clear()
 
 
