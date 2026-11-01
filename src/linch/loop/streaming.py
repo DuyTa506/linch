@@ -5,9 +5,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
-from contextlib import aclosing
+from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass
+from inspect import isawaitable
 from time import monotonic
 from typing import Any, cast, get_args
 from uuid import uuid4
@@ -65,6 +66,19 @@ from .request import (
 # doesn't hammer the server.
 _SAME_MODEL_RETRY_OPTIONS = RetryOptions(base_delay_ms=100, max_delay_ms=2000, jitter=0.2)
 _STOP_REASONS = frozenset(get_args(StopReason))
+
+
+@asynccontextmanager
+async def _provider_stream_context(stream: Any) -> AsyncIterator[Any]:
+    """Close a provider iterator when it exposes an optional async closer."""
+    try:
+        yield stream
+    finally:
+        close = getattr(stream, "aclose", None)
+        if callable(close):
+            result = close()
+            if isawaitable(result):
+                await result
 
 
 @dataclass(slots=True)
@@ -215,7 +229,7 @@ async def _stream_turn_with_recovery(
     auxiliary_caller: _AccountedAuxiliaryCaller | None = None,
     compaction_logical_call_id: str | None = None,
     config: Any = None,
-) -> AsyncIterator[Any]:
+) -> AsyncGenerator[Any, None]:
     """Recover provider turns with a per-turn retry or a per-run ladder budget.
 
     Default recovery includes its second prepare/dispatch inside the retryable
@@ -226,7 +240,7 @@ async def _stream_turn_with_recovery(
     micro_tried_this_turn = False
     same_model_retries = [0]
 
-    async def recover(exc: ContextLengthError) -> AsyncIterator[Any]:
+    async def recover(exc: ContextLengthError) -> AsyncGenerator[Any, None]:
         nonlocal req, micro_tried_this_turn
         if ladder is None and session.compaction_retry_used_this_turn:
             raise exc
@@ -284,17 +298,23 @@ async def _stream_turn_with_recovery(
             config=config,
             model_override=req.model,
         )
+        if getattr(session, "current_turn_allowed_tools", None) == []:
+            req.tools = []
+            req.tool_choice = None
 
-    async def dispatch() -> AsyncIterator[Any]:
-        async for item in _accounted_primary_stream(
-            session,
-            req,
-            ledger=ledger,
-            logical_call_id=logical_call_id,
-            turn_index=turn_index,
-            bind_active_primary=bind_active_primary,
-        ):
-            yield item
+    async def dispatch() -> AsyncGenerator[Any, None]:
+        async with aclosing(
+            _accounted_primary_stream(
+                session,
+                req,
+                ledger=ledger,
+                logical_call_id=logical_call_id,
+                turn_index=turn_index,
+                bind_active_primary=bind_active_primary,
+            )
+        ) as primary_stream:
+            async for item in primary_stream:
+                yield item
 
     prepared = request_prepared
     while True:
@@ -305,17 +325,20 @@ async def _stream_turn_with_recovery(
         await start_provider_call(turn_index, req.model)
         try:
             try:
-                async for item in dispatch():
-                    yield item
+                async with aclosing(dispatch()) as dispatch_stream:
+                    async for item in dispatch_stream:
+                        yield item
             except ContextLengthError as exc:
                 if ladder is not None:
                     raise
-                async for item in recover(exc):
-                    yield item
+                async with aclosing(recover(exc)) as recovery_stream:
+                    async for item in recovery_stream:
+                        yield item
                 req = await prepare_provider_call(req, turn_index)
                 await start_provider_call(turn_index, req.model)
-                async for item in dispatch():
-                    yield item
+                async with aclosing(dispatch()) as dispatch_stream:
+                    async for item in dispatch_stream:
+                        yield item
         except ProviderError as exc:
             if not getattr(exc, "retryable", False):
                 raise
@@ -330,8 +353,9 @@ async def _stream_turn_with_recovery(
         except ContextLengthError as exc:
             if ladder is None:
                 raise
-            async for item in recover(exc):
-                yield item
+            async with aclosing(recover(exc)) as recovery_stream:
+                async for item in recovery_stream:
+                    yield item
             continue
         return
 
@@ -395,7 +419,7 @@ async def _accounted_primary_stream(
     logical_call_id: str,
     turn_index: int | None,
     bind_active_primary: Any,
-) -> AsyncIterator[_PrimaryPartial | _AccountedPrimaryAssembly]:
+) -> AsyncGenerator[_PrimaryPartial | _AccountedPrimaryAssembly, None]:
     """Settle exactly one receipt around the actual primary provider stream."""
     intent = ModelCallIntent(
         logical_call_id=logical_call_id,
@@ -497,8 +521,9 @@ async def _stream_turn(
     *,
     state: _PrimaryStreamState | None = None,
     stage_partials: bool = False,
-) -> AsyncIterator[
-    PartialAssistantEvent | _PrimaryPartial | AssistantAssembly | _ParsedPrimaryAssembly
+) -> AsyncGenerator[
+    PartialAssistantEvent | _PrimaryPartial | AssistantAssembly | _ParsedPrimaryAssembly,
+    None,
 ]:
     agent = session.agent
     stream_partials = (
@@ -537,132 +562,142 @@ async def _stream_turn(
         event = PartialAssistantEvent(delta=delta)
         return _PrimaryPartial(event) if stage_partials else event
 
-    async for event in agent.provider.stream(req):
-        if not isinstance(event, dict):
-            raise protocol_error(f"event must be a dict, got {type(event).__name__}")
-        typ = event.get("type")
-        if not isinstance(typ, str):
-            raise protocol_error("event.type must be a string")
-        if message_ended:
-            raise protocol_error(f"event {typ!r} appeared after message_end")
-        if typ == "message_start":
-            if message_started:
-                raise protocol_error("duplicate message_start")
-            model = event.get("model")
-            if not isinstance(model, str) or not model.strip():
-                raise protocol_error("message_start.model must be a nonblank string")
-            if state is not None:
-                state.actual_model = model
-            message_started = True
-            continue
-        if not message_started:
-            raise protocol_error(f"first event must be message_start, got {typ!r}")
-        if typ == "text_delta":
-            flush_thinking()
-            if not isinstance(event.get("text"), str):
-                raise protocol_error("text_delta.text must be a string")
-            text = cast(str, event["text"])
-            text_buf.append(text)
-            if stream_partials:
-                yield partial({"kind": "text", "text": text})
-        elif typ == "thinking_delta":
-            flush_text()
-            if not isinstance(event.get("text"), str):
-                raise protocol_error("thinking_delta.text must be a string")
-            text = cast(str, event["text"])
-            thinking_buf.append(text)
-            signature = event.get("signature", thinking_sig)
-            thinking_sig = signature if isinstance(signature, str) else thinking_sig
-            if stream_partials:
-                yield partial({"kind": "thinking", "text": text})
-        elif typ == "redacted_thinking":
-            flush_text()
-            flush_thinking()
-            content.append(RedactedThinkingBlock(data=str(event.get("data", ""))))
-        elif typ == "tool_use_start":
-            flush_text()
-            flush_thinking()
-            tool_id = event.get("id")
-            name = event.get("name")
-            if not isinstance(tool_id, str) or not tool_id:
-                raise protocol_error("tool_use_start.id must be a non-empty string")
-            if not isinstance(name, str) or not name:
-                raise protocol_error("tool_use_start.name must be a non-empty string")
-            if tool_id in seen_tool_ids:
-                raise protocol_error(f"duplicate tool-use id {tool_id!r}")
-            seen_tool_ids.add(tool_id)
-            tool_meta[tool_id] = (tool_id, name)
-            tool_inputs[tool_id] = []
-        elif typ == "tool_use_input_delta":
-            tool_id = event.get("id")
-            json_delta = event.get("json_delta")
-            if not isinstance(tool_id, str) or tool_id not in tool_meta:
-                raise protocol_error(
-                    f"tool_use_input_delta references unknown or closed id {tool_id!r}"
-                )
-            if not isinstance(json_delta, str):
-                raise protocol_error("tool_use_input_delta.json_delta must be a string")
-            tool_inputs[tool_id].append(json_delta)
-            if stream_partials:
-                yield partial(
-                    {
-                        "kind": "tool_use_input",
-                        "tool_use_id": tool_id,
-                        "json_delta": json_delta,
-                    }
-                )
-        elif typ == "tool_use_end":
-            tool_id = event.get("id")
-            if not isinstance(tool_id, str) or tool_id not in tool_meta:
-                raise protocol_error(f"tool_use_end references unknown or closed id {tool_id!r}")
-            meta = tool_meta.pop(tool_id)
-            raw = "".join(tool_inputs.pop(tool_id))
-            try:
-                parsed = json.loads(raw)
-            except json.JSONDecodeError as exc:
-                if state is None:
-                    raise protocol_error(f"tool {tool_id!r} input is invalid JSON: {exc}") from exc
-                state.native_failure = state.native_failure or "malformed_native_tool_arguments"
-            else:
-                if not isinstance(parsed, dict):
+    async with _provider_stream_context(agent.provider.stream(req)) as provider_stream:
+        async for event in provider_stream:
+            if not isinstance(event, dict):
+                raise protocol_error(f"event must be a dict, got {type(event).__name__}")
+            typ = event.get("type")
+            if not isinstance(typ, str):
+                raise protocol_error("event.type must be a string")
+            if message_ended:
+                raise protocol_error(f"event {typ!r} appeared after message_end")
+            if typ == "message_start":
+                if message_started:
+                    raise protocol_error("duplicate message_start")
+                model = event.get("model")
+                if not isinstance(model, str) or not model.strip():
+                    raise protocol_error("message_start.model must be a nonblank string")
+                if state is not None:
+                    state.actual_model = model
+                message_started = True
+                continue
+            if not message_started:
+                raise protocol_error(f"first event must be message_start, got {typ!r}")
+            if typ == "text_delta":
+                flush_thinking()
+                if not isinstance(event.get("text"), str):
+                    raise protocol_error("text_delta.text must be a string")
+                text = cast(str, event["text"])
+                text_buf.append(text)
+                if stream_partials:
+                    yield partial({"kind": "text", "text": text})
+            elif typ == "thinking_delta":
+                flush_text()
+                if not isinstance(event.get("text"), str):
+                    raise protocol_error("thinking_delta.text must be a string")
+                text = cast(str, event["text"])
+                thinking_buf.append(text)
+                signature = event.get("signature", thinking_sig)
+                thinking_sig = signature if isinstance(signature, str) else thinking_sig
+                if stream_partials:
+                    yield partial({"kind": "thinking", "text": text})
+            elif typ == "redacted_thinking":
+                flush_text()
+                flush_thinking()
+                content.append(RedactedThinkingBlock(data=str(event.get("data", ""))))
+            elif typ == "tool_use_start":
+                flush_text()
+                flush_thinking()
+                tool_id = event.get("id")
+                name = event.get("name")
+                if not isinstance(tool_id, str) or not tool_id:
+                    raise protocol_error("tool_use_start.id must be a non-empty string")
+                if not isinstance(name, str) or not name:
+                    raise protocol_error("tool_use_start.name must be a non-empty string")
+                if tool_id in seen_tool_ids:
+                    raise protocol_error(f"duplicate tool-use id {tool_id!r}")
+                seen_tool_ids.add(tool_id)
+                tool_meta[tool_id] = (tool_id, name)
+                tool_inputs[tool_id] = []
+            elif typ == "tool_use_input_delta":
+                tool_id = event.get("id")
+                json_delta = event.get("json_delta")
+                if not isinstance(tool_id, str) or tool_id not in tool_meta:
+                    raise protocol_error(
+                        f"tool_use_input_delta references unknown or closed id {tool_id!r}"
+                    )
+                if not isinstance(json_delta, str):
+                    raise protocol_error("tool_use_input_delta.json_delta must be a string")
+                tool_inputs[tool_id].append(json_delta)
+                if stream_partials:
+                    yield partial(
+                        {
+                            "kind": "tool_use_input",
+                            "tool_use_id": tool_id,
+                            "json_delta": json_delta,
+                        }
+                    )
+            elif typ == "tool_use_end":
+                tool_id = event.get("id")
+                if not isinstance(tool_id, str) or tool_id not in tool_meta:
+                    raise protocol_error(
+                        f"tool_use_end references unknown or closed id {tool_id!r}"
+                    )
+                meta = tool_meta.pop(tool_id)
+                raw = "".join(tool_inputs.pop(tool_id))
+                try:
+                    parsed = json.loads(raw)
+                except json.JSONDecodeError as exc:
                     if state is None:
-                        raise protocol_error(f"tool {tool_id!r} input must decode to a JSON object")
-                    state.native_failure = state.native_failure or "nonobject_native_tool_arguments"
+                        raise protocol_error(
+                            f"tool {tool_id!r} input is invalid JSON: {exc}"
+                        ) from exc
+                    state.native_failure = state.native_failure or "malformed_native_tool_arguments"
                 else:
-                    content.append(ToolUseBlock(id=meta[0], name=meta[1], input=parsed))
-        elif typ == "message_end":
-            if tool_meta:
-                raise protocol_error(
-                    "message_end arrived before tool_use_end for " + ", ".join(sorted(tool_meta))
-                )
-            raw_usage = event.get("usage")
-            if not isinstance(raw_usage, Usage):
-                raise protocol_error("message_end.usage must be a Usage instance")
-            try:
-                owned_usage = _copy_usage(raw_usage)
-            except _ModelCallError as exc:
-                raise protocol_error(
-                    "message_end.usage must contain nonnegative integer buckets"
-                ) from exc
-            if state is not None:
-                # Preserve observed spend before subsequent end-shape validation.
-                state.usage = owned_usage
-            raw_stop = event.get("stop_reason")
-            if not isinstance(raw_stop, str) or raw_stop not in _STOP_REASONS:
-                raise protocol_error(f"invalid message_end.stop_reason {raw_stop!r}")
-            flush_text()
-            flush_thinking()
-            stop_reason = cast(StopReason, raw_stop)
-            if state is not None:
-                state.stop_reason = stop_reason
-            usage = owned_usage
-            raw_metadata = event.get("provider_metadata")
-            if raw_metadata is not None and not isinstance(raw_metadata, dict):
-                raise protocol_error("message_end.provider_metadata must be a dict or None")
-            metadata = raw_metadata
-            message_ended = True
-        else:
-            raise protocol_error(f"unknown event type {typ!r}")
+                    if not isinstance(parsed, dict):
+                        if state is None:
+                            raise protocol_error(
+                                f"tool {tool_id!r} input must decode to a JSON object"
+                            )
+                        state.native_failure = (
+                            state.native_failure or "nonobject_native_tool_arguments"
+                        )
+                    else:
+                        content.append(ToolUseBlock(id=meta[0], name=meta[1], input=parsed))
+            elif typ == "message_end":
+                if tool_meta:
+                    raise protocol_error(
+                        "message_end arrived before tool_use_end for "
+                        + ", ".join(sorted(tool_meta))
+                    )
+                raw_usage = event.get("usage")
+                if not isinstance(raw_usage, Usage):
+                    raise protocol_error("message_end.usage must be a Usage instance")
+                try:
+                    owned_usage = _copy_usage(raw_usage)
+                except _ModelCallError as exc:
+                    raise protocol_error(
+                        "message_end.usage must contain nonnegative integer buckets"
+                    ) from exc
+                if state is not None:
+                    # Preserve observed spend before subsequent end-shape validation.
+                    state.usage = owned_usage
+                raw_stop = event.get("stop_reason")
+                if not isinstance(raw_stop, str) or raw_stop not in _STOP_REASONS:
+                    raise protocol_error(f"invalid message_end.stop_reason {raw_stop!r}")
+                flush_text()
+                flush_thinking()
+                stop_reason = cast(StopReason, raw_stop)
+                if state is not None:
+                    state.stop_reason = stop_reason
+                usage = owned_usage
+                raw_metadata = event.get("provider_metadata")
+                if raw_metadata is not None and not isinstance(raw_metadata, dict):
+                    raise protocol_error("message_end.provider_metadata must be a dict or None")
+                metadata = raw_metadata
+                message_ended = True
+            else:
+                raise protocol_error(f"unknown event type {typ!r}")
 
     if not message_started:
         raise protocol_error("stream ended before message_start")

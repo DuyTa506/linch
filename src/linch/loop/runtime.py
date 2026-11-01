@@ -7,10 +7,12 @@ must retain their persistence/yield ordering.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
+from contextlib import aclosing
 from dataclasses import replace
 from functools import partial
 from typing import Any, cast
@@ -198,8 +200,16 @@ def restore_checkpointable_hooks(
             raise RuntimeError(f"checkpointable hook {key!r} failed to restore state") from exc
 
 
-async def drain_pending_notifications(session: Session, run_id: str) -> AsyncIterator[Event]:
-    """Inject pending background-worker notifications into provider history."""
+async def drain_pending_notifications(session: Session, run_id: str) -> AsyncGenerator[Event, None]:
+    """Inject pending background-worker notifications into provider history.
+
+    Args:
+        session: Session whose queued notifications are delivered at the turn boundary.
+        run_id: Run receiving the persisted notification events.
+
+    Returns:
+        An async generator yielding notification events after their messages are logged.
+    """
     durability = getattr(session.agent, "durability", None)
     if getattr(durability, "durable_inbox", False):
         notifications = getattr(session, "pending_notifications", None)
@@ -214,17 +224,42 @@ async def drain_pending_notifications(session: Session, run_id: str) -> AsyncIte
                 "durable_inbox requires a SessionStore implementing "
                 "enqueue_inbox() and commit_inbox()"
             )
-        stored = await durable_call(
-            session,
-            "session.commit_inbox",
-            cast(Any, commit)(session.id, after_seq=session._last_seq),
+        commit_task = asyncio.create_task(
+            durable_call(
+                session,
+                "session.commit_inbox",
+                cast(Any, commit)(session.id, after_seq=session._last_seq),
+            )
         )
-        if not stored:
-            return
+        cancellation: asyncio.CancelledError | None = None
+        try:
+            stored = await asyncio.shield(commit_task)
+        except asyncio.CancelledError as exc:
+            cancellation = exc
+            while not commit_task.done():
+                try:
+                    await asyncio.shield(commit_task)
+                except BaseException:
+                    continue
+            try:
+                stored = commit_task.result()
+            except _StoreUnavailableError:
+                raise cancellation from None
+            except LeaseLostError:
+                # Preserve the fencing signal so run cleanup cannot write.
+                raise
+            except BaseException:
+                # Observe a late store failure without replacing the caller's
+                # original cancellation with its subsequent backend error.
+                raise cancellation from None
+        # The store commits the whole batch. Publish the same live projection
+        # before advancing its cursor or suspending delivery at an event yield.
+        session.session_log.append_many(row.message for row in stored)
         session._track_seqs(stored)
+        if cancellation is not None:
+            raise cancellation
         for row in stored:
             note = row.message
-            session.session_log.append(note)
             event: Event = UserEvent(message=note, subtype="notification")
             await _persist_event(session, run_id, event)
             yield event
@@ -233,15 +268,31 @@ async def drain_pending_notifications(session: Session, run_id: str) -> AsyncIte
     if not notifications:
         return
     to_drain = list(notifications)
-    notifications.clear()
     for note in to_drain:
-        await session.append([note])
+        append_task = asyncio.create_task(session.append([note]))
+        try:
+            await asyncio.shield(append_task)
+        except asyncio.CancelledError:
+            # A cancelled caller cannot tell whether the backend committed.
+            # Settle the append, including repeated cancellation, before acking
+            # the queue head so retry cannot discard or duplicate the message.
+            while not append_task.done():
+                try:
+                    await asyncio.shield(append_task)
+                except BaseException:
+                    continue
+            if not append_task.cancelled() and append_task.exception() is None:
+                notifications.pop(0)
+            raise
+        notifications.pop(0)
         event: Event = UserEvent(message=note, subtype="notification")
         await _persist_event(session, run_id, event)
         yield event
 
 
-async def drain_inbox(session: Session, run_id: str, *, config: Any = None) -> AsyncIterator[Event]:
+async def drain_inbox(
+    session: Session, run_id: str, *, config: Any = None
+) -> AsyncGenerator[Event, None]:
     """Consume context inbox producers at the top of a turn."""
     producers = tuple(session.agent.context._inbox or ())
     if config is not None and config.context is not session.agent.context:
@@ -270,7 +321,7 @@ async def drain_alignment(
         [str, list[dict[str, str]] | None, str],
         Awaitable[tuple[str, list[dict[str, str]] | None, list[Event], str | None]],
     ],
-) -> AsyncIterator[Event]:
+) -> AsyncGenerator[Event, None]:
     """Apply queued steering prompts at the top-of-turn boundary."""
     queue = getattr(session, "alignment_queue", None)
     if not queue:
@@ -320,7 +371,7 @@ async def drain_alignment(
             raise
 
 
-async def drain_child_events(session: Session, run_id: str) -> AsyncIterator[Event]:
+async def drain_child_events(session: Session, run_id: str) -> AsyncGenerator[Event, None]:
     """Surface accumulated subagent events at the top-of-turn boundary."""
     pending = getattr(session, "pending_child_events", None)
     if not pending:
@@ -828,7 +879,7 @@ class RunRuntime:
             error=error,
         )
 
-    async def drain_auxiliary_usage(self) -> AsyncIterator[Event]:
+    async def drain_auxiliary_usage(self) -> AsyncGenerator[Event, None]:
         """Project settled auxiliary receipts before the next primary call."""
         for receipt in self.ledger.consume_auxiliary_receipts():
             self.sync_ledger_totals()
@@ -846,18 +897,10 @@ class RunRuntime:
             )
             await _persist_event(self.session, self.run_id, event)
             yield event
-            if self.budget is not None and self.budget.take_warning():
-                warning: Event = BudgetEvent(
-                    kind="warning",
-                    spent_tokens=self.budget.spent_tokens,
-                    spent_usd=self.budget.spent_usd,
-                    max_tokens=self.budget.max_tokens,
-                    max_cost_usd=self.budget.max_cost_usd,
-                )
-                await _persist_event(self.session, self.run_id, warning)
+            async for warning in self._emit_budget_warning():
                 yield warning
 
-    async def emit_primary_usage(self, receipt: Any) -> AsyncIterator[Event]:
+    async def emit_primary_usage(self, receipt: Any) -> AsyncGenerator[Event, None]:
         """Publish the compatibility-shaped primary usage line."""
         self.sync_ledger_totals()
         if receipt.usage is None:
@@ -871,39 +914,47 @@ class RunRuntime:
         )
         await _persist_event(self.session, self.run_id, event)
         yield event
-        if self.budget is not None and self.budget.take_warning():
-            warning: Event = BudgetEvent(
-                kind="warning",
-                spent_tokens=self.budget.spent_tokens,
-                spent_usd=self.budget.spent_usd,
-                max_tokens=self.budget.max_tokens,
-                max_cost_usd=self.budget.max_cost_usd,
-            )
-            await _persist_event(self.session, self.run_id, warning)
+        async for warning in self._emit_budget_warning():
             yield warning
 
-    async def emit_budget_exhausted(self) -> AsyncIterator[Event]:
+    async def _emit_budget_warning(self) -> AsyncGenerator[Event, None]:
+        if self.budget is None or not self.budget.take_warning():
+            return
+        warning: Event = BudgetEvent(
+            kind="warning",
+            spent_tokens=self.budget.spent_tokens,
+            spent_usd=self.budget.spent_usd,
+            max_tokens=self.budget.max_tokens,
+            max_cost_usd=self.budget.max_cost_usd,
+        )
+        await _persist_event(self.session, self.run_id, warning)
+        yield warning
+
+    async def emit_budget_exhausted(self) -> AsyncGenerator[Event, None]:
         """Emit the legacy budget tail with ledger-owned totals."""
         self.sync_checkpoint_accounting()
         if self.budget is None:
             raise RuntimeError("budget terminal requested without a budget")
         duration_ms = int((time.time() - self.started) * 1000)
         self.terminal_result = self.build_run_result("error", "error", duration_ms=duration_ms)
-        async for event in _budget_exhausted_tail(
-            self.session,
-            runtime=self,
-            run_id=self.run_id,
-            budget=self.budget,
-            total=self.total,
-            duration_ms=duration_ms,
-            running_cost=self.running_cost,
-            usage_complete=self.ledger.usage_complete,
-        ):
-            yield event
+        async with aclosing(
+            _budget_exhausted_tail(
+                self.session,
+                runtime=self,
+                run_id=self.run_id,
+                budget=self.budget,
+                total=self.total,
+                duration_ms=duration_ms,
+                running_cost=self.running_cost,
+                usage_complete=self.ledger.usage_complete,
+            )
+        ) as events:
+            async for event in events:
+                yield event
 
     async def emit_abort_terminal(
         self, *, close_active_spans: Callable[..., Awaitable[None]]
-    ) -> AsyncIterator[Event]:
+    ) -> AsyncGenerator[Event, None]:
         """Persist and project the abort terminal while preserving event order."""
         await cancel_background_workers(self.session)
         duration_ms = int((time.time() - self.started) * 1000)
@@ -935,8 +986,9 @@ class RunRuntime:
             if failure is None:
                 self.session._event_journal = None
         if failure is not None:
-            async for item in self.emit_exception_terminal(failure):
-                yield item
+            async with aclosing(self.emit_exception_terminal(failure)) as events:
+                async for item in events:
+                    yield item
         else:
             yield event
 
@@ -971,7 +1023,7 @@ class RunRuntime:
         exc: Exception,
         *,
         close_active_spans: Callable[..., Awaitable[None]] | None = None,
-    ) -> AsyncIterator[Event]:
+    ) -> AsyncGenerator[Event, None]:
         """Persist the typed error pair before making failed status visible."""
         await cancel_background_workers(self.session)
         if isinstance(self.lease_lost, _StoreUnavailableError):
@@ -1201,7 +1253,6 @@ class RunRuntime:
             raise ConfigError("run_store returned an invalid model-input snapshot")
         self.checkpoint.provider_attempt = provider_attempt
         self.checkpoint.model_input_snapshot_id = snapshot.id
-        await self.best_effort_snapshot_cleanup(keep_ids=(snapshot.id,))
         return request
 
     async def bind_active_primary(self, intent: ModelCallIntent) -> None:
@@ -1212,6 +1263,10 @@ class RunRuntime:
             full_history_fingerprint=self.session.session_log._history_fingerprint(),
         )
         await self.save_checkpoint("provider_pending", turn_index=intent.turn_index)
+        if self.checkpoint.model_input_snapshot_id is not None:
+            await self.best_effort_snapshot_cleanup(
+                keep_ids=(self.checkpoint.model_input_snapshot_id,),
+            )
 
     async def load_pending_provider_request(self, signal: Any) -> ProviderRequest:
         if not self.exact_model_input or self.model_input_store is None:

@@ -80,7 +80,9 @@ def in_span(
         previous = getattr(session, "_telemetry_run", None)
         run = _RunTrace(span, run_id) if session is not None and run_id is not None else None
         if run is not None and session is not None:
+            assert run_id is not None
             session._telemetry_run = run
+            telemetry_for(session.agent)._runs[(session.id, run_id)] = run
         try:
             while True:
                 with trace.use_span(
@@ -118,6 +120,12 @@ def in_span(
                         run.step.end()
                 finally:
                     if run is not None and session is not None:
+                        for tool_span, _capture in tuple(run.tool_spans.values()):
+                            if tool_span.is_recording():
+                                tool_span.end()
+                        run.tool_spans.clear()
+                        run.closed = True
+                        _release_closed_run(session, run)
                         session._telemetry_run = previous
                     if end_on_exit:
                         span.end()
@@ -131,6 +139,7 @@ class Telemetry:
     def __init__(self, context: Context) -> None:
         self._context = context
         self._bindings: tuple[Any, ...] | None = None
+        self._runs: dict[tuple[str, str], Any] = {}
         self._refresh()
 
     def _refresh(self) -> None:
@@ -297,6 +306,10 @@ class _RunTrace:
         self.turn_index: int | None = None
         self.error: str | None = None
         self.chat_error: str | None = None
+        self.tool_spans: dict[str, tuple[trace.Span, bool]] = {}
+        self.prompt_captured = False
+        self.closed = False
+        self.background_tasks: list[Any] = []
 
     def observe(self, event: Any) -> None:
         if event.type == "error":
@@ -356,9 +369,25 @@ def start_run_span(session: Any, prompt: str, run_id: str, *, resumed: bool = Fa
     attrs[RUN_ID] = run_id
     attrs[RESUMED] = resumed
     span = telemetry.tracer.start_span("invoke_agent", attributes=attrs)
-    if span.is_recording() and capture_content():
-        span.set_attribute(INPUT_MESSAGES, _json(prompt))
     return span
+
+
+def record_prompt_capture(session: Any, prompt: str) -> None:
+    """Refresh run-span prompt content after UserPromptSubmit hooks run.
+
+    Args:
+        session: Session whose active run span receives the prompt.
+        prompt: Hook-processed prompt text.
+    """
+    state = getattr(session, "_telemetry_run", None)
+    if (
+        state is not None
+        and not state.prompt_captured
+        and state.span.is_recording()
+        and capture_content()
+    ):
+        state.span.set_attribute(INPUT_MESSAGES, _json(prompt))
+        state.prompt_captured = True
 
 
 def start_step(session: Any, turn_index: int) -> None:
@@ -536,21 +565,106 @@ def trace_tool(function: Any) -> Any:
             span.set_attribute(
                 TOOL_ARGUMENTS, _json(getattr(decision, "updated_input", None) or call.input)
             )
+        run_id = kwargs.get("run_id") or getattr(call, "_run_id", None)
+        run = _run_trace_for(session, run_id)
+        defer_result = run is not None and capture
         with trace.use_span(
-            span, end_on_exit=True, record_exception=False, set_status_on_exception=False
+            span,
+            end_on_exit=not defer_result,
+            record_exception=False,
+            set_status_on_exception=False,
         ):
             try:
                 outcome = await function(call, decision, agent, session, signal, **kwargs)
                 if outcome.block.is_error:
                     set_error(span, outcome.error_type or "tool_error")
-                if capture:
+                if capture and not defer_result:
                     span.set_attribute(TOOL_RESULT, str(outcome.block.content))
+                if run is not None and defer_result:
+                    run.tool_spans[call.id] = (span, capture)
                 return outcome
             except BaseException as exc:
                 set_error(span, exc)
+                if defer_result:
+                    span.end()
                 raise
 
     return wrapped
+
+
+def _run_trace_for(session: Any, run_id: str | None = None) -> Any:
+    current = getattr(session, "_telemetry_run", None)
+    if current is not None and (run_id is None or current.run_id == run_id):
+        return current
+    resolved_run_id = run_id or getattr(session, "active_run_id", None)
+    if resolved_run_id is None:
+        return current
+    agent = getattr(session, "agent", None)
+    if agent is None:
+        return None
+    telemetry = telemetry_for(agent)
+    return telemetry._runs.get((session.id, resolved_run_id))
+
+
+def register_background_task(session: Any, task: Any, *, run_id: str, tool_use_id: str) -> None:
+    """Retain the originating run until its detached task finishes.
+
+    Args:
+        session: Session owning the detached task.
+        task: Newly scheduled background task.
+        run_id: Explicit originating run identifier.
+        tool_use_id: Tool call whose deferred span belongs to this task.
+    """
+    state = _run_trace_for(session, run_id)
+    if state is None:
+        return
+    state.background_tasks.append(task)
+
+    def finished(done: Any) -> None:
+        state.background_tasks.remove(done)
+        # Cancellation or post-processing failure can skip record_tool_result.
+        # End only this task's span, without capturing its unprocessed result.
+        span_info = state.tool_spans.pop(tool_use_id, None)
+        if span_info is not None:
+            span_info[0].end()
+        _release_closed_run(session, state)
+
+    task.add_done_callback(finished)
+
+
+def _release_closed_run(session: Any, state: Any) -> None:
+    if not state.closed or state.tool_spans:
+        return
+    if any(not task.done() for task in state.background_tasks):
+        return
+    agent = getattr(session, "agent", None)
+    if agent is not None:
+        telemetry_for(agent)._runs.pop((session.id, state.run_id), None)
+
+
+def record_tool_result(
+    session: Any, tool_use_id: str, result: Any, *, run_id: str | None = None
+) -> None:
+    """Record and close a tool span after PostToolUse has finalized its result.
+
+    Args:
+        session: Session owning the active tool span.
+        tool_use_id: Provider tool-call identifier used to find the span.
+        result: Final hook-processed tool result content.
+        run_id: Optional originating run id for detached tool work.
+    """
+    state = _run_trace_for(session, run_id)
+    if state is None:
+        return
+    span_info = state.tool_spans.pop(tool_use_id, None)
+    if span_info is None:
+        _release_closed_run(session, state)
+        return
+    span, capture = span_info
+    if capture and span.is_recording():
+        span.set_attribute(TOOL_RESULT, str(result))
+    span.end()
+    _release_closed_run(session, state)
 
 
 class _TelemetryProvider:
