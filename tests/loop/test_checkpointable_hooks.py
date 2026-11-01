@@ -8,19 +8,8 @@ from typing import Any
 import pytest
 from test_run_resume import _pin_run_contract
 
-
-class _TextProvider:
-    id = "checkpointable-hook-test"
-
-    def context_window(self, model: str) -> int:
-        return 100_000
-
-    async def stream(self, req: Any) -> AsyncIterator[dict[str, object]]:
-        from linch.types import Usage
-
-        yield {"type": "message_start", "model": req.model}
-        yield {"type": "text_delta", "text": "done"}
-        yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
+from tests.support.agents import make_agent
+from tests.support.providers import ScriptedProvider, TextTurn
 
 
 class _DurableStateHook:
@@ -42,25 +31,6 @@ class _DurableStateHook:
         self.restored.append((state, session.id, run_id))
 
 
-def _agent(*, provider: Any, session_store: Any, run_store: Any, hooks: list[Any]):
-    from linch import Agent
-    from linch.config import FeatureFlags
-    from linch.tools.registry import empty_tools
-
-    return Agent(
-        model="test-model",
-        provider=provider,
-        tools=empty_tools(),
-        session_store=session_store,
-        run_store=run_store,
-        hooks=hooks,
-        features=FeatureFlags(skills=False, subagents=False, mcp=False, filesystem=False),
-        read_before_write=False,
-        result_offload=None,
-        cwd=".",
-    )
-
-
 async def _collect(events: AsyncIterator[Any]) -> list[Any]:
     return [event async for event in events]
 
@@ -75,11 +45,13 @@ async def test_checkpointable_hook_snapshots_session_scoped_json_state() -> None
     hook = _DurableStateHook({"profile": "hash-1", "repair": {"used": 1}})
     assert isinstance(hook, CheckpointableHook)
 
-    agent = _agent(
-        provider=_TextProvider(),
+    agent = make_agent(
+        ScriptedProvider([TextTurn("done")], context_window=100_000),
         session_store=session_store,
         run_store=run_store,
         hooks=[hook],
+        result_offload=None,
+        read_before_write=False,
     )
     session = await agent.session(id="session-1")
     events = await _collect(session.run("hello"))
@@ -123,11 +95,13 @@ async def test_checkpointable_hook_restores_matching_state_and_preserves_other_e
         ),
     )
     hook = _DurableStateHook({"profile": "pinned", "repair": {"used": 2}})
-    agent = _agent(
-        provider=_TextProvider(),
+    agent = make_agent(
+        ScriptedProvider([TextTurn("done")], context_window=100_000),
         session_store=session_store,
         run_store=run_store,
         hooks=[hook],
+        result_offload=None,
+        read_before_write=False,
     )
     session = await agent.session(id="session-restore")
 
@@ -167,11 +141,13 @@ async def test_empty_hook_snapshot_clears_stale_active_namespace_only() -> None:
         ),
     )
     hook = _DurableStateHook({})
-    agent = _agent(
-        provider=_TextProvider(),
+    agent = make_agent(
+        ScriptedProvider([TextTurn("done")], context_window=100_000),
         session_store=session_store,
         run_store=run_store,
         hooks=[hook],
+        result_offload=None,
+        read_before_write=False,
     )
     session = await agent.session(id="session-clear")
 
@@ -198,11 +174,13 @@ async def test_incomplete_checkpointable_hook_fails_closed_with_configuration_er
         def checkpoint_state(self, session: Any, run_id: str) -> dict[str, Any]:
             return {}
 
-    agent = _agent(
-        provider=_TextProvider(),
+    agent = make_agent(
+        ScriptedProvider([TextTurn("done")], context_window=100_000),
         session_store=InMemorySessionStore(),
         run_store=InMemoryRunStore(),
         hooks=[_IncompleteHook()],
+        result_offload=None,
+        read_before_write=False,
     )
     session = await agent.session()
 

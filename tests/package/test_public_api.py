@@ -126,7 +126,7 @@ def test_durable_run_store_names_are_public_and_lazy() -> None:
         "PostgresRunStore",
     }
     assert expected <= set(linch.__all__)
-    root = Path(__file__).resolve().parents[1]
+    root = Path(__file__).resolve().parents[2]
     script = f"""
 import sys
 sys.path.insert(0, {str(root / "src")!r})
@@ -180,7 +180,7 @@ def test_extensions_are_explicit_and_removed_from_kernel_surface() -> None:
 
 
 def test_kernel_has_no_imports_from_extensions() -> None:
-    source_root = Path(__file__).resolve().parents[1] / "src" / "linch"
+    source_root = Path(__file__).resolve().parents[2] / "src" / "linch"
     violations: list[str] = []
     for path in source_root.rglob("*.py"):
         if "ext" in path.relative_to(source_root).parts:
@@ -212,7 +212,7 @@ def test_imported_modules_resolve_extension_boundaries(
 
 
 def test_extension_modules_are_explicit() -> None:
-    root = Path(__file__).resolve().parents[1]
+    root = Path(__file__).resolve().parents[2]
     script = f"""
 import sys
 sys.path.insert(0, {str(root / "src")!r})
@@ -297,11 +297,11 @@ def test_no_undeclared_public_attributes() -> None:
 def test_external_consumer_fixture_uses_core_and_extension_api() -> None:
     """A consumer module uses core and extension public paths explicitly."""
 
-    fixture = Path(__file__).parent / "fixtures" / "public_consumer.py"
+    fixture = Path(__file__).resolve().parents[1] / "fixtures" / "public_consumer.py"
     script = f"""
 import importlib.util
 import sys
-sys.path.insert(0, {str(Path(__file__).resolve().parents[1] / "src")!r})
+sys.path.insert(0, {str(Path(__file__).resolve().parents[2] / "src")!r})
 spec = importlib.util.spec_from_file_location("external_consumer", {str(fixture)!r})
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
@@ -311,7 +311,7 @@ assert module.DeepAgentProfile is not None
 """
     completed = subprocess.run(
         [sys.executable, "-c", script],
-        cwd=Path(__file__).resolve().parents[1],
+        cwd=Path(__file__).resolve().parents[2],
         capture_output=True,
         text=True,
         check=False,

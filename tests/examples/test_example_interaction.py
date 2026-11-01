@@ -19,7 +19,7 @@ from typing import Any
 
 from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
 
-_EXAMPLES = Path(__file__).resolve().parents[1] / "examples" / "core"
+_EXAMPLES = Path(__file__).resolve().parents[2] / "examples" / "core"
 
 
 def _load(name: str):
