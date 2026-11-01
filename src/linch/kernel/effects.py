@@ -147,7 +147,20 @@ class EffectScope:
             raise RuntimeError("effect scope is disposing or disposed")
 
     def add(self, disposer: Disposable | DisposerFn) -> Disposable:
-        """Track an already-created disposer so the scope owns its teardown."""
+        """Track a disposer so this scope owns its teardown.
+
+        Successfully disposed handles are not retained. A handle whose cleanup
+        fails remains owned by the scope so a later teardown can retry it.
+
+        Args:
+            disposer: An existing disposable or cleanup callback to track.
+
+        Returns:
+            The disposable tracked by this scope.
+
+        Raises:
+            RuntimeError: If teardown has begun and the scope is closed.
+        """
         self.ensure_active()
         d = _coerce(disposer)
         self._track(d)
@@ -167,6 +180,18 @@ class EffectScope:
         *fn* may return ``None``, a single disposer (a :class:`Disposable` or a
         zero-arg callable), or an iterable of disposers. The returned composite
         disposes only this effect's group, in reverse, and is idempotent.
+        Successfully disposed handles are not retained; failed handles remain
+        owned by the scope for a later retry.
+
+        Args:
+            fn: Callback that runs immediately and yields cleanup handles.
+
+        Returns:
+            A composite disposable for this effect's cleanup group.
+
+        Raises:
+            RuntimeError: If teardown has begun and the scope is closed.
+            TypeError: If the callback yields an unsupported value.
         """
         self.ensure_active()
         result = fn()
