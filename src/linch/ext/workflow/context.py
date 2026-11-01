@@ -763,11 +763,13 @@ def _run_options_fingerprint(run_options: RunOptions | None) -> str:
         return ""
     payload: dict[str, Any] = {}
     for field in dataclasses.fields(run_options):
-        if field.name in {"signal", "budget"}:
+        if field.name in {"signal", "budget", "lease"}:
             continue
         value = getattr(run_options, field.name)
         if value is not None:
-            payload[field.name] = _fingerprint_value(value)
+            payload[field.name] = (
+                value._contract() if field.name == "profile" else _fingerprint_value(value)
+            )
     if not payload:
         return ""
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
