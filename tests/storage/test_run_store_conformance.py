@@ -28,14 +28,8 @@ class _StoreCase:
 
 
 def _memory_peer(store: InMemoryRunStore) -> InMemoryRunStore:
-    """Create another holder sharing storage but with independent lease state."""
-    peer = copy.copy(store)
-    # ``copy.copy`` shares the durable dictionaries, including ``_lease_state``.
-    # Lease ownership is process-local, so each peer gets independent copies of
-    # the holder's maps only.
-    for name in ("_held_leases", "_lease_ttls", "_lease_owners"):
-        setattr(peer, name, dict(getattr(store, name)))
-    return peer
+    """Create another holder sharing the durable in-memory dictionaries."""
+    return copy.copy(store)
 
 
 @pytest.fixture(params=["memory", "postgres"])
@@ -412,7 +406,7 @@ async def test_pending_adoption_is_fenced_after_peer_claims_newer_epoch(
     await _seed_pending(store_case, run_id, "session-1", {})
     store = store_case.store
     peer = store_case.peer
-    await store.claim(run_id, "owner-a", 30.0)  # type: ignore[attr-defined]
+    old_lease = await store.claim(run_id, "owner-a", 30.0)  # type: ignore[attr-defined]
     if isinstance(store, InMemoryRunStore):
         owner, _, epoch = store._lease_state[run_id]
         assert owner == "owner-a"
@@ -424,7 +418,11 @@ async def test_pending_adoption_is_fenced_after_peer_claims_newer_epoch(
     await peer.claim(run_id, "owner-b", 30.0)  # type: ignore[attr-defined]
     with pytest.raises(LeaseLostError):
         await store.create_run(
-            "session-1", id=run_id, meta={"worker": "stale"}, initial_checkpoint=_checkpoint()
+            "session-1",
+            id=run_id,
+            meta={"worker": "stale"},
+            initial_checkpoint=_checkpoint(),
+            lease=old_lease,
         )
     loaded = await store.load_run(run_id)
     assert loaded is not None

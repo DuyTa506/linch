@@ -23,27 +23,14 @@ def _checkpoint(prompt: str = "lease") -> RunCheckpoint:
 
 
 def _memory_peer(store: InMemoryRunStore) -> InMemoryRunStore:
-    peer = copy.copy(store)
-    # ``copy.copy`` shares durable state (including ``_lease_state``), while
-    # holder-local lease maps must be independent for fencing tests.
-    for name in ("_held_leases", "_lease_ttls", "_lease_owners"):
-        setattr(peer, name, dict(getattr(store, name)))
-    return peer
-
-
-def _local_lease_maps(store: object) -> list[dict[str, object]]:
-    """Return holder-local maps, allowing Postgres to omit ``_lease_owners``."""
-    maps: list[dict[str, object]] = []
-    for name in ("_held_leases", "_lease_ttls", "_lease_owners"):
-        value = getattr(store, name, None)
-        if isinstance(value, dict):
-            maps.append(value)
-    return maps
+    # ``copy.copy`` shares the durable dictionaries, including lease state.
+    return copy.copy(store)
 
 
 def _assert_no_local_leases(store: object) -> None:
-    for mapping in _local_lease_maps(store):
-        assert mapping == {}
+    assert not hasattr(store, "_held_leases")
+    assert not hasattr(store, "_lease_owners")
+    assert not hasattr(store, "_lease_ttls")
 
 
 @pytest.fixture(params=["memory", "postgres"])
@@ -96,11 +83,11 @@ async def test_lease_claim_conflict_renew_expiry_takeover_and_fencing(lease_stor
     with pytest.raises(LeaseLostError):
         await first.renew(lease_a)
     with pytest.raises(LeaseLostError):
-        await first.save_checkpoint(run_id, _checkpoint())
+        await first.save_checkpoint(run_id, _checkpoint(), lease=lease_a)
     with pytest.raises(LeaseLostError):
-        await first.append_event(run_id, _event())
+        await first.append_event(run_id, _event(), lease=lease_a)
     with pytest.raises(LeaseLostError):
-        await first.mark_completed(run_id, _checkpoint("done"))
+        await first.mark_completed(run_id, _checkpoint("done"), lease=lease_a)
 
     with pytest.raises(LeaseLostError):
         await first.release(lease_a)
@@ -122,7 +109,7 @@ async def test_live_same_owner_claim_keeps_epoch_and_expiry_only_blocks_renewal(
     same_owner = await second.claim(run_id, "owner-a", 0.2)
     assert same_owner.epoch == lease_a.epoch
     await asyncio.sleep(max(0.0, same_owner.expires_at - time.time()) + 0.03)
-    saved = await first.save_checkpoint(run_id, _checkpoint("expired"))
+    saved = await first.save_checkpoint(run_id, _checkpoint("expired"), lease=lease_a)
     assert saved.checkpoint is not None
     assert saved.checkpoint.prompt == "expired"
     with pytest.raises(LeaseLostError):
@@ -141,7 +128,7 @@ async def test_release_bumps_epoch_and_fences_other_copy_of_old_lease(lease_stor
     assert stale_copy.epoch == lease_a.epoch
     await first.release(lease_a)
     with pytest.raises(LeaseLostError):
-        await second.save_checkpoint(run_id, _checkpoint("released"))
+        await second.save_checkpoint(run_id, _checkpoint("released"), lease=stale_copy)
     takeover = await second.claim(run_id, "owner-b", 1.0)
     assert takeover.epoch > lease_a.epoch
 
@@ -211,11 +198,23 @@ async def test_stale_writes_are_fenced_without_mutating_persisted_state(lease_st
     assert before_snapshot == snapshot
 
     stale_ops = (
-        first.append_events(run_id, [_event(), _event()]),
-        first.mark_failed(run_id, _checkpoint("bad"), {"message": "stale"}, events=[_event()]),
-        first.save(run_id, 2, request),
-        first.delete(snapshot.id, run_id=run_id),
-        first.prune(run_id),
+        first.save_checkpoint(run_id, _checkpoint("stale checkpoint"), lease=old_lease),
+        first.save_checkpoint_with_events(
+            run_id, _checkpoint("stale phase"), [_event()], lease=old_lease
+        ),
+        first.append_event(run_id, _event(), lease=old_lease),
+        first.append_events(run_id, [_event(), _event()], lease=old_lease),
+        first.mark_completed(run_id, _checkpoint("stale completed"), lease=old_lease),
+        first.mark_failed(
+            run_id,
+            _checkpoint("bad"),
+            {"message": "stale"},
+            events=[_event()],
+            lease=old_lease,
+        ),
+        first.save(run_id, 2, request, lease=old_lease),
+        first.delete(snapshot.id, run_id=run_id, lease=old_lease),
+        first.prune(run_id, lease=old_lease),
     )
     for operation in stale_ops:
         with pytest.raises(LeaseLostError):
@@ -240,7 +239,7 @@ async def test_repeated_claim_write_release_clears_holder_local_state(lease_stor
         run_id = f"{prefix}-{index}"
         await first.create_run("session-1", id=run_id)
         lease = await first.claim(run_id, "cycle-owner", 30.0)
-        await first.save_checkpoint(run_id, _checkpoint(str(index)))
+        await first.save_checkpoint(run_id, _checkpoint(str(index)), lease=lease)
         await first.release(lease)
     _assert_no_local_leases(first)
 
@@ -258,15 +257,44 @@ async def test_expired_takeover_fence_then_stale_release_clears_only_old_holder(
     live_lease = await live_holder.claim(run_id, "live-owner", 30.0)
 
     with pytest.raises(LeaseLostError):
-        await old_holder.save_checkpoint(run_id, _checkpoint("fenced"))
-    held = old_holder._held_leases
-    assert held.get(run_id) == old_lease.epoch
+        await old_holder.save_checkpoint(run_id, _checkpoint("fenced"), lease=old_lease)
 
     with pytest.raises(LeaseLostError):
         await old_holder.release(old_lease)
     _assert_no_local_leases(old_holder)
 
     renewed = await live_holder.renew(live_lease)
-    await live_holder.save_checkpoint(run_id, _checkpoint("live"))
+    await live_holder.save_checkpoint(run_id, _checkpoint("live"), lease=renewed)
     await live_holder.release(renewed)
     _assert_no_local_leases(live_holder)
+
+
+async def test_explicit_lease_is_required_and_remains_fenced_after_release(lease_stores) -> None:
+    """A stale immutable token cannot become an unleased write after release."""
+    from dataclasses import replace
+
+    from linch.run_store import LeaseLostError
+
+    first, second = lease_stores
+    run_id = f"explicit-token-{id(first)}-{time.monotonic_ns()}"
+    await first.create_run("session-1", id=run_id)
+    lease = await first.claim(run_id, "owner-a", 30.0)
+    assert lease.ttl_s == 30.0
+
+    await first.release(lease)
+    with pytest.raises(LeaseLostError):
+        await first.save_checkpoint(run_id, _checkpoint("stale"), lease=lease)
+    with pytest.raises(LeaseLostError):
+        await first.append_events(run_id, [], lease=lease)
+    with pytest.raises(LeaseLostError):
+        await first.prune(run_id, lease=lease)
+
+    current = await second.claim(run_id, "owner-b", 30.0)
+    with pytest.raises(LeaseLostError):
+        await first.append_event(run_id, _event(), lease=lease)
+    with pytest.raises(LeaseLostError):
+        await first.save_checkpoint(
+            run_id, _checkpoint("wrong-run"), lease=replace(lease, run_id="other")
+        )
+    await second.save_checkpoint(run_id, _checkpoint("current"), lease=current)
+    await second.release(current)

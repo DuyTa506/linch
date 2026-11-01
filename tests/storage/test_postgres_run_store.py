@@ -201,8 +201,7 @@ async def test_postgres_claim_rollback_does_not_publish_local_lease(
             await first.claim(run_id, "owner-a", 30.0)
         first._pool = real_pool
 
-        assert first._held_leases == {}
-        assert first._lease_ttls == {}
+        assert not hasattr(first, "_held_leases")
 
         # A newly created run starts at epoch zero; the failed claimant's
         # candidate would have been epoch one, and the independent peer must
@@ -216,14 +215,19 @@ async def test_postgres_claim_rollback_does_not_publish_local_lease(
             owner="owner-a",
             epoch=failed_candidate_epoch,
             expires_at=peer_lease.expires_at,
+            ttl_s=30.0,
         )
-        for token in (candidate, peer_lease):
-            with pytest.raises(LeaseLostError):
-                await first.renew(token)
-            with pytest.raises(LeaseLostError):
-                await first.release(token)
-            assert first._held_leases == {}
-            assert first._lease_ttls == {}
+        with pytest.raises(LeaseLostError):
+            await first.renew(candidate)
+        with pytest.raises(LeaseLostError):
+            await first.release(candidate)
+        checkpoint = RunCheckpoint(
+            phase="started",
+            prompt="current owner",
+            turn_index=1,
+            total_usage=Usage(),
+        )
+        assert (await first.save_checkpoint(run_id, checkpoint, lease=peer_lease)).checkpoint
 
         renewed = await peer.renew(peer_lease)
         checkpoint = RunCheckpoint(
@@ -232,12 +236,11 @@ async def test_postgres_claim_rollback_does_not_publish_local_lease(
             turn_index=1,
             total_usage=Usage(),
         )
-        saved = await peer.save_checkpoint(run_id, checkpoint)
+        saved = await peer.save_checkpoint(run_id, checkpoint, lease=renewed)
         assert saved.checkpoint is not None
         assert saved.checkpoint.prompt == "live owner"
         await peer.release(renewed)
-        assert peer._held_leases == {}
-        assert peer._lease_ttls == {}
+        assert not hasattr(peer, "_held_leases")
     finally:
         if real_pool is not None:
             first._pool = real_pool
@@ -403,28 +406,37 @@ async def test_atomic_checkpoint_fencing_leaves_both_components_unchanged(pg_dsn
         await peer.claim(run_id, "new", 30)
         with pytest.raises(LeaseLostError):
             await store.save_checkpoint_with_events(
-                run_id, _atomic_checkpoint("zombie"), [_atomic_event("zombie")]
+                run_id,
+                _atomic_checkpoint("zombie"),
+                [_atomic_event("zombie")],
+                lease=lease,
             )
         record = await peer.load_run(run_id)
         assert record.checkpoint.prompt == "before"
         assert await peer.load_events(run_id) == []
-        assert store._held_leases[run_id] == lease.epoch
+        assert not hasattr(store, "_held_leases")
     finally:
         await asyncio.gather(store.close(), peer.close())
 
 
 @needs_postgres
 async def test_missing_local_lease_owner_fails_closed(pg_dsn) -> None:
-    from linch.run_store import LeaseLostError
+    from linch.run_store import LeaseLostError, RunLease
     from linch.run_stores.postgres import PostgresRunStore
 
     store = PostgresRunStore(pg_dsn)
     run_id = f"lease-owner-missing-{uuid4()}"
     try:
         await store.create_run("session", id=run_id)
-        store._held_leases[run_id] = 1
+        candidate = RunLease(
+            run_id=run_id,
+            owner="missing-owner",
+            epoch=1,
+            expires_at=time.time() + 30,
+            ttl_s=30,
+        )
         with pytest.raises(LeaseLostError):
-            await store.save_checkpoint(run_id, _atomic_checkpoint())
+            await store.save_checkpoint(run_id, _atomic_checkpoint(), lease=candidate)
         assert await store.load_run(run_id) is not None
     finally:
         await store.close()
