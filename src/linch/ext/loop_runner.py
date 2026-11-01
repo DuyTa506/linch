@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import math
@@ -312,13 +313,16 @@ class InMemoryLoopLeaseStore:
             The refreshed lease.
 
         Raises:
-            ConfigError: If the lease is foreign or no longer registered.
+            ConfigError: If the lease is foreign, expired, or no longer
+                registered.
         """
         _safe_loop_id(lease.loop_id)
         with self._guard:
             current = self._leases.get(lease.loop_id)
             if current is None or current.token != lease.token or current.owner != lease.owner:
                 raise ConfigError(f"Loop lease for {lease.loop_id!r} is not held by this owner")
+            if current.expires_at <= time.time():
+                raise ConfigError(f"Loop lease for {lease.loop_id!r} has expired")
             refreshed = LoopLease(
                 loop_id=lease.loop_id,
                 owner=lease.owner,
@@ -508,6 +512,18 @@ class LoopRunner:
         spec: LoopSpec,
         trigger: LoopTrigger | None = None,
     ) -> LoopTickResult:
+        """Execute one loop tick and renew its optional lease while it runs.
+
+        Args:
+            spec: Loop definition and artifact location for this tick.
+            trigger: Optional event that caused the tick.
+
+        Returns:
+            The completed tick result and persisted report metadata.
+
+        Raises:
+            ConfigError: If another runner owns the loop or lease renewal fails.
+        """
         _validate_spec(spec)
         trigger = trigger or LoopTrigger()
         with self._active_guard:
@@ -524,12 +540,46 @@ class LoopRunner:
                 )
                 if lease is None:
                     raise ConfigError(f"Loop {spec.id!r} already has an active lease")
-            return await self._run_once_locked(spec, trigger)
+            if lease is None or self.leases is None:
+                return await self._run_once_locked(spec, trigger)
+            lease_store = self.leases
+            held_lease = lease
+
+            async def _heartbeat() -> None:
+                nonlocal held_lease
+                interval = self.lease_ttl_s / 3
+                while True:
+                    await asyncio.sleep(interval)
+                    held_lease = await lease_store.refresh(held_lease, ttl_s=self.lease_ttl_s)
+
+            run_task = asyncio.create_task(self._run_once_locked(spec, trigger))
+            heartbeat_task = asyncio.create_task(_heartbeat())
+            try:
+                done, _ = await asyncio.wait(
+                    {run_task, heartbeat_task}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if heartbeat_task in done:
+                    heartbeat_task.result()
+                    raise ConfigError(f"Loop {spec.id!r} lease heartbeat stopped")
+                return await run_task
+            except BaseException:
+                if not run_task.done():
+                    run_task.cancel()
+                await _drain_task(run_task)
+                raise
+            finally:
+                lease = held_lease
+                if not heartbeat_task.done():
+                    heartbeat_task.cancel()
+                await _drain_task(heartbeat_task)
         finally:
-            if lease is not None and self.leases is not None:
-                await self.leases.release(lease)
-            with self._active_guard:
-                self._active_loop_ids.discard(spec.id)
+            try:
+                if lease is not None and self.leases is not None:
+                    release_task = asyncio.create_task(self.leases.release(lease))
+                    await _drain_task(release_task)
+            finally:
+                with self._active_guard:
+                    self._active_loop_ids.discard(spec.id)
 
     async def _run_once_locked(self, spec: LoopSpec, trigger: LoopTrigger) -> LoopTickResult:
         await self.artifacts.ensure_layout(spec)
@@ -557,7 +607,8 @@ class LoopRunner:
                 )
             )
         finally:
-            await self.agent.release_session(session, force=True)
+            release_task = asyncio.create_task(self.agent.release_session(session, force=True))
+            await _drain_task(release_task)
 
         report = build_run_report(events)
         if run_error is not None:
@@ -696,7 +747,7 @@ def _read_lease_file(path: Path) -> LoopLease | None:
     try:
         with os.fdopen(fd, "r", encoding="utf-8") as fh:
             raw = json.loads(fh.read())
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
         return None
     if not isinstance(raw, dict):
         return None
@@ -791,6 +842,21 @@ def _run_id_from_events(events: Sequence[Event]) -> str:
         if isinstance(event, SystemEvent):
             return event.run_id
     return str(uuid4())
+
+
+async def _drain_task(task: asyncio.Task[Any]) -> None:
+    """Await a cleanup task even when its caller is cancelled repeatedly."""
+    caller_cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if not task.done():
+                caller_cancelled = True
+    if not task.cancelled():
+        task.result()
+    if caller_cancelled:
+        raise asyncio.CancelledError
 
 
 def _final_text(events: Sequence[Event]) -> str | None:

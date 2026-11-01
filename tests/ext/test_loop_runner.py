@@ -260,6 +260,18 @@ async def test_inmemory_lease_store_requires_owner_on_refresh_and_release() -> N
     await store.release(lease)
 
 
+async def test_inmemory_lease_store_rejects_expired_refresh(monkeypatch) -> None:
+    now = 100.0
+    monkeypatch.setattr(loop_runner_module.time, "time", lambda: now)
+    store = InMemoryLoopLeaseStore()
+    lease = await store.try_acquire("docs-loop", owner="owner", ttl_s=1)
+    assert lease is not None
+
+    now = 102.0
+    with pytest.raises(ConfigError, match="expired"):
+        await store.refresh(lease, ttl_s=60)
+
+
 async def test_file_lease_refresh_refuses_symlinked_lock(tmp_path) -> None:
     # Hardening: a symlink planted at the lock path must not let a refresh write
     # the lease JSON through it to an arbitrary target (O_NOFOLLOW). The refresh
@@ -287,6 +299,18 @@ async def test_file_lease_store_recovers_malformed_lock(tmp_path) -> None:
     lock = tmp_path / "domains" / "docs-loop" / ".lock.json"
     lock.parent.mkdir(parents=True)
     lock.write_text("{not json", encoding="utf-8")
+    store = FileLoopLeaseStore(root=tmp_path / "domains")
+
+    lease = await store.try_acquire("docs-loop", owner="owner", ttl_s=60)
+
+    assert lease is not None
+    assert json.loads(lock.read_text(encoding="utf-8"))["owner"] == "owner"
+
+
+async def test_file_lease_store_recovers_malformed_utf8_lock(tmp_path) -> None:
+    lock = tmp_path / "domains" / "docs-loop" / ".lock.json"
+    lock.parent.mkdir(parents=True)
+    lock.write_bytes(b"\xff")
     store = FileLoopLeaseStore(root=tmp_path / "domains")
 
     lease = await store.try_acquire("docs-loop", owner="owner", ttl_s=60)
@@ -407,6 +431,227 @@ async def test_run_once_releases_retained_subagent_sessions(tmp_path) -> None:
         await runner.run_once(_spec(tmp_path))
 
     assert agent._sessions == {}
+
+
+async def test_run_once_renews_long_tick_lease(tmp_path) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingProvider(ScriptedProvider):
+        async def stream(self, request):
+            started.set()
+            await release.wait()
+            async for event in super().stream(request):
+                yield event
+
+    class RecordingLeaseStore(InMemoryLoopLeaseStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.refreshed = asyncio.Event()
+
+        async def refresh(self, lease, *, ttl_s):
+            self.refreshed.set()
+            return await super().refresh(lease, ttl_s=ttl_s)
+
+    lease_store = RecordingLeaseStore()
+    agent = _agent(BlockingProvider([TextTurn("done")]), tmp_path)
+    runner = LoopRunner(
+        agent,
+        leases=lease_store,
+        lease_owner="runner",
+        lease_ttl_s=0.03,
+    )
+    task = asyncio.create_task(runner.run_once(_spec(tmp_path)))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    renewed = False
+    try:
+        await asyncio.wait_for(lease_store.refreshed.wait(), timeout=1)
+        renewed = True
+    except TimeoutError:
+        pass
+    finally:
+        release.set()
+    result = await task
+
+    assert renewed
+    assert result.status == "completed"
+
+
+async def test_run_once_stops_when_lease_renewal_fails(tmp_path) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    class BlockingProvider(ScriptedProvider):
+        async def stream(self, request):
+            started.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+            async for event in super().stream(request):
+                yield event
+
+    class FailingLeaseStore(InMemoryLoopLeaseStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.released = asyncio.Event()
+
+        async def refresh(self, lease, *, ttl_s):
+            raise ConfigError("lease lost")
+
+        async def release(self, lease) -> None:
+            self.released.set()
+            await super().release(lease)
+
+    lease_store = FailingLeaseStore()
+    agent = _agent(BlockingProvider([TextTurn("done")]), tmp_path)
+    runner = LoopRunner(
+        agent,
+        leases=lease_store,
+        lease_owner="runner",
+        lease_ttl_s=0.03,
+    )
+    task = asyncio.create_task(runner.run_once(_spec(tmp_path)))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    try:
+        with pytest.raises(ConfigError, match="lease lost"):
+            await asyncio.wait_for(asyncio.shield(task), timeout=1)
+    except TimeoutError:
+        release.set()
+        await task
+        pytest.fail("run_once did not stop after lease renewal failed")
+
+    assert cancelled.is_set()
+    assert lease_store.released.is_set()
+
+
+async def test_run_once_clears_active_guard_when_release_fails(tmp_path) -> None:
+    class FailingReleaseStore(InMemoryLoopLeaseStore):
+        async def release(self, lease) -> None:
+            await super().release(lease)
+            raise ConfigError("release failed")
+
+    lease_store = FailingReleaseStore()
+    agent = _agent(ScriptedProvider([TextTurn("done"), TextTurn("done")]), tmp_path)
+    runner = LoopRunner(
+        agent,
+        leases=lease_store,
+        lease_owner="runner",
+        lease_ttl_s=60,
+    )
+
+    with pytest.raises(ConfigError, match="release failed"):
+        await runner.run_once(_spec(tmp_path))
+    with pytest.raises(ConfigError, match="release failed"):
+        await runner.run_once(_spec(tmp_path))
+
+
+async def test_run_once_drains_release_after_repeated_cancellation(tmp_path) -> None:
+    started = asyncio.Event()
+    release_started = asyncio.Event()
+    allow_release = asyncio.Event()
+    release_finished = asyncio.Event()
+
+    class BlockingProvider(ScriptedProvider):
+        async def stream(self, request):
+            started.set()
+            await allow_release.wait()
+            async for event in super().stream(request):
+                yield event
+
+    class SlowReleaseStore(InMemoryLoopLeaseStore):
+        async def release(self, lease) -> None:
+            release_started.set()
+            await allow_release.wait()
+            await super().release(lease)
+            release_finished.set()
+
+    lease_store = SlowReleaseStore()
+    agent = _agent(BlockingProvider([TextTurn("done")]), tmp_path)
+    runner = LoopRunner(
+        agent,
+        leases=lease_store,
+        lease_owner="runner",
+        lease_ttl_s=60,
+    )
+    task = asyncio.create_task(runner.run_once(_spec(tmp_path)))
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    task.cancel()
+    await asyncio.wait_for(release_started.wait(), timeout=1)
+    task.cancel()
+    allow_release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert release_finished.is_set()
+
+    result = await runner.run_once(_spec(tmp_path))
+    assert result.status == "completed"
+
+
+async def test_run_once_drains_session_release_after_repeated_cancellation(
+    tmp_path, monkeypatch
+) -> None:
+    from linch.session import Session
+
+    started = asyncio.Event()
+    allow_provider = asyncio.Event()
+    close_started = asyncio.Event()
+    allow_close = asyncio.Event()
+
+    class BlockingProvider(ScriptedProvider):
+        async def stream(self, request):
+            started.set()
+            await allow_provider.wait()
+            async for event in super().stream(request):
+                yield event
+
+    agent = _agent(BlockingProvider([TextTurn("done")]), tmp_path)
+    session = await agent.session(id="tick")
+
+    async def return_session(*, meta=None, **kwargs):
+        return session
+
+    monkeypatch.setattr(agent, "session", return_session)
+    original_aclose_impl = Session._aclose_impl
+
+    async def delayed_aclose_impl(self, *, force):
+        if self is session:
+            close_started.set()
+            await allow_close.wait()
+        await original_aclose_impl(self, force=force)
+
+    monkeypatch.setattr(Session, "_aclose_impl", delayed_aclose_impl)
+    runner = LoopRunner(agent)
+    task = asyncio.create_task(runner.run_once(_spec(tmp_path)))
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    task.cancel()
+    await asyncio.wait_for(close_started.wait(), timeout=1)
+    task.cancel()
+
+    returned_early = False
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=0.1)
+    except TimeoutError:
+        pass
+    except asyncio.CancelledError:
+        returned_early = True
+    else:
+        returned_early = True
+
+    close_task = session._close_task
+    assert close_task is not None
+    allow_close.set()
+    await asyncio.wait_for(asyncio.shield(close_task), timeout=1)
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert close_task.done()
+    assert session.id not in agent._sessions
+    assert not returned_early, "run_once returned before session release drained"
 
 
 async def test_run_failure_releases_durable_lease(tmp_path) -> None:
