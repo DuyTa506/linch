@@ -116,6 +116,26 @@ async def test_in_memory_event_batch_copies_once_and_fences_once():
     assert [row.event.tool_result.metadata["labels"] for row in rows] == [["original"]] * 3
 
 
+async def test_legacy_batch_override_accepts_unleased_and_rejects_leased_calls() -> None:
+    class LegacyBatchStore(InMemoryRunStore):
+        async def append_event(self, run_id, event):
+            return await super().append_event(run_id, event)
+
+    store = LegacyBatchStore()
+    await store.create_run("session", id="legacy-batch")
+    event = ToolCallEndEvent(
+        tool_use_id="call-legacy",
+        tool_name="Search",
+        result="ok",
+        tool_result=ToolResult(content="ok"),
+    )
+    assert await store.append_events("legacy-batch", [event]) == [1]
+    lease = await store.claim("legacy-batch", "owner", 30.0)
+    with pytest.raises(TypeError, match="does not support lease"):
+        await store.append_events("legacy-batch", [event], lease=lease)
+    assert [row.seq for row in await store.load_events("legacy-batch")] == [1]
+
+
 @pytest.mark.parametrize("kind", ["memory", "postgres"])
 async def test_run_store_round_trip(kind: str, pg_dsn: str) -> None:
     """Persist the checkpoint and event fields used while a turn resumes."""
