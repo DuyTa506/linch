@@ -210,7 +210,8 @@ async def test_skill_threshold_and_body_loading(count):
     events = await _run(session)
     reminder = session.full_history[0].content[0].text
     if count == 50:
-        assert "Skill description 49" in reminder
+        assert "Skill description 49" in "\n".join(block.text for block in _request(session).system)
+        assert "Skill description 49" not in reminder
         assert "tool_search" not in _names(_request(session))
         enabled = asdict(_request(session))
         await agent.tool_search.dispose()
@@ -583,7 +584,7 @@ async def test_compaction_reinjects_only_deferred_skill_names():
     session.session_log.record_projection(
         [Message(role="user", content=[TextBlock(text="summary")])]
     )
-    _re_inject_skill_context(session)
+    await _re_inject_skill_context(session)
     text = "\n".join(
         b.text for m in session.provider_view for b in m.content if isinstance(b, TextBlock)
     )

@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .._prompt_cache import prompt_cache_advisories, tool_signature
+from ..catalog import sync_catalog
 from ..compaction import build_compaction_event, reset_read_tracker_after_compaction
 from ..context import context_budget_to_dict
 from ..errors import ConfigError
@@ -217,13 +218,14 @@ async def prepare_provider_turn(ctx: ProviderPreparationContext) -> AsyncGenerat
         # its session mutation order without pulling runner state into this phase.
         from .request import _re_inject_skill_context
 
-        _re_inject_skill_context(ctx.session, config=ctx.config)
+        await _re_inject_skill_context(ctx.session, config=ctx.config)
         await ctx.maybe_save_provider_snapshot(ctx.session)
         event = build_compaction_event(ctx.session)
         await ctx.persist_event(event)
         yield event
 
     if not ctx.resumed_assistant and not ctx.exact_pending_replay:
+        await sync_catalog(ctx.session, ctx.config, None)
         try:
             ctx.ledger.assert_may_start()
         except _ModelCallError as exc:

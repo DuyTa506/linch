@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .. import lifecycle
+from ..catalog import snapshot_enabled
 from ..errors import ConfigError
 from ..events import (
     ErrorEvent,
@@ -55,11 +56,18 @@ def _prompt_message(ctx: RunStartupContext, prompt: str, images: Any) -> Any:
     catalog = ctx.runtime.config.context.get("request_catalog")
     if catalog is not None:
         listing = catalog.skill_listing(session, listing)
-    if listing and not session.tools_override:
+    if listing and not session.tools_override and not snapshot_enabled(session, ctx.runtime.config):
         from ..skills.system_reminder import wrap_in_system_reminder
 
         reminder = wrap_in_system_reminder(listing)
-        message.content.insert(0, TextBlock(text=reminder))
+        present = {
+            block.text
+            for previous in session.provider_view
+            for block in previous.content
+            if isinstance(block, TextBlock)
+        }
+        if reminder not in present:
+            message.content.insert(0, TextBlock(text=reminder))
     return message
 
 
