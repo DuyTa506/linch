@@ -150,7 +150,7 @@ def _normalize_permissions(permissions: Any | dict[str, object] | None) -> _Perm
                     "permissions.rules entries must be ToolRule, PathRule, or BashRule"
                 )
             perm_rules.append(rule)
-        can_use = permissions.get("canUseTool") or permissions.get("can_use_tool")
+        can_use = permissions.get("can_use_tool")
         return _PermissionConfig(
             mode=perm_mode,
             rules=perm_rules,
@@ -160,7 +160,7 @@ def _normalize_permissions(permissions: Any | dict[str, object] | None) -> _Perm
     perm_mode = _normalize_permission_mode(getattr(permissions, "mode", "default"))
     raw_rules = getattr(permissions, "rules", None)
     perm_rules = list(raw_rules) if raw_rules else []
-    can_use = getattr(permissions, "canUseTool", None) or getattr(permissions, "can_use_tool", None)
+    can_use = getattr(permissions, "can_use_tool", None)
     return _PermissionConfig(
         mode=perm_mode,
         rules=cast(list[PermissionRule], perm_rules),
@@ -1703,19 +1703,38 @@ class Agent:
                 )
 
             session.invoked_skills = []
-            for rec in record.invoked_skills:
+            for index, rec in enumerate(record.invoked_skills):
                 if not isinstance(rec, dict):
-                    continue
+                    raise ConfigError(
+                        f"session.invoked_skills[{index}] must be an object with canonical fields"
+                    )
+                missing = {
+                    field
+                    for field in ("name", "substituted_body", "invoked_at")
+                    if field not in rec
+                }
+                if missing:
+                    missing_fields = ", ".join(sorted(missing))
+                    raise ConfigError(
+                        f"session.invoked_skills[{index}] is missing canonical field(s): "
+                        f"{missing_fields}"
+                    )
+                name = rec["name"]
+                substituted_body = rec["substituted_body"]
+                invoked_at = rec["invoked_at"]
+                if not isinstance(name, str) or not isinstance(substituted_body, str):
+                    raise ConfigError(
+                        f"session.invoked_skills[{index}] name and substituted_body must be strings"
+                    )
+                if isinstance(invoked_at, bool) or not isinstance(invoked_at, (int, float)):
+                    raise ConfigError(
+                        f"session.invoked_skills[{index}] invoked_at must be a number"
+                    )
                 session.invoked_skills.append(
-                    # Stored metadata may come from JSON backends; normalize defensively.
                     InvokedSkillRecord(
-                        name=str(rec.get("name", "")),
-                        substituted_body=str(
-                            rec.get("substituted_body", rec.get("substitutedBody", ""))
-                        ),
-                        invoked_at=float(
-                            cast(Any, rec.get("invoked_at", rec.get("invokedAt", 0.0)) or 0.0)
-                        ),
+                        name=name,
+                        substituted_body=substituted_body,
+                        invoked_at=float(invoked_at),
                     )
                 )
             # close() may have started while store/setup calls were awaiting. Do

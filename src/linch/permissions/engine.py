@@ -218,7 +218,7 @@ class PermissionEngine:
             return PermissionDecision(
                 decision="deny",
                 reason=f"Permission denied for {call.tool.name}: "
-                "canUseTool callback is not configured.",
+                "can_use_tool callback is not configured.",
             )
 
         if _signal_aborted(signal):
