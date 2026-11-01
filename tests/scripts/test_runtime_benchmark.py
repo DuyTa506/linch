@@ -9,7 +9,7 @@ import pytest
 
 
 def _load_script():
-    path = Path(__file__).resolve().parents[1] / "scripts" / "benchmark_runtime.py"
+    path = Path(__file__).resolve().parents[2] / "scripts" / "benchmark_runtime.py"
     spec = importlib.util.spec_from_file_location("benchmark_runtime_script", path)
     assert spec is not None
     module = importlib.util.module_from_spec(spec)

@@ -14,7 +14,7 @@ import pytest
 
 from linch.ext.scaffold import main
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _new_project(tmp_path: Path, name: str = "my-agent") -> Path:

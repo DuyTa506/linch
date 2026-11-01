@@ -5,8 +5,9 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from test_model_call_journal import _close, _reopen, _stores
 from test_terminal_atomicity import _CrashWrites, _normalized, _ProcessDeath
+
+from tests.model_calls.test_model_call_journal import _close, _reopen, _stores
 
 
 class CorrectionWrites(_CrashWrites):

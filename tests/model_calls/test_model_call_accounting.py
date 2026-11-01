@@ -11,7 +11,8 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
-from test_run_resume import _pin_run_contract
+
+from tests.loop.test_run_resume import _pin_run_contract
 
 
 async def _run_compaction_case(

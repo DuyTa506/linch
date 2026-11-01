@@ -10,7 +10,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
-_RECIPE = Path(__file__).resolve().parents[1] / "examples" / "recipes" / "runner_recipes.py"
+_RECIPE = Path(__file__).resolve().parents[2] / "examples" / "recipes" / "runner_recipes.py"
 
 
 def _load():
