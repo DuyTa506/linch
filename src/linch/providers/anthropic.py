@@ -131,6 +131,7 @@ class AnthropicProvider(BaseProvider):
         return full_capabilities(
             self.context_window(model),
             structured_output_terminal_tool=_effective_api_mode(self._options) == "compatible",
+            can_disable_thinking=True,
         )
 
     async def _get_client(self) -> Any:

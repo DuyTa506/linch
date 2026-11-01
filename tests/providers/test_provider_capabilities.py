@@ -26,6 +26,7 @@ def test_capabilities_defaults():
     assert caps.structured_output_terminal_tool is False
     assert caps.tool_choice is True
     assert caps.prompt_cache is False
+    assert caps.can_disable_thinking is False
 
 
 def test_capabilities_custom_values():
@@ -47,18 +48,20 @@ def test_capabilities_custom_values():
 
 
 @pytest.mark.parametrize(
-    "provider_key,model,expected_window,minimum_window,terminal,expected_id,expected_parallel",
+    "provider_key,model,expected_window,minimum_window,terminal,expected_id,expected_parallel,can_disable_thinking",
     [
-        ("openai-chat", "gpt-4o", 128_000, 0, False, "openai-chat", True),
-        ("openai-responses", "gpt-5", None, 1, False, "openai-responses", True),
-        ("vllm", "served-model", 65_536, 0, False, "vllm", False),
-        ("sglang", "served-model", 65_536, 0, False, "sglang", False),
-        ("anthropic", "claude-opus-4-8", 200_000, 0, False, "anthropic", True),
-        ("anthropic-compatible", "deepseek-v4-flash", 200_000, 0, True, "anthropic", True),
-        ("gemini-flash", "gemini-2.0-flash", None, 1_000_000, False, "gemini", True),
-        ("gemini-pro", "gemini-2.5-pro", None, 1_000_000, False, "gemini", True),
-        ("gemini-15", "gemini-1.5-pro", 2_000_000, 0, False, "gemini", True),
-        ("gemini-unknown", "gemini-unknown-xyz", None, 32_000, False, "gemini", True),
+        ("openai-chat", "gpt-4o", 128_000, 0, False, "openai-chat", True, False),
+        ("openai-responses", "gpt-5", None, 1, False, "openai-responses", True, False),
+        ("vllm", "served-model", 65_536, 0, False, "vllm", False, False),
+        ("sglang", "served-model", 65_536, 0, False, "sglang", False, False),
+        ("anthropic", "claude-opus-4-8", 200_000, 0, False, "anthropic", True, True),
+        ("anthropic-compatible", "deepseek-v4-flash", 200_000, 0, True, "anthropic", True, True),
+        ("deepseek", "deepseek-v4-flash", None, 1, False, "deepseek", True, True),
+        ("llamacpp", "local-model", 128_000, 0, False, "llamacpp", True, True),
+        ("gemini-flash", "gemini-2.0-flash", None, 1_000_000, False, "gemini", True, False),
+        ("gemini-pro", "gemini-2.5-pro", None, 1_000_000, False, "gemini", True, False),
+        ("gemini-15", "gemini-1.5-pro", 2_000_000, 0, False, "gemini", True, False),
+        ("gemini-unknown", "gemini-unknown-xyz", None, 32_000, False, "gemini", True, False),
     ],
 )
 def test_provider_capability_flags(
@@ -69,11 +72,14 @@ def test_provider_capability_flags(
     terminal: bool,
     expected_id: str,
     expected_parallel: bool,
+    can_disable_thinking: bool,
 ) -> None:
     from linch.providers import (
         AnthropicProvider,
         AnthropicProviderOptions,
+        DeepSeekProvider,
         GeminiProvider,
+        LlamaCppProvider,
         OpenAIChatCompletionsProvider,
         OpenAIResponsesProvider,
         SGLangProvider,
@@ -93,6 +99,8 @@ def test_provider_capability_flags(
         "anthropic-compatible": AnthropicProvider(
             AnthropicProviderOptions(base_url="https://api.deepseek.com/anthropic")
         ),
+        "deepseek": DeepSeekProvider(),
+        "llamacpp": LlamaCppProvider(),
         "gemini-flash": GeminiProvider(),
         "gemini-pro": GeminiProvider(),
         "gemini-15": GeminiProvider(),
@@ -110,6 +118,7 @@ def test_provider_capability_flags(
     assert caps.tool_choice is True
     assert caps.prompt_cache is True
     assert caps.structured_output_terminal_tool is terminal
+    assert caps.can_disable_thinking is can_disable_thinking
 
 
 def test_base_provider_default_capabilities():
