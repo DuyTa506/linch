@@ -157,11 +157,13 @@ def test_build_usage_surfaces_cache_read_tokens() -> None:
         "input_tokens_details": {"cached_tokens": 768},
     }
     usage = build_usage(raw)
-    assert usage.input_tokens == 1000
+    assert usage.input_tokens == 232
     assert usage.cache_read_tokens == 768
 
     # No cache details / no usage → 0, never raises.
-    assert build_usage({"input_tokens": 10, "output_tokens": 2}).cache_read_tokens == 0
+    uncached = build_usage({"input_tokens": 10, "output_tokens": 2})
+    assert uncached.input_tokens == 10
+    assert uncached.cache_read_tokens == 0
     assert build_usage(None).cache_read_tokens == 0
 
 
@@ -238,3 +240,39 @@ async def test_stream_propagates_wait_for_timeout_instead_of_swallowing_it() -> 
 
     with pytest.raises(asyncio.TimeoutError):
         await asyncio.wait_for(consume(), timeout=0.05)
+
+
+@pytest.mark.parametrize("arguments", ["", " \n\t"])
+@pytest.mark.parametrize("completed_arguments", ["", " ", '{"value":"complete"}'])
+async def test_map_wire_events_normalizes_empty_tool_arguments(
+    arguments: str, completed_arguments: str
+) -> None:
+    import json
+
+    async def wire():
+        yield {
+            "type": "response.output_item.added",
+            "item": {
+                "type": "function_call",
+                "id": "item_1",
+                "call_id": "call_1",
+                "name": "NoArgs",
+            },
+        }
+        yield {
+            "type": "response.function_call_arguments.delta",
+            "item_id": "item_1",
+            "delta": arguments,
+        }
+        yield {
+            "type": "response.output_item.done",
+            "item": {"type": "function_call", "id": "item_1", "arguments": completed_arguments},
+        }
+        yield {"type": "response.completed", "response": {"status": "completed"}}
+
+    events = [event async for event in map_wire_events(wire(), "gpt-5")]
+    raw_input = "".join(
+        event["json_delta"] for event in events if event["type"] == "tool_use_input_delta"
+    )
+    assert json.loads(raw_input) == json.loads(completed_arguments.strip() or "{}")
+    assert events[-1]["stop_reason"] == "tool_use"

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import inspect
-import logging
 from dataclasses import replace
 from typing import Any
 
@@ -19,32 +18,47 @@ from ..middleware import (
 )
 from ..tools import ToolResult
 from .contexts import (
-    AgentStartContext,
     AgentStopContext,
     BeforeFinalAnswerContext,
     BeforeProviderCallContext,
-    EventEmitContext,
     PostToolUseContext,
     PreToolUseContext,
-    ProviderCallStartContext,
-    ProviderCallStopContext,
-    ToolUseStartContext,
-    ToolUseStopContext,
-    TurnStartContext,
-    TurnStopContext,
 )
 from .types import HookResult
 
-_log = logging.getLogger("linch.observability")
-
 
 class ContextInjectionHook:
+    """Adapt a context builder to the hook lifecycle.
+
+    Args:
+        builder: Context builder or builder sequence used for each turn.
+    """
+
     name = "context_builder"
 
     def __init__(self, builder: Any) -> None:
+        """Create an adapter around a context builder.
+
+        Args:
+            builder: Context builder configuration.
+        """
+
         self.builder = normalize_context_builder(builder)
 
-    async def build_context(self, session: Any, turn_index: int) -> ContextBuildResult | None:
+    async def build_context(
+        self, session: Any, turn_index: int, *, _run_config: Any = None
+    ) -> ContextBuildResult | None:
+        """Build bounded context for a session turn.
+
+        Args:
+            session: Session whose provider context is being assembled.
+            turn_index: Turn number being assembled.
+            _run_config: Private captured configuration supplying this request's tools and services.
+
+        Returns:
+            Context build result, or ``None`` when no builder is configured.
+        """
+
         if self.builder is None:
             return None
         agent = session.agent
@@ -54,7 +68,12 @@ class ContextInjectionHook:
             turn_index=turn_index,
             deps=getattr(session, "run_deps", None),
             model=agent.model,
-            tools=getattr(session, "tools_override", None) or agent.tools,
+            tools=(
+                _run_config.tools
+                if _run_config is not None
+                else (getattr(session, "tools_override", None) or agent.tools)
+            ),
+            _run_config=_run_config,
             token_estimator=getattr(agent, "token_estimator", None),
         )
         result = await self.builder.build(turn)
@@ -64,14 +83,49 @@ class ContextInjectionHook:
             model=agent.model,
         )
 
+    async def on_agent_stop(self, ctx: AgentStopContext) -> None:
+        """Run the builder's optional terminal cleanup hook.
+
+        Args:
+            ctx: Agent-stop lifecycle context.
+        """
+
+        cleanup = getattr(self.builder, "on_agent_stop", None)
+        if cleanup is not None:
+            result = cleanup(ctx)
+            if inspect.isawaitable(result):
+                await result
+
 
 class ToolMiddlewareHook:
+    """Adapt tool middleware objects to pre/post tool hooks.
+
+    Args:
+        middleware: Middleware object or sequence to invoke in order.
+    """
+
     name = "tool_middleware"
 
     def __init__(self, middleware: Any) -> None:
+        """Create an adapter around tool middleware.
+
+        Args:
+            middleware: Middleware configuration.
+        """
+
         self.middleware = normalize_middleware(middleware)
 
     async def on_pre_tool_use(self, ctx: PreToolUseContext) -> HookResult | None:
+        """Validate or rewrite tool input before execution.
+
+        Args:
+            ctx: Pre-tool lifecycle context.
+
+        Returns:
+            A hook result when input changes or execution is blocked; otherwise
+            ``None``.
+        """
+
         current = ToolCallMiddlewareInput(
             tool_use_id=ctx.tool_use_id,
             tool_name=ctx.tool_name,
@@ -96,7 +150,7 @@ class ToolMiddlewareHook:
                     raw = await raw
             except Exception as exc:
                 # Fail closed: a raising before_tool_call middleware blocks the
-                # call (matches the legacy dispatch_before_tool_call contract).
+                # call (matches the former middleware dispatch contract).
                 return HookResult.block(
                     f"Middleware before_tool_call failed: {exc}", input=current.input
                 )
@@ -116,6 +170,19 @@ class ToolMiddlewareHook:
         return None
 
     async def on_post_tool_use(self, ctx: PostToolUseContext) -> HookResult | None:
+        """Validate or rewrite the legacy result after execution.
+
+        Canonical-only ``ctx.tool_output`` values are not processed by this
+        legacy middleware adapter.
+
+        Args:
+            ctx: Post-tool lifecycle context.
+
+        Returns:
+            A hook result when the result changes or middleware fails; otherwise
+            ``None``.
+        """
+
         current = ctx.result
         if current is None:
             return None
@@ -165,9 +232,23 @@ class ToolMiddlewareHook:
 
 
 class FinalAnswerVerifierHook:
+    """Adapt final-answer verifiers to the pre-final-answer hook.
+
+    Args:
+        verifiers: Verifier object or sequence evaluated in order.
+        max_retries: Maximum verification retries allowed per run.
+    """
+
     name = "verifiers"
 
     def __init__(self, verifiers: Any, *, max_retries: int = 2) -> None:
+        """Create a bounded final-answer verifier adapter.
+
+        Args:
+            verifiers: Verifier configuration.
+            max_retries: Maximum retries allowed for each run.
+        """
+
         from ..verification import normalize_verifiers
 
         self.verifiers = normalize_verifiers(verifiers)
@@ -175,6 +256,16 @@ class FinalAnswerVerifierHook:
         self.attempts_by_run: dict[str, int] = {}
 
     async def on_before_final_answer(self, ctx: BeforeFinalAnswerContext) -> HookResult | None:
+        """Evaluate verifiers before returning a candidate answer.
+
+        Args:
+            ctx: Candidate final-answer context.
+
+        Returns:
+            A retry, stop, or exhausted-result hook decision; ``None`` when all
+            verifiers pass.
+        """
+
         if not self.verifiers:
             return None
         from ..events import VerificationEvent
@@ -233,156 +324,49 @@ class FinalAnswerVerifierHook:
         return None
 
     def on_agent_stop(self, ctx: Any) -> None:
+        """Drop retry counters when a run reaches any terminal path.
+
+        Args:
+            ctx: Agent-stop context containing the run identifier.
+        """
+
         # Drop per-run retry state on every terminal path (incl. max_turns,
         # budget, abort, error) so this per-agent hook can't leak run ids.
         self.attempts_by_run.pop(ctx.run_id, None)
 
 
 class StopPredicateHook:
+    """Stop a run when a host predicate returns true.
+
+    Args:
+        predicate: Callable receiving the current session.
+    """
+
     name = "stop_when"
 
     def __init__(self, predicate: Any) -> None:
+        """Create a predicate-backed stop hook.
+
+        Args:
+            predicate: Callable evaluated before each provider call.
+        """
+
         self.predicate = predicate
 
     def on_before_provider_call(self, ctx: BeforeProviderCallContext) -> HookResult | None:
+        """Evaluate the stop predicate before a provider request.
+
+        Args:
+            ctx: Before-provider-call lifecycle context.
+
+        Returns:
+            A successful stop result when the predicate is true; otherwise
+            ``None``.
+        """
+
         try:
             if self.predicate(ctx.session):
                 return HookResult.stop("stop_when", metadata={"subtype": "success"})
         except Exception:
             return None
         return None
-
-
-def _provider_id(ctx: Any) -> str:
-    # Provider id for gen_ai.provider.name; "" when unresolvable (e.g. tests
-    # driving hooks with bare contexts).
-    provider = getattr(getattr(getattr(ctx, "session", None), "agent", None), "provider", None)
-    return str(getattr(provider, "id", "") or "")
-
-
-class RunTelemetryHook:
-    name = "observers"
-
-    def __init__(self, observers: Any) -> None:
-        from ..observability import ObserverDispatcher, normalize_observers
-
-        self.observers = normalize_observers(observers)
-        # Reuse the observability hub for fan-out (await async, isolate
-        # exceptions) instead of re-implementing it here.
-        self._hub = ObserverDispatcher(self.observers)
-
-    async def on_agent_start(self, ctx: AgentStartContext) -> None:
-        from ..observability import RunInfo
-
-        await self._dispatch(
-            "on_run_start",
-            RunInfo(
-                run_id=ctx.run_id,
-                session_id=ctx.session.id,
-                model=ctx.model,
-                prompt=ctx.prompt,
-                tools=ctx.tools,
-                provider_id=_provider_id(ctx),
-            ),
-        )
-
-    async def on_agent_stop(self, ctx: AgentStopContext) -> None:
-        await self._dispatch("on_run_end", ctx.result)
-
-    async def on_turn_start(self, ctx: TurnStartContext) -> None:
-        from ..observability import TurnInfo
-
-        await self._dispatch(
-            "on_turn_start",
-            TurnInfo(run_id=ctx.run_id, turn_index=int(ctx.turn_index or 0)),
-        )
-
-    async def on_turn_stop(self, ctx: TurnStopContext) -> None:
-        from ..observability import TurnInfo
-
-        await self._dispatch(
-            "on_turn_end",
-            TurnInfo(run_id=ctx.run_id, turn_index=int(ctx.turn_index or 0)),
-        )
-
-    async def on_provider_call_start(self, ctx: ProviderCallStartContext) -> None:
-        from ..observability import ProviderCallInfo
-
-        await self._dispatch(
-            "on_provider_call_start",
-            ProviderCallInfo(
-                run_id=ctx.run_id,
-                turn_index=int(ctx.turn_index or 0),
-                model=ctx.model,
-                provider_id=_provider_id(ctx),
-            ),
-        )
-
-    async def on_provider_call_stop(self, ctx: ProviderCallStopContext) -> None:
-        from ..observability import ProviderCallResult
-        from ..types import Usage
-
-        await self._dispatch(
-            "on_provider_call_end",
-            ProviderCallResult(
-                run_id=ctx.run_id,
-                turn_index=int(ctx.turn_index or 0),
-                model=ctx.model,
-                stop_reason=ctx.stop_reason,
-                usage=ctx.usage or Usage(),
-                duration_ms=ctx.duration_ms,
-                provider_id=_provider_id(ctx),
-            ),
-        )
-
-    async def on_tool_use_start(self, ctx: ToolUseStartContext) -> None:
-        from ..observability import ToolInfo
-
-        await self._dispatch(
-            "on_tool_start",
-            ToolInfo(
-                run_id=ctx.run_id,
-                turn_index=int(ctx.turn_index or 0),
-                tool_use_id=ctx.tool_use_id,
-                tool_name=ctx.tool_name,
-                input=ctx.input,
-                summary=ctx.summary,
-            ),
-        )
-
-    async def on_tool_use_stop(self, ctx: ToolUseStopContext) -> None:
-        from ..observability import ToolResultInfo
-
-        await self._dispatch(
-            "on_tool_end",
-            ToolResultInfo(
-                run_id=ctx.run_id,
-                turn_index=int(ctx.turn_index or 0),
-                tool_use_id=ctx.tool_use_id,
-                tool_name=ctx.tool_name,
-                is_error=ctx.is_error,
-                duration_ms=ctx.duration_ms,
-                result=ctx.result,
-                tool_result=ctx.tool_result,
-            ),
-        )
-
-    async def on_event_emit(self, ctx: EventEmitContext) -> None:
-        await self._dispatch("on_event", ctx.event)
-
-    async def aclose(self) -> None:
-        # Forward close/flush to wrapped observers (e.g. OTel exporters) so
-        # Agent.close() still flushes them after the observers→hooks migration.
-        for observer in self.observers:
-            closer = getattr(observer, "aclose", None) or getattr(observer, "close", None)
-            if closer is None:
-                continue
-            try:
-                result = closer()
-                if inspect.isawaitable(result):
-                    await result
-            except Exception:
-                _log.exception("observer %r raised on close; continuing", type(observer).__name__)
-
-    async def _dispatch(self, method: str, *args: Any) -> None:
-        await self._hub.dispatch(method, *args)

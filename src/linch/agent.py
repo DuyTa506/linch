@@ -3,24 +3,27 @@ from __future__ import annotations
 import asyncio
 import os
 import platform
-import warnings
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
 from ._blocking import run_blocking
 from ._version import get_version
+from ._wire import UnsupportedWireVersionError
 from .config import FeatureFlags, SystemPromptConfig
 from .durability import DurabilityOptions
 from .errors import ConfigError
-from .execution import ExecutionBackend, ShellBackend
-from .kernel import Context
+from .execution import ExecutionBackend
+from .kernel import Context, Disposable, Plugin
+from .loop.reliability import PrerequisiteHook
+from .loop.turn_stopping import TurnStoppingDispatcher, TurnStoppingListener
 from .openai_responses import OpenAIOptions, OpenAIReasoning
 from .permissions import BashRule, CanUseTool, PathRule, PermissionEngine, PermissionRule, ToolRule
 from .providers import BaseProvider, OpenAIResponsesProvider, OpenAIResponsesProviderOptions
 from .providers.limiter import Limiter, _SemaphoreLimiter
 from .recovery import TruncationRecovery
+from .reliability import ReliabilityPolicy
 from .run_store import RunStore
 from .session import Session
 from .sessions import InMemorySessionStore, SessionStore
@@ -44,12 +47,40 @@ _UNSET: Any = object()
 # default (offload on, threshold derived from context window) from an explicit
 # None (offload disabled).
 _DEFAULT_OFFLOAD: Any = object()
+_DEFAULT_RELIABILITY_POLICY = ReliabilityPolicy()
 
 _SECTION_PLACEMENTS = ("before_defaults", "after_defaults", "after_env")
 
 _OPEN = "open"
 _QUIESCING = "quiescing"
 _CLOSED = "closed"
+
+
+async def _close_mcp_connection(connection: Any, primary: BaseException) -> None:
+    """Close a newly connected MCP connection while preserving its failure."""
+    try:
+        close_task = asyncio.create_task(connection.close())
+    except BaseException as exc:
+        primary.add_note(f"MCP connection cleanup failed: {type(exc).__name__}: {exc}")
+        return
+    cleanup_error: BaseException | None = None
+    while not close_task.done():
+        try:
+            await asyncio.shield(close_task)
+        except asyncio.CancelledError:
+            continue
+        except BaseException as exc:
+            cleanup_error = exc
+            break
+    if cleanup_error is None:
+        try:
+            close_task.result()
+        except BaseException as exc:
+            cleanup_error = exc
+    if cleanup_error is not None:
+        primary.add_note(
+            f"MCP connection cleanup failed: {type(cleanup_error).__name__}: {cleanup_error}"
+        )
 
 
 @dataclass(slots=True)
@@ -67,11 +98,8 @@ class _RuntimeLimits:
 
 def _resolve_system_prompt(
     system_prompt: str | None,
-    system_prompt_alias: str | None,
     cfg: SystemPromptConfig | None,
 ) -> str | None:
-    if system_prompt_alias is not None:
-        system_prompt = system_prompt_alias
     if cfg is not None and cfg.append is not None:
         return cfg.append
     return system_prompt
@@ -119,7 +147,7 @@ def _normalize_permissions(permissions: Any | dict[str, object] | None) -> _Perm
                     "permissions.rules entries must be ToolRule, PathRule, or BashRule"
                 )
             perm_rules.append(rule)
-        can_use = permissions.get("canUseTool") or permissions.get("can_use_tool")
+        can_use = permissions.get("can_use_tool")
         return _PermissionConfig(
             mode=perm_mode,
             rules=perm_rules,
@@ -129,7 +157,7 @@ def _normalize_permissions(permissions: Any | dict[str, object] | None) -> _Perm
     perm_mode = _normalize_permission_mode(getattr(permissions, "mode", "default"))
     raw_rules = getattr(permissions, "rules", None)
     perm_rules = list(raw_rules) if raw_rules else []
-    can_use = getattr(permissions, "canUseTool", None) or getattr(permissions, "can_use_tool", None)
+    can_use = getattr(permissions, "can_use_tool", None)
     return _PermissionConfig(
         mode=perm_mode,
         rules=cast(list[PermissionRule], perm_rules),
@@ -372,59 +400,224 @@ def _build_tool_protocol_lines(
     return lines
 
 
-@dataclass(slots=True)
-class AgentOptions:
-    model: str
-    provider: BaseProvider | None = None
-    openai: OpenAIOptions = field(default_factory=OpenAIOptions)
-    reasoning: OpenAIReasoning | None = None
-    tools: ToolRegistry | None = None
-    permissions: dict[str, object] | None = None
-    session_store: SessionStore | None = None
-    run_store: RunStore | None = None
-    durability: DurabilityOptions | None = None
-    cwd: str | None = None
-    system_prompt: str | None = None
-    system_prompt_config: SystemPromptConfig | None = None
-    max_retries: int = 5
-    max_output_tokens: int | None = None
-    include_partial_messages: bool = False
-    max_turns: int | None = None
-    max_tool_concurrency: int | None = None
-    limiter: Any = None  # Limiter | None
-    max_provider_concurrency: int | None = None
-    tool_batching_strategy: str = "greedy"
-    tool_timeout_ms: float | None = None
-    tool_retry: Any = None  # RetryOptions | None
-    cache_ttl: str | None = None
-    config_dir: str | None = None
-    mcp_servers: dict[str, Any] | None = None
-    compaction: Any = None
-    compaction_ladder: Any = None  # CompactionLadder | None
-    truncation_recovery: TruncationRecovery | None = None
-    token_estimator: Any = None
-    budget: Any = None  # RunBudget | None
-    features: FeatureFlags | None = None
-    deps: Any = None
-    output_schema: Any = None  # OutputSchema | None
-    tool_choice: Any = None  # ToolChoice | None
-    final_tool_name: str | None = None
-    loop_guard: Any = None  # LoopGuard | None; None means "use default LoopGuard"
-    filesystem: Any = None  # FileBackend | None
-    result_offload: Any = None  # OffloadConfig | None; requires filesystem feature opt-in
-    hooks: Any = None
-    read_before_write: Any = False
-    extra_subagents: list[AgentDefinition] | None = None
-    enable_worker_tools: bool = False
-    retain_subagents: bool = False
-    enable_background_subagents: bool = False
-    enable_task_stop: bool = False
-    execution_backend: ExecutionBackend | ShellBackend | None = None
-    context: Context | None = None
-    tool_pipeline: ToolPipeline | None = None
+def _system_blocks_signature_for(
+    *,
+    tools: Any,
+    tool_names: list[str],
+    tool_sections: list[Any],
+    system_prompt: str | None,
+    system_prompt_config: Any,
+    permission_mode: str,
+    bash_security: str,
+) -> tuple[Any, ...]:
+    cfg = system_prompt_config
+    cfg_sections = tuple(
+        (
+            getattr(section, "name", None),
+            getattr(section, "text", None),
+            getattr(section, "cacheable", None),
+            getattr(section, "placement", None),
+        )
+        for section in ((cfg.sections or []) if cfg is not None else [])
+    )
+    contributed = tuple(
+        (section.name, section.text, section.cacheable, section.placement)
+        for section in tool_sections
+    )
+    cfg_blocks = tuple(
+        (getattr(block, "text", None), getattr(block, "cacheable", None))
+        for block in ((cfg.blocks or []) if cfg is not None else [])
+    )
+    return (
+        tools.generation,
+        tuple(tool_names),
+        contributed,
+        cfg_sections,
+        cfg_blocks,
+        getattr(cfg, "replace_defaults", False),
+        getattr(cfg, "append", None),
+        system_prompt,
+        permission_mode,
+        bash_security,
+    )
+
+
+def _build_system_blocks_for(
+    *,
+    tool_names: list[str],
+    tool_sections: list[Any] | None,
+    cwd: str,
+    bash_security: str,
+    permission_mode: str,
+    system_prompt: str | None,
+    system_prompt_config: Any,
+) -> list[SystemBlock]:
+    names = ", ".join(sorted(tool_names))
+    shell = os.environ.get("SHELL", os.environ.get("COMSPEC", "unknown"))
+    py_ver = platform.python_version()
+    os_info = f"{platform.system()} {platform.release()} ({platform.machine()})"
+
+    # ── Tool-aware protocol block ────────────────────────────────────────
+    # Only include clauses for the tools that are actually present so
+    # non-SWE agents (RAG, SQL, …) aren't given misleading instructions.
+    present = set(tool_names)
+    has_swe_tools = bool(present & _SWE_TOOL_FAMILIES)
+    protocol_lines = _build_tool_protocol_lines(
+        present,
+        has_swe_tools=has_swe_tools,
+        bash_security=bash_security,
+    )
+
+    # ── env block (always included) ──────────────────────────────────────
+    env_lines = [
+        "Runtime:",
+        "",
+        f"- Linch version: {get_version()}",
+        f"- Permission mode: {permission_mode}",
+        f"- Tools available: {names or 'none'}",
+    ]
+    if has_swe_tools:
+        env_lines.extend(
+            [
+                f"- Working directory: {cwd}",
+                f"- OS: {os_info}",
+                f"- Shell: {shell}",
+                f"- Python: {py_ver}",
+            ]
+        )
+    env_text = "\n".join(env_lines)
+
+    cfg = system_prompt_config
+
+    # ── Assemble blocks ──────────────────────────────────────────────────
+    blocks: list[SystemBlock] = []
+    section_blocks = _system_prompt_section_blocks(cfg, tool_sections)
+
+    if cfg is not None and cfg.replace_defaults:
+        # Custom-identity / non-SWE mode: skip built-in identity + protocol
+        blocks.extend(section_blocks["before_defaults"])
+        if cfg.blocks:
+            blocks.extend(cfg.blocks)
+        blocks.extend(section_blocks["after_defaults"])
+    else:
+        # Neutral SDK mode: caller/tool blocks surround a generic identity.
+        blocks.extend(section_blocks["before_defaults"])
+        if cfg is not None and cfg.blocks:
+            blocks.extend(cfg.blocks)
+        blocks.append(SystemBlock(text=_CORE_IDENTITY, cacheable=True))
+        if has_swe_tools and protocol_lines:
+            protocol = "Tool use protocol:\n\n" + "\n".join(protocol_lines)
+            blocks.append(SystemBlock(text=protocol, cacheable=True))
+        elif protocol_lines:
+            # Non-SWE tools present: include the generic concurrency hint only
+            protocol = "Tool use protocol:\n\n" + protocol_lines[-1]
+            blocks.append(SystemBlock(text=protocol, cacheable=True))
+        blocks.extend(section_blocks["after_defaults"])
+
+    # ── Virtual filesystem block ─────────────────────────────────────────
+    # Present whenever the filesystem tools are available, in both default
+    # and replace_defaults modes — offloaded RAG/search results are useless
+    # if the model doesn't know how to recover them.
+    if {"read_file", "ls", "write_file", "edit_file"} & present:
+        fs_lines = [
+            "Virtual filesystem:",
+            "",
+            "- You have a virtual filesystem, separate from the real workspace, "
+            "accessed via ls, read_file, write_file, and edit_file.",
+            "- Large tool results may be automatically offloaded here: instead of the "
+            "full output you will see a short preview plus a file path. Call "
+            "read_file(path, offset, limit) to read the parts you need — do not "
+            "assume the preview is the whole result.",
+            "- Use write_file as a scratchpad for notes, plans, or intermediate "
+            "results you want to keep across turns without bloating the conversation.",
+        ]
+        blocks.append(SystemBlock(text="\n".join(fs_lines), cacheable=True))
+
+    # env_text is always present
+    blocks.append(SystemBlock(text=env_text, cacheable=True))
+    blocks.extend(section_blocks["after_env"])
+
+    # User-provided instructions (from system_prompt or SystemPromptConfig.append)
+    append_text = system_prompt
+    if cfg is not None and cfg.append is not None:
+        append_text = cfg.append
+    if append_text:
+        blocks.append(
+            SystemBlock(
+                text=f"User-provided instructions:\n\n{append_text}",
+                cacheable=True,
+            )
+        )
+
+    return blocks
 
 
 class Agent:
+    """Own long-lived provider, tool, policy, context, and session configuration.
+
+    An agent can create many independent sessions. Its child :class:`Context` owns
+    registrations and is disposed with the agent; a supplied context is treated as
+    a host parent and is never disposed by this object.
+
+    Args:
+        provider: Provider implementation, or a provider inferred from options.
+        model: Model identifier used for provider calls.
+        openai: Optional OpenAI client options.
+        reasoning: Optional OpenAI reasoning configuration.
+        openai_api_key: API key used when constructing an inferred OpenAI provider.
+        openai_base_url: Base URL used when constructing an inferred OpenAI provider.
+        tools: Initial tool registry copied into the agent.
+        permissions: Permission engine or declarative permission configuration.
+        session_store: Session persistence backend.
+        max_idle_sessions: Optional bound on cached idle sessions.
+        run_store: Durable run/checkpoint backend.
+        durability: Durable inbox and related persistence options.
+        cwd: Working directory used by execution and path permissions.
+        system_prompt: Additional user instructions.
+        system_prompt_config: Structured system-prompt placement and replacement options.
+        max_retries: Maximum provider retries per call.
+        max_output_tokens: Default provider output-token cap.
+        include_partial_messages: Whether to emit partial assistant messages.
+        max_turns: Maximum turns allowed in a run.
+        max_tool_concurrency: Maximum concurrent tool executions.
+        limiter: Host-supplied provider concurrency limiter.
+        max_provider_concurrency: Convenience provider concurrency cap.
+        tool_batching_strategy: Tool batching policy, ``"greedy"`` or ``"maximal"``.
+        tool_timeout_ms: Default tool timeout in milliseconds.
+        tool_retry: Optional tool retry configuration.
+        cache_ttl: Provider prompt-cache lifetime hint.
+        config_dir: Relative configuration directory under ``cwd``.
+        mcp_servers: MCP server configurations connected on demand.
+        compaction: Strategy used when context must be compacted.
+        compaction_ladder: Optional LLM-free compaction recovery settings.
+        truncation_recovery: Optional output-truncation recovery strategy.
+        token_estimator: Host token-estimation callable.
+        fallback_models: Ordered alternate models for retryable overloads.
+        budget: Default spending budget for runs.
+        features: Feature flags selecting optional subsystems.
+        deps: Application dependencies passed to tools.
+        output_schema: Default structured-output schema.
+        structured_output_retries: Maximum structured-output correction attempts.
+        tool_choice: Default tool-choice policy.
+        final_tool_name: Default terminal tool for structured answers.
+        loop_guard: Loop-guard configuration; the sentinel keeps the default guard.
+        filesystem: Session filesystem backend.
+        result_offload: Result offload configuration or its default sentinel.
+        hooks: Hook implementations installed on the agent.
+        read_before_write: Read-before-write hook configuration.
+        tool_cache: Optional read-tool cache configuration.
+        extra_subagents: Additional subagent definitions.
+        enable_worker_tools: Whether worker-management tools are available.
+        retain_subagents: Whether child sessions remain attached after a run.
+        enable_background_subagents: Whether background subagent execution is enabled.
+        enable_task_stop: Whether task-stop controls are available.
+        enable_background_tools: Whether tools may run in the background.
+        execution_backend: Unified shell/filesystem execution world.
+        context: Optional host context used as the parent scope.
+        tool_pipeline: Optional per-agent tool execution pipeline.
+        reliability: Reliability policy, or ``None`` to disable it.
+    """
+
     def __init__(
         self,
         *,
@@ -437,35 +630,25 @@ class Agent:
         tools: ToolRegistry | None = None,
         permissions: Any | dict[str, object] | None = None,
         session_store: SessionStore | None = None,
+        max_idle_sessions: int | None = None,
         run_store: RunStore | None = None,
         durability: DurabilityOptions | None = None,
         cwd: str | None = None,
         system_prompt: str | None = None,
-        systemPrompt: str | None = None,
         system_prompt_config: SystemPromptConfig | None = None,
         max_retries: int = 5,
-        maxRetries: int | None = None,
         max_output_tokens: int | None = None,
-        maxOutputTokens: int | None = None,
         include_partial_messages: bool = False,
-        includePartialMessages: bool | None = None,
         max_turns: int | None = None,
-        maxTurns: int | None = None,
         max_tool_concurrency: int | None = None,
-        maxToolConcurrency: int | None = None,
         limiter: Limiter | None = None,
         max_provider_concurrency: int | None = None,
         tool_batching_strategy: str = "greedy",
-        toolBatchingStrategy: str | None = None,
         tool_timeout_ms: float | None = None,
-        toolTimeoutMs: float | None = None,
         tool_retry: Any = None,
         cache_ttl: str | None = None,
-        cacheTtl: str | None = None,
         config_dir: str | None = None,
-        configDir: str | None = None,
         mcp_servers: dict[str, Any] | None = None,
-        mcpServers: dict[str, Any] | None = None,
         compaction: Any = None,
         compaction_ladder: Any = None,
         truncation_recovery: TruncationRecovery | None = None,
@@ -479,11 +662,8 @@ class Agent:
         tool_choice: ToolChoice | None = None,
         final_tool_name: str | None = None,
         loop_guard: Any = _UNSET,
-        loopGuard: Any = _UNSET,
         filesystem: Any = None,
         result_offload: Any = _DEFAULT_OFFLOAD,
-        mailbox: Any = None,
-        schedule_store: Any = None,
         hooks: Any = None,
         read_before_write: Any = False,
         tool_cache: Any = None,
@@ -493,39 +673,86 @@ class Agent:
         enable_background_subagents: bool = False,
         enable_task_stop: bool = False,
         enable_background_tools: bool = False,
-        execution_backend: ExecutionBackend | ShellBackend | None = None,
+        execution_backend: ExecutionBackend | None = None,
         context: Context | None = None,
         tool_pipeline: ToolPipeline | None = None,
-        ask_user: Any = None,
+        reliability: ReliabilityPolicy | None = _DEFAULT_RELIABILITY_POLICY,
     ) -> None:
-        system_prompt = _resolve_system_prompt(system_prompt, systemPrompt, system_prompt_config)
-        if maxRetries is not None:
-            max_retries = maxRetries
-        if maxOutputTokens is not None:
-            max_output_tokens = maxOutputTokens
-        if includePartialMessages is not None:
-            include_partial_messages = includePartialMessages
-        if maxTurns is not None:
-            max_turns = maxTurns
-        if maxToolConcurrency is not None:
-            max_tool_concurrency = maxToolConcurrency
-        if toolBatchingStrategy is not None:
-            tool_batching_strategy = toolBatchingStrategy
+        """Initialize a reusable agent and its per-agent service scope.
+
+        Args:
+            provider: Provider implementation, or a provider inferred from options.
+            model: Model identifier used for provider calls.
+            openai: Optional OpenAI client options.
+            reasoning: Optional OpenAI reasoning configuration.
+            openai_api_key: API key for an inferred OpenAI provider.
+            openai_base_url: Base URL for an inferred OpenAI provider.
+            tools: Initial tool registry copied into the agent.
+            permissions: Permission engine or declarative permission configuration.
+            session_store: Session persistence backend.
+            max_idle_sessions: Optional bound on cached idle sessions.
+            run_store: Durable run/checkpoint backend.
+            durability: Durable inbox and persistence options.
+            cwd: Working directory for execution and path permissions.
+            system_prompt: Additional user instructions.
+            system_prompt_config: Structured system-prompt options.
+            max_retries: Maximum provider retries per call.
+            max_output_tokens: Default provider output-token cap.
+            include_partial_messages: Whether to emit partial assistant messages.
+            max_turns: Maximum turns allowed in a run.
+            max_tool_concurrency: Maximum concurrent tool executions.
+            limiter: Host-supplied provider concurrency limiter.
+            max_provider_concurrency: Convenience provider concurrency cap.
+            tool_batching_strategy: Tool batching policy.
+            tool_timeout_ms: Default tool timeout in milliseconds.
+            tool_retry: Optional tool retry configuration.
+            cache_ttl: Provider prompt-cache lifetime hint.
+            config_dir: Relative configuration directory under ``cwd``.
+            mcp_servers: MCP server configurations connected on demand.
+            compaction: Strategy used when context must be compacted.
+            compaction_ladder: Optional LLM-free compaction recovery settings.
+            truncation_recovery: Optional output-truncation recovery strategy.
+            token_estimator: Host token-estimation callable.
+            fallback_models: Ordered alternate models for retryable overloads.
+            budget: Default spending budget for runs.
+            features: Feature flags selecting optional subsystems.
+            deps: Application dependencies passed to tools.
+            output_schema: Default structured-output schema.
+            structured_output_retries: Structured-output correction attempts.
+            tool_choice: Default tool-choice policy.
+            final_tool_name: Default terminal tool for structured answers.
+            loop_guard: Loop-guard configuration or its default sentinel.
+            filesystem: Session filesystem backend.
+            result_offload: Result offload configuration or default sentinel.
+            hooks: Hook implementations installed on the agent.
+            read_before_write: Read-before-write hook configuration.
+            tool_cache: Optional read-tool cache configuration.
+            extra_subagents: Additional subagent definitions.
+            enable_worker_tools: Whether worker-management tools are available.
+            retain_subagents: Whether child sessions remain attached after a run.
+            enable_background_subagents: Whether background subagents are enabled.
+            enable_task_stop: Whether task-stop controls are available.
+            enable_background_tools: Whether tools may run in the background.
+            execution_backend: Unified shell/filesystem execution world.
+            context: Optional host context used as the parent scope.
+            tool_pipeline: Optional per-agent tool execution pipeline.
+            reliability: Reliability policy, or ``None`` to disable it.
+
+        Raises:
+            ConfigError: If model, concurrency, durability, or subsystem configuration
+                is invalid.
+        """
+        system_prompt = _resolve_system_prompt(system_prompt, system_prompt_config)
         if tool_batching_strategy not in ("greedy", "maximal"):
             raise ConfigError('tool_batching_strategy must be "greedy" or "maximal"')
-        if toolTimeoutMs is not None:
-            tool_timeout_ms = toolTimeoutMs
-        if cacheTtl is not None:
-            cache_ttl = cacheTtl
-        if configDir is not None:
-            config_dir = configDir
-        if mcpServers is not None:
-            mcp_servers = mcpServers
-
         if not model:
             raise ConfigError("Agent requires a model")
         if max_retries < 0:
             raise ConfigError("max_retries must be non-negative")
+        if max_idle_sessions is not None and (
+            type(max_idle_sessions) is not int or max_idle_sessions < 0
+        ):
+            raise ConfigError("max_idle_sessions must be a non-negative integer or None")
         if truncation_recovery is not None and not isinstance(
             truncation_recovery, TruncationRecovery
         ):
@@ -549,26 +776,19 @@ class Agent:
 
         if context is not None and not isinstance(context, Context):
             raise ConfigError("context must be a linch.Context or None")
-        # A supplied Context is a parent/host scope, never transferred into the
-        # Agent. Each Agent owns a child so two agents can share host services
-        # without one Agent.close() disposing the other's branch.
-        self.context: Context = (
-            context.scope(label=f"agent:{model}")
-            if context is not None
-            else Context(label=f"agent:{model}")
-        )
         self.tool_pipeline: ToolPipeline = tool_pipeline or ToolPipeline()
+        if reliability is not None and not isinstance(reliability, ReliabilityPolicy):
+            raise ConfigError("reliability must be ReliabilityPolicy or None")
+        self.reliability = reliability
+        self._turn_stopping_dispatcher = TurnStoppingDispatcher()
 
         inherited_execution = context.get("execution") if context is not None else None
         execution_source = (
             execution_backend if execution_backend is not None else inherited_execution
         )
-        self.execution_backend: Any = None
+        self.execution_backend: ExecutionBackend | None = None
         if execution_source is not None:
-            from .execution.backend import (
-                UnavailableFileBackend,
-                normalize_execution_backend,
-            )
+            from .execution.backend import normalize_execution_backend
 
             # These messages name ``execution_backend=``/"the execution world",
             # but an inherited world was never passed here — say where it came
@@ -598,45 +818,23 @@ class Agent:
                     "local execution world with cwd=Agent.cwd so shell and fs share "
                     f"one workspace{origin}"
                 )
-            if getattr(self.execution_backend, "legacy_shell_only", False):
-                warnings.warn(
-                    "shell-only execution_backend values are deprecated; pass an "
-                    "ExecutionBackend exposing both .shell and .fs",
-                    DeprecationWarning,
-                    stacklevel=2,
-                )
-                if self.features.filesystem and isinstance(
-                    self.execution_backend.fs, UnavailableFileBackend
-                ):
-                    raise ConfigError(
-                        "filesystem=True with a legacy shell-only execution backend "
-                        "requires an explicit filesystem=; migrate to an ExecutionBackend "
-                        "with coherent shell and fs transports"
-                    )
         self._owns_execution_backend = bool(
-            execution_backend is not None
-            and self.execution_backend is not None
-            and not getattr(self.execution_backend, "legacy_shell_only", False)
+            execution_backend is not None and self.execution_backend is not None
         )
         self._borrows_execution_filesystem = bool(
             execution_backend is None
             and inherited_execution is not None
             and self.execution_backend is not None
-            and not getattr(self.execution_backend, "legacy_shell_only", False)
         )
         # Linch is an SDK, not an implicit coding harness.  A bare Agent gets
         # no shell/filesystem authority; applications opt in with their own
         # registry or ``workspace_tools()``/a higher-level preset.
-        self.tools = tools if tools is not None else ToolRegistry()
+        self.tools = tools.copy() if tools is not None else ToolRegistry()
         if self.execution_backend is not None:
             from .tools.builtin import BashTool
 
             if self.tools.get("Bash") is not None:
                 self.tools.replace(BashTool(execution=self.execution_backend))
-        if ask_user is not None:
-            from .tools.ask_user import AskUserTool
-
-            self.tools.replace(AskUserTool(ask_user))
         self.permission_engine = PermissionEngine(
             mode=permissions_config.mode,
             rules=permissions_config.rules,
@@ -644,6 +842,11 @@ class Agent:
             project_root=cwd_resolved,
         )
         self._store: SessionStore | None = session_store
+        self.max_idle_sessions = max_idle_sessions
+        self._idle_prune_task: asyncio.Task[None] | None = None
+        self._idle_watch_tasks: set[asyncio.Task[Any]] | None = (
+            set() if max_idle_sessions is not None else None
+        )
         self.run_store: RunStore | None = run_store
         self.durability: DurabilityOptions = durability or DurabilityOptions()
         self.system_prompt = system_prompt
@@ -702,18 +905,35 @@ class Agent:
         self._system_prompt_config: SystemPromptConfig | None = system_prompt_config
         self._cached_system_blocks: list[SystemBlock] | None = None
         self._cached_system_blocks_signature: tuple[Any, ...] | None = None
-        self._configure_loop_guard(loop_guard, loopGuard)
+        self._configure_loop_guard(loop_guard)
         self._configure_hooks(
             hooks=hooks,
             read_before_write=read_before_write,
             tool_cache=tool_cache,
         )
+        # A supplied Context is a parent/host scope, never transferred into the
+        # Agent. Each Agent owns a child so two agents can share host services
+        # without one Agent.close() disposing the other's branch. Delay creating
+        # that owned child until configuration has succeeded so failed
+        # construction cannot leave an orphaned child on the host.
+        self.context: Context = (
+            context.scope(label=f"agent:{model}")
+            if context is not None
+            else Context(label=f"agent:{model}")
+        )
+        if self.reliability is not None and self.reliability.prerequisites:
+            self.context.effect(lambda: PrerequisiteHook(self).install(self))
         self._configure_filesystem(filesystem, result_offload)
-        self._configure_mailbox(mailbox)
-        self._configure_schedule_store(schedule_store)
         self.context.register("tool_pipeline", self.tool_pipeline)
         if self.execution_backend is not None:
             self.context.register("execution", self.execution_backend)
+        self.context.register("agent", self)
+        from .profiles import _RunConfig
+
+        self._run_config = _RunConfig(self)
+        self.context.register("run_config", self._run_config)
+        self.tool_search = Disposable()
+        self._tool_search_mounted = False
 
     def _initialize_extension_state(
         self,
@@ -749,14 +969,64 @@ class Agent:
         # primary connection in close()).
         self._extra_mcp_connections: list[Any] = []
 
+    def on_turn_stopping(self, listener: TurnStoppingListener) -> Disposable:
+        """Register a serial listener that may accept, continue, or fail a turn.
+
+        Args:
+            listener: Callable receiving the turn-stopping event.
+
+        Returns:
+            A disposer that unregisters this listener.
+        """
+        return self.context.effect(lambda: self._turn_stopping_dispatcher.register(listener))
+
+    @property
+    def mailbox(self) -> Any:
+        """Return the mounted mailbox service, or ``None`` when unavailable.
+
+        Returns:
+            The context-resolved mailbox service.
+        """
+        return self.context.get("mailbox")
+
+    async def use(self, plugin: Plugin, config: Any = None) -> Disposable:
+        """Mount a plugin and await its initial activation or rollback.
+
+        The mount stays dormant until required services resolve; each activation
+        uses a fresh child context, and requirement removal awaits cleanup.
+        Setup or audit failures propagate only after activation-scope rollback,
+        including owned asynchronous cleanup, has been awaited. If cleanup fails,
+        unfinished work stays owned for retry by agent teardown; successful
+        mounts also expose retryable cleanup through the returned disposer.
+
+        Args:
+            plugin: Duck-typed plugin implementation to mount.
+            config: Optional plugin-specific configuration passed to setup.
+
+        Returns:
+            An idempotent disposer that unmounts the plugin and its active scope.
+
+        Raises:
+            ConfigError: If setup returns an invalid disposer, violates the
+                service audit, or a dependency cycle/duplicate provision is
+                detected.
+            RuntimeError: If this agent is closing or already closed.
+            BaseException: Any setup or awaited cleanup failure from the plugin.
+        """
+        if self._lifecycle_state != _OPEN:
+            raise RuntimeError("agent is closed")
+        from .kernel.plugins import _PluginMount
+
+        return await _PluginMount(self.context, plugin, config).start()
+
     def _set_subagent_tool_registry(self, registry: ToolRegistry) -> None:
         """Install a worker-only tool catalog without changing parent tools.
 
         This private seam is used by coordinator mode.  The caller-supplied
         registry is copied so later parent registration (Subagent,
         SubagentContinue, TaskStop) cannot leak orchestration tools into child
-        sessions.  Tools configured by ``Agent.__init__`` — virtual filesystem,
-        mailbox, schedule, AskUser, and similar additions — are merged into the
+        sessions.  Tools configured by ``Agent.__init__`` and mounted plugins
+        are merged into the
         worker catalog before the first child can run.
         """
 
@@ -770,15 +1040,14 @@ class Agent:
                 worker_tools.register(tool)
         self._subagent_tool_registry = worker_tools
 
-    def _configure_loop_guard(self, loop_guard: Any, loop_guard_alias: Any) -> None:
+    def _configure_loop_guard(self, loop_guard: Any) -> None:
         from .loop_guard import LoopGuard as _LoopGuard
         from .loop_guard import normalize_loop_guard as _normalize_loop_guard
 
-        effective_lg = loop_guard_alias if loop_guard_alias is not _UNSET else loop_guard
-        if effective_lg is _UNSET:
+        if loop_guard is _UNSET:
             self.loop_guard: _LoopGuard | None = _LoopGuard()
         else:
-            self.loop_guard = _normalize_loop_guard(effective_lg)
+            self.loop_guard = _normalize_loop_guard(loop_guard)
 
     def _configure_hooks(
         self,
@@ -843,48 +1112,6 @@ class Agent:
                 pass  # already registered (e.g. caller added them manually)
         self._refresh_system_blocks()
 
-    def _configure_mailbox(self, mailbox: Any) -> None:
-        """Register the peer-messaging tool when a mailbox is provided.
-
-        Opt-in: with ``mailbox=None`` no tool is added and no drain runs, so the
-        loop stays byte-identical. Workers share this same ``Agent`` object, so
-        ``self.mailbox`` is reachable from every session in the agent tree.
-        """
-        self.mailbox: Any = mailbox
-        if mailbox is None:
-            return
-
-        from .coordination.send_message import SendMessageTool
-
-        get_session = lambda sid: self._sessions.get(sid)  # noqa: E731
-        try:
-            self.tools.register(
-                cast("Tool", SendMessageTool(mailbox=mailbox, get_session=get_session))
-            )
-        except ConfigError:
-            pass  # already registered (e.g. caller added it manually)
-        self._refresh_system_blocks()
-
-    def _configure_schedule_store(self, schedule_store: Any) -> None:
-        """Register the schedule create/list/cancel tools when a store is provided.
-
-        Opt-in: with ``schedule_store=None`` no tool is added and the loop stays
-        byte-identical. The embedder drives a ``SchedulerLoop`` over the same
-        store to fire due schedules into a session.
-        """
-        self.schedule_store: Any = schedule_store
-        if schedule_store is None:
-            return
-
-        from .coordination.scheduling import schedule_tools
-
-        for schedule_tool in schedule_tools(schedule_store):
-            try:
-                self.tools.register(cast("Tool", schedule_tool))
-            except ConfigError:
-                pass  # already registered (e.g. caller added it manually)
-        self._refresh_system_blocks()
-
     def _filesystem_active(self) -> bool:
         """Return True when the virtual filesystem subsystem should be on."""
         enabled = getattr(self.features, "filesystem", True)
@@ -894,6 +1121,11 @@ class Agent:
 
     @property
     def system_blocks(self) -> list[SystemBlock]:
+        """Return cached system-prompt blocks for the current tool catalog.
+
+        Returns:
+            Provider-ready system blocks, rebuilt when prompt inputs change.
+        """
         tool_names = sorted(tool.name for tool in self.tools.list())
         tool_sections = self.tools.system_prompt_sections(active_names=tool_names)
         signature = self._system_blocks_signature(tool_names, tool_sections)
@@ -912,45 +1144,16 @@ class Agent:
         self._cached_system_blocks_signature = None
 
     def _system_blocks_signature(
-        self,
-        tool_names: list[str],
-        tool_sections: list[Any],
+        self, tool_names: list[str], tool_sections: list[Any]
     ) -> tuple[Any, ...]:
-        """Return the stable identity of every static prompt input.
-
-        Tool-contributed section content is part of this key, so changing a
-        dynamic contribution invalidates the cached provider prefix even when
-        the registered tool names and JSON schemas did not change.
-        """
-        cfg = self._system_prompt_config
-        cfg_sections = tuple(
-            (
-                getattr(section, "name", None),
-                getattr(section, "text", None),
-                getattr(section, "cacheable", None),
-                getattr(section, "placement", None),
-            )
-            for section in ((cfg.sections or []) if cfg is not None else [])
-        )
-        contributed = tuple(
-            (section.name, section.text, section.cacheable, section.placement)
-            for section in tool_sections
-        )
-        cfg_blocks = tuple(
-            (getattr(block, "text", None), getattr(block, "cacheable", None))
-            for block in ((cfg.blocks or []) if cfg is not None else [])
-        )
-        return (
-            self.tools.generation,
-            tuple(tool_names),
-            contributed,
-            cfg_sections,
-            cfg_blocks,
-            getattr(cfg, "replace_defaults", False),
-            getattr(cfg, "append", None),
-            self.system_prompt,
-            self.permission_engine.mode,
-            self._bash_security_mode(),
+        return _system_blocks_signature_for(
+            tools=self.tools,
+            tool_names=tool_names,
+            tool_sections=tool_sections,
+            system_prompt=self.system_prompt,
+            system_prompt_config=self._system_prompt_config,
+            permission_mode=self.permission_engine.mode,
+            bash_security=self._bash_security_mode(),
         )
 
     def _bash_security_mode(self) -> str:
@@ -976,18 +1179,38 @@ class Agent:
 
     @property
     def session_store(self) -> SessionStore | None:
+        """Return the configured session store, if one has been supplied.
+
+        Returns:
+            The session persistence backend or ``None`` before lazy store creation.
+        """
         return self._store
 
     @session_store.setter
     def session_store(self, value: SessionStore | None) -> None:
+        """Replace the session store used for subsequently opened sessions.
+
+        Args:
+            value: New session persistence backend, or ``None`` to clear it.
+        """
         self._store = value
 
     @property
     def hooks(self) -> list[Any]:
+        """Return the active hook list.
+
+        Returns:
+            Hook objects currently applied to runs.
+        """
         return self._hooks
 
     @hooks.setter
     def hooks(self, value: Any) -> None:
+        """Replace active hooks while retaining removed hooks for teardown.
+
+        Args:
+            value: Hook object or iterable normalized into the active list.
+        """
         from .hooks import normalize_hooks
 
         new_hooks = normalize_hooks(value)
@@ -997,6 +1220,11 @@ class Agent:
         self._hooks = new_hooks
 
     def context_window(self) -> int:
+        """Return the provider-reported context capacity for the configured model.
+
+        Returns:
+            Maximum context tokens accepted by the provider.
+        """
         return self.provider.context_window(self.model)
 
     async def _ensure_provider_prepared(self) -> None:
@@ -1048,20 +1276,20 @@ class Agent:
 
     @property
     def provider(self) -> BaseProvider:
+        """Return the active model provider.
+
+        Returns:
+            Provider implementation used by runs.
+        """
         return self._provider
 
     @provider.setter
     def provider(self, value: BaseProvider) -> None:
-        self._provider = value
-        self._reset_provider_prepared()
+        """Replace the provider and reset its one-time preparation state.
 
-    @property
-    def openai(self) -> BaseProvider:
-        # Backward compatibility for older integrations.
-        return self._provider
-
-    @openai.setter
-    def openai(self, value: BaseProvider) -> None:
+        Args:
+            value: Provider implementation to use for future calls.
+        """
         self._provider = value
         self._reset_provider_prepared()
 
@@ -1075,109 +1303,17 @@ class Agent:
             self._refresh_context_window_derived()
 
     def _build_system_blocks(
-        self,
-        tool_names: list[str],
-        *,
-        tool_sections: list[Any] | None = None,
+        self, tool_names: list[str], *, tool_sections: list[Any] | None = None
     ) -> list[SystemBlock]:
-        names = ", ".join(sorted(tool_names))
-        shell = os.environ.get("SHELL", os.environ.get("COMSPEC", "unknown"))
-        py_ver = platform.python_version()
-        os_info = f"{platform.system()} {platform.release()} ({platform.machine()})"
-
-        # ── Tool-aware protocol block ────────────────────────────────────────
-        # Only include clauses for the tools that are actually present so
-        # non-SWE agents (RAG, SQL, …) aren't given misleading instructions.
-        present = set(tool_names)
-        has_swe_tools = bool(present & _SWE_TOOL_FAMILIES)
-        protocol_lines = _build_tool_protocol_lines(
-            present,
-            has_swe_tools=has_swe_tools,
+        return _build_system_blocks_for(
+            tool_names=tool_names,
+            tool_sections=tool_sections,
+            cwd=self.cwd,
             bash_security=self._bash_security_mode(),
+            permission_mode=self.permission_engine.mode,
+            system_prompt=self.system_prompt,
+            system_prompt_config=self._system_prompt_config,
         )
-
-        # ── env block (always included) ──────────────────────────────────────
-        env_lines = [
-            "Runtime:",
-            "",
-            f"- Linch version: {get_version()}",
-            f"- Permission mode: {self.permission_engine.mode}",
-            f"- Tools available: {names or 'none'}",
-        ]
-        if has_swe_tools:
-            env_lines.extend(
-                [
-                    f"- Working directory: {self.cwd}",
-                    f"- OS: {os_info}",
-                    f"- Shell: {shell}",
-                    f"- Python: {py_ver}",
-                ]
-            )
-        env_text = "\n".join(env_lines)
-
-        cfg = self._system_prompt_config
-
-        # ── Assemble blocks ──────────────────────────────────────────────────
-        blocks: list[SystemBlock] = []
-        section_blocks = _system_prompt_section_blocks(cfg, tool_sections)
-
-        if cfg is not None and cfg.replace_defaults:
-            # Custom-identity / non-SWE mode: skip built-in identity + protocol
-            blocks.extend(section_blocks["before_defaults"])
-            if cfg.blocks:
-                blocks.extend(cfg.blocks)
-            blocks.extend(section_blocks["after_defaults"])
-        else:
-            # Neutral SDK mode: caller/tool blocks surround a generic identity.
-            blocks.extend(section_blocks["before_defaults"])
-            if cfg is not None and cfg.blocks:
-                blocks.extend(cfg.blocks)
-            blocks.append(SystemBlock(text=_CORE_IDENTITY, cacheable=True))
-            if has_swe_tools and protocol_lines:
-                protocol = "Tool use protocol:\n\n" + "\n".join(protocol_lines)
-                blocks.append(SystemBlock(text=protocol, cacheable=True))
-            elif protocol_lines:
-                # Non-SWE tools present: include the generic concurrency hint only
-                protocol = "Tool use protocol:\n\n" + protocol_lines[-1]
-                blocks.append(SystemBlock(text=protocol, cacheable=True))
-            blocks.extend(section_blocks["after_defaults"])
-
-        # ── Virtual filesystem block ─────────────────────────────────────────
-        # Present whenever the filesystem tools are available, in both default
-        # and replace_defaults modes — offloaded RAG/search results are useless
-        # if the model doesn't know how to recover them.
-        if {"read_file", "ls", "write_file", "edit_file"} & present:
-            fs_lines = [
-                "Virtual filesystem:",
-                "",
-                "- You have a virtual filesystem, separate from the real workspace, "
-                "accessed via ls, read_file, write_file, and edit_file.",
-                "- Large tool results may be automatically offloaded here: instead of the "
-                "full output you will see a short preview plus a file path. Call "
-                "read_file(path, offset, limit) to read the parts you need — do not "
-                "assume the preview is the whole result.",
-                "- Use write_file as a scratchpad for notes, plans, or intermediate "
-                "results you want to keep across turns without bloating the conversation.",
-            ]
-            blocks.append(SystemBlock(text="\n".join(fs_lines), cacheable=True))
-
-        # env_text is always present
-        blocks.append(SystemBlock(text=env_text, cacheable=True))
-        blocks.extend(section_blocks["after_env"])
-
-        # User-provided instructions (from system_prompt or SystemPromptConfig.append)
-        append_text = self.system_prompt
-        if cfg is not None and cfg.append is not None:
-            append_text = cfg.append
-        if append_text:
-            blocks.append(
-                SystemBlock(
-                    text=f"User-provided instructions:\n\n{append_text}",
-                    cacheable=True,
-                )
-            )
-
-        return blocks
 
     def build_system_blocks_for_tool_names(self, tool_names: list[str]) -> list[SystemBlock]:
         """Build system blocks for an arbitrary tool name set (used by subagents).
@@ -1186,6 +1322,12 @@ class Agent:
         recomputes and respects the given *tool_names* so that a
         tool-filtered subagent gets a protocol block matching its actual
         toolset.
+
+        Args:
+            tool_names: Tool names to describe in the recomputed prompt.
+
+        Returns:
+            Fresh system-prompt blocks for the requested tool set.
         """
         # Temporarily override _cached_system_blocks to avoid polluting the
         # agent-level cache; build with the requested names and return.
@@ -1199,6 +1341,7 @@ class Agent:
         return self._build_system_blocks(tool_names, tool_sections=tool_sections)
 
     async def connect_skills(self) -> None:
+        """Load configured skills and register the skill tool once."""
         if self._skills_loaded:
             return
         if self._skills_connect is not None:
@@ -1261,6 +1404,7 @@ class Agent:
             raise
 
     async def connect_subagents(self) -> None:
+        """Load configured subagent definitions and register subagent tools once."""
         if self._subagents_loaded:
             return
         if self._subagents_connect is not None:
@@ -1279,10 +1423,35 @@ class Agent:
             self.subagent_registry = registry
 
             get_session = lambda sid: self._sessions.get(sid)  # noqa: E731
+
+            def _parallel_tool_catalog() -> ToolRegistry | None:
+                # parallel(input) has no session argument. If an active parent
+                # exposes this tool through an override, its effective catalog
+                # cannot be inferred from the agent catalog: fail closed. Child
+                # registries strip Subagent, so they do not disable sibling work.
+                for session in self._sessions.values():
+                    override = session.tools_override
+                    if session.active_run_id is not None:
+                        binding = session._run_bindings.get(session.active_run_id)
+                        if binding is not None and binding.config._values is not None:
+                            override = binding.config.tools
+                    if (
+                        session._active
+                        and override is not None
+                        and override.get(subagent_tool.name) is subagent_tool
+                    ):
+                        return None
+                return (
+                    self._subagent_tool_registry
+                    if self._subagent_tool_registry is not None
+                    else self.tools
+                )
+
             subagent_tool = SubagentTool(
                 registry=registry,
                 get_session=get_session,
                 next_default_display_name=self._next_default_display_name,
+                tool_registry=_parallel_tool_catalog,
                 retain_subagents=self.retain_subagents,
                 enable_background_subagents=self.enable_background_subagents,
             )
@@ -1317,7 +1486,7 @@ class Agent:
             raise
 
     async def reload_subagents(self) -> None:
-        """Reload disk-backed subagents and refresh subagent orchestration tools."""
+        """Reload disk-backed subagents and refresh orchestration tools."""
 
         self.tools.unregister("Subagent")
         self.tools.unregister("SubagentContinue")
@@ -1336,6 +1505,7 @@ class Agent:
         return f"Agent #{cur + 1}"
 
     async def connect_mcp(self) -> None:
+        """Connect configured MCP servers once and register their tools."""
         if not self._mcp_servers:
             return
         if self._mcp_connection is not None:
@@ -1348,17 +1518,21 @@ class Agent:
             from .mcp import connect_mcp_servers
 
             mcp_conn = await connect_mcp_servers(cast(Any, self._mcp_servers))
-            self._attach_mcp_tools(mcp_conn)
+            try:
+                await self._attach_mcp_tools(mcp_conn)
+            except BaseException as exc:
+                await _close_mcp_connection(mcp_conn, exc)
+                raise
             self._mcp_connection = mcp_conn
 
         self._mcp_connect = _load()
         try:
             await self._mcp_connect
-        except Exception:
+        except BaseException:
             self._mcp_connect = None
             raise
 
-    def _attach_mcp_tools(self, connection: Any) -> None:
+    async def _attach_mcp_tools(self, connection: Any) -> None:
         """Register a connection's tools + derived permission rules into the live agent.
 
         Shared by the configured-connect path and mid-run registration. Because
@@ -1368,31 +1542,89 @@ class Agent:
         """
         from .mcp import mcp_permission_rules
 
-        for tool in connection.tools:
-            self.tools.register(cast("Tool", tool))
-            if (
-                self._subagent_tool_registry is not None
-                and self._subagent_tool_registry.get(tool.name) is None
-            ):
-                self._subagent_tool_registry.register(cast("Tool", tool))
-        self.permission_engine.rules.extend(mcp_permission_rules(connection.tools))
-        self._refresh_system_blocks()
+        rules = mcp_permission_rules(connection.tools)
+        registered: list[Disposable] = []
+        try:
+            self.permission_engine.rules.extend(rules)
+            for tool in connection.tools:
+                registered.append(self.tools.register(cast("Tool", tool)))
+                if (
+                    self._subagent_tool_registry is not None
+                    and self._subagent_tool_registry.get(tool.name) is None
+                ):
+                    registered.append(self._subagent_tool_registry.register(cast("Tool", tool)))
+            self._refresh_system_blocks()
+        except BaseException:
+            rule_ids = {id(rule) for rule in rules}
+
+            async def rollback() -> None:
+                cleanup_error: BaseException | None = None
+                for disposer in reversed(registered):
+                    try:
+                        await disposer.dispose()
+                    except BaseException as exc:
+                        if cleanup_error is None:
+                            cleanup_error = exc
+                self.permission_engine.rules[:] = [
+                    rule for rule in self.permission_engine.rules if id(rule) not in rule_ids
+                ]
+                if cleanup_error is not None:
+                    raise cleanup_error
+
+            rollback_task = asyncio.create_task(rollback())
+            cancelled = False
+            while not rollback_task.done():
+                try:
+                    await asyncio.shield(rollback_task)
+                except asyncio.CancelledError:
+                    cancelled = True
+            rollback_error: BaseException | None = None
+            try:
+                rollback_task.result()
+            except BaseException as exc:
+                rollback_error = exc
+            if cancelled:
+                raise asyncio.CancelledError from rollback_error
+            if rollback_error is not None:
+                raise rollback_error from None
+            raise
 
     async def add_mcp_servers(self, servers: dict[str, Any]) -> Any:
         """Connect additional MCP servers during a run; their tools appear next turn.
 
-        Returns the new :class:`McpConnection`, also tracked for ``close()``.
+        Args:
+            servers: MCP server configurations to connect.
+
+        Returns:
+            The new connection, also tracked for ``close()``.
         """
         from .mcp import connect_mcp_servers
 
         connection = await connect_mcp_servers(cast(Any, servers))
-        self._attach_mcp_tools(connection)
-        self._extra_mcp_connections.append(connection)
+        try:
+            await self._attach_mcp_tools(connection)
+            self._extra_mcp_connections.append(connection)
+        except BaseException as exc:
+            await _close_mcp_connection(connection, exc)
+            raise
         return connection
 
     async def session(
         self, id: str | None = None, meta: dict[str, object] | None = None
     ) -> Session:
+        """Open or reattach one live conversation session.
+
+        Args:
+            id: Existing session identifier to reattach, or ``None`` for a new id.
+            meta: Initial JSON-compatible metadata for a newly created session.
+
+        Returns:
+            The live session registered on this agent.
+
+        Raises:
+            ConfigError: If the agent is closed or closing, a live session is closing,
+                or stored skill metadata is malformed.
+        """
         from .session import Session
         from .session_log import SessionLog
 
@@ -1404,6 +1636,11 @@ class Agent:
         # before shared stores are released.
         async with self._session_lock:
             self._require_open()
+            if not self._tool_search_mounted and not self.tool_search.disposed:
+                from .tools.search import ToolSearchPlugin
+
+                self.tool_search = await self.use(ToolSearchPlugin())
+                self._tool_search_mounted = True
             if self.features.mcp:
                 await self.connect_mcp()
             if self.features.skills:
@@ -1416,6 +1653,8 @@ class Agent:
             if id is not None:
                 existing = self._sessions.get(id)
                 if existing is not None and not existing._closed:
+                    if self.max_idle_sessions is not None:
+                        self._touch_session(existing)
                     return existing
 
             store = self._get_store()
@@ -1453,7 +1692,7 @@ class Agent:
                 from .filesystem.backend import StateFileBackend
 
                 # If the caller passed a backend, use it as the session-level store.
-                # CompositeFileBackend and SqliteFileBackend are shared across sessions
+                # Explicit filesystem backends are shared across sessions
                 # by design; StateFileBackend is session-local by default.
                 session.filesystem = (
                     self._filesystem_default
@@ -1462,19 +1701,38 @@ class Agent:
                 )
 
             session.invoked_skills = []
-            for rec in record.invoked_skills:
+            for index, rec in enumerate(record.invoked_skills):
                 if not isinstance(rec, dict):
-                    continue
+                    raise ConfigError(
+                        f"session.invoked_skills[{index}] must be an object with canonical fields"
+                    )
+                missing = {
+                    field
+                    for field in ("name", "substituted_body", "invoked_at")
+                    if field not in rec
+                }
+                if missing:
+                    missing_fields = ", ".join(sorted(missing))
+                    raise ConfigError(
+                        f"session.invoked_skills[{index}] is missing canonical field(s): "
+                        f"{missing_fields}"
+                    )
+                name = rec["name"]
+                substituted_body = rec["substituted_body"]
+                invoked_at = rec["invoked_at"]
+                if not isinstance(name, str) or not isinstance(substituted_body, str):
+                    raise ConfigError(
+                        f"session.invoked_skills[{index}] name and substituted_body must be strings"
+                    )
+                if isinstance(invoked_at, bool) or not isinstance(invoked_at, (int, float)):
+                    raise ConfigError(
+                        f"session.invoked_skills[{index}] invoked_at must be a number"
+                    )
                 session.invoked_skills.append(
-                    # Stored metadata may come from JSON backends; normalize defensively.
                     InvokedSkillRecord(
-                        name=str(rec.get("name", "")),
-                        substituted_body=str(
-                            rec.get("substituted_body", rec.get("substitutedBody", ""))
-                        ),
-                        invoked_at=float(
-                            cast(Any, rec.get("invoked_at", rec.get("invokedAt", 0.0)) or 0.0)
-                        ),
+                        name=name,
+                        substituted_body=substituted_body,
+                        invoked_at=float(invoked_at),
                     )
                 )
             # close() may have started while store/setup calls were awaiting. Do
@@ -1486,6 +1744,84 @@ class Agent:
                 raise ConfigError("agent is closing")
             self._sessions[record.id] = session
             return session
+
+    def _touch_session(self, session: Session) -> None:
+        """Keep the opted-in cache in least-to-most-recently-used order."""
+        if self._sessions.get(session.id) is session:
+            self._sessions.pop(session.id)
+            self._sessions[session.id] = session
+
+    async def _session_became_idle(self, session: Session) -> None:
+        self._touch_session(session)
+        await self._prune_idle_sessions()
+
+    def _idle_session_tree(
+        self, session: Session, seen: set[str] | None = None
+    ) -> list[Session] | None:
+        """Return the releasable ownership tree, protecting all live work."""
+        if (
+            session._active
+            or session._lifecycle_state != _OPEN
+            or session.pending_notifications
+            or session.pending_child_events
+        ):
+            return None
+        seen = set() if seen is None else seen
+        if session.id in seen:
+            return []
+        seen.add(session.id)
+        busy = False
+        tasks = list(session.background_tasks) + [
+            getattr(handle, "task", None) for handle in session.workers.values()
+        ]
+        for task in tasks:
+            if isinstance(task, asyncio.Task) and not task.done():
+                busy = True
+                if self._idle_watch_tasks is not None and task not in self._idle_watch_tasks:
+                    self._idle_watch_tasks.add(task)
+                    task.add_done_callback(self._idle_work_done)
+        tree = [session]
+        for handle in session.workers.values():
+            child_id = getattr(handle, "child_session_id", None)
+            child = self._sessions.get(child_id) if isinstance(child_id, str) else None
+            if child is not None:
+                subtree = self._idle_session_tree(child, seen)
+                if subtree is None:
+                    busy = True
+                else:
+                    tree.extend(subtree)
+        return None if busy else tree
+
+    def _idle_work_done(self, task: asyncio.Task[Any]) -> None:
+        if self._idle_watch_tasks is not None:
+            self._idle_watch_tasks.discard(task)
+        if self._lifecycle_state != _OPEN:
+            return
+        if self._idle_prune_task is None or self._idle_prune_task.done():
+            self._idle_prune_task = asyncio.create_task(self._prune_idle_sessions())
+            self._idle_prune_task.add_done_callback(_consume_task_exception)
+
+    async def _prune_idle_sessions(self) -> None:
+        bound = self.max_idle_sessions
+        if bound is None or self._lifecycle_state != _OPEN:
+            return
+        if self._session_lock is None:
+            self._session_lock = asyncio.Lock()
+        async with self._session_lock:
+            while self._lifecycle_state == _OPEN:
+                candidates = [
+                    (session, tree)
+                    for session in self._sessions.values()
+                    if (tree := self._idle_session_tree(session)) is not None
+                ]
+                if len(candidates) <= bound:
+                    return
+                session, tree = candidates[0]
+                # Reserve the entire tree before the first await: release_session
+                # closes descendants recursively, so they must reject new runs too.
+                for owned in tree:
+                    owned._lifecycle_state = _QUIESCING
+                await self.release_session(session)
 
     def _require_open(self) -> None:
         if self._lifecycle_state != _OPEN:
@@ -1504,6 +1840,15 @@ class Agent:
         ``before_seq`` is an exclusive boundary.  The store-level helper owns
         lineage metadata, assistant/tool pairing validation, and atomic custom
         id handling; this method intentionally remains a thin lifecycle seam.
+
+        Args:
+            source_or_id: Source session instance or identifier.
+            before_seq: Exclusive stored-message sequence boundary.
+            id: Optional identifier for the forked session.
+            meta: Optional metadata for the forked session.
+
+        Returns:
+            The newly created independent session.
         """
         from .sessions.fork import fork_session as _fork_session
 
@@ -1513,46 +1858,6 @@ class Agent:
             before_seq=before_seq,
             id=id,
             meta=meta,
-        )
-
-    async def run_workflow(
-        self,
-        fn: Any,
-        *,
-        budget: Any = None,
-        run_id: str | None = None,
-        max_concurrency: int = 4,
-        max_agent_concurrency: int = 0,
-        on_event: Any = None,
-        step_timeout_ms: float | None = None,
-        deadline_ms: float | None = None,
-        journal_snapshot_every: int = 0,
-        signal: Any = None,
-        resume: dict[str, Any] | None = None,
-    ) -> Any:
-        """Run a deterministic workflow function and return its value.
-
-        *fn* is ``async def flow(wf: WorkflowContext) -> Any``.  See
-        :mod:`linch.workflow` for the ``wf`` primitives (``agent``, ``step``,
-        ``interrupt``, ``parallel``, ``settled``, ``pipeline``, ``phase``,
-        ``budget``) and the journal/resume semantics behind *run_id*.  *resume*
-        answers ``wf.interrupt`` calls left pending by an earlier suspend.
-        """
-        from .workflow.engine import run_workflow as _run_workflow
-
-        return await _run_workflow(
-            self,
-            fn,
-            budget=budget,
-            run_id=run_id,
-            max_concurrency=max_concurrency,
-            max_agent_concurrency=max_agent_concurrency,
-            on_event=on_event,
-            step_timeout_ms=step_timeout_ms,
-            deadline_ms=deadline_ms,
-            journal_snapshot_every=journal_snapshot_every,
-            signal=signal,
-            resume=resume,
         )
 
     async def release_session(self, session_or_id: Session | str, force: bool = False) -> None:
@@ -1600,9 +1905,9 @@ class Agent:
     async def close(self) -> None:
         """Quiesce sessions, then tear down shared resources transactionally.
 
-        Concurrent callers await one shielded task. Caller cancellation never
-        cancels teardown; failures leave the agent quiescing so a later call can
-        retry only resources that have not already closed successfully.
+        Concurrent callers await one shielded task. Caller cancellation waits
+        for owned teardown before propagating; failures leave the agent quiescing
+        so a later call can retry resources that have not closed successfully.
         """
         if self._lifecycle_state == _CLOSED:
             return
@@ -1614,7 +1919,11 @@ class Agent:
             task = asyncio.create_task(self._close_impl())
             task.add_done_callback(_consume_task_exception)
             self._close_task = task
-        await asyncio.shield(task)
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await asyncio.shield(task)
+            raise
 
     async def _close_resource_once(self, resource: Any) -> None:
         """Close one owned resource once, recording success only after it returns."""
@@ -1653,6 +1962,9 @@ class Agent:
 
     async def _close_impl(self) -> None:
         import inspect as _inspect
+
+        if self._idle_prune_task is not None:
+            await asyncio.gather(self._idle_prune_task, return_exceptions=True)
 
         # Drain and release every live session — cancel owned worker/background
         # tasks and await their finalizers — before closing shared resources, so
@@ -1711,8 +2023,7 @@ class Agent:
             await self._close_resource_once(self._provider)
             self._teardown_complete.add("provider")
 
-        # Close hooks that expose a closer (e.g. RunTelemetryHook flushes its
-        # wrapped observers). Successful hooks are remembered across retries.
+        # Close hooks that expose a closer. Successful hooks are remembered across retries.
         # Also close any hooks that were replaced via the hooks setter so their
         # resources (e.g. OTel exporters) are not orphaned.
         for hook in [*self._hooks, *self._replaced_hooks]:
@@ -1743,6 +2054,8 @@ async def _restore_provider_view(
     fallback = list(full_history)
     try:
         snapshot = await snapshot_loader(sid)
+    except UnsupportedWireVersionError:
+        raise
     except Exception as exc:
         _logging.getLogger(__name__).warning(
             "provider snapshot load failed; rebuilding from full history: %s", exc

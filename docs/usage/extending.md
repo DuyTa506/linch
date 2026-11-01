@@ -5,7 +5,7 @@ can re-implement and inject — no base class to inherit, just match the attribu
 methods. This page is the "implement your own" reference for the seams added in the
 roadmap, mirroring the patterns already documented for
 [`ExecutionBackend`](./tools.md#bash-execution-backend),
-[`Tool`](./tools.md#custom-tools), [`MemoryStore` and `ContextBuilder`](./context-and-memory.md),
+[`Tool`](./tools.md#custom-tools), [`FileBackend` and `ContextBuilder`](./context-and-memory.md),
 providers, and [hooks](./hooks.md).
 
 A protocol is satisfied structurally: implement the listed methods with matching
@@ -29,8 +29,6 @@ from linch import (
     assert_file_backend_contract,
     assert_isolation_backend_contract,
     assert_mailbox_contract,
-    assert_memory_store_contract,
-    assert_schedule_store_contract,
     assert_tool_contract,
 )
 
@@ -47,14 +45,6 @@ async def test_my_mailbox_contract(tmp_path):
     await assert_mailbox_contract(lambda: MyMailbox(tmp_path / "mailbox.db"))
 
 @pytest.mark.asyncio
-async def test_my_memory_store_contract(tmp_path):
-    await assert_memory_store_contract(lambda: MyMemoryStore(tmp_path / "memory.db"))
-
-@pytest.mark.asyncio
-async def test_my_schedule_store_contract(tmp_path):
-    await assert_schedule_store_contract(lambda: MyScheduleStore(tmp_path / "schedules.db"))
-
-@pytest.mark.asyncio
 async def test_my_tool_contract():
     await assert_tool_contract(
         MyTool(),
@@ -66,13 +56,12 @@ async def test_my_tool_contract():
 The helpers expect a factory that returns a fresh, empty adapter. They exercise
 the same behavioral guarantees Linch's built-in adapters rely on: file backend
 CRUD/list/edit semantics, distinct writable isolation workspaces, destructive
-mailbox drains, no dropped concurrent sends, memory upsert/search/filter
-behavior, schedule add/update/remove/list, atomic `claim_due` when the store
-implements it, and custom tool metadata/validation/execution/resource shape.
+mailbox drains, no dropped concurrent sends, and custom tool
+metadata/validation/execution/resource shape.
 
 Copyable starter files live in
-[`examples/extensions/`](../../examples/extensions/): provider, memory store,
-virtual filesystem backend, tool package, and hook package templates. They are
+[`examples/extensions/`](../../examples/extensions/): provider, virtual
+filesystem backend, tool package, and hook package templates. They are
 kept importable and smoke-tested so they track the public protocols.
 
 ---
@@ -118,8 +107,9 @@ double-release (abort + normal completion) cannot raise.
 ## `Mailbox` — peer-to-peer messages between agents
 
 The mailbox is the substrate for inter-agent messaging. `InMemoryMailbox` is the
-in-process default; implement the protocol for a durable or cross-process inbox (SQLite,
-Redis, a queue).
+only built-in implementation, with process-lifetime state. Implement the
+protocol for a durable or cross-process inbox in host-owned infrastructure;
+mailbox adapters are outside the core SDK.
 
 ```python
 from dataclasses import dataclass, field
@@ -153,32 +143,11 @@ handle you choose). `type` is a neutral category *you* interpret. Pair with the
 
 ---
 
-## `ScheduleStore` — durable time triggers
+## Scheduling and queue workers
 
-`SchedulerLoop` fires `Schedule`s (cron or interval) and reads/writes them through a
-`ScheduleStore`. `InMemoryScheduleStore` and durable `SqliteScheduleStore` ship;
-implement the protocol for another backend (Postgres, a cloud scheduler).
-
-```python
-from typing import Protocol
-
-class ScheduleStore(Protocol):
-    async def add(self, schedule: Schedule) -> None: ...
-    async def update(self, schedule: Schedule) -> None: ...
-    async def remove(self, schedule_id: str) -> bool: ...      # True if it existed
-    async def get(self, schedule_id: str) -> Schedule | None: ...
-    async def list(self) -> list[Schedule]: ...
-```
-
-A `Schedule` carries exactly one of `cron` / `interval_s`, a `payload`, an `enabled`
-flag, and a computed `next_run` (epoch seconds). Your store only persists and returns
-them — `Schedule.compute_next_run()` owns the timing math, so a custom store never
-re-implements cron parsing.
-
-For multi-process durability, also guard firing with a lock row so two processes
-sharing one store don't double-fire the same schedule. `SqliteScheduleStore` is the
-reference for the persistence shape; see [the scheduling section of the roadmap](../ROADMAP.md)
-for the loop contract.
+Durable schedules and run dispatch are provided by the optional `linch.worker`
+package. Hosts register its schedule tools and configure PgQueuer; see
+[Scale out](./production.md#scale-out).
 
 ---
 
@@ -361,10 +330,11 @@ agent = Agent(..., cwd=".", execution_backend=LocalExecutionBackend(cwd="."))
 ```
 
 Construct the local world with `cwd=Agent.cwd` so shell and filesystem share one
-workspace (a mismatch raises `ConfigError`). A shell-only `execution_backend`
-remains a deprecated compatibility path — it has no filesystem transport, and
-pairing it with `FeatureFlags(filesystem=True)` requires an explicit
-`filesystem=`; migrate to a real `ExecutionBackend`.
+workspace (a mismatch raises `ConfigError`). `execution_backend` must expose
+both `.shell` and `.fs`; shell-only values are rejected. Pair a shell transport
+such as `DockerBackend` with a filesystem transport for the same execution
+world through `RemoteExecutionBackend(shell=..., fs=...)`. An explicit
+`filesystem=` must be the backend's own `.fs` object.
 
 **`execution_backend=` transfers ownership.** The agent closes that world during
 `Agent.close()`, so do *not* hand the same object to two agents — the first
@@ -424,49 +394,22 @@ need ordered static blocks with explicit cache boundaries.
 
 ---
 
-## Memory lifecycle — extraction + consolidation
+## File memory policy
 
-The memory *store* is one seam ([`MemoryStore`](./context-and-memory.md)); the
-*lifecycle* — what to remember and when to consolidate — is two more, both policy you
-supply over neutral wiring in `memory/lifecycle.py`.
-
-**`MemoryExtractor`** is a plain callable (no base class), run on a terminal turn to
-propose what to persist:
-
-```python
-from linch import MemoryExtractionContext, MemoryItem
-
-async def my_extractor(ctx: MemoryExtractionContext) -> list[MemoryItem]:
-    # ctx.history is the pre-trim full_history tail (the complete record, not the
-    # trimmed provider_view); ctx.store lets you read existing entries first.
-    facts = await infer_durable_facts(ctx.history)
-    return [MemoryItem(id=f.id, content=f.text, metadata={"tier": "semantic"}) for f in facts]
-```
-
-Wire it through `MemoryExtractionHook(my_extractor, store=...)` (the hooks layer). The
-prompt and what counts as a memory are entirely yours — Linch only runs the callable at
-the terminal-turn chokepoint and upserts what it returns.
-
-**`ConsolidationGate`** throttles an expensive consolidation pass on time + change-count
-+ an in-process single-flight lock:
-
-```python
-from linch import ConsolidationGate
-
-gate = ConsolidationGate(min_interval_s=300, min_changes=20)
-gate.record(n)                       # note n memories changed
-ran = await gate.run(consolidate)    # runs the thunk iff both gates pass; resets on run
-```
-
-`run()` returns `True` only when it actually fired (counters reset) and is single-flight
-within the process. A *multi-process* lock (a store lock row) is left to durable store
-adapters — add it in your `MemoryStore` if you consolidate from more than one process.
+File memory intentionally has no extraction hook or memory-store contract. Use
+the public `FileMemoryContextBuilder` with `ContextInjectionHook`, and keep the
+run's `ScopedFileBackend` in `RunOptions(deps=...)`. The model maintains
+`/memories/MEMORY.md` and one fact file per line with the existing filesystem
+tools; application policy can update or delete stale files through the backend.
+For semantic recall, adapt the recipe in
+[`examples/memory/mem0_recall.py`](../../examples/memory/mem0_recall.py) with a
+fake async client in unit tests.
 
 ---
 
 ## Related pages
 
 - [Tools](./tools.md) — `Tool`, `ExecutionBackend`, `FileBackend` seams.
-- [Context & memory](./context-and-memory.md) — `ContextBuilder`, `MemoryStore`.
-- [Hooks](./hooks.md) — the single dispatch layer the lifecycle/verifier/observer adapters ride on.
+- [Context & memory](./context-and-memory.md) — `ContextBuilder`, file memory, and scoped backends.
+- [Hooks](./hooks.md) — the single dispatch layer for lifecycle and policy adapters.
 - [Versioning](../versioning.md) — what a protocol change means for semver.

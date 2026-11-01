@@ -18,6 +18,22 @@ _ANTHROPIC_PRICING_SOURCE = "https://www.anthropic.com/pricing"
 
 @dataclass(frozen=True, slots=True)
 class ProviderModelInfo:
+    """Describe one model in the static built-in provider catalog.
+
+    Args:
+        provider_id: Stable identifier of the provider adapter.
+        model: Exact model identifier accepted by that adapter.
+        display_name: Human-readable model label.
+        context_window: Maximum context capacity in tokens.
+        capabilities: Features advertised by the adapter for this model.
+        pricing: Known pricing metadata, when available.
+        pricing_source: Source URL for the pricing metadata, when available.
+        notes: Additional catalog guidance for callers.
+
+    Attributes:
+        pricing_source: May be ``None`` when the catalog has no pricing record.
+    """
+
     provider_id: str
     model: str
     display_name: str
@@ -119,6 +135,12 @@ def list_provider_models(provider_id: str | None = None) -> list[ProviderModelIn
 
     The catalog intentionally excludes OpenAI-compatible services and local
     llama.cpp models whose model lists depend on external configuration.
+
+    Args:
+        provider_id: Optional provider identifier used to filter the catalog.
+
+    Returns:
+        Static metadata records in catalog order.
     """
     models = _catalog()
     if provider_id is None:
@@ -130,7 +152,15 @@ def get_provider_model_info(
     model: str,
     provider_id: str | None = None,
 ) -> ProviderModelInfo | None:
-    """Return catalog metadata for an exact model id, or ``None`` if unknown."""
+    """Return catalog metadata for an exact model id, or ``None`` if unknown.
+
+    Args:
+        model: Exact model identifier to find.
+        provider_id: Optional provider identifier used to disambiguate the lookup.
+
+    Returns:
+        The matching metadata record, or ``None`` when the catalog has no match.
+    """
     for info in list_provider_models(provider_id):
         if info.model == model:
             return info

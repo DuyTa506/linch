@@ -7,11 +7,14 @@ from dataclasses import dataclass
 from typing import Any, Literal, cast
 
 from ..errors import AbortError
+from .principal import Principal
 from .rules import (
     BashRule,
     PathRule,
     PermissionRule,
     ToolRule,
+    _contains_unparsed_shell_construct,
+    _match_unparsed_bash_rule,
     evaluate_bash_rules,
     match_path_rule,
     match_tool_rule,
@@ -22,12 +25,21 @@ _ToolDecision = Literal["allow", "deny", "ask"]
 
 @dataclass(slots=True)
 class PermissionDecision:
+    """Represent the policy outcome for one pending tool call.
+
+    Args:
+        decision: Whether the call is allowed, denied, or needs approval.
+        reason: Optional human-readable explanation for the outcome.
+        precomputed_result: Optional result supplied by a pre-execution hook.
+
+    Attributes:
+        decision: The policy outcome.
+        reason: The explanation shown to callers or the model.
+        precomputed_result: A result that can replace execution when present.
+    """
+
     decision: _ToolDecision
     reason: str | None = None
-    # Kept only so v1 checkpoints decode. Linch 2 never executes or replays a
-    # decision carrying updated input; mutation belongs in PreToolUse, before
-    # the final permission evaluation.
-    updated_input: dict[str, Any] | None = None
     # Set by a PreToolUse hook that short-circuits execution (e.g. a cache hit):
     # when present, the scheduler returns this result instead of running the
     # tool. Typed Any to avoid coupling permissions to the tools layer.
@@ -36,23 +48,72 @@ class PermissionDecision:
 
 @dataclass(slots=True)
 class PendingToolCall:
+    """Carry the tool invocation context through permission evaluation.
+
+    Args:
+        tool_use_id: Provider-issued identifier for the invocation.
+        tool: Duck-typed tool object being evaluated.
+        input: Model-supplied tool arguments.
+        cwd: Effective working directory for path-aware rules.
+        principal: Optional identity used by role-aware rules.
+
+    Attributes:
+        tool_use_id: Provider-issued invocation identifier.
+        tool: The tool object under evaluation.
+        input: The validated model input mapping.
+        cwd: The effective working directory, when supplied.
+        principal: The caller identity, when supplied.
+    """
+
     tool_use_id: str
     tool: Any
     input: dict[str, Any]
     cwd: str | None = None
+    principal: Principal | None = None
 
 
 @dataclass(slots=True)
 class CanUseToolRequest:
+    """Describe an approval request sent to a host callback.
+
+    Args:
+        tool_name: Name of the tool awaiting approval.
+        tool_use_id: Provider-issued identifier for the invocation.
+        input: Model-supplied tool arguments.
+        summary: Human-readable description of the invocation.
+        mode: Permission mode that produced the request.
+        principal: Optional identity associated with the run.
+
+    Attributes:
+        tool_name: Name of the tool awaiting approval.
+        tool_use_id: Provider-issued invocation identifier.
+        input: The model-supplied arguments.
+        summary: Human-readable invocation summary.
+        mode: Active permission mode.
+        principal: The caller identity, when supplied.
+    """
+
     tool_name: str
     tool_use_id: str
     input: dict[str, Any]
     summary: str
     mode: str
+    principal: Principal | None = None
 
 
 @dataclass(slots=True)
 class CanUseToolResponse:
+    """Carry an approval callback's allow/deny decision and optional message.
+
+    Args:
+        behavior: Callback response behavior, typically ``"allow"`` or ``"deny"``.
+        message: Optional explanation accompanying a denial.
+
+    Attributes:
+        behavior: The callback's requested behavior.
+        message: The optional denial explanation.
+    """
+
     behavior: str
     message: str | None = None
 
@@ -64,6 +125,23 @@ _TASK_TOOL_NAMES = frozenset({"TaskCreate", "TaskList", "TaskGet", "TaskUpdate"}
 
 
 class PermissionEngine:
+    """Evaluate and resolve ordered permission rules for tool calls.
+
+    Args:
+        mode: Baseline permission mode used when no rule matches.
+        rules: Ordered flat rules evaluated after any layered rule set.
+        can_use_tool: Optional callback used to resolve an ``ask`` decision.
+        project_root: Root used to resolve relative path patterns.
+        rule_set: Optional layered policy source evaluated before flat rules.
+
+    Attributes:
+        mode: Baseline permission mode.
+        rules: Ordered flat permission rules.
+        can_use_tool: Optional host approval callback.
+        project_root: Root used for path matching.
+        rule_set: Optional layered permission policy.
+    """
+
     def __init__(
         self,
         *,
@@ -73,6 +151,15 @@ class PermissionEngine:
         project_root: str = "",
         rule_set: Any = None,
     ) -> None:
+        """Configure permission evaluation for one agent or run.
+
+        Args:
+            mode: Baseline permission mode used when no rule matches.
+            rules: Ordered flat rules evaluated after any layered rule set.
+            can_use_tool: Optional callback used to resolve an ``ask`` decision.
+            project_root: Root used to resolve relative path patterns.
+            rule_set: Optional layered policy source evaluated before flat rules.
+        """
         self.mode = mode
         self.rules: list[PermissionRule] = list(rules or [])
         self.can_use_tool = can_use_tool
@@ -82,6 +169,14 @@ class PermissionEngine:
         self.rule_set = rule_set
 
     def evaluate(self, call: PendingToolCall) -> PermissionDecision:
+        """Evaluate a pending call without invoking an approval callback.
+
+        Args:
+            call: Pending tool invocation to validate against the configured policy.
+
+        Returns:
+            The allow, deny, or ask decision for the call.
+        """
         invalid_reason = _validate_pending_call(call)
         if invalid_reason is not None:
             return PermissionDecision(decision="deny", reason=invalid_reason)
@@ -101,6 +196,19 @@ class PermissionEngine:
         return _mode_default(call.tool, self.mode)
 
     async def resolve(self, call: PendingToolCall, signal: Any) -> PermissionDecision:
+        """Resolve an evaluated call, including any host approval request.
+
+        Args:
+            call: Pending tool invocation to evaluate and, if needed, approve.
+            signal: Abort signal used while waiting for the approval callback.
+
+        Returns:
+            The final allow or deny decision, or an unchanged non-ask decision.
+
+        Raises:
+            AbortError: If the approval wait is aborted by ``signal``.
+            asyncio.CancelledError: If the surrounding task is cancelled.
+        """
         initial = self.evaluate(call)
         if initial.decision != "ask":
             return initial
@@ -110,7 +218,7 @@ class PermissionEngine:
             return PermissionDecision(
                 decision="deny",
                 reason=f"Permission denied for {call.tool.name}: "
-                "canUseTool callback is not configured.",
+                "can_use_tool callback is not configured.",
             )
 
         if _signal_aborted(signal):
@@ -131,6 +239,7 @@ class PermissionEngine:
             input=call.input,
             summary=summary,
             mode=self.mode,
+            principal=call.principal,
         )
 
         try:
@@ -190,30 +299,56 @@ def evaluate_rule_list(
     A matched ``passthrough`` rule abstains: scanning continues past it (so a
     layer can carve out exceptions that defer to the next source) and the list
     yields ``None`` if nothing else matches.
+
+    Args:
+        rules: Ordered permission rules to evaluate.
+        call: Pending tool invocation under evaluation.
+        project_root: Root used to resolve relative path patterns.
+
+    Returns:
+        The first applicable decision, or ``None`` when every rule abstains.
     """
     tool_name = call.tool.name
     for idx, rule in enumerate(rules):
-        if isinstance(rule, ToolRule) and match_tool_rule(rule, tool_name, call.input):
+        if (
+            isinstance(rule, ToolRule)
+            and _rule_applies(rule, call.principal)
+            and match_tool_rule(rule, tool_name, call.input)
+        ):
+            if rule.decision == "allow" and tool_name == "Bash":
+                command = call.input.get("command")
+                if isinstance(command, str) and _contains_unparsed_shell_construct(command):
+                    floor = _unparsed_bash_floor(rules, idx + 1, call.principal, command)
+                    if floor is not None:
+                        return _rule_outcome(floor, rule.kind, tool_name)
             decision = rule.decision
             if decision == "passthrough":
                 continue
             return _rule_outcome(decision, rule.kind, tool_name)
-        if isinstance(rule, PathRule) and match_path_rule(
-            rule,
-            tool_name,
-            call.input,
-            project_root,
-            call.cwd,
+        if (
+            isinstance(rule, PathRule)
+            and _rule_applies(rule, call.principal)
+            and match_path_rule(
+                rule,
+                tool_name,
+                call.input,
+                project_root,
+                call.cwd,
+            )
         ):
             decision = rule.decision
             if decision == "passthrough":
                 continue
             return _rule_outcome(decision, rule.kind, tool_name)
-        if isinstance(rule, BashRule) and tool_name == "Bash":
+        if (
+            isinstance(rule, BashRule)
+            and _rule_applies(rule, call.principal)
+            and tool_name == "Bash"
+        ):
             command = call.input.get("command")
             if not isinstance(command, str):
                 continue
-            bash_rules = _bash_rules_from(rules, idx)
+            bash_rules = _bash_rules_from(rules, idx, call.principal)
             bash_decision = evaluate_bash_rules(bash_rules, command)
             if bash_decision is not None and bash_decision != "passthrough":
                 return _rule_outcome(bash_decision, rule.kind, tool_name)
@@ -237,6 +372,8 @@ def _validate_pending_call(call: PendingToolCall) -> str | None:
         return "Invalid permission call: tool_use_id must be a non-empty string."
     if not isinstance(call.input, dict):
         return "Invalid permission call: input must be a dict."
+    if call.principal is not None and not isinstance(call.principal, Principal):
+        return "Invalid permission call: principal is invalid."
     if not _is_tool_like(call.tool):
         return "Invalid permission call: tool is invalid."
     return None
@@ -259,8 +396,47 @@ def _invalid_callback_response(tool_name: str) -> PermissionDecision:
     )
 
 
-def _bash_rules_from(rules: list[PermissionRule], start_index: int) -> list[BashRule]:
-    return [r for r in rules[start_index:] if isinstance(r, BashRule)]
+def _bash_rules_from(
+    rules: list[PermissionRule], start_index: int, principal: Principal | None
+) -> list[BashRule]:
+    return [
+        rule
+        for rule in rules[start_index:]
+        if isinstance(rule, BashRule) and _rule_applies(rule, principal)
+    ]
+
+
+def _unparsed_bash_floor(
+    rules: list[PermissionRule],
+    start_index: int,
+    principal: Principal | None,
+    command: str,
+) -> Literal["allow", "deny", "ask"] | None:
+    for rule in rules[start_index:]:
+        if not _rule_applies(rule, principal):
+            continue
+        if isinstance(rule, BashRule) and rule.decision == "deny":
+            if _match_unparsed_bash_rule(rule, command.strip()):
+                return "deny"
+            return "ask"
+        if isinstance(rule, ToolRule) and match_tool_rule(rule, "Bash", {"command": command}):
+            if rule.decision == "deny":
+                return "deny"
+            if rule.decision == "ask":
+                return "ask"
+    return None
+
+
+_EMPTY_ROLES: frozenset[str] = frozenset()
+
+
+def _rule_applies(rule: PermissionRule, principal: Principal | None) -> bool:
+    if rule.role is None and rule.unless_role is None:
+        return True
+    roles = principal.roles if principal is not None else _EMPTY_ROLES
+    return (rule.role is None or rule.role in roles) and (
+        rule.unless_role is None or rule.unless_role not in roles
+    )
 
 
 async def _run_with_abort(coro: Any, signal: Any) -> Any:

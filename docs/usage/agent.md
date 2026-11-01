@@ -11,8 +11,55 @@ spending is capped (budgets).
 - Model and provider selection live in [providers.md](./providers.md).
 - Tools, timeouts, retry, the Bash backend, dependencies, and permissions live
   in [tools.md](./tools.md).
-- Cross-cutting extension (observers, middleware, RAG, verifiers) is unified
+- Cross-cutting extension (middleware, RAG, verifiers) is unified
   under [hooks.md](./hooks.md).
+- Versioned per-run roles and configuration use `RunOptions(profile=...)`;
+  see [domain profiles](./profiles.md) for layering and durable resume.
+
+## Tool and response reliability
+
+`Agent` uses `ReliabilityPolicy()` by default for every provider. An empty
+`end_turn`, a whole-text `<tool_call>...</tool_call>` envelope, or malformed
+native tool arguments receives a logged Linch diagnostic asking the model to
+resend. No tool in a rejected native batch runs. The default allows two
+correction turns across the entire run; exhaustion ends with an error result.
+Transport and structural stream errors retain their provider-error behavior.
+Ordinary answers, refusals and truncated output keep their existing behavior.
+Text envelopes are never executed; prose and fenced examples remain plain text.
+
+Declare tool ordering and completion requirements when your application needs
+them:
+
+```python
+from linch import Agent, CompletionGate, ReliabilityPolicy, ToolPrerequisite, empty_tools
+
+agent = Agent(
+    model="gpt-5",
+    tools=empty_tools(lookup_customer, update_customer),
+    reliability=ReliabilityPolicy(
+        prerequisites=(ToolPrerequisite("update_customer", ("lookup_customer",)),),
+        completion=CompletionGate(("update_customer",)),
+    ),
+)
+```
+
+Use the tools' registered canonical names. Requirements are validated after
+tools load, before the first provider call. A prerequisite must have succeeded
+in an earlier batch of the same run. Calls in one batch cannot unlock each
+other. Only successful foreground results after hooks count; errors, denials,
+interruptions and background acknowledgements do not count. A final-answer tool
+cannot serve as completion evidence. The completion gate checks every final
+route, including a loop-guard forced answer, and shares the correction budget.
+Explicit host early-success stops through `StopPredicateHook` take precedence.
+
+Set `retry_invalid_responses=False` to disable response corrections while
+retaining configured prerequisites and completion requirements. Set
+`max_correction_turns=0` to fail immediately when a correction is needed, or
+`reliability=None` to disable the subsystem entirely. A clean run adds no
+reliability events, feedback or provider calls. Intervention emits
+`ReliabilityEvent`; correction counts and referenced successful tools survive
+resume, and changing the policy rejects resume. State belongs to each run and
+is not inherited by subagents.
 
 ---
 
@@ -42,10 +89,10 @@ workers, flushes stores, and closes hooks that expose `close`/`aclose`.
 
 Each Agent also owns one per-agent `Context` scope. It contains the agent's
 service registrations, event bus, tool pipeline, and effective execution world;
-it is not process-global state. Pass `context=` to supply a scope to the Agent;
-the Agent disposes that supplied scope on close. If a host needs to retain a
-parent scope, pass a child from `parent.scope(...)`. Closing the agent disposes
-the scope after quiescing active work. Disposal is retryable: if a custom
+it is not process-global state. Pass `context=` to supply a parent/host scope;
+the Agent creates and owns a child scope and disposes only that child on close.
+The supplied parent remains available to the host. Closing the agent disposes
+its child scope after quiescing active work. Disposal is retryable: if a custom
 teardown fails, a later `await agent.close()` retries only unfinished cleanup.
 
 ### Releasing a single session
@@ -73,6 +120,35 @@ Releasing a session with an **active run** raises unless you pass `force=True`.
 A forced release aborts the run, drains owned background work so finalizers run,
 and recursively releases retained child sessions. Durable history in the session
 store is always preserved — a released session can be reattached later by id.
+
+### Bounding cached idle sessions
+
+Long-lived hosts can opt into automatic release of idle conversations:
+
+```python
+agent = Agent(model="gpt-5", session_store=store, max_idle_sessions=100)
+session = await agent.session(id="user-42")
+async for event in session.run("hello"):
+    ...
+```
+
+`max_idle_sessions=None` (the default) keeps all live sessions until explicitly
+released. A non-negative integer bounds cached idle sessions; `0` releases each
+session once its run iterator finishes. Run completion and reattachment by id
+refresh recency. When the bound is exceeded, Linch releases the least recently
+used idle sessions through `release_session()`, preserving stored history.
+Opening a session does not itself trigger eviction; the bound is checked after
+runs and protected background work finish.
+
+Active runs, detached tool tasks, background workers, and undelivered in-process
+notifications or child events are protected and do not count toward the idle
+bound. A parent with a busy retained child is protected too. Completion of
+protected background work reapplies the bound; queued delivery stays live until
+the next run drains it. Idle retained children can be released independently or
+along with their parent. Worker continuation needs a
+live retained child, so choose a bound that fits your worker lifetime. Reattach
+an evicted conversation with `await agent.session(id=...)`; a previously released
+`Session` instance cannot run again.
 
 ### Steering an in-flight run
 
@@ -111,7 +187,7 @@ so the messages survive a reload. `session.session_log.append(...)` updates
 only the in-memory log and is not a durable session mutation. Record
 compaction with `session.session_log.record_projection(...)`. Per-request context-builder output
 is ephemeral and is never part of the log. Pick ephemeral for stateless workers,
-SQLite to survive restarts.
+Postgres to survive restarts.
 
 Because each read of `provider_view`/`full_history` builds a detached deep copy,
 reach for the cheap accessors when you only need a count or the newest turn —
@@ -124,35 +200,42 @@ boundary is the session snapshot, not a persisted projection-entry journal. On
 load, Linch seeds a fresh log from the stored historical and visible snapshots.
 
 ```python
-from linch.sessions import InMemorySessionStore, SqliteSessionStore
-from pathlib import Path
+import os
+from linch import InMemorySessionStore
+from linch.sessions.postgres import PostgresSessionStore
 
 # Ephemeral (tests, single-request workers)
 store = InMemorySessionStore()
 
 # Persistent (keep history across restarts)
-store = SqliteSessionStore(Path("~/.myapp/sessions.db").expanduser())
+store = PostgresSessionStore(os.environ["LINCH_POSTGRES_DSN"])
 
 agent = Agent(model="gpt-5", session_store=store)
 ```
 
-`SessionStore` is a protocol, so a host app can implement its own backend
-(Redis, Postgres, …) by satisfying the same interface. For durable *run*
+`SessionStore` is a protocol, so a host app can implement its own backend by
+satisfying the same interface. The built-in durable adapter is Postgres; the
+in-memory adapter is for tests and development. For durable *run*
 checkpoints (resume across process restarts, durable HITL approvals) also pass a
-`run_store=SqliteRunStore(...)` — see [workflows.md](./workflows.md) and
+`run_store=PostgresRunStore(dsn)` — see [workflows.md](./workflows.md) and
 [deep-agent.md](./deep-agent.md).
 
 ### Incremental durability
 
-`DurabilityOptions` enables durability without changing the default 2.x path:
+`DurabilityOptions` enables optional durability without changing the default
+agent behavior:
 
 ```python
-from linch import Agent, DurabilityOptions, SqliteRunStore, SqliteSessionStore
+import os
+from linch import Agent, DurabilityOptions, PostgresRunStore
+from linch.sessions.postgres import PostgresSessionStore
+
+dsn = os.environ["LINCH_POSTGRES_DSN"]
 
 agent = Agent(
     model="gpt-5",
-    session_store=SqliteSessionStore("sessions.db"),
-    run_store=SqliteRunStore("runs.db"),
+    session_store=PostgresSessionStore(dsn),
+    run_store=PostgresRunStore(dsn),
     durability=DurabilityOptions.strict_v1(),
 )
 
@@ -174,7 +257,7 @@ the SDK verifies integrity but encryption and access control belong to the host.
 `FeatureFlags` turns off subsystems you don't use so they never connect during
 `session()`. This trims startup work and the system prompt.
 
-In Linch 2.0 the SDK-safe defaults are all `False`: a bare `Agent` does not
+In Linch 3.0 the SDK-safe defaults are all `False`: a bare `Agent` does not
 discover project skills/subagents, connect to ambient MCP, or enable a virtual
 filesystem. This is intentional resource trust isolation, not a coding-agent
 configuration. Opt in only for a trusted project or use an explicit preset:
@@ -270,11 +353,38 @@ from linch import Agent, DetailedCompaction
 agent = Agent(model="gpt-5", compaction=DetailedCompaction())
 ```
 
+### Accounting for compaction
+
+In a normal run, the configured strategy's provider delivery is an accounted
+auxiliary call. Its valid `Usage` is added to the same cumulative total as the
+primary turn, and its receipt settles before the summary is applied or another
+provider call starts. A summary that reaches the token or USD limit therefore
+stops the run before the main turn is dispatched. An unusable summary (empty,
+non-text, tool-using, or oversized) is rejected but still charged when valid
+final usage was observed.
+
+`DefaultCompaction` and `DetailedCompaction` have a deterministic paid-result
+replay seam for durable runs. Linch stores a bounded accepted summary, its
+receipt identity, and an ordered hash-only source recipe; after a crash, a
+matching durable source can apply that summary without another provider call or
+duplicate charge. Required invoked-skill bodies are flushed through the
+existing session store before that recipe is written. A changed source,
+strategy configuration, listing wrapper, or run contract fails closed rather
+than applying a stale summary.
+
+The public `CompactionStrategy` protocol remains unchanged. A custom strategy
+receives an accounted provider facade for calls made through Linch, including
+the run's cancellation and provider-slot/limiter guarantees. Opaque network
+calls outside that facade are not observable, and arbitrary multi-call or
+transform logic has no automatic deterministic paid-replay guarantee. The
+standalone `summarize_with_provider(...)` helper remains available with its
+existing direct-provider behavior; it is not a durable run receipt by itself.
+
 ### Compaction ladder
 
 `CompactionLadder` adds cheap, LLM-free recovery rungs before and around
-summarization. It is opt-in — with the default (`compaction_ladder=None`)
-behavior is byte-identical to the legacy single-retry path.
+summarization. It is opt-in — the default (`compaction_ladder=None`) keeps one
+compaction retry per turn. Both policies use the same recovery driver.
 
 ```python
 from linch import Agent, CompactionLadder
@@ -359,8 +469,10 @@ print(budget.spent_tokens, budget.remaining_tokens, budget.exceeded)
 
 Behavior:
 
-- The loop charges the budget after every provider turn and checks it before the
-  next one. When exceeded it emits `BudgetEvent(kind="exceeded")`, an
+- The loop settles each physical provider delivery before it continues. This
+  includes the auxiliary compaction delivery, so its usage is charged before
+  the summary is applied and admission is checked again before the next
+  primary turn. When exceeded it emits `BudgetEvent(kind="exceeded")`, an
   `ErrorEvent` named `BudgetExceededError`, and a `ResultEvent(subtype="error")`
   — the session history stays intact and the session remains usable.
 - `BudgetEvent(kind="warning")` fires once per budget object when spending first
@@ -368,8 +480,22 @@ Behavior:
   across the whole tree, not once per run.
 - Precedence: `RunOptions(budget=...)` > a budget inherited from a parent
   session (subagents) > `Agent(budget=...)`.
-- Token counts sum all `Usage` buckets. USD costs come from `linch.pricing`;
-  unknown models charge `$0`, so for unpriced models only the token limit binds.
+- Token counts sum all `Usage` buckets from primary and auxiliary deliveries.
+  USD costs come from `linch.pricing`; unknown models do not receive a
+  synthetic price, so their known tokens remain in the total while cost is
+  partial and only a token limit can bind for that delivery.
+- If a dispatched delivery is cancelled or fails before valid final usage, its
+  usage is `unknown`, never zero. A capped run fails closed before another
+  provider call until the host resolves that accounting fence; an uncapped run
+  may finish with a lower-bound total and `ResultEvent.usage_complete=False`.
+- A live `RunBudget` object carries its receipt owner and charged delivery IDs
+  across the in-process agent/subagent tree. Resume may adopt a checkpoint only
+  with a fresh zero-spent budget; a fresh nonzero or owner-mismatched capped
+  budget fails closed rather than silently replaying charges.
+
+These ownership fences are intentionally in-process. They do not promise
+distributed-tree recovery, exactly-once external-provider billing, or a
+reservation against concurrently admitted deliveries.
 
 Verification retries (schema repair, [verifier hooks](./hooks.md)) and workflow
 subagents all draw from the same budget, so a strict gate can never loop
@@ -410,6 +536,6 @@ The tool side has its own separate cap, `Agent(max_tool_concurrency=...)` — se
 ## Related pages
 
 - [Providers](./providers.md) — model selection and capabilities.
-- [Hooks](./hooks.md) — observers, middleware, RAG, verifiers, stop predicates.
+- [Hooks](./hooks.md) — middleware, RAG, verifiers, stop predicates, and OTel setup.
 - [Workflows](./workflows.md) / [Deep agent](./deep-agent.md) — durable runs and
   the subagent tree that budgets cover.

@@ -1,5 +1,9 @@
 # Migrating to Linch 2.0
 
+This page records the historical 2.0 transition. For current 3.0 upgrades, see
+[the 3.0 migration guide](migration-3.0.md): old runs and database schemas are
+rejected, and new runs require current version-3 state.
+
 Linch 2.0 makes the SDK boundary explicit: Linch supplies reusable agent
 runtime mechanisms, while an application chooses the tools, prompt policy,
 resource trust, and domain behavior. A coding agent is a valid application of
@@ -27,14 +31,14 @@ agent = Agent(model="gpt-5", tools=workspace_tools())
 For a durable planning/subagent preset, use the opt-in deep-agent factory:
 
 ```python
-from linch import create_deep_agent
+from linch.ext.deep_agent import create_deep_agent
 
 agent = create_deep_agent(model="gpt-5")
 ```
 
-`default_tools()` and `defaultTools` remain compatibility names for the
-workspace preset, but they are not the defaults of `Agent`. New integrations
-should prefer `workspace_tools()` when the intent is clear at the call site.
+`workspace_tools()` is the explicit workspace preset, but it is not the default
+of `Agent`. New integrations should pass it when workspace authority is
+intentional and visible at the call site.
 `FeatureFlags(skills=True, subagents=True, filesystem=True, mcp=True)` can be
 provided explicitly when those project resources are trusted. MCP still needs
 configured servers; enabling the flag alone does not invent a server.
@@ -114,33 +118,17 @@ its state slot and is not a substitute for policy identity. Runtime package
 version participates in the contract, so upgrade the runtime only after
 finishing active durable runs; otherwise start a new run.
 
-```python
-from linch import RunOptions
+In 2.0, normal resumes compared a persisted contract; an explicit legacy
+resume override existed for contractless records. That override has been
+removed in 3.0. Start new runs rather than resuming those records; follow the
+[3.0 migration guide](migration-3.0.md) for current storage requirements.
+A mismatched or corrupt current contract fingerprint fails closed with
+`RunContractMismatchError`; `Session.resume()` surfaces it as a `ConfigError`
+with differing contract paths.
 
-# Normal resumes compare the persisted contract automatically.
-async for event in session.resume(run_id):
-    ...
-
-# A pre-2.0 row has no contract. Opt into that unsafe migration explicitly.
-async for event in session.resume(
-    run_id,
-    RunOptions(allow_legacy_resume=True),
-):
-    ...
-```
-
-An old run without a contract is called a legacy run. It is not silently
-blessed as compatible: hosts must explicitly choose
-`RunOptions(allow_legacy_resume=True)` (and accept that the original inputs
-cannot be proven), or start a new run. A stored contract with a mismatched or
-corrupt fingerprint fails closed with `RunContractMismatchError`.
-The low-level compatibility helper raises that typed error; `Session.resume()`
-surfaces it as a `ConfigError` with the differing contract paths.
-
-Checkpoint and event wire compatibility remains independently versioned by
-`RUN_SCHEMA_VERSION`. The contract fingerprint is not a replacement for the
-event log or tool idempotency key; tool execution after a crash remains
-at-least-once, so integrations must reconcile external side effects with
+The contract fingerprint is not a replacement for the event log or tool
+idempotency key; tool execution after a crash remains at-least-once, so
+integrations must reconcile external side effects with
 `ToolContext.idempotency_key`.
 
 Detached background workers emit origin-attributed audit events when their
@@ -175,9 +163,9 @@ compaction safer: provider-agnostic summaries do not assume OpenAI-specific
 wire details, snapshot/restore boundaries are explicit, and malformed or
 missing durable snapshots fall back to the event log. Session/run storage
 allocation uses transaction-safe IDs for concurrent creation in SQLite and
-Postgres. Existing stores are
-read with compatibility defaults; no checkpoint migration is needed solely for
-the new optional contract/progress fields.
+Postgres. Those historical 2.0 compatibility defaults do not apply to 3.0;
+current readers require wire-3 state and built-in stores require fresh version-3
+schemas. See the [3.0 migration guide](migration-3.0.md).
 
 ## A practical upgrade checklist
 
@@ -189,7 +177,8 @@ the new optional contract/progress fields.
    from approval responses.
 5. Make provider adapters emit the normalized stream contract strictly.
 6. Let Linch persist and compare the run contract before resuming durable runs;
-   use `RunOptions(allow_legacy_resume=True)` only for an explicit migration.
+   for 3.0, start new runs and use fresh databases as described in the
+   [3.0 migration guide](migration-3.0.md).
 7. For Docker-backed durable runs that pass environment values to Bash, supply
    the same protected `resume_fingerprint_key` on every resume host.
 8. Treat detached background completion as an in-process convenience unless

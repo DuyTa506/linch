@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import inspect
 import logging
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from .. import lifecycle
 from .contexts import (
     AfterProviderCallContext,
     AgentStartContext,
@@ -35,6 +37,17 @@ _log = logging.getLogger("linch.observability")
 
 @dataclass(slots=True)
 class HookDispatchResult:
+    """Collect the combined outcome of dispatching hooks for one event.
+
+    Attributes:
+        context: Context after all accepted mutations have been applied.
+
+    Args:
+        result: Combined hook action.
+        events: Telemetry events emitted during dispatch.
+        context: Final lifecycle context.
+    """
+
     result: HookResult = field(default_factory=HookResult.continue_)
     events: list[Any] = field(default_factory=list)
     # The context after all mutations were applied — lets callers read the final
@@ -44,15 +57,52 @@ class HookDispatchResult:
 
 
 class HookDispatcher:
+    """Dispatch lifecycle contexts to registered hooks in order.
+
+    Args:
+        hooks: Hook objects to invoke for matching lifecycle points.
+    """
+
     def __init__(self, hooks: Iterable[Any] | None = None) -> None:
+        """Create a dispatcher with an optional ordered hook collection.
+
+        Args:
+            hooks: Hook objects to retain for future dispatches.
+        """
+
         self._hooks = list(hooks or [])
 
     @property
     def active(self) -> bool:
+        """Return whether at least one hook is registered.
+
+        Returns:
+            Whether dispatch has any hooks to invoke.
+        """
+
         return bool(self._hooks)
 
-    async def dispatch(self, event: HookEvent | str, ctx: HookContext) -> HookDispatchResult:
-        event_value = event.value if isinstance(event, HookEvent) else str(event)
+    async def dispatch(
+        self, event: lifecycle.LifecyclePoint | HookEvent | str, ctx: HookContext
+    ) -> HookDispatchResult:
+        """Run hooks for one lifecycle point while preserving hook ordering.
+
+        Args:
+            event: Catalog point or hook name.
+            ctx: Mutable context passed to matching hooks.
+
+        Returns:
+            The combined hook action, telemetry events, and final context.
+        """
+        if isinstance(event, lifecycle.LifecyclePoint):
+            if event.mode != "hook":
+                raise ValueError(
+                    f"hook lifecycle point {event.name!r} uses {event.mode} dispatch; "
+                    "HookDispatcher requires hook"
+                )
+            event_value = event.name
+        else:
+            event_value = event.value if isinstance(event, HookEvent) else str(event)
         telemetry: list[Any] = []
         current = HookResult.continue_()
         for hook in self._hooks:
@@ -120,31 +170,23 @@ class HookDispatcher:
 
 
 _METHODS = {
-    HookEvent.AGENT_START.value: "on_agent_start",
-    HookEvent.AGENT_STOP.value: "on_agent_stop",
-    HookEvent.USER_PROMPT_SUBMIT.value: "on_user_prompt_submit",
-    HookEvent.TURN_START.value: "on_turn_start",
-    HookEvent.TURN_STOP.value: "on_turn_stop",
-    HookEvent.BEFORE_PROVIDER_CALL.value: "on_before_provider_call",
-    HookEvent.PROVIDER_CALL_START.value: "on_provider_call_start",
-    HookEvent.PROVIDER_CALL_STOP.value: "on_provider_call_stop",
-    HookEvent.AFTER_PROVIDER_CALL.value: "on_after_provider_call",
-    HookEvent.PRE_TOOL_USE.value: "on_pre_tool_use",
-    HookEvent.TOOL_USE_START.value: "on_tool_use_start",
-    HookEvent.TOOL_USE_STOP.value: "on_tool_use_stop",
-    HookEvent.POST_TOOL_USE.value: "on_post_tool_use",
-    HookEvent.POST_TOOL_USE_FAILURE.value: "on_post_tool_use_failure",
-    HookEvent.PRE_COMPACT.value: "on_pre_compact",
-    HookEvent.POST_COMPACT.value: "on_post_compact",
-    HookEvent.BEFORE_FINAL_ANSWER.value: "on_before_final_answer",
-    HookEvent.STOP.value: "on_stop",
-    HookEvent.SUBAGENT_START.value: "on_subagent_start",
-    HookEvent.SUBAGENT_STOP.value: "on_subagent_stop",
-    HookEvent.EVENT_EMIT.value: "on_event_emit",
+    point.name: "on_" + re.sub(r"(?<!^)(?=[A-Z])", "_", point.name).lower()
+    for point in lifecycle.LIFECYCLE_POINTS
+    if isinstance(point._payload_ref, str)
+    and point._payload_ref.startswith("linch.hooks.contexts.")
 }
 
 
 def normalize_hooks(raw: Any) -> list[Any]:
+    """Normalize optional hook configuration to a list.
+
+    Args:
+        raw: A hook object, sequence of hooks, or ``None``.
+
+    Returns:
+        A new list containing hooks in registration order.
+    """
+
     if raw is None:
         return []
     if isinstance(raw, (list, tuple)):

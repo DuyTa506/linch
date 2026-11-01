@@ -4,12 +4,16 @@ import asyncio
 import copy
 import logging
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass, replace
+from collections.abc import AsyncGenerator, Awaitable, Callable
+from contextlib import aclosing
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal, cast
 from uuid import uuid4
 from xml.sax.saxutils import escape
 
+from . import lifecycle
+from ._telemetry import record_tool_result, register_background_task, trace_tool
+from ._wire import UnsupportedWireVersionError
 from .abort import AbortContext, throw_if_aborted
 from .errors import AbortError, ToolExecutionError, ToolTimeoutError
 from .events import (
@@ -25,14 +29,14 @@ from .events import (
 )
 from .hooks import (
     HookDispatcher,
-    HookEvent,
     PostToolUseContext,
     PostToolUseFailureContext,
     PreToolUseContext,
 )
-from .permissions import PendingToolCall, PermissionDecision
+from .permissions import PendingToolCall, PermissionDecision, Principal
 from .permissions.keys import permission_decision_key as _permission_key
 from .providers.retry import RetryOptions, _delay_for_error
+from .run_store import _lease_kwargs
 from .tools import (
     CanonicalToolOutput,
     ResourceAccess,
@@ -66,6 +70,10 @@ class ResolvedCall:
     summary: str
     is_immediate_error: bool
     immediate_error_reason: str | None = None
+    principal: Principal | None = field(default=None, repr=False)
+    _run_config: Any = field(default=None, repr=False)
+    _run_id: str | None = field(default=None, repr=False)
+    _run_deps: Any = field(default=None, repr=False)
 
 
 @dataclass(slots=True)
@@ -74,6 +82,7 @@ class ToolExecutionOutcome:
     tool_result: ToolResult
     duration_ms: int
     tool_output: CanonicalToolOutput | None = None
+    error_type: str | None = None
 
 
 @dataclass(slots=True)
@@ -112,9 +121,15 @@ async def _maybe_offload_block(
 
     Returns *result* unchanged when offload is disabled or not applicable
     (``maybe_offload`` is a no-op on error / filesystem-tool results)."""
-    _fs = getattr(session, "filesystem", None)
     _offload_cfg = getattr(agent, "result_offload", None)
-    if _fs is None or _offload_cfg is None:
+    if _offload_cfg is None:
+        return result
+    from .filesystem.backend import resolve_filesystem_backend
+
+    _fs = resolve_filesystem_backend(getattr(session, "run_deps", None))
+    if _fs is None:
+        _fs = getattr(session, "filesystem", None)
+    if _fs is None:
         return result
     from .filesystem.offload import maybe_offload
 
@@ -141,6 +156,7 @@ def _execution_outcome(
     block_result: ToolResult | None = None,
     *,
     tool_output: CanonicalToolOutput | None = None,
+    error_type: str | None = None,
 ) -> ToolExecutionOutcome:
     provider_result = block_result or tool_result
     return ToolExecutionOutcome(
@@ -152,6 +168,7 @@ def _execution_outcome(
         tool_result=tool_result,
         duration_ms=tool_result.duration_ms,
         tool_output=tool_output,
+        error_type=error_type,
     )
 
 
@@ -211,10 +228,17 @@ def _v2_contract_error(
     return _execution_outcome(
         call.id,
         _tool_result_error(f"Tool output invalid: {exc}", duration_ms),
+        error_type=type(exc).__name__,
     )
 
 
-def _resolve_call(block: ToolUseBlock, tools: Any, cwd: str) -> ResolvedCall:
+def _resolve_call(
+    block: ToolUseBlock, tools: Any, cwd: str, error_reason: str | None = None
+) -> ResolvedCall:
+    if error_reason:
+        return ResolvedCall(
+            block.id, block, None, block.input, f"{block.name}(unavailable)", True, error_reason
+        )
     if block.input.get("__invalid_json"):
         raw = str(block.input.get("raw", ""))
         return ResolvedCall(
@@ -302,6 +326,7 @@ async def _run_background_tool(
     turn_index: int | None,
     middleware_error: str | None,
     origin_run_id: str,
+    origin_lease: Any = None,
 ) -> None:
     """Run a detached tool call and post its completion as a <task-notification>.
 
@@ -325,21 +350,23 @@ async def _run_background_tool(
     except (AbortError, asyncio.CancelledError):
         raise
     except Exception as exc:  # defensive: _execute_one normally returns error results
-        result_text = f"{type(exc).__name__}: {exc}"
-        is_error = True
-    else:
-        if _is_v2_tool(call):
-            outcome, _ = await _dispatch_post_tool_use(
-                HookDispatcher(_scheduler_hooks(agent)),
-                call,
-                _effective_input(call, decision),
-                outcome,
-                session,
-                agent=agent,
-                turn_index=turn_index,
-            )
-        result_text = str(outcome.block.content)
-        is_error = outcome.block.is_error
+        outcome = _execution_outcome(
+            call.id,
+            _tool_result_error(f"{type(exc).__name__}: {exc}"),
+        )
+
+    outcome, _ = await _dispatch_post_tool_use(
+        HookDispatcher(_scheduler_hooks(call._run_config or agent)),
+        call,
+        _effective_input(call, decision),
+        outcome,
+        session,
+        agent=agent,
+        turn_index=turn_index,
+        run_id=origin_run_id,
+    )
+    result_text = str(outcome.block.content)
+    is_error = outcome.block.is_error
 
     status_str = "failed" if is_error else "completed"
     notification = (
@@ -353,25 +380,12 @@ async def _run_background_tool(
     from .types import Message, TextBlock
 
     notification_message = Message(role="user", content=[TextBlock(text=notification)])
-    notify = getattr(session, "notify", None)
-    if callable(notify):
-        await cast(
-            Awaitable[Any],
-            notify(
-                notification_message,
-                delivery_id=f"background-tool:{bg_id}",
-                source="background-tool",
-                metadata={"task_id": bg_id, "tool_name": tool_name, "status": status_str},
-            ),
-        )
-    else:
-        # Compatibility for lightweight Session duck types used by legacy
-        # embedders/tests. Real Session instances always route through notify(),
-        # which enforces the durable-inbox contract when enabled.
-        notifications = getattr(session, "pending_notifications", None)
-        if notifications is None:
-            return
-        notifications.append(notification_message)
+    await session.notify(
+        notification_message,
+        delivery_id=f"background-tool:{bg_id}",
+        source="background-tool",
+        metadata={"task_id": bg_id, "tool_name": tool_name, "status": status_str},
+    )
     completion_event = BackgroundWorkerEvent(
         worker_id=bg_id,
         status=status_str,
@@ -388,7 +402,12 @@ async def _run_background_tool(
     run_store = getattr(agent, "run_store", None)
     if run_store is not None:
         try:
-            await run_store.append_event(origin_run_id, completion_event)
+            method = run_store.append_event
+            await method(
+                origin_run_id,
+                completion_event,
+                **_lease_kwargs(method, origin_lease),
+            )
         except Exception:
             logger.warning(
                 "Failed to append background worker completion event "
@@ -424,6 +443,7 @@ def _skill_name_from_input(call: ResolvedCall, input: dict[str, Any]) -> str | N
     return raw[1:] if raw.startswith("/") else raw
 
 
+@trace_tool
 async def _execute_one(
     call: ResolvedCall,
     decision: PermissionDecision,
@@ -478,10 +498,7 @@ async def _execute_one(
                 call.id,
                 _tool_result_error("Legacy PreToolUse resolve must supply tool_result"),
             )
-        block_result = await _maybe_offload_block(
-            precomputed, call=call, agent=agent, session=session
-        )
-        return _execution_outcome(call.id, precomputed, block_result=block_result)
+        return _execution_outcome(call.id, precomputed)
 
     tool = call.tool
     result_timeout_ms = _tool_timeout_ms(agent, tool)
@@ -489,7 +506,7 @@ async def _execute_one(
     max_attempts = opts.max_attempts if opts is not None else 1
     started = time.perf_counter()
 
-    execution_run_id = run_id or session.active_run_id or "unknown"
+    execution_run_id = run_id or call._run_id or session.active_run_id or "unknown"
     accepting_progress = True
 
     def _report_progress(message: str, data: dict[str, Any] | None) -> None:
@@ -512,12 +529,14 @@ async def _execute_one(
         signal=signal,
         file_read_tracker=getattr(session, "file_read_tracker", None),
         emit=_report_progress,
-        deps=getattr(session, "run_deps", None),
+        deps=_captured_call_deps(call, session),
         execution=getattr(agent, "execution_backend", None),
         filesystem=getattr(session, "filesystem", None),
         # Stable across resume: run_id is reused by resume_loop and call.id comes
         # from the persisted provider_view, so a re-executed tool sees the same key.
         idempotency_key=f"{execution_run_id}:{call.id}",
+        _principal=call.principal,
+        _run_config=call._run_config,
     )
     try:
         return await _execute_tool_attempts(
@@ -552,7 +571,7 @@ def _dispatch_execute(
     With no pipeline listeners registered this returns ``tool.execute(...)``
     unchanged, so the default path is byte-identical.
     """
-    pipeline = getattr(agent, "tool_pipeline", None)
+    pipeline = getattr(getattr(ctx, "_run_config", None) or agent, "tool_pipeline", None)
     has_listeners = getattr(pipeline, "has_listeners", None)
     if pipeline is None or not callable(has_listeners) or not has_listeners():
         return tool.execute(effective_input, ctx)
@@ -574,6 +593,8 @@ def _dispatch_execute(
             # permission would redirect the approved call to another workspace.
             "execution",
             "idempotency_key",
+            "principal",
+            "_run_config",
         )
     }
     execution = ToolExecution(
@@ -648,20 +669,16 @@ async def _execute_tool_attempts(
             result = raw_result
             if result.duration_ms <= 0:
                 result.duration_ms = elapsed
-            # ── Auto-offload oversized results ────────────────────────────────
-            block_result = await _maybe_offload_block(
-                result, call=call, agent=agent, session=session
-            )
-            return _execution_outcome(call.id, result, block_result=block_result)
+            return _execution_outcome(call.id, result)
         except AbortError:
             raise
-        except asyncio.TimeoutError:
+        except TimeoutError:
             # result_timeout_ms may be None if the tool raised asyncio.TimeoutError
             # internally (its own deadline) with no agent-wide timeout set.
             ms: int | str = int(result_timeout_ms) if result_timeout_ms is not None else "unknown"
             te: Exception = ToolTimeoutError(f"Tool '{_tool_name(call)}' timed out after {ms}ms")
             last_exc = te
-            if _tool_retryable(call, te) and attempt < max_attempts - 1:
+            if _tool_retryable(call) and attempt < max_attempts - 1:
                 continue
             duration_ms = int((time.perf_counter() - started) * 1000)
             return _execution_outcome(
@@ -673,18 +690,20 @@ async def _execute_tool_attempts(
                     ),
                     duration_ms,
                 ),
+                error_type="ToolTimeoutError",
             )
         except ToolOutputContractError as exc:
             duration_ms = int((time.perf_counter() - started) * 1000)
             return _v2_contract_error(call, exc, duration_ms)
         except Exception as exc:
             last_exc = exc
-            if _tool_retryable(call, exc) and attempt < max_attempts - 1:
+            if _tool_retryable(call) and attempt < max_attempts - 1:
                 continue
             duration_ms = int((time.perf_counter() - started) * 1000)
             return _execution_outcome(
                 call.id,
                 _tool_result_error(f"Tool failed: {exc}", duration_ms),
+                error_type=type(exc).__name__,
             )
 
     # Defensive fallback — all attempts exhausted (should be unreachable because
@@ -719,9 +738,7 @@ def _tool_parallel(call: ResolvedCall, input: dict[str, Any] | None = None) -> b
             return False
     if _tool_scope(call) != "read":
         return False
-    if parallel is not None:
-        return bool(parallel)
-    return bool(getattr(call.tool, "parallel_safe", False))
+    return bool(parallel)
 
 
 def _resource_accesses(
@@ -813,15 +830,15 @@ def _retry_options(agent: Any) -> RetryOptions | None:
     return None
 
 
-def _tool_retryable(call: ResolvedCall, exc: Exception) -> bool:
-    """True when the exception is safe to retry for this call.
+def _tool_retryable(call: ResolvedCall) -> bool:
+    """Return whether retrying this call is safe.
 
     Read-scope tools are always retried on any exception — they are idempotent
     by design, so any failure is safe to retry.
 
     Write / exec tools are never retried by default (side-effect risk); a tool
-    may opt in by setting a class-level ``retryable = True`` attribute, or an
-    exception may carry ``retryable = True`` (e.g. ``ToolTimeoutError``).
+    may opt in by setting a class-level ``retryable = True`` attribute. Exception
+    metadata never overrides the tool's side-effect policy.
 
     ``AbortError`` is never seen here — it is re-raised before the retry
     predicate is consulted.
@@ -830,7 +847,7 @@ def _tool_retryable(call: ResolvedCall, exc: Exception) -> bool:
     opt_in = bool(getattr(tool, "retryable", False)) if tool is not None else False
     if opt_in or _tool_scope(call) == "read":
         return True
-    return bool(getattr(exc, "retryable", False))
+    return False
 
 
 def _scheduler_hooks(agent: Any) -> list[Any]:
@@ -846,7 +863,7 @@ async def _dispatch_pre_tool_use(
     turn_index: int | None,
 ) -> tuple[dict[str, Any], str | None, Any, list[Event]]:
     outcome = await dispatcher.dispatch(
-        HookEvent.PRE_TOOL_USE,
+        lifecycle.PRE_TOOL_USE,
         PreToolUseContext(
             session=session,
             run_id=session.active_run_id or "unknown",
@@ -913,6 +930,12 @@ def _canonicalize_hook_input(call: ResolvedCall, input: Any) -> str | None:
     return None
 
 
+def _captured_call_deps(call: ResolvedCall, session: Any) -> Any:
+    if getattr(call, "_run_id", None) is not None:
+        return call._run_deps
+    return getattr(session, "run_deps", None)
+
+
 async def _dispatch_post_tool_use(
     dispatcher: HookDispatcher,
     call: ResolvedCall,
@@ -922,14 +945,15 @@ async def _dispatch_post_tool_use(
     *,
     agent: Any,
     turn_index: int | None,
+    run_id: str | None = None,
 ) -> tuple[ToolExecutionOutcome, list[Event]]:
     dispatched = await dispatcher.dispatch(
-        HookEvent.POST_TOOL_USE,
+        lifecycle.POST_TOOL_USE,
         PostToolUseContext(
             session=session,
-            run_id=session.active_run_id or "unknown",
+            run_id=run_id or session.active_run_id or "unknown",
             turn_index=turn_index,
-            deps=getattr(session, "run_deps", None),
+            deps=_captured_call_deps(call, session),
             tool_use_id=call.id,
             tool_name=_tool_name(call),
             input=input,
@@ -982,13 +1006,27 @@ async def _dispatch_post_tool_use(
             tool_output=outcome.tool_output,
         )
     else:
-        final = outcome
+        block_result = await _maybe_offload_block(
+            outcome.tool_result, call=call, agent=agent, session=session
+        )
+        final = _execution_outcome(
+            call.id,
+            outcome.tool_result,
+            block_result=block_result,
+            tool_output=outcome.tool_output,
+        )
+    record_tool_result(
+        session,
+        call.id,
+        final.tool_result.content,
+        run_id=run_id or getattr(call, "_run_id", None),
+    )
     # PostToolUseFailure: an observational notification fired only when the final
     # (post-mutation) result is an error, so a failure-watcher hook need not
     # re-derive "did this fail?" from every PostToolUse.
     events.extend(
         await _dispatch_post_tool_use_failure(
-            dispatcher, call, input, final, session, turn_index=turn_index
+            dispatcher, call, input, final, session, turn_index=turn_index, run_id=run_id
         )
     )
     return final, events
@@ -1002,17 +1040,18 @@ async def _dispatch_post_tool_use_failure(
     session: Any,
     *,
     turn_index: int | None,
+    run_id: str | None = None,
 ) -> list[Event]:
     tool_result = outcome.tool_result
     if not dispatcher.active or tool_result is None or not getattr(tool_result, "is_error", False):
         return []
     dispatched = await dispatcher.dispatch(
-        HookEvent.POST_TOOL_USE_FAILURE,
+        lifecycle.POST_TOOL_USE_FAILURE,
         PostToolUseFailureContext(
             session=session,
-            run_id=session.active_run_id or "unknown",
+            run_id=run_id or session.active_run_id or "unknown",
             turn_index=turn_index,
-            deps=getattr(session, "run_deps", None),
+            deps=_captured_call_deps(call, session),
             tool_use_id=call.id,
             tool_name=_tool_name(call),
             input=input,
@@ -1209,12 +1248,13 @@ def _evaluate_permissions(
             continue
 
         tool_obj = call.tool
-        initial = agent.permission_engine.evaluate(
+        initial = (call._run_config or agent).permission_engine.evaluate(
             PendingToolCall(
                 tool_use_id=call.id,
                 tool=tool_obj,
                 input=call.input,
                 cwd=_effective_cwd(session, agent),
+                principal=call.principal,
             )
         )
         if initial.decision != "ask":
@@ -1229,6 +1269,8 @@ def _evaluate_permissions(
 
             try:
                 decisions.append(_pd_from_dict(_stored_decisions[_key]))
+            except UnsupportedWireVersionError:
+                raise
             except (AttributeError, TypeError, ValueError):
                 ask_indices.append(i)
                 decisions.append(initial)
@@ -1258,12 +1300,13 @@ async def _resolve_ask_decisions(
     for idx in ask_indices:
         call = resolved[idx]
         try:
-            decisions[idx] = await agent.permission_engine.resolve(
+            decisions[idx] = await (call._run_config or agent).permission_engine.resolve(
                 PendingToolCall(
                     tool_use_id=call.id,
                     tool=call.tool,
                     input=call.input,
                     cwd=_effective_cwd(session, agent),
+                    principal=call.principal,
                 ),
                 signal,
             )
@@ -1291,7 +1334,7 @@ async def _run_serial_batch(
     hook_dispatcher: HookDispatcher,
     middleware_errors: dict[str, str],
     turn_index: int | None,
-) -> AsyncIterator[Event]:
+) -> AsyncGenerator[Event, None]:
     """Run a serial (one-call-at-a-time) batch, yielding skill + start/end events."""
     for call, _idx, decision in batch["calls"]:
         input = _effective_input(call, decision)
@@ -1305,7 +1348,7 @@ async def _run_serial_batch(
         yield ToolCallStartEvent(
             tool_use_id=call.id,
             tool_name=_tool_name(call),
-            input=input,
+            input=copy.deepcopy(input),
             summary=call.summary,
         )
         running = _start_tool_execution(
@@ -1318,8 +1361,9 @@ async def _run_serial_batch(
             middleware_error=middleware_errors.get(call.id),
         )
         try:
-            async for progress in _drain_tool_execution(running):
-                yield progress
+            async with aclosing(_drain_tool_execution(running)) as progress_stream:
+                async for progress in progress_stream:
+                    yield progress
             outcome = running.task.result()
             outcome, hook_events = await _dispatch_post_tool_use(
                 hook_dispatcher,
@@ -1372,7 +1416,7 @@ async def _run_parallel_batch(
     hook_dispatcher: HookDispatcher,
     middleware_errors: dict[str, str],
     turn_index: int | None,
-) -> AsyncIterator[Event]:
+) -> AsyncGenerator[Event, None]:
     """Run a parallel batch: emit all starts, gather concurrently, then all ends.
 
     On abort/cancel, synthesises an ``aborted`` end event for every call that
@@ -1391,7 +1435,7 @@ async def _run_parallel_batch(
         yield ToolCallStartEvent(
             tool_use_id=call.id,
             tool_name=_tool_name(call),
-            input=input,
+            input=copy.deepcopy(input),
             summary=call.summary,
         )
 
@@ -1414,8 +1458,11 @@ async def _run_parallel_batch(
             # While waiting for the next provider-ordered result, multiplex
             # every call's bounded progress queue. A later tool can therefore
             # update live without allowing its final end bracket to overtake.
-            async for progress in _drain_parallel_progress_until(running, execution.task):
-                yield progress
+            async with aclosing(
+                _drain_parallel_progress_until(running, execution.task)
+            ) as progress_stream:
+                async for progress in progress_stream:
+                    yield progress
             outcome = execution.task.result()
             input = _effective_input(call, decision)
             outcome, hook_events = await _dispatch_post_tool_use(
@@ -1517,7 +1564,7 @@ def _start_tool_execution(
     return _RunningTool(task=task, progress=progress)
 
 
-async def _drain_tool_execution(running: _RunningTool) -> AsyncIterator[ToolProgressEvent]:
+async def _drain_tool_execution(running: _RunningTool) -> AsyncGenerator[ToolProgressEvent, None]:
     """Yield bounded/coalesced progress live until the tool task settles."""
     while True:
         while not running.progress.empty():
@@ -1528,23 +1575,22 @@ async def _drain_tool_execution(running: _RunningTool) -> AsyncIterator[ToolProg
                 yield running.progress.get_nowait()
             return
         progress_wait = asyncio.ensure_future(running.progress.get())
-        done, _ = await asyncio.wait(
-            [running.task, progress_wait], return_when=asyncio.FIRST_COMPLETED
-        )
-        if progress_wait in done:
-            yield progress_wait.result()
-        else:
-            progress_wait.cancel()
-            try:
-                await progress_wait
-            except asyncio.CancelledError:
-                pass
+        try:
+            done, _ = await asyncio.wait(
+                [running.task, progress_wait], return_when=asyncio.FIRST_COMPLETED
+            )
+            if progress_wait in done:
+                yield progress_wait.result()
+        finally:
+            if not progress_wait.done():
+                progress_wait.cancel()
+            await asyncio.gather(progress_wait, return_exceptions=True)
 
 
 async def _drain_parallel_progress_until(
     executions: list[_RunningTool],
     until: asyncio.Task[ToolExecutionOutcome],
-) -> AsyncIterator[ToolProgressEvent]:
+) -> AsyncGenerator[ToolProgressEvent, None]:
     while True:
         for execution in executions:
             while not execution.progress.empty():
@@ -1583,16 +1629,51 @@ async def execute_tool_calls(
     *,
     turn_index: int | None = None,
     on_permissions_resolved: Callable[[], Awaitable[None]] | None = None,
-) -> AsyncIterator[Event]:
+    run_config: Any = None,
+) -> AsyncGenerator[Event, None]:
+    """Execute a provider batch and yield its lifecycle events.
+
+    Args:
+        blocks: Provider-emitted tool calls to validate and execute.
+        agent: Agent configuration and tool registry owner.
+        session: Session carrying run-scoped state and notifications.
+        signal: Abort signal checked during permission and tool execution.
+        turn_index: Optional provider-turn index for hooks and telemetry.
+        on_permissions_resolved: Optional durability callback before execution.
+        run_config: Captured run policy and services; omission preserves the direct helper path.
+
+    Yields:
+        Tool lifecycle, permission, progress, and skill events.
+    """
     if not blocks:
         return
 
     blocks, bg_ids = _strip_background_hints(blocks, agent)
 
-    effective_tools = getattr(session, "tools_override", None) or agent.tools
-    resolved = [_resolve_call(b, effective_tools, agent.cwd) for b in blocks]
+    effective_tools = (
+        run_config.tools
+        if run_config is not None
+        else (getattr(session, "tools_override", None) or agent.tools)
+    )
+    bus = getattr(getattr(run_config or agent, "context", None), "events", None)
+    if bus is not None and bus.has_listeners(lifecycle.TOOL_RESOLVE):
+        resolved = []
+        for block in blocks:
+            reason = await bus.serial(lifecycle.TOOL_RESOLVE, block.name, block.input, session)
+            resolved.append(_resolve_call(block, effective_tools, agent.cwd, reason))
+    else:
+        resolved = [_resolve_call(b, effective_tools, agent.cwd) for b in blocks]
+    origin_run_id = session.active_run_id or "unknown"
+    for call in resolved:
+        call._run_config = run_config
+        call._run_id = origin_run_id
+        call._run_deps = getattr(session, "run_deps", None)
+    principal = getattr(session, "_active_principal", None)
+    if principal is not None:
+        for call in resolved:
+            call.principal = principal
     _enforce_turn_tool_availability(resolved, session)
-    hook_dispatcher = HookDispatcher(_scheduler_hooks(agent))
+    hook_dispatcher = HookDispatcher(_scheduler_hooks(run_config or agent))
 
     # PreToolUse is the only input-mutation seam. It runs after the tool's
     # initial schema validation but before final policy evaluation. Every
@@ -1640,7 +1721,7 @@ async def execute_tool_calls(
                 PermissionRequestItem(
                     tool_use_id=call.id,
                     tool_name=_tool_name(call),
-                    input=call.input,
+                    input=copy.deepcopy(call.input),
                     summary=call.summary,
                 )
             )
@@ -1683,10 +1764,15 @@ async def execute_tool_calls(
             yield ToolCallStartEvent(
                 tool_use_id=call.id,
                 tool_name=tool_name,
-                input=input,
+                input=copy.deepcopy(input),
                 summary=call.summary,
             )
-            task = asyncio.ensure_future(
+            binding = session._run_bindings.get(origin_run_id) if run_config is not None else None
+            origin_lease = getattr(getattr(session, "_event_journal", None), "lease", None)
+            from .profiles import _schedule_with_binding
+
+            task = _schedule_with_binding(
+                binding,
                 _run_background_tool(
                     call,
                     decisions[i],
@@ -1696,10 +1782,12 @@ async def execute_tool_calls(
                     bg_id=bg_id,
                     turn_index=turn_index,
                     middleware_error=middleware_errors.get(call.id),
-                    origin_run_id=session.active_run_id or "unknown",
-                )
+                    origin_run_id=origin_run_id,
+                    origin_lease=origin_lease,
+                ),
             )
             session.background_tasks.append(task)
+            register_background_task(session, task, run_id=origin_run_id, tool_use_id=call.id)
             ack = _background_ack(tool_name, bg_id)
             yield ToolCallEndEvent(
                 tool_use_id=call.id,
@@ -1730,19 +1818,16 @@ async def execute_tool_calls(
     for batch in batches:
         throw_if_aborted(signal)
         lane = _run_serial_batch if not batch["parallel"] else _run_parallel_batch
-        lane_events = lane(
-            batch,
-            agent=agent,
-            session=session,
-            signal=signal,
-            hook_dispatcher=hook_dispatcher,
-            middleware_errors=middleware_errors,
-            turn_index=turn_index,
-        )
-        try:
+        async with aclosing(
+            lane(
+                batch,
+                agent=agent,
+                session=session,
+                signal=signal,
+                hook_dispatcher=hook_dispatcher,
+                middleware_errors=middleware_errors,
+                turn_index=turn_index,
+            )
+        ) as lane_events:
             async for event in lane_events:
                 yield event
-        finally:
-            # Async-generator delegation does not automatically close the
-            # delegated iterator when this outer stream is abandoned.
-            await cast(Any, lane_events).aclose()

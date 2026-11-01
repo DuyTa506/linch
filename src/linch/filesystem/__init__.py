@@ -5,7 +5,6 @@ Public API::
     from linch.filesystem import (
         FileBackend,
         StateFileBackend,
-        SqliteFileBackend,
         CompositeFileBackend,
         OffloadConfig,
         filesystem_tools,
@@ -20,13 +19,13 @@ write_file/edit_file tools.
 from .backend import (
     CompositeFileBackend,
     FileBackend,
+    ScopedFileBackend,
     StateFileBackend,
     normalize_path,
     resolve_filesystem_backend,
 )
 from .disk import DiskFileBackend
 from .offload import OffloadConfig, estimate_tokens, maybe_offload
-from .sqlite import SqliteFileBackend
 from .tools import (
     EditFileTool,
     LsTool,
@@ -43,7 +42,7 @@ __all__ = [
     "LsTool",
     "OffloadConfig",
     "ReadFileTool",
-    "SqliteFileBackend",
+    "ScopedFileBackend",
     "StateFileBackend",
     "WriteFileTool",
     "estimate_tokens",

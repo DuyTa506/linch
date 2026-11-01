@@ -8,26 +8,26 @@ from __future__ import annotations
 
 import pytest
 
+from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
+from tests.support.tools import StubTool, tool_registry
+
 # ---------------------------------------------------------------------------
 # Unit: ToolResult.recovery_hint field exists
 # ---------------------------------------------------------------------------
 
 
-def test_tool_result_has_recovery_hint_field():
-    """ToolResult exposes a recovery_hint field that defaults to empty string."""
+@pytest.mark.parametrize(
+    ("content", "recovery_hint", "expected"),
+    [("ok", None, ""), ("failed", "Check your JSON syntax.", "Check your JSON syntax.")],
+)
+def test_tool_result_recovery_hint_field(content, recovery_hint, expected):
+    """ToolResult exposes a default and configurable recovery hint."""
     from linch.tools.base import ToolResult
 
-    result = ToolResult(content="ok")
+    kwargs = {} if recovery_hint is None else {"recovery_hint": recovery_hint, "is_error": True}
+    result = ToolResult(content=content, **kwargs)
     assert hasattr(result, "recovery_hint")
-    assert result.recovery_hint == ""
-
-
-def test_tool_result_recovery_hint_is_settable():
-    """recovery_hint can be set to a non-empty hint string."""
-    from linch.tools.base import ToolResult
-
-    result = ToolResult(content="failed", is_error=True, recovery_hint="Check your JSON syntax.")
-    assert result.recovery_hint == "Check your JSON syntax."
+    assert result.recovery_hint == expected
 
 
 # ---------------------------------------------------------------------------
@@ -37,49 +37,19 @@ def test_tool_result_recovery_hint_is_settable():
 # so these tests survive test_hardening.py's sys.modules reset correctly.
 
 
-def _make_fail_once_provider():
-    from linch.providers.base import BaseProvider
-    from linch.types import Usage
-
-    class _P(BaseProvider):
-        id = "fail-once"
-
-        def __init__(self):
-            self.calls = 0
-            self.received_messages: list = []
-
-        def context_window(self, model):
-            return 100_000
-
-        async def stream(self, req):
-            self.calls += 1
-            self.received_messages.append(req.messages)
-            yield {"type": "message_start", "model": req.model}
-            if self.calls == 1:
-                yield {"type": "tool_use_start", "id": "call_1", "name": "FakeTool"}
-                yield {"type": "tool_use_input_delta", "id": "call_1", "json_delta": "{}"}
-                yield {"type": "tool_use_end", "id": "call_1"}
-                yield {"type": "message_end", "stop_reason": "tool_use", "usage": Usage()}
-            else:
-                yield {"type": "text_delta", "text": "I'll fix my approach."}
-                yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
-
-    return _P()
+def _make_fail_once_provider() -> ScriptedProvider:
+    return ScriptedProvider(
+        [
+            ToolUseTurn("FakeTool", {}),
+            TextTurn("I'll fix my approach."),
+        ]
+    )
 
 
-def _make_error_with_hint_tool():
+def _make_error_with_hint_tool() -> StubTool:
     from linch.tools.base import ToolResult
 
-    class _T:
-        name = "FakeTool"
-        description = "A tool that always errors."
-        input_schema = {"type": "object", "properties": {}}
-        scope = "read"
-        parallel = True
-
-        def validate(self, raw):
-            return raw
-
+    class _FailureTool(StubTool):
         async def execute(self, input, ctx):
             return ToolResult(
                 content="Input validation failed: 'path' is required.",
@@ -87,40 +57,17 @@ def _make_error_with_hint_tool():
                 recovery_hint="Provide a non-empty 'path' argument.",
             )
 
-        def summarize(self, input):
-            return "FakeTool()"
-
-    return _T()
+    return _FailureTool("FakeTool", scope="read", parallel=True)
 
 
-def _make_error_no_hint_tool():
+def _make_error_no_hint_tool() -> StubTool:
     from linch.tools.base import ToolResult
 
-    class _T:
-        name = "FakeTool"
-        description = "A tool that errors without a hint."
-        input_schema = {"type": "object", "properties": {}}
-        scope = "read"
-        parallel = True
-
-        def validate(self, raw):
-            return raw
-
+    class _FailureTool(StubTool):
         async def execute(self, input, ctx):
             return ToolResult(content="Something went wrong.", is_error=True)
 
-        def summarize(self, input):
-            return "FakeTool()"
-
-    return _T()
-
-
-def _make_registry(tool):
-    from linch.tools.registry import ToolRegistry
-
-    reg = ToolRegistry()
-    reg.register(tool)
-    return reg
+    return _FailureTool("FakeTool", scope="read", parallel=True)
 
 
 @pytest.mark.asyncio
@@ -133,7 +80,7 @@ async def test_all_failed_with_hint_injects_recovery_message():
     agent = Agent(
         model="fake-model",
         provider=provider,
-        tools=_make_registry(_make_error_with_hint_tool()),
+        tools=tool_registry(_make_error_with_hint_tool()),
         session_store=InMemorySessionStore(),
         permissions={"mode": "skip-dangerous"},
         cwd=".",
@@ -141,10 +88,10 @@ async def test_all_failed_with_hint_injects_recovery_message():
     session = await agent.session()
     [e async for e in session.run("use the tool")]
 
-    assert provider.calls == 2
+    assert len(provider.requests) == 2
     # Second call's messages should include the injected recovery hint message.
     # Messages are Message objects with TextBlock/ToolResultBlock content.
-    second_call_messages = provider.received_messages[1]
+    second_call_messages = provider.requests[1].messages
     hint_texts = []
     for msg in second_call_messages:
         role = msg.role if hasattr(msg, "role") else msg.get("role")
@@ -159,6 +106,28 @@ async def test_all_failed_with_hint_injects_recovery_message():
     full_text = " ".join(hint_texts)
     assert "Provide" in full_text or "path" in full_text.lower() or "recovery" in full_text.lower()
 
+    assistant_index = next(
+        index
+        for index, message in enumerate(second_call_messages)
+        if getattr(message, "role", None) == "assistant"
+    )
+    result_index = next(
+        index
+        for index, message in enumerate(second_call_messages)
+        if getattr(message, "role", None) == "user"
+        and any(getattr(block, "type", None) == "tool_result" for block in message.content)
+    )
+    hint_index = next(
+        index
+        for index, message in enumerate(second_call_messages)
+        if getattr(message, "role", None) == "user"
+        and any(
+            getattr(block, "type", None) == "text" and "All tool calls failed" in block.text
+            for block in message.content
+        )
+    )
+    assert assistant_index < result_index < hint_index
+
 
 @pytest.mark.asyncio
 async def test_all_failed_without_hint_no_injection():
@@ -170,7 +139,7 @@ async def test_all_failed_without_hint_no_injection():
     agent = Agent(
         model="fake-model",
         provider=provider,
-        tools=_make_registry(_make_error_no_hint_tool()),
+        tools=tool_registry(_make_error_no_hint_tool()),
         session_store=InMemorySessionStore(),
         permissions={"mode": "skip-dangerous"},
         cwd=".",
@@ -178,12 +147,12 @@ async def test_all_failed_without_hint_no_injection():
     session = await agent.session()
     events = [e async for e in session.run("use the tool")]
 
-    assert provider.calls == 2
+    assert len(provider.requests) == 2
     # With no recovery_hint, no injection message — verify run completes successfully.
     assert events[-1].type == "result"
     assert events[-1].subtype == "success"
     # Confirm no "All tool calls failed" injection in the second call's messages
-    second_call_messages = provider.received_messages[1]
+    second_call_messages = provider.requests[1].messages
     for msg in second_call_messages:
         role = msg.role if hasattr(msg, "role") else msg.get("role")
         if role != "user":
@@ -231,15 +200,9 @@ async def test_partial_failure_no_injection():
 
     _alt_count = [0]
 
-    class _AlternatingTool:
-        name = "FakeTool"
-        description = "Fails on odd calls, succeeds on even."
-        input_schema = {"type": "object", "properties": {}}
-        scope = "read"
-        parallel = True
-
-        def validate(self, raw):
-            return raw
+    class _AlternatingTool(StubTool):
+        def __init__(self):
+            super().__init__("FakeTool", scope="read", parallel=True)
 
         async def execute(self, input, ctx):
             _alt_count[0] += 1
@@ -247,14 +210,11 @@ async def test_partial_failure_no_injection():
                 return ToolResult(content="error", is_error=True, recovery_hint="Fix your input.")
             return ToolResult(content="ok")
 
-        def summarize(self, input):
-            return "FakeTool()"
-
     provider = _MixedProvider()
     agent = Agent(
         model="fake-model",
         provider=provider,
-        tools=_make_registry(_AlternatingTool()),
+        tools=tool_registry(_AlternatingTool()),
         session_store=InMemorySessionStore(),
         permissions={"mode": "skip-dangerous"},
         cwd=".",

@@ -6,75 +6,19 @@
 > definition the **whole linch SDK is the harness**. This page is *not* "the
 > harness"; it is one optional capability *within* it.
 
-`linch.coordination` is about **advancing the loop from a source other than a
-direct user turn**: from a *clock* (scheduling) or from a *peer* (mailbox /
-multi-agent teams). Core stays single-conversation and user-driven; this is the
-opt-in layer for scheduled and multi-agent work.
+`linch.coordination` retains the in-process mailbox capability for peer
+messages. Core stays single-conversation and user-driven.
 
-These are deliberately **thin primitives, not implementations**. The SDK ships
-the mechanism; *you* supply the policy (what a fired schedule does, what a peer
-message means). Everything here is **opt-in and zero-overhead when unused** —
-with the defaults (`schedule_store=None`, `mailbox=None`) nothing is registered
-and the loop is byte-identical.
+The mailbox is an opt-in primitive; the host supplies the policy for interpreting
+peer messages. Durable recurring work uses `linch.worker` and PgQueuer; see
+[Scale out](./production.md#scale-out).
 
-> All public names are re-exported from the top-level package, so
-> `from linch import Schedule, Mailbox` is unchanged. The `linch.coordination.*`
-> path is internal organization, not a separate import surface.
+> Mailbox names are re-exported from the top-level package. The
+> `linch.coordination.*` path is internal organization, not a separate import
+> surface.
 
 For the *implement-your-own* side of these seams (durable stores, a git-worktree
 isolation backend, a Redis mailbox), see [Extending](./extending.md).
-
----
-
-## Scheduling — produce work on a schedule
-
-`linch.coordination.scheduling` is a dependency-free cron/interval primitive plus the
-tools that let an agent enqueue its *own* future work. Pass a store and three
-tools register automatically:
-
-```python
-from linch import Agent, InMemoryScheduleStore, SchedulerLoop
-
-agent = Agent(model="gpt-5", schedule_store=InMemoryScheduleStore())
-# Auto-registers: CreateSchedule, ListSchedules, CancelSchedule
-```
-
-The round trip has two halves — the agent schedules, **the embedder fires**:
-
-1. The agent calls `CreateSchedule(payload=..., cron="0 9 * * *")` (a 5-field UTC
-   cron expression) or `CreateSchedule(payload=..., interval_s=3600)`.
-2. You drive a `SchedulerLoop` over the same store. `loop.start()` ticks once a
-   second; each due schedule fires its `payload` into the session's next-turn
-   notification channel — the same channel background workers use.
-3. The next `session.run()` drains the payload as a `<scheduled-task>`
-   `UserEvent` at the top of the turn, so the agent acts on it as if a user asked.
-
-```python
-loop = SchedulerLoop(store, session)
-loop.start()                 # background asyncio task for the process lifetime
-# ... or tick by hand in tests / bounded runs:
-fired = await loop.tick()    # returns the schedules that fired this tick
-```
-
-`Schedule` takes exactly one of `cron` / `interval_s`; the cron expression is
-validated at creation, so an invalid expression is rejected before it can fire.
-`SqliteScheduleStore` makes schedules durable across restarts and supports atomic
-due claims: if two `SchedulerLoop`s share the same SQLite database, only one loop
-claims and fires a due schedule for a given tick. A `ScheduleEvent` is emitted on
-each fire for observers.
-
-With `DurabilityOptions(durable_inbox=True)`, the loop uses the optional
-`LeasedScheduleStore` occurrence outbox: materialization and `next_run`
-advancement are atomic, delivery uses the stable occurrence ID, and an
-unacknowledged occurrence is reclaimed after its lease. Removing a schedule
-prevents future occurrences but does not discard one already materialized.
-
-**When to reach for it:** the agent itself should set up recurring work
-("check CI every 30 min", "summarize the inbox at 9am"). If your *application*
-already owns a scheduler (cron, k8s `CronJob`, Celery beat), drive `session.run`
-from that instead — you don't need this.
-
-Runnable: [`examples/coordination/scheduling_agent.py`](../../examples/coordination/scheduling_agent.py).
 
 ---
 
@@ -82,14 +26,15 @@ Runnable: [`examples/coordination/scheduling_agent.py`](../../examples/coordinat
 
 The core subagent model is parent→child: a worker runs once and returns a
 conclusion. `linch.coordination.mailbox` adds the other half — **peers that address
-each other** and exchange messages across turns. Opt in with `Agent(mailbox=...)`
-and the `send_message` tool registers:
+each other** and exchange messages across turns. Opt in with the mailbox plugin;
+the `send_message` tool registers:
 
 ```python
-from linch import Agent, InMemoryMailbox
+from linch import Agent, InMemoryMailbox, MailboxPlugin
 
 box = InMemoryMailbox()
-agent = Agent(model="gpt-5", mailbox=box)   # registers send_message
+agent = Agent(model="gpt-5")
+await agent.use(MailboxPlugin(), box)   # registers send_message and inbox
 ```
 
 Two mechanisms:
@@ -97,8 +42,9 @@ Two mechanisms:
 **Message bus.** A session with a `mailbox_address` receives its inbox at the top of
 each turn (through the same next-turn notification seam). One agent addresses a peer with
 `send_message(to=..., content=..., type=...)`; the peer picks it up on its next
-run as a `<peer-message>` `UserEvent`. Spawned workers are auto-addressed by their
-`display_name` when the agent has a mailbox.
+run as a `<peer-message>` `UserEvent`. Spawned workers use a unique mailbox address
+when the agent has a mailbox: the worker ID exposed by the Subagent tool, or the
+child session ID for direct runner calls. Display names are labels only.
 
 ```python
 lead = await agent.session();   lead.mailbox_address = "lead"
@@ -123,25 +69,21 @@ c.resolve(MailboxMessage(sender="lead", recipient="alice",
 assert c.is_resolved("req-001")                      # requester checks on a later turn
 ```
 
-`InMemoryMailbox` is in-process (one agent, many workers). For cross-process teams
-or restart survival, use `SqliteMailbox`:
+`InMemoryMailbox` is the only built-in mailbox. Messages live for the current
+process (one agent, many workers), without restart survival or cross-process
+delivery. Mailbox functionality moves to `linch.ext` in WP10. Hosts needing
+external infrastructure can implement the `Mailbox` protocol — see
+[Extending](./extending.md).
 
-```python
-from linch import Agent, SqliteMailbox
+Host adapters supporting durable inbox mode use the optional `ClaimableMailbox` lease protocol instead
+of destructive drain: claim → enqueue by `mailbox:<message-id>` → commit the inbox/live log →
+acknowledge. A crash before acknowledgement permits reclaim; a crash after enqueue is
+deduplicated by the session inbox receipt. Legacy `send()`/`drain()` behavior remains unchanged.
 
-box = SqliteMailbox("coordination.db")
-agent = Agent(model="gpt-5", mailbox=box)
-```
-
-`SqliteMailbox` preserves FIFO order per recipient and makes `drain()` destructive
-inside one SQLite transaction, so two workers draining the same inbox do not both
-receive the same message. For Redis/SQS or other infrastructure, implement the
-same `Mailbox` protocol — see [Extending](./extending.md).
-
-Durable inbox mode uses the additive `ClaimableMailbox` lease protocol instead
-of destructive drain: claim → enqueue by `mailbox:<message-id>` → acknowledge.
-A crash before enqueue permits reclaim; a crash after enqueue is deduplicated by
-the session inbox receipt. Legacy `send()`/`drain()` behavior remains unchanged.
+The generic Context inbox seam distinguishes uncommitted `Message` values from
+already history-committed `Event` values. Register producers on the agent's
+context through a plugin-owned `ctx.inbox(...)`; the loop consumes them in
+registration order at the same next-turn boundary as notifications.
 
 **When to reach for it:** long-lived teammates that negotiate (plan approval,
 graceful shutdown) or self-organize. For one-shot delegation, plain

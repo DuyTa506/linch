@@ -47,16 +47,33 @@ class _OpenSession:
 
 
 class McpConnection:
+    """Own the live MCP sessions and tools returned by a server connection.
+
+    Args:
+        tools: Linch tool wrappers created from the connected servers.
+        sessions: Entered server resources released when this connection closes.
+
+    Attributes:
+        tools: Tools exposed by the connected MCP servers.
+    """
+
     def __init__(
         self,
         tools: list[object],
         sessions: list[_OpenSession],
     ) -> None:
+        """Create a connection that owns its server resources.
+
+        Args:
+            tools: Linch tool wrappers created from the connected servers.
+            sessions: Entered server resources released when this connection closes.
+        """
         self.tools = tools
         self._sessions = sessions
         self._closed = False
 
     async def close(self) -> None:
+        """Close every connected server session once, in reverse order."""
         if self._closed:
             return
         self._closed = True
@@ -67,6 +84,21 @@ class McpConnection:
 async def connect_mcp_servers(
     servers: dict[str, McpServerConfig],
 ) -> McpConnection:
+    """Connect to MCP servers and wrap their tools for a Linch registry.
+
+    Servers are connected in mapping order. If a later connection fails, every
+    session opened so far is closed before the configuration error is raised.
+
+    Args:
+        servers: Mapping from stable server names to stdio or HTTP configurations.
+
+    Returns:
+        A connection owning the wrapped tools and all entered server resources.
+
+    Raises:
+        ConfigError: If a server name is invalid, names collide after normalization,
+            or a server cannot be connected or enumerated.
+    """
     entries = list(servers.items())
     normalized: set[str] = set()
     for name, _ in entries:
@@ -79,6 +111,7 @@ async def connect_mcp_servers(
 
     opened: list[_OpenSession] = []
     tools: list[object] = []
+    tool_names: set[str] = set()
     failures: list[str] = []
 
     for name, config in entries:
@@ -90,6 +123,11 @@ async def connect_mcp_servers(
             session = opened[-1].session
             result = await session.list_tools()
             mcp_tools = [make_mcp_tool(name, t, _make_call_tool(session)) for t in result.tools]
+            for tool in mcp_tools:
+                tool_name = str(getattr(tool, "name", ""))
+                if tool_name in tool_names:
+                    raise ConfigError(f"MCP tool names collide after normalization: '{tool_name}'")
+                tool_names.add(tool_name)
             tools.extend(mcp_tools)
         except BaseException as exc:
             for s in reversed(opened):

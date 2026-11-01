@@ -2,75 +2,41 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
 
-
-class _ToolThenTextProvider:
-    id = "alignment-test"
-
-    def __init__(self) -> None:
-        self.calls = 0
-        self.requests: list[Any] = []
-
-    def context_window(self, model: str) -> int:
-        return 128_000
-
-    async def stream(self, req: Any) -> AsyncIterator[dict[str, Any]]:
-        from linch.types import Usage
-
-        self.calls += 1
-        self.requests.append(req)
-        yield {"type": "message_start", "model": req.model}
-        if self.calls == 1:
-            yield {"type": "tool_use_start", "id": "call_1", "name": "Wait"}
-            yield {"type": "tool_use_input_delta", "id": "call_1", "json_delta": "{}"}
-            yield {"type": "tool_use_end", "id": "call_1"}
-            yield {"type": "message_end", "stop_reason": "tool_use", "usage": Usage()}
-        else:
-            yield {"type": "text_delta", "text": "done"}
-            yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
+from tests.support.agents import make_agent
+from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
+from tests.support.tools import StubTool, tool_registry
 
 
-class _WaitTool:
-    name = "Wait"
-    description = "Wait until released."
-    input_schema = {"type": "object", "properties": {}}
-    scope = "read"
-    parallel = False
+def _tool_then_text_provider() -> ScriptedProvider:
+    return ScriptedProvider([ToolUseTurn("Wait", {}), TextTurn("done")])
 
-    def __init__(self) -> None:
-        self.started = asyncio.Event()
-        self.release = asyncio.Event()
 
-    def validate(self, raw: dict[str, Any]) -> dict[str, Any]:
-        return {}
+def _wait_tool() -> Any:
+    started = asyncio.Event()
+    release = asyncio.Event()
 
-    def summarize(self, input: dict[str, Any]) -> str:
-        return "Wait"
+    async def wait(_input: dict[str, Any], _ctx: Any) -> None:
+        started.set()
+        await release.wait()
 
-    async def execute(self, input: dict[str, Any], ctx: Any) -> Any:
-        from linch import ToolResult
-
-        self.started.set()
-        await self.release.wait()
-        return ToolResult(content="waited")
+    tool: Any = StubTool(name="Wait", output="waited", on_execute=wait)
+    tool.started = started
+    tool.release = release
+    return tool
 
 
 def _agent(provider: Any, tool: Any, *, hooks: Any = None) -> Any:
-    from linch import Agent
     from linch.config import FeatureFlags
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import empty_tools
 
-    return Agent(
-        model="test-model",
-        provider=provider,
-        tools=empty_tools(tool),
+    return make_agent(
+        provider,
+        tools=tool_registry(tool),
         permissions={"mode": "skip-dangerous"},
-        session_store=InMemorySessionStore(),
+        run_store=None,
         features=FeatureFlags(skills=False, subagents=False, mcp=False),
         result_offload=None,
         hooks=hooks,
@@ -91,8 +57,8 @@ def _text_messages(req: Any) -> list[str]:
 async def test_idle_align_rejects() -> None:
     from linch.errors import ConfigError
 
-    provider = _ToolThenTextProvider()
-    tool = _WaitTool()
+    provider = _tool_then_text_provider()
+    tool = _wait_tool()
     session = await _agent(provider, tool).session()
 
     with pytest.raises(ConfigError):
@@ -103,8 +69,8 @@ async def test_idle_align_rejects() -> None:
 async def test_alignment_injects_user_message_before_next_model_turn() -> None:
     from linch.events import ResultEvent, UserEvent
 
-    provider = _ToolThenTextProvider()
-    tool = _WaitTool()
+    provider = _tool_then_text_provider()
+    tool = _wait_tool()
     session = await _agent(provider, tool).session()
     events: list[Any] = []
 
@@ -123,7 +89,7 @@ async def test_alignment_injects_user_message_before_next_model_turn() -> None:
         event for event in events if isinstance(event, UserEvent) and event.subtype == "alignment"
     ]
     assert len(alignment_events) == 1
-    assert provider.calls == 2
+    assert len(provider.requests) == 2
     assert "please adjust course" in _text_messages(provider.requests[1])
     assert isinstance(events[-1], ResultEvent)
     assert events[-1].subtype == "success"
@@ -133,8 +99,8 @@ async def test_alignment_injects_user_message_before_next_model_turn() -> None:
 async def test_interrupt_stops_before_next_model_turn() -> None:
     from linch.events import ResultEvent
 
-    provider = _ToolThenTextProvider()
-    tool = _WaitTool()
+    provider = _tool_then_text_provider()
+    tool = _wait_tool()
     session = await _agent(provider, tool).session()
     events: list[Any] = []
 
@@ -148,7 +114,7 @@ async def test_interrupt_stops_before_next_model_turn() -> None:
     tool.release.set()
     await run_task
 
-    assert provider.calls == 1
+    assert len(provider.requests) == 1
     result = next(event for event in reversed(events) if isinstance(event, ResultEvent))
     assert result.subtype == "interrupted"
     assert result.stop_reason == "interrupted"
@@ -158,8 +124,8 @@ async def test_interrupt_stops_before_next_model_turn() -> None:
 async def test_interrupt_rejects_pending_alignment() -> None:
     from linch.errors import ConfigError
 
-    provider = _ToolThenTextProvider()
-    tool = _WaitTool()
+    provider = _tool_then_text_provider()
+    tool = _wait_tool()
     session = await _agent(provider, tool).session()
 
     async def collect() -> list[Any]:
@@ -188,8 +154,8 @@ async def test_alignment_runs_user_prompt_hooks_with_source() -> None:
                 return HookResult.mutate(prompt=f"{ctx.prompt} hooked")
             return None
 
-    provider = _ToolThenTextProvider()
-    tool = _WaitTool()
+    provider = _tool_then_text_provider()
+    tool = _wait_tool()
     session = await _agent(provider, tool, hooks=[Hooks()]).session()
 
     async def collect() -> list[Any]:
@@ -204,6 +170,41 @@ async def test_alignment_runs_user_prompt_hooks_with_source() -> None:
 
     assert sources == ["run", "align"]
     assert "change hooked" in _text_messages(provider.requests[1])
+
+
+@pytest.mark.asyncio
+async def test_timed_out_alignment_is_not_applied_after_slow_hook() -> None:
+    """A deadline during alignment hooks must prevent the queued message."""
+    from linch.errors import ConfigError
+
+    hook_entered = asyncio.Event()
+    release_hook = asyncio.Event()
+
+    class SlowAlignmentHook:
+        async def on_user_prompt_submit(self, ctx: Any) -> None:
+            if ctx.source == "align":
+                hook_entered.set()
+                await release_hook.wait()
+
+    provider = _tool_then_text_provider()
+    tool = _wait_tool()
+    session = await _agent(provider, tool, hooks=[SlowAlignmentHook()]).session()
+
+    async def collect() -> list[Any]:
+        return [event async for event in session.run("start")]
+
+    run_task = asyncio.create_task(collect())
+    await tool.started.wait()
+    align_task = asyncio.create_task(session.align("change", timeout_s=0.05))
+    tool.release.set()
+    await hook_entered.wait()
+    with pytest.raises(ConfigError, match="timed out before it was applied"):
+        await align_task
+    release_hook.set()
+    events = await run_task
+
+    assert not any(getattr(event, "subtype", None) == "alignment" for event in events)
+    assert "change" not in _text_messages(provider.requests[1])
 
 
 def test_user_event_subtype_serializes() -> None:
@@ -255,8 +256,8 @@ async def test_align_times_out_when_run_never_reaches_boundary() -> None:
     """align(timeout_s=...) must not block forever if the run never drains it."""
     from linch.errors import ConfigError
 
-    provider = _ToolThenTextProvider()
-    tool = _WaitTool()
+    provider = _tool_then_text_provider()
+    tool = _wait_tool()
     session = await _agent(provider, tool).session()
     session._active = True  # simulate an active run that never reaches a boundary
     try:
@@ -266,3 +267,38 @@ async def test_align_times_out_when_run_never_reaches_boundary() -> None:
         assert session.alignment_queue == []
     finally:
         session._active = False
+
+
+async def test_alignment_deadline_after_append_starts_waits_for_truthful_completion():
+    from linch.sessions import InMemorySessionStore
+
+    append_started, append_release = asyncio.Event(), asyncio.Event()
+
+    class HeldAppendStore(InMemorySessionStore):
+        async def append_messages(self, session_id, messages, **kwargs):
+            if any("change" in str(message) for message in messages):
+                append_started.set()
+                await append_release.wait()
+            return await super().append_messages(session_id, messages, **kwargs)
+
+    provider, tool = _tool_then_text_provider(), _wait_tool()
+    agent = _agent(provider, tool)
+    agent.session_store = HeldAppendStore()
+    session = await agent.session()
+
+    async def collect():
+        return [event async for event in session.run("start")]
+
+    running = asyncio.create_task(collect())
+    await tool.started.wait()
+    aligning = asyncio.create_task(session.align("change", timeout_s=0.02))
+    tool.release.set()
+    await asyncio.wait_for(append_started.wait(), 1)
+    await asyncio.sleep(0.04)
+    assert not aligning.done()
+    append_release.set()
+    await aligning
+    events = await running
+    assert sum(getattr(event, "subtype", None) == "alignment" for event in events) == 1
+    assert "change" in _text_messages(provider.requests[1])
+    await agent.close()

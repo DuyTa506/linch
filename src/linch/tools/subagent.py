@@ -4,6 +4,8 @@ from html import escape
 from typing import Any
 from uuid import uuid4
 
+from ..run_store import _lease_kwargs
+from ..session import RunOptions
 from .base import ToolContext, ToolResult, ToolScope
 
 SUBAGENT_TOOL_NAME = "Subagent"
@@ -46,7 +48,6 @@ class SubagentTool:
     name = SUBAGENT_TOOL_NAME
     input_schema = SUBAGENT_TOOL_SCHEMA
     scope: ToolScope = "exec"
-    parallel = True
 
     def __init__(
         self,
@@ -54,14 +55,67 @@ class SubagentTool:
         get_session: Any,
         next_default_display_name: Any,
         *,
+        tool_registry: Any = None,
         retain_subagents: bool = False,
         enable_background_subagents: bool = False,
     ) -> None:
         self._registry = registry
+        # A typed subagent's declared tools are resolved against the effective
+        # worker catalog.  The catalog may be supplied as a zero-argument
+        # callable because coordinator mode installs its worker registry after
+        # this tool is constructed.
+        self._tool_registry = tool_registry
         self._get_session = get_session
         self._next_default_display_name = next_default_display_name
         self._retain_subagents = retain_subagents
         self._enable_background_subagents = enable_background_subagents
+
+    def parallel(self, input: dict[str, object]) -> bool:
+        """Return whether this invocation is safe to run alongside another.
+
+        ``SubagentTool`` itself is an exec-scoped tool, so a plain boolean
+        cannot express the safety boundary: an omitted/general-purpose
+        subagent receives the full worker catalog while a named read-only
+        definition can be parallelized.  Keep the decision fail-closed for
+        malformed input, registry failures, inherited tool access, and any
+        unresolved or non-read tool.
+        """
+        try:
+            if not isinstance(input, dict) or bool(input.get("run_in_background", False)):
+                return False
+
+            requested = input.get("subagent_type")
+            if not isinstance(requested, str):
+                return False
+            requested = requested.strip()
+            if requested == "" or requested == "general-purpose":
+                return False
+
+            definition = self._registry.get(requested)
+            if definition is None:
+                return False
+            allowed_tools = getattr(getattr(definition, "frontmatter", None), "tools", None)
+            if not isinstance(allowed_tools, list):
+                return False
+
+            tool_registry: Any = self._tool_registry
+            if callable(tool_registry):
+                tool_registry = tool_registry()
+            if tool_registry is None:
+                return False
+
+            for tool_name in allowed_tools:
+                # ``build_child_tools`` treats ``*`` as inherited/full access;
+                # never let a literal tool with that name turn the wildcard
+                # into a read-only declaration.
+                if not isinstance(tool_name, str) or tool_name in {"", "*"}:
+                    return False
+                tool = tool_registry.get(tool_name)
+                if tool is None or getattr(tool, "scope", None) != "read":
+                    return False
+            return True
+        except Exception:
+            return False
 
     @property
     def description(self) -> str:
@@ -115,10 +169,24 @@ class SubagentTool:
         return f"Spawn subagent: {input['description']}"
 
     async def execute(self, input: dict[str, object], ctx: ToolContext) -> ToolResult:
+        """Run a child with the invoking run's configuration and dependencies.
+
+        Args:
+            input: Validated child task, definition, and background selection.
+            ctx: Invoking call's captured capabilities and authorization identity.
+
+        Returns:
+            The child result, or an acknowledgement for a detached worker.
+        """
         import asyncio
 
         from ..subagents.default_agent import DEFAULT_AGENT_TYPE
-        from ..subagents.runner import RunSubagentArgs, result_text_for_caller, run_subagent
+        from ..subagents.runner import (
+            RunSubagentArgs,
+            RunSubagentResult,
+            result_text_for_caller,
+            run_subagent,
+        )
         from ..subagents.workers import WorkerHandle
 
         requested = str(input.get("subagent_type", "")).strip()
@@ -159,7 +227,7 @@ class SubagentTool:
             display_name = definition.frontmatter.name
 
         subagent_run_id = f"sa_{uuid4().hex[:8]}"
-        worker_id = f"agent-{uuid4().hex[:4]}"
+        worker_id = f"agent-{uuid4().hex}"
         run_in_background = bool(input.get("run_in_background", False))
         if run_in_background and not self._enable_background_subagents:
             return ToolResult(
@@ -175,21 +243,31 @@ class SubagentTool:
         # Use the session emit channel so SubagentEvents reach pending_child_events.
         emit_list = getattr(session, "pending_child_events", None)
         emit_fn = emit_list.append if emit_list is not None else getattr(ctx, "emit", None)
+        origin_run_id = ctx.run_id
+        origin_lease = getattr(getattr(session, "_event_journal", None), "lease", None)
 
         runner_args = RunSubagentArgs(
             parent_session=session,
             parent_agent=session.agent,
+            config_binding=(
+                session._run_bindings.get(ctx.run_id) if ctx._run_config is not None else None
+            ),
+            parent_run_id=ctx.run_id,
             definition=definition,
             prompt=str(input["prompt"]),
             display_name=display_name,
             subagent_run_id=subagent_run_id,
+            mailbox_address=worker_id,
             signal=ctx.signal,
             emit=emit_fn,
             retain=self._retain_subagents,
+            run_options=RunOptions(principal=ctx.principal, deps=ctx.deps),
+            _deps_captured=True,
         )
 
         if run_in_background:
             runner_args.retain = True
+            runner_args.detached = True
             # Spawn detached; return immediately with an ack.
             handle = WorkerHandle(
                 worker_id=worker_id,
@@ -208,6 +286,13 @@ class SubagentTool:
 
             runner_args.on_child_registered = _record_child_id
 
+            binding = runner_args.config_binding
+            from ..hooks import HookDispatcher, PostToolUseContext
+
+            completion_hooks = HookDispatcher(
+                ctx._run_config.hooks if ctx._run_config is not None else session.agent.hooks
+            )
+
             async def _bg_run() -> None:
                 try:
                     result = await run_subagent(runner_args)
@@ -215,6 +300,14 @@ class SubagentTool:
                     if handle.status != "killed":
                         handle.status = "killed"
                     raise
+                except Exception as exc:
+                    result = RunSubagentResult(
+                        child_session_id=handle.child_session_id,
+                        final_text="",
+                        aborted=False,
+                        errored=True,
+                        error={"name": type(exc).__name__, "message": str(exc)},
+                    )
                 result_text = result_text_for_caller(result)
                 handle.child_session_id = result.child_session_id
                 handle.last_result_text = result_text
@@ -244,6 +337,32 @@ class SubagentTool:
                     f"{error_line}"
                     f"</task-notification>"
                 )
+                if completion_hooks.active:
+                    from .. import lifecycle
+
+                    dispatched = await completion_hooks.dispatch(
+                        lifecycle.POST_TOOL_USE,
+                        PostToolUseContext(
+                            session=session,
+                            run_id=ctx.run_id,
+                            turn_index=None,
+                            deps=ctx.deps,
+                            tool_use_id=worker_id,
+                            tool_name=self.name,
+                            input=dict(input),
+                            result=ToolResult(content=notification_text, is_error=result.errored),
+                        ),
+                    )
+                    if emit_list is not None:
+                        emit_list.extend(dispatched.events)
+                    if dispatched.result.action in {"block", "stop"}:
+                        notification_text = (
+                            dispatched.result.reason
+                            or dispatched.result.feedback
+                            or "Worker result blocked"
+                        )
+                    else:
+                        notification_text = dispatched.context.result.content
                 await session.notify(
                     Message(role="user", content=[TextBlock(text=notification_text)]),
                     delivery_id=f"subagent:{worker_id}",
@@ -268,11 +387,24 @@ class SubagentTool:
                 run_store = getattr(session.agent, "run_store", None)
                 if run_store is not None:
                     try:
-                        await run_store.append_event(ctx.run_id, completion_event)
+                        method = run_store.append_event
+                        await method(
+                            origin_run_id,
+                            completion_event,
+                            **_lease_kwargs(method, origin_lease),
+                        )
                     except Exception:
                         pass
 
-            handle.task = asyncio.create_task(_bg_run())
+            from ..profiles import _schedule_with_binding
+
+            handle.task = _schedule_with_binding(binding, _bg_run())
+
+            def _settle_cancelled(task: asyncio.Task[Any]) -> None:
+                if task.cancelled() and handle.status == "running":
+                    handle.status = "killed"
+
+            handle.task.add_done_callback(_settle_cancelled)
             return ToolResult(
                 content=(
                     f"Worker '{worker_id}' started in background."

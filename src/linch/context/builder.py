@@ -1,17 +1,33 @@
 from __future__ import annotations
 
+import inspect
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
+from .._token_estimation import custom_token_estimate
 from ..types import Message, SystemBlock, TextBlock
 
 if TYPE_CHECKING:
+    from ..hooks.contexts import AgentStopContext
     from ..session import Session
 
 
 @dataclass(slots=True)
 class ContextBudget:
+    """Track the token estimate and trimming outcome for ephemeral context.
+
+    Args:
+        max_tokens: Optional ceiling applied to the assembled context.
+        used_tokens: Estimated tokens retained after assembly.
+        remaining_tokens: Capacity left under ``max_tokens``, when bounded.
+        trimmed: Whether any messages or system blocks were removed.
+
+    Attributes:
+        max_tokens: ``None`` leaves context unbounded by this builder.
+        remaining_tokens: ``None`` when no ceiling was configured.
+    """
+
     max_tokens: int | None = None
     used_tokens: int = 0
     remaining_tokens: int | None = None
@@ -20,6 +36,22 @@ class ContextBudget:
 
 @dataclass(slots=True)
 class ContextBuildTurn:
+    """Describe one request for ephemeral context assembly.
+
+    Attributes:
+        deps: Run-scoped application dependencies available to builders.
+        token_estimator: Optional callable used for model-specific token estimates.
+
+    Args:
+        session: Session receiving the context.
+        messages: Candidate conversation messages.
+        turn_index: Zero-based turn number.
+        deps: Run-scoped application dependencies.
+        model: Model receiving the assembled request.
+        tools: Tools currently eligible for the request.
+        token_estimator: Optional host token-estimation callable.
+    """
+
     session: Session
     messages: list[Message]
     turn_index: int
@@ -27,10 +59,26 @@ class ContextBuildTurn:
     model: str
     tools: Any
     token_estimator: Any = None
+    _run_config: Any = None
 
 
 @dataclass(slots=True)
 class ContextBuildResult:
+    """Carry context additions and budget information from a builder.
+
+    Attributes:
+        selected_tools: Request-specific tool selection, when a builder supplies one.
+        budget: Mutable token accounting for this assembled context.
+        metadata: Builder metadata merged in order by :class:`ContextBuilderChain`.
+
+    Args:
+        system_blocks: Ephemeral system blocks to prepend to the request.
+        messages: Ephemeral messages to include in the request.
+        selected_tools: Optional request-specific tool selection.
+        budget: Token-budget accounting for the assembled context.
+        metadata: JSON-compatible builder metadata for events and diagnostics.
+    """
+
     system_blocks: list[SystemBlock] = field(default_factory=list)
     messages: list[Message] = field(default_factory=list)
     selected_tools: Any = None
@@ -39,16 +87,45 @@ class ContextBuildResult:
 
 
 class ContextBuilder(Protocol):
+    """Define the async contract for request-scoped context builders."""
+
     async def build(self, turn: ContextBuildTurn) -> ContextBuildResult:
-        """Build ephemeral context for one provider call."""
+        """Build ephemeral context for one provider call.
+
+        Args:
+            turn: Session, messages, dependencies, and tool selection for the request.
+
+        Returns:
+            Context additions that remain outside the durable session log.
+        """
         ...
 
 
 class ContextBuilderChain:
+    """Run multiple context builders and merge their request-scoped results.
+
+    Args:
+        builders: Builders invoked in order; later supplied selections and metadata
+            keys replace earlier values.
+    """
+
     def __init__(self, builders: Iterable[ContextBuilder]) -> None:
+        """Create a chain that invokes builders in the supplied order.
+
+        Args:
+            builders: Context builders whose results will be merged.
+        """
         self.builders = list(builders)
 
     async def build(self, turn: ContextBuildTurn) -> ContextBuildResult:
+        """Build and merge context from every configured builder.
+
+        Args:
+            turn: Request-scoped context inputs shared with each builder.
+
+        Returns:
+            The merged context result in builder order.
+        """
         merged = ContextBuildResult()
         for builder in self.builders:
             result = await builder.build(turn)
@@ -62,10 +139,40 @@ class ContextBuilderChain:
             merged.metadata.update(result.metadata)
         return merged
 
+    async def on_agent_stop(self, ctx: AgentStopContext) -> None:
+        """Release per-run builder state and aggregate cleanup failures.
+
+        Args:
+            ctx: Agent-stop lifecycle context identifying the run to clean up.
+
+        Raises:
+            ExceptionGroup: If one or more builders fail during cleanup.
+        """
+        errors: list[Exception] = []
+        for builder in self.builders:
+            cleanup = getattr(builder, "on_agent_stop", None)
+            if cleanup is not None:
+                try:
+                    result = cleanup(ctx)
+                    if inspect.isawaitable(result):
+                        await result
+                except Exception as exc:
+                    errors.append(exc)
+        if errors:
+            raise ExceptionGroup("Context builder cleanup failed", errors)
+
 
 def normalize_context_builder(
     builder: ContextBuilder | Iterable[ContextBuilder] | None,
 ) -> ContextBuilder | None:
+    """Normalize one builder or an iterable into one optional chain.
+
+    Args:
+        builder: A builder, iterable of builders, or ``None``.
+
+    Returns:
+        ``None``, the sole builder, or a chain preserving input order.
+    """
     builders: list[ContextBuilder] = []
     if builder is not None:
         if isinstance(builder, Iterable) and not hasattr(builder, "build"):
@@ -86,6 +193,16 @@ def apply_context_budget(
     estimator: Any = None,
     model: str,
 ) -> ContextBuildResult:
+    """Trim a context result to its configured token budget.
+
+    Args:
+        result: Context result to update in place.
+        estimator: Optional host token-estimation callable.
+        model: Model whose tokenization is being estimated.
+
+    Returns:
+        The same result with retained blocks, messages, and budget fields updated.
+    """
     max_tokens = result.budget.max_tokens
     system_blocks = list(result.system_blocks)
     messages = list(result.messages)
@@ -178,6 +295,14 @@ def _trim_to_budget(
 
 
 def context_budget_to_dict(budget: ContextBudget) -> dict[str, Any]:
+    """Serialize budget accounting for event or checkpoint metadata.
+
+    Args:
+        budget: Budget state to encode.
+
+    Returns:
+        Mapping containing the budget ceiling, usage, remaining capacity, and trim flag.
+    """
     return {
         "max_tokens": budget.max_tokens,
         "used_tokens": budget.used_tokens,
@@ -193,20 +318,16 @@ def _estimate_context_tokens(
     model: str,
 ) -> int:
     system_tokens = _estimate_text("\n".join(block.text for block in system_blocks))
-    if callable(estimator):
-        try:
-            return system_tokens + max(0, int(cast(Any, estimator(messages, model))))
-        except Exception:
-            pass
+    estimate = custom_token_estimate(estimator, messages, model)
+    if estimate is not None:
+        return system_tokens + estimate
     return system_tokens + sum(_estimate_message(message) for message in messages)
 
 
 def _estimate_one_message(message: Message, estimator: Any, model: str) -> int:
-    if callable(estimator):
-        try:
-            return max(0, int(cast(Any, estimator([message], model))))
-        except Exception:
-            pass
+    estimate = custom_token_estimate(estimator, [message], model)
+    if estimate is not None:
+        return estimate
     return _estimate_message(message)
 
 

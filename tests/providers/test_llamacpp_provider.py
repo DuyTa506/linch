@@ -2,38 +2,12 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from linch.providers import LlamaCppProvider, LlamaCppProviderOptions
 from linch.providers.llamacpp import _build_llamacpp_payload, _extract_n_ctx, _props_urls
 from linch.types import Message, OutputSchema, ProviderRequest, TextBlock, ThinkingBlock, Usage
-
-
-class _FakeStream:
-    def __init__(self, chunks: list[object]) -> None:
-        self._chunks = chunks
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self):
-        if not self._chunks:
-            raise StopAsyncIteration
-        return self._chunks.pop(0)
-
-
-class _FakeCompletions:
-    def __init__(self, chunks: list[object]) -> None:
-        self._chunks = chunks
-        self.payload: dict | None = None
-
-    async def create(self, **payload):
-        self.payload = payload
-        return _FakeStream(list(self._chunks))
-
-
-class _FakeClient:
-    def __init__(self, chunks: list[object]) -> None:
-        self.completions = _FakeCompletions(chunks)
-        self.chat = SimpleNamespace(completions=self.completions)
+from tests.support.providers import OpenAICompatibleFakeClient
 
 
 def _chunk(*, delta, finish_reason=None, usage=None, timings=None):
@@ -135,6 +109,26 @@ def test_llamacpp_payload_includes_llamacpp_specific_options() -> None:
     assert payload["extra_body"]["cache_prompt"] is True
 
 
+@pytest.mark.parametrize("configured_in", ["option", "extra_body", "neither"])
+def test_llamacpp_request_disables_thinking(configured_in: str) -> None:
+    template = {"enable_thinking": True, "other": "keep"}
+    options = LlamaCppProviderOptions(
+        chat_template_kwargs=template if configured_in == "option" else None,
+        extra_body={"chat_template_kwargs": template} if configured_in == "extra_body" else None,
+    )
+    req = ProviderRequest(
+        model="local-tool-model", system=[], tools=[], messages=[], thinking={"type": "disabled"}
+    )
+
+    payload = _build_llamacpp_payload(req, options)
+
+    expected = {"enable_thinking": False}
+    if configured_in != "neither":
+        expected["other"] = "keep"
+    assert payload["extra_body"]["chat_template_kwargs"] == expected
+    assert template == {"enable_thinking": True, "other": "keep"}
+
+
 def test_llamacpp_payload_enables_cache_prompt_from_request() -> None:
     req = ProviderRequest(
         model="local-tool-model",
@@ -201,7 +195,7 @@ async def test_llamacpp_stream_emits_text_reasoning_and_usage() -> None:
         ),
     ]
     provider = LlamaCppProvider()
-    provider._client = _FakeClient(chunks)
+    provider._client = OpenAICompatibleFakeClient(chunks)
 
     events = [
         event
@@ -216,7 +210,7 @@ async def test_llamacpp_stream_emits_text_reasoning_and_usage() -> None:
     assert events[-1]["type"] == "message_end"
     assert events[-1]["stop_reason"] == "end_turn"
     assert events[-1]["usage"] == Usage(
-        input_tokens=3,
+        input_tokens=1,
         output_tokens=5,
         cache_read_tokens=2,
     )
@@ -241,7 +235,7 @@ async def test_llamacpp_stream_reads_cache_read_tokens_from_timings() -> None:
         ),
     ]
     provider = LlamaCppProvider()
-    provider._client = _FakeClient(chunks)
+    provider._client = OpenAICompatibleFakeClient(chunks)
 
     events = [
         event
@@ -251,7 +245,7 @@ async def test_llamacpp_stream_reads_cache_read_tokens_from_timings() -> None:
     ]
 
     assert events[-1]["usage"] == Usage(
-        input_tokens=6318,
+        input_tokens=512,
         output_tokens=2,
         cache_read_tokens=5806,
     )
@@ -271,7 +265,7 @@ async def test_llamacpp_stream_reads_cache_read_tokens_from_model_extra() -> Non
         model_extra={"timings": {"cache_n": 80, "prompt_n": 20}},
     )
     provider = LlamaCppProvider()
-    provider._client = _FakeClient(
+    provider._client = OpenAICompatibleFakeClient(
         [_chunk(delta=SimpleNamespace(content="ok", reasoning_content=None, tool_calls=[])), final]
     )
 
@@ -282,7 +276,34 @@ async def test_llamacpp_stream_reads_cache_read_tokens_from_model_extra() -> Non
         )
     ]
 
-    assert events[-1]["usage"].cache_read_tokens == 80
+    assert events[-1]["usage"] == Usage(input_tokens=20, output_tokens=4, cache_read_tokens=80)
+
+
+async def test_llamacpp_reported_cache_count_wins_over_timings_fallback() -> None:
+    """Prefer the standard usage field when a server reports both fields."""
+    final = _chunk(
+        delta=SimpleNamespace(content=None, reasoning_content=None, tool_calls=[]),
+        finish_reason="stop",
+        usage=SimpleNamespace(
+            prompt_tokens=100,
+            completion_tokens=4,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=80),
+        ),
+        timings={"cache_n": 60, "prompt_n": 40},
+    )
+    provider = LlamaCppProvider()
+    provider._client = OpenAICompatibleFakeClient(
+        [_chunk(delta=SimpleNamespace(content="ok", reasoning_content=None, tool_calls=[])), final]
+    )
+
+    events = [
+        event
+        async for event in provider.stream(
+            ProviderRequest(model="local-tool-model", system=[], tools=[], messages=[])
+        )
+    ]
+
+    assert events[-1]["usage"] == Usage(input_tokens=20, output_tokens=4, cache_read_tokens=80)
 
 
 async def test_llamacpp_stream_emits_tool_call_events() -> None:
@@ -316,7 +337,7 @@ async def test_llamacpp_stream_emits_tool_call_events() -> None:
         ),
     ]
     provider = LlamaCppProvider()
-    provider._client = _FakeClient(chunks)
+    provider._client = OpenAICompatibleFakeClient(chunks)
 
     events = [
         event

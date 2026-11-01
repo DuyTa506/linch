@@ -1,11 +1,3 @@
-"""`Agent(limiter=...)` — the proactive gate around every live provider call.
-
-The gate sits inside `stream_turn` (so it is released across retry backoff) and
-around `strategy.compact(...)` (so third-party compaction strategies are covered
-too). These tests pin both placements, the balanced release on every exit path,
-and the fact that an unset limiter costs nothing.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -14,16 +6,13 @@ from typing import Any
 
 import pytest
 
-from linch import Agent
 from linch.errors import ContextLengthError, ProviderError
 from linch.providers import BaseProvider
-from linch.sessions import InMemorySessionStore
 from linch.types import Usage
+from tests.support.agents import make_agent
 
 
 class SpyLimiter:
-    """Records every acquire/release and tracks how many slots were held at once."""
-
     def __init__(self) -> None:
         self.acquired: list[str] = []
         self.released: list[str] = []
@@ -45,8 +34,6 @@ class SpyLimiter:
 
 
 class CappingLimiter(SpyLimiter):
-    """A SpyLimiter that actually blocks past *cap* concurrent holders."""
-
     def __init__(self, cap: int) -> None:
         super().__init__()
         self._cap = cap
@@ -64,13 +51,12 @@ class CappingLimiter(SpyLimiter):
         self._sem.release()
 
 
-class TextProvider(BaseProvider):
-    """One text-only turn per call, optionally sleeping to overlap with peers."""
-
+class LimiterProvider(BaseProvider):
     id = "fake"
 
-    def __init__(self, *, delay: float = 0.0) -> None:
+    def __init__(self, error: BaseException | None = None, *, delay: float = 0.0) -> None:
         self.calls = 0
+        self._error = error
         self._delay = delay
 
     def context_window(self, model: str) -> int:
@@ -79,56 +65,24 @@ class TextProvider(BaseProvider):
     async def stream(self, req: Any) -> AsyncIterator[dict[str, object]]:
         self.calls += 1
         yield {"type": "message_start", "model": req.model}
+        if self.calls == 1 and self._error is not None:
+            raise self._error
         if self._delay:
             await asyncio.sleep(self._delay)
-        yield {"type": "text_delta", "text": "done"}
+        yield {"type": "text_delta", "text": "recovered" if self._error else "done"}
         yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
 
 
-class FailingProvider(BaseProvider):
-    """Raises *error* on the first call, then behaves like TextProvider."""
-
-    id = "fake"
-
-    def __init__(self, error: BaseException) -> None:
-        self.calls = 0
-        self._error = error
-
-    def context_window(self, model: str) -> int:
-        return 100_000
-
-    async def stream(self, req: Any) -> AsyncIterator[dict[str, object]]:
-        self.calls += 1
-        yield {"type": "message_start", "model": req.model}
-        if self.calls == 1:
-            raise self._error
-        yield {"type": "text_delta", "text": "recovered"}
-        yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
+def _agent(provider: BaseProvider, **kwargs: Any) -> Any:
+    return make_agent(provider, model="gpt-5", run_store=None, **kwargs)
 
 
-def _agent(provider: BaseProvider, **kwargs: Any) -> Agent:
-    return Agent(
-        model="gpt-5",
-        provider=provider,
-        session_store=InMemorySessionStore(),
-        permissions={"mode": "skip-dangerous"},
-        cwd=".",
-        **kwargs,
-    )
-
-
-async def _drain(agent: Agent, prompt: str = "hi") -> list[Any]:
+async def _drain(agent: Any, prompt: str = "hi") -> list[Any]:
     session = await agent.session()
     return [event async for event in session.run(prompt)]
 
 
-async def _fan_out(agent: Agent, n: int) -> None:
-    """Run *n* sessions of one agent concurrently.
-
-    Sessions are created serially on purpose: `agent.session()` is not safe to
-    call from concurrent tasks (its lazy `connect_skills` coroutine is awaited
-    twice), which is unrelated to what these tests measure.
-    """
+async def _fan_out(agent: Any, n: int) -> None:
     sessions = [await agent.session() for _ in range(n)]
 
     async def drive(session: Any) -> None:
@@ -138,8 +92,7 @@ async def _fan_out(agent: Agent, n: int) -> None:
     await asyncio.gather(*(drive(s) for s in sessions))
 
 
-async def _fan_out_errors(agent: Agent, n: int) -> list[str]:
-    """Run *n* sessions concurrently and return the name of every error event."""
+async def _fan_out_errors(agent: Any, n: int) -> list[str]:
     sessions = [await agent.session() for _ in range(n)]
 
     async def drive(session: Any) -> list[str]:
@@ -152,74 +105,96 @@ async def _fan_out_errors(agent: Agent, n: int) -> list[str]:
     return [name for batch in await asyncio.gather(*(drive(s) for s in sessions)) for name in batch]
 
 
-async def test_limiter_is_acquired_and_released_around_a_turn() -> None:
+def _track(provider: Any) -> dict[str, int]:
+    stats = {"running": 0, "high_water": 0}
+    original = provider.stream
+
+    def tracked(req: Any) -> AsyncIterator[dict[str, object]]:
+        async def run() -> AsyncIterator[dict[str, object]]:
+            stats["running"] += 1
+            stats["high_water"] = max(stats["high_water"], stats["running"])
+            try:
+                async for item in original(req):
+                    yield item
+            finally:
+                stats["running"] -= 1
+
+        return run()
+
+    provider.stream = tracked  # type: ignore[method-assign]
+    return stats
+
+
+@pytest.mark.parametrize(
+    "error",
+    [None, ProviderError("boom", status=400, retryable=False)],
+    ids=["success", "provider-error"],
+)
+async def test_limiter_is_acquired_and_released_around_a_turn(
+    error: BaseException | None,
+) -> None:
     limiter = SpyLimiter()
-    events = await _drain(_agent(TextProvider(), limiter=limiter))
+    provider = LimiterProvider(error) if error else LimiterProvider()
+    events = await _drain(_agent(provider, limiter=limiter))
 
-    assert events[-1].subtype == "success"
-    assert limiter.acquired == ["gpt-5"]
-    assert limiter.released == ["gpt-5"]
-
-
-async def test_limiter_is_released_when_the_provider_raises() -> None:
-    limiter = SpyLimiter()
-    provider = FailingProvider(ProviderError("boom", status=400, retryable=False))
-
-    await _drain(_agent(provider, limiter=limiter))
-
-    assert limiter.acquired, "the gate was never entered"
-    assert limiter.balanced, "a failed provider call leaked its slot"
+    assert limiter.acquired
+    assert limiter.balanced
+    if error is None:
+        assert events[-1].subtype == "success"
+        assert limiter.acquired == ["gpt-5"]
+        assert limiter.released == ["gpt-5"]
 
 
-async def test_limiter_is_released_across_retry_backoff() -> None:
-    """Pins D5: a retrying call re-queues instead of holding its slot while sleeping.
-
-    With a cap of one, a slot held across `_retry_same_model`'s backoff would
-    make the second attempt wait on itself forever.
-    """
+@pytest.mark.parametrize(
+    ("error", "max_retries", "assert_retry_slot"),
+    [
+        (ProviderError("overloaded", status=529, retryable=True), 3, True),
+        (ContextLengthError("context too long"), 0, False),
+    ],
+    ids=["retry-backoff", "forced-compaction"],
+)
+async def test_provider_slot_is_released_before_retry_or_compaction(
+    error: BaseException, max_retries: int, assert_retry_slot: bool
+) -> None:
     limiter = CappingLimiter(cap=1)
-    provider = FailingProvider(ProviderError("overloaded", status=529, retryable=True))
+    provider = LimiterProvider(error)
 
     events = await asyncio.wait_for(
-        _drain(_agent(provider, limiter=limiter, max_retries=3)), timeout=5.0
+        _drain(_agent(provider, limiter=limiter, max_retries=max_retries)), timeout=5.0
     )
 
-    assert provider.calls == 2, "the retry never happened"
+    assert provider.calls == 2
     assert events[-1].subtype == "success"
-    assert len(limiter.acquired) == 2, "the retry did not re-enter the gate"
-    assert limiter.high_water == 1
     assert limiter.balanced
+    if assert_retry_slot:
+        assert len(limiter.acquired) == 2
+        assert limiter.high_water == 1
 
 
 async def test_an_unset_limiter_resolves_to_a_no_op_context() -> None:
-    """Pins the zero-overhead rule: no limiter means no semaphore, no wrapper."""
     from contextlib import nullcontext
 
     from linch.providers.limiter import provider_slot
 
-    agent = _agent(TextProvider())
+    agent = _agent(LimiterProvider())
     assert agent.limiter is None
     assert isinstance(provider_slot(agent, "gpt-5"), type(nullcontext()))
 
 
 async def test_cap_bounds_concurrent_provider_calls_across_sessions() -> None:
-    """The whole point: one ceiling shared by every session of one Agent."""
     capped = CappingLimiter(cap=2)
-    agent = _agent(TextProvider(delay=0.05), limiter=capped)
+    agent = _agent(LimiterProvider(delay=0.05), limiter=capped)
     await _fan_out(agent, 5)
     assert capped.high_water == 2
     assert capped.balanced
 
-    # Control: the same fan-out with a non-blocking limiter really does overlap,
-    # so the assertion above is measuring the cap and not the test's own timing.
     uncapped = SpyLimiter()
-    loose = _agent(TextProvider(delay=0.05), limiter=uncapped)
+    loose = _agent(LimiterProvider(delay=0.05), limiter=uncapped)
     await _fan_out(loose, 5)
     assert uncapped.high_water == 5
 
 
 async def test_compaction_goes_through_the_gate() -> None:
-    """Pins D3: the gate wraps `strategy.compact`, so custom strategies are covered."""
     from linch.abort import AbortContext
     from linch.compaction import run_forced_compaction
 
@@ -233,7 +208,7 @@ async def test_compaction_goes_through_the_gate() -> None:
             seen.append(limiter.in_flight)
             return list(ctx.messages)
 
-    agent = _agent(TextProvider(), limiter=limiter, compaction=RecordingStrategy())
+    agent = _agent(LimiterProvider(), limiter=limiter, compaction=RecordingStrategy())
     session = await agent.session()
     await _drain_session(session)
     limiter.acquired.clear()
@@ -245,26 +220,9 @@ async def test_compaction_goes_through_the_gate() -> None:
     assert limiter.balanced
 
 
-async def test_forced_compaction_inside_a_turn_does_not_deadlock() -> None:
-    """The headline safety test.
-
-    Forced compaction is invoked from inside the turn path. At a cap of one this
-    only works because `stream_turn` releases its slot on the way out of the
-    generator, before `run_forced_compaction` asks for one.
-    """
-    limiter = CappingLimiter(cap=1)
-    provider = FailingProvider(ContextLengthError("context too long"))
-
-    events = await asyncio.wait_for(_drain(_agent(provider, limiter=limiter)), timeout=5.0)
-
-    assert provider.calls == 2
-    assert events[-1].subtype == "success"
-    assert limiter.balanced
-
-
 async def test_abandoning_the_run_releases_the_slot() -> None:
     limiter = SpyLimiter()
-    agent = _agent(TextProvider(delay=0.02), limiter=limiter)
+    agent = _agent(LimiterProvider(delay=0.02), limiter=limiter)
     session = await agent.session()
 
     stream = session.run("hi")
@@ -283,94 +241,32 @@ async def test_both_limiter_and_max_provider_concurrency_is_rejected() -> None:
     from linch.errors import ConfigError
 
     with pytest.raises(ConfigError, match="max_provider_concurrency"):
-        _agent(TextProvider(), limiter=SpyLimiter(), max_provider_concurrency=2)
+        _agent(LimiterProvider(), limiter=SpyLimiter(), max_provider_concurrency=2)
 
 
 async def test_max_provider_concurrency_caps_like_an_explicit_limiter() -> None:
-    agent = _agent(TextProvider(delay=0.05), max_provider_concurrency=2)
+    agent = _agent(LimiterProvider(delay=0.05), max_provider_concurrency=2)
     assert agent.limiter is not None
 
-    running = 0
-    high_water = 0
-    original = agent.provider.stream
-
-    def tracked(req: Any) -> AsyncIterator[dict[str, object]]:
-        async def run() -> AsyncIterator[dict[str, object]]:
-            nonlocal running, high_water
-            running += 1
-            high_water = max(high_water, running)
-            try:
-                async for item in original(req):
-                    yield item
-            finally:
-                running -= 1
-
-        return run()
-
-    agent.provider.stream = tracked  # type: ignore[method-assign]
+    stats = _track(agent.provider)
     await _fan_out(agent, 5)
 
-    assert high_water == 2
-
-
-async def test_max_provider_concurrency_unset_leaves_no_limiter() -> None:
-    assert _agent(TextProvider()).limiter is None
+    assert stats["high_water"] == 2
 
 
 def test_the_cap_survives_being_used_from_a_new_event_loop() -> None:
-    """An `Agent` reused across loops must not trip over its own semaphore.
-
-    `asyncio.Semaphore` binds to the loop of its first *contended* acquire, so
-    the failure only shows up under load: an uncapped second loop works, a
-    contended one raises "bound to a different event loop". A host that runs one
-    loop per task (Celery) is exactly the shape `Agent(max_provider_concurrency=)`
-    is for, so the cap has to outlive the loop it was first used on.
-    """
-    agent = _agent(TextProvider(delay=0.01), max_provider_concurrency=1)
+    agent = _agent(LimiterProvider(delay=0.01), max_provider_concurrency=1)
+    stats = _track(agent.provider)
 
     def drive() -> list[str]:
-        # Three sessions against a cap of one guarantees contention. The loop
-        # turns a limiter failure into an error event rather than raising, so
-        # assert on the events: otherwise two of three runs fail silently.
         return asyncio.run(_fan_out_errors(agent, 3))
 
     assert drive() == []
     assert drive() == []
-
-
-def test_the_cap_still_binds_on_the_second_loop() -> None:
-    """Rebuilding the semaphore must not quietly hand the new loop a free pass."""
-    provider = TextProvider(delay=0.01)
-    agent = _agent(provider, max_provider_concurrency=1)
-
-    running = 0
-    high_water = 0
-    original = provider.stream
-
-    def tracked(req: Any) -> AsyncIterator[dict[str, object]]:
-        async def run() -> AsyncIterator[dict[str, object]]:
-            nonlocal running, high_water
-            running += 1
-            high_water = max(high_water, running)
-            try:
-                async for item in original(req):
-                    yield item
-            finally:
-                running -= 1
-
-        return run()
-
-    provider.stream = tracked  # type: ignore[method-assign]
-
-    assert asyncio.run(_fan_out_errors(agent, 3)) == []
-    high_water = 0
-    assert asyncio.run(_fan_out_errors(agent, 3)) == []
-
-    assert high_water == 1
+    assert stats["high_water"] == 1
 
 
 def test_rebuilding_is_refused_while_slots_are_still_held() -> None:
-    """Two live loops sharing one cap is ambiguous — say so instead of doubling it."""
     from linch.errors import ConfigError
     from linch.providers.limiter import _SemaphoreLimiter
 

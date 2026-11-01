@@ -38,7 +38,7 @@ my-agent/
 ```
 
 The project is **offline-first**: `build_agent()` falls back to a
-`ScriptedProvider` (from `linch.evals`) when `OPENAI_API_KEY` is unset, so the
+`ScriptedProvider` (from `linch.ext.evals`) when `OPENAI_API_KEY` is unset, so the
 agent loop and the generated tests work before any credentials exist. Setting
 `OPENAI_API_KEY` switches to Linch's default OpenAI provider; `LINCH_MODEL`
 overrides the model (default `gpt-5`). See [Providers](./providers.md) to wire

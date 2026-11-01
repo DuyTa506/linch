@@ -7,8 +7,8 @@ that gives Linch three things the rest of the SDK builds on: **reversible
 effects**, a **typed event bus**, and **per-agent `Context` scopes** (a scoped
 IoC container). It is async-first and ships no third-party dependency.
 
-Public names: `linch.Context`, `linch.Disposable`. `EffectScope`, `EventBus`,
-and `Next` live under `linch.kernel` for internal use.
+Public names: `linch.Context`, `linch.Disposable`, and `linch.Plugin`.
+`EffectScope`, `EventBus`, and `Next` live under `linch.kernel` for internal use.
 
 Why it exists: extension points (tool wrappers, capability providers, listeners)
 must be **addable and removable** without editing the loop, and N agents must run
@@ -26,7 +26,7 @@ later close can finish cleanup. The undo may be a coroutine. Every registration
 in the system returns one:
 
 ```python
-disposer = registry.add(tool)       # returns a Disposable
+disposer = registry.register(tool)  # returns a Disposable
 ...
 await disposer.dispose()            # removes exactly that tool
 await disposer.dispose()            # single-use: a no-op
@@ -48,6 +48,14 @@ remain for a later retry.
 `EventBus` (`kernel/events.py`) registers listeners with
 `on(name, listener, *, prepend=False) -> Disposable` and dispatches three ways:
 
+Lifecycle producers pass a `linch.kernel.events.LifecyclePoint` constant instead
+of repeating a string. The domain catalog re-exports the same descriptor for
+convenient imports. Each point declares its payload type and one dispatch mode;
+`EventBus` rejects `emit`, `serial`, or `waterfall` calls that do not match that
+mode. Hook points use the `hook` mode and are owned by `HookDispatcher`, which
+preserves user-hook ordering and mutation semantics. Plain string names remain
+available for host-defined events.
+
 | Dispatcher | Semantics |
 |---|---|
 | `emit(name, *args)` | Fire-and-forget. Non-vetoing; each listener is isolated by its own `try/except` so one failure never breaks the others. Coroutine listeners are scheduled. |
@@ -66,6 +74,10 @@ it rather than through module globals — that is what makes Linch multi-tenant
 safe.
 
 - `register(key, service) -> Disposable` — add a service; dispose to remove it.
+  Registration and removal publish `context/service` with `(context, key)` on
+  the shared bus after the registry changes. Removal awaits every listener;
+  failed notifications remain retryable through the same disposer. With no
+  listeners, no event is dispatched.
 - `ctx.<name>` — read a **required** capability as an attribute (e.g.
   `ctx.execution`); `AttributeError` if unresolved. Underscore names raise, to
   avoid recursion.
@@ -73,25 +85,87 @@ safe.
   unresolved. Both walk up to parent scopes, so a child sees a service its
   parent registered unless it shadows the name.
 - `on(...)` / `effect(...)` — delegate to the bus / scope.
-- `scope(label) -> Context` — a **child** sharing the bus but with an isolated
+- `inbox(producer) -> Disposable` — add an ordered, agent-local run-boundary
+  producer. The producer is called as `producer(session, run_id)` and returns an
+  async iterator of `Message` or already-committed `Event` values. Messages are
+  appended to session history and emitted as notification `UserEvent`s; Events
+  are emitted/persisted without another history append. The registration is
+  independent and idempotently removable, and an iterator's `aclose()` is
+  awaited when present. No producer means the loop does not allocate or dispatch
+  an inbox coroutine.
+- `scope(label, isolate_events=False) -> Context` — a **child** sharing the bus but with an isolated
   service overlay and its own child `EffectScope`, so per-agent (or per-subagent)
-  teardown disposes only that branch.
+  teardown disposes only that branch. With `isolate_events=True`, listener
+  registrations are snapshotted onto an independent bus; filtered parent service
+  changes still reach the child. `EventBus.fork()` and `ToolPipeline.fork()` own
+  the listener-copy mechanics and preserve registration ordering and ownership.
 
-`Agent` creates one `Context` for its lifetime (or accepts a supplied one), then
-registers the agent's pipeline and effective execution world in that scope.
-The Agent owns the supplied scope and disposes it during close; hosts that need
-to retain a parent scope should pass `parent.scope("agent")` rather than the
-parent itself. Sessions and child agents resolve capabilities through the scope;
+`Agent` creates one owned child `Context` for its lifetime. When `context=` is
+supplied it is the parent/host scope, which remains alive when the Agent closes;
+hosts may also pass `parent.scope("agent")` when they want an explicit child.
+The Agent registers its pipeline and effective execution world in its owned
+scope. Sessions and child agents resolve capabilities through the scope;
 they do not use process-global services. `await agent.close()` first quiesces
 the agent and then disposes the context. Context teardown is transactional:
 successful registrations are not repeated, while a failed disposer remains
 retryable and a later `close()` resumes the unfinished teardown.
 
+### Plugins
+
+`Plugin` is a duck-typed protocol with `name`, `version`, `provides`,
+`requires`, and synchronous `setup(ctx, config) -> Disposable`. Mount one with
+`await agent.use(plugin, config)`. A mount is dormant until every required
+service resolves in the agent context; it gets a fresh child scope for each
+activation. Removing a requirement withdraws published services before awaiting
+cleanup, and a later reappearance activates a fresh scope. The returned
+`Disposable` unmounts the mount and retries failed teardown on a later dispose
+or `agent.close()`. A synchronous `Context.register` emits its change event
+immediately; activation reconciliation runs asynchronously, while removal waits
+for dependent cleanup.
+
+Only services declared in `provides` may be registered by a plugin, including
+nested scopes. Services are not published to the agent until setup and the
+audit complete, so failed setup is fully rolled back. Plugin mounts and inbox
+registrations are per-agent; sharing a parent `Context` does not share a
+mount's child services.
+
+### Domain profiles
+
+`Profile` (`profiles.py`) composes immutable declarative fields and plugin rows
+by stable id. `RunOptions(profile=...)` selects the composed definition. Before
+the loop starts, the session enters a run scope: a shallow configuration copy of
+the same Agent shares its provider, stores, and host dependencies, while tools,
+permission configuration, hook registrations, tool pipeline listener lists,
+turn-stopping registrations, and context event listener lists are local to the
+run. `agent.use` mounts selected plugins in that scope. Existing hooks and host
+service objects retain their normal shared ownership. No listener is registered
+unfiltered on the parent agent bus.
+
+The effective tool registry intersects the profile allow/deny names and any
+session tool override. A deny-only permission layer reinforces the restriction;
+host permission rules still decide authorization. Role instructions append to
+the existing system prompt, schemas use `OutputSchema`, and budget limits create
+a fresh `RunBudget`. Cleanup restores the session's original Agent and overrides
+and disposes the scope, including on early iterator close or setup failure.
+Detached work releases the scope when its last task finishes; retained child
+sessions retain their services until released. Session close notifications and
+task callbacks trigger disposal without requiring Agent shutdown. The parent
+Context retains retry ownership if disposal fails. Inherited service changes
+are relayed by the kernel's isolated scope so run-local plugin dependencies
+still activate and deactivate normally.
+
+Direct callers pass the same profile on resume; workers resolve it from their
+supplied `profiles` definitions on queue launch and takeover. `loop/contracts.py` records its id, version, and
+SHA-256 content hash in `RunContract.payload.run_options.profile`. The existing
+whole-contract compatibility check rejects omission or a changed definition,
+including plugin execution order. `profile=None` adds no contract fields or
+request changes. See [domain profiles](../usage/profiles.md) for the API.
+
 ---
 
 ## What builds on the kernel
 
-- **Reversible registration** — `ToolRegistry.add/register/replace` return a
+- **Reversible registration** — `ToolRegistry.register/replace` return a
   `Disposable` (see [Tool Protocol](./tool-protocol.md)).
 - **Open tool pipeline** — `ToolPipeline` (`tools/pipeline.py`) exposes
   `tools/pre-execute → tools/execute → tools/post-execute`. `tools/execute` is a

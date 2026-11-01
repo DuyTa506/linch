@@ -1,11 +1,4 @@
-"""Byte-identical + linear-scaling guard for context-budget trimming (Phase 2.2).
-
-The trim was rewritten from repeated ``pop(0)`` + per-drop system re-joins to a
-moving cutoff, one suffix slice, and an incremental system-length total. This
-pins the new implementation to the exact output of a naive per-pop oracle across
-randomized inputs, and checks that trimming is linear (not quadratic) in message
-count.
-"""
+"""Byte-identical and linear-scaling guard for the Phase 2.2 trim."""
 
 from __future__ import annotations
 
@@ -22,7 +15,6 @@ def _msg(text: str) -> Message:
 
 
 def _naive_trim(system_blocks, messages, message_costs, system_used, max_tokens, trimmed0):
-    """Reference: the original per-pop algorithm (the oracle we must match)."""
     system_blocks = list(system_blocks)
     messages = list(messages)
     message_costs = list(message_costs)
@@ -49,7 +41,6 @@ def test_trim_matches_naive_oracle_over_random_inputs() -> None:
         messages = [_msg("y" * rng.randint(0, 40)) for _ in range(n_msg)]
         max_tokens = rng.randint(0, 60)
 
-        # Estimator path (callable) and fallback path (None) must both match.
         for estimator in (None, lambda ms, model: sum(_estimate_message(m) for m in ms)):
             result = ContextBuildResult(
                 system_blocks=list(system_blocks),
@@ -64,8 +55,12 @@ def test_trim_matches_naive_oracle_over_random_inputs() -> None:
 
             out = apply_context_budget(result, estimator=estimator, model="gpt-5")
 
-            assert [b.text for b in out.system_blocks] == [b.text for b in exp_sys]
-            assert [m.content[0].text for m in out.messages] == [m.content[0].text for m in exp_msg]
+            assert [getattr(b, "text", "") for b in out.system_blocks] == [
+                getattr(b, "text", "") for b in exp_sys
+            ]
+            assert [getattr(m.content[0], "text", "") for m in out.messages] == [
+                getattr(m.content[0], "text", "") for m in exp_msg
+            ]
             assert out.budget.used_tokens == exp_used
             assert out.budget.remaining_tokens == exp_rem
             assert out.budget.trimmed is exp_trim
@@ -79,10 +74,7 @@ def test_trim_scales_roughly_linearly_in_message_count() -> None:
         apply_context_budget(result, estimator=None, model="gpt-5")
         return time.perf_counter() - start
 
-    trim_n(2_000)  # warm
+    trim_n(2_000)
     t_small = min(trim_n(2_000) for _ in range(3))
     t_large = min(trim_n(20_000) for _ in range(3))
-
-    # 10x the messages must not be ~100x the time (the quadratic signature).
-    # Linear would be ~10x; allow generous slack for noise/constant factors.
     assert t_large < t_small * 30, f"trim looks superlinear: {t_small=} {t_large=}"

@@ -7,35 +7,7 @@ import pytest
 from linch.providers import VLLMProvider, VLLMProviderOptions
 from linch.providers.vllm import _build_vllm_payload
 from linch.types import Message, OutputSchema, ProviderRequest, TextBlock, ThinkingBlock, Usage
-
-
-class _FakeStream:
-    def __init__(self, chunks: list[object]) -> None:
-        self._chunks = chunks
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self):
-        if not self._chunks:
-            raise StopAsyncIteration
-        return self._chunks.pop(0)
-
-
-class _FakeCompletions:
-    def __init__(self, chunks: list[object]) -> None:
-        self._chunks = chunks
-        self.payload: dict | None = None
-
-    async def create(self, **payload):
-        self.payload = payload
-        return _FakeStream(list(self._chunks))
-
-
-class _FakeClient:
-    def __init__(self, chunks: list[object]) -> None:
-        self.completions = _FakeCompletions(chunks)
-        self.chat = SimpleNamespace(completions=self.completions)
+from tests.support.providers import OpenAICompatibleFakeClient
 
 
 def _chunk(*, delta, finish_reason=None, usage=None):
@@ -121,7 +93,7 @@ async def test_vllm_stream_reuses_openai_compatible_parser() -> None:
         ),
     ]
     provider = VLLMProvider()
-    provider._client = _FakeClient(chunks)
+    provider._client = OpenAICompatibleFakeClient(chunks)
 
     events = [
         event
@@ -136,7 +108,7 @@ async def test_vllm_stream_reuses_openai_compatible_parser() -> None:
     assert {"type": "tool_use_end", "id": "call_1"} in events
     assert events[-1]["stop_reason"] == "tool_use"
     assert events[-1]["usage"] == Usage(
-        input_tokens=3,
+        input_tokens=1,
         output_tokens=5,
         cache_read_tokens=2,
     )

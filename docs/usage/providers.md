@@ -16,7 +16,7 @@ talking to.
 |---|---|
 | OpenAI reasoning-native models (`o1`, `o3`, `gpt-5`) with effort/summary controls and stateful `previous_response_id` | `OpenAIResponsesProvider` |
 | Standard OpenAI Chat Completions (`gpt-4o`, `gpt-5-nano`) | `OpenAIChatCompletionsProvider` |
-| Any OpenAI-compatible endpoint (Azure, Groq, Together) | `OpenAIChatCompletionsProvider(base_url=...)` |
+| Any OpenAI-compatible endpoint (Azure, Groq, Together) | `OpenAIChatCompletionsProvider(OpenAIChatProviderOptions(base_url=...))` |
 | DeepSeek native API — thinking controls, tool-loop reasoning, JSON-object output | `DeepSeekProvider` |
 | Anthropic Claude — adaptive thinking, prompt caching, signed thinking blocks | `AnthropicProvider` |
 | Google Gemini — large context windows, Google tool semantics | `GeminiProvider` (`[gemini]` extra) |
@@ -113,7 +113,7 @@ provider = AnthropicProvider(
 )
 
 # ── Google Gemini ────────────────────────────────────────────────────────────
-# Requires: pip install "linch[gemini]"
+# Requires: pip install "linch[gemini]" (uses google-genai)
 # Supports text, tool use, structured output, and large context windows.
 from linch.providers import GeminiProvider, GeminiProviderOptions
 
@@ -124,6 +124,29 @@ agent = Agent(
     ),
     session_store=InMemorySessionStore(),
 )
+
+# Vertex AI uses the same SDK with application default credentials:
+provider = GeminiProvider(
+    GeminiProviderOptions(project="my-project", location="us-central1")
+)
+
+# Native GenerateContentConfig defaults, including thinking on supported models.
+# Per-run thinking={"type": "enabled", "budget_tokens": 1024} overrides this.
+# Native thinking_budget/thinking_level dictionaries also work per run.
+# Budget ranges and support for disabling thinking depend on the model.
+provider = GeminiProvider(
+    GeminiProviderOptions(
+        api_key=os.environ["GOOGLE_API_KEY"],
+        default_generation_config={
+            "thinking_config": {"thinking_budget": 1024, "include_thoughts": True},
+        },
+    )
+)
+# Thought text streams as thinking_delta; output usage includes thought tokens.
+# Linch retains signed model parts in message metadata for subsequent tool turns.
+# Keep provider_metadata when copying assistant messages. Tools execute in Linch.
+# Gemini uses native JSON Schema for tool parameters and OutputSchema responses.
+# Agent teardown closes the provider; standalone callers should await provider.aclose().
 
 # ── DeepSeek native endpoint ────────────────────────────────────────────────
 # deepseek-v4-flash / deepseek-v4-pro are reasoning models that emit
@@ -253,9 +276,10 @@ Responses for stateful reasoning controls, Anthropic for explicit prompt-cache
 markers and Claude thinking signatures, Gemini for Google model/tool semantics, and
 llama.cpp, vLLM, or SGLang for self-hosted local servers.
 
-Use `OpenAIChatCompletionsProvider(base_url=...)` when a service implements the
-OpenAI Chat Completions protocol. This is the recommended path for Azure, Groq,
-Together, and similar OpenAI-compatible endpoints. Use `DeepSeekProvider` for
+Use `OpenAIChatCompletionsProvider(OpenAIChatProviderOptions(base_url=...))` when
+a service implements the OpenAI Chat Completions protocol. This is the
+recommended path for Azure, Groq, Together, and similar OpenAI-compatible
+endpoints. Use `DeepSeekProvider` for
 the native DeepSeek API, where it owns DeepSeek-specific thinking and
 JSON-object semantics.
 
@@ -370,11 +394,11 @@ isolated by default: the script includes the provider name in the stable prefix.
 Pass `--shared-prefix` only when you intentionally want to test whether two
 endpoints share the same backend prompt cache.
 
-The benchmark normalizes prompt-cache percentages across provider accounting:
-OpenAI-compatible usage reports cached prompt tokens inside `input_tokens`,
-while Anthropic-compatible usage reports cached input separately. Use the
-per-call `cache_read` columns when in doubt; warm calls near the full prompt size
-mean the cache is working.
+All adapters normalize prompt-cache usage into separate token buckets:
+they report uncached prompt tokens in `input_tokens` and cache hits in
+`cache_read_tokens` (with cache writes in `cache_creation_tokens`). Use the
+per-call `cache_read` columns when in doubt; warm calls near the full prompt
+size mean the cache is working.
 
 To measure cache behavior through the real Linch agent loop and tool-result
 turns, use:

@@ -1,103 +1,19 @@
-"""Shared-budget tests across the parent/subagent tree.
-
-linch imports happen inside test functions / provider methods (not at module
-level) because tests/loop/test_hardening.py pops all ``linch*`` modules from
-``sys.modules`` — stale class references would fail ``isinstance`` checks in
-the reloaded loop.
-"""
-
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from typing import Any
 
-
-class ParentChildProvider:
-    """Call 1: parent spawns a Subagent. Call 2: child text. Call 3: parent text."""
-
-    id = "fake"
-
-    def __init__(self, tokens_per_turn: int = 500) -> None:
-        self.calls = 0
-        self.tokens_per_turn = tokens_per_turn
-
-    def context_window(self, model: str) -> int:
-        return 10_000_000
-
-    async def stream(self, req: Any) -> AsyncIterator[dict[str, object]]:
-        from linch.types import Usage
-
-        self.calls += 1
-        yield {"type": "message_start", "model": req.model}
-        if self.calls == 1:
-            yield {"type": "tool_use_start", "id": "call_1", "name": "Subagent"}
-            yield {
-                "type": "tool_use_input_delta",
-                "id": "call_1",
-                "json_delta": '{"description":"helper","prompt":"do the thing"}',
-            }
-            yield {"type": "tool_use_end", "id": "call_1"}
-            stop_reason = "tool_use"
-        else:
-            yield {"type": "text_delta", "text": "done"}
-            stop_reason = "end_turn"
-        yield {
-            "type": "message_end",
-            "stop_reason": stop_reason,
-            "usage": Usage(input_tokens=self.tokens_per_turn),
-        }
-
-
-class ThreeLevelProvider:
-    """Calls 1-2 spawn a Subagent (parent → child1 → child2); calls 3-5 each
-    return text (child2, child1, parent)."""
-
-    id = "fake"
-
-    def __init__(self, tokens_per_turn: int = 300) -> None:
-        self.calls = 0
-        self.tokens_per_turn = tokens_per_turn
-
-    def context_window(self, model: str) -> int:
-        return 10_000_000
-
-    async def stream(self, req: Any) -> AsyncIterator[dict[str, object]]:
-        from linch.types import Usage
-
-        self.calls += 1
-        yield {"type": "message_start", "model": req.model}
-        if self.calls <= 2:
-            call_id = f"call_{self.calls}"
-            yield {"type": "tool_use_start", "id": call_id, "name": "Subagent"}
-            yield {
-                "type": "tool_use_input_delta",
-                "id": call_id,
-                "json_delta": '{"description":"helper","prompt":"go deeper"}',
-            }
-            yield {"type": "tool_use_end", "id": call_id}
-            stop_reason = "tool_use"
-        else:
-            yield {"type": "text_delta", "text": "done"}
-            stop_reason = "end_turn"
-        yield {
-            "type": "message_end",
-            "stop_reason": stop_reason,
-            "usage": Usage(input_tokens=self.tokens_per_turn),
-        }
+from tests.support.agents import make_agent
+from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
 
 
 def _make_agent(provider: Any, **kwargs: Any) -> Any:
-    from linch import Agent, workspace_tools
+    from linch import workspace_tools
     from linch.config import FeatureFlags
-    from linch.sessions import InMemorySessionStore
 
-    return Agent(
+    return make_agent(
+        provider,
         model="gpt-5",
-        provider=provider,
         tools=workspace_tools(),
-        session_store=InMemorySessionStore(),
-        permissions={"mode": "skip-dangerous"},
-        cwd=".",
         features=FeatureFlags(subagents=True),
         **kwargs,
     )
@@ -105,41 +21,60 @@ def _make_agent(provider: Any, **kwargs: Any) -> Any:
 
 async def test_subagent_run_charges_parent_budget() -> None:
     from linch import RunBudget, RunOptions
+    from linch.types import Usage
 
-    provider = ParentChildProvider(tokens_per_turn=500)
+    provider = ScriptedProvider(
+        [
+            ToolUseTurn(
+                "Subagent",
+                {"description": "helper", "prompt": "do the thing"},
+                usage=Usage(input_tokens=500),
+            ),
+            TextTurn("done", usage=Usage(input_tokens=500)),
+            TextTurn("done", usage=Usage(input_tokens=500)),
+        ]
+    )
     agent = _make_agent(provider)
     session = await agent.session()
     budget = RunBudget(max_tokens=100_000)
 
     events = [event async for event in session.run("delegate", RunOptions(budget=budget))]
-
     assert events[-1].type == "result"
     assert events[-1].subtype == "success"
-    # Parent turn 1 + child turn + parent turn 2, all on one shared budget.
-    assert provider.calls == 3
+    assert len(provider.requests) == 3
     assert budget.spent_tokens == 1500
 
 
 async def test_budget_aggregates_across_three_levels() -> None:
-    # Budget inheritance must compose recursively: a grandchild charges the same
-    # shared RunBudget as the parent (active_budget threads parent → child →
-    # grandchild), so the total reflects every turn in the tree.
     from linch import RunBudget, RunOptions
+    from linch.types import Usage
 
-    provider = ThreeLevelProvider(tokens_per_turn=300)
+    provider = ScriptedProvider(
+        [
+            ToolUseTurn(
+                "Subagent",
+                {"description": "helper", "prompt": "go deeper"},
+                usage=Usage(input_tokens=300),
+            ),
+            ToolUseTurn(
+                "Subagent",
+                {"description": "helper", "prompt": "go deeper"},
+                usage=Usage(input_tokens=300),
+            ),
+            TextTurn("done", usage=Usage(input_tokens=300)),
+            TextTurn("done", usage=Usage(input_tokens=300)),
+            TextTurn("done", usage=Usage(input_tokens=300)),
+        ]
+    )
     agent = _make_agent(provider)
     session = await agent.session()
     budget = RunBudget(max_tokens=100_000)
 
     events = [event async for event in session.run("delegate", RunOptions(budget=budget))]
-
     assert events[-1].type == "result"
     assert events[-1].subtype == "success"
-    # parent → child1 → child2 (+ continuations). At least the three levels ran.
-    assert provider.calls >= 3
-    # Every turn across all three levels charged the one shared budget — no level
-    # spent against a private budget that the parent could not see.
-    assert budget.spent_tokens == provider.calls * 300
+    assert len(provider.requests) >= 3
+    assert budget.spent_tokens == len(provider.requests) * 300
 
 
 async def test_exhausted_budget_stops_child_run() -> None:
@@ -148,11 +83,13 @@ async def test_exhausted_budget_stops_child_run() -> None:
     from linch.subagents.runner import RunSubagentArgs, run_subagent
     from linch.types import Usage
 
-    provider = ParentChildProvider()
+    provider = ScriptedProvider(
+        [ToolUseTurn("Subagent", {"description": "helper", "prompt": "do the thing"})]
+    )
     agent = _make_agent(provider)
     parent = await agent.session()
     budget = RunBudget(max_tokens=100)
-    budget.charge(Usage(input_tokens=200), None)  # already exhausted
+    budget.charge(Usage(input_tokens=200), None)
     parent.active_budget = budget
 
     emitted: list[Any] = []
@@ -171,9 +108,44 @@ async def test_exhausted_budget_stops_child_run() -> None:
     assert result.errored
     assert result.error is not None
     assert result.error["name"] == "BudgetExceededError"
-    assert provider.calls == 0  # child never reached the provider
+    assert provider.requests == []
     nested = [e.event for e in emitted]
     assert any(e.type == "budget" and e.kind == "exceeded" for e in nested)
+
+
+async def test_continued_worker_charges_current_run_budget() -> None:
+    from linch import RunBudget, RunOptions
+    from linch.types import Usage
+
+    usage = Usage(input_tokens=10, output_tokens=0)
+    provider = ScriptedProvider(
+        [
+            ToolUseTurn("Subagent", {"description": "d", "prompt": "p"}, usage=usage),
+            TextTurn("child-1", usage=usage),
+            TextTurn("parent-1", usage=usage),
+            ToolUseTurn("SubagentContinue", {"to": "Agent #1", "message": "more"}, usage=usage),
+            TextTurn("child-2", usage=Usage(input_tokens=500, output_tokens=0)),
+            TextTurn("parent-2", usage=usage),
+        ]
+    )
+    agent = _make_agent(
+        provider,
+        retain_subagents=True,
+        enable_worker_tools=True,
+    )
+    parent = await agent.session()
+    first_budget = RunBudget(max_tokens=10_000)
+    second_budget = RunBudget(max_tokens=10_000)
+
+    async for _ in parent.run("one", RunOptions(budget=first_budget)):
+        pass
+    first_spent = first_budget.spent_tokens
+    async for _ in parent.run("two", RunOptions(budget=second_budget)):
+        pass
+
+    assert first_budget.spent_tokens == first_spent
+    assert second_budget.spent_tokens == 520
+    await agent.close()
 
 
 def test_budget_event_round_trips_event_dict() -> None:

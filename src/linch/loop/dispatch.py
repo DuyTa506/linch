@@ -11,13 +11,14 @@ from __future__ import annotations
 
 from typing import Any, cast
 
+from .. import lifecycle
+from .._telemetry import record_prompt_capture
 from ..events import Event, ResultEvent
 from ..hooks import (
     AfterProviderCallContext,
     BeforeFinalAnswerContext,
     BeforeProviderCallContext,
     HookDispatcher,
-    HookEvent,
     StopContext,
     UserPromptSubmitContext,
 )
@@ -34,9 +35,10 @@ async def dispatch_user_prompt(
     source: str = "run",
 ) -> tuple[str, list[dict[str, str]] | None, list[Event], str | None]:
     if not hook_dispatcher.active:
+        record_prompt_capture(session, prompt_value)
         return prompt_value, images_value, [], None
     dispatched = await hook_dispatcher.dispatch(
-        HookEvent.USER_PROMPT_SUBMIT,
+        lifecycle.USER_PROMPT_SUBMIT,
         UserPromptSubmitContext(
             session=session,
             run_id=run_id,
@@ -48,19 +50,26 @@ async def dispatch_user_prompt(
         ),
     )
     result = dispatched.result
+    processed_prompt = getattr(dispatched.context, "prompt", prompt_value)
     if result.action == "mutate":
+        prompt = result.prompt if result.prompt is not None else processed_prompt
+        record_prompt_capture(session, prompt)
         return (
-            result.prompt if result.prompt is not None else prompt_value,
+            prompt,
             result.images if result.images is not None else images_value,
             dispatched.events,
             None,
         )
     if result.action in {"block", "stop"}:
+        # Rejection short-circuits the hook chain, including later redaction.
         return prompt_value, images_value, dispatched.events, result.reason or result.feedback
+    record_prompt_capture(session, processed_prompt)
     return prompt_value, images_value, dispatched.events, None
 
 
-async def dispatch_lifecycle(hook_dispatcher: HookDispatcher, event: HookEvent, ctx: Any) -> None:
+async def dispatch_lifecycle(
+    hook_dispatcher: HookDispatcher, event: lifecycle.LifecyclePoint, ctx: Any
+) -> None:
     if hook_dispatcher.active:
         await hook_dispatcher.dispatch(event, ctx)
 
@@ -76,7 +85,7 @@ async def dispatch_before_provider_call(
     if not hook_dispatcher.active:
         return request, [], None, None
     dispatched = await hook_dispatcher.dispatch(
-        HookEvent.BEFORE_PROVIDER_CALL,
+        lifecycle.BEFORE_PROVIDER_CALL,
         BeforeProviderCallContext(
             session=session,
             run_id=run_id,
@@ -108,7 +117,7 @@ async def dispatch_after_provider_call(
     if not hook_dispatcher.active:
         return assembly, [], None, None
     dispatched = await hook_dispatcher.dispatch(
-        HookEvent.AFTER_PROVIDER_CALL,
+        lifecycle.AFTER_PROVIDER_CALL,
         AfterProviderCallContext(
             session=session,
             run_id=run_id,
@@ -151,7 +160,7 @@ async def dispatch_before_final_answer(
     if skip or not hook_dispatcher.active:
         return final_text_value, structured_output, structured_error, [], None, None
     dispatched = await hook_dispatcher.dispatch(
-        HookEvent.BEFORE_FINAL_ANSWER,
+        lifecycle.BEFORE_FINAL_ANSWER,
         BeforeFinalAnswerContext(
             session=session,
             run_id=run_id,
@@ -206,7 +215,7 @@ async def dispatch_stop(
     if not hook_dispatcher.active:
         return result_event, [], None, None
     dispatched = await hook_dispatcher.dispatch(
-        HookEvent.STOP,
+        lifecycle.STOP,
         StopContext(
             session=session,
             run_id=run_id,

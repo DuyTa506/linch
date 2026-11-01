@@ -1,5 +1,4 @@
 from .memory import InMemorySessionStore
-from .sqlite import SqliteSessionStore
 from .store import (
     ProviderViewSnapshot,
     ProviderViewSnapshotStore,
@@ -18,7 +17,6 @@ __all__ = [
     "SessionRecord",
     "SessionInboxStore",
     "SessionStore",
-    "SqliteSessionStore",
     "StoredMessage",
     "Task",
     "TaskPatch",

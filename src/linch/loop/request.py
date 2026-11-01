@@ -8,6 +8,7 @@ from dataclasses import replace
 from typing import Any, Literal, cast
 
 from ..context import ContextBuildResult, apply_context_budget
+from ..profiles import _base_run_config
 from ..session import RunOptions, Session
 from ..types import (
     ContentBlock,
@@ -61,9 +62,13 @@ def final_text(message: Message) -> str | None:
     return None
 
 
-def _re_inject_skill_context(session: Session) -> None:
+def _re_inject_skill_context(session: Session, *, config: Any = None) -> None:
     agent = session.agent
-    if not agent.skill_listing_text and not session.invoked_skills:
+    listing = agent.skill_listing_text
+    catalog = (config or _base_run_config(session)).context.get("request_catalog")
+    if catalog is not None:
+        listing = catalog.skill_listing(session, listing)
+    if not listing and not session.invoked_skills:
         return
     from ..skills.system_reminder import wrap_in_system_reminder
 
@@ -79,8 +84,8 @@ def _re_inject_skill_context(session: Session) -> None:
         if isinstance(block, TextBlock)
     }
 
-    if agent.skill_listing_text:
-        text = wrap_in_system_reminder(agent.skill_listing_text)
+    if listing:
+        text = wrap_in_system_reminder(listing)
         if text not in present_text:
             session.session_log.append(
                 Message(role="user", content=[TextBlock(text=text)]), historical=False
@@ -98,18 +103,25 @@ def _re_inject_skill_context(session: Session) -> None:
             present_text.add(text)
 
 
-async def _build_context_result(session: Session, turn_index: int) -> ContextBuildResult | None:
+async def _build_context_result(
+    session: Session, turn_index: int, *, config: Any = None
+) -> ContextBuildResult | None:
     agent = session.agent
+    config = config or _base_run_config(session)
     context_hooks = [
-        hook
-        for hook in getattr(agent, "hooks", [])
-        if callable(getattr(hook, "build_context", None))
+        hook for hook in config.hooks if callable(getattr(hook, "build_context", None))
     ]
     if not context_hooks:
         return None
     merged = ContextBuildResult()
     for hook in context_hooks:
-        result = await hook.build_context(session, turn_index)
+        from ..hooks.adapters import ContextInjectionHook
+
+        result = (
+            await hook.build_context(session, turn_index, _run_config=config)
+            if getattr(hook.build_context, "__func__", None) is ContextInjectionHook.build_context
+            else await hook.build_context(session, turn_index)
+        )
         if result is None:
             continue
         merged.system_blocks.extend(result.system_blocks)
@@ -155,6 +167,13 @@ def apply_provider_capabilities(req: ProviderRequest, caps: Any) -> ProviderRequ
       :func:`run_loop` line ~452, so the host's intent is preserved.
     * ``parallel_tool_calls`` is informational and has no ``req`` field yet.
 
+    Args:
+        req: Provider request whose optional fields should be downgraded.
+        caps: Provider capability object exposing the supported request flags.
+
+    Returns:
+        The same request object after unsupported options have been cleared.
+
     Modifies *req* in place and returns it.
     """
     if not caps.prompt_cache:
@@ -173,6 +192,7 @@ def _build_turn_request(
     *,
     context: ContextBuildResult | None = None,
     model_override: str | None = None,
+    config: Any = None,
 ) -> ProviderRequest:
     """Build the :class:`ProviderRequest` for one provider call.
 
@@ -182,22 +202,25 @@ def _build_turn_request(
     """
     agent = session.agent
 
-    tools = _select_context_tools(session, context)
-    if session.system_blocks_override is not None:
-        base_system = list(session.system_blocks_override)
+    catalog = (config or _base_run_config(session)).context.get("request_catalog")
+    if catalog is not None:
+        catalog.prepare()
+    config = config or _base_run_config(session)
+    tools = _select_context_tools(session, context, config=config)
+    if catalog is not None:
+        tools = catalog.select_tools(session, tools)
+    effective_system = config.system_blocks_override
+    if effective_system is None:
+        effective_system = session.system_blocks_override
+    if effective_system is not None:
+        base_system = list(effective_system)
     else:
         active_names = [tool.name for tool in tools.list()]
-        tool_sections = tools.system_prompt_sections(active_names=active_names)
-        private_builder = getattr(agent, "_build_system_blocks", None)
-        builder = getattr(agent, "build_system_blocks_for_tool_names", None)
-        if callable(private_builder):
-            base_system = list(
-                cast(Any, private_builder)(active_names, tool_sections=tool_sections)
+        base_system = list(
+            config._build_system_blocks(
+                active_names, tool_sections=tools.system_prompt_sections(active_names=active_names)
             )
-        elif callable(builder):
-            base_system = list(cast(Any, builder)(active_names))
-        else:
-            base_system = list(agent.system_blocks)
+        )
     if context and context.system_blocks:
         # Per-turn context blocks (RAG, dates, retrieved snippets) are ephemeral
         # and volatile, so force them out of the cacheable prefix: a ContextBuilder
@@ -225,7 +248,7 @@ def _build_turn_request(
         stream_partials=opts.stream_partials,
         thinking=opts.thinking,
         effort=_provider_effort(opts.effort),
-        output_schema=opts.output_schema or agent.output_schema,
+        output_schema=opts.output_schema or config.output_schema,
         tool_choice=opts.tool_choice or agent.tool_choice,
         max_retries=agent.max_retries,
         cache_ttl=_cache_ttl(agent.cache_ttl),
@@ -242,8 +265,12 @@ def _build_turn_request(
     return req
 
 
-def _select_context_tools(session: Session, context: ContextBuildResult | None) -> Any:
-    registry = session.tools_override or session.agent.tools
+def _select_context_tools(
+    session: Session, context: ContextBuildResult | None, *, config: Any = None
+) -> Any:
+    registry = (
+        config.tools if config is not None else (session.tools_override or session.agent.tools)
+    )
     allowed = getattr(session, "current_turn_allowed_tools", None)
     allowed_names = {str(name) for name in allowed} if allowed is not None else None
     if allowed is not None:

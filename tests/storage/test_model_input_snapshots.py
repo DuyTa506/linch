@@ -1,21 +1,21 @@
 from __future__ import annotations
 
-import sqlite3
 from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
+from linch._wire import UnsupportedWireVersionError
 from linch.run_store import (
     MODEL_INPUT_CODEC_VERSION,
     InMemoryRunStore,
     ModelInputSnapshotError,
     RunCheckpoint,
-    SqliteRunStore,
     checkpoint_from_dict,
     checkpoint_to_dict,
     create_model_input_snapshot,
     decode_model_input_snapshot,
 )
+from linch.run_stores.postgres import PostgresRunStore
 from linch.types import (
     ImageBlock,
     Message,
@@ -120,11 +120,12 @@ def test_snapshot_codec_round_trips_every_request_field_and_rebinds_signal() -> 
 
 
 def test_snapshot_codec_rejects_corruption_and_incompatible_version() -> None:
+
     snapshot = create_model_input_snapshot("run-1", 1, _request())
 
     with pytest.raises(ModelInputSnapshotError, match="integrity"):
         decode_model_input_snapshot(replace(snapshot, request_json="{}"))
-    with pytest.raises(ModelInputSnapshotError, match="codec version"):
+    with pytest.raises(UnsupportedWireVersionError, match="start a new run"):
         decode_model_input_snapshot(replace(snapshot, codec_version=999))
 
 
@@ -160,7 +161,7 @@ def test_snapshot_codec_rejects_cycles_but_never_serializes_signal() -> None:
     create_model_input_snapshot("run-1", 1, request)
 
 
-def test_checkpoint_snapshot_fields_are_additive_and_round_trip() -> None:
+def test_checkpoint_snapshot_fields_are_always_written_and_round_trip() -> None:
     legacy = RunCheckpoint(
         phase="provider_pending",
         prompt="hello",
@@ -168,8 +169,8 @@ def test_checkpoint_snapshot_fields_are_additive_and_round_trip() -> None:
         total_usage=Usage(),
     )
     legacy_wire = checkpoint_to_dict(legacy)
-    assert "provider_attempt" not in legacy_wire
-    assert "model_input_snapshot_id" not in legacy_wire
+    assert legacy_wire["provider_attempt"] == 0
+    assert legacy_wire["model_input_snapshot_id"] is None
 
     exact = replace(
         legacy,
@@ -185,7 +186,7 @@ def test_checkpoint_snapshot_fields_are_additive_and_round_trip() -> None:
     assert restored.model_input_snapshot_id == "snapshot-2"
 
 
-async def _exercise_snapshot_store(store: InMemoryRunStore | SqliteRunStore) -> None:
+async def _exercise_snapshot_store(store: InMemoryRunStore | PostgresRunStore) -> None:
     await store.create_run("session-1", id="run-1")
     first = await store.save("run-1", 1, _request(signal=object()))
     second = await store.save("run-1", 2, _request(signal=object()))
@@ -198,7 +199,7 @@ async def _exercise_snapshot_store(store: InMemoryRunStore | SqliteRunStore) -> 
     assert await store.prune("run-1", keep_ids=(second.id,)) == 1
     assert await store.load(first.id) is None
     assert await store.load(second.id) == second
-    await store.delete(second.id)
+    await store.delete(second.id, run_id="run-1")
     assert await store.load(second.id) is None
 
     with pytest.raises(KeyError, match="run not found"):
@@ -209,14 +210,15 @@ async def test_in_memory_model_input_snapshot_store() -> None:
     await _exercise_snapshot_store(InMemoryRunStore())
 
 
-async def test_sqlite_model_input_snapshot_store_persists_across_restart(tmp_path) -> None:
-    path = tmp_path / "runs.db"
-    store = SqliteRunStore(path)
+async def test_postgres_model_input_snapshot_store_persists_across_restart(
+    pg_dsn,
+) -> None:
+    store = PostgresRunStore(pg_dsn)
     await store.create_run("session-1", id="run-persist")
     snapshot = await store.save("run-persist", 4, _request(signal=object()))
     await store.close()
 
-    reopened = SqliteRunStore(path)
+    reopened = PostgresRunStore(pg_dsn)
     try:
         loaded = await reopened.load(snapshot.id)
         assert loaded == snapshot
@@ -226,30 +228,35 @@ async def test_sqlite_model_input_snapshot_store_persists_across_restart(tmp_pat
         await reopened.close()
 
 
-async def test_sqlite_model_input_snapshot_store_contract(tmp_path) -> None:
-    store = SqliteRunStore(tmp_path / "contract.db")
+async def test_postgres_model_input_snapshot_store_contract(
+    pg_dsn,
+) -> None:
+    store = PostgresRunStore(pg_dsn)
     try:
         await _exercise_snapshot_store(store)
     finally:
         await store.close()
 
 
-async def test_sqlite_load_fails_closed_for_corrupt_snapshot(tmp_path) -> None:
-    path = tmp_path / "corrupt.db"
-    store = SqliteRunStore(path)
+async def test_postgres_load_fails_closed_for_corrupt_snapshot(
+    pg_dsn,
+) -> None:
+    store = PostgresRunStore(pg_dsn)
     await store.create_run("session-1", id="run-1")
     snapshot = await store.save("run-1", 1, _request())
     await store.close()
 
-    conn = sqlite3.connect(path)
-    conn.execute(
-        "update model_input_snapshots set request_json = '{}' where id = ?",
-        (snapshot.id,),
-    )
-    conn.commit()
-    conn.close()
+    import asyncpg
 
-    reopened = SqliteRunStore(path)
+    conn = await asyncpg.connect(pg_dsn)
+    try:
+        await conn.execute(
+            "UPDATE model_input_snapshots SET request_json = '{}' WHERE id = $1", snapshot.id
+        )
+    finally:
+        await conn.close()
+
+    reopened = PostgresRunStore(pg_dsn)
     try:
         with pytest.raises(ModelInputSnapshotError, match="integrity"):
             await reopened.load(snapshot.id)
@@ -257,41 +264,13 @@ async def test_sqlite_load_fails_closed_for_corrupt_snapshot(tmp_path) -> None:
         await reopened.close()
 
 
-async def test_sqlite_schema_migrates_a_legacy_database_additively(tmp_path) -> None:
-    path = tmp_path / "legacy.db"
-    conn = sqlite3.connect(path)
-    conn.executescript(
-        """
-        create table runs (
-          id text primary key,
-          session_id text not null,
-          status text not null,
-          created_at text not null,
-          updated_at text not null,
-          checkpoint text,
-          meta text not null
-        );
-        create table run_events (
-          run_id text not null,
-          seq integer not null,
-          appended_at text not null,
-          event text not null,
-          primary key (run_id, seq)
-        );
-        insert into runs values (
-          'legacy-run', 'legacy-session', 'running', 'before', 'before', null, '{}'
-        );
-        """
-    )
-    conn.commit()
-    conn.close()
+def test_snapshot_codec_preserves_golden_bytes_and_integrity_hash() -> None:
+    import hashlib
 
-    store = SqliteRunStore(path)
-    try:
-        legacy = await store.load_run("legacy-run")
-        snapshot = await store.save("legacy-run", 1, _request())
-        assert legacy is not None
-        assert legacy.checkpoint is None
-        assert await store.load(snapshot.id) == snapshot
-    finally:
-        await store.close()
+    snapshot = create_model_input_snapshot("run-1", 3, _request())
+    assert hashlib.sha256(snapshot.request_json.encode()).hexdigest() == (
+        "afcfb1aabbe427c33c50f4772e51c30c14c58a91e5d3d05439a34a752644b0a8"
+    )
+    assert snapshot.integrity_hash == (
+        "sha256:779cf554f6f848fa02f28ae7425e0fc4ec3628c5c9bf9257f3af89d437000111"
+    )

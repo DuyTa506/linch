@@ -4,17 +4,30 @@ resume recovery, and message-identity checks used on resume."""
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from html import escape
-from typing import Any, cast
+from typing import Any
 
+from .._tracing import trace_id_for
+from .._wire import WIRE_VERSION, require_wire_version
+from ..errors import ConfigError
 from ..events import (
-    AssistantEvent,
     BackgroundWorkerEvent,
     Event,
+    ResultEvent,
+    SystemEvent,
     ToolCallEndEvent,
     ToolCallStartEvent,
+    UsageEvent,
 )
-from ..run_store import RunCheckpoint
+from ..model_calls import _context_fingerprint, _model_call_fingerprint
+from ..run_store import (
+    RunCheckpoint,
+    RunLease,
+    _lease_kwargs,
+    _require_tool_recovery_cursor,
+    durable_call,
+)
 from ..session import Session
 from ..types import (
     Message,
@@ -23,6 +36,161 @@ from ..types import (
     ToolUseBlock,
     message_to_dict,
 )
+
+_MODEL_CALL_RUNTIME_NAMESPACE = "linch.model_calls.v1"
+_MODEL_CALL_RUNTIME_VERSION = WIRE_VERSION
+_ACTIVE_PRIMARY_FIELDS = {
+    "version",
+    "logical_call_id",
+    "delivery_attempt_id",
+    "turn_index",
+    "snapshot_id",
+    "request_fingerprint",
+    "full_history_base_count",
+    "full_history_base_fingerprint",
+}
+
+
+def _same_lease_identity(left: Any, right: Any) -> bool:
+    """Compare the fencing identity without treating renewal metadata as authority."""
+    if left is right:
+        return True
+    if left is None or right is None:
+        return False
+    return all(
+        getattr(left, name, None) == getattr(right, name, None)
+        for name in ("run_id", "owner", "epoch")
+    )
+
+
+def _model_call_runtime_from_extension(
+    extension_state: dict[str, Any],
+) -> tuple[dict[str, Any] | None, int | None]:
+    """Decode the compact journal-backed accounting envelope."""
+    raw = extension_state.get(_MODEL_CALL_RUNTIME_NAMESPACE)
+    if raw is None:
+        return None, None
+    if not isinstance(raw, dict):
+        require_wire_version(None)
+    require_wire_version(raw.get("version"))
+    if set(raw) != {"version", "format", "ledger", "active_primary", "journal_count"}:
+        raise ConfigError("invalid model-call checkpoint runtime envelope")
+    if raw["format"] != "journal-v1" or raw["ledger"] is not None:
+        raise ConfigError("invalid model-call checkpoint runtime envelope")
+    if type(raw["journal_count"]) is not int or raw["journal_count"] < 0:
+        raise ConfigError("invalid model-call checkpoint runtime envelope")
+    active = raw["active_primary"]
+    if active is not None:
+        _validate_active_primary_binding(active)
+    return deepcopy(active), raw["journal_count"]
+
+
+def _model_call_runtime_to_extension(
+    extension_state: dict[str, Any],
+    *,
+    active_primary: dict[str, Any] | None,
+    journal_count: int = 0,
+) -> None:
+    """Write the compact, journal-backed accounting envelope into state."""
+    if not isinstance(extension_state, dict):
+        raise ConfigError("RunCheckpoint.extension_state must be a dict")
+    if active_primary is not None:
+        _validate_active_primary_binding(active_primary)
+    if type(journal_count) is not int or journal_count < 0:
+        raise ConfigError("invalid model-call journal count")
+    extension_state[_MODEL_CALL_RUNTIME_NAMESPACE] = {
+        "version": _MODEL_CALL_RUNTIME_VERSION,
+        "format": "journal-v1",
+        "ledger": None,
+        "active_primary": deepcopy(active_primary),
+        "journal_count": journal_count,
+    }
+
+
+def _validate_active_primary_binding(raw: Any) -> None:
+    if not isinstance(raw, dict):
+        require_wire_version(None)
+    require_wire_version(raw.get("version"))
+    if set(raw) != _ACTIVE_PRIMARY_FIELDS:
+        raise ConfigError("invalid active-primary checkpoint binding")
+    for name in (
+        "logical_call_id",
+        "delivery_attempt_id",
+        "request_fingerprint",
+        "full_history_base_fingerprint",
+    ):
+        value = raw.get(name)
+        if not isinstance(value, str) or not value.strip():
+            raise ConfigError("invalid active-primary checkpoint binding")
+    snapshot_id = raw.get("snapshot_id")
+    if snapshot_id is not None and (not isinstance(snapshot_id, str) or not snapshot_id.strip()):
+        raise ConfigError("invalid active-primary checkpoint binding")
+    for name in ("turn_index", "full_history_base_count"):
+        value = raw.get(name)
+        if type(value) is not int or value < 0:
+            raise ConfigError("invalid active-primary checkpoint binding")
+
+
+def _message_digest(message: Message) -> str:
+    return _model_call_fingerprint(message_to_dict(message))
+
+
+def _receipt_message_prefix(
+    messages: list[Message],
+    *,
+    base_count: int,
+    base_fingerprint: str,
+    expected_digests: list[str],
+) -> int:
+    """Match only an ordered durable prefix at a receipt's exact history boundary.
+
+    Reliability can share this identity check for prefix0/1/2 without enabling
+    its feedback policy in terminal_error_v0 accounting runs.
+    """
+    if (
+        type(base_count) is not int
+        or base_count < 0
+        or len(messages) < base_count
+        or _context_fingerprint(messages[:base_count]) != base_fingerprint
+    ):
+        raise ConfigError("receipt recovery durable message base does not match")
+    suffix = messages[base_count:]
+    if len(suffix) > len(expected_digests) or any(
+        _message_digest(message) != expected_digests[index] for index, message in enumerate(suffix)
+    ):
+        raise ConfigError("receipt recovery has an unexpected durable message suffix")
+    return len(suffix)
+
+
+def _primary_control_message(
+    message: Message,
+    feedback: str | None,
+    final_id: str | None = None,
+    final_is_error: bool = True,
+    wrap: bool = True,
+) -> Message:
+    """The existing AfterProviderCall continue tail, derived without inference."""
+    from ..skills.system_reminder import wrap_in_system_reminder
+
+    tools = [block for block in message.content if isinstance(block, ToolUseBlock)]
+    if not tools:
+        text = feedback or ""
+        if wrap:
+            text = wrap_in_system_reminder(text)
+        return Message(role="user", content=[TextBlock(text=text)])
+    return Message(
+        role="user",
+        content=[
+            ToolResultBlock(
+                tool_use_id=block.id,
+                content=(feedback or "Provider hook requested another turn.")
+                if (block.id == final_id if final_id else index == 0)
+                else "Tool not executed; revise and resubmit your final answer.",
+                is_error=final_is_error if block.id == final_id else True,
+            )
+            for index, block in enumerate(tools)
+        ],
+    )
 
 
 class RunEventBuffer:
@@ -34,13 +202,41 @@ class RunEventBuffer:
     the session for one run), never process-global.
     """
 
-    __slots__ = ("store", "run_id", "_pending", "_last_seq")
+    __slots__ = (
+        "store",
+        "run_id",
+        "lease",
+        "_pending",
+        "_last_seq",
+        "session",
+        "_atomic_write_failed",
+    )
 
-    def __init__(self, store: Any, run_id: str, *, initial_seq: int = 0) -> None:
+    def __init__(
+        self,
+        store: Any,
+        run_id: str,
+        *,
+        lease: RunLease | None = None,
+        initial_seq: int = 0,
+        session: Any = None,
+    ) -> None:
+        """Initialize a run-scoped event buffer.
+
+        Args:
+            store: Run store receiving flushed events.
+            run_id: Run whose events are buffered.
+            lease: Immutable token fencing the buffered writes, if leased.
+            initial_seq: Last durable event sequence before this buffer starts.
+            session: Session used for durable-operation telemetry.
+        """
         self.store = store
+        self.session = session
         self.run_id = run_id
+        self.lease = lease
         self._pending: list[Event] = []
         self._last_seq = max(0, initial_seq)
+        self._atomic_write_failed = False
 
     @property
     def last_seq(self) -> int:
@@ -51,15 +247,59 @@ class RunEventBuffer:
         if self.store is not None:
             self._pending.append(event)
 
+    async def flush_with_checkpoint(
+        self,
+        checkpoint: RunCheckpoint,
+        *,
+        status: str = "running",
+        error: dict[str, object] | None = None,
+    ) -> None:
+        """Commit a pending prefix with its checkpoint."""
+        if not self._pending and status == "running":
+            return
+        pending, self._pending = self._pending, []
+        try:
+            operation = "mark_failed" if status == "failed" else "save_checkpoint_with_events"
+            if status == "failed":
+                method = self.store.mark_failed
+                write = method(
+                    self.run_id,
+                    checkpoint,
+                    error=error,
+                    events=pending,
+                    **_lease_kwargs(method, self.lease),
+                )
+            else:
+                method = self.store.save_checkpoint_with_events
+                write = method(
+                    self.run_id,
+                    checkpoint,
+                    pending,
+                    status=status,
+                    **_lease_kwargs(method, self.lease),
+                )
+            _, seqs = await durable_call(self.session, f"run.{operation}", write)
+        except BaseException:
+            self._pending = pending + self._pending
+            self._atomic_write_failed = True
+            raise
+        self._atomic_write_failed = False
+        if seqs:
+            self._last_seq = max(self._last_seq, *seqs)
+
     async def flush(self) -> int:
-        if self.store is None or not self._pending:
+        if self.store is None or not self._pending or self._atomic_write_failed:
             return self._last_seq
         pending = self._pending
         self._pending = []
         appender = getattr(self.store, "append_events", None)
         if appender is not None:
             try:
-                seqs = await appender(self.run_id, pending)
+                seqs = await durable_call(
+                    self.session,
+                    "run.append_events",
+                    appender(self.run_id, pending, **_lease_kwargs(appender, self.lease)),
+                )
             except BaseException:
                 self._pending = pending + self._pending
                 raise
@@ -67,7 +307,16 @@ class RunEventBuffer:
             seqs = []
             for index, event in enumerate(pending):
                 try:
-                    seq = await self.store.append_event(self.run_id, event)
+                    method = self.store.append_event
+                    seq = await durable_call(
+                        self.session,
+                        "run.append_event",
+                        method(
+                            self.run_id,
+                            event,
+                            **_lease_kwargs(method, self.lease),
+                        ),
+                    )
                 except BaseException:
                     self._pending = pending[index:] + self._pending
                     raise
@@ -80,14 +329,26 @@ class RunEventBuffer:
         return self._last_seq
 
 
-async def _persist_event(session: Session, run_id: str, event: Event) -> None:
+async def _persist_event(session: Session, run_id: str, event: Event, *, lease: Any = None) -> None:
+    if isinstance(event, SystemEvent) or isinstance(event, ResultEvent):
+        if event.trace_id is None:
+            event.trace_id = trace_id_for(run_id)
     buf = getattr(session, "_event_journal", None)
-    if buf is not None and buf.run_id == run_id:
+    if (
+        buf is not None
+        and buf.run_id == run_id
+        and (lease is None or _same_lease_identity(buf.lease, lease))
+    ):
         await buf.append(event)
         return
     store = session.agent.run_store
     if store is not None:
-        await store.append_event(run_id, event)
+        method = store.append_event
+        await durable_call(
+            session,
+            "run.append_event",
+            method(run_id, event, **_lease_kwargs(method, lease)),
+        )
 
 
 async def _flush_events(session: Session) -> None:
@@ -165,6 +426,13 @@ async def _queue_crashed_worker_notifications(
     return events
 
 
+def _loop_guard_is_active(guard: Any) -> bool:
+    return guard is not None and (
+        getattr(guard, "max_identical_tool_calls", 0) > 0
+        or getattr(guard, "max_consecutive_failures", 0) > 0
+    )
+
+
 def _loop_guard_state_to_dict(state: Any) -> dict[str, object] | None:
     if state is None:
         return None
@@ -179,15 +447,43 @@ def _loop_guard_state_from_dict(raw: dict[str, object] | None) -> Any:
         return None
     from ..loop_guard import LoopGuardState
 
-    call_counts_raw = raw.get("call_counts", {})
+    call_counts_raw = raw.get("call_counts")
+    failures = raw.get("consecutive_failures")
+    if (
+        set(raw) != {"call_counts", "consecutive_failures"}
+        or not isinstance(call_counts_raw, dict)
+        or type(failures) is not int
+        or failures < 0
+        or any(
+            type(key) is not str
+            or len(key) != 16
+            or key != key.lower()
+            or any(char not in "0123456789abcdef" for char in key)
+            or type(value) is not int
+            or value < 0
+            for key, value in call_counts_raw.items()
+        )
+    ):
+        raise ConfigError("invalid loop-guard checkpoint state")
     return LoopGuardState(
-        call_counts=(
-            {str(k): int(v) for k, v in call_counts_raw.items()}
-            if isinstance(call_counts_raw, dict)
-            else {}
-        ),
-        consecutive_failures=int(cast(Any, raw.get("consecutive_failures", 0) or 0)),
+        call_counts=dict(call_counts_raw),
+        consecutive_failures=failures,
     )
+
+
+def _consumed_auxiliary_receipt_ids_from_events(rows: list[Any]) -> tuple[str, ...]:
+    """Extract and validate the durable usage-projection watermark."""
+    ids: list[str] = []
+    for row in rows:
+        event = getattr(row, "event", None)
+        if not isinstance(event, UsageEvent) or event.source != "compaction":
+            continue
+        if not isinstance(event.call_id, str) or not event.call_id.strip():
+            raise ConfigError("compaction usage event lacks a receipt call ID")
+        ids.append(event.call_id)
+    if len(set(ids)) != len(ids):
+        raise ConfigError("duplicate compaction usage event receipt IDs")
+    return tuple(ids)
 
 
 def _skill_overlay_to_dict(overlay: Any) -> dict[str, object] | None:
@@ -263,6 +559,26 @@ def _message_matches(left: Message, right: Message) -> bool:
     return message_to_dict(left) == message_to_dict(right)
 
 
+def _replayed_feedback_present(
+    session: Session,
+    messages: tuple[Message, ...],
+    after_tool_ids: set[str] | None = None,
+) -> bool:
+    """Find an ordered suffix, optionally scanning back to a replayed batch's results."""
+    history = session.session_log._derived
+    for end in range(len(history), len(messages) - 1, -1):
+        if all(
+            _message_matches(a, b)
+            for a, b in zip(history[end - len(messages) : end], messages, strict=True)
+        ):
+            return True
+        if after_tool_ids is None or after_tool_ids == {
+            b.tool_use_id for b in history[end - 1].content if isinstance(b, ToolResultBlock)
+        }:
+            break
+    return False
+
+
 def _last_message_matches(session: Session, message: Message) -> bool:
     last = session.last_provider_message()
     return last is not None and _message_matches(last, message)
@@ -278,29 +594,6 @@ def _last_message_has_tool_results(session: Session, tool_blocks: list[ToolUseBl
     return {block.tool_use_id for block in results} == {block.id for block in tool_blocks}
 
 
-async def _legacy_batch_boundary_seq(
-    store: Any,
-    run_id: str,
-    assistant_message: Message | None,
-) -> int | None:
-    """Bound a legacy (cursor-less) recovery scan to this turn's tool batch.
-
-    Locates the latest ``AssistantEvent`` matching the checkpoint's assistant
-    message; the batch's tool events are strictly after it. Returns ``None`` when
-    no unambiguous boundary exists (so recovery trusts the checkpoint only rather
-    than scanning the whole run by id — which would mis-attribute a tool-use id
-    that recurs across turns)."""
-    if assistant_message is None:
-        return None
-    target = message_to_dict(assistant_message)
-    boundary: int | None = None
-    for stored in await store.load_events(run_id):
-        event = stored.event
-        if isinstance(event, AssistantEvent) and message_to_dict(event.message) == target:
-            boundary = stored.seq  # latest match wins
-    return boundary
-
-
 async def _recover_completed_tool_results(
     session: Session,
     run_id: str,
@@ -308,7 +601,6 @@ async def _recover_completed_tool_results(
     tool_blocks: list[ToolUseBlock],
     *,
     after_seq: int | None,
-    assistant_message: Message | None = None,
 ) -> dict[str, ToolResultBlock]:
     """Reconstruct a resumed turn's completed tool results from durable state.
 
@@ -326,9 +618,7 @@ async def _recover_completed_tool_results(
     Args:
         completed: Results already present on the resumed checkpoint.
         tool_blocks: The current turn's tool-use blocks (the membership set).
-        after_seq: Event-seq cursor from the checkpoint; ``None`` triggers the
-            legacy assistant-boundary fallback.
-        assistant_message: The checkpoint's assistant message (legacy boundary).
+        after_seq: Required non-negative event-seq cursor from the checkpoint.
 
     Returns:
         The tool_use_id → result-block map for the current tool batch, merging the
@@ -337,15 +627,14 @@ async def _recover_completed_tool_results(
     store = session.agent.run_store
     if store is None:
         return dict(completed)
-    if after_seq is None:
-        after_seq = await _legacy_batch_boundary_seq(store, run_id, assistant_message)
-        if after_seq is None:
-            return dict(completed)
+    after_seq = _require_tool_recovery_cursor(after_seq)
     membership = {block.id: block.name for block in tool_blocks}
     recovered = dict(completed)
     started: dict[str, ToolCallStartEvent] = {}
     ended: set[str] = set()
-    for stored in await store.load_events(run_id, after_seq=after_seq):
+    for stored in await durable_call(
+        session, "run.load_events", store.load_events(run_id, after_seq=after_seq)
+    ):
         event = stored.event
         if (
             isinstance(event, ToolCallStartEvent)

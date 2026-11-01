@@ -2,234 +2,206 @@
 
 [← Usage guide](./README.md)
 
-Linch gives you two complementary layers for getting the right information in
-front of the model: a **per-turn context builder** for ephemeral RAG and memory
-snippets, and a set of **memory primitives** (stores, search tools, and a
-tiered router) for durable recall. Both are wired through the same dependency
-object and stay out of your conversation history unless you put them there.
+Linch keeps request context and durable memory on the same extension seam. A
+`ContextBuilder` can add ephemeral RAG or live application data to a provider
+request. File memory uses the virtual filesystem: the model reads and writes
+facts with the existing filesystem tools, while a small index is loaded once
+when a run starts.
+
+---
+
+## Sourced retrieval and grounding
+
+A `RagConnector` implements async `retrieve(query, *, k, principal=None)` and
+returns `RetrievedChunk(id, source, text, score, metadata)` values. Install it
+with reversible registrations:
+
+```python
+from linch import Agent, Principal, RunOptions, register_grounding_check, register_rag_connector
+
+agent = Agent(...)
+run_principal = Principal("acme", "user-42", {"reader"})
+retrieval = register_rag_connector(agent, connector, k=5, principal=run_principal)
+grounding = register_grounding_check(agent)
+session = await agent.session()
+events = session.run("question", RunOptions(principal=run_principal))
+# Later: await grounding.dispose(); await retrieval.dispose()
+```
+
+Only one connector may be active per agent. `k` must be a positive integer.
+Chunk ids must be nonempty strings without `]`, carriage returns or newlines.
+Each request renders `[doc:<id>]`, source and text into ephemeral system blocks.
+Retrieval uses the submitted user query across correction retries and durable
+resume; an alignment prompt replaces that query. The active principal from
+`RunOptions` is passed through unchanged. If registration supplies `principal`,
+it is an expected-identity guard only: a missing or different active principal
+fails before connector I/O. The connector and host own access checks and
+knowledge scoping.
+
+Grounding requires at least one citation to an id returned by the latest
+retrieval, and rejects any unknown cited id. It checks every final text block,
+forced finals, and recursively checks string values in terminal-tool inputs.
+It verifies citation membership, not whether the cited text supports a claim.
+Empty retrieval cannot ground an answer. Retrieval errors fail visibly.
+
+An ungrounded answer receives short correction feedback, then fails after
+`agent.reliability.max_correction_turns` corrections. This is a separate per-run
+counter from built-in reliability corrections; each mechanism can consume its
+own bound. `reliability=None` allows zero grounding corrections. Query, latest retrieved
+ids and counter survive checkpoints. `required=False` disables interventions;
+without an active connector grounding is a no-op.
+
+Retrieved bodies and chunk metadata stay outside the session log and stored
+session messages. Typed `ContextBuildEvent.metadata["rag"]` audits only `ids`
+and `sources`, including empty retrieval. Context budget trimming does not
+change retrieval membership: a trimmed chunk id remains eligible for citation
+until the next retrieval replaces the ids. Grounding interventions emit typed
+`VerificationEvent` records without retrieved bodies. Exact-model-input snapshots
+may contain retrieved text because they preserve the outgoing request.
+
+For durable runs, connectors should expose stable `resume_policy_id`,
+`resume_policy_version` and JSON-safe `resume_policy_config` identifying the
+knowledge scope and corpus revision; these participate in resume identity.
+See [the in-memory keyword connector](../../examples/rag/keyword_connector.py)
+for a dependency-free reference. Disposing registrations or closing the agent
+removes their hooks, listener and run state.
 
 ---
 
 ## Per-turn context building (RAG)
 
-A `ContextBuilder` runs once before every provider call. Its job is to look at
-the turn-so-far and return *ephemeral* context — RAG passages, recalled
-memories, request-scoped system blocks — that is appended to the provider
-request **only for that call**. It never mutates `session.provider_view`, so
-nothing it injects becomes permanent conversation history. This is exactly what
-you want for retrieval: the freshest, most relevant snippets each turn, with no
-unbounded accumulation.
-
-A builder is any object with an async `build(turn) -> ContextBuildResult`
-method (it is a duck-typed protocol, no base class to inherit):
+A `ContextBuilder` is a duck-typed object with an async `build(turn)` method.
+It receives the current messages, `turn.deps`, model, tools, and turn index, and
+returns a `ContextBuildResult` containing request-scoped messages or system
+blocks. The result never mutates the session log.
 
 ```python
-from linch.context import ContextBudget, ContextBuildResult
-from linch.types import Message, TextBlock
+from linch import Agent, ContextBuildResult, ContextBudget, ContextInjectionHook, Message, TextBlock
 
-TAG = "[[ctx]]"
 
-class MyContextBuilder:
+class PolicyContextBuilder:
     async def build(self, turn) -> ContextBuildResult:
-        docs = await turn.deps.search(last_query(turn.messages))
+        docs = await turn.deps.search(turn.messages[-1])
         if not docs:
             return ContextBuildResult()
         return ContextBuildResult(
-            messages=[
-                Message(role="user", content=[TextBlock(text=f"{TAG}\n{docs}")])
-            ],
+            messages=[Message(role="user", content=[TextBlock(text=docs)])],
             budget=ContextBudget(max_tokens=800),
-            metadata={"source": "my_store"},
+            metadata={"source": "policy"},
         )
 
-from linch.hooks import ContextInjectionHook
 
-agent = Agent(..., hooks=[ContextInjectionHook(MyContextBuilder())], deps=my_store)
+agent = Agent(..., hooks=[ContextInjectionHook(PolicyContextBuilder())])
 ```
 
-The `turn` passed to `build` carries everything you need to decide what to
-inject: `turn.messages` (the current `provider_view`), `turn.deps` (your shared
-dependency object — see below), `turn.model`, `turn.tools`, and `turn.turn_index`.
+`ContextInjectionHook` is the standard wiring point. Context builders run for
+each provider request, so changing data is naturally ephemeral and does not
+accumulate in `session.provider_view`. Request-scoped blocks are kept outside
+the static prompt prefix and are not assumed to be cacheable.
 
-`ContextBuildResult` is the return contract. Populate only the fields you need:
-
-- `messages` — ephemeral `Message`s appended to the provider request for this turn.
-- `system_blocks` — request-scoped system prompt additions.
-- `selected_tools` — a per-turn tool override (request-scoped tool selection).
-- `budget` — a `ContextBudget(max_tokens=...)` that caps how much room this
-  context may consume; the framework trims to fit and records what it did.
-- `metadata` — an arbitrary dict surfaced on the emitted `ContextBuildEvent`,
-  handy for tracing which store or strategy produced the context.
-
-Returning an empty `ContextBuildResult()` (as the early-return above does) is the
-right move when there is nothing relevant — you skip the injection entirely
-rather than pad the request.
-
-**Prompt-cache note.** Context is *ephemeral* by design, so it must sit outside
-the cached request prefix: `system_blocks` you return here are always forced to
-`cacheable=False` on the wire, and `messages` land after the static prefix.
-Rotating `selected_tools` per turn, however, changes the tools array — which
-leads the prefix — and invalidates the cache; Linch emits a
-`prompt_cache_advisory` event when it detects that churn. Keep the tool set
-stable across turns if you rely on caching. See
-[Prompt caching](./providers.md#keeping-the-cached-prefix-stable-what-produces-hits).
-
-### Wiring via a hook
-
-Context builders are attached through the **hooks** layer, not a dedicated
-constructor argument. Wrap your builder in `ContextInjectionHook` and pass it in
-`Agent(hooks=[...])`:
-
-```python
-from linch.hooks import ContextInjectionHook
-
-agent = Agent(..., hooks=[ContextInjectionHook(MyContextBuilder())], deps=my_store)
-```
-
-`ContextInjectionHook` builds the `turn` from session state, calls your
-builder, and applies the `ContextBudget` for you before the result is appended.
-For the full hook lifecycle — including how to stack `ContextInjectionHook`
-alongside other adapters like `ToolMiddlewareHook` and `RunTelemetryHook` — see
-[./hooks.md](./hooks.md).
-
-### The shared `deps` object
-
-The object you pass as `Agent(deps=...)` is handed to **both** your context
-builder (as `turn.deps`) and your tools (via `ToolContext`). That means a single
-tenant-specific store, request-scoped service bundle, or per-user client can
-drive context selection and tool execution from one place — no globals, no
-duplicate wiring.
-
-```python
-async for event in session.run("Find policy citations for PTO rollover."):
-    if event.type == "context_build":
-        print("context metadata:", event.metadata)
-    elif event.type == "tool_call_start":
-        print("tool:", event.summary)
-    elif event.type == "result":
-        print(event.final_text)
-```
-
-The `context_build` event exposes the `metadata` you set on the result, so you
-can observe exactly what each turn pulled in. See [./tools.md](./tools.md) for how
-the same `deps` reaches tool `execute()` calls, and [./events.md](./events.md) for
-the full event reference.
+The shared dependency object is available as `turn.deps` to builders and as
+`ctx.deps` to tools. Hosts should put request or run-specific clients and
+backends there rather than using module globals.
 
 ---
 
-## Memory and RAG primitives
+## File memory
 
-For durable recall that survives across turns and sessions, Linch ships memory
-stores, a memory-backed context builder, and search/upsert tools. These are
-deliberately dependency-free in core: vector databases and embedding models stay
-in your host app or an adapter that implements the `MemoryStore` protocol.
+File memory is the built-in durable memory path in Linch 3.0. It has one public
+entry point, `FileMemoryContextBuilder`, which is attached through
+`ContextInjectionHook`:
 
 ```python
-from linch import Agent
-from linch.memory import (
-    InMemoryKeywordMemoryStore,
-    MemoryContextBuilder,
-    MemoryItem,
-    MemorySearchTool,
-    TieredMemoryStore,
-)
-from linch.tools.registry import empty_tools
-
-store = InMemoryKeywordMemoryStore()
-await store.upsert([
-    MemoryItem(id="m1", content="ToolResult can carry citations.", namespace="docs")
-])
+from linch import Agent, ContextInjectionHook, FeatureFlags, FileMemoryContextBuilder
 
 agent = Agent(
     ...,
-    deps=store,
-    hooks=[ContextInjectionHook(MemoryContextBuilder(namespace="docs", max_tokens=800))],
-    tools=empty_tools(MemorySearchTool(namespace="docs")),
+    features=FeatureFlags(filesystem=True),
+    hooks=[ContextInjectionHook(FileMemoryContextBuilder())],
 )
 ```
 
-Here every piece composes through the standard seams:
+At most once per run, the builder reads `/memories/MEMORY.md` through the run's
+filesystem backend. It keeps the first 200 lines and reports truncation when
+the index is longer. A missing index still injects the fixed instruction so the
+model knows where memory belongs:
 
-- `InMemoryKeywordMemoryStore` is a cooperative, dependency-free keyword store —
-  perfect for tests and small deployments. Swap it for `SqliteMemoryStore`,
-  `PostgresMemoryStore`, or your own embedding-backed adapter without changing the
-  rest of the wiring.
-- `MemoryItem` is the unit of storage: an `id`, `content`, a `namespace` for
-  scoping, and an optional `metadata` dict.
-- `MemoryContextBuilder` is a ready-made context builder that recalls relevant
-  items each turn and injects them ephemerally. Wire it through
-  `ContextInjectionHook` exactly like any custom builder, and bound it with
-  `max_tokens` so recall never crowds out the conversation.
-- `MemorySearchTool` (and its sibling `MemoryUpsertTool`) let the **model**
-  query or write memory on demand, rather than relying solely on the builder's
-  automatic recall.
+> Memories live under `/memories/`, one file per fact. `MEMORY.md` is a
+> one-line-per-file index. Use the file tools to read and maintain memories;
+> update or delete stale facts.
 
-### Tiered memory
+The index is cached by run, so it stays stable across turns and can remain in a
+cacheable request prefix. The model updates memory with `write_file` and
+`edit_file` through the ordinary filesystem tools, removing stale entries from
+the index as it edits it. Hosts that need to remove a fact file can call the
+backend's `delete` operation. A direct host backend call is outside the model
+tool path, so it is not automatically serialized, permission-checked, or
+logged; use the existing file tools when those guarantees are required.
 
-For long-running, multi-session, user-oriented agents, wrap stores with
-`TieredMemoryStore` so working, episodic, and semantic memories are routed and
-ranked separately:
+### Per-run isolation
+
+Hosts create a scoped backend for each run and pass it in `RunOptions(deps=...)`.
+`ScopedFileBackend` normalizes every model-supplied path under its root;
+absolute paths, `..`, duplicate separators, and odd path segments cannot escape
+the scope. Listing returns scope-relative paths.
 
 ```python
-working = InMemoryKeywordMemoryStore()
-episodic = InMemoryKeywordMemoryStore()
-semantic = InMemoryKeywordMemoryStore()
-store = TieredMemoryStore(working=working, episodic=episodic, semantic=semantic)
+from linch import RunOptions, ScopedFileBackend, StateFileBackend
 
-await store.upsert([
-    MemoryItem(
-        id="pref-1",
-        content="The user prefers concise status updates.",
-        namespace="user:42",
-        metadata={"tier": "semantic"},
-    )
-])
+inner = StateFileBackend()
+tenant_a = ScopedFileBackend(inner, "/tenants/acme/users/alice")
+tenant_b = ScopedFileBackend(inner, "/tenants/acme/users/bob")
+
+async for _event in session.run(
+    "Remember that I prefer concise updates.",
+    opts=RunOptions(deps={"filesystem": tenant_a}),
+):
+    pass
 ```
 
-`TieredMemoryStore` is itself a `MemoryStore`, so it drops into the same `deps`
-slot. Writes route by `item.metadata["tier"]` (defaulting to `working` when
-unset), and searches fan out across all three sub-stores and merge the results.
-This keeps short-lived task notes (`working`), event history (`episodic`), and
-distilled long-term facts (`semantic`) from contaminating each other's ranking.
+Two concurrent runs can share one `Agent` while using different scoped
+backends. Each run sees only its own `/memories/` tree, including through
+traversal attempts. `FileMemoryContextBuilder` resolves the backend from the
+same `turn.deps` object as the file tools, so reads and writes cannot silently
+use a different tenant.
 
-### Optional Postgres memory
+### Stable index shape
 
-Core includes `MemoryStore` protocols, cooperative in-memory keyword memory,
-SQLite memory, optional Postgres memory via `pip install 'linch[postgres]'`,
-tiered memory, and memory search/upsert tools. `PostgresMemoryStore` mirrors the
-SQLite store's keyword-search API, so you can promote from SQLite to Postgres for
-shared, persistent memory without touching your builder or tool wiring. Vector
-databases and embedding models stay in the host app or an adapter. See
-[Vector memory adapters](./vector-memory-adapters.md) for FAISS, pgvector, and
-Qdrant recipes using this same `MemoryStore` shape.
+Keep `MEMORY.md` short and explicit. Each line points to one fact file, for
+example:
+
+```text
+/memories/favorite-language.md
+/memories/meeting-timezone.md
+```
+
+Fact files contain the text the model should remember. When a fact changes,
+edit its file and keep the index line. When it is no longer true, delete the
+fact file and its index line. The 200-line bound applies to the index; the
+filesystem backend owns fact-file size and persistence policy.
 
 ---
 
-## Keep the layers separate (production guidance)
+## Optional semantic recall with mem0
 
-For production long-running agents, keep the layers separate so each one does the
-job it is good at:
+Semantic recall is an example recipe, not a core store or extra. The
+`examples/memory/mem0_recall.py` recipe uses only Linch's public context and
+hook APIs. Its context builder searches a mem0 `AsyncMemory`-like client with
+the latest user text and `filters={"user_id": ...}` from `run.deps`; its
+terminal-turn hook calls `add(...)` after the run. A fake client with matching
+async `search` and `add` methods is enough to test the recipe without
+installing mem0.
 
-- Use a `ContextBuilder` for ephemeral RAG and memory snippets that should not
-  be persisted into conversation history.
-- Use `TieredMemoryStore` metadata to separate working task notes, episodic
-  events, and distilled semantic facts.
-- Let virtual filesystem offloading replace large tool payloads with durable
-  references the model can read back on demand.
-- Keep `RunStore` enabled for checkpoints, durable approvals, resume, and
-  `load_run_report()` diagnostics.
-
-The payoff is a context window that stays lean: recall is fresh and bounded each
-turn, durable facts live in tiered memory, and bulky payloads live on the virtual
-filesystem — see [./filesystem.md](./filesystem.md) — instead of inflating the
-provider request.
+Use file memory for explicit, inspectable facts and opt into mem0 when semantic
+similarity is worth an external LLM-backed write on each `add` call. Keep the
+mem0 client and its user identity in run dependencies so one tenant cannot
+search another tenant's memories.
 
 ---
 
 ## Related pages
 
-- [./hooks.md](./hooks.md) — `ContextInjectionHook` and the hook lifecycle
-- [./tools.md](./tools.md) — the shared `deps` object and `ToolContext`
-- [./vector-memory-adapters.md](./vector-memory-adapters.md) — vector DB adapter recipes
-- [./filesystem.md](./filesystem.md) — offloading large payloads to durable references
-- [../architecture.md](../architecture.md) — how context and memory fit the loop
+- [Hooks](./hooks.md) — `ContextInjectionHook` and hook lifecycle
+- [Tools](./tools.md) — filesystem tools and the shared `deps` object
+- [Virtual filesystem](./filesystem.md) — `FileBackend`, scoping, and offloading
+- [Architecture](../architecture/README.md) — subsystem contracts and invariants

@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import Any, Literal
+
+import jsonschema  # type: ignore[import]
 
 from ..events import (
     BudgetEvent,
@@ -18,27 +20,40 @@ from ..events import (
     Event,
     LoopGuardEvent,
     ResultEvent,
-    UserEvent,
     VerificationEvent,
 )
+from ..run_store import _lease_kwargs, durable_call
 from ..session import Session
 from ..types import (
-    ContentBlock,
     Message,
     StopReason,
     TextBlock,
-    ToolResultBlock,
     ToolUseBlock,
     Usage,
 )
-from .checkpoint import _flush_events, _persist_event
+from .checkpoint import (
+    _flush_events,
+    _persist_event,
+    _primary_control_message,
+    _same_lease_identity,
+)
+from .feedback import append_feedback
 from .request import final_text
 
 _FENCED_JSON_RE = re.compile(r"```(?:json)?\s*\n?(.*?)```", re.DOTALL | re.IGNORECASE)
 
 
+def _discard_pending_terminal_events(session: Session, *events: Event) -> None:
+    """Remove terminal events that failed their atomic status write."""
+    buf = getattr(session, "_event_journal", None)
+    if buf is None or not events:
+        return
+    identities = {id(event) for event in events}
+    buf._pending[:] = [event for event in buf._pending if id(event) not in identities]
+
+
 def _parse_structured_output(text: str, schema: object) -> tuple[dict | None, str | None]:
-    """Try to parse *text* as JSON and optionally validate against *schema*.
+    """Try to parse *text* as JSON and validate against *schema*.
 
     Models — especially local/small ones — often wrap their final JSON answer
     in a ```json ... ``` fence, sometimes with leading prose. Try the raw text
@@ -75,13 +90,9 @@ def _try_json_loads(text: str) -> tuple[Any, str | None]:
 def _validate_structured_output(value: dict[str, Any], schema: object) -> str | None:
     """Validate a parsed structured-output object against *schema*."""
     try:
-        import jsonschema  # type: ignore[import]
-
         schema_dict = getattr(schema, "schema", None)
         if schema_dict:
             jsonschema.validate(value, schema_dict)
-    except ImportError:
-        return None  # jsonschema not installed — skip validation
     except Exception as exc:
         return f"Schema validation error: {exc}"
     return None
@@ -97,18 +108,49 @@ def _last_assistant_text(session: Session) -> str | None:
     return None
 
 
+async def _complete_with_pending_events(
+    session: Session, run_id: str, checkpoint: Any, *, lease: Any = None
+) -> None:
+    """Write through a successful terminal and its pending result together."""
+    store = session.agent.run_store
+    assert store is not None
+    buf = session._event_journal
+    if (
+        buf is not None
+        and (lease is None or _same_lease_identity(buf.lease, lease))
+        and buf._pending
+    ):
+        checkpoint.phase = "completed"
+        await buf.flush_with_checkpoint(checkpoint, status="completed")
+        return
+    if buf is not None and lease is not None and not _same_lease_identity(buf.lease, lease):
+        method = store.mark_completed
+        await durable_call(
+            session,
+            "run.mark_completed",
+            method(run_id, checkpoint, **_lease_kwargs(method, lease)),
+        )
+        return
+    await _flush_events(session)
+    method = store.mark_completed
+    await durable_call(
+        session,
+        "run.mark_completed",
+        method(run_id, checkpoint, **_lease_kwargs(method, lease)),
+    )
+
+
 async def _budget_exhausted_tail(
     session: Session,
-    agent: Any,
     *,
+    runtime: Any,
     run_id: str,
-    run_record: Any,
-    checkpoint: Any,
     budget: Any,
     total: Usage,
     duration_ms: int,
     running_cost: float | None,
-) -> AsyncIterator[Event]:
+    usage_complete: bool = True,
+) -> AsyncGenerator[Event, None]:
     """Emit the graceful-stop event sequence for an exhausted RunBudget."""
     event: Event = BudgetEvent(
         kind="exceeded",
@@ -117,7 +159,7 @@ async def _budget_exhausted_tail(
         max_tokens=budget.max_tokens,
         max_cost_usd=budget.max_cost_usd,
     )
-    await _persist_event(session, run_id, event)
+    await _persist_event(session, run_id, event, lease=runtime.lease)
     yield event
     budget_error = {
         "name": "BudgetExceededError",
@@ -126,22 +168,30 @@ async def _budget_exhausted_tail(
         ),
         "retryable": False,
     }
-    event = ErrorEvent(error=budget_error)
-    await _persist_event(session, run_id, event)
+    budget_error_event = ErrorEvent(error=budget_error)
+    event = budget_error_event
+    await _persist_event(session, run_id, event, lease=runtime.lease)
     yield event
-    event = ResultEvent(
+    budget_result_event = ResultEvent(
         subtype="error",
         stop_reason="error",
         total_usage=total,
         duration_ms=duration_ms,
         total_cost_usd=running_cost,
+        usage_complete=usage_complete,
     )
-    await _persist_event(session, run_id, event)
-    store = agent.run_store
-    if run_record is not None and store is not None:
+    event = budget_result_event
+    await _persist_event(session, run_id, event, lease=runtime.lease)
+    store = runtime.agent.run_store
+    checkpoint = runtime.checkpoint
+    if runtime.run_record is not None and store is not None:
         checkpoint.total_usage = total
-        await _flush_events(session)
-        await store.mark_failed(run_id, checkpoint, error=budget_error)
+        failure = await runtime.persist_failed(budget_error)
+        if failure is not None:
+            _discard_pending_terminal_events(session, budget_error_event, budget_result_event)
+            async for item in runtime.emit_exception_terminal(failure):
+                yield item
+            return
     yield event
 
 
@@ -155,7 +205,9 @@ async def _stop_when_tail(
     total: Usage,
     duration_ms: int,
     running_cost: float | None,
-) -> AsyncIterator[Event]:
+    lease: Any = None,
+    usage_complete: bool = True,
+) -> AsyncGenerator[Event, None]:
     """Emit the graceful-stop event sequence for a met stop_when predicate."""
     event: Event = ResultEvent(
         subtype="success",
@@ -164,28 +216,27 @@ async def _stop_when_tail(
         duration_ms=duration_ms,
         final_text=_last_assistant_text(session),
         total_cost_usd=running_cost,
+        usage_complete=usage_complete,
     )
-    await _persist_event(session, run_id, event)
+    await _persist_event(session, run_id, event, lease=lease)
     store = agent.run_store
     if run_record is not None and store is not None:
         checkpoint.total_usage = total
-        await _flush_events(session)
-        await store.mark_completed(run_id, checkpoint)
+        await _complete_with_pending_events(session, run_id, checkpoint, lease=lease)
     yield event
 
 
 async def _error_result_tail(
     session: Session,
-    agent: Any,
     *,
+    runtime: Any,
     run_id: str,
-    run_record: Any,
-    checkpoint: Any,
     total: Usage,
     duration_ms: int,
     running_cost: float | None,
     final_text_value: str | None = None,
-) -> AsyncIterator[Event]:
+    usage_complete: bool = True,
+) -> AsyncGenerator[Event, None]:
     """Emit the error ResultEvent and mark the run failed.
 
     Shared by the loop-guard hard stop and the verifier ``stop`` verdict."""
@@ -196,13 +247,19 @@ async def _error_result_tail(
         duration_ms=duration_ms,
         final_text=final_text_value,
         total_cost_usd=running_cost,
+        usage_complete=usage_complete,
     )
-    await _persist_event(session, run_id, event)
-    store = agent.run_store
-    if run_record is not None and store is not None:
+    await _persist_event(session, run_id, event, lease=runtime.lease)
+    store = runtime.agent.run_store
+    checkpoint = runtime.checkpoint
+    if runtime.run_record is not None and store is not None:
         checkpoint.total_usage = total
-        await _flush_events(session)
-        await store.mark_failed(run_id, checkpoint)
+        failure = await runtime.persist_failed(None)
+        if failure is not None:
+            _discard_pending_terminal_events(session, event)
+            async for item in runtime.emit_exception_terminal(failure):
+                yield item
+            return
     yield event
 
 
@@ -217,10 +274,12 @@ async def _success_result_tail(
     duration_ms: int,
     running_cost: float | None,
     stop_reason: StopReason,
+    lease: Any = None,
     final_text_value: str | None = None,
     structured_output: dict[str, Any] | None = None,
     structured_error: str | None = None,
-) -> AsyncIterator[Event]:
+    usage_complete: bool = True,
+) -> AsyncGenerator[Event, None]:
     """Emit the success ResultEvent and mark the run completed.
 
     Shared by the final-text and final-tool terminal paths."""
@@ -233,28 +292,27 @@ async def _success_result_tail(
         structured_output=structured_output,
         structured_error=structured_error,
         total_cost_usd=running_cost,
+        usage_complete=usage_complete,
     )
-    await _persist_event(session, run_id, event)
+    await _persist_event(session, run_id, event, lease=lease)
     store = agent.run_store
     if run_record is not None and store is not None:
         checkpoint.total_usage = total
-        await _flush_events(session)
-        await store.mark_completed(run_id, checkpoint)
+        await _complete_with_pending_events(session, run_id, checkpoint, lease=lease)
     yield event
 
 
 async def _max_turns_tail(
     session: Session,
-    agent: Any,
     *,
+    runtime: Any,
     run_id: str,
-    run_record: Any,
-    checkpoint: Any,
     max_turns: int,
     total: Usage,
     duration_ms: int,
     running_cost: float | None,
-) -> AsyncIterator[Event]:
+    usage_complete: bool = True,
+) -> AsyncGenerator[Event, None]:
     """Emit the guard/error/result sequence for an exhausted max_turns."""
     turn_error = {
         "name": "TurnLimitError",
@@ -266,24 +324,32 @@ async def _max_turns_tail(
         detail=f"Maximum turns ({max_turns}) reached.",
         action="stop",
     )
-    await _persist_event(session, run_id, event)
+    await _persist_event(session, run_id, event, lease=runtime.lease)
     yield event
-    event = ErrorEvent(error=turn_error)
-    await _persist_event(session, run_id, event)
+    turn_error_event = ErrorEvent(error=turn_error)
+    event = turn_error_event
+    await _persist_event(session, run_id, event, lease=runtime.lease)
     yield event
-    event = ResultEvent(
+    turn_result_event = ResultEvent(
         subtype="error",
         stop_reason="error",
         total_usage=total,
         duration_ms=duration_ms,
         total_cost_usd=running_cost,
+        usage_complete=usage_complete,
     )
-    await _persist_event(session, run_id, event)
-    store = agent.run_store
-    if run_record is not None and store is not None:
+    event = turn_result_event
+    await _persist_event(session, run_id, event, lease=runtime.lease)
+    store = runtime.agent.run_store
+    checkpoint = runtime.checkpoint
+    if runtime.run_record is not None and store is not None:
         checkpoint.total_usage = total
-        await _flush_events(session)
-        await store.mark_failed(run_id, checkpoint, error=turn_error)
+        failure = await runtime.persist_failed(turn_error)
+        if failure is not None:
+            _discard_pending_terminal_events(session, turn_error_event, turn_result_event)
+            async for item in runtime.emit_exception_terminal(failure):
+                yield item
+            return
     yield event
 
 
@@ -292,15 +358,13 @@ async def _gate_retry_tail(
     *,
     run_id: str,
     feedback: str,
-) -> AsyncIterator[Event]:
+) -> AsyncGenerator[Event, None]:
     """Inject gate *feedback* as a system-reminder user message."""
     from ..skills.system_reminder import wrap_in_system_reminder
 
     message = Message(role="user", content=[TextBlock(text=wrap_in_system_reminder(feedback))])
-    await session.append([message])
-    event: Event = UserEvent(message=message)
-    await _persist_event(session, run_id, event)
-    yield event
+    async for event in append_feedback(session, run_id, (message,), paired=True):
+        yield event
 
 
 async def _final_tool_retry_tail(
@@ -311,7 +375,7 @@ async def _final_tool_retry_tail(
     final_id: str,
     feedback: str,
     final_is_error: bool = True,
-) -> AsyncIterator[Event]:
+) -> AsyncGenerator[Event, None]:
     """Bounce a final-tool answer back into the loop with *feedback*.
 
     Unlike :func:`_gate_retry_tail`, the assistant message that triggered this
@@ -321,29 +385,14 @@ async def _final_tool_retry_tail(
     ``tool_result``).  So we answer every ``tool_use`` in the assistant turn —
     the terminal one carries the repair *feedback*, any others are marked not
     executed — which both satisfies pairing and delivers the instruction."""
-    content: list[ContentBlock] = []
-    for block in tool_blocks:
-        if block.id == final_id:
-            content.append(
-                ToolResultBlock(
-                    tool_use_id=block.id,
-                    content=feedback,
-                    is_error=final_is_error,
-                )
-            )
-        else:
-            content.append(
-                ToolResultBlock(
-                    tool_use_id=block.id,
-                    content="Tool not executed; revise and resubmit your final answer.",
-                    is_error=True,
-                )
-            )
-    message = Message(role="user", content=content)
-    await session.append([message])
-    event: Event = UserEvent(message=message)
-    await _persist_event(session, run_id, event)
-    yield event
+    paired = _primary_control_message(
+        Message(role="assistant", content=list(tool_blocks)),
+        feedback,
+        final_id,
+        final_is_error,
+    )
+    async for event in append_feedback(session, run_id, (paired,), paired=True):
+        yield event
 
 
 @dataclass(slots=True)

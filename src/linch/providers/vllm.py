@@ -13,6 +13,22 @@ from linch.types import ProviderRequest
 
 @dataclass(slots=True)
 class VLLMProviderOptions:
+    """Configure the vLLM OpenAI-compatible endpoint.
+
+    Args:
+        api_key: Optional endpoint credential.
+        base_url: vLLM server endpoint.
+        default_headers: Headers added to requests.
+        context_window: Server context capacity in tokens.
+        json_mode: Whether to request JSON-object output.
+        parallel_tool_calls: Optional parallel-call support declaration.
+        extra_body: Additional request fields merged into the payload.
+
+    Attributes:
+        json_mode: Requests JSON-object transport for structured responses.
+        extra_body: Provider-specific fields merged into each request payload.
+    """
+
     api_key: str | None = None
     base_url: str | None = None
     default_headers: dict[str, str] | None = None
@@ -23,11 +39,20 @@ class VLLMProviderOptions:
 
 
 class VLLMProvider(OpenAIChatCompletionsProvider):
-    """vLLM provider using its OpenAI-compatible chat completions endpoint."""
+    """vLLM provider using its OpenAI-compatible chat completions endpoint.
+
+    Args:
+        options: Optional vLLM endpoint and request settings.
+    """
 
     id = "vllm"
 
     def __init__(self, options: VLLMProviderOptions | None = None) -> None:
+        """Create a vLLM provider with optional server settings.
+
+        Args:
+            options: vLLM endpoint and request options.
+        """
         opts = options or VLLMProviderOptions()
         self._vllm_options = opts
         super().__init__(

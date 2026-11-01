@@ -61,13 +61,6 @@ classDiagram
         +metadata: dict
     }
 
-    class MemoryItem {
-        +id: str
-        +text: str
-        +namespace: str | None
-        +metadata: dict
-    }
-
     class ResourceAccess {
         +resource: str
         +mode: Literal~read, write~

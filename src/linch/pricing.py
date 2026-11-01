@@ -26,6 +26,12 @@ _M = 1_000_000  # per-million denominator
 class ModelPricing:
     """USD-per-1M-token rates for a single model.
 
+    Args:
+        input: Standard prompt-token rate in USD per million tokens.
+        output: Generated-token rate in USD per million tokens.
+        cache_read: Prompt-cache hit rate in USD per million tokens.
+        cache_creation: Prompt-cache write rate in USD per million tokens.
+
     Attributes:
         input:            Standard prompt tokens.
         output:           Generated tokens.
@@ -70,10 +76,8 @@ def cost_usd(
     - ``cache_read_tokens``     — prompt-cache hits (cheap)
     - ``cache_creation_tokens`` — prompt-cache writes (slightly more expensive)
 
-    Anthropic reports these as separate, non-overlapping fields; summing all
-    four is correct.  Verify this assumption when adding OpenAI entries — if
-    any provider folds cached tokens into ``input_tokens``, adjust the formula
-    to avoid double-counting.
+    Providers normalize these into separate, non-overlapping fields before
+    pricing; summing all four is therefore correct.
 
     Args:
         usage: Token counts for a single turn or an accumulated total.

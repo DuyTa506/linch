@@ -31,6 +31,20 @@ OpenAIReasoningSummary = Literal["auto", "concise", "detailed"]
 
 @dataclass(slots=True)
 class OpenAIOptions:
+    """Connection options for the OpenAI Responses API client.
+
+    Args:
+        api_key: API key passed to the OpenAI client, or ``None`` to use the
+            client's environment-based lookup.
+        base_url: Optional API-compatible endpoint URL.
+        default_headers: Optional headers added to every client request.
+
+    Attributes:
+        api_key: API key passed to the OpenAI client, if configured.
+        base_url: API-compatible endpoint URL, if configured.
+        default_headers: Headers added to every client request, if configured.
+    """
+
     api_key: str | None = None
     base_url: str | None = None
     default_headers: dict[str, str] | None = None
@@ -38,6 +52,26 @@ class OpenAIOptions:
 
 @dataclass(slots=True)
 class OpenAIReasoning:
+    """Reasoning controls applied to OpenAI Responses API requests.
+
+    Args:
+        effort: Reasoning effort requested from the model, or ``None`` to use
+            the provider default.
+        summary: Reasoning-summary detail requested from the model, or ``None``
+            to omit the setting.
+        previous_response_id: Response-chaining policy: ``"auto"`` continues
+            from the latest response ID, while ``"disabled"`` sends no prior
+            response ID.
+        encrypted_content: Whether to request encrypted reasoning content in
+            the response.
+
+    Attributes:
+        effort: Configured reasoning effort, if any.
+        summary: Configured reasoning-summary detail, if any.
+        previous_response_id: Response-chaining policy for the request.
+        encrypted_content: Whether encrypted reasoning content is requested.
+    """
+
     effort: OpenAIReasoningEffort | None = None
     summary: OpenAIReasoningSummary | None = None
     previous_response_id: Literal["auto", "disabled"] = "auto"
@@ -222,10 +256,20 @@ def derive_stop_reason(
 
 
 def build_usage(raw: dict[str, Any] | None) -> Usage:
+    """Normalize one OpenAI Responses usage payload.
+
+    Args:
+        raw: Provider usage mapping, or ``None`` when the response omitted it.
+
+    Returns:
+        Usage with cached input separated from uncached input tokens.
+    """
+    input_tokens = int((raw or {}).get("input_tokens") or 0)
+    cache_read_tokens = openai_responses_cached_tokens(raw)
     return Usage(
-        input_tokens=int((raw or {}).get("input_tokens") or 0),
+        input_tokens=max(0, input_tokens - cache_read_tokens),
         output_tokens=int((raw or {}).get("output_tokens") or 0),
-        cache_read_tokens=openai_responses_cached_tokens(raw),
+        cache_read_tokens=cache_read_tokens,
     )
 
 
@@ -324,6 +368,7 @@ async def map_wire_events(
 ) -> AsyncIterator[dict[str, Any]]:
     yield {"type": "message_start", "model": model}
     item_to_call_id: dict[str, str] = {}
+    nonempty_tool_inputs: set[str] = set()
     has_function_call = False
     stop_reason: StopReason = "end_turn"
     usage = Usage()
@@ -348,12 +393,22 @@ async def map_wire_events(
         elif typ == "response.function_call_arguments.delta":
             call_id = item_to_call_id.get(str(ev.get("item_id")))
             if call_id and ev.get("delta") is not None:
+                if ev["delta"].strip():
+                    nonempty_tool_inputs.add(call_id)
                 yield {"type": "tool_use_input_delta", "id": call_id, "json_delta": ev["delta"]}
         elif typ == "response.output_item.done":
             item = ev.get("item") or {}
             if item.get("type") == "function_call":
                 call_id = item_to_call_id.pop(str(item.get("id")), None)
                 if call_id:
+                    if call_id not in nonempty_tool_inputs:
+                        arguments = str(item.get("arguments") or "").strip() or "{}"
+                        yield {
+                            "type": "tool_use_input_delta",
+                            "id": call_id,
+                            "json_delta": arguments,
+                        }
+                    nonempty_tool_inputs.discard(call_id)
                     yield {"type": "tool_use_end", "id": call_id}
         elif typ in {"response.completed", "response.failed", "response.incomplete"}:
             response = ev.get("response") or {}

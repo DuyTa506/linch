@@ -10,9 +10,10 @@ from __future__ import annotations
 import pytest
 
 from linch import Agent, ToolCacheConfig
-from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
-from linch.sessions import InMemorySessionStore
-from linch.tools import ToolRegistry, tool
+from linch.tools import tool
+from tests.support.agents import make_agent
+from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
+from tests.support.tools import tool_registry
 
 
 def _read_tool(name: str = "Search"):
@@ -37,20 +38,6 @@ def _write_tool(name: str = "Mutate"):
     return fn, calls
 
 
-def _agent(provider, tools, *, tool_cache=None, permissions=None) -> Agent:
-    reg = ToolRegistry()
-    for t in tools:
-        reg.register(t)
-    return Agent(
-        model="m",
-        provider=provider,
-        session_store=InMemorySessionStore(),
-        tools=reg,
-        tool_cache=tool_cache,
-        permissions=permissions,
-    )
-
-
 def _twice(tool_name: str, tool_input: dict) -> ScriptedProvider:
     return ScriptedProvider(
         [
@@ -59,6 +46,14 @@ def _twice(tool_name: str, tool_input: dict) -> ScriptedProvider:
             TextTurn(text="done"),
         ]
     )
+
+
+def _cache_agent(
+    provider: ScriptedProvider,
+    *tools: object,
+    **options: object,
+) -> Agent:
+    return make_agent(provider, tools=tool_registry(*tools), run_store=None, **options)
 
 
 async def _run(agent: Agent, prompt: str = "go") -> None:
@@ -70,24 +65,21 @@ async def _run(agent: Agent, prompt: str = "go") -> None:
 # ── efficiency ────────────────────────────────────────────────────────────────
 
 
-async def test_cache_serves_duplicate_read_without_re_executing() -> None:
+@pytest.mark.parametrize(
+    "config, expected",
+    [(ToolCacheConfig(), 1), (None, 2), (ToolCacheConfig(allow={"Other"}), 2)],
+)
+async def test_cache_policy_cases(config: ToolCacheConfig | None, expected: int) -> None:
     search, calls = _read_tool()
-    agent = _agent(_twice("Search", {"query": "x"}), [search], tool_cache=ToolCacheConfig())
+    agent = _cache_agent(_twice("Search", {"query": "x"}), search, tool_cache=config)
     await _run(agent)
-    assert calls["n"] == 1  # second identical call served from cache
-
-
-async def test_disabled_by_default_executes_every_call() -> None:
-    search, calls = _read_tool()
-    agent = _agent(_twice("Search", {"query": "x"}), [search])  # no tool_cache
-    await _run(agent)
-    assert calls["n"] == 2
+    assert calls["n"] == expected
 
 
 # ── correctness ───────────────────────────────────────────────────────────────
 
 
-async def test_distinct_inputs_are_not_conflated() -> None:
+async def test_cache_miss_cases() -> None:
     search, calls = _read_tool()
     provider = ScriptedProvider(
         [
@@ -96,7 +88,7 @@ async def test_distinct_inputs_are_not_conflated() -> None:
             TextTurn(text="done"),
         ]
     )
-    agent = _agent(provider, [search], tool_cache=ToolCacheConfig())
+    agent = _cache_agent(provider, search, tool_cache=ToolCacheConfig())
     await _run(agent)
     assert calls["n"] == 2  # different inputs → no false hit
 
@@ -112,9 +104,10 @@ async def test_write_invalidates_cached_read() -> None:
             TextTurn(text="done"),
         ]
     )
-    agent = _agent(
+    agent = _cache_agent(
         provider,
-        [search, mutate],
+        search,
+        mutate,
         tool_cache=ToolCacheConfig(),
         permissions={"mode": "skip-dangerous"},
     )
@@ -124,9 +117,9 @@ async def test_write_invalidates_cached_read() -> None:
 
 async def test_write_scope_tool_is_never_cached() -> None:
     mutate, calls = _write_tool()
-    agent = _agent(
+    agent = _cache_agent(
         _twice("Mutate", {"path": "/f"}),
-        [mutate],
+        mutate,
         # Even explicitly allow-listed, a write-scope tool must not be cached.
         tool_cache=ToolCacheConfig(allow={"Mutate"}),
         permissions={"mode": "skip-dangerous"},
@@ -143,16 +136,16 @@ async def test_error_results_are_not_cached() -> None:
         calls["n"] += 1
         raise RuntimeError("boom")
 
-    agent = _agent(_twice("Search", {"query": "x"}), [search], tool_cache=ToolCacheConfig())
+    agent = _cache_agent(_twice("Search", {"query": "x"}), search, tool_cache=ToolCacheConfig())
     await _run(agent)
     assert calls["n"] == 2  # failed call not cached → retried
 
 
 async def test_allowlist_excludes_unlisted_read_tool() -> None:
     search, calls = _read_tool()
-    agent = _agent(
+    agent = _cache_agent(
         _twice("Search", {"query": "x"}),
-        [search],
+        search,
         tool_cache=ToolCacheConfig(allow={"Other"}),
     )
     await _run(agent)
@@ -247,9 +240,9 @@ async def test_oversized_results_are_not_cached() -> None:
     # Large results are left to the offload subsystem; caching them would pin
     # full payloads and re-offload on each hit. Above max_value_bytes → re-runs.
     search, calls = _read_tool()
-    agent = _agent(
+    agent = _cache_agent(
         _twice("Search", {"query": "x"}),
-        [search],
+        search,
         tool_cache=ToolCacheConfig(max_value_bytes=2),  # "r1:x" exceeds 2 bytes
     )
     await _run(agent)
@@ -287,7 +280,7 @@ async def test_resolve_without_tool_result_blocks_instead_of_executing() -> None
             TextTurn(text="done"),
         ]
     )
-    agent = _agent(provider, [danger], permissions={"mode": "skip-dangerous"})
+    agent = _cache_agent(provider, danger, permissions={"mode": "skip-dangerous"})
     agent.hooks = [BadResolve()]
     await _run(agent)
     assert calls["n"] == 0  # malformed resolve blocks; the tool never runs
@@ -308,7 +301,7 @@ async def test_resolve_reports_the_mutated_input_in_telemetry() -> None:
                 return HookResult.mutate(input={"query": "X"})
             return None
 
-    agent = _agent(_twice("Search", {"query": "x"}), [search], tool_cache=ToolCacheConfig())
+    agent = _cache_agent(_twice("Search", {"query": "x"}), search, tool_cache=ToolCacheConfig())
     agent.hooks = [Rewrite(), *agent.hooks]  # mutate first, cache appended last
 
     inputs = []
@@ -347,3 +340,44 @@ async def test_resolve_action_short_circuits_dispatch() -> None:
     assert res.result.action == "resolve"
     assert res.result.tool_result is served
     assert later_ran["v"] is False  # short-circuited before the next hook
+
+
+async def test_cached_results_are_isolated_from_consumers() -> None:
+    """Mutating a returned legacy or canonical result must not poison its cache."""
+    from linch.hooks.contexts import PostToolUseContext
+    from linch.hooks.tool_cache import ToolCacheHook
+    from linch.tools import ToolOutput, ToolResult
+
+    hook = ToolCacheHook()
+    first = await hook.on_pre_tool_use(_pre("t1", "Search", "read", {"q": "x"}))
+    assert first is None
+    legacy = ToolResult(content="secret", metadata={"nested": {"value": 1}})
+    canonical = ToolOutput(value={"nested": {"value": 1}})
+    await hook.on_post_tool_use(
+        PostToolUseContext(
+            session=None,
+            run_id="r",
+            turn_index=0,
+            tool_use_id="t1",
+            tool_name="Search",
+            input={"q": "x"},
+            result=legacy,
+            tool_output=canonical,
+        )
+    )
+
+    legacy.content = "changed"
+    legacy.metadata["nested"]["value"] = 9
+    canonical.value["nested"]["value"] = 9
+
+    hit = await hook.on_pre_tool_use(_pre("t2", "Search", "read", {"q": "x"}))
+    assert hit is not None
+    assert hit.tool_result.content == "secret"
+    assert hit.tool_result.metadata == {"nested": {"value": 1}}
+    assert hit.tool_output.value == {"nested": {"value": 1}}
+
+    hit.tool_result.metadata["nested"]["value"] = 42
+    hit.tool_output.value["nested"]["value"] = 42
+    again = await hook.on_pre_tool_use(_pre("t3", "Search", "read", {"q": "x"}))
+    assert again.tool_result.metadata == {"nested": {"value": 1}}
+    assert again.tool_output.value == {"nested": {"value": 1}}

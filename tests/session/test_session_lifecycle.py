@@ -1,0 +1,742 @@
+"""Exercise session release, agent teardown, and lifecycle race behavior."""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import AsyncIterator
+from typing import Any
+
+import pytest
+
+from tests.support.providers import ScriptedProvider, TextTurn
+
+
+async def test_break_after_result_event_releases_session() -> None:
+    """Breaking from the terminal event stream must release run admission."""
+    from linch.events import ResultEvent
+
+    agent = _agent(provider=ScriptedProvider([TextTurn("first"), TextTurn("second")]))
+    session = await agent.session(id="break-result")
+
+    stream = session.run("first")
+    async for event in stream:
+        if isinstance(event, ResultEvent):
+            assert not session._active
+            break
+
+    again = await agent.session(id="break-result")
+    assert again is session
+    await agent.close()
+
+
+async def test_close_during_terminal_break_completes() -> None:
+    """Agent shutdown must not wait forever on a parked terminal iterator."""
+    from linch.events import ResultEvent
+    from linch.types import Usage
+
+    entered = asyncio.Event()
+    gate = asyncio.Event()
+
+    class Paused(_Provider):
+        async def stream(self, req: Any) -> AsyncIterator[dict[str, Any]]:
+            entered.set()
+            await gate.wait()
+            yield {"type": "message_start", "model": req.model}
+            yield {"type": "text_delta", "text": "done"}
+            yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
+
+    agent = _agent(provider=Paused())
+    session = await agent.session(id="break-close")
+
+    async def consume() -> None:
+        async for event in session.run("first"):
+            if isinstance(event, ResultEvent):
+                break
+
+    consumer = asyncio.create_task(consume())
+    await asyncio.wait_for(entered.wait(), 1.0)
+    closer = asyncio.create_task(agent.close())
+    await asyncio.sleep(0)
+    assert not closer.done()
+    gate.set()
+    await asyncio.wait_for(asyncio.gather(consumer, closer), 2.0)
+
+
+class _Provider(ScriptedProvider):
+    id = "p"
+
+    def __init__(self, order: list[str] | None = None) -> None:
+        super().__init__([], context_window=100_000)
+        self._order = order
+
+    async def stream(self, req: Any) -> AsyncIterator[dict[str, Any]]:
+        async for event in ScriptedProvider([TextTurn("done")]).stream(req):
+            yield event
+
+    async def aclose(self) -> None:
+        if self._order is not None:
+            self._order.append("provider_closed")
+
+
+class _CloseGateProvider(_Provider):
+    """Gate provider teardown so close races can observe the in-flight state."""
+
+    def __init__(self, order: list[str] | None = None) -> None:
+        super().__init__(order)
+        self.calls = 0
+        self.entered = asyncio.Event()
+        self.gate = asyncio.Event()
+        self.closed = asyncio.Event()
+
+    async def aclose(self) -> None:
+        self.calls += 1
+        self.entered.set()
+        await self.gate.wait()
+        if self._order is not None:
+            self._order.append("provider_closed")
+        self.closed.set()
+
+
+def _agent(**kwargs: Any):
+    from tests.support.agents import make_agent
+    from tests.support.stores import memory_session_store
+
+    provider = kwargs.pop("provider", _Provider())
+    kwargs.setdefault("model", "gpt-5")
+    kwargs.setdefault("session_store", memory_session_store())
+    kwargs.setdefault("run_store", None)
+    return make_agent(provider, **kwargs)
+
+
+async def test_release_unknown_session_is_noop() -> None:
+    agent = _agent()
+    await agent.release_session("does-not-exist")  # no raise
+    await agent.release_session("does-not-exist", force=True)  # still no raise
+
+
+async def test_release_is_idempotent() -> None:
+    agent = _agent()
+    session = await agent.session(id="s1")
+    assert "s1" in agent._sessions
+    await agent.release_session(session)
+    assert "s1" not in agent._sessions
+    # Second release (by id and by object) is a no-op.
+    await agent.release_session("s1")
+    await session.aclose()
+    assert "s1" not in agent._sessions
+
+
+async def test_release_rejects_active_run_without_force() -> None:
+    from linch.errors import ConfigError
+
+    agent = _agent()
+    session = await agent.session(id="s1")
+    session._active = True
+    try:
+        await agent.release_session(session)
+        raise AssertionError("expected ConfigError for active session without force")
+    except ConfigError:
+        pass
+    assert "s1" in agent._sessions  # not unregistered on rejection
+
+
+async def test_force_release_aborts_and_unregisters_active_session() -> None:
+    agent = _agent()
+    session = await agent.session(id="s1")
+    session._active = True
+    await agent.release_session(session, force=True)
+    assert "s1" not in agent._sessions
+    assert session._abort_controller.aborted
+
+
+async def test_force_release_keeps_generator_teardown_error_retryable() -> None:
+    agent = _agent()
+    session = await agent.session(id="s1")
+
+    class FailingGenerator:
+        calls = 0
+
+        async def aclose(self) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                raise ValueError("teardown failed")
+
+    gen = FailingGenerator()
+    session._active = True
+    session._active_gen = gen
+
+    with pytest.raises(ValueError, match="teardown failed"):
+        await agent.release_session(session, force=True)
+
+    assert not session._closed
+    assert "s1" in agent._sessions
+    assert agent.session_store is not None
+
+    await agent.release_session(session, force=True)
+
+    assert session._closed
+    assert "s1" not in agent._sessions
+    assert gen.calls == 2
+
+
+async def test_async_context_manager_releases_on_exit() -> None:
+    agent = _agent()
+    session = await agent.session(id="s1")
+    async with session as s:
+        assert s is session
+        assert "s1" in agent._sessions
+    assert "s1" not in agent._sessions
+
+
+async def test_force_release_drains_owned_background_task() -> None:
+    agent = _agent()
+    session = await agent.session(id="s1")
+    finalized = asyncio.Event()
+
+    async def bg() -> None:
+        try:
+            await asyncio.sleep(100)
+        finally:
+            finalized.set()
+
+    task = asyncio.create_task(bg())
+    await asyncio.sleep(0)  # let it start
+    session.background_tasks.append(task)
+
+    await agent.release_session(session, force=True)
+
+    assert task.done()
+    assert finalized.is_set()
+    assert session.background_tasks == []
+
+
+async def test_completed_background_tasks_unregister_themselves() -> None:
+    agent = _agent()
+    session = await agent.session()
+    tasks = [asyncio.create_task(asyncio.sleep(0)) for _ in range(100)]
+    for task in tasks:
+        session.background_tasks.append(task)
+
+    await asyncio.gather(*tasks)
+
+    assert session.background_tasks == []
+    await agent.close()
+
+
+async def test_close_cancels_and_drains_registered_inflight_task() -> None:
+    agent = _agent()
+    session = await agent.session()
+    started = asyncio.Event()
+    finalized = asyncio.Event()
+
+    async def background() -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            finalized.set()
+
+    task = asyncio.create_task(background())
+    session.background_tasks.append(task)
+    await started.wait()
+
+    await agent.close()
+
+    assert task.cancelled()
+    assert finalized.is_set()
+    assert session.background_tasks == []
+
+
+async def test_agent_close_runs_task_finalizers_before_closing_provider() -> None:
+    order: list[str] = []
+    agent = _agent(provider=_Provider(order))
+    session = await agent.session(id="s1")
+
+    async def bg() -> None:
+        try:
+            await asyncio.sleep(100)
+        finally:
+            order.append("task_finalized")
+
+    task = asyncio.create_task(bg())
+    await asyncio.sleep(0)
+    session.background_tasks.append(task)
+
+    await agent.close()
+
+    assert order == ["task_finalized", "provider_closed"], order
+
+
+async def test_force_release_recurses_into_retained_child_session() -> None:
+    from linch.subagents.types import AgentDefinition, AgentFrontmatter
+    from linch.subagents.workers import WorkerHandle
+
+    agent = _agent()
+    parent = await agent.session(id="parent")
+    await agent.session(id="child")
+    assert {"parent", "child"} <= set(agent._sessions)
+
+    definition = AgentDefinition(
+        name="w",
+        file_path="<test>",
+        source="built-in",
+        frontmatter=AgentFrontmatter(name="w", description="d"),
+        body="",
+    )
+    parent.workers["agent-1"] = WorkerHandle(
+        worker_id="agent-1",
+        child_session_id="child",
+        display_name="Worker",
+        definition=definition,
+        status="running",
+        task=None,
+    )
+
+    await agent.release_session("parent", force=True)
+
+    # Both the parent and its retained child are unregistered.
+    assert "parent" not in agent._sessions
+    assert "child" not in agent._sessions
+
+
+async def test_session_churn_returns_registry_and_tasks_to_baseline() -> None:
+    agent = _agent()
+    baseline_sessions = len(agent._sessions)
+    baseline_tasks = len(asyncio.all_tasks())
+
+    for i in range(500):
+        session = await agent.session(id=f"s{i}")
+        async for _ in session.run("hi"):
+            pass
+        await agent.release_session(session)
+
+    assert len(agent._sessions) == baseline_sessions
+    # No owned background tasks leaked across the churn.
+    assert len(asyncio.all_tasks()) <= baseline_tasks
+
+
+async def test_agent_awaits_provider_prepare_once_before_first_run() -> None:
+    from linch.filesystem.offload import OffloadConfig
+
+    class PreparingProvider(_Provider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.prepared = 0
+            self._ctx = 8_192
+
+        def context_window(self, model: str) -> int:
+            return self._ctx
+
+        async def prepare(self) -> None:
+            self.prepared += 1
+            self._ctx = 40_000  # "discovered" a larger window
+
+    provider = PreparingProvider()
+    agent = _agent(
+        provider=provider,
+        result_offload=OffloadConfig(threshold_fraction=0.5),  # auto (no threshold_tokens)
+    )
+    # Threshold sized from the pre-prepare window (8192 * 0.5).
+    assert agent.result_offload.threshold_tokens == 4_096
+
+    async for _ in agent_run(agent, "s1", "hi"):
+        pass
+    async for _ in agent_run(agent, "s2", "hi"):
+        pass
+
+    assert provider.prepared == 1  # coalesced across runs
+    # Offload threshold refreshed from the discovered window (40000 * 0.5).
+    assert agent.result_offload.threshold_tokens == 20_000
+
+
+async def agent_run(agent, sid, prompt):
+    session = await agent.session(id=sid)
+    async for event in session.run(prompt):
+        yield event
+
+
+async def test_agent_close_is_idempotent() -> None:
+    order: list[str] = []
+    agent = _agent(provider=_Provider(order))
+    await agent.session(id="s1")
+    await agent.close()
+    await agent.close()  # second call must be a no-op
+    assert order.count("provider_closed") == 1
+
+
+async def test_release_foreign_agent_session_raises() -> None:
+    from linch.errors import ConfigError
+
+    agent_a = _agent()
+    agent_b = _agent()
+    session_a = await agent_a.session(id="s1")
+    try:
+        await agent_b.release_session(session_a)
+        raise AssertionError("expected ConfigError releasing a foreign agent's session")
+    except ConfigError:
+        pass
+    # The foreign object's own registration is untouched.
+    assert "s1" in agent_a._sessions
+
+
+async def test_release_stale_instance_does_not_unregister_replacement() -> None:
+    agent = _agent()
+    stale = await agent.session(id="x")
+    await agent.release_session(stale)  # unregisters the stale instance
+    fresh = await agent.session(id="x")  # a new live instance under the same id
+    assert agent._sessions["x"] is fresh
+    # Releasing the now-stale object must not disturb the fresh registration.
+    await agent.release_session(stale)
+    assert agent._sessions.get("x") is fresh
+    assert not fresh._closed
+
+
+async def test_provider_reassignment_reruns_prepare() -> None:
+    class _PreparingProvider(_Provider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.prepared = 0
+
+        async def prepare(self) -> None:
+            self.prepared += 1
+
+    p1 = _PreparingProvider()
+    p2 = _PreparingProvider()
+    agent = _agent(provider=p1)
+    async for _ in agent_run(agent, "s1", "hi"):
+        pass
+    assert p1.prepared == 1
+    # Reassigning the provider must reset prepare-state so the new provider's
+    # one-time prepare() actually runs before the next run.
+    agent.provider = p2
+    async for _ in agent_run(agent, "s2", "hi"):
+        pass
+    assert p2.prepared == 1
+
+
+async def test_close_cancelled_mid_teardown_still_releases_provider() -> None:
+    order: list[str] = []
+    provider = _CloseGateProvider(order)
+    agent = _agent(provider=provider)
+    await agent.session(id="s1")
+
+    close_task = asyncio.create_task(agent.close())
+    await asyncio.wait_for(provider.entered.wait(), 1.0)  # teardown reached provider
+    close_task.cancel()  # cancel mid-teardown
+    provider.gate.set()  # let the shielded teardown finish
+    with pytest.raises(asyncio.CancelledError):
+        await close_task
+    # The shielded teardown still released the provider despite the cancellation.
+    await asyncio.wait_for(provider.closed.wait(), 1.0)
+    assert order.count("provider_closed") == 1
+
+
+async def test_cancelled_agent_close_drains_default_plugin_before_returning() -> None:
+    provider = _CloseGateProvider()
+    agent = _agent(provider=provider)
+    session = await agent.session(id="never-started-close")
+    session.run("never consumed")
+    closing = asyncio.create_task(agent.close())
+    await asyncio.wait_for(provider.entered.wait(), 1)
+    closing.cancel()
+    provider.gate.set()
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await closing
+        assert agent._closed
+        assert agent.context._scope.disposed
+        assert agent.context.get("request_catalog") is None
+        assert not agent.context.events.has_listeners("tools/resolve")
+    finally:
+        await agent.close()
+
+
+@pytest.mark.parametrize("operation", ["run", "append"])
+async def test_closed_session_rejects_operations(operation: str) -> None:
+    from linch.errors import ConfigError
+
+    agent = _agent()
+    session = await agent.session(id="s1")
+    await session.aclose()
+    with pytest.raises(ConfigError):
+        if operation == "run":
+            session.run("hi")
+        else:
+            from linch.types import Message, TextBlock
+
+            await session.append([Message(role="user", content=[TextBlock(text="x")])])
+
+
+async def test_never_started_run_releases_admission_and_idle_barrier() -> None:
+    agent = _agent()
+    session = await agent.session(id="never-started")
+    iterator = session.run("hi")
+
+    assert session._active
+    assert not session._idle.is_set()
+
+    await session.aclose(force=True)
+
+    assert session._closed
+    assert not session._active
+    assert session._idle.is_set()
+    with pytest.raises(StopAsyncIteration):
+        await anext(iterator)
+
+
+async def test_close_finalizes_iterator_suspended_at_yield() -> None:
+    order: list[str] = []
+    agent = _agent(provider=_Provider(order))
+    session = await agent.session(id="yielded")
+    iterator = session.run("hi")
+
+    await anext(iterator)
+    assert session._active
+
+    await agent.close()
+
+    assert session._closed
+    assert not session._active
+    assert session._idle.is_set()
+    assert order == ["provider_closed"]
+
+
+async def test_concurrent_same_id_creation_is_reserved_once() -> None:
+    from linch.sessions import InMemorySessionStore
+
+    class SlowCreateStore(InMemorySessionStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.create_calls = 0
+            self.entered = asyncio.Event()
+            self.gate = asyncio.Event()
+
+        async def create(self, **kwargs: Any):
+            self.create_calls += 1
+            self.entered.set()
+            await self.gate.wait()
+            return await super().create(**kwargs)
+
+    store = SlowCreateStore()
+    agent = _agent(session_store=store)
+    first_task = asyncio.create_task(agent.session(id="same"))
+    await asyncio.wait_for(store.entered.wait(), 1.0)
+    second_task = asyncio.create_task(agent.session(id="same"))
+    await asyncio.sleep(0)
+    store.gate.set()
+
+    first, second = await asyncio.gather(first_task, second_task)
+
+    assert first is second
+    assert agent._sessions["same"] is first
+    assert store.create_calls == 1
+
+
+async def test_session_setup_rolls_back_when_close_starts() -> None:
+    from linch.errors import ConfigError
+    from linch.sessions import InMemorySessionStore
+
+    class SlowCreateStore(InMemorySessionStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.entered = asyncio.Event()
+            self.gate = asyncio.Event()
+            self.closed = False
+
+        async def create(self, **kwargs: Any):
+            self.entered.set()
+            await self.gate.wait()
+            return await super().create(**kwargs)
+
+        async def close(self) -> None:
+            self.closed = True
+            await super().close()
+
+    store = SlowCreateStore()
+    agent = _agent(session_store=store)
+    create_task = asyncio.create_task(agent.session(id="racing"))
+    await asyncio.wait_for(store.entered.wait(), 1.0)
+
+    close_task = asyncio.create_task(agent.close())
+    await asyncio.sleep(0)
+    assert agent._lifecycle_state == "quiescing"
+    assert not store.closed
+
+    store.gate.set()
+    with pytest.raises(ConfigError, match="agent is closing"):
+        await create_task
+    await close_task
+
+    assert agent._lifecycle_state == "closed"
+    assert agent._sessions == {}
+    assert store.closed
+
+
+async def test_agent_close_waits_for_actively_iterated_provider_finalizer() -> None:
+    order: list[str] = []
+
+    class PausingProvider(_Provider):
+        def __init__(self) -> None:
+            super().__init__(order)
+            self.entered = asyncio.Event()
+            self.gate = asyncio.Event()
+
+        async def stream(self, req: Any) -> AsyncIterator[dict[str, object]]:
+            from linch.types import Usage
+
+            try:
+                self.entered.set()
+                await self.gate.wait()
+                yield {"type": "message_start", "model": req.model}
+                yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
+            finally:
+                order.append("provider_stream_finalized")
+
+    provider = PausingProvider()
+    agent = _agent(provider=provider, reliability=None)
+    session = await agent.session(id="active")
+
+    async def consume() -> None:
+        async for _ in session.run("hi"):
+            pass
+
+    consumer = asyncio.create_task(consume())
+    await asyncio.wait_for(provider.entered.wait(), 1.0)
+    close_task = asyncio.create_task(agent.close())
+    await asyncio.sleep(0)
+
+    assert not close_task.done()
+    assert order == []
+    provider.gate.set()
+    await asyncio.gather(consumer, close_task)
+
+    assert order == ["provider_stream_finalized", "provider_closed"]
+
+
+async def test_concurrent_agent_close_callers_share_one_teardown() -> None:
+    provider = _CloseGateProvider()
+    agent = _agent(provider=provider)
+    first = asyncio.create_task(agent.close())
+    second = asyncio.create_task(agent.close())
+    await asyncio.wait_for(provider.entered.wait(), 1.0)
+
+    assert provider.calls == 1
+    assert not first.done()
+    assert not second.done()
+    provider.gate.set()
+    await asyncio.gather(first, second)
+
+    assert provider.calls == 1
+    assert agent._lifecycle_state == "closed"
+
+
+async def test_agent_close_failure_retries_only_unfinished_resources() -> None:
+    from linch.sessions import InMemorySessionStore
+
+    class CountingStore(InMemorySessionStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.close_calls = 0
+
+        async def close(self) -> None:
+            self.close_calls += 1
+            await super().close()
+
+    class FailOnceProvider(_Provider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.close_calls = 0
+
+        async def aclose(self) -> None:
+            self.close_calls += 1
+            if self.close_calls == 1:
+                raise RuntimeError("provider teardown failed")
+
+    store = CountingStore()
+    provider = FailOnceProvider()
+    agent = _agent(provider=provider, session_store=store)
+    session = await agent.session(id="s1")
+
+    with pytest.raises(RuntimeError, match="provider teardown failed"):
+        await agent.close()
+
+    assert agent._lifecycle_state == "quiescing"
+    assert session._closed
+    assert store.close_calls == 1
+    assert provider.close_calls == 1
+
+    await agent.close()
+
+    assert agent._lifecycle_state == "closed"
+    assert store.close_calls == 1
+    assert provider.close_calls == 2
+
+
+async def test_new_admission_is_rejected_while_agent_quiesces() -> None:
+    from linch.errors import ConfigError
+
+    provider = _CloseGateProvider()
+    agent = _agent(provider=provider)
+    session = await agent.session(id="existing")
+    close_task = asyncio.create_task(agent.close())
+    await asyncio.wait_for(provider.entered.wait(), 1.0)
+
+    with pytest.raises(ConfigError, match="agent is closing"):
+        await agent.session(id="new")
+    with pytest.raises(ConfigError):
+        session.run("late")
+
+    provider.gate.set()
+    await close_task
+
+
+async def test_profile_subagent_close_race_uses_one_agent_lifecycle() -> None:
+    from linch import Profile, RunOptions
+    from linch.config import FeatureFlags
+    from tests.support.agents import make_agent
+    from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
+    from tests.support.tools import tool_registry
+
+    started, release = asyncio.Event(), asyncio.Event()
+
+    class HeldChild(ScriptedProvider):
+        async def stream(self, req):
+            if self.requests:
+                started.set()
+                await release.wait()
+            async for event in super().stream(req):
+                yield event
+
+    provider = HeldChild(
+        [
+            ToolUseTurn("Subagent", {"description": "child", "prompt": "child"}),
+            TextTurn("child"),
+            TextTurn("done"),
+        ]
+    )
+    agent = make_agent(
+        provider,
+        tools=tool_registry(),
+        run_store=None,
+        max_idle_sessions=10,
+        features=FeatureFlags(subagents=True),
+    )
+    parent = await agent.session()
+
+    async def consume():
+        return [
+            event async for event in parent.run("go", RunOptions(profile=Profile("empty", "1")))
+        ]
+
+    running = asyncio.create_task(consume())
+    await asyncio.wait_for(started.wait(), 1)
+    closing = asyncio.create_task(agent.close())
+    await asyncio.sleep(0)
+    release.set()
+    try:
+        await asyncio.wait_for(asyncio.gather(running, closing), 1)
+    finally:
+        running.cancel()
+        closing.cancel()
+    assert parent._closed
+    assert agent._sessions == {}

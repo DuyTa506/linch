@@ -11,7 +11,7 @@ Runnable example code lives in the `examples/` directory, organized by subsystem
 | File | What it shows |
 |------|---------------|
 | `core/minimal_agent.py` | Smallest possible agent |
-| `core/coding_agent.py` | Full SWE agent — tools_from_defaults, BashRule/PathRule safety fence, LoopGuard, multi-turn |
+| `core/coding_agent.py` | Full SWE agent — workspace_tools, BashRule/PathRule safety fence, LoopGuard, multi-turn |
 | `core/policy_aware_execution.py` | Docker-backed Bash execution with permission rules and opt-in runtime restrictions |
 | `core/reading_agent.py` | Read-only codebase Q&A — exclude Write/Edit/Bash, PathRule, custom reviewer persona |
 | `core/chat_agent.py` | Pure conversation agent — no tools, custom domain, structured JSON output via ContextBuilder injection |
@@ -53,11 +53,7 @@ Runnable example code lives in the `examples/` directory, organized by subsystem
 
 | File | What it shows |
 |------|---------------|
-| `memory/memory_agent.py` | Core memory primitives with search/upsert tools and citations |
-| `memory/sqlite_memory_agent.py` | SqliteMemoryStore — persistent memory, round-trip, upsert update |
-| `memory/faiss_adapter.py` | FAISS vector-memory adapter recipe using the existing `MemoryStore` seam |
-| `memory/pgvector_memory.py` | pgvector adapter recipe for Postgres semantic search |
-| `memory/qdrant_adapter.py` | Qdrant vector-memory adapter recipe |
+| `memory/mem0_recall.py` | Optional mem0 recipe: run-scoped semantic recall and terminal-turn writes using public context and hook APIs |
 
 ---
 
@@ -65,8 +61,7 @@ Runnable example code lives in the `examples/` directory, organized by subsystem
 
 | File | What it shows |
 |------|---------------|
-| `observability/observability_agent.py` | LoggingObserver + optional OpenTelemetryObserver |
-| `observability/custom_observer.py` | BaseObserver subclass: latency tracking, error counts per tool |
+| `observability/observability_agent.py` | Direct OpenTelemetry setup with per-agent `Context` injection and console exporters |
 
 ---
 
@@ -93,7 +88,6 @@ Runnable example code lives in the `examples/` directory, organized by subsystem
 | File | What it shows |
 |------|---------------|
 | `extensions/provider_template.py` | Minimal `BaseProvider` adapter with normalized streaming events |
-| `extensions/memory_store_template.py` | Duck-typed `MemoryStore` with search/upsert signatures |
 | `extensions/filesystem_backend_template.py` | Virtual `FileBackend` path operations |
 | `extensions/tool_package_template.py` | `@tool` first, with an advanced class-shaped tool plus registry factory |
 | `extensions/hook_package_template.py` | Hook object with dispatcher method names and `HookResult` actions |
@@ -115,7 +109,6 @@ clock or a peer. Both are built via a factory so they run offline under a
 
 | File | What it shows |
 |------|---------------|
-| `coordination/scheduling_agent.py` | An agent that schedules its own recurring work: `Agent(schedule_store=...)` auto-registers `CreateSchedule`, a `SchedulerLoop` fires the due payload into `pending_notifications`, and the next turn drains it as a `<scheduled-task>` |
 | `coordination/team_mailbox.py` | A two-agent team over a shared `InMemoryMailbox`: one peer addresses another with `send_message` and it drains into the recipient's next turn, plus a `Correlator` request/response handshake (plan approval) |
 
 ---

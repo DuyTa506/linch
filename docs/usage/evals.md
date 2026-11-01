@@ -11,13 +11,15 @@ import asyncio
 
 from linch import (
     Agent,
+    InMemorySessionStore,
+    empty_tools,
+)
+from linch.ext.evals import (
     EvalBenchmarkTarget,
     EvalCase,
     EvalSuite,
-    InMemorySessionStore,
     ScriptedProvider,
     TextTurn,
-    empty_tools,
     run_eval_benchmark,
     text_contains,
 )
@@ -128,25 +130,24 @@ scorers:
     budget_usd: 0.05
 ```
 
-Supported scorer types map to the built-in scorers exported from `linch`:
+Supported scorer types map to the built-in scorers exported from
+`linch.ext.evals`:
 
 | Type | Fields |
 |---|---|
-| `text_contains` | `substring` or `text` or `contains` |
+| `text_contains` | `substring` (defaults to `{expected}` when omitted) |
 | `tool_called` | `tool` |
 | `schema_valid` | `schema` |
 | `cost_under` | `budget_usd` |
 | `context_selected_tool` | `tool` |
 | `context_not_trimmed` | none |
 | `context_metadata_contains` | `key`, optional `expected` |
-| `memory_recalled` | `id` or `ids` |
 | `recovery_succeeded` | optional `tool` |
 | `run_completed` | none |
 
-`schema_valid` requires the optional `jsonschema` package. It fails closed
-(returns `False`) when that validator is unavailable, so an unchecked output
-cannot silently pass an eval. The development extra installs it; minimal runtime
-environments that use this scorer should install `jsonschema` explicitly.
+`schema_valid` uses the core `jsonschema` dependency. The scorer returns `False`
+for invalid output and also fails closed if the validator is unavailable in a
+broken installation, so unchecked output cannot silently pass an eval.
 
 Scripted turn files may be JSON or YAML and can either be a list or an object
 with a `turns` list. A text turn is:
@@ -160,11 +161,11 @@ A tool-use turn is:
 ```json
 {
   "type": "tool_use",
-  "tool_name": "SearchMemory",
-  "tool_input": {"query": "PTO rollover"}
+  "tool_name": "read_file",
+  "tool_input": {"path": "/memories/MEMORY.md"}
 }
 ```
 
 The CLI intentionally wires scripted agents with `empty_tools()` so it is safe
 for CI smoke tests. Use the library API when a benchmark target needs a real
-tool registry, memory store, filesystem, hooks, or live provider.
+tool registry, file-memory dependencies, filesystem, hooks, or live provider.

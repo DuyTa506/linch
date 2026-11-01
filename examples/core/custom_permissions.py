@@ -6,20 +6,20 @@ Run:
 Demonstrates:
   1. mode="skip-dangerous"         — auto-approve everything (development/testing)
   2. mode="acceptEdits"  — auto-approve file edits; ask for shell/exec
-  3. mode="default"      — ask for everything via canUseTool callback
+  3. mode="default"      — ask for everything via can_use_tool callback
   4. ToolRule            — allow or deny a specific tool by name
   5. PathRule            — restrict file access to certain directories
   6. BashRule            — block specific shell command patterns
-  7. canUseTool sync     — simple synchronous approval callback
-  8. canUseTool async    — async callback (e.g. calls an approval API)
-  9. canUseTool with UI  — interactively prompt the terminal user
+  7. can_use_tool sync     — simple synchronous approval callback
+  8. can_use_tool async    — async callback (e.g. calls an approval API)
+  9. can_use_tool with UI  — interactively prompt the terminal user
 
 The permission system evaluation order:
   1. Rules are checked in order. First match wins.
   2. If no rule matches, the mode default is applied:
        "skip-dangerous"        → allow
        "acceptEdits" → allow edits/reads; deny exec/shell
-       "default"     → canUseTool callback (or deny if not set)
+       "default"     → can_use_tool callback (or deny if not set)
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ from linch import Agent
 from linch.config import FeatureFlags
 from linch.permissions import BashRule, PathRule, ToolRule
 from linch.sessions import InMemorySessionStore
-from linch.tools.registry import default_tools, tools_from_defaults
+from linch.tools.registry import workspace_tools
 
 API_KEY = os.environ.get("OPENAI_API_KEY", "")
 MODEL = "gpt-5-nano-2025-08-07"
@@ -60,7 +60,7 @@ def make_skip_dangerous_agent() -> Agent:
 #
 # Auto-approves Read/Write/Edit/Glob/Grep (file tools).
 # Requires explicit approval for Bash and anything with scope="exec".
-# In practice: if you have no canUseTool callback, exec calls are denied.
+# In practice: if you have no can_use_tool callback, exec calls are denied.
 
 
 def make_edits_agent() -> Agent:
@@ -80,7 +80,7 @@ def make_edits_agent() -> Agent:
 def make_no_bash_agent() -> Agent:
     return Agent(
         **BASE_CFG,
-        tools=default_tools(),
+        tools=workspace_tools(),
         permissions={
             "mode": "skip-dangerous",
             "rules": [
@@ -99,7 +99,7 @@ def make_no_bash_agent() -> Agent:
 def make_sandboxed_agent(allowed_dir: str = "/tmp") -> Agent:
     return Agent(
         **BASE_CFG,
-        tools=default_tools(),
+        tools=workspace_tools(),
         cwd=allowed_dir,
         permissions={
             "mode": "skip-dangerous",
@@ -122,7 +122,7 @@ def make_sandboxed_agent(allowed_dir: str = "/tmp") -> Agent:
 def make_safe_bash_agent() -> Agent:
     return Agent(
         **BASE_CFG,
-        tools=default_tools(),
+        tools=workspace_tools(),
         permissions={
             "mode": "skip-dangerous",
             "rules": [
@@ -135,7 +135,7 @@ def make_safe_bash_agent() -> Agent:
     )
 
 
-# ── 6. canUseTool — synchronous callback ────────────────────────────────────
+# ── 6. can_use_tool — synchronous callback ──────────────────────────────────
 #
 # The simplest custom logic: a plain Python function.
 # Return {"behavior": "allow"} or {"behavior": "deny", "message": "..."}
@@ -160,15 +160,15 @@ def my_sync_approval(request) -> dict:
 def make_readonly_agent() -> Agent:
     return Agent(
         **BASE_CFG,
-        tools=tools_from_defaults(exclude={"Write", "Edit"}),
+        tools=workspace_tools(exclude={"Write", "Edit"}),
         permissions={
             "mode": "default",
-            "canUseTool": my_sync_approval,
+            "can_use_tool": my_sync_approval,
         },
     )
 
 
-# ── 7. canUseTool — async callback ───────────────────────────────────────────
+# ── 7. can_use_tool — async callback ─────────────────────────────────────────
 #
 # Use async when the approval decision requires I/O (DB lookup, HTTP call).
 
@@ -189,15 +189,15 @@ async def my_async_approval(request) -> dict:
 def make_async_callback_agent() -> Agent:
     return Agent(
         **BASE_CFG,
-        tools=default_tools(),
+        tools=workspace_tools(),
         permissions={
             "mode": "default",
-            "canUseTool": my_async_approval,  # async functions work directly
+            "can_use_tool": my_async_approval,  # async functions work directly
         },
     )
 
 
-# ── 8. canUseTool — interactive terminal prompt ──────────────────────────────
+# ── 8. can_use_tool — interactive terminal prompt ────────────────────────────
 #
 # Block nothing by default, but pause the event stream and ask the user before
 # running any write or exec tool. This is the "human-in-the-loop" pattern.
@@ -224,10 +224,10 @@ def make_interactive_agent() -> Agent:
 
     return Agent(
         **BASE_CFG,
-        tools=default_tools(),
+        tools=workspace_tools(),
         permissions={
             "mode": "default",
-            "canUseTool": interactive_approval,
+            "can_use_tool": interactive_approval,
         },
     )
 
@@ -248,7 +248,7 @@ def make_production_agent(project_root: str = "/tmp/myproject") -> Agent:
 
     return Agent(
         **BASE_CFG,
-        tools=default_tools(),
+        tools=workspace_tools(),
         cwd=project_root,
         permissions={
             "mode": "default",
@@ -263,7 +263,7 @@ def make_production_agent(project_root: str = "/tmp/myproject") -> Agent:
                 # Block dangerous bash patterns
                 BashRule(patterns=["rm -rf*", "sudo *", "curl*|*sh"], decision="deny"),
             ],
-            "canUseTool": production_approval,
+            "can_use_tool": production_approval,
         },
     )
 
@@ -304,8 +304,8 @@ async def demo_path_rule() -> None:
 
 
 async def demo_readonly_callback() -> None:
-    """canUseTool blocks write/exec, allows reads."""
-    print("\n── Demo: sync canUseTool — read-only mode ──")
+    """can_use_tool blocks write/exec, allows reads."""
+    print("\n── Demo: sync can_use_tool — read-only mode ──")
     agent = make_readonly_agent()
     session = await agent.session()
     # Read should work; write should be denied

@@ -4,7 +4,7 @@ import asyncio
 import random
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TypeVar, cast
+from typing import TypeVar
 
 from linch.errors import AbortError, ConfigError, RateLimitError
 
@@ -13,6 +13,20 @@ T = TypeVar("T")
 
 @dataclass(slots=True)
 class RetryOptions:
+    """Configure attempt limits and exponential backoff for provider retries.
+
+    Args:
+        max_attempts: Maximum number of calls, including the first attempt.
+        base_delay_ms: Initial exponential-backoff delay in milliseconds.
+        max_delay_ms: Upper bound for any retry delay in milliseconds. A server
+            retry-after hint longer than this ends retrying with the original error.
+        jitter: Fractional randomization applied to exponential delays.
+
+    Attributes:
+        jitter: A value of zero disables randomization; rate-limit retry-after
+            values still take precedence over exponential backoff.
+    """
+
     max_attempts: int = 5
     base_delay_ms: int = 1000
     max_delay_ms: int = 30000
@@ -22,7 +36,7 @@ class RetryOptions:
 def _delay_for_error(err: Exception, attempt: int, opts: RetryOptions) -> float:
     retry_after = err.retry_after_seconds if isinstance(err, RateLimitError) else None
     if retry_after is not None:
-        return min(float(cast(float, retry_after)) * 1000.0, float(opts.max_delay_ms))
+        return float(retry_after) * 1000.0
     exp = min(float(opts.base_delay_ms) * (2**attempt), float(opts.max_delay_ms))
     jitter = exp * opts.jitter * ((random.random() * 2.0) - 1.0)
     return max(0.0, exp + jitter)
@@ -71,6 +85,10 @@ async def with_retry(
             if not retryable or attempt == opts.max_attempts - 1:
                 raise
             delay_ms = _delay_for_error(exc, attempt, opts)
+            if delay_ms > opts.max_delay_ms:
+                # Never shorten a server-requested wait, and never hold the run
+                # (and its lease) for an unbounded server-chosen time.
+                raise
             await asyncio.sleep(delay_ms / 1000.0)
     if last_error is not None:
         raise last_error

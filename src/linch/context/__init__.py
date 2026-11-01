@@ -8,6 +8,7 @@ from .builder import (
     context_budget_to_dict,
     normalize_context_builder,
 )
+from .file_memory import FileMemoryContextBuilder
 
 __all__ = [
     "ContextBudget",
@@ -15,6 +16,7 @@ __all__ = [
     "ContextBuilderChain",
     "ContextBuildResult",
     "ContextBuildTurn",
+    "FileMemoryContextBuilder",
     "apply_context_budget",
     "context_budget_to_dict",
     "normalize_context_builder",

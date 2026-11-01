@@ -9,7 +9,8 @@ pad for notes, plans, and intermediate state.
 Register them via::
 
     from linch.filesystem import filesystem_tools
-    registry = tools_from_defaults(extra=list(filesystem_tools()))
+    from linch.tools.registry import workspace_tools
+    registry = workspace_tools(extra=list(filesystem_tools()))
 
 Or pass ``Agent(filesystem=StateFileBackend())`` which wires everything
 automatically.
@@ -22,12 +23,12 @@ from .backend import FileBackend, resolve_filesystem_backend
 
 
 def _get_backend(ctx: ToolContext) -> FileBackend:
-    fs = getattr(ctx, "filesystem", None)
+    fs = resolve_filesystem_backend(ctx.deps)
+    if fs is None:
+        fs = getattr(ctx, "filesystem", None)
     if fs is None:
         execution = getattr(ctx, "execution", None)
         fs = getattr(execution, "fs", None)
-    if fs is None:
-        fs = resolve_filesystem_backend(ctx.deps)
     if fs is None:
         raise RuntimeError(
             "No filesystem backend attached. Pass Agent(filesystem=StateFileBackend()) "
@@ -277,7 +278,18 @@ def filesystem_tools(
     write_file: bool = True,
     edit_file: bool = True,
 ) -> list:
-    """Return a list of filesystem tool instances, optionally filtered."""
+    """Create the selected virtual filesystem tool instances.
+
+    Args:
+        ls: Whether to include the ``ls`` listing tool.
+        read_file: Whether to include the ``read_file`` tool.
+        write_file: Whether to include the ``write_file`` tool.
+        edit_file: Whether to include the ``edit_file`` tool.
+
+    Returns:
+        New tool instances in registration order: ``ls``, ``read_file``,
+        ``write_file``, then ``edit_file`` for the enabled options.
+    """
     out = []
     if ls:
         out.append(LsTool())

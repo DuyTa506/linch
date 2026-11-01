@@ -1,8 +1,8 @@
 """Typed configuration objects for Linch.
 
-These replace the loose ``dict`` / ``Any`` parameters on ``Agent`` with
-typed, IDE-friendly dataclasses while keeping all existing dict/camelCase
-kwargs working for backward compatibility.
+These provide typed, IDE-friendly dataclasses for the agent's optional feature
+flags and system-prompt configuration. They keep those settings explicit and
+discoverable when constructing an ``Agent``.
 """
 
 from __future__ import annotations
@@ -18,6 +18,18 @@ class FeatureFlags:
     Setting a flag to ``False`` skips the corresponding ``connect_*`` call in
     :meth:`Agent.session`, so the subsystem's tools and prompt additions are
     never loaded.
+
+    Args:
+        skills: Whether to enable project skill discovery and loading.
+        subagents: Whether to enable the subagent tools and registry.
+        mcp: Whether to connect configured MCP servers for the session.
+        filesystem: Whether to enable the virtual filesystem and result offload.
+
+    Attributes:
+        skills: Whether project skill discovery and loading is enabled.
+        subagents: Whether the subagent tools and registry are enabled.
+        mcp: Whether configured MCP servers are connected for the session.
+        filesystem: Whether the virtual filesystem and result offload are enabled.
 
     Example::
 
@@ -49,6 +61,20 @@ class SystemPromptSection:
     - ``"after_env"``: after the environment block and before appended user
       instructions.
 
+    Args:
+        name: Stable metadata name for the section.
+        text: Text rendered in the system-prompt block.
+        cacheable: Whether the section may be included in a provider cacheable
+            prefix.
+        placement: Prompt layer where the section is inserted.
+
+    Attributes:
+        name: Stable metadata name for the section.
+        text: Text rendered in the system-prompt block.
+        cacheable: Whether the section may be included in a provider cacheable
+            prefix.
+        placement: Prompt layer where the section is inserted.
+
     Section names are metadata for callers/tests; the rendered block contains
     only ``text``.
     """
@@ -63,12 +89,17 @@ class SystemPromptSection:
 class SystemPromptConfig:
     """Controls how the agent system prompt is constructed.
 
+    Args:
+        append: Text appended as a user-provided instruction block.
+        blocks: Additional system blocks to include in the prompt.
+        sections: Named prompt sections inserted at their declared placements.
+        replace_defaults: Whether to omit the built-in identity and protocol
+            blocks.
+
     Attributes:
         append:
-            Text appended as a ``"User-provided instructions"`` block,
-            equivalent to the legacy ``system_prompt`` / ``systemPrompt``
-            parameter.  If both ``append`` and ``system_prompt`` are set,
-            ``append`` wins.
+            Text appended as a ``"User-provided instructions"`` block.  If
+            both ``append`` and ``system_prompt`` are set, ``append`` wins.
         blocks:
             Additional :class:`~linch.types.SystemBlock` objects to
             include.  When ``replace_defaults=False`` these are *prepended*
