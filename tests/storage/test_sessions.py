@@ -43,6 +43,15 @@ async def test_set_invoked_skills_missing_session_raises(store_case) -> None:
     assert await store_case.load("missing") is None
 
 
+@pytest.mark.parametrize("offset", [0, 2, 4, 9])
+async def test_session_list_offset_without_limit(store_case, monkeypatch, offset: int) -> None:
+    timestamps = iter(f"2026-01-01T00:00:0{index}+00:00" for index in range(4))
+    monkeypatch.setattr(f"{type(store_case).__module__}.now_iso", lambda: next(timestamps))
+    sessions = [await store_case.create() for _ in range(4)]
+    expected = [session.id for session in reversed(sessions)]
+    assert [session.id for session in await store_case.list(offset=offset)] == expected[offset:]
+
+
 @pytest.mark.parametrize("add_from_blocker", [True, False])
 async def test_task_dependencies_are_reciprocal(store_case, add_from_blocker: bool) -> None:
     store = store_case

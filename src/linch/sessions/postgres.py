@@ -640,7 +640,8 @@ class PostgresSessionStore:
             else:
                 rows = await conn.fetch(
                     "SELECT id, created_at, updated_at, meta, invoked_skills "
-                    "FROM sessions ORDER BY updated_at DESC"
+                    "FROM sessions ORDER BY updated_at DESC OFFSET $1",
+                    offset,
                 )
         return [_record(row) for row in rows]
 
