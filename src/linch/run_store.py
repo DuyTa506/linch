@@ -1074,8 +1074,10 @@ def _provider_request_payload(request: ProviderRequest) -> dict[str, Any]:
         "output_schema": _output_schema_to_snapshot(request.output_schema),
         "tool_choice": request.tool_choice,
         "stream_partials": request.stream_partials,
-        "_native_catalog_changes": request._native_catalog_changes,
     }
+    # Omitted when unset so non-native requests keep their 3.0.0 snapshot bytes.
+    if request._native_catalog_changes is not None:
+        payload["_native_catalog_changes"] = request._native_catalog_changes
     safe = _strict_model_json(payload)
     assert isinstance(safe, dict)
     return safe
@@ -1164,7 +1166,7 @@ def _validated_snapshot_payload(snapshot: ModelInputSnapshot) -> dict[str, Any]:
         ) from exc
     if not isinstance(raw, dict):
         raise ModelInputSnapshotError("model-input snapshot request payload must be an object")
-    keys = set(raw)
+    keys = set(raw) | {"_native_catalog_changes"}
     if keys != _MODEL_INPUT_PAYLOAD_FIELDS:
         raise ModelInputSnapshotError(
             "model-input snapshot request fields do not match codec "
@@ -1347,7 +1349,7 @@ def decode_model_input_snapshot(
         tool_choice=cast(Any, tool_choice),
         stream_partials=_optional_bool(raw["stream_partials"], "stream_partials"),
         _native_catalog_changes=_optional_bool(
-            raw["_native_catalog_changes"], "_native_catalog_changes"
+            raw.get("_native_catalog_changes"), "_native_catalog_changes"
         ),
     )
 

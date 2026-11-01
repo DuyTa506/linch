@@ -816,3 +816,13 @@ async def test_option_off_context_registration_waits_for_next_catalog_sync(adapt
     assert len(notices(session)) == 1
     assert notices(session)[0].added_tools == ("late",)
     await agent.close()
+
+
+def test_option_off_leaves_request_flag_unset_for_snapshot_compatibility() -> None:
+    from types import SimpleNamespace
+
+    from linch.loop.request import _native_catalog_flag
+    from linch.providers.anthropic import AnthropicProvider
+
+    session = SimpleNamespace(agent=SimpleNamespace(provider=AnthropicProvider()))
+    assert _native_catalog_flag(session, "claude-opus-5-5", positional=False) is None

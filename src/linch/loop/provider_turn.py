@@ -284,7 +284,8 @@ async def prepare_provider_turn(ctx: ProviderPreparationContext) -> AsyncGenerat
     if req is not None and ctx.force_final_pending and not ctx.exact_pending_replay:
         req.tools = []
         req.tool_choice = None
-        req._native_catalog_changes = False
+        if getattr(req, "_native_catalog_changes", None):
+            req._native_catalog_changes = False
 
     ctx.outcome_req = req
     ctx.outcome_context = context_result

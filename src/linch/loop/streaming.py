@@ -322,7 +322,8 @@ async def _stream_turn_with_recovery(
         if getattr(session, "current_turn_allowed_tools", None) == []:
             req.tools = []
             req.tool_choice = None
-            req._native_catalog_changes = False
+            if getattr(req, "_native_catalog_changes", None):
+                req._native_catalog_changes = False
 
     async def dispatch() -> AsyncGenerator[Any, None]:
         async with aclosing(

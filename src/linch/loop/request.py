@@ -62,6 +62,14 @@ def build_user_message(prompt: str, images: list[dict[str, str]] | None = None) 
     return Message(role="user", content=content)
 
 
+def _native_catalog_flag(session: Session, model: str, *, positional: bool) -> bool | None:
+    """Return ``None`` off native providers so snapshots keep their 3.0.0 bytes."""
+    capabilities = getattr(session.agent.provider, "capabilities", None)
+    if capabilities is None or capabilities(model).catalog_changes != "positional":
+        return None
+    return positional
+
+
 def final_text(message: Message) -> str | None:
     for block in message.content:
         if isinstance(block, TextBlock):
@@ -288,7 +296,7 @@ def _build_turn_request(
         # A run-level fallback (set by the model-fallback recovery path) overrides
         # agent.model for the rest of the run; an explicit model_override wins.
         model=model,
-        _native_catalog_changes=positional,
+        _native_catalog_changes=_native_catalog_flag(session, model, positional=positional),
         system=base_system,
         tools=wire_tools,
         messages=messages,
