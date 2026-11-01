@@ -61,3 +61,108 @@ async def test_provider_services_are_isolated_and_errors_are_private(otel):
     assert recorded.status.description is None
     assert not recorded.events
     assert "private prompt" not in str(recorded.attributes)
+
+
+@pytest.mark.parametrize("kind", ["direct", "provider"])
+async def test_late_service_registration_disposal_and_replacement(otel, kind):
+    from types import SimpleNamespace
+
+    from linch import Context
+    from linch._telemetry import telemetry_for
+
+    host, exporter, reader = otel
+    context = Context()
+    agent = SimpleNamespace(context=context)
+    telemetry_for(agent)
+    tracer_key, meter_key = (
+        ("tracer", "meter") if kind == "direct" else ("tracer_provider", "meter_provider")
+    )
+    tracer = host.tracer_provider.get_tracer("test")
+    meter = host.meter_provider.get_meter("test")
+    tracer_service = tracer if kind == "direct" else host.tracer_provider
+    meter_service = meter if kind == "direct" else host.meter_provider
+    first_trace = context.register(tracer_key, tracer_service)
+    first_meter = context.register(meter_key, meter_service)
+    try:
+        refreshed = telemetry_for(agent)
+        with refreshed.tracer.start_as_current_span("late"):
+            pass
+        await refreshed.store_call("late", asyncio.sleep(0))
+        assert [span.name for span in exporter.get_finished_spans()] == ["late"]
+        assert reader.get_metrics_data() is not None
+        assert telemetry_for(agent) is refreshed
+        bound = refreshed.store_duration
+        assert telemetry_for(agent).store_duration is bound
+        await first_trace.dispose()
+        await first_meter.dispose()
+        refreshed = telemetry_for(agent)
+        with refreshed.tracer.start_as_current_span("disposed"):
+            pass
+        assert [span.name for span in exporter.get_finished_spans()] == ["late"]
+        assert not refreshed.metrics_enabled
+        context.register(tracer_key, tracer_service)
+        context.register(meter_key, meter_service)
+        refreshed = telemetry_for(agent)
+        with refreshed.tracer.start_as_current_span("replaced"):
+            pass
+        await refreshed.store_call("replaced", asyncio.sleep(0))
+        assert [span.name for span in exporter.get_finished_spans()] == ["late", "replaced"]
+    finally:
+        await context.dispose()
+
+
+async def test_parent_service_replacement_preserves_agent_isolation(otel):
+    from types import SimpleNamespace
+
+    from linch import Context
+    from linch._telemetry import telemetry_for
+
+    host, exporter, _ = otel
+    child = host.scope("child", isolate_events=True)
+    other = Context()
+    child_agent, other_agent = SimpleNamespace(context=child), SimpleNamespace(context=other)
+    original = telemetry_for(child_agent)
+    telemetry_for(other_agent)
+    override = child.register("tracer", trace.NoOpTracer())
+    assert not telemetry_for(child_agent).tracing_enabled
+    await override.dispose()
+    with telemetry_for(child_agent).tracer.start_as_current_span("restored parent"):
+        pass
+    assert telemetry_for(child_agent) is original
+    assert not telemetry_for(other_agent).tracing_enabled
+    assert [span.name for span in exporter.get_finished_spans()] == ["restored parent"]
+    await other.dispose()
+
+
+@pytest.mark.parametrize("explicit_proxy", [False, True])
+async def test_late_global_providers_refresh_deferred_bindings(otel, monkeypatch, explicit_proxy):
+    from types import SimpleNamespace
+
+    from opentelemetry import metrics
+    from opentelemetry.metrics import _internal as metric_api
+
+    from linch import Context
+    from linch._telemetry import telemetry_for
+
+    host, exporter, reader = otel
+    monkeypatch.setattr(trace, "_TRACER_PROVIDER", None)
+    monkeypatch.setattr(metric_api, "_METER_PROVIDER", None)
+    context = Context()
+    if explicit_proxy:
+        context.register("tracer", trace.ProxyTracer("test"))
+        # Direct tracer takes precedence over a disabled scoped provider.
+        context.register("tracer_provider", trace.NoOpTracerProvider())
+    agent = SimpleNamespace(context=context)
+    telemetry = telemetry_for(agent)
+    assert not telemetry.tracing_enabled
+    monkeypatch.setattr(trace, "_TRACER_PROVIDER", host.tracer_provider)
+    monkeypatch.setattr(metric_api, "_METER_PROVIDER", host.meter_provider)
+    refreshed = telemetry_for(agent)
+    assert refreshed.tracing_enabled
+    with refreshed.tracer.start_as_current_span("late global"):
+        pass
+    await refreshed.store_call("late global", asyncio.sleep(0))
+    assert [span.name for span in exporter.get_finished_spans()] == ["late global"]
+    assert reader.get_metrics_data() is not None
+    assert metrics.get_meter_provider() is host.meter_provider
+    await context.dispose()
