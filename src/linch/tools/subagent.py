@@ -212,7 +212,7 @@ class SubagentTool:
             display_name = definition.frontmatter.name
 
         subagent_run_id = f"sa_{uuid4().hex[:8]}"
-        worker_id = f"agent-{uuid4().hex[:4]}"
+        worker_id = f"agent-{uuid4().hex}"
         run_in_background = bool(input.get("run_in_background", False))
         if run_in_background and not self._enable_background_subagents:
             return ToolResult(
@@ -240,6 +240,7 @@ class SubagentTool:
             prompt=str(input["prompt"]),
             display_name=display_name,
             subagent_run_id=subagent_run_id,
+            mailbox_address=worker_id,
             signal=ctx.signal,
             emit=emit_fn,
             retain=self._retain_subagents,
