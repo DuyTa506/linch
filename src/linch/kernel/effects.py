@@ -127,7 +127,7 @@ class EffectScope:
     __slots__ = ("_closed", "_disposers", "_teardown")
 
     def __init__(self) -> None:
-        self._disposers: list[Disposable] = []
+        self._disposers: dict[int, Disposable] = {}
         self._closed = False
         self._teardown = Disposable(self._dispose_all)
 
@@ -168,11 +168,11 @@ class EffectScope:
 
     def _track(self, disposer: Disposable) -> None:
         if not disposer.disposed:
-            self._disposers.append(disposer)
+            self._disposers[id(disposer)] = disposer
             disposer._scopes.add(self)
 
     def _discard(self, disposer: Disposable) -> None:
-        self._disposers[:] = [item for item in self._disposers if item is not disposer]
+        self._disposers.pop(id(disposer), None)
 
     def effect(self, fn: Callable[[], Any]) -> Disposable:
         """Run *fn* now and register the teardown it yields.
@@ -227,7 +227,7 @@ class EffectScope:
     async def _dispose_all(self) -> None:
         # Snapshot because successful entries remove themselves while teardown
         # runs; failed entries remain tracked for the next dispose() call.
-        await _dispose_reverse(list(self._disposers))
+        await _dispose_reverse(list(self._disposers.values()))
         self._disposers.clear()
 
 

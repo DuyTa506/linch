@@ -176,4 +176,4 @@ def test_failed_agent_constructor_does_not_leave_host_scope_orphaned(option: str
         )
 
     assert host._children == before_children
-    assert host._scope._disposers == before_disposers
+    assert list(host._scope._disposers) == before_disposers
