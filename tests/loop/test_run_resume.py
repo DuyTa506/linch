@@ -437,11 +437,84 @@ async def test_resume_after_final_tool_ack_does_not_treat_ack_as_feedback() -> N
     assert events[-1].structured_output == {"value": 1}
 
 
+async def test_resume_final_tool_ack_and_hook_retry_are_history_idempotent() -> None:
+    """A composite terminal-tool tail must not duplicate its acknowledgement."""
+    from linch import HookResult
+    from linch.types import ToolResultBlock
+    from tests.support.providers import ScriptedProvider, ToolUseTurn
+
+    class RetryThenAccept:
+        resume_policy_id = "test.resume-final-tool-retry"
+        resume_policy_version = "1"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def on_before_final_answer(self, _ctx: Any) -> Any:
+            self.calls += 1
+            return HookResult.retry("please revise") if self.calls == 1 else None
+
+    session_store = _CrashAfterSessionMessageStore(_memory_session_store(), "please revise")
+    run_store = _memory_run_store()
+    agent = _agent(
+        provider=ScriptedProvider(
+            [ToolUseTurn(tool_name="answer", tool_input={"value": 1}, tool_id="final-1")]
+        ),
+        final_tool_name="answer",
+        hooks=[RetryThenAccept()],
+        session_store=session_store,
+        run_store=run_store,
+    )
+    session = await agent.session(id="s1")
+    run_id = ""
+    with pytest.raises(_Crash, match="after-message:please revise"):
+        async for event in session.run("hello"):
+            if event.type == "system":
+                run_id = event.run_id
+    assert run_id
+    await agent.close()
+
+    resumed_provider = ScriptedProvider(
+        [ToolUseTurn(tool_name="answer", tool_input={"value": 2}, tool_id="final-2")]
+    )
+    restarted = _agent(
+        provider=resumed_provider,
+        final_tool_name="answer",
+        hooks=[RetryThenAccept()],
+        session_store=session_store.store,
+        run_store=run_store,
+    )
+    resumed = await restarted.session(id="s1")
+    events = await _collect(resumed.resume(run_id))
+
+    assert events[-1].type == "result"
+    assert events[-1].subtype == "success"
+    assert events[-1].structured_output == {"value": 2}
+    assert len(resumed_provider.requests) == 1
+    assert (
+        sum(
+            isinstance(block, ToolResultBlock) and block.tool_use_id == "final-1"
+            for message in resumed.full_history
+            for block in message.content
+        )
+        == 1
+    )
+    assert (
+        sum(
+            any("please revise" in getattr(block, "text", "") for block in message.content)
+            for message in resumed.full_history
+        )
+        == 1
+    )
+
+
 async def test_resume_after_before_final_answer_retry_does_not_replay_as_turn_feedback() -> None:
     """A hook retry persisted after the assistant checkpoint is not turn feedback."""
     from linch import HookResult
+    from linch.types import TextBlock
+    from tests.support.providers import ScriptedProvider, TextTurn
 
-    class RetryOnce:
+    class RetryThenAccept:
         resume_policy_id = "test.resume-retry-once"
         resume_policy_version = "1"
 
@@ -454,11 +527,11 @@ async def test_resume_after_before_final_answer_retry_does_not_replay_as_turn_fe
                 return HookResult.retry("please revise")
             return None
 
-    hook = RetryOnce()
+    hook = RetryThenAccept()
     session_store = _CrashAfterSessionMessageStore(_memory_session_store(), "please revise")
     run_store = _memory_run_store()
     agent = _agent(
-        provider=ScriptProvider(),
+        provider=ScriptedProvider([TextTurn("draft")]),
         hooks=[hook],
         session_store=session_store,
         run_store=run_store,
@@ -472,9 +545,11 @@ async def test_resume_after_before_final_answer_retry_does_not_replay_as_turn_fe
     assert run_id
     await agent.close()
 
+    resumed_hook = RetryThenAccept()
+    restarted_provider = ScriptedProvider([TextTurn("revised")])
     restarted = _agent(
-        provider=ScriptProvider(),
-        hooks=[hook],
+        provider=restarted_provider,
+        hooks=[resumed_hook],
         session_store=session_store.store,
         run_store=run_store,
     )
@@ -483,11 +558,27 @@ async def test_resume_after_before_final_answer_retry_does_not_replay_as_turn_fe
 
     assert events[-1].type == "result"
     assert events[-1].subtype == "success"
+    assert events[-1].final_text == "revised"
+    assert len(restarted_provider.requests) == 1
+    assert (
+        sum(
+            any("please revise" in getattr(block, "text", "") for block in message.content)
+            for message in resumed.full_history
+        )
+        == 1
+    )
+    assert [
+        next((block.text for block in message.content if isinstance(block, TextBlock)), "")
+        for message in resumed.full_history
+        if message.role == "assistant"
+    ] == ["draft", "revised"]
 
 
 async def test_resume_after_truncation_nudge_clears_replayed_feedback() -> None:
     """A persisted truncation nudge must not poison the following turn."""
     from linch import TruncationRecovery
+    from linch.loop.turn_stopping import TurnStoppingDecision
+    from linch.types import Message, TextBlock
     from tests.support.providers import ScriptedProvider, TextTurn
 
     session_store = _CrashAfterSessionMessageStore(_memory_session_store(), "cut off")
@@ -508,16 +599,76 @@ async def test_resume_after_truncation_nudge_clears_replayed_feedback() -> None:
     await agent.close()
 
     restarted = _agent(
-        provider=ScriptedProvider([TextTurn("done")]),
+        provider=ScriptedProvider([TextTurn("done"), TextTurn("final")]),
         truncation_recovery=TruncationRecovery(max_attempts=1, feedback="cut off; continue"),
         session_store=session_store.store,
         run_store=run_store,
+    )
+    restarted.on_turn_stopping(
+        lambda event: (
+            TurnStoppingDecision(
+                "continue",
+                feedback=(Message(role="user", content=[TextBlock(text="next turn")]),),
+            )
+            if event.turn_index == 1
+            else None
+        )
     )
     resumed = await restarted.session(id="s1")
     events = await _collect(resumed.resume(run_id))
 
     assert events[-1].type == "result"
     assert events[-1].subtype == "success"
+    assert events[-1].final_text == "final"
+    assert len(restarted.provider.requests) == 2
+
+
+async def test_resume_rejects_changed_turn_stopping_feedback_decision() -> None:
+    """A changed turn-stopping decision must not discard persisted feedback."""
+    from linch.loop.turn_stopping import TurnStoppingDecision
+    from linch.types import Message, TextBlock
+
+    class ContinueThenAccept:
+        def __init__(self) -> None:
+            self.continue_ = True
+
+        def __call__(self, _event: Any) -> Any:
+            if self.continue_:
+                return TurnStoppingDecision(
+                    "continue", feedback=(Message(role="user", content=[TextBlock(text="retry")]),)
+                )
+            return TurnStoppingDecision("accept")
+
+    listener = ContinueThenAccept()
+    session_store = _CrashAfterSessionMessageStore(_memory_session_store(), "retry")
+    run_store = _memory_run_store()
+    agent = _agent(
+        provider=ScriptProvider(),
+        session_store=session_store,
+        run_store=run_store,
+    )
+    agent.on_turn_stopping(listener)
+    session = await agent.session(id="s1")
+    run_id = ""
+    with pytest.raises(_Crash, match="after-message:retry"):
+        async for event in session.run("hello"):
+            if event.type == "system":
+                run_id = event.run_id
+    assert run_id
+    await agent.close()
+
+    listener.continue_ = False
+    restarted = _agent(
+        provider=ScriptProvider(),
+        session_store=session_store.store,
+        run_store=run_store,
+    )
+    restarted.on_turn_stopping(listener)
+    resumed = await restarted.session(id="s1")
+    events = await _collect(resumed.resume(run_id))
+
+    assert events[-1].type == "result"
+    assert events[-1].subtype == "error"
 
 
 async def test_resume_after_one_tool_completed_runs_only_missing_tool() -> None:
