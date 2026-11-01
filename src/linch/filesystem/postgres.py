@@ -37,6 +37,11 @@ CREATE TABLE IF NOT EXISTS agentkit_files (
 """
 
 
+def _escape_like(value: str) -> str:
+    """Escape PostgreSQL LIKE metacharacters in a literal path prefix."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 class PostgresFileBackend:
     """Virtual filesystem backed by a Postgres table.
 
@@ -151,9 +156,10 @@ class PostgresFileBackend:
                 return [r["path"] for r in rows]
             pfx = normalize_path(prefix).rstrip("/")
             rows = await conn.fetch(
-                "SELECT path FROM agentkit_files WHERE path = $1 OR path LIKE $2 ORDER BY path",
+                "SELECT path FROM agentkit_files "
+                "WHERE path = $1 OR path LIKE $2 ESCAPE '\\' ORDER BY path",
                 pfx,
-                pfx + "/%",
+                _escape_like(pfx) + "/%",
             )
             return [r["path"] for r in rows]
 
@@ -177,7 +183,9 @@ class PostgresFileBackend:
         pool = await self._ensure()
         async with pool.acquire() as conn:
             async with conn.transaction():
-                row = await conn.fetchrow("SELECT content FROM agentkit_files WHERE path = $1", p)
+                row = await conn.fetchrow(
+                    "SELECT content FROM agentkit_files WHERE path = $1 FOR UPDATE", p
+                )
                 if row is None:
                     raise FileNotFoundError(p)
                 text: str = row["content"]
