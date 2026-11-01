@@ -47,6 +47,24 @@ def test_builtin_legacy_argument_aliases_are_rejected(tool_cls, raw, error) -> N
         tool_cls().validate(raw)
 
 
+@pytest.mark.parametrize(
+    ("legacy_field", "raw"),
+    [
+        (
+            "old",
+            {"file_path": "a.txt", "old": "before", "new_string": "after"},
+        ),
+        (
+            "new",
+            {"file_path": "a.txt", "old_string": "before", "new": "after"},
+        ),
+    ],
+)
+def test_edit_legacy_replacement_aliases_are_rejected(legacy_field, raw) -> None:
+    with pytest.raises(ValueError, match=legacy_field):
+        EditTool().validate(raw)
+
+
 def test_glob_path_alias_does_not_select_target_directory() -> None:
     assert GlobTool().validate({"glob_pattern": "*.py", "path": "other"}) == {
         "glob_pattern": "*.py"

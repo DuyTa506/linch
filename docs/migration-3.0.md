@@ -23,6 +23,9 @@ The tables below group the 2.x removals and replacements by area.
 | `coding_tools`, `default_tools`, `defaultTools`, `tools_from_defaults` | `workspace_tools(exclude=..., extra=...)`; `from linch import workspace_tools` |
 | `ToolRegistry.add/remove` | `register/unregister`; `register` and `replace` return reversible `Disposable` handles; `from linch import ToolRegistry` |
 | `permissions["canUseTool"]` and `.canUseTool` | `permissions["can_use_tool"]` and `.can_use_tool` |
+| Tool `.schema` attribute | Tool `.input_schema` attribute |
+| AskUser response `ok` / `confirmed` keys | `accepted`, or `answers`-only response inference |
+| Callback, hook, and pipeline `policy_id` / `policy_version` attributes | `resume_policy_id` / `resume_policy_version` |
 | `Session(provider_view=..., full_history=...)` | `session_log=SessionLog.seed(historical=..., visible=...)`; `from linch import Session, SessionLog` |
 | `SessionLog.derive_messages()` | Read `session.provider_view`; append with `await session.append(...)` |
 | Mutation of `provider_view` / `full_history` | Detached sequence snapshots; append messages or record a logged projection |
@@ -75,6 +78,7 @@ Old package names in the first column are relative to the former top-level
 | Root eval suite/benchmark exports | `from linch.ext.evals import EvalSuite, EvalBenchmarkTarget, EvalTargetResult, EvalBenchmarkResult, load_eval_suite, load_scripted_turns, run_eval_benchmark` |
 | Root scripted-provider exports | `from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn` |
 | Root eval scorers (except removed `memory_recalled`) | `from linch.ext.evals import text_contains, tool_called, schema_valid, cost_under, context_selected_tool, context_not_trimmed, context_metadata_contains, recovery_succeeded, run_completed` |
+| `text_contains` scorer fields `text` / `contains` | `substring` (omitted field defaults to `{expected}`) |
 | `deep_agent`; root preset/profile/prompt exports | `from linch.ext.deep_agent import create_deep_agent, DeepAgentProfile, DEEP_AGENT_PROFILES, DEEP_AGENT_SYSTEM_PROMPT, DEEP_AGENT_SUBAGENTS` |
 | `reports`; root report helpers | `from linch.ext.reports import RunReport, build_run_report, load_run_report` |
 | `loop_runner`; root loop spec/runner exports | `from linch.ext.loop_runner import LoopSpec, LoopTrigger, LoopTickResult, LoopRunner` |

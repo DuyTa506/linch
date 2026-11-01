@@ -66,6 +66,31 @@ async def test_tool_contract_accepts_input_aware_tool() -> None:
     assert result.content == "contract-session:alpha"
 
 
+async def test_tool_contract_rejects_tool_with_only_legacy_schema_attribute() -> None:
+    import pytest
+
+    from linch import ToolResult, assert_tool_contract
+
+    class LegacySchemaTool:
+        name = "LegacySchema"
+        description = "Legacy schema test tool."
+        schema = {"type": "object"}
+        scope = "read"
+        parallel = True
+
+        def validate(self, raw: dict[str, Any]) -> dict[str, Any]:
+            return dict(raw)
+
+        def summarize(self, input: dict[str, Any]) -> str:
+            return self.name
+
+        async def execute(self, input: dict[str, Any], ctx: Any) -> ToolResult:
+            return ToolResult(content="ok")
+
+    with pytest.raises(AssertionError, match="input_schema"):
+        await assert_tool_contract(LegacySchemaTool(), valid_input={})
+
+
 async def test_file_backend_contract_accepts_state_backend() -> None:
     from linch import StateFileBackend, assert_file_backend_contract
 

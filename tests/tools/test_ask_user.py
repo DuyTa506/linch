@@ -154,6 +154,26 @@ async def test_ask_user_answers_without_accepted_flag_count_as_accepted() -> Non
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"ok": True},
+        {"confirmed": True},
+        {"ok": True, "answers": {"mode": "Fast"}},
+        {"confirmed": False, "answers": {"mode": "Fast"}},
+        {"answers": {"mode": "Fast"}, "unexpected": True},
+    ],
+)
+async def test_ask_user_unsupported_response_keys_fail_closed(response) -> None:
+    from linch.tools import AskUserTool
+
+    tool = AskUserTool(lambda request, ctx: response)
+    result = await tool.execute(tool.validate(_input()), _ctx())
+
+    assert result.summary == "User declined AskUser"
+
+
+@pytest.mark.asyncio
 async def test_ask_user_sync_handler_runs_off_the_event_loop() -> None:
     """A blocking synchronous handler must run on a worker thread, not the loop."""
     import threading

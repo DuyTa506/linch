@@ -191,6 +191,39 @@ async def test_opaque_custom_policy_rejected_for_durable_run(kind: str) -> None:
         _ = [event async for event in session.run("go")]
 
 
+@pytest.mark.parametrize("kind", ["callback", "hook"])
+async def test_legacy_policy_attributes_do_not_identify_durable_policy(kind: str) -> None:
+    class Callback:
+        policy_id = "legacy-policy"
+        policy_version = "1"
+        resume_policy_config: dict[str, Any] = {}
+
+        async def __call__(self, request: Any) -> dict[str, str]:
+            return {"behavior": "allow"}
+
+    class Hook:
+        policy_id = "legacy-policy"
+        policy_version = "1"
+        resume_policy_config: dict[str, Any] = {}
+
+        def on_pre_tool_use(self, ctx: Any) -> None:
+            return None
+
+    agent = _agent(
+        run_store=InMemoryRunStore(),
+        session_store=InMemorySessionStore(),
+        permissions=(
+            {"mode": "default", "can_use_tool": Callback()}
+            if kind == "callback"
+            else {"mode": "skip-dangerous"}
+        ),
+        hooks=[Hook()] if kind == "hook" else None,
+    )
+    session = await agent.session()
+    with pytest.raises(ConfigError, match="resume_policy_id"):
+        _ = [event async for event in session.run("go")]
+
+
 def _docker_world(**kwargs: Any) -> Any:
     from linch.execution import RemoteExecutionBackend
     from linch.tools.execution import DockerBackend

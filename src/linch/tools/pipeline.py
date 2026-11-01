@@ -258,7 +258,7 @@ class ToolPipeline:
 
 
 def _listener_resume_identity(listener: Any, *, phase: str) -> dict[str, Any]:
-    policy_id = getattr(listener, "resume_policy_id", getattr(listener, "policy_id", None))
+    policy_id = getattr(listener, "resume_policy_id", None)
     if not isinstance(policy_id, str) or not policy_id:
         name = getattr(listener, "__qualname__", listener.__class__.__qualname__)
         raise ValueError(
@@ -266,11 +266,7 @@ def _listener_resume_identity(listener: Any, *, phase: str) -> dict[str, Any]:
             "listener.resume_policy_id (plus optional resume_policy_version/"
             "resume_policy_config)"
         )
-    policy_version = getattr(
-        listener,
-        "resume_policy_version",
-        getattr(listener, "policy_version", None),
-    )
+    policy_version = getattr(listener, "resume_policy_version", None)
     callable_module = getattr(listener, "__module__", listener.__class__.__module__)
     callable_name = getattr(listener, "__qualname__", listener.__class__.__qualname__)
     config = getattr(listener, "resume_policy_config", None)

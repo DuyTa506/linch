@@ -7,13 +7,24 @@ from tests.support.agents import make_agent
 from tests.support.providers import ScriptedProvider, TextTurn
 
 
-def test_agent_does_not_read_camel_case_permission_callback() -> None:
+@pytest.mark.parametrize(
+    "kind",
+    ["mapping", "object"],
+)
+def test_agent_does_not_read_camel_case_permission_callback(kind: str) -> None:
+    from types import SimpleNamespace
+
     async def allow(_request: object) -> dict[str, str]:
         return {"behavior": "allow"}
 
+    permissions: object = (
+        {"mode": "default", "canUseTool": allow}
+        if kind == "mapping"
+        else SimpleNamespace(mode="default", canUseTool=allow)
+    )
     agent = make_agent(
         ScriptedProvider([TextTurn("done")]),
-        permissions={"mode": "default", "canUseTool": allow},
+        permissions=permissions,
         run_store=None,
     )
 
