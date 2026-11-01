@@ -1878,6 +1878,23 @@ def _lease_lost(run_id: str, expected: int, actual: int | None = None) -> LeaseL
     return LeaseLostError(f"lease lost for run {run_id}: expected epoch {expected}{detail}")
 
 
+def _supports_lease_keyword(method: Any) -> bool:
+    """Report whether a callable can receive the explicit lease keyword."""
+    try:
+        signature = inspect.signature(method)
+    except (TypeError, ValueError):
+        return False
+    lease_parameter = signature.parameters.get("lease")
+    return (
+        lease_parameter is not None
+        and lease_parameter.kind
+        in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    ) or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
+
+
 def _lease_kwargs(method: Any, lease: RunLease | None) -> dict[str, Any]:
     """Build a mutation keyword mapping without dropping an explicit lease.
 
@@ -1887,14 +1904,7 @@ def _lease_kwargs(method: Any, lease: RunLease | None) -> dict[str, Any]:
     """
     if lease is None:
         return {}
-    try:
-        signature = inspect.signature(method)
-    except (TypeError, ValueError):
-        return {"lease": lease}
-    if "lease" not in signature.parameters and not any(
-        parameter.kind is inspect.Parameter.VAR_KEYWORD
-        for parameter in signature.parameters.values()
-    ):
+    if not _supports_lease_keyword(method):
         raise TypeError(f"{getattr(method, '__qualname__', method)!s} does not support lease")
     return {"lease": lease}
 
@@ -1922,6 +1932,16 @@ def _preflight_leased_store(
     if lease is None:
         return
     _validate_lease_run(run_id, lease)
+    _preflight_lease_capabilities(store, include_snapshots=include_snapshots)
+
+
+def _preflight_lease_capabilities(
+    store: Any,
+    *,
+    include_snapshots: bool = False,
+    include_lifecycle: bool = False,
+) -> None:
+    """Check leased mutation and optional lifecycle signatures before setup."""
     required = (
         "create_run",
         "save_checkpoint",
@@ -1935,13 +1955,15 @@ def _preflight_leased_store(
     if include_snapshots:
         snapshot_methods = ("save", "delete", "prune")
         optional += snapshot_methods
-    for name in (*required, *optional):
+    lifecycle = ("claim", "renew", "release") if include_lifecycle else ()
+    for name in (*required, *optional, *lifecycle):
         method = getattr(store, name, None)
         if not callable(method):
-            if name in required or name in snapshot_methods:
+            if name in required or name in snapshot_methods or name in lifecycle:
                 raise ConfigError(f"run store lease capability missing {name}")
             continue
-        _lease_kwargs(method, lease)
+        if not _supports_lease_keyword(method) and name not in {"claim", "renew", "release"}:
+            raise TypeError(f"{getattr(method, '__qualname__', method)!s} does not support lease")
 
 
 class InMemoryRunStore:

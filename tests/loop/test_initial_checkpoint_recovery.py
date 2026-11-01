@@ -314,8 +314,6 @@ async def test_startup_store_boundary_takeover_trace(kind, variant, pg_dsn):
                 if kind == "memory":
                     raw._lease_state[rid] = ("old", 0, old.epoch)
                     peer = copy.copy(raw)
-                    for name in ("_held_leases", "_lease_ttls", "_lease_owners"):
-                        setattr(peer, name, {})
                 else:
                     await (await raw._ensure()).execute(
                         "UPDATE runs SET lease_expires_at=0 WHERE id=$1", rid
@@ -332,15 +330,15 @@ async def test_startup_store_boundary_takeover_trace(kind, variant, pg_dsn):
                     not in record.checkpoint.extension_state.get("linch.startup", {})
                 )
                 iterator = (
-                    fresh.resume(rid)
+                    fresh.resume(rid, RunOptions(lease=new))
                     if record.checkpoint
-                    else fresh.run("hello", RunOptions(run_id=rid))
+                    else fresh.run("hello", RunOptions(run_id=rid, lease=new))
                 )
                 try:
                     _ = [event async for event in iterator]
                     session = fresh
                     with pytest.raises(LeaseLostError):
-                        await raw.mark_failed(rid, error={"name": "zombie"})
+                        await raw.mark_failed(rid, error={"name": "zombie"}, lease=old)
                 finally:
                     await second.close()
             record = await raw.load_run(rid)

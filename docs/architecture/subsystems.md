@@ -123,13 +123,16 @@ stateDiagram-v2
 
 ### Lease fencing
 
-`RunLease` contains `run_id`, `owner`, `epoch`, and `expires_at`. A Postgres
-claim is a conditional `UPDATE ... RETURNING`: an unexpired lease owned by a
-different worker returns `RunLeaseConflictError`; a takeover increments the
-epoch. Renewal keeps the epoch, and release clears ownership while advancing
-the epoch. When a store has a held lease, every checkpoint, status, event, and
-model-input-snapshot write includes the owner and epoch predicate. A stale
-holder receives `LeaseLostError` and cannot append an event or change status.
+`RunLease` contains `run_id`, `owner`, `epoch`, `expires_at`, and `ttl_s`. A
+Postgres claim is a conditional `UPDATE ... RETURNING`: an unexpired lease owned
+by a different worker returns `RunLeaseConflictError`; a takeover increments the
+epoch. Renewal keeps the epoch and uses the token's TTL, while release clears
+ownership and advances the epoch. Every checkpoint, status, event, and
+model-input-snapshot mutation accepts an explicit `lease=` token and includes
+its owner and epoch predicate. A stale holder receives `LeaseLostError` and
+cannot append an event or change status. Releasing a token permanently fences
+that token; unleased mutations remain supported for runs without worker
+ownership.
 
 Stores without the optional lease capability, or runs started without a held
 lease, retain the single-process behavior of the `RunStore` protocol.

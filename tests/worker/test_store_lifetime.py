@@ -257,7 +257,10 @@ async def test_worker_jobs_reuse_verified_stores_without_schema_protocol_calls(p
         assert all(all(a is b for a, b in zip(handles[0], item, strict=True)) for item in handles)
         run, session, borrowed = handles[0]
         assert run._initialized and session._initialized
-        assert run._held_leases == run._lease_owners == run._lease_ttls == {}
+        assert await measured.fetchval(
+            "SELECT count(*) FROM runs WHERE id=ANY($1::text[]) AND lease_owner IS NULL",
+            ids,
+        ) == len(ids)
         assert not worker._active_runs
         metrics.sql.clear()
         metrics.reset_round_trip_metrics()
@@ -289,11 +292,14 @@ async def test_stale_release_does_not_erase_new_claim_on_same_store(pool):
     new = await store.claim(record.id, "new", 30)
     with pytest.raises(LeaseLostError):
         await store.release(old)
-    assert store._held_leases[record.id] == new.epoch
-    assert store._lease_owners[record.id] == new.owner
+    row = await pool.fetchrow("SELECT lease_owner,lease_epoch FROM runs WHERE id=$1", record.id)
+    assert row["lease_epoch"] == new.epoch
+    assert row["lease_owner"] == new.owner
     await store.renew(new)
     await store.release(new)
-    assert store._held_leases == store._lease_owners == store._lease_ttls == {}
+    row = await pool.fetchrow("SELECT lease_owner,lease_epoch FROM runs WHERE id=$1", record.id)
+    assert row["lease_owner"] is None
+    assert row["lease_epoch"] == new.epoch + 1
 
 
 @pytest.mark.parametrize("wrong", ["run_store", "session_store"])
@@ -385,11 +391,14 @@ async def test_suspended_stale_release_preserves_claim_published_during_await(po
         resume.set()
         with pytest.raises(LeaseLostError):
             await releasing
-        assert store._held_leases[record.id] == new.epoch
-        assert store._lease_owners[record.id] == new.owner
+        row = await pool.fetchrow("SELECT lease_owner,lease_epoch FROM runs WHERE id=$1", record.id)
+        assert row["lease_epoch"] == new.epoch
+        assert row["lease_owner"] == new.owner
         await store.renew(new)
         await store.release(new)
-        assert store._held_leases == store._lease_owners == store._lease_ttls == {}
+        row = await pool.fetchrow("SELECT lease_owner,lease_epoch FROM runs WHERE id=$1", record.id)
+        assert row["lease_owner"] is None
+        assert row["lease_epoch"] == new.epoch + 1
     finally:
         resume.set()
         await asyncio.gather(releasing, return_exceptions=True)

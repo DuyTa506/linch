@@ -63,7 +63,6 @@ from .checkpoint import (
     _alignment_queue_to_dicts,
     _background_workers_to_dict,
     _consumed_auxiliary_receipt_ids_from_events,
-    _flush_events,
     _loop_guard_is_active,
     _loop_guard_state_from_dict,
     _loop_guard_state_to_dict,
@@ -536,6 +535,7 @@ class RunRuntime:
         self.opts = opts
         self.run_id = run_id
         self.lease = getattr(opts, "lease", None)
+        self.event_buffer: RunEventBuffer | None = None
         self.run_record = run_record
         self.resume_checkpoint = resume_checkpoint
         self.started = 0.0
@@ -659,13 +659,14 @@ class RunRuntime:
                 session, "run.load_events", agent.run_store.load_events(run_id)
             )
             initial_event_seq = max((row.seq for row in runtime.stored_events), default=0)
-        session._event_journal = RunEventBuffer(
+        runtime.event_buffer = RunEventBuffer(
             agent.run_store,
             run_id,
             lease=runtime.lease,
             initial_seq=initial_event_seq,
             session=session,
         )
+        session._event_journal = runtime.event_buffer
         session.active_model = None
         session.fallback_index = 0
         if resume_checkpoint is not None:
@@ -843,12 +844,12 @@ class RunRuntime:
 
     async def persist_model_call(self, event: ModelCallEvent) -> None:
         await _persist_event(self.session, self.run_id, event, lease=self.lease)
-        buf = self.session._event_journal
+        buf = self.event_buffer
         if self.checkpoint.phase == "started" and buf is not None:
             # Preserve startup progress without snapshotting a partially run hook.
             await buf.flush_with_checkpoint(self.checkpoint)
-        else:
-            await _flush_events(self.session)
+        elif buf is not None:
+            await buf.flush()
 
     def sync_ledger_totals(self) -> None:
         self.total = self.ledger.total_usage
@@ -1004,13 +1005,14 @@ class RunRuntime:
         if self.run_record is None or store is None:
             return None
         self.sync_checkpoint_accounting()
-        buf = self.session._event_journal
+        buf = self.event_buffer
         failure = await self._attempt(
             "run.mark_failed",
             lambda: (
                 buf.flush_with_checkpoint(self.checkpoint, status="failed", error=error)
                 if buf is not None
-                and (self.lease is None or _same_lease_identity(buf.lease, self.lease))
+                and buf.run_id == self.run_id
+                and _same_lease_identity(buf.lease, self.lease)
                 else durable_call(
                     self.session,
                     "run.mark_failed",
@@ -1139,10 +1141,15 @@ class RunRuntime:
         store = self.agent.run_store
         if self.run_record is None or store is None:
             return
-        buf = self.session._event_journal
-        has_pending_events = buf is not None and bool(buf._pending)
-        if not has_pending_events:
-            await _flush_events(self.session)
+        buf = self.event_buffer
+        buffer_matches = (
+            buf is not None
+            and buf.run_id == self.run_id
+            and _same_lease_identity(buf.lease, self.lease)
+        )
+        has_pending_events = bool(buf._pending) if buffer_matches and buf is not None else False
+        if buf is not None and buffer_matches and not has_pending_events:
+            await buf.flush()
         completed_snapshot_id = (
             self.checkpoint.model_input_snapshot_id
             if self.exact_model_input

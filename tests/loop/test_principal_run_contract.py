@@ -309,8 +309,6 @@ async def test_cold_resume_after_lease_takeover_preserves_principal_for_role_rul
 
     first_store = InMemoryRunStore()
     second_store = copy.copy(first_store)
-    for name in ("_held_leases", "_lease_ttls", "_lease_owners"):
-        setattr(second_store, name, dict(getattr(first_store, name)))
     session_store = InMemorySessionStore()
     principal = Principal("tenant-a", "alice", {"reader"})
     permissions = {
@@ -336,7 +334,7 @@ async def test_cold_resume_after_lease_takeover_preserves_principal_for_role_rul
     )
     await first_store.claim("cold", "worker-a", 0.01)
     await asyncio.sleep(0.02)
-    await second_store.claim("cold", "worker-b", 60.0)
+    new = await second_store.claim("cold", "worker-b", 60.0)
     await contract_agent.close()
 
     tool = _PrincipalTool()
@@ -347,7 +345,10 @@ async def test_cold_resume_after_lease_takeover_preserves_principal_for_role_rul
         session_store,
         permissions=permissions,
     )
-    events = [event async for event in (await resumed.session(id="s")).resume("cold", RunOptions())]
+    events = [
+        event
+        async for event in (await resumed.session(id="s")).resume("cold", RunOptions(lease=new))
+    ]
     assert events[-1].subtype == "success"
     assert tool.seen == [principal]
 

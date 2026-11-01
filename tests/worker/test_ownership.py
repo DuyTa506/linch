@@ -102,6 +102,9 @@ async def test_expired_lease_without_takeover_retries_and_resumes_checkpoint(poo
     real_renew = PostgresRunStore.renew
 
     async def renew(store, lease):
+        nonlocal first_epoch
+        if first_epoch is None:
+            first_epoch = lease.epoch
         if lease.epoch == first_epoch:
             raise ConnectionError("renewal unavailable for a full TTL")
         return await real_renew(store, lease)
@@ -117,10 +120,8 @@ async def test_expired_lease_without_takeover_retries_and_resumes_checkpoint(poo
                 first_stopped.set()
 
     async def factory(job):
-        nonlocal first_epoch
         resumed.append(job.run.checkpoint.phase if job.run.checkpoint else None)
-        if first_epoch is None:
-            first_epoch = job.run_store._held_leases[job.run.id]
+        if not resumed[:-1]:
             return make_agent(job, WaitingProvider([TextTurn("unused")]))
         return make_agent(job)
 
@@ -298,11 +299,12 @@ async def test_cancellation_during_cleanup_preserves_nonterminal_dispatch(pool, 
 
     worker = Worker(pool, factory)
 
-    async def nonterminal(execution, store, record, payload):
+    async def nonterminal(execution, store, record, payload, lease):
         from linch import Agent, empty_tools
         from linch.ext.evals import ScriptedProvider
         from linch.sessions import InMemorySessionStore
 
+        assert lease.run_id == record.id
         execution.agent = Agent(
             model="m",
             provider=ScriptedProvider([]),
