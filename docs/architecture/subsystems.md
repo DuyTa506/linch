@@ -320,7 +320,7 @@ registers no delete tool.
 RAG is a small request-scoped protocol in `rag/__init__.py`:
 
 ```python
-from linch import Agent, Principal, RetrievedChunk, register_rag_connector
+from linch import Agent, Principal, RetrievedChunk, RunOptions, register_rag_connector
 
 class TenantRag:
     async def retrieve(self, query: str, *, k: int, principal=None):
@@ -328,12 +328,15 @@ class TenantRag:
         return [RetrievedChunk("doc-1", "handbook", "...", 0.9, {})]
 
 agent = Agent(model="your-model")
+run_principal = Principal("acme", "user-42", {"reader"})
 undo = register_rag_connector(
     agent,
     TenantRag(),
     k=5,
-    principal=Principal("acme", "user-42", {"reader"}),
+    principal=run_principal,
 )
+session = await agent.session()
+events = session.run("question", RunOptions(principal=run_principal))
 ```
 
 `RagConnector.retrieve()` returns sourced `RetrievedChunk` values. The hook
@@ -341,6 +344,9 @@ adds `[doc:<id>]` system blocks and records the ids in checkpointable,
 run-local state. `register_grounding_check(required=True)` adds a
 `TurnStopping` listener that accepts only citations to the latest retrieved
 ids; missing citations receive bounded correction feedback and then fail.
+The active `RunOptions.principal` is passed to retrieval. A registration
+`principal` is an optional expected-identity guard, so a missing or different
+run principal fails closed before connector I/O.
 RAG connectors and their clients are host-owned; Linch does not add an
 embedding or vector-database dependency.
 

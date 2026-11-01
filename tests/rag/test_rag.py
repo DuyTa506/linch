@@ -46,14 +46,23 @@ async def drain(session, prompt="original question"):
 
 
 async def test_request_only_retrieval_and_persisted_typed_audit():
-    from linch import ContextBuildEvent, InMemoryRunStore, register_rag_connector
+    from linch import (
+        ContextBuildEvent,
+        InMemoryRunStore,
+        Principal,
+        RunOptions,
+        register_rag_connector,
+    )
     from linch.events import event_to_dict
 
-    provider, connector, principal, store = Provider(), Connector(), object(), InMemoryRunStore()
+    provider, connector, store = Provider(), Connector(), InMemoryRunStore()
+    principal = Principal("tenant-a", "alice", frozenset())
     agent = make_agent(provider, run_store=store)
     register_rag_connector(agent, connector, k=3, principal=principal)
     session = await agent.session()
-    events = await drain(session)
+    events = [
+        event async for event in session.run("original question", RunOptions(principal=principal))
+    ]
     assert connector.calls == [("original question", 3, principal)]
     assert any(
         "[doc:a]" in block.text and "source-a" in block.text and "PRIVATE BODY a" in block.text
@@ -71,6 +80,39 @@ async def test_request_only_retrieval_and_persisted_typed_audit():
         for event in persisted
     )
     assert "PRIVATE BODY" not in str([event_to_dict(event) for event in persisted])
+    await agent.close()
+
+
+async def test_rag_connector_receives_active_run_principal():
+    from linch import Principal, RunOptions, register_rag_connector
+
+    provider = Provider(["answer [doc:a]", "answer [doc:a]"])
+    connector = Connector()
+    agent = make_agent(provider)
+    register_rag_connector(agent, connector)
+    session = await agent.session()
+    alice = Principal("tenant-a", "alice", frozenset())
+    bob = Principal("tenant-b", "bob", frozenset())
+
+    for principal in (alice, bob):
+        [event async for event in session.run("question", RunOptions(principal=principal))]
+
+    assert [principal for _, _, principal in connector.calls] == [alice, bob]
+    await agent.close()
+
+
+async def test_rag_connector_does_not_use_registration_principal_without_run_principal():
+    from linch import Principal, register_rag_connector
+
+    provider, connector = Provider(), Connector()
+    agent = make_agent(provider)
+    registration_principal = Principal("tenant-a", "host", frozenset())
+    register_rag_connector(agent, connector, principal=registration_principal)
+
+    events = await drain(await agent.session())
+
+    assert events[-1].subtype == "error"
+    assert connector.calls == []
     await agent.close()
 
 
