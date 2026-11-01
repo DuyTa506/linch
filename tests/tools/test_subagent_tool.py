@@ -120,6 +120,84 @@ async def test_plain_background_subagent_returns_clear_error(tmp_path: Any) -> N
     assert session.workers == {}
 
 
+@pytest.mark.parametrize("background", [False, True])
+async def test_subagent_inherits_invoking_tenant_filesystem(
+    tmp_path: Any, background: bool
+) -> None:
+    from linch.config import FeatureFlags
+    from linch.filesystem import StateFileBackend, filesystem_tools
+    from tests.support.agents import make_agent
+    from tests.support.tools import tool_registry
+
+    tenant, workspace = StateFileBackend(), StateFileBackend()
+    agent = make_agent(
+        ScriptedProvider(
+            [ToolUseTurn("write_file", {"path": "/note", "content": "tenant"}), TextTurn("done")]
+        ),
+        tools=tool_registry(*filesystem_tools()),
+        filesystem=workspace,
+        cwd=str(tmp_path),
+        features=FeatureFlags(subagents=True),
+        retain_subagents=True,
+        enable_background_subagents=True,
+        run_store=None,
+    )
+    session = await agent.session()
+    ctx = _make_ctx(session)
+    ctx.deps = {"filesystem": tenant}
+    try:
+        result = await agent.tools.get("Subagent").execute(
+            {"description": "tenant writer", "prompt": "write", "run_in_background": background},
+            ctx,
+        )
+        assert not result.is_error
+        if background:
+            await next(iter(session.workers.values())).task
+        assert await tenant.read("/note") == "tenant"
+        assert await workspace.ls() == []
+    finally:
+        await agent.close()
+
+
+async def test_subagent_continue_inherits_current_run_deps(tmp_path: Any) -> None:
+    from linch import RunOptions
+    from linch.config import FeatureFlags
+    from linch.filesystem import StateFileBackend, filesystem_tools
+    from tests.support.agents import make_agent
+    from tests.support.tools import tool_registry
+
+    tenant, workspace = StateFileBackend(), StateFileBackend()
+    provider = ScriptedProvider(
+        [
+            ToolUseTurn("Subagent", {"description": "writer", "prompt": "wait"}),
+            TextTurn("ready"),
+            TextTurn("spawned"),
+            ToolUseTurn("SubagentContinue", {"to": "Agent #1", "message": "write"}),
+            ToolUseTurn("write_file", {"path": "/note", "content": "current tenant"}),
+            TextTurn("written"),
+            TextTurn("done"),
+        ]
+    )
+    agent = make_agent(
+        provider,
+        tools=tool_registry(*filesystem_tools()),
+        filesystem=workspace,
+        cwd=str(tmp_path),
+        features=FeatureFlags(subagents=True),
+        retain_subagents=True,
+        enable_worker_tools=True,
+        run_store=None,
+    )
+    session = await agent.session()
+    try:
+        [_ async for _ in session.run("spawn")]
+        [_ async for _ in session.run("continue", RunOptions(deps={"filesystem": tenant}))]
+        assert await tenant.read("/note") == "current tenant"
+        assert await workspace.ls() == []
+    finally:
+        await agent.close()
+
+
 async def test_subagent_tool_stores_worker_handle(tmp_path: Any) -> None:
     """Subagent execution stores a WorkerHandle in session.workers."""
     agent, session = await _make_agent_and_session(tmp_path)
