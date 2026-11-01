@@ -128,9 +128,75 @@ async def test_force_final_turn_closes_execution_boundary(monkeypatch: Any) -> N
     assert ctx.outcome_req.tool_choice is None
 
 
+@pytest.mark.asyncio
+async def test_force_final_turn_rejects_provider_tool_calls() -> None:
+    """A provider that ignores the empty offer cannot execute a forced tool."""
+    import json
+
+    from linch.loop_guard import LoopGuard
+    from tests.support.agents import make_agent
+    from tests.support.tools import StubTool, tool_registry
+
+    class IgnoringToolsProvider:
+        id = "ignoring-tools"
+
+        def __init__(self) -> None:
+            self.requests: list[Any] = []
+            self.calls = 0
+
+        def context_window(self, model: str) -> int:
+            return 100_000
+
+        async def stream(self, req: Any) -> Any:
+            self.requests.append(req)
+            self.calls += 1
+            yield {"type": "message_start", "model": req.model}
+            if self.calls > 2:
+                yield {"type": "text_delta", "text": "done"}
+                yield {"type": "message_end", "stop_reason": "end_turn", "usage": _usage()}
+                return
+            yield {"type": "tool_use_start", "id": f"call-{self.calls}", "name": "Write"}
+            yield {
+                "type": "tool_use_input_delta",
+                "id": f"call-{self.calls}",
+                "json_delta": json.dumps({"value": "x"}),
+            }
+            yield {"type": "tool_use_end", "id": f"call-{self.calls}"}
+            yield {"type": "message_end", "stop_reason": "tool_use", "usage": _usage()}
+
+    executed: list[dict[str, Any]] = []
+    provider = IgnoringToolsProvider()
+
+    def record(input: dict[str, Any], _ctx: Any) -> None:
+        executed.append(input)
+
+    agent = make_agent(
+        provider,
+        tools=tool_registry(StubTool("Write", scope="write", on_execute=record)),
+        permissions={"mode": "skip-dangerous"},
+        loop_guard=LoopGuard(max_identical_tool_calls=1, force_final_answer=True),
+        max_turns=3,
+        run_store=None,
+    )
+    session = await agent.session()
+    events = [event async for event in session.run("go")]
+
+    assert provider.requests[1].tools == []
+    assert len(executed) == 1
+    second_end = [event for event in events if event.type == "tool_call_end"][1]
+    assert second_end.is_error is True
+    assert "not offered for the current turn" in second_end.result
+
+
 async def _no_compaction(*args: Any, **kwargs: Any) -> bool:
     return False
 
 
 async def _no_context(*args: Any, **kwargs: Any) -> None:
     return None
+
+
+def _usage() -> Any:
+    from linch.types import Usage
+
+    return Usage()
