@@ -117,7 +117,7 @@ async def test_stop_is_not_lost_between_manager_cycles(monkeypatch, when):
     def manager(connection):
         async def run(**kwargs):
             started.append(True)
-            raise OSError("down")
+            raise ConnectionError("down")
 
         return SimpleNamespace(run=run, shutdown=asyncio.Event())
 
@@ -190,7 +190,13 @@ async def test_repeated_cancellation_waits_for_manager_and_callbacks_to_drain(mo
 
 
 @pytest.mark.parametrize(
-    "failure", [ValueError("bad config"), asyncpg.UndefinedTableError("schema")]
+    "failure",
+    [
+        ValueError("bad config"),
+        asyncpg.UndefinedTableError("schema"),
+        OSError("permanent failure"),
+        asyncpg.InterfaceError("another operation"),
+    ],
 )
 async def test_configuration_errors_are_not_retried(monkeypatch, failure):
     worker = await prepared(monkeypatch)
@@ -392,7 +398,7 @@ async def test_transient_startup_retries_without_replacing_worker_stores(monkeyp
         nonlocal attempts
         attempts += 1
         if attempts == 1:
-            raise OSError("startup database loss")
+            raise ConnectionError("startup database loss")
 
     def manager(connection):
         async def run(**kwargs):
@@ -497,10 +503,10 @@ async def test_connection_close_loss_releases_and_reconnects(monkeypatch):
 
                 async def close():
                     connection.closed = True
-                    raise OSError("connection disappeared during close")
+                    raise ConnectionError("connection disappeared during close")
 
                 connection.close = close
-                raise OSError("database lost")
+                raise ConnectionError("database lost")
             assert cycles[0].closed
             worker.stop()
 

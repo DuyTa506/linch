@@ -26,6 +26,7 @@ import asyncpg
 import psutil  # pyright: ignore[reportMissingModuleSource]
 
 from linch.providers.base import BaseProvider
+from linch.run_store import _is_transient_store_error
 from linch.storage._pg import _reset_connection
 
 TERMINAL = "('completed','failed','aborted')"
@@ -133,7 +134,9 @@ async def child(a: argparse.Namespace) -> None:
     from linch.worker import Worker, enqueue_run
 
     stop = asyncio.Event()
-    metrics: dict[str, Any] = defaultdict(int, errors=Counter(), lag=[], pool=[], renew_failures=0)
+    metrics: dict[str, Any] = defaultdict(
+        int, errors=Counter(), lag=[], pool=[], renew_failures=0, reader_errors=0
+    )
     for key in "dequeue_calls empty_dequeues executed_jobs reset_queries".split():
         metrics[key] = 0
     metrics["notifications_by_operation"] = Counter()
@@ -302,8 +305,12 @@ async def reader(pool: Any, stop: asyncio.Event, metrics: dict[str, Any], index:
             if rows and rows[-1]["kind"] == "result":
                 metrics["reader_results"][index] += 1
                 complete = True
-        except (asyncpg.PostgresError, OSError, TimeoutError, asyncpg.InterfaceError):
-            metrics["reader_retries"] += 1
+        except Exception as exc:
+            if _is_transient_store_error(exc):
+                metrics["reader_retries"] += 1
+            else:
+                metrics["reader_errors"] += 1
+                raise
         await asyncio.sleep(0.1)
 
 
@@ -401,9 +408,7 @@ async def summarize(pool: Any, a: argparse.Namespace) -> dict[str, Any]:
         'failed_without_error',count(*) FILTER(WHERE status='failed' AND coalesce(errors,0)=0),
         'orphans',count(*) FILTER(WHERE status NOT IN {TERMINAL} AND NOT EXISTS
           (SELECT 1 FROM pgqueuer q WHERE q.dedupe_key='run:'||cohort.id)),
-        'writer_mismatch',(SELECT count(*) FROM load_writes),
-        'duplicate_notes',(SELECT count(*) FROM (SELECT run_id,tool_id FROM load_notes
-            GROUP BY 1,2 HAVING count(*)>1)s)) invariant_errors,
+        'writer_mismatch',(SELECT count(*) FROM load_writes)) invariant_errors,
       (SELECT coalesce(sum(attempts-1),0)::bigint FROM load_notes) note_conflicts,
       count(*) FILTER(WHERE status='completed' AND finish >= $1 AND finish < $2)::float/$3 tps,
       percentile_cont(ARRAY[.5,.95,.99]) WITHIN GROUP(ORDER BY (finish-arrival)*1000)
@@ -424,6 +429,7 @@ async def summarize(pool: Any, a: argparse.Namespace) -> dict[str, Any]:
     result = dict(row)
     for key in ("invariant_errors", "errors_by_type"):
         result[key] = json.loads(result[key] or "{}")
+    result["invariant_errors"]["duplicate_notes"] = int(result["note_conflicts"] or 0)
     for source, target in (("latency", "latency_ms"), ("wait", "wait_ms")):
         values = result.pop(source)
         names = ("p50", "p95", "p99") if source == "latency" else ("p50", "p99")
@@ -620,6 +626,7 @@ async def run_point(a: argparse.Namespace) -> dict[str, Any]:
         api_metrics = result["clients"].get("api", {})
         checks["readers"] = int(a.readers > 0 and not all(api_metrics.get("reader_results", [0])))
         checks["reader_seq"] = api_metrics.get("reader_seq_errors", 0)
+        checks["reader_errors"] = api_metrics.get("reader_errors", 0)
         print(f"M={a.workers}: {result['completed']}/{result['runs']} complete", file=sys.stderr)
         return result
     finally:

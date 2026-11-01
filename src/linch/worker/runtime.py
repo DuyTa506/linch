@@ -22,6 +22,7 @@ from pgqueuer.domain.models import AnyEvent, TableChangedEvent
 from pgqueuer.errors import FailingListenerError
 from pgqueuer.ports.driver import NotifyCallback
 
+from .._tracing import trace_id_for
 from ..agent import Agent
 from ..errors import ConfigError
 from ..events import ErrorEvent, ModelCallEvent, ResultEvent
@@ -33,6 +34,7 @@ from ..run_store import (
     RunLease,
     RunLeaseConflictError,
     RunRecord,
+    _is_transient_store_error,
     run_contract_from_meta,
 )
 from ..run_stores.postgres import PostgresRunStore
@@ -41,25 +43,17 @@ from ..sessions.postgres import PostgresSessionStore
 from .dispatch import _BorrowedPool, _entrypoint, install
 
 _TERMINAL = frozenset({"completed", "failed", "aborted"})
-_INFRASTRUCTURE = (
-    asyncpg.PostgresError,
-    asyncpg.InterfaceError,
-    OSError,
-    TimeoutError,
-    RunLeaseConflictError,
-)
 
-_RECONNECT = (
-    asyncpg.PostgresConnectionError,
-    asyncpg.AdminShutdownError,
-    asyncpg.CrashShutdownError,
-    asyncpg.CannotConnectNowError,
-    asyncpg.TooManyConnectionsError,
-    asyncpg.InterfaceError,
-    OSError,
-    TimeoutError,
-    FailingListenerError,
-)
+
+def _is_worker_reconnect_error(error: BaseException) -> bool:
+    """Classify listener and store failures that should rebuild the manager."""
+    if isinstance(error, FailingListenerError) or _is_transient_store_error(error):
+        return True
+    return (
+        type(error).__module__.startswith("asyncpg.")
+        and type(error).__name__ == "InterfaceError"
+        and str(error).endswith("connection has been released back to the pool")
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -330,8 +324,9 @@ class Worker:
             except asyncpg.ObjectNotInPrerequisiteStateError as exc:
                 if getattr(exc, "severity", None) != "FATAL":
                     raise
-            except _RECONNECT:
-                pass
+            except Exception as exc:
+                if not _is_worker_reconnect_error(exc):
+                    raise
             finally:
                 self._manager = None
             with suppress(TimeoutError):
@@ -471,7 +466,7 @@ class Worker:
             except Exception as exc:
                 current = await store.load_run(rid)
                 if current is None or current.status not in _TERMINAL:
-                    if isinstance(exc, _INFRASTRUCTURE):
+                    if isinstance(exc, RunLeaseConflictError) or _is_transient_store_error(exc):
                         raise
                     ledger = _ModelCallLedger(rid)
                     rows = await store.load_events(rid)
@@ -481,6 +476,9 @@ class Worker:
                     if current is not None and current.checkpoint is not None:
                         current.checkpoint.total_usage = ledger.total_usage
                     error = {"name": type(exc).__name__, "message": str(exc), "retryable": False}
+                    trace_id = current.meta.get("trace_id") if current is not None else None
+                    if not isinstance(trace_id, str) or not trace_id:
+                        trace_id = trace_id_for(rid)
                     with suppress(LeaseLostError):
                         await store.mark_failed(
                             rid,
@@ -497,6 +495,7 @@ class Worker:
                                     total_usage=ledger.total_usage,
                                     total_cost_usd=ledger.total_cost_usd,
                                     usage_complete=ledger.usage_complete,
+                                    trace_id=trace_id,
                                 ),
                             ],
                         )

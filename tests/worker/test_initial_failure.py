@@ -161,3 +161,53 @@ async def test_progressed_factory_failure_uses_receipts_instead_of_stale_checkpo
     assert result.usage_complete is (not unresolved)
     assert [r.event.type for r in rows][-2:] == ["error", "result"]
     assert [r.seq for r in rows] == list(range(1, len(rows) + 1))
+
+
+async def test_setup_failure_result_preserves_persisted_trace_id(pool):
+    from linch.worker import Worker, enqueue_run
+
+    rid = await enqueue_run(pool, "s", "hello", meta={"trace_id": "trace-from-run"})
+    observed = []
+
+    async def factory(context):
+        from linch._tracing import trace_id_for
+
+        observed.append(trace_id_for(context.run.id))
+        raise ValueError("invalid factory config")
+
+    worker = Worker(pool, factory)
+    queued = job(rid)
+    payload = json.loads(queued.payload)
+    payload["traceparent"] = f"00-{'a' * 32}-{'b' * 16}-01"
+    queued.payload = json.dumps(payload).encode()
+    await worker._handle(queued)
+    result = (await worker._run_store.load_events(rid))[-1].event
+    assert observed == ["a" * 32]
+    assert result.trace_id == "trace-from-run"
+
+
+@pytest.mark.parametrize("failure_kind", ["permission", "os", "data", "interface", "released"])
+async def test_setup_permanent_store_errors_terminalize_the_run(pool, failure_kind):
+    import asyncpg
+
+    from linch.worker import Worker, enqueue_run
+
+    failure = {
+        "permission": PermissionError("certificate denied"),
+        "os": OSError("permanent failure"),
+        "data": asyncpg.DataError("invalid argument"),
+        "interface": asyncpg.InterfaceError("another operation"),
+        "released": asyncpg.InterfaceError(
+            "cannot call Connection.fetch(): connection has been released back to the pool"
+        ),
+    }[failure_kind]
+    rid = await enqueue_run(pool, "s", "hello")
+
+    async def factory(context):
+        raise failure
+
+    worker = Worker(pool, factory)
+    await worker._handle(job(rid))
+    rows = await worker._run_store.load_events(rid)
+    assert (await worker._run_store.load_run(rid)).status == "failed"
+    assert [row.event.type for row in rows][-2:] == ["error", "result"]
