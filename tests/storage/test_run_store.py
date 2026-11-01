@@ -1,6 +1,7 @@
 import errno
 import json
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -82,6 +83,37 @@ async def _assert_durable_error(error, transient):
         assert raised.value.__cause__ is error
     else:
         assert raised.value is error
+
+
+async def test_in_memory_event_batch_copies_once_and_fences_once():
+    import linch.run_store as run_store
+
+    store = run_store.InMemoryRunStore()
+    await store.create_run("session", id="batch")
+    await store.claim("batch", "owner", 30.0)
+    events = [
+        ToolCallEndEvent(
+            tool_use_id=f"call-{index}",
+            tool_name="Search",
+            result="ok",
+            tool_result=ToolResult(content="ok", metadata={"labels": ["original"]}),
+        )
+        for index in range(2)
+    ]
+    assert await store.append_event("batch", events[0]) == 1
+    with (
+        patch.object(run_store, "_copy_event", wraps=run_store._copy_event) as copy_event,
+        patch.object(store, "_check_lease", wraps=store._check_lease) as check_lease,
+    ):
+        assert await store.append_events("batch", events) == [2, 3]
+        assert (copy_event.call_count, check_lease.call_count) == (2, 1)
+        assert await store.append_events("missing", []) == []
+        assert (copy_event.call_count, check_lease.call_count) == (2, 1)
+    events[0].tool_result.metadata["labels"].append("mutated")
+    events.clear()
+    rows = await store.load_events("batch")
+    assert [row.seq for row in rows] == [1, 2, 3]
+    assert [row.event.tool_result.metadata["labels"] for row in rows] == [["original"]] * 3
 
 
 @pytest.mark.parametrize("kind", ["memory", "postgres"])

@@ -2168,7 +2168,14 @@ class InMemoryRunStore:
         if run_id not in self._runs:
             raise KeyError(f"run not found: {run_id}")
         copies = [_copy_event(event) for event in events]
-        return [await self.append_event(run_id, event) for event in copies]
+        bucket = self._events.setdefault(run_id, [])
+        timestamp = now_iso()
+        seqs = list(range(len(bucket) + 1, len(bucket) + len(copies) + 1))
+        bucket.extend(
+            StoredRunEvent(seq=seq, appended_at=timestamp, event=event)
+            for seq, event in zip(seqs, copies, strict=True)
+        )
+        return seqs
 
     async def load_events(self, run_id: str, *, after_seq: int = 0) -> list[StoredRunEvent]:
         """Load detached events after an exclusive sequence watermark.
