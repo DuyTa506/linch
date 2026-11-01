@@ -123,6 +123,27 @@ async def test_run_store_round_trip_status_and_reconnect(store_case: _StoreCase)
     assert failed_loaded.meta["errors"] == [{"message": "boom"}]
 
 
+async def test_run_store_preserves_cyclic_tool_metadata_as_markers(store_case: _StoreCase) -> None:
+    from linch.events import ToolCallEndEvent
+    from linch.tools.base import ToolResult
+
+    metadata = {"labels": ["stable"]}
+    metadata["cycle"] = metadata
+    event = ToolCallEndEvent(
+        tool_use_id="tool-1",
+        tool_name="Lookup",
+        tool_result=ToolResult(content="done", metadata=metadata),
+    )
+    store = store_case.store
+    run_id = f"conformance-{uuid4()}"
+    await store.create_run("session-1", id=run_id)
+
+    await store.append_event(run_id, event)
+    rows = await store.load_events(run_id)
+
+    assert rows[0].event.tool_result.metadata == {"labels": ["stable"], "cycle": "<recursion>"}
+
+
 async def test_run_store_event_sequence_is_monotonic_under_concurrent_appends(
     store_case: _StoreCase,
 ) -> None:
