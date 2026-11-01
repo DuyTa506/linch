@@ -15,7 +15,7 @@ from pathlib import Path
 from linch import RunOptions
 from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
 
-_RECIPE = Path(__file__).resolve().parents[1] / "examples" / "recipes" / "research_desk.py"
+_RECIPE = Path(__file__).resolve().parents[2] / "examples" / "recipes" / "research_desk.py"
 
 
 def _load_recipe():

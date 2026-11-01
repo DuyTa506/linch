@@ -13,7 +13,7 @@ from pathlib import Path
 from linch import MailboxMessage
 from linch.testing import assert_mailbox_contract
 
-_EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "integrations" / "redis_mailbox.py"
+_EXAMPLE = Path(__file__).resolve().parents[2] / "examples" / "integrations" / "redis_mailbox.py"
 
 
 def _load():

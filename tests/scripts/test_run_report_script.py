@@ -8,7 +8,7 @@ import pytest
 
 
 def _load_script():
-    path = Path(__file__).resolve().parents[1] / "scripts" / "run_report.py"
+    path = Path(__file__).resolve().parents[2] / "scripts" / "run_report.py"
     spec = importlib.util.spec_from_file_location("run_report_script", path)
     assert spec is not None
     module = importlib.util.module_from_spec(spec)
