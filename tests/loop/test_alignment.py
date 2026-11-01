@@ -172,6 +172,41 @@ async def test_alignment_runs_user_prompt_hooks_with_source() -> None:
     assert "change hooked" in _text_messages(provider.requests[1])
 
 
+@pytest.mark.asyncio
+async def test_timed_out_alignment_is_not_applied_after_slow_hook() -> None:
+    """A deadline during alignment hooks must prevent the queued message."""
+    from linch.errors import ConfigError
+
+    hook_entered = asyncio.Event()
+    release_hook = asyncio.Event()
+
+    class SlowAlignmentHook:
+        async def on_user_prompt_submit(self, ctx: Any) -> None:
+            if ctx.source == "align":
+                hook_entered.set()
+                await release_hook.wait()
+
+    provider = _tool_then_text_provider()
+    tool = _wait_tool()
+    session = await _agent(provider, tool, hooks=[SlowAlignmentHook()]).session()
+
+    async def collect() -> list[Any]:
+        return [event async for event in session.run("start")]
+
+    run_task = asyncio.create_task(collect())
+    await tool.started.wait()
+    align_task = asyncio.create_task(session.align("change", timeout_s=0.05))
+    tool.release.set()
+    await hook_entered.wait()
+    with pytest.raises(ConfigError, match="timed out before it was applied"):
+        await align_task
+    release_hook.set()
+    events = await run_task
+
+    assert not any(getattr(event, "subtype", None) == "alignment" for event in events)
+    assert "change" not in _text_messages(provider.requests[1])
+
+
 def test_user_event_subtype_serializes() -> None:
     from linch.events import UserEvent, event_from_dict, event_to_dict
     from linch.types import Message, TextBlock

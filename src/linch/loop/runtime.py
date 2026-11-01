@@ -275,6 +275,8 @@ async def drain_alignment(
     entries = list(queue)
     queue.clear()
     for entry in entries:
+        if entry.cancelled:
+            continue
         try:
             try:
                 prompt, images, hook_events, block_reason = await dispatch_user_prompt_fn(
@@ -296,13 +298,19 @@ async def drain_alignment(
                 if not entry.future.done():
                     entry.future.set_exception(ConfigError(block_reason))
                 continue
+            if entry.cancelled:
+                continue
             user_message = build_user_message(prompt, images)
-            await session.append([user_message])
-            event: Event = UserEvent(message=user_message, subtype="alignment")
-            await _persist_event(session, run_id, event)
-            if not entry.future.done():
-                entry.future.set_result(None)
-            yield event
+            entry.applying = True
+            try:
+                await session.append([user_message])
+                event: Event = UserEvent(message=user_message, subtype="alignment")
+                await _persist_event(session, run_id, event)
+                if not entry.future.done():
+                    entry.future.set_result(None)
+                yield event
+            finally:
+                entry.applying = False
         except BaseException as exc:
             if not entry.future.done():
                 entry.future.set_exception(exc)
