@@ -129,6 +129,28 @@ async def test_scale_smoke_uses_one_shared_store_and_validates_five_runs(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_scale_report_keeps_sampler_peak_before_sampler_cleanup(tmp_path, monkeypatch):
+    benchmark = _load_script()
+
+    class StubSampler:
+        peak_rss = 123456789
+
+        async def start(self):
+            return None
+
+        async def stop(self):
+            return {"interval": 10.0, "samples": 1, "p99": 0.0, "max": 0.0}
+
+    monkeypatch.setattr(benchmark, "LagSampler", StubSampler)
+    result = await benchmark.run_scale_case(
+        benchmark.ScaleCase("sampler_peak", "memory", sessions=1, turns=4),
+        tmp_path / "memory",
+    )
+
+    assert result["rss"]["sampled_peak_rss_bytes"] == 123456789
+
+
+@pytest.mark.asyncio
 async def test_scale_subprocess_hard_deadline_reports_observed_work():
     benchmark = _load_script()
     started = time.monotonic()

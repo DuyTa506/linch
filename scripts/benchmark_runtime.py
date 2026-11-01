@@ -1100,6 +1100,7 @@ async def run_scale_case(
         await asyncio.gather(*(run_one() for _ in range(case.sessions)))
         elapsed = time.perf_counter() - started
         lag = await sampler.stop()
+        sampled_peak = sampler.peak_rss
         sampler = None
         final_hwm = _rss_high_water()
         result.update(
@@ -1117,7 +1118,7 @@ async def run_scale_case(
             rss=scale_rss_summary(
                 baseline=baseline_rss,
                 initial_hwm=initial_hwm,
-                sampled_peak=sampler.peak_rss if sampler else 0,
+                sampled_peak=sampled_peak,
                 final_hwm=final_hwm,
                 sessions=case.sessions,
             ),
