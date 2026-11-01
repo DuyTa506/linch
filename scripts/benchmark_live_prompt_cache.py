@@ -380,15 +380,12 @@ def benchmark_token_estimator(messages: list[Message], model: str) -> int:
 def _estimated_prompt_tokens(provider: str, call: LiveCacheCall) -> int:
     """Normalize provider usage accounting for cache ratios.
 
-    OpenAI-compatible APIs report total prompt tokens in ``input_tokens`` and cached
-    tokens as a detail, so adding them double-counts. Anthropic-compatible usage
-    reports cached input separately, so the prompt denominator is input + cache.
+    Provider adapters normalize uncached input, cache reads, and cache writes into
+    separate usage buckets, so the prompt denominator is their sum.
     """
 
     if call.error_type is not None:
         return 0
-    if provider in {"openai-chat", "vllm", "sglang", "llamacpp"}:
-        return max(0, call.input_tokens)
     return max(0, call.input_tokens + call.cache_read_tokens + call.cache_creation_tokens)
 
 
