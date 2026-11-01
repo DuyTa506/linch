@@ -73,7 +73,7 @@ async def _emit_prompt_block(
         event: Event = ErrorEvent(
             error={"name": "HookBlockedPrompt", "message": block_reason, "retryable": False}
         )
-        await _persist_event(runtime.session, runtime.run_id, event)
+        await _persist_event(runtime.session, runtime.run_id, event, lease=runtime.lease)
         if startup is not None:
             startup["blocked_error_emitted"] = True
         yield event
@@ -149,7 +149,7 @@ async def initialize_run(ctx: RunStartupContext) -> AsyncGenerator[Event, None]:
                     permission_mode=runtime.config.permission_engine.mode,
                     cwd=agent.cwd,
                 )
-                await _persist_event(session, runtime.run_id, event)
+                await _persist_event(session, runtime.run_id, event, lease=runtime.lease)
                 if baseline and baseline.get("preparation_required"):
                     baseline["system_emitted"] = True
                 yield event
@@ -174,7 +174,7 @@ async def initialize_run(ctx: RunStartupContext) -> AsyncGenerator[Event, None]:
                     for skill in sorted(agent.skills.values(), key=lambda item: item.name)
                 ]
                 event = SkillsLoadedEvent(skills=skills_data)
-                await _persist_event(session, runtime.run_id, event)
+                await _persist_event(session, runtime.run_id, event, lease=runtime.lease)
                 if baseline and baseline.get("preparation_required"):
                     baseline["skills_emitted"] = True
                 yield event
@@ -198,7 +198,7 @@ async def initialize_run(ctx: RunStartupContext) -> AsyncGenerator[Event, None]:
                 await ctx.save_checkpoint("started")
         cursor = baseline.get("hook_event_cursor", 0) if baseline else 0
         for index, hook_event in enumerate(hook_events[cursor:], start=cursor):
-            await _persist_event(session, runtime.run_id, hook_event)
+            await _persist_event(session, runtime.run_id, hook_event, lease=runtime.lease)
             if baseline and baseline.get("preparation_required"):
                 baseline["hook_event_cursor"] = index + 1
             yield hook_event
@@ -226,7 +226,7 @@ async def initialize_run(ctx: RunStartupContext) -> AsyncGenerator[Event, None]:
         if append:
             await session.append([user_message])
         event = UserEvent(message=user_message, subtype="prompt")
-        await _persist_event(session, runtime.run_id, event)
+        await _persist_event(session, runtime.run_id, event, lease=runtime.lease)
         ctx.checkpoint.extension_state.pop("linch.startup", None)
         await ctx.save_checkpoint("user_appended")
         if emit_skills:

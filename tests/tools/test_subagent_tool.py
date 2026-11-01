@@ -554,6 +554,63 @@ async def test_background_subagent_completion_is_audited_on_origin_run(tmp_path:
     assert not any(isinstance(item.event, BackgroundWorkerEvent) for item in later_stored)
 
 
+async def test_background_subagent_child_is_unleased_and_completion_keeps_origin_lease(
+    tmp_path: Any,
+) -> None:
+    """Child writes stay unleased while parent completion keeps its captured token."""
+    from types import SimpleNamespace
+
+    from linch.events import BackgroundWorkerEvent
+    from linch.run_store import InMemoryRunStore
+
+    class TrackingStore(InMemoryRunStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls: list[tuple[str, str, type[Any] | None, Any]] = []
+
+        async def create_run(self, session_id: str, **kwargs: Any) -> Any:
+            self.calls.append(("create", str(kwargs.get("id")), None, kwargs.get("lease")))
+            return await super().create_run(session_id, **kwargs)
+
+        async def append_event(self, run_id: str, event: Any, *, lease: Any = None) -> int:
+            self.calls.append(("append", run_id, type(event), lease))
+            return await super().append_event(run_id, event, lease=lease)
+
+    agent, session = await _make_agent_and_session(tmp_path)
+    store = TrackingStore()
+    agent.run_store = store
+    await store.create_run(session.id, id="test-run")
+    origin_lease = await store.claim("test-run", "parent-owner", 30.0)
+    session._event_journal = SimpleNamespace(lease=origin_lease)
+    try:
+        result = await _spawn(
+            agent,
+            session,
+            description="child",
+            prompt="hello",
+            run_in_background=True,
+        )
+        assert not result.is_error
+        worker = next(iter(session.workers.values()))
+        await worker.task
+
+        parent_completion = [
+            lease
+            for operation, run_id, event_type, lease in store.calls
+            if operation == "append"
+            and run_id == "test-run"
+            and event_type is BackgroundWorkerEvent
+        ]
+        assert parent_completion == [origin_lease]
+        child_calls = [
+            lease for operation, run_id, _event_type, lease in store.calls if run_id != "test-run"
+        ]
+        assert child_calls
+        assert all(lease is None for lease in child_calls)
+    finally:
+        await agent.close()
+
+
 async def test_background_worker_notification_escapes_worker_output(tmp_path: Any) -> None:
     import asyncio
     import xml.etree.ElementTree as ET

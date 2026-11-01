@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import errno
 import hashlib
+import inspect
 import json
 import math
 import time
@@ -19,6 +20,7 @@ from uuid import UUID, uuid4
 from ._json import walk_json
 from ._telemetry import store_call
 from ._wire import WIRE_VERSION, require_wire_version
+from .errors import ConfigError
 from .events import (
     IGNORABLE_MAX_DEPTH,
     Event,
@@ -1865,6 +1867,66 @@ def _lease_lost(run_id: str, expected: int, actual: int | None = None) -> LeaseL
     return LeaseLostError(f"lease lost for run {run_id}: expected epoch {expected}{detail}")
 
 
+def _lease_kwargs(method: Any, lease: RunLease | None) -> dict[str, Any]:
+    """Build a mutation keyword mapping without dropping an explicit lease.
+
+    Unleased calls omit the keyword so custom stores retain their existing
+    signatures. A leased call fails before invoking an override that cannot
+    receive the token; callers must never retry that call without its fence.
+    """
+    if lease is None:
+        return {}
+    try:
+        signature = inspect.signature(method)
+    except (TypeError, ValueError):
+        return {"lease": lease}
+    if "lease" not in signature.parameters and not any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    ):
+        raise TypeError(f"{getattr(method, '__qualname__', method)!s} does not support lease")
+    return {"lease": lease}
+
+
+def _validate_lease_run(run_id: str, lease: RunLease | None) -> None:
+    """Reject a token that names a different run before a mutation starts."""
+    if lease is not None and lease.run_id != run_id:
+        raise LeaseLostError(f"lease run {lease.run_id} does not match target run {run_id}")
+
+
+def _preflight_leased_store(
+    store: Any,
+    run_id: str,
+    lease: RunLease | None,
+    *,
+    include_snapshots: bool = False,
+) -> None:
+    """Check leased mutation signatures before an execution has side effects."""
+    if lease is None:
+        return
+    _validate_lease_run(run_id, lease)
+    required = (
+        "create_run",
+        "save_checkpoint",
+        "save_checkpoint_with_events",
+        "append_event",
+        "mark_completed",
+        "mark_failed",
+    )
+    optional = ("append_events",)
+    snapshot_methods: tuple[str, ...] = ()
+    if include_snapshots:
+        snapshot_methods = ("save", "delete", "prune")
+        optional += snapshot_methods
+    for name in (*required, *optional):
+        method = getattr(store, name, None)
+        if not callable(method):
+            if name in required or name in snapshot_methods:
+                raise ConfigError(f"run store lease capability missing {name}")
+            continue
+        _lease_kwargs(method, lease)
+
+
 class InMemoryRunStore:
     """Keep runs, events, leases, and model-input snapshots in process memory.
 
@@ -2175,7 +2237,10 @@ class InMemoryRunStore:
             raise KeyError(f"run not found: {run_id}")
         copies = [_copy_event(event) for event in events]
         if type(self).append_event is not InMemoryRunStore.append_event:
-            return [await self.append_event(run_id, event, lease=lease) for event in copies]
+            return [
+                await self.append_event(run_id, event, **_lease_kwargs(self.append_event, lease))
+                for event in copies
+            ]
         bucket = self._events.setdefault(run_id, [])
         timestamp = now_iso()
         seqs = list(range(len(bucket) + 1, len(bucket) + len(copies) + 1))

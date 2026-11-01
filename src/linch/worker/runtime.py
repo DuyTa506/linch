@@ -35,6 +35,8 @@ from ..run_store import (
     RunLeaseConflictError,
     RunRecord,
     _is_transient_store_error,
+    _lease_kwargs,
+    _validate_lease_run,
     run_contract_from_meta,
 )
 from ..run_stores.postgres import PostgresRunStore
@@ -237,7 +239,7 @@ class Worker:
             )
         return profile
 
-    def _run_options(self, record: RunRecord) -> RunOptions:
+    def _run_options(self, record: RunRecord, lease: RunLease | None = None) -> RunOptions:
         options: Any = record.meta
         if "run_contract" in record.meta:
             options = run_contract_from_meta(record.meta).payload.get("run_options")
@@ -246,7 +248,8 @@ class Worker:
         profile = self._resolve_profile(options.get("profile"))
         raw_principal = options.get("principal")
         principal = _principal_from_value(raw_principal) if raw_principal is not None else None
-        return RunOptions(run_id=record.id, profile=profile, principal=principal)
+        _validate_lease_run(record.id, lease)
+        return RunOptions(run_id=record.id, profile=profile, principal=principal, lease=lease)
 
     def _make_manager(self, connection: Any) -> QueueManager:
         manager = _WorkerQueueManager(
@@ -371,8 +374,9 @@ class Worker:
         store: PostgresRunStore,
         record: RunRecord,
         payload: dict[str, Any],
+        lease: RunLease,
     ) -> None:
-        options = self._run_options(record)
+        options = self._run_options(record, lease)
         execution.agent = await self.agent_factory(
             WorkerJob(record, store, self._pool, self._session_store, payload.get("queue"))
         )
@@ -451,7 +455,9 @@ class Worker:
                 if record is None:
                     raise KeyError(f"run not found: {rid}")
                 if record.status not in _TERMINAL and not execution.cancel_requested:
-                    run_task = asyncio.create_task(self._invoke(execution, store, record, payload))
+                    run_task = asyncio.create_task(
+                        self._invoke(execution, store, record, payload, lease)
+                    )
                     execution.run_task = run_task
                     # Renew immediately so two short failed requests have a full
                     # TTL budget; subsequent attempts run on the ttl/3 cadence.
@@ -480,7 +486,8 @@ class Worker:
                     if not isinstance(trace_id, str) or not trace_id:
                         trace_id = trace_id_for(rid)
                     with suppress(LeaseLostError):
-                        await store.mark_failed(
+                        method = store.mark_failed
+                        await method(
                             rid,
                             current.checkpoint if current is not None else None,
                             error=error,
@@ -498,6 +505,7 @@ class Worker:
                                     trace_id=trace_id,
                                 ),
                             ],
+                            **_lease_kwargs(method, lease),
                         )
             finally:
                 if heartbeat is not None:
