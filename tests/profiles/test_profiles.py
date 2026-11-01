@@ -82,8 +82,8 @@ class _ScopedProfilePlugin:
         service = ctx.register("profile.service", config)
         tool = _ConfiguredTool(label)
         self.tools.append(tool)
-        tool_disposer = ctx.agent.tools.replace(tool)
-        wrapper_disposer = ctx.agent.tool_pipeline.on_execute(_ConfiguredWrapper(label))
+        tool_disposer = ctx.run_config.tools.replace(tool)
+        wrapper_disposer = ctx.run_config.tool_pipeline.on_execute(_ConfiguredWrapper(label))
 
         async def cleanup() -> None:
             await wrapper_disposer.dispose()
@@ -684,10 +684,11 @@ async def test_retained_child_keeps_profile_service_after_parent_scope_ends(
         frontmatter=AgentFrontmatter(name="retained", description="test", tools=[]),
         body="Return the child answer.",
     )
-    async with _profile_scope(session, profile):
+    async with _profile_scope(session, profile, "profile-run"):
         args = RunSubagentArgs(
             parent_session=session,
             parent_agent=session.agent,
+            config_binding=session._run_bindings["profile-run"],
             definition=definition,
             prompt="child prompt",
             display_name="retained",
@@ -696,7 +697,10 @@ async def test_retained_child_keeps_profile_service_after_parent_scope_ends(
             retain=True,
         )
         if background:
-            task = asyncio.create_task(run_subagent(args))
+            from linch.profiles import _schedule_with_binding
+
+            binding = session._run_bindings["profile-run"]
+            task = _schedule_with_binding(binding, run_subagent(args))
             session.workers["worker"] = WorkerHandle(
                 "worker", "pending", "retained", definition, task=task
             )
@@ -706,7 +710,8 @@ async def test_retained_child_keeps_profile_service_after_parent_scope_ends(
     if background:
         result = await task
     child = agent._sessions[result.child_session_id]
-    assert child.agent.context.get("profile.service") == {"tenant": "acme"}
+    assert child.agent is agent
+    assert child._config_seed.config.context.get("profile.service") == {"tenant": "acme"}
     releasing = asyncio.create_task(agent.release_session(child.id))
     await asyncio.wait_for(cleanup_started.wait(), 1)
     waited_for_cleanup = not releasing.done()
@@ -714,7 +719,8 @@ async def test_retained_child_keeps_profile_service_after_parent_scope_ends(
     await releasing
     await asyncio.wait_for(cleaned.wait(), 1)
     assert waited_for_cleanup
-    assert child.agent.context.get("profile.service") is None
+    assert child._config_seed is None
+    assert agent.context.get("profile.service") is None
     await agent.close()
 
 
@@ -739,10 +745,10 @@ async def test_profile_plugin_tracks_removal_of_inherited_requirement() -> None:
     dependency = agent.context.register("dependency", object())
     session = await agent.session()
     profile = Profile(id="support", version="1", plugins={"dep": (DependentPlugin(), {})})
-    async with _profile_scope(session, profile):
-        assert session.agent.context.get("dependent") == "active"
+    async with _profile_scope(session, profile, "profile-run") as config:
+        assert config.context.get("dependent") == "active"
         await dependency.dispose()
-        assert session.agent.context.get("dependent") is None
+        assert config.context.get("dependent") is None
     await agent.close()
 
 
@@ -762,8 +768,10 @@ async def test_profile_filter_preserves_host_ruleset_path_root() -> None:
     call = PendingToolCall("call", write, {"file_path": "/tenant-policy/secret/key"})
     assert agent.permission_engine.evaluate(call).decision == "deny"
     session = await agent.session()
-    async with _profile_scope(session, Profile(id="support", version="1", tool_allow=("Write",))):
-        assert session.agent.permission_engine.evaluate(call).decision == "deny"
+    async with _profile_scope(
+        session, Profile(id="support", version="1", tool_allow=("Write",)), "profile-run"
+    ) as config:
+        assert config.permission_engine.evaluate(call).decision == "deny"
     await agent.close()
 
 
@@ -782,8 +790,13 @@ async def test_profile_scope_disposes_after_last_background_task_finishes() -> N
     agent = _agent(_CaptureProvider([]), empty_tools())
     session = await agent.session()
     profile = Profile(id="support", version="1", plugins={"cleanup": (CleanupPlugin("c", "1"), {})})
-    async with _profile_scope(session, profile):
-        tasks = [asyncio.create_task(release.wait()) for _ in range(2)]
+    async with _profile_scope(session, profile, "profile-run"):
+        from linch.profiles import _schedule_with_binding
+
+        tasks = [
+            _schedule_with_binding(session._run_bindings["profile-run"], release.wait())
+            for _ in range(2)
+        ]
         session.background_tasks.extend(tasks)
     assert not cleaned.is_set()
     release.set()
@@ -818,3 +831,764 @@ async def test_profile_plugin_listener_does_not_affect_concurrent_plain_run() ->
     assert plain_end.result == "tool:plain"
     assert not agent.tool_pipeline.has_listeners()
     await agent.close()
+
+
+async def test_profile_tool_observes_real_agent_identity():
+    owner = None
+    seen = []
+
+    def inspect_owner(raw, ctx):
+        seen.append(owner._sessions[ctx.session_id].agent)
+
+    tool = StubTool("inspect_owner", on_execute=inspect_owner)
+    owner = _agent(
+        ScriptedProvider([ToolUseTurn("inspect_owner", {}), TextTurn("done")]), tool_registry(tool)
+    )
+    session = await owner.session()
+    await _collect(session, RunOptions(profile=Profile("empty", "1")))
+    assert seen == [owner]
+    await owner.close()
+
+
+def _child_definition():
+    from linch.subagents.types import AgentDefinition, AgentFrontmatter
+
+    return AgentDefinition(
+        "child", "<test>", "built-in", AgentFrontmatter("child", "child", []), "child instructions"
+    )
+
+
+@pytest.mark.parametrize("bound", [None, 1])
+async def test_profile_retained_child_is_owned_and_can_be_forked(bound):
+    from linch.subagents.runner import RunSubagentArgs, run_subagent
+
+    children = []
+    owner = None
+    parent = None
+
+    async def spawn(raw, ctx):
+        result = await run_subagent(
+            RunSubagentArgs(
+                parent_session=parent,
+                parent_agent=parent.agent,
+                definition=_child_definition(),
+                prompt="child",
+                display_name="child",
+                subagent_run_id="child",
+                retain=True,
+            )
+        )
+        children.append(owner._sessions[result.child_session_id])
+
+    owner = _agent(
+        ScriptedProvider([ToolUseTurn("spawn", {}), TextTurn("child"), TextTurn("done")]),
+        tool_registry(StubTool("spawn", on_execute=spawn)),
+        max_idle_sessions=bound,
+    )
+    parent = await owner.session()
+    events = await _collect(parent, RunOptions(profile=Profile("empty", "1")))
+    assert not any(e.type == "tool_call_end" and e.is_error for e in events)
+    assert children
+    if bound is None:
+        fork = await owner.fork_session(children[0])
+        assert fork.agent is owner
+        assert fork._config_seed is None
+        assert children[0].agent is owner
+        await owner.release_session(children[0])
+    else:
+        assert all(child._lifecycle_state != "quiescing" for child in children)
+    await owner.close()
+
+
+async def test_profile_child_abort_after_record_creation_releases_owned_child():
+    from linch.abort import AbortContext
+    from linch.kernel import Disposable
+    from linch.subagents.runner import RunSubagentArgs, run_subagent
+
+    cleaned = asyncio.Event()
+
+    class Cleanup(_NamedPlugin):
+        def setup(self, ctx, config=None):
+            return Disposable(cleaned.set)
+
+    owner = None
+    parent = None
+
+    async def spawn(raw, ctx):
+        signal = AbortContext()
+        store = owner._get_store()
+        create = store.create
+
+        async def aborted_create(*args, **kwargs):
+            record = await create(*args, **kwargs)
+            signal.abort()
+            return record
+
+        store.create = aborted_create
+        try:
+            await run_subagent(
+                RunSubagentArgs(
+                    parent_session=parent,
+                    parent_agent=parent.agent,
+                    definition=_child_definition(),
+                    prompt="child",
+                    display_name="child",
+                    subagent_run_id="child",
+                    retain=True,
+                    signal=signal,
+                )
+            )
+        finally:
+            store.create = create
+
+    owner = _agent(
+        ScriptedProvider([ToolUseTurn("spawn", {}), TextTurn("done")]),
+        tool_registry(StubTool("spawn", on_execute=spawn)),
+    )
+    parent = await owner.session()
+    await _collect(
+        parent,
+        RunOptions(
+            profile=Profile("empty", "1", plugins={"cleanup": (Cleanup("cleanup", "1"), {})})
+        ),
+    )
+    assert list(owner._sessions) == [parent.id]
+    assert cleaned.is_set()
+    await owner.close()
+
+
+async def test_cancelled_retained_foreground_profile_child_does_not_orphan():
+    from linch.kernel import Disposable
+    from linch.subagents.runner import RunSubagentArgs, run_subagent
+
+    started, cleaned = asyncio.Event(), asyncio.Event()
+
+    class Cleanup(_NamedPlugin):
+        def setup(self, ctx, config=None):
+            return Disposable(cleaned.set)
+
+    owner = None
+    parent = None
+
+    class HeldChild(ScriptedProvider):
+        async def stream(self, req):
+            if self.requests:
+                started.set()
+                await asyncio.Future()
+            async for event in super().stream(req):
+                yield event
+
+    async def spawn(raw, ctx):
+        await run_subagent(
+            RunSubagentArgs(
+                parent_session=parent,
+                parent_agent=parent.agent,
+                definition=_child_definition(),
+                prompt="child",
+                display_name="child",
+                subagent_run_id="child",
+                retain=True,
+            )
+        )
+
+    owner = _agent(
+        HeldChild([ToolUseTurn("spawn", {})]), tool_registry(StubTool("spawn", on_execute=spawn))
+    )
+    parent = await owner.session()
+    profile = Profile("empty", "1", plugins={"cleanup": (Cleanup("cleanup", "1"), {})})
+    task = asyncio.create_task(_collect(parent, RunOptions(profile=profile)))
+    await asyncio.wait_for(started.wait(), 1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert list(owner._sessions) == [parent.id]
+    assert cleaned.is_set()
+    assert parent._run_bindings == {}
+    await owner.close()
+
+
+async def test_run_binding_rejects_missing_and_foreign_ids():
+    from linch.errors import ConfigError
+    from linch.profiles import _effective_run_config, _profile_scope
+
+    owner = _agent(ScriptedProvider([]), tool_registry())
+    first, second = await owner.session(), await owner.session()
+    async with _profile_scope(first, Profile("first", "1"), "first") as config:
+        assert _effective_run_config(first, "first") is config
+        with pytest.raises(ConfigError, match="missing or foreign"):
+            _effective_run_config(first, "other")
+        with pytest.raises(ConfigError, match="missing or foreign"):
+            _effective_run_config(second, "first")
+    assert first._run_bindings == {}
+    await owner.close()
+
+
+async def test_profile_setup_sees_reserved_binding_and_real_owner_before_publication():
+    from linch.kernel import Disposable
+    from linch.profiles import _effective_run_config
+
+    observations = []
+    owner = _agent(ScriptedProvider([TextTurn("done")]), tool_registry())
+    session = await owner.session()
+
+    class Inspect(_NamedPlugin):
+        def setup(self, ctx, config=None):
+            observations.append(
+                (
+                    ctx.agent,
+                    session.active_run_id,
+                    _effective_run_config(session, "reserved") is ctx.run_config,
+                )
+            )
+            return Disposable()
+
+    await _collect(
+        session,
+        RunOptions(
+            run_id="reserved",
+            profile=Profile("inspect", "1", plugins={"inspect": (Inspect("inspect", "1"), {})}),
+        ),
+    )
+    assert observations == [(owner, None, True)]
+    assert session._run_bindings == {}
+    await owner.close()
+
+
+async def test_base_configuration_tracks_replaced_agent_fields():
+    owner = _agent(ScriptedProvider([]), tool_registry())
+    base = owner.context.run_config
+    owner.tools = tool_registry(StubTool("late"))
+    owner.hooks = [object()]
+    owner.system_prompt = "changed"
+    assert base.tools is owner.tools
+    assert base.hooks is owner.hooks
+    assert base.system_prompt == "changed"
+    await owner.close()
+
+
+async def test_background_run_a_keeps_its_config_while_same_session_runs_b():
+    from linch.kernel import Disposable
+
+    reading, read_release, b_started, b_release = (asyncio.Event() for _ in range(4))
+    cleaned = []
+    seen = []
+
+    class Service(_NamedPlugin):
+        provides = ("profile.service",)
+
+        def setup(self, ctx, config=None):
+            ctx.register("profile.service", config["label"])
+            return Disposable(lambda: cleaned.append(config["label"]))
+
+    class HeldB(ScriptedProvider):
+        async def stream(self, req):
+            if len(self.requests) == 2:
+                b_started.set()
+                await b_release.wait()
+            async for event in super().stream(req):
+                yield event
+
+    async def read(raw, ctx):
+        reading.set()
+        await read_release.wait()
+        seen.append((ctx.run_id, ctx._run_config.context.get("profile.service")))
+
+    provider = HeldB(
+        [ToolUseTurn("read", {"run_in_background": True}), TextTurn("A"), TextTurn("B")]
+    )
+    owner = _agent(
+        provider, tool_registry(StubTool("read", on_execute=read)), enable_background_tools=True
+    )
+    session = await owner.session()
+
+    def options(label):
+        return RunOptions(
+            run_id=label,
+            profile=Profile(
+                label, "1", plugins={"service": (Service("service", "1"), {"label": label})}
+            ),
+        )
+
+    await _collect(session, options("A"))
+    await asyncio.wait_for(reading.wait(), 1)
+    assert cleaned == []
+    running_b = asyncio.create_task(_collect(session, options("B")))
+    await asyncio.wait_for(b_started.wait(), 1)
+    read_release.set()
+    await asyncio.gather(*session.background_tasks)
+    assert seen == [("A", "A")]
+    assert cleaned == ["A"]
+    assert "A" not in session._run_bindings
+    assert "B" in session._run_bindings
+    b_release.set()
+    await running_b
+    assert cleaned == ["A", "B"]
+    assert session._run_bindings == {}
+    await owner.close()
+
+
+async def test_profile_cleanup_failure_keeps_retry_ownership_and_releases_admission():
+    from linch.kernel import Disposable
+
+    attempts = []
+
+    class RetryCleanup(_NamedPlugin):
+        def setup(self, ctx, config=None):
+            def cleanup():
+                attempts.append(1)
+                if len(attempts) == 1:
+                    raise RuntimeError("retry me")
+
+            return Disposable(cleanup)
+
+    owner = _agent(ScriptedProvider([TextTurn("first"), TextTurn("second")]), tool_registry())
+    session = await owner.session()
+    from linch._telemetry import telemetry_for
+
+    telemetry_for(owner)
+    baseline = len(owner.context._scope._disposers)
+    profile = Profile("retry", "1", plugins={"retry": (RetryCleanup("retry", "1"), {})})
+    with pytest.raises(RuntimeError, match="retry me"):
+        await _collect(session, RunOptions(run_id="retry", profile=profile))
+    assert not session._active
+    assert session._idle.is_set()
+    assert "retry" in session._run_bindings
+    assert len(owner.context._scope._disposers) > baseline
+    await _collect(session, RunOptions())
+    await session.aclose()
+    assert attempts == [1, 1]
+    assert session._run_bindings == {}
+    assert len(owner.context._scope._disposers) == baseline
+    await owner.close()
+
+
+async def test_background_binding_is_released_when_task_cancelled_before_start():
+    from linch.kernel import Disposable
+    from linch.profiles import _profile_scope, _schedule_with_binding
+
+    cleaned = asyncio.Event()
+    entered = []
+
+    class Cleanup(_NamedPlugin):
+        def setup(self, ctx, config=None):
+            return Disposable(cleaned.set)
+
+    owner = _agent(ScriptedProvider([]), tool_registry())
+    session = await owner.session()
+    profile = Profile("cancel", "1", plugins={"cleanup": (Cleanup("cleanup", "1"), {})})
+    async with _profile_scope(session, profile, "cancel"):
+        binding = session._run_bindings["cancel"]
+
+        async def work():
+            entered.append(True)
+
+        inner = work()
+        task = _schedule_with_binding(binding, inner)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        assert entered == []
+        assert inner.cr_frame is None
+    assert cleaned.is_set()
+    assert session._run_bindings == {}
+    await owner.close()
+
+
+async def test_profile_event_emit_hook_uses_effective_hooks_and_real_owner():
+    from linch.kernel import Disposable
+
+    emitted = []
+
+    class Hook:
+        def on_event_emit(self, ctx):
+            emitted.append((ctx.event.type, ctx.session.agent))
+
+    class Hooks(_NamedPlugin):
+        def setup(self, ctx, config=None):
+            hook = Hook()
+            hooks = ctx.run_config.hooks
+            hooks.append(hook)
+            return Disposable(lambda: hooks.remove(hook))
+
+    owner = _agent(ScriptedProvider([TextTurn("profile"), TextTurn("plain")]), tool_registry())
+    profile = Profile("hooks", "1", plugins={"hooks": (Hooks("hooks", "1"), {})})
+    await _collect(await owner.session(), RunOptions(profile=profile))
+    assert emitted and emitted[-1] == ("result", owner)
+    count = len(emitted)
+    await _collect(await owner.session(), RunOptions())
+    assert len(emitted) == count
+    await owner.close()
+
+
+async def test_profile_setup_failure_rolls_back_effects_and_binding():
+    from linch._telemetry import telemetry_for
+    from linch.kernel import Disposable
+
+    cleaned = []
+
+    class Failing(_NamedPlugin):
+        provides = ("partial",)
+
+        def setup(self, ctx, config=None):
+            ctx.register("partial", object())
+            ctx.effect(lambda: Disposable(lambda: cleaned.append(True)))
+            raise RuntimeError("setup failed")
+
+    owner = _agent(ScriptedProvider([]), tool_registry())
+    telemetry_for(owner)
+    session = await owner.session()
+    baseline = len(owner.context._scope._disposers)
+    with pytest.raises(RuntimeError, match="setup failed"):
+        await _collect(
+            session,
+            RunOptions(profile=Profile("fail", "1", plugins={"fail": (Failing("fail", "1"), {})})),
+        )
+    assert cleaned == [True]
+    assert session.agent is owner and not session._active
+    assert session._run_bindings == {}
+    assert len(owner.context._scope._disposers) == baseline
+    assert owner.context.get("partial") is None
+    await owner.close()
+
+
+async def test_profile_preserves_custom_context_adapter_override_signature():
+    from linch.context import ContextBuildResult
+    from linch.hooks.adapters import ContextInjectionHook
+    from linch.types import SystemBlock
+
+    class CustomContext(ContextInjectionHook):
+        async def build_context(self, session, turn_index):
+            return ContextBuildResult(system_blocks=[SystemBlock(text="custom context")])
+
+    provider = ScriptedProvider([TextTurn("done")])
+    owner = _agent(provider, tool_registry(), hooks=[CustomContext(None)])
+    events = await _collect(await owner.session(), RunOptions(profile=Profile("empty", "1")))
+    assert events[-1].subtype == "success"
+    assert any(block.text == "custom context" for block in provider.requests[0].system)
+    await owner.close()
+
+
+@pytest.mark.parametrize("nested", [False, True])
+async def test_retained_child_continuation_keeps_seed_services_and_restrictions(nested):
+    from linch.context import ContextBuildResult
+    from linch.hooks.adapters import ContextInjectionHook
+    from linch.kernel import Disposable
+    from linch.subagents.runner import (
+        ContinueSubagentArgs,
+        RunSubagentArgs,
+        continue_subagent,
+        run_subagent,
+    )
+    from linch.subagents.workers import WorkerHandle
+    from linch.types import SystemBlock
+
+    cleaned = []
+    children = []
+    parent = None
+
+    class Builder:
+        async def build(self, turn):
+            value = turn._run_config.context.get("profile.service")
+            return ContextBuildResult(system_blocks=[SystemBlock(text=f"service:{value}")])
+
+    class Service(_NamedPlugin):
+        provides = ("profile.service",)
+
+        def setup(self, ctx, config=None):
+            ctx.register("profile.service", "parent")
+            hooks = ctx.run_config.hooks
+            hook = ContextInjectionHook(Builder())
+            hooks.append(hook)
+            return Disposable(lambda: (hooks.remove(hook), cleaned.append(True)))
+
+    class Extra(_NamedPlugin):
+        def setup(self, ctx, config=None):
+            return ctx.run_config.tools.register(StubTool("extra"))
+
+    async def spawn(raw, ctx):
+        result = await run_subagent(
+            RunSubagentArgs(
+                parent_session=parent,
+                parent_agent=parent.agent,
+                config_binding=parent._run_bindings[ctx.run_id],
+                definition=_child_definition(),
+                prompt="child",
+                display_name="child",
+                subagent_run_id="child",
+                retain=True,
+            )
+        )
+        children.append(owner._sessions[result.child_session_id])
+
+    provider = ScriptedProvider(
+        [ToolUseTurn("spawn", {}), TextTurn("child"), TextTurn("parent"), TextTurn("continued")]
+    )
+    owner = _agent(provider, tool_registry(StubTool("spawn", on_execute=spawn)))
+    parent = await owner.session()
+    profile = Profile("parent", "1", plugins={"service": (Service("service", "1"), {})})
+    await _collect(parent, RunOptions(profile=profile))
+    child = children[0]
+    original = child._config_seed
+    assert original.profile is profile
+    assert cleaned == []
+    handle = WorkerHandle("worker", child.id, "child", _child_definition())
+    options = (
+        RunOptions(profile=Profile("nested", "1", plugins={"extra": (Extra("extra", "1"), {})}))
+        if nested
+        else RunOptions()
+    )
+    result = await continue_subagent(
+        ContinueSubagentArgs(parent, owner, handle, "continue", "continue", run_options=options)
+    )
+    assert not result.errored
+    assert child._config_seed is original
+    assert any(block.text == "service:parent" for block in provider.requests[-1].system)
+    assert provider.requests[-1].tools == []
+    assert cleaned == []
+    await owner.release_session(child)
+    assert cleaned == [True]
+    assert parent._run_bindings == {}
+    await owner.close()
+
+
+async def test_failed_profile_teardown_is_retried_before_same_id_readmission():
+    from linch.kernel import Disposable
+
+    attempts = []
+
+    class Retry(_NamedPlugin):
+        def setup(self, ctx, config=None):
+            def cleanup():
+                attempts.append(True)
+                if len(attempts) == 1:
+                    raise RuntimeError("cleanup retry")
+
+            return Disposable(cleanup)
+
+    owner = _agent(ScriptedProvider([TextTurn("first"), TextTurn("second")]), tool_registry())
+    session = await owner.session()
+    options = RunOptions(
+        run_id="same", profile=Profile("same", "1", plugins={"retry": (Retry("retry", "1"), {})})
+    )
+    with pytest.raises(RuntimeError, match="cleanup retry"):
+        await _collect(session, options)
+    events = await _collect(session, options)
+    assert events[-1].subtype == "success"
+    assert attempts == [True, True, True]
+    assert session._run_bindings == {}
+    await owner.close()
+
+
+async def test_nested_profile_cleanup_retry_does_not_await_its_own_parent_release():
+    from linch.kernel import Disposable
+    from linch.profiles import _profile_scope
+
+    attempts = []
+
+    class Retry(_NamedPlugin):
+        def setup(self, ctx, config=None):
+            def cleanup():
+                attempts.append(True)
+                if len(attempts) == 1:
+                    raise RuntimeError("nested cleanup")
+
+            return Disposable(cleanup)
+
+    owner = _agent(ScriptedProvider([]), tool_registry())
+    parent = await owner.session()
+    child = await owner.session()
+    outer = Profile("outer", "1")
+    inner = Profile("inner", "1", plugins={"retry": (Retry("retry", "1"), {})})
+    async with _profile_scope(parent, outer, "outer"):
+        child._config_seed = parent._run_bindings["outer"].retain()
+        with pytest.raises(RuntimeError, match="nested cleanup"):
+            async with _profile_scope(child, inner, "inner"):
+                pass
+    await asyncio.wait_for(child.aclose(), 1)
+    assert attempts == [True, True]
+    assert parent._run_bindings == child._run_bindings == {}
+    await owner.close()
+
+
+async def test_profile_reliability_validation_uses_restricted_session_catalog():
+    from linch import ReliabilityPolicy, ToolPrerequisite
+
+    owner = _agent(
+        ScriptedProvider([TextTurn("done")]),
+        tool_registry(StubTool("deploy"), StubTool("run_tests")),
+        reliability=ReliabilityPolicy(prerequisites=(ToolPrerequisite("deploy", ("run_tests",)),)),
+    )
+    session = await owner.session()
+    session.tools_override = owner.tools.copy()
+    with pytest.raises(ValueError, match="unknown reliability tool name"):
+        await _collect(
+            session, RunOptions(profile=Profile("restricted", "1", tool_deny=("run_tests",)))
+        )
+    assert owner.provider.requests == []
+    await owner.close()
+
+
+async def test_ordinary_context_builder_sees_session_tool_override():
+    from linch.context import ContextBuildResult
+    from linch.hooks.adapters import ContextInjectionHook
+
+    seen = []
+
+    class Builder:
+        async def build(self, turn):
+            seen.append([tool.name for tool in turn.tools.list()])
+            return ContextBuildResult()
+
+    owner = _agent(
+        ScriptedProvider([TextTurn("done")]),
+        tool_registry(StubTool("host")),
+        hooks=[ContextInjectionHook(Builder())],
+    )
+    session = await owner.session()
+    session.tools_override = tool_registry(StubTool("limited"))
+    await _collect(session, RunOptions())
+    assert seen == [["limited"]]
+    await owner.close()
+
+
+async def test_live_run_config_builds_worker_catalog_prompt_contributions():
+    from linch.config import SystemPromptSection
+    from linch.profiles import _profile_scope
+
+    tool = StubTool("worker_only")
+    tool.system_prompt_sections = [SystemPromptSection(name="worker", text="worker instructions")]
+    owner = _agent(ScriptedProvider([]), tool_registry())
+    owner._subagent_tool_registry = tool_registry(tool)
+    session = await owner.session()
+    async with _profile_scope(session, None, "ordinary") as config:
+        blocks = config.build_system_blocks_for_tool_names(["worker_only"])
+        assert any(block.text == "worker instructions" for block in blocks)
+    await owner.close()
+
+
+async def test_inactive_request_and_contract_helpers_use_session_tool_override():
+    from linch.loop.contracts import _build_run_contract
+    from linch.loop.request import _build_turn_request
+
+    owner = _agent(ScriptedProvider([]), tool_registry(StubTool("host")))
+    session = await owner.session()
+    session.tools_override = tool_registry(StubTool("limited"))
+    request = _build_turn_request(session, RunOptions())
+    contract = _build_run_contract(session, "go", RunOptions())
+    assert [tool["name"] for tool in request.tools] == ["limited"]
+    assert [tool["name"] for tool in contract.payload["tools"]] == ["limited"]
+    assert session._run_bindings == {}
+    await owner.close()
+
+
+@pytest.mark.parametrize(
+    "base,role", [(["SESSION BASE"], "PROFILE ROLE"), ([], "PROFILE ROLE"), ([], None)]
+)
+async def test_explicit_subagent_fork_preserves_effective_profile_system_override(base, role):
+    from linch.profiles import _profile_scope
+    from linch.subagents.runner import RunSubagentArgs, run_subagent
+    from linch.types import SystemBlock
+
+    provider = ScriptedProvider([TextTurn("child")])
+    owner = _agent(provider, tool_registry())
+    parent = await owner.session()
+    parent.system_blocks_override = [SystemBlock(text=text) for text in base]
+    profile = Profile("fork", "1", system_prompt=role)
+    async with _profile_scope(parent, profile, "parent") as config:
+        expected = list(config.system_blocks_override)
+        await run_subagent(
+            RunSubagentArgs(
+                parent,
+                owner,
+                _child_definition(),
+                "child",
+                "child",
+                "child",
+                config_binding=parent._run_bindings["parent"],
+                fork=True,
+            )
+        )
+    assert provider.requests[0].system == expected
+    assert [block.text for block in provider.requests[0].system] == [
+        *base,
+        *([role] if role is not None else []),
+    ]
+    await owner.close()
+
+
+@pytest.mark.parametrize("active_b", [False, True])
+@pytest.mark.parametrize("fails", [False, True])
+async def test_background_tool_hooks_keep_originating_profile_identity_and_deps(active_b, fails):
+    from linch.kernel import Disposable
+    from linch.profiles import _effective_run_config
+
+    entered, tool_release, b_started, b_release = (asyncio.Event() for _ in range(4))
+    seen_ids, seen_services, post_deps, failure_deps = [], [], [], []
+
+    class Hook:
+        def on_post_tool_use(self, ctx):
+            post_deps.append(ctx.deps)
+
+        def on_post_tool_use_failure(self, ctx):
+            failure_deps.append(ctx.deps)
+            seen_ids.append(ctx.run_id)
+            seen_services.append(
+                _effective_run_config(ctx.session, ctx.run_id).context.get("label")
+            )
+
+    class Service(_NamedPlugin):
+        provides = ("label",)
+
+        def setup(self, ctx, config=None):
+            ctx.register("label", config["label"])
+            hook, hooks = Hook(), ctx.run_config.hooks
+            hooks.append(hook)
+            return Disposable(lambda: hooks.remove(hook))
+
+    class HeldB(ScriptedProvider):
+        async def stream(self, req):
+            if len(self.requests) == 2:
+                b_started.set()
+                await b_release.wait()
+            async for event in super().stream(req):
+                yield event
+
+    async def fail(raw, ctx):
+        entered.set()
+        await tool_release.wait()
+        if fails:
+            raise ValueError("failure from A")
+
+    provider = HeldB(
+        [ToolUseTurn("fail", {"run_in_background": True}), TextTurn("A"), TextTurn("B")]
+    )
+    owner = _agent(
+        provider, tool_registry(StubTool("fail", on_execute=fail)), enable_background_tools=True
+    )
+    session = await owner.session()
+
+    def options(label):
+        return RunOptions(
+            run_id=label,
+            deps={"label": label},
+            profile=Profile(
+                label, "1", plugins={"service": (Service("service", "1"), {"label": label})}
+            ),
+        )
+
+    await _collect(session, options("A"))
+    await entered.wait()
+    running_b = None
+    if active_b:
+        running_b = asyncio.create_task(_collect(session, options("B")))
+        await b_started.wait()
+    tool_release.set()
+    await asyncio.gather(*session.background_tasks)
+    if running_b is not None:
+        b_release.set()
+        await running_b
+    assert seen_ids == (["A"] if fails else [])
+    assert seen_services == (["A"] if fails else [])
+    assert post_deps == [{"label": "A"}]
+    assert failure_deps == ([{"label": "A"}] if fails else [])
+    assert session._run_bindings == {}
+    await owner.close()

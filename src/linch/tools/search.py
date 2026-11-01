@@ -66,7 +66,9 @@ class ToolSearchPlugin:
         catalog = _SearchCatalog(ctx, agent, self.max_tools, self.max_skills)
         ctx.register("request_catalog", catalog)
         catalog.prepare()
-        ctx.effect(lambda: agent._turn_stopping_dispatcher.register(catalog._guard_terminal))
+        ctx.effect(
+            lambda: ctx.run_config._turn_stopping_dispatcher.register(catalog._guard_terminal)
+        )
         ctx.on(TOOL_RESOLVE, catalog._guard_call)
         return Disposable()
 
@@ -75,6 +77,7 @@ class _SearchCatalog:
     def __init__(self, scope: Context, agent: Any, max_tools: int, max_skills: int) -> None:
         self.scope = scope
         self.agent = agent
+        self.config = scope.run_config
         self.max_tools = max_tools
         self.max_skills = max_skills
         self.search = _SearchTool(self)
@@ -83,7 +86,7 @@ class _SearchCatalog:
     def active(self) -> bool:
         """Whether the live agent catalog requires discovery in a new request."""
         return (
-            sum(not isinstance(tool, _SearchTool) for tool in self.agent.tools.list())
+            sum(not isinstance(tool, _SearchTool) for tool in self.config.tools.list())
             > self.max_tools
             or len(self._skills()) > self.max_skills
         )
@@ -94,12 +97,12 @@ class _SearchCatalog:
         Raises:
             ConfigError: If an application tool already owns the discovery name.
         """
-        if not self.active or self.agent.tools.get(self.search.name) is self.search:
+        if not self.active or self.config.tools.get(self.search.name) is self.search:
             return
-        existing = self.agent.tools.get(self.search.name)
+        existing = self.config.tools.get(self.search.name)
         if existing is not None and not isinstance(existing, _SearchTool):
             raise ConfigError("tool_search is reserved while tool discovery is active")
-        self.scope.effect(lambda: self.agent.tools.replace(self.search))
+        self.scope.effect(lambda: self.config.tools.replace(self.search))
 
     def _skills(self) -> dict[str, Any]:
         return {
@@ -190,13 +193,31 @@ class _SearchCatalog:
     def _guard_call(self, name: str, raw: dict[str, Any], session: Any) -> str | None:
         if session.agent is not self.agent:
             return None
+        from ..profiles import _effective_run_config
+
+        config = (
+            _effective_run_config(session, session.active_run_id)
+            if session.active_run_id
+            else session.agent._run_config
+        )
+        if config.context.get("request_catalog") is not self:
+            return None
         offering = session._extensions.get(_KEY)
         if offering is not None and name not in offering["offered"]:
             return f"Tool '{name}' is deferred; call tool_search with select:{name} first"
         return None
 
     def _guard_terminal(self, event: TurnStopping) -> TurnStoppingDecision | None:
-        if self.agent.context.get("request_catalog") is not self:
+        if event.session.agent is not self.agent:
+            return None
+        from ..profiles import _effective_run_config
+
+        config = (
+            _effective_run_config(event.session, event.run_id)
+            if event.session._active
+            else self.agent._run_config
+        )
+        if config.context.get("request_catalog") is not self:
             return None
         block = event.final_block
         offering = event.session._extensions.get(_KEY)
@@ -278,7 +299,11 @@ class _SearchTool:
         offering = session._extensions.get(_KEY)
         if offering is None or self.name not in offering["offered"]:
             return ToolResult(content="No deferred catalog is offered on this turn.", is_error=True)
-        registry = session.tools_override or self._catalog.agent.tools
+        registry = (
+            ctx._run_config.tools
+            if ctx._run_config is not None
+            else (session.tools_override or self._catalog.config.tools)
+        )
         tools = registry.select(names=set(offering["candidates"])).schemas()
         skills = [
             {"name": name, "description": skill.frontmatter.description}
@@ -293,7 +318,7 @@ class _SearchTool:
         state = {
             "tools": sorted(
                 (set(loaded.get("tools", ())) | {s["name"] for s in matches})
-                & {t.name for t in self._catalog.agent.tools.list()}
+                & {t.name for t in registry.list()}
             ),
             "skills": sorted(
                 (set(loaded.get("skills", ())) | {s["name"] for s in skill_matches})

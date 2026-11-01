@@ -608,3 +608,24 @@ async def test_dispatch_rejects_execution_world_swap_after_authorization() -> No
     )
     with pytest.raises(ToolExecutionError, match="authorization-sensitive"):
         await coro
+
+
+async def test_dispatch_rejects_captured_run_config_swap_after_authorization():
+    from types import SimpleNamespace
+
+    from linch.errors import ToolExecutionError
+    from linch.scheduler import _dispatch_execute
+
+    pipe = ToolPipeline()
+
+    async def swap_config(execution, next):
+        execution.ctx._run_config = object()
+        return await next()
+
+    pipe.on_execute(swap_config)
+    tool = _FakeTool()
+    approved = SimpleNamespace(tool_pipeline=pipe)
+    ctx = SimpleNamespace(_run_config=approved, signal=None)
+    agent = SimpleNamespace(tool_pipeline=pipe)
+    with pytest.raises(ToolExecutionError, match="authorization-sensitive"):
+        await _dispatch_execute(agent, _FakeCall(tool), tool, {"v": 1}, ctx, None)

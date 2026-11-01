@@ -355,16 +355,20 @@ async def test_deferred_background_tool_retains_origin_principal(
     initial = old if initial_kind == "principal" else None
     gate = asyncio.Event()
     seen: list[Any] = []
+    seen_deps: list[Any] = []
+    originating_deps = {"tenant": "a"}
 
     class _DeferredTool(_ContextTool):
         async def execute(self, input: dict[str, Any], ctx: Any) -> Any:
             await gate.wait()
             seen.append(ctx.principal)
+            seen_deps.append(ctx.deps)
             return ToolResult(content="done")
 
     run_id = "same-run" if same_run else "old-run"
     session = _scheduler_session(initial)
     _bind_fake_run(session, run_id, initial)
+    session.run_deps = originating_deps
     iterator = execute_tool_calls(
         [ToolUseBlock(id="bg", name="Deferred", input={"run_in_background": True})],
         _scheduler_agent(_DeferredTool("Deferred", seen, scope="read", parallel=True)),
@@ -383,6 +387,7 @@ async def test_deferred_background_tool_retains_origin_principal(
     else:
         session.active_run_id = "replacement-run"
         session._active_principal = replacement
+    session.run_deps = {"tenant": "b"}
     gate.set()
     await asyncio.gather(*tasks)
 
@@ -391,6 +396,8 @@ async def test_deferred_background_tool_retains_origin_principal(
         assert seen[0] is old
     else:
         assert seen == [None]
+    assert seen_deps == [originating_deps]
+    assert seen_deps[0] is originating_deps
     session._finish_run()
 
 
