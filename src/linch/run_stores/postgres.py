@@ -116,7 +116,7 @@ class PostgresRunStore:
 
     Args:
         dsn: PostgreSQL connection string used when a pool is created.
-        pool: Optional asyncpg pool to use instead of creating one lazily.
+        pool: Optional host-owned asyncpg pool; the store never closes it.
         min_size: Minimum size for a store-created pool.
         max_size: Maximum size for a store-created pool.
     """
@@ -133,7 +133,7 @@ class PostgresRunStore:
 
         Args:
             dsn: PostgreSQL connection string used when a pool is created.
-            pool: Optional asyncpg pool to use instead of creating one lazily.
+            pool: Optional host-owned asyncpg pool; the store never closes it.
             min_size: Minimum size for a store-created pool.
             max_size: Maximum size for a store-created pool.
 
@@ -144,6 +144,7 @@ class PostgresRunStore:
         _import_asyncpg()
         self._dsn = dsn
         self._pool: Any = pool
+        self._owns_pool = pool is None
         self._min_size = min_size
         self._max_size = max_size
         self._initialized = False
@@ -978,11 +979,9 @@ class PostgresRunStore:
         )
 
     async def close(self) -> None:
-        """Close the pool held by this store and reset lazy initialization.
+        """Close this store's owned pool and reset lazy initialization.
 
-        Store-created pools and raw caller-supplied pools are closed and the
-        store can initialize again later. A worker-supplied ``_BorrowedPool``
-        handle is retained; its worker or host owns that pool's lifecycle.
+        Caller-supplied pools are retained; their host owns their lifecycle.
         """
 
         await close_pool(self, reset_initialized=True)

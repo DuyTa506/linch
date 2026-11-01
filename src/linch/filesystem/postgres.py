@@ -46,8 +46,8 @@ class PostgresFileBackend:
 
     Args:
         dsn: PostgreSQL connection string.
-        pool: Pre-created asyncpg.Pool to reuse; when set, dsn is ignored. The
-            pool is closed by :meth:`close`.
+        pool: Host-owned asyncpg pool to reuse; when set, dsn is ignored. The
+            backend never closes this pool.
         min_size: Minimum pool connections.
         max_size: Maximum pool connections.
 
@@ -67,7 +67,7 @@ class PostgresFileBackend:
 
         Args:
             dsn: PostgreSQL connection string, ignored when ``pool`` is supplied.
-            pool: Optional pre-created asyncpg pool. It is closed by :meth:`close`.
+            pool: Optional host-owned asyncpg pool; the backend never closes it.
             min_size: Minimum size for a pool created from ``dsn``.
             max_size: Maximum size for a pool created from ``dsn``.
 
@@ -77,6 +77,7 @@ class PostgresFileBackend:
         _import_asyncpg()
         self._dsn = dsn
         self._pool: Any = pool
+        self._owns_pool = pool is None
         self._min_size = min_size
         self._max_size = max_size
         self._initialized = False
@@ -226,9 +227,8 @@ class PostgresFileBackend:
     # ── lifecycle ────────────────────────────────────────────────────────────
 
     async def close(self) -> None:
-        """Close the backend's Postgres pool.
+        """Close the backend's owned Postgres pool.
 
-        A pool supplied to the constructor is closed as well as one created from
-        the DSN.
+        Caller-supplied pools are retained; their host owns their lifecycle.
         """
         await close_pool(self)
