@@ -22,18 +22,25 @@ The tables below group the 2.x removals and replacements by area.
 | `BashTool(backend=...)` | `BashTool(execution=...)`; `from linch.tools.builtin import BashTool` |
 | `coding_tools`, `default_tools`, `defaultTools`, `tools_from_defaults` | `workspace_tools(exclude=..., extra=...)`; `from linch import workspace_tools` |
 | `ToolRegistry.add/remove` | `register/unregister`; `register` and `replace` return reversible `Disposable` handles; `from linch import ToolRegistry` |
+| `permissions["canUseTool"]` and `.canUseTool` | `permissions["can_use_tool"]` and `.can_use_tool` |
+| Tool `.schema` attribute | Tool `.input_schema` attribute |
+| AskUser response `ok` / `confirmed` keys | `accepted`, or `answers`-only response inference |
+| Callback, hook, and pipeline `policy_id` / `policy_version` attributes | `resume_policy_id` / `resume_policy_version` |
 | `Session(provider_view=..., full_history=...)` | `session_log=SessionLog.seed(historical=..., visible=...)`; `from linch import Session, SessionLog` |
 | `SessionLog.derive_messages()` | Read `session.provider_view`; append with `await session.append(...)` |
 | Mutation of `provider_view` / `full_history` | Detached sequence snapshots; append messages or record a logged projection |
 | `AgentMiddleware` and obsolete middleware dispatch/outcome helpers | Duck-typed hooks through `ToolMiddlewareHook`; `from linch import ToolMiddlewareHook` |
+| Built-in `Read`/`Write`/`Edit`/`Glob` argument aliases (`path`, `old`, `new`, `pattern`) | Canonical `file_path`, `old_string`, `new_string`, `glob_pattern`, and `target_directory` keys |
 | Background completion writing directly into notification lists | Custom sessions implement async `notify(...)` |
 | `parallel_safe` fallback | Declare `parallel`: read tools use a boolean opt-in; an input-aware predicate may also admit calls in another scope, such as a subagent restricted to read tools |
+| Ambiguous worker display names for `SubagentContinue` or `TaskStop` | Pass the unique `worker_id`; unique display names remain accepted |
 | `Agent(mailbox=...)` | Mount the plugin: `await agent.use(MailboxPlugin(), mailbox)`; `from linch import MailboxPlugin` |
 | `Agent(ask_user=...)` | Mount the plugin: `await agent.use(AskUserPlugin(), handler)`; `from linch import AskUserPlugin` |
 | Large tool or skill catalogs | `ToolSearchPlugin` is mounted by default; use `await agent.tool_search.dispose()` to restore the unfiltered catalog, or mount `ToolSearchPlugin(max_tools=..., max_skills=...)` explicitly |
 | `Agent(tools=registry)` sharing later caller mutations | Each agent copies `registry` at construction; register later tools on `agent.tools` to keep agent registrations isolated |
 | `ToolActivation`, `ToolSurfaceReaderGuard`, `tool_activations`, and discovery codecs/capability gates | Removed; unknown content-block types and tool-result fields are rejected |
 | Missing-`jsonschema` validation bypass | `jsonschema` is core; configured output schemas are always validated |
+| Persisted skill fields `substitutedBody` and `invokedAt` | Canonical `substituted_body` and `invoked_at`; malformed records are rejected |
 
 Constructor aliases now use these exact spellings:
 
@@ -71,6 +78,7 @@ Old package names in the first column are relative to the former top-level
 | Root eval suite/benchmark exports | `from linch.ext.evals import EvalSuite, EvalBenchmarkTarget, EvalTargetResult, EvalBenchmarkResult, load_eval_suite, load_scripted_turns, run_eval_benchmark` |
 | Root scripted-provider exports | `from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn` |
 | Root eval scorers (except removed `memory_recalled`) | `from linch.ext.evals import text_contains, tool_called, schema_valid, cost_under, context_selected_tool, context_not_trimmed, context_metadata_contains, recovery_succeeded, run_completed` |
+| `text_contains` scorer fields `text` / `contains` | `substring` (omitted field defaults to `{expected}`) |
 | `deep_agent`; root preset/profile/prompt exports | `from linch.ext.deep_agent import create_deep_agent, DeepAgentProfile, DEEP_AGENT_PROFILES, DEEP_AGENT_SYSTEM_PROMPT, DEEP_AGENT_SUBAGENTS` |
 | `reports`; root report helpers | `from linch.ext.reports import RunReport, build_run_report, load_run_report` |
 | `loop_runner`; root loop spec/runner exports | `from linch.ext.loop_runner import LoopSpec, LoopTrigger, LoopTickResult, LoopRunner` |
@@ -135,6 +143,13 @@ Custom store implementations must follow these changed contracts:
   capabilities fence writes with owner/epoch; workers drive renewal. Import
   `RunLease`, `RunLeaseStore`, `RunLeaseConflictError`, and `LeaseLostError`
   from `linch` when implementing ownership handling.
+- Leases are carried per write, not held by the store. Every run-store
+  mutation takes an explicit `lease=` token; pass the claimed `RunLease`
+  through `RunOptions(lease=...)` when driving a leased run yourself.
+  Stores no longer remember which leases they hold. A custom leased store
+  must accept `lease=` on every mutation and validate run, owner and epoch in
+  the same operation as the write. `RunLease` gains `ttl_s`, used for renewal.
+  Unleased writes stay supported for in-process runs.
 
 Writes remain durable before guarded side effects. Lease loss ends execution
 without further writes. Transient durable-store connection failures interrupt

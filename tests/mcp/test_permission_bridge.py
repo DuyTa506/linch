@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import pytest
 
@@ -12,6 +13,30 @@ class _FakeMcpTool(StubTool):
     def __init__(self, name: str, *, scope: str = "write", destructive: bool = False) -> None:
         super().__init__(name, scope=scope, parallel=False, output="called")
         self.destructive = destructive
+
+
+class _FakeConnection:
+    def __init__(self, tools: list[Any], close_error: BaseException | None = None) -> None:
+        self.tools = tools
+        self.closed = 0
+        self.close_error = close_error
+
+    async def close(self) -> None:
+        self.closed += 1
+        if self.close_error is not None:
+            raise self.close_error
+
+
+class _BlockingCloseConnection(_FakeConnection):
+    def __init__(self, tools: list[Any]) -> None:
+        super().__init__(tools)
+        self.close_started = asyncio.Event()
+        self.release_close = asyncio.Event()
+
+    async def close(self) -> None:
+        self.closed += 1
+        self.close_started.set()
+        await self.release_close.wait()
 
 
 class _DisposableRegistry:
@@ -270,3 +295,159 @@ async def test_mcp_attach_rollback_cleans_subagent_registry() -> None:
     assert subagent_registry.get("srv__new") is None
     assert main_registry.get("srv__collision") is collision
     assert subagent_registry.get("srv__collision") is collision
+
+
+async def test_configured_mcp_connection_closes_when_attachment_fails(monkeypatch) -> None:
+    import linch.mcp as mcp_module
+    from linch import Agent
+    from linch.errors import ConfigError
+    from linch.sessions import InMemorySessionStore
+    from tests.support.tools import tool_registry
+
+    existing = _FakeMcpTool("srv__collision")
+    agent = Agent(
+        model="m",
+        provider=ScriptedProvider([TextTurn("ok")]),  # type: ignore[arg-type]
+        permissions={"mode": "acceptEdits"},
+        session_store=InMemorySessionStore(),
+        cwd=".",
+        tools=tool_registry(existing),
+    )
+    agent._mcp_servers = {"srv": object()}
+    connection = _FakeConnection([_FakeMcpTool("srv__collision")])
+
+    async def connect(_servers: Any) -> _FakeConnection:
+        return connection
+
+    monkeypatch.setattr(mcp_module, "connect_mcp_servers", connect)
+
+    try:
+        with pytest.raises(ConfigError, match="already registered"):
+            await agent.connect_mcp()
+        assert connection.closed == 1
+        assert agent._mcp_connection is None
+        assert agent._mcp_connect is None
+    finally:
+        await agent.close()
+
+
+async def test_added_mcp_connection_closes_when_attachment_fails(monkeypatch) -> None:
+    import linch.mcp as mcp_module
+    from linch import Agent
+    from linch.errors import ConfigError
+    from linch.sessions import InMemorySessionStore
+    from tests.support.tools import tool_registry
+
+    existing = _FakeMcpTool("srv__collision")
+    agent = Agent(
+        model="m",
+        provider=ScriptedProvider([TextTurn("ok")]),  # type: ignore[arg-type]
+        permissions={"mode": "acceptEdits"},
+        session_store=InMemorySessionStore(),
+        cwd=".",
+        tools=tool_registry(existing),
+    )
+    connection = _FakeConnection([_FakeMcpTool("srv__collision")])
+
+    async def connect(_servers: Any) -> _FakeConnection:
+        return connection
+
+    monkeypatch.setattr(mcp_module, "connect_mcp_servers", connect)
+
+    try:
+        with pytest.raises(ConfigError, match="already registered"):
+            await agent.add_mcp_servers({"srv": object()})
+        assert connection.closed == 1
+        assert agent._extra_mcp_connections == []
+    finally:
+        await agent.close()
+
+
+async def test_mcp_cleanup_error_preserves_attachment_error(monkeypatch) -> None:
+    import linch.mcp as mcp_module
+    from linch import Agent
+    from linch.errors import ConfigError
+    from linch.sessions import InMemorySessionStore
+    from tests.support.tools import tool_registry
+
+    existing = _FakeMcpTool("srv__collision")
+    agent = Agent(
+        model="m",
+        provider=ScriptedProvider([TextTurn("ok")]),  # type: ignore[arg-type]
+        permissions={"mode": "acceptEdits"},
+        session_store=InMemorySessionStore(),
+        cwd=".",
+        tools=tool_registry(existing),
+    )
+    agent._mcp_servers = {"srv": object()}
+    connection = _FakeConnection(
+        [_FakeMcpTool("srv__collision")], close_error=RuntimeError("close failed")
+    )
+
+    async def connect(_servers: Any) -> _FakeConnection:
+        return connection
+
+    monkeypatch.setattr(mcp_module, "connect_mcp_servers", connect)
+
+    try:
+        with pytest.raises(ConfigError, match="already registered") as caught:
+            await agent.connect_mcp()
+        assert connection.closed == 1
+        assert any("MCP connection cleanup failed" in note for note in caught.value.__notes__)
+    finally:
+        await agent.close()
+
+
+@pytest.mark.parametrize("entrypoint", ["configured", "added"])
+async def test_mcp_connection_close_drains_repeated_cancellation(
+    monkeypatch, entrypoint: str
+) -> None:
+    import linch.mcp as mcp_module
+    from linch import Agent
+    from linch.sessions import InMemorySessionStore
+
+    agent = Agent(
+        model="m",
+        provider=ScriptedProvider([TextTurn("ok")]),  # type: ignore[arg-type]
+        permissions={"mode": "acceptEdits"},
+        session_store=InMemorySessionStore(),
+        cwd=".",
+    )
+    if entrypoint == "configured":
+        agent._mcp_servers = {"srv": object()}
+    connection = _BlockingCloseConnection([])
+    attached = asyncio.Event()
+
+    async def connect(_servers: Any) -> _FakeConnection:
+        return connection
+
+    async def block_attach(_connection: Any) -> None:
+        attached.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(mcp_module, "connect_mcp_servers", connect)
+    monkeypatch.setattr(agent, "_attach_mcp_tools", block_attach)
+
+    async def invoke() -> None:
+        if entrypoint == "configured":
+            await agent.connect_mcp()
+        else:
+            await agent.add_mcp_servers({"srv": object()})
+
+    task = asyncio.create_task(invoke())
+    await attached.wait()
+    task.cancel()
+    try:
+        await connection.close_started.wait()
+        task.cancel()
+        connection.release_close.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert connection.closed == 1
+        if entrypoint == "configured":
+            assert agent._mcp_connect is None
+        else:
+            assert agent._extra_mcp_connections == []
+    finally:
+        connection.release_close.set()
+        await agent.close()

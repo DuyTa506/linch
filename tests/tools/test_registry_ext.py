@@ -151,24 +151,53 @@ def test_select_by_names_and_tags():
     assert {tool.name for tool in selected.list()} == {"SearchDocs", "Calculator"}
 
 
-def test_schemas_accept_v2_schema_attribute():
+def test_schemas_export_canonical_input_schema():
     class SchemaTool(FakeTool):
-        schema = {
+        configured_schema = {
             "type": "object",
             "properties": {"query": {"type": "string"}},
             "required": ["query"],
         }
 
     r = ToolRegistry()
-    r.register(SchemaTool("SearchDocs"))
+    tool = SchemaTool("SearchDocs")
+    tool.input_schema = SchemaTool.configured_schema
+    r.register(tool)
 
     assert r.schemas() == [
         {
             "name": "SearchDocs",
             "description": "Fake SearchDocs",
-            "input_schema": SchemaTool.schema,
+            "input_schema": SchemaTool.configured_schema,
         }
     ]
+
+
+def test_registry_rejects_tool_with_only_legacy_schema_attribute():
+    from linch.errors import ConfigError
+
+    class LegacySchemaTool(FakeTool):
+        schema = {"type": "object"}
+
+        def __init__(self) -> None:
+            super().__init__("LegacySchema")
+            del self.input_schema
+
+    with pytest.raises(ConfigError, match="input_schema"):
+        ToolRegistry().register(LegacySchemaTool())
+
+
+def test_registry_does_not_read_legacy_schema_when_exporting():
+    class CanonicalSchemaTool(FakeTool):
+        input_schema = {"type": "object"}
+
+        @property
+        def schema(self):
+            raise AssertionError("legacy schema attribute was read")
+
+    registry = ToolRegistry()
+    registry.register(CanonicalSchemaTool("CanonicalSchema"))
+    assert registry.schemas()[0]["input_schema"] == {"type": "object"}
 
 
 @pytest.mark.asyncio
