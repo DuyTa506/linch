@@ -2,6 +2,14 @@ from __future__ import annotations
 
 
 def split_shell_args(raw: str) -> list[str]:
+    """Split shell-like arguments while honoring quotes and backslash escapes.
+
+    Args:
+        raw: Raw argument string to tokenize.
+
+    Returns:
+        Argument tokens with surrounding quotes and escape characters removed.
+    """
     tokens: list[str] = []
     current = ""
     in_token = False

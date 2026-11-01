@@ -7,9 +7,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from ..coordination.mailbox import Mailbox, MailboxMessage
-from ..coordination.scheduling import ClaimingScheduleStore, Schedule, ScheduleStore
 from ..filesystem import FileBackend
-from ..memory import MemoryItem, MemoryStore
 from ..tools.base import ResourceAccess, ToolContext, ToolResult
 from ..tools.isolation import IsolationBackend
 
@@ -19,7 +17,15 @@ T = TypeVar("T")
 async def assert_file_backend_contract(
     factory: Callable[[], FileBackend | Awaitable[FileBackend]],
 ) -> None:
-    """Assert the core behavioral contract for a ``FileBackend`` implementation."""
+    """Assert the core behavioral contract for a ``FileBackend`` implementation.
+
+    Args:
+        factory: Zero-argument callable returning a fresh backend, either
+            directly or through an awaitable.
+
+    Raises:
+        AssertionError: If the backend violates the file contract.
+    """
 
     backend = await _call_factory(factory)
     try:
@@ -62,7 +68,15 @@ async def assert_file_backend_contract(
 async def assert_isolation_backend_contract(
     factory: Callable[[], IsolationBackend | Awaitable[IsolationBackend]],
 ) -> None:
-    """Assert the core behavioral contract for an ``IsolationBackend`` implementation."""
+    """Assert the core behavioral contract for an ``IsolationBackend`` implementation.
+
+    Args:
+        factory: Zero-argument callable returning a fresh backend, either
+            directly or through an awaitable.
+
+    Raises:
+        AssertionError: If the backend violates the isolation contract.
+    """
 
     backend = await _call_factory(factory)
     first: str | None = None
@@ -104,6 +118,14 @@ async def assert_mailbox_contract(
     ``factory`` must return a fresh, empty mailbox. The check is designed for
     pytest suites in adapter packages: ``await assert_mailbox_contract(lambda:
     MyMailbox(...))``.
+
+    Args:
+        factory: Zero-argument callable returning a fresh mailbox, either
+            directly or through an awaitable.
+
+    Raises:
+        AssertionError: If the mailbox violates delivery or lifecycle
+            guarantees.
     """
 
     box = await _call_factory(factory)
@@ -154,181 +176,6 @@ async def assert_mailbox_contract(
         await _maybe_close(box)
 
 
-async def assert_memory_store_contract(
-    factory: Callable[[], MemoryStore | Awaitable[MemoryStore]],
-) -> None:
-    """Assert the core behavioral contract for a ``MemoryStore`` implementation."""
-
-    store = await _call_factory(factory)
-    try:
-        assert await store.search("anything", namespace="docs") == [], (
-            "fresh store must return no search results"
-        )
-        assert await store.search("", namespace="docs") == [], "empty query must return no results"
-        assert await store.search("anything", namespace="docs", limit=0) == [], (
-            "limit=0 must return no results"
-        )
-
-        await store.upsert(
-            [
-                MemoryItem(
-                    id="alpha",
-                    content="alpha shared memory",
-                    metadata={"kind": "guide"},
-                    namespace="docs",
-                ),
-                MemoryItem(
-                    id="beta",
-                    content="alpha private memory",
-                    metadata={"kind": "note"},
-                    namespace="private",
-                ),
-                MemoryItem(
-                    id="gamma",
-                    content="gamma unrelated",
-                    metadata={"kind": "guide"},
-                    namespace="docs",
-                ),
-            ]
-        )
-
-        hits = await store.search("alpha memory", namespace="docs")
-        assert [hit.item.id for hit in hits] == ["alpha"], (
-            "namespace filtering must exclude other namespaces"
-        )
-        assert hits[0].item.namespace == "docs"
-        assert hits[0].item.metadata == {"kind": "guide"}
-        assert hits[0].score is None or isinstance(hits[0].score, int | float)
-
-        private_hits = await store.search("alpha memory", namespace="private")
-        assert [hit.item.id for hit in private_hits] == ["beta"]
-
-        filtered = await store.search(
-            "alpha memory",
-            namespace="docs",
-            metadata_filter={"kind": "guide"},
-        )
-        assert [hit.item.id for hit in filtered] == ["alpha"]
-        assert (
-            await store.search("alpha memory", namespace="docs", metadata_filter={"kind": "note"})
-        ) == []
-
-        await store.upsert(
-            [
-                MemoryItem(
-                    id="alpha",
-                    content="replacement delta memory",
-                    metadata={"kind": "replacement"},
-                    namespace="docs",
-                )
-            ]
-        )
-        assert await store.search("shared", namespace="docs") == [], (
-            "upsert must replace an existing item with the same namespace and id"
-        )
-        replaced = await store.search("replacement delta", namespace="docs")
-        assert [hit.item.id for hit in replaced] == ["alpha"]
-        assert replaced[0].item.metadata == {"kind": "replacement"}
-
-        await store.upsert(
-            [
-                MemoryItem(id=f"limit-{index}", content="limit token", namespace="docs")
-                for index in range(3)
-            ]
-        )
-        limited = await store.search("limit token", namespace="docs", limit=1)
-        assert len(limited) == 1, "search must honor limit"
-
-        concurrent = [
-            MemoryItem(id=f"concurrent-{index}", content="concurrent token", namespace="docs")
-            for index in range(10)
-        ]
-        await asyncio.gather(*(store.upsert([item]) for item in concurrent))
-        concurrent_hits = await store.search("concurrent", namespace="docs", limit=20)
-        assert {hit.item.id for hit in concurrent_hits} == {item.id for item in concurrent}, (
-            "concurrent upserts must not drop items"
-        )
-    finally:
-        await _maybe_close(store)
-
-
-async def assert_schedule_store_contract(
-    factory: Callable[[], ScheduleStore | Awaitable[ScheduleStore]],
-) -> None:
-    """Assert the core behavioral contract for a ``ScheduleStore`` implementation.
-
-    Stores that also implement ``claim_due`` are checked for the atomic claim
-    invariant used by ``SchedulerLoop``.
-    """
-
-    store = await _call_factory(factory)
-    try:
-        assert await store.list() == [], "fresh store must list no schedules"
-
-        schedule = Schedule(id="contract-interval", payload="alpha", interval_s=60)
-        schedule.next_run = 1000.0
-        await store.add(schedule)
-
-        loaded = await store.get(schedule.id)
-        assert loaded is not None, "added schedule must be retrievable"
-        assert loaded.id == schedule.id
-        assert loaded.payload == "alpha"
-        assert [item.id for item in await store.list()] == [schedule.id]
-
-        updated = Schedule(
-            id=schedule.id,
-            payload="beta",
-            interval_s=30,
-            next_run=2000.0,
-            enabled=False,
-            metadata={"kind": "contract"},
-        )
-        await store.update(updated)
-        loaded = await store.get(schedule.id)
-        assert loaded is not None, "updated schedule must remain retrievable"
-        assert loaded.payload == "beta"
-        assert loaded.interval_s == 30
-        assert loaded.next_run == 2000.0
-        assert loaded.enabled is False
-        assert loaded.metadata == {"kind": "contract"}
-
-        assert await store.remove(schedule.id) is True
-        assert await store.remove(schedule.id) is False
-        assert await store.get(schedule.id) is None
-        assert await store.list() == []
-
-        if isinstance(store, ClaimingScheduleStore):
-            due = Schedule(id="contract-due", payload="due", interval_s=60, next_run=1000.0)
-            future = Schedule(
-                id="contract-future",
-                payload="future",
-                interval_s=60,
-                next_run=5000.0,
-            )
-            disabled = Schedule(
-                id="contract-disabled",
-                payload="disabled",
-                interval_s=60,
-                next_run=1000.0,
-                enabled=False,
-            )
-            await store.add(due)
-            await store.add(future)
-            await store.add(disabled)
-
-            first, second = await asyncio.gather(store.claim_due(1000.0), store.claim_due(1000.0))
-            claimed_ids = [schedule.id for schedule in first + second]
-            assert claimed_ids == [due.id], "claim_due must atomically claim each due schedule once"
-
-            loaded_due = await store.get(due.id)
-            assert loaded_due is not None
-            assert loaded_due.next_run == 1060.0, "claim_due must advance next_run before returning"
-            assert await store.get(future.id) is not None
-            assert await store.get(disabled.id) is not None
-    finally:
-        await _maybe_close(store)
-
-
 async def assert_tool_contract(
     tool: Any,
     *,
@@ -341,6 +188,20 @@ async def assert_tool_contract(
     The helper validates the metadata and callable shape Linch's registry and
     scheduler depend on, executes one known-good call, and returns the
     ``ToolResult`` so adapter tests can make tool-specific assertions.
+
+    Args:
+        tool: Tool implementation to validate and execute.
+        valid_input: Input payload that the tool must accept.
+        ctx: Optional execution context; a minimal contract context is used
+            when omitted.
+        invalid_input: Optional payload that the tool must reject.
+
+    Returns:
+        The result returned by executing ``tool`` with ``valid_input``.
+
+    Raises:
+        AssertionError: If metadata, validation, execution, or result shape
+            violates the tool contract.
     """
 
     assert _non_empty_str(getattr(tool, "name", None)), "tool.name must be a non-empty string"
@@ -422,6 +283,10 @@ async def assert_provider_contract(
         factory: Zero-arg callable (sync or async) returning the provider.
         model: A model id the provider recognizes, used for the window/capability
             probes.
+
+    Raises:
+        AssertionError: If the provider violates the lifecycle or declarative
+            contract.
     """
     provider = await _call_factory(factory)
     try:

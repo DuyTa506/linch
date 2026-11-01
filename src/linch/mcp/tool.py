@@ -51,6 +51,16 @@ def make_mcp_tool(
     mcp_tool: McpToolDef,
     call_tool: McpCallTool,
 ) -> object:
+    """Wrap one MCP tool definition in Linch's duck-typed tool protocol.
+
+    Args:
+        server_name: Configured MCP server name used in the stable tool name.
+        mcp_tool: MCP tool definition containing description, schema, and annotations.
+        call_tool: Async callback that invokes the tool on its live MCP session.
+
+    Returns:
+        A Linch-compatible tool object whose scope and permissions reflect MCP hints.
+    """
     name = build_mcp_tool_name(server_name, mcp_tool.name)
     annotations = getattr(mcp_tool, "annotations", None)
     read_only = getattr(annotations, "read_only_hint", False) if annotations is not None else False

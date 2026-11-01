@@ -9,6 +9,16 @@ def substitute_skill_body(
     args: str,
     session_id: str,
 ) -> str:
+    """Substitute invocation arguments and runtime placeholders into a skill body.
+
+    Args:
+        skill: Loaded skill whose body and frontmatter define the substitutions.
+        args: Raw invocation arguments supplied to the skill.
+        session_id: Current session identifier for the session placeholder.
+
+    Returns:
+        The expanded prompt prefixed with the skill's base directory.
+    """
     tokens = split_shell_args(args)
     slots = skill.frontmatter.arguments or []
 
