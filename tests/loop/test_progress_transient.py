@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from typing import Any
 
+from tests.support.agents import make_agent
+from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
+from tests.support.stores import memory_run_store, memory_session_store
+from tests.support.tools import tool_registry
+
 
 async def test_tool_progress_is_not_persisted() -> None:
-    from linch import Agent
-    from linch.config import FeatureFlags
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
-    from linch.run_store import InMemoryRunStore
-    from linch.sessions import InMemorySessionStore
-    from linch.tools import ToolContext, ToolRegistry, ToolResult
+    from linch.tools import ToolContext, ToolResult
 
     class ProgressTool:
         name = "Progress"
@@ -30,17 +30,14 @@ async def test_tool_progress_is_not_persisted() -> None:
             ctx.report_progress("secret transient detail", {"token": "do-not-persist"})
             return ToolResult(content="done")
 
-    tools = ToolRegistry()
-    tools.add(ProgressTool())
-    run_store = InMemoryRunStore()
-    agent = Agent(
+    tools = tool_registry(ProgressTool())
+    run_store = memory_run_store()
+    agent = make_agent(
+        ScriptedProvider([ToolUseTurn("Progress", {}, "call-1"), TextTurn("finished")]),
         model="test-model",
-        provider=ScriptedProvider([ToolUseTurn("Progress", {}, "call-1"), TextTurn("finished")]),
         tools=tools,
-        permissions={"mode": "skip-dangerous"},
-        session_store=InMemorySessionStore(),
+        session_store=memory_session_store(),
         run_store=run_store,
-        features=FeatureFlags(),
         result_offload=None,
     )
     events = [event async for event in (await agent.session()).run("go")]

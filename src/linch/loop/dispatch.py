@@ -11,13 +11,13 @@ from __future__ import annotations
 
 from typing import Any, cast
 
+from .. import lifecycle
 from ..events import Event, ResultEvent
 from ..hooks import (
     AfterProviderCallContext,
     BeforeFinalAnswerContext,
     BeforeProviderCallContext,
     HookDispatcher,
-    HookEvent,
     StopContext,
     UserPromptSubmitContext,
 )
@@ -36,7 +36,7 @@ async def dispatch_user_prompt(
     if not hook_dispatcher.active:
         return prompt_value, images_value, [], None
     dispatched = await hook_dispatcher.dispatch(
-        HookEvent.USER_PROMPT_SUBMIT,
+        lifecycle.USER_PROMPT_SUBMIT,
         UserPromptSubmitContext(
             session=session,
             run_id=run_id,
@@ -60,7 +60,9 @@ async def dispatch_user_prompt(
     return prompt_value, images_value, dispatched.events, None
 
 
-async def dispatch_lifecycle(hook_dispatcher: HookDispatcher, event: HookEvent, ctx: Any) -> None:
+async def dispatch_lifecycle(
+    hook_dispatcher: HookDispatcher, event: lifecycle.LifecyclePoint, ctx: Any
+) -> None:
     if hook_dispatcher.active:
         await hook_dispatcher.dispatch(event, ctx)
 
@@ -76,7 +78,7 @@ async def dispatch_before_provider_call(
     if not hook_dispatcher.active:
         return request, [], None, None
     dispatched = await hook_dispatcher.dispatch(
-        HookEvent.BEFORE_PROVIDER_CALL,
+        lifecycle.BEFORE_PROVIDER_CALL,
         BeforeProviderCallContext(
             session=session,
             run_id=run_id,
@@ -108,7 +110,7 @@ async def dispatch_after_provider_call(
     if not hook_dispatcher.active:
         return assembly, [], None, None
     dispatched = await hook_dispatcher.dispatch(
-        HookEvent.AFTER_PROVIDER_CALL,
+        lifecycle.AFTER_PROVIDER_CALL,
         AfterProviderCallContext(
             session=session,
             run_id=run_id,
@@ -151,7 +153,7 @@ async def dispatch_before_final_answer(
     if skip or not hook_dispatcher.active:
         return final_text_value, structured_output, structured_error, [], None, None
     dispatched = await hook_dispatcher.dispatch(
-        HookEvent.BEFORE_FINAL_ANSWER,
+        lifecycle.BEFORE_FINAL_ANSWER,
         BeforeFinalAnswerContext(
             session=session,
             run_id=run_id,
@@ -206,7 +208,7 @@ async def dispatch_stop(
     if not hook_dispatcher.active:
         return result_event, [], None, None
     dispatched = await hook_dispatcher.dispatch(
-        HookEvent.STOP,
+        lifecycle.STOP,
         StopContext(
             session=session,
             run_id=run_id,

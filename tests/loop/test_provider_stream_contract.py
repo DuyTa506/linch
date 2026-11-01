@@ -22,20 +22,9 @@ class _Provider:
 
 
 async def _run(events: list[dict[str, Any]]) -> list[Any]:
-    from linch import Agent
-    from linch.config import FeatureFlags
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import empty_tools
+    from tests.support.agents import make_agent
 
-    agent = Agent(
-        model="test-model",
-        provider=_Provider(events),
-        tools=empty_tools(),
-        permissions={"mode": "skip-dangerous"},
-        session_store=InMemorySessionStore(),
-        features=FeatureFlags(),
-        result_offload=None,
-    )
+    agent = make_agent(_Provider(events), model="test-model", result_offload=None)
     session = await agent.session()
     return [event async for event in session.run("go")]
 

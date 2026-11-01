@@ -63,7 +63,11 @@ def final_text(message: Message) -> str | None:
 
 def _re_inject_skill_context(session: Session) -> None:
     agent = session.agent
-    if not agent.skill_listing_text and not session.invoked_skills:
+    listing = agent.skill_listing_text
+    catalog = agent.context.get("request_catalog")
+    if catalog is not None:
+        listing = catalog.skill_listing(session, listing)
+    if not listing and not session.invoked_skills:
         return
     from ..skills.system_reminder import wrap_in_system_reminder
 
@@ -79,8 +83,8 @@ def _re_inject_skill_context(session: Session) -> None:
         if isinstance(block, TextBlock)
     }
 
-    if agent.skill_listing_text:
-        text = wrap_in_system_reminder(agent.skill_listing_text)
+    if listing:
+        text = wrap_in_system_reminder(listing)
         if text not in present_text:
             session.session_log.append(
                 Message(role="user", content=[TextBlock(text=text)]), historical=False
@@ -155,6 +159,13 @@ def apply_provider_capabilities(req: ProviderRequest, caps: Any) -> ProviderRequ
       :func:`run_loop` line ~452, so the host's intent is preserved.
     * ``parallel_tool_calls`` is informational and has no ``req`` field yet.
 
+    Args:
+        req: Provider request whose optional fields should be downgraded.
+        caps: Provider capability object exposing the supported request flags.
+
+    Returns:
+        The same request object after unsupported options have been cleared.
+
     Modifies *req* in place and returns it.
     """
     if not caps.prompt_cache:
@@ -182,7 +193,12 @@ def _build_turn_request(
     """
     agent = session.agent
 
+    catalog = agent.context.get("request_catalog")
+    if catalog is not None:
+        catalog.prepare()
     tools = _select_context_tools(session, context)
+    if catalog is not None:
+        tools = catalog.select_tools(session, tools)
     if session.system_blocks_override is not None:
         base_system = list(session.system_blocks_override)
     else:

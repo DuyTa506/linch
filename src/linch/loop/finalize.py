@@ -8,7 +8,7 @@ generator stays focused on the turn loop itself.
 
 The loop drives each via a thin wrapper that supplies the per-turn ``total`` /
 ``running_cost`` and a :class:`TerminalOutcome`. ``outcome.result`` is set (to
-the terminal :class:`RunResultInfo`) only when the run should end; it stays
+the terminal :class:`_AgentResult`) only when the run should end; it stays
 ``None`` when the answer was bounced back for another turn, so the loop reads
 the flag to choose between ``return`` and ``continue``."""
 
@@ -21,10 +21,11 @@ from typing import Any
 
 from ..errors import ProviderError
 from ..events import Event, ResultEvent
-from ..observability import RunResultInfo
+from ..hooks.contexts import _AgentResult
 from ..session import Session
-from ..types import AssistantAssembly, ToolUseBlock, Usage
-from .checkpoint import _persist_event
+from ..types import AssistantAssembly, Message, TextBlock, ToolUseBlock, Usage
+from .checkpoint import _message_digest, _persist_event, _primary_control_message
+from .feedback import append_feedback
 from .request import final_text
 from .terminals import (
     _error_result_tail,
@@ -35,6 +36,7 @@ from .terminals import (
     _success_result_tail,
     _validate_structured_output,
 )
+from .turn_stopping import TurnStopping
 
 
 @dataclass(slots=True)
@@ -43,6 +45,7 @@ class FinalizeCtx:
     signatures stay short. Built once per run by ``_run_loop_impl``."""
 
     session: Session
+    runtime: Any
     agent: Any
     run_id: str
     run_record: Any
@@ -59,16 +62,138 @@ class FinalizeCtx:
     end_active_provider_call: Callable[..., Awaitable[None]]
     dispatch_before_final_answer: Callable[..., Awaitable[Any]]
     dispatch_stop: Callable[..., Awaitable[Any]]
+    usage_complete: Callable[[], bool]
+    turn_stopping: Any
 
 
 @dataclass(slots=True)
 class TerminalOutcome:
-    """Carries the terminal :class:`RunResultInfo` back to the loop.
+    """Carries the terminal :class:`_AgentResult` back to the loop.
 
     ``result`` is ``None`` while the run should continue (the finalizer bounced
     the answer back for another turn) and set when the run should end."""
 
-    result: RunResultInfo | None = None
+    result: _AgentResult | None = None
+
+
+@dataclass(slots=True)
+class RunFinalization:
+    """Run-bound adapters for the terminal-answer phase.
+
+    ``FinalizeCtx`` contains the hook and checkpoint dependencies specific to
+    answer gates.  This adapter supplies the shared ledger/runtime state and
+    keeps those details out of the turn choreography in ``runner.py``.
+    """
+
+    ctx: FinalizeCtx
+    runtime: Any
+    result: _AgentResult | None = None
+
+    async def emit_error(
+        self,
+        *,
+        final_text_value: str | None = None,
+        duration_ms: int | None = None,
+        end_provider_call_usage: Usage | None = None,
+    ) -> AsyncIterator[Event]:
+        self.runtime.sync_checkpoint_accounting()
+        outcome = TerminalOutcome()
+        async for event in emit_error_terminal(
+            self.ctx,
+            total=self.runtime.total,
+            running_cost=self.runtime.running_cost,
+            outcome=outcome,
+            final_text_value=final_text_value,
+            duration_ms=duration_ms,
+            end_provider_call_usage=end_provider_call_usage,
+        ):
+            yield event
+        self.result = outcome.result
+
+    async def finalize(
+        self, turn_index: int, forced_final_turn: bool, **answer: Any
+    ) -> AsyncIterator[Event]:
+        forced = forced_final_turn
+        tool_blocks = answer.get("tool_blocks", ())
+        final_block = answer.get("final_block")
+        candidate = TurnStopping(
+            self.ctx.session,
+            self.ctx.run_id,
+            turn_index,
+            "forced_final" if forced else "final_tool" if final_block else "final_text",
+            answer.get("assembly"),
+            tuple(tool_blocks),
+            final_block,
+            forced,
+        )
+        decision = await self.ctx.turn_stopping.dispatch(candidate)
+        messages = decision.feedback
+        if final_block is not None and decision.action != "accept":
+            paired = _primary_control_message(
+                Message(role="assistant", content=list(tool_blocks)),
+                "Final tool was not executed.",
+                final_block.id,
+            )
+            messages = (paired, *messages)
+        replayed = self.runtime.replayed_feedback
+        if replayed and (
+            decision.action == "accept"
+            or list(map(_message_digest, replayed)) != list(map(_message_digest, messages))
+        ):
+            raise ValueError("replayed turn feedback differs from its decision")
+        self.runtime.replayed_feedback = ()
+        if decision.action != "accept":
+            async for event in append_feedback(
+                self.ctx.session,
+                self.ctx.run_id,
+                messages,
+                paired=bool(tool_blocks),
+                decision=decision,
+            ):
+                yield event
+            await self.ctx.end_active_turn()
+            await self.ctx.save_checkpoint("turn_complete", turn_index=turn_index)
+            return
+        self.runtime.sync_checkpoint_accounting()
+        outcome = TerminalOutcome()
+        finalize = finalize_final_tool_answer if final_block else finalize_text_answer
+        async for event in finalize(
+            self.ctx,
+            turn_index=turn_index,
+            **answer,
+            total=self.runtime.total,
+            running_cost=self.runtime.running_cost,
+            forced_final_turn=forced,
+            outcome=outcome,
+        ):
+            yield event
+        self.result = outcome.result
+
+
+def assembly_with_truncation_prefix(assembly: AssistantAssembly, prefix: str) -> AssistantAssembly:
+    """Prepend recovered truncated text to a terminal assistant assembly."""
+    if not prefix:
+        return assembly
+    text = final_text(assembly.message)
+    if text is None:
+        return assembly
+    merged = Message(
+        role="assistant",
+        content=[TextBlock(text=f"{prefix}{text}")],
+        provider_metadata=assembly.message.provider_metadata,
+    )
+    return AssistantAssembly(message=merged, stop_reason=assembly.stop_reason, usage=assembly.usage)
+
+
+def last_user_message_is_feedback(session: Session, feedback: str) -> bool:
+    """Return whether the current provider history already contains feedback."""
+    from ..skills.system_reminder import wrap_in_system_reminder
+
+    message = session.last_provider_message()
+    if message is None or message.role != "user":
+        return False
+    expected = wrap_in_system_reminder(feedback)
+    return any(isinstance(block, TextBlock) and block.text == expected for block in message.content)
 
 
 def build_run_result(
@@ -80,12 +205,12 @@ def build_run_result(
     total: Usage,
     duration_ms: int,
     error: dict[str, Any] | None = None,
-) -> RunResultInfo:
-    """Build a terminal :class:`RunResultInfo` from current run state.
+) -> _AgentResult:
+    """Build a terminal :class:`_AgentResult` from current run state.
 
     Centralises the ``run_id``/``session_id``/``total_usage`` boilerplate
     repeated at every loop exit (success, error, abort, max-turns, finally)."""
-    return RunResultInfo(
+    return _AgentResult(
         run_id=run_id,
         session_id=session_id,
         subtype=subtype,
@@ -125,14 +250,13 @@ async def emit_error_terminal(
     await ctx.end_active_turn()
     async for event in _error_result_tail(
         ctx.session,
-        ctx.agent,
+        runtime=ctx.runtime,
         run_id=ctx.run_id,
-        run_record=ctx.run_record,
-        checkpoint=ctx.checkpoint,
         total=total,
         duration_ms=dur,
         running_cost=running_cost,
         final_text_value=final_text_value,
+        usage_complete=ctx.usage_complete(),
     ):
         yield event
 
@@ -170,6 +294,7 @@ async def emit_success_terminal(
         final_text_value=proposed.final_text,
         structured_output=proposed.structured_output,
         structured_error=proposed.structured_error,
+        usage_complete=ctx.usage_complete(),
     ):
         yield event
 
@@ -295,6 +420,7 @@ async def finalize_final_tool_answer(
         structured_output=structured_output,
         structured_error=structured_error,
         total_cost_usd=running_cost,
+        usage_complete=ctx.usage_complete(),
     )
     proposed, hook_events, stop_action, feedback = await ctx.dispatch_stop(proposed, turn_index)
     for hook_event in hook_events:
@@ -424,6 +550,7 @@ async def finalize_text_answer(
         structured_output=structured_output,
         structured_error=structured_error,
         total_cost_usd=running_cost,
+        usage_complete=ctx.usage_complete(),
     )
     proposed, hook_events, stop_action, feedback = await ctx.dispatch_stop(proposed, turn_index)
     for hook_event in hook_events:
