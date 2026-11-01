@@ -7,37 +7,16 @@ import pytest
 from linch.kernel import Disposable, EffectScope
 
 
-@pytest.mark.asyncio
-async def test_disposable_runs_once() -> None:
+async def test_disposable_runs_once_and_is_callable() -> None:
     calls: list[int] = []
     d = Disposable(lambda: calls.append(1))
+    await d()  # await the disposable directly
     await d.dispose()
     await d.dispose()  # idempotent
     assert calls == [1]
     assert d.disposed is True
 
 
-@pytest.mark.asyncio
-async def test_disposable_callable_sugar() -> None:
-    calls: list[int] = []
-    d = Disposable(lambda: calls.append(1))
-    await d()  # await the disposable directly
-    assert calls == [1]
-
-
-@pytest.mark.asyncio
-async def test_disposable_awaits_async_teardown() -> None:
-    calls: list[str] = []
-
-    async def teardown() -> None:
-        calls.append("async")
-
-    d = Disposable(teardown)
-    await d.dispose()
-    assert calls == ["async"]
-
-
-@pytest.mark.asyncio
 async def test_effect_disposes_in_reverse_order() -> None:
     order: list[int] = []
     scope = EffectScope()
@@ -47,7 +26,6 @@ async def test_effect_disposes_in_reverse_order() -> None:
     assert order == [2, 1, 0]
 
 
-@pytest.mark.asyncio
 async def test_effect_group_disposer_is_scoped() -> None:
     order: list[str] = []
     scope = EffectScope()
@@ -59,7 +37,6 @@ async def test_effect_group_disposer_is_scoped() -> None:
     assert order == ["inner", "outer"]
 
 
-@pytest.mark.asyncio
 async def test_effect_accepts_iterable_of_disposers() -> None:
     order: list[int] = []
     scope = EffectScope()
@@ -72,30 +49,21 @@ async def test_effect_accepts_iterable_of_disposers() -> None:
     assert order == [2, 1]  # reverse within the group
 
 
-@pytest.mark.asyncio
-async def test_effect_awaits_async_disposer() -> None:
-    order: list[str] = []
-    scope = EffectScope()
+async def test_async_teardown_and_scope_idempotence() -> None:
+    calls: list[str] = []
 
     async def teardown() -> None:
-        order.append("async")
+        calls.append("async")
 
+    disposable = Disposable(teardown)
+    await disposable.dispose()
+    scope = EffectScope()
     scope.effect(lambda: teardown)
     await scope.dispose()
-    assert order == ["async"]
-
-
-@pytest.mark.asyncio
-async def test_scope_dispose_is_idempotent() -> None:
-    calls: list[int] = []
-    scope = EffectScope()
-    scope.effect(lambda: lambda: calls.append(1))
     await scope.dispose()
-    await scope.dispose()
-    assert calls == [1]
+    assert calls == ["async", "async"]
 
 
-@pytest.mark.asyncio
 async def test_concurrent_dispose_coalesces_and_shields_teardown() -> None:
     started = asyncio.Event()
     release = asyncio.Event()
@@ -122,7 +90,6 @@ async def test_concurrent_dispose_coalesces_and_shields_teardown() -> None:
     assert disposable.disposed is True
 
 
-@pytest.mark.asyncio
 async def test_cleanup_failure_is_shared_then_retryable() -> None:
     attempts = 0
     started = asyncio.Event()
@@ -152,7 +119,6 @@ async def test_cleanup_failure_is_shared_then_retryable() -> None:
     assert disposable.disposed is True
 
 
-@pytest.mark.asyncio
 async def test_scope_attempts_all_cleanup_and_retries_only_failures() -> None:
     order: list[str] = []
     failed_once = False
@@ -180,7 +146,6 @@ async def test_scope_attempts_all_cleanup_and_retries_only_failures() -> None:
     assert scope.disposed is True
 
 
-@pytest.mark.asyncio
 async def test_scope_rejects_add_and_effect_once_teardown_starts() -> None:
     started = asyncio.Event()
     release = asyncio.Event()
@@ -210,21 +175,11 @@ async def test_scope_rejects_add_and_effect_once_teardown_starts() -> None:
     await disposing
 
 
-def test_effect_rejects_invalid_iterable_disposer_during_registration() -> None:
+async def test_effect_rejects_invalid_iterable_disposers() -> None:
     scope = EffectScope()
 
     with pytest.raises(TypeError, match="disposer must be callable"):
         scope.effect(lambda: [lambda: None, 42])
-
-
-async def test_effect_keeps_disposers_coerced_before_an_invalid_item() -> None:
-    """A partially valid iterable must not strand the disposers already coerced.
-
-    ``fn()`` has already run, so every item before the invalid one is a live
-    registration. Dropping the group on the raise leaves them unreachable and
-    scope teardown never undoes them.
-    """
-    scope = EffectScope()
     released: list[str] = []
 
     with pytest.raises(TypeError, match="disposer must be callable"):
