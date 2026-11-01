@@ -671,6 +671,117 @@ async def test_resume_rejects_changed_turn_stopping_feedback_decision() -> None:
     assert events[-1].subtype == "error"
 
 
+async def test_resume_completion_gate_does_not_recount_crashed_feedback() -> None:
+    """A crashed completion correction is dispatched once after resume."""
+    from linch import CompletionGate, ReliabilityPolicy
+    from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
+
+    session_store = _CrashAfterSessionMessageStore(
+        _memory_session_store(), "Completion requirements are missing"
+    )
+    run_store = _memory_run_store()
+    agent = _agent(
+        provider=ScriptedProvider([TextTurn("draft")]),
+        tools=_registry({}, "prepare"),
+        reliability=ReliabilityPolicy(
+            max_correction_turns=1,
+            completion=CompletionGate(("prepare",)),
+        ),
+        session_store=session_store,
+        run_store=run_store,
+    )
+    session = await agent.session(id="s1")
+    run_id = ""
+    with pytest.raises(_Crash, match="after-message:Completion requirements are missing"):
+        async for event in session.run("hello"):
+            if event.type == "system":
+                run_id = event.run_id
+    assert run_id
+    await agent.close()
+
+    restarted_provider = ScriptedProvider(
+        [
+            ToolUseTurn(tool_name="prepare", tool_input={}, tool_id="prepare-1"),
+            TextTurn("final"),
+        ]
+    )
+    restarted = _agent(
+        provider=restarted_provider,
+        tools=_registry({}, "prepare"),
+        reliability=ReliabilityPolicy(
+            max_correction_turns=1,
+            completion=CompletionGate(("prepare",)),
+        ),
+        session_store=session_store.store,
+        run_store=run_store,
+    )
+    resumed = await restarted.session(id="s1")
+    events = await _collect(resumed.resume(run_id))
+
+    assert events[-1].type == "result"
+    assert events[-1].subtype == "success"
+    assert events[-1].final_text == "final"
+    assert len(restarted_provider.requests) == 2
+    rows = await run_store.load_events(run_id)
+    assert sum(row.event.type == "reliability" for row in rows) == 1
+
+
+async def test_resume_turn_stopping_feedback_keeps_equal_assistant_message() -> None:
+    """Replay keeps feedback when it repeats the checkpointed assistant text."""
+    from linch.loop.turn_stopping import TurnStoppingDecision
+    from linch.types import Message, TextBlock
+    from tests.support.providers import ScriptedProvider, TextTurn
+
+    feedback = (
+        Message(role="assistant", content=[TextBlock(text="draft")]),
+        Message(role="user", content=[TextBlock(text="retry")]),
+    )
+
+    class ContinueOnce:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __call__(self, _event: Any) -> TurnStoppingDecision:
+            self.calls += 1
+            return (
+                TurnStoppingDecision("continue", feedback=feedback)
+                if self.calls == 1
+                else TurnStoppingDecision("accept")
+            )
+
+    session_store = _CrashAfterSessionMessageStore(_memory_session_store(), "retry")
+    run_store = _memory_run_store()
+    agent = _agent(
+        provider=ScriptedProvider([TextTurn("draft")]),
+        session_store=session_store,
+        run_store=run_store,
+    )
+    agent.on_turn_stopping(ContinueOnce())
+    session = await agent.session(id="s1")
+    run_id = ""
+    with pytest.raises(_Crash, match="after-message:retry"):
+        async for event in session.run("hello"):
+            if event.type == "system":
+                run_id = event.run_id
+    assert run_id
+    await agent.close()
+
+    restarted_provider = ScriptedProvider([TextTurn("final")])
+    restarted = _agent(
+        provider=restarted_provider,
+        session_store=session_store.store,
+        run_store=run_store,
+    )
+    restarted.on_turn_stopping(ContinueOnce())
+    resumed = await restarted.session(id="s1")
+    events = await _collect(resumed.resume(run_id))
+
+    assert events[-1].type == "result"
+    assert events[-1].subtype == "success"
+    assert events[-1].final_text == "final"
+    assert len(restarted_provider.requests) == 1
+
+
 async def test_resume_after_one_tool_completed_runs_only_missing_tool() -> None:
     session_store = _memory_session_store()
     run_store = _memory_run_store()
