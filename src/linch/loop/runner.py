@@ -436,8 +436,9 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
     )
     try:
         _runtime.bind_run()
-        async for _startup_event in initialize_run(_startup_ctx):
-            yield _startup_event
+        async with aclosing(initialize_run(_startup_ctx)) as startup_events:
+            async for _startup_event in startup_events:
+                yield _startup_event
         if _startup_ctx.blocked:
             return
         # Closed-loop schema-repair state (per-run; not checkpointed — a resumed
@@ -487,22 +488,28 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         ) -> AsyncIterator[Event]:
             """Error exit shared by provider, hooks, and guard hard-stop paths."""
             nonlocal _final_result
-            async for event in _finalization.emit_error(
-                final_text_value=final_text_value,
-                duration_ms=duration_ms,
-                end_provider_call_usage=end_provider_call_usage,
-            ):
-                yield event
+            async with aclosing(
+                _finalization.emit_error(
+                    final_text_value=final_text_value,
+                    duration_ms=duration_ms,
+                    end_provider_call_usage=end_provider_call_usage,
+                )
+            ) as error_events:
+                async for event in error_events:
+                    yield event
             _final_result = _finalization.result
 
         async def _finalize_answer(turn_index: int, **answer: Any) -> AsyncIterator[Event]:
             nonlocal _final_result, active_primary
             active_primary = None
             _runtime.active_primary = None
-            async for event in _finalization.finalize(
-                turn_index=turn_index, forced_final_turn=_forced_final_turn, **answer
-            ):
-                yield event
+            async with aclosing(
+                _finalization.finalize(
+                    turn_index=turn_index, forced_final_turn=_forced_final_turn, **answer
+                )
+            ) as finalization_events:
+                async for event in finalization_events:
+                    yield event
             _final_result = _finalization.result
 
         def _assembly_with_truncation_prefix(assembly: AssistantAssembly) -> AssistantAssembly:
@@ -516,8 +523,9 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
 
         async def _emit_budget_exhausted() -> AsyncIterator[Event]:
             nonlocal _final_result
-            async for event in _runtime.emit_budget_exhausted():
-                yield event
+            async with aclosing(_runtime.emit_budget_exhausted()) as budget_events:
+                async for event in budget_events:
+                    yield event
             _final_result = _runtime.terminal_result
 
         start_turn = checkpoint.turn_index
@@ -552,8 +560,9 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
             turn_stopping=_runtime.turn_stopping,
             state=_resume_state,
         )
-        async for _resume_event in recover_resume(_resume_ctx):
-            yield _resume_event
+        async with aclosing(recover_resume(_resume_ctx)) as resume_events:
+            async for _resume_event in resume_events:
+                yield _resume_event
         if _resume_state.terminal:
             return
         _runtime.replayed_feedback = _resume_state.replayed_feedback
@@ -582,15 +591,17 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 and _budget.exceeded
                 and not (_recovered_primary_projection is not None and turn_index == start_turn)
             ):
-                async for event in _emit_budget_exhausted():
-                    yield event
+                async with aclosing(_emit_budget_exhausted()) as budget_events:
+                    async for event in budget_events:
+                        yield event
                 return
             # A provider_pending resume continues an already-frozen turn. New
             # deliveries belong to the following turn; inserting them here
             # would place a user message between that request and its assistant.
             if not _replaying_frozen_attempt:
-                async for note_event in _drain_pending_notifications(session, run_id):
-                    yield note_event
+                async with aclosing(_drain_pending_notifications(session, run_id)) as note_events:
+                    async for note_event in note_events:
+                        yield note_event
                 if session.agent.context._inbox or _runtime.config.context._inbox:
                     async with aclosing(
                         _drain_inbox(session, run_id, config=_runtime.config)
@@ -598,8 +609,9 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                         async for inbox_event in inbox:
                             yield inbox_event
             # Bubble accumulated subagent events (incl. child PermissionRequests).
-            async for child_event in _drain_child_events(session, run_id):
-                yield child_event
+            async with aclosing(_drain_child_events(session, run_id)) as child_events:
+                async for child_event in child_events:
+                    yield child_event
             if session.interrupt_requested:
                 session._reject_pending_alignment(
                     ConfigError("run interrupted before alignment was applied")
@@ -626,14 +638,20 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 # Skipped only on the mid-turn-resumed turn itself: draining
                 # there would put a user message between assistant(tool_use)
                 # and its tool results. Entries drain at the next turn instead.
-                async for align_event in _drain_alignment(session, run_id, _dispatch_user_prompt):
-                    yield align_event
+                async with aclosing(
+                    _drain_alignment(session, run_id, _dispatch_user_prompt)
+                ) as alignment_events:
+                    async for align_event in alignment_events:
+                        yield align_event
             await _start_turn(turn_index)
             if _pending_truncation_feedback is not None:
                 feedback = _pending_truncation_feedback
                 if not _last_user_message_is_feedback(feedback):
-                    async for event in _gate_retry_tail(session, run_id=run_id, feedback=feedback):
-                        yield event
+                    async with aclosing(
+                        _gate_retry_tail(session, run_id=run_id, feedback=feedback)
+                    ) as retry_events:
+                        async for event in retry_events:
+                            yield event
                 _pending_truncation_feedback = None
                 await _end_active_turn()
                 await _save_checkpoint("turn_complete", turn_index=turn_index)
@@ -694,8 +712,9 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 emit_budget_exhausted=_emit_budget_exhausted,
                 maybe_save_provider_snapshot=_maybe_save_provider_snapshot,
             )
-            async for _prep_event in prepare_provider_turn(_prep_ctx):
-                yield _prep_event
+            async with aclosing(prepare_provider_turn(_prep_ctx)) as preparation_events:
+                async for _prep_event in preparation_events:
+                    yield _prep_event
             if _prep_ctx.terminal:
                 return
             req = _prep_ctx.outcome_req
@@ -733,21 +752,28 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                         else []
                     )
                     if _pending_tools:
-                        async for event in _final_tool_retry_tail(
-                            session,
-                            run_id=run_id,
-                            tool_blocks=_pending_tools,
-                            final_id=_pending_tools[0].id,
-                            feedback=provider_feedback or "Provider hook requested another turn.",
-                        ):
-                            yield event
+                        async with aclosing(
+                            _final_tool_retry_tail(
+                                session,
+                                run_id=run_id,
+                                tool_blocks=_pending_tools,
+                                final_id=_pending_tools[0].id,
+                                feedback=provider_feedback
+                                or "Provider hook requested another turn.",
+                            )
+                        ) as retry_events:
+                            async for event in retry_events:
+                                yield event
                     else:
-                        async for event in _gate_retry_tail(
-                            session,
-                            run_id=run_id,
-                            feedback=provider_feedback or "",
-                        ):
-                            yield event
+                        async with aclosing(
+                            _gate_retry_tail(
+                                session,
+                                run_id=run_id,
+                                feedback=provider_feedback or "",
+                            )
+                        ) as retry_events:
+                            async for event in retry_events:
+                                yield event
                     await _end_active_turn()
                     await _save_checkpoint("turn_complete", turn_index=turn_index)
                     continue
@@ -759,31 +785,37 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                             if isinstance(block, ToolUseBlock)
                         ]
                         if _stopped_tools:
-                            async for event in _final_tool_retry_tail(
-                                session,
-                                run_id=run_id,
-                                tool_blocks=_stopped_tools,
-                                final_id=_stopped_tools[0].id,
-                                feedback="Provider hook stopped before tool execution.",
-                                final_is_error=False,
-                            ):
-                                yield event
+                            async with aclosing(
+                                _final_tool_retry_tail(
+                                    session,
+                                    run_id=run_id,
+                                    tool_blocks=_stopped_tools,
+                                    final_id=_stopped_tools[0].id,
+                                    feedback="Provider hook stopped before tool execution.",
+                                    final_is_error=False,
+                                )
+                            ) as retry_events:
+                                async for event in retry_events:
+                                    yield event
                     _dur = int((time.time() - started) * 1000)
                     _final_result = _build_run_result("success", "end_turn", duration_ms=_dur)
                     _sync_checkpoint_accounting()
                     await _end_active_turn()
-                    async for event in _stop_when_tail(
-                        session,
-                        agent,
-                        run_id=run_id,
-                        run_record=run_record,
-                        checkpoint=checkpoint,
-                        total=total,
-                        duration_ms=_dur,
-                        running_cost=running_cost,
-                        usage_complete=ledger.usage_complete,
-                    ):
-                        yield event
+                    async with aclosing(
+                        _stop_when_tail(
+                            session,
+                            agent,
+                            run_id=run_id,
+                            run_record=run_record,
+                            checkpoint=checkpoint,
+                            total=total,
+                            duration_ms=_dur,
+                            running_cost=running_cost,
+                            usage_complete=ledger.usage_complete,
+                        )
+                    ) as stop_events:
+                        async for event in stop_events:
+                            yield event
                     return
                 if provider_action == "stop":
                     if resumed_assistant and checkpoint.assistant_message is not None:
@@ -793,16 +825,22 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                             if isinstance(block, ToolUseBlock)
                         ]
                         if _stopped_tools:
-                            async for event in _final_tool_retry_tail(
-                                session,
-                                run_id=run_id,
-                                tool_blocks=_stopped_tools,
-                                final_id=_stopped_tools[0].id,
-                                feedback=provider_feedback or "Provider hook stopped the run.",
-                            ):
-                                yield event
-                    async for event in _emit_error_terminal(final_text_value=provider_feedback):
-                        yield event
+                            async with aclosing(
+                                _final_tool_retry_tail(
+                                    session,
+                                    run_id=run_id,
+                                    tool_blocks=_stopped_tools,
+                                    final_id=_stopped_tools[0].id,
+                                    feedback=provider_feedback or "Provider hook stopped the run.",
+                                )
+                            ) as retry_events:
+                                async for event in retry_events:
+                                    yield event
+                    async with aclosing(
+                        _emit_error_terminal(final_text_value=provider_feedback)
+                    ) as error_events:
+                        async for event in error_events:
+                            yield event
                     return
             _provider_ctx = ProviderTurnContext(
                 session=session,
@@ -865,8 +903,9 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 await _save_checkpoint(phase, **kwargs)
 
             _provider_ctx.save_checkpoint = _save_provider_checkpoint
-            async for _provider_event in run_provider_turn(_provider_ctx):
-                yield _provider_event
+            async with aclosing(run_provider_turn(_provider_ctx)) as provider_events:
+                async for _provider_event in provider_events:
+                    yield _provider_event
             if _provider_ctx.continued:
                 _recovered_primary_projection = None
                 await _end_active_turn()
@@ -912,10 +951,13 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                 tool_blocks = [b for b in assembly.message.content if isinstance(b, ToolUseBlock)]
                 final_block = next((b for b in tool_blocks if b.name == effective_final_tool), None)
                 if final_block is not None:
-                    async for event in _finalize_answer(
-                        turn_index, tool_blocks=tool_blocks, final_block=final_block
-                    ):
-                        yield event
+                    async with aclosing(
+                        _finalize_answer(
+                            turn_index, tool_blocks=tool_blocks, final_block=final_block
+                        )
+                    ) as finalization_events:
+                        async for event in finalization_events:
+                            yield event
                     if _final_result is not None:
                         return
                     continue
@@ -944,18 +986,26 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                         assistant_message=assembly.message,
                         assistant_stop_reason=assembly.stop_reason,
                     )
-                    async for event in _gate_retry_tail(
-                        session, run_id=run_id, feedback=_truncation_recovery.feedback
-                    ):
-                        yield event
+                    async with aclosing(
+                        _gate_retry_tail(
+                            session,
+                            run_id=run_id,
+                            feedback=_truncation_recovery.feedback,
+                        )
+                    ) as retry_events:
+                        async for event in retry_events:
+                            yield event
                     _pending_truncation_feedback = None
                     await _end_active_turn()
                     await _save_checkpoint("turn_complete", turn_index=turn_index)
                     continue
-                async for event in _finalize_answer(
-                    turn_index, assembly=_assembly_with_truncation_prefix(assembly)
-                ):
-                    yield event
+                async with aclosing(
+                    _finalize_answer(
+                        turn_index, assembly=_assembly_with_truncation_prefix(assembly)
+                    )
+                ) as finalization_events:
+                    async for event in finalization_events:
+                        yield event
                 if _final_result is not None:
                     return
                 _truncation_prefix = ""
@@ -1003,8 +1053,9 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
 
             _tool_ctx.save_checkpoint = _save_tool_checkpoint
 
-            async for _tool_event in run_tool_batch(_tool_ctx):
-                yield _tool_event
+            async with aclosing(run_tool_batch(_tool_ctx)) as tool_events:
+                async for _tool_event in tool_events:
+                    yield _tool_event
             _force_final_pending = _tool_ctx.force_final_pending
             if _tool_ctx.terminal:
                 return
@@ -1016,33 +1067,39 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
         _dur = int((time.time() - started) * 1000)
         _final_result = _build_run_result("error", "error", duration_ms=_dur)
         _sync_checkpoint_accounting()
-        async for event in _max_turns_tail(
-            session,
-            run_id=run_id,
-            runtime=_runtime,
-            max_turns=max_turns,
-            total=total,
-            duration_ms=_dur,
-            running_cost=running_cost,
-            usage_complete=ledger.usage_complete,
-        ):
-            yield event
+        async with aclosing(
+            _max_turns_tail(
+                session,
+                run_id=run_id,
+                runtime=_runtime,
+                max_turns=max_turns,
+                total=total,
+                duration_ms=_dur,
+                running_cost=running_cost,
+                usage_complete=ledger.usage_complete,
+            )
+        ) as max_turn_events:
+            async for event in max_turn_events:
+                yield event
     except AbortError:
-        async for event in _runtime.emit_abort_terminal(
-            close_active_spans=_close_active_spans,
-        ):
-            yield event
+        async with aclosing(
+            _runtime.emit_abort_terminal(close_active_spans=_close_active_spans)
+        ) as abort_events:
+            async for event in abort_events:
+                yield event
     except LeaseLostError as exc:
         _runtime.lease_lost = exc
-        async for event in _runtime.emit_exception_terminal(
-            exc, close_active_spans=_close_active_spans
-        ):
-            yield event
+        async with aclosing(
+            _runtime.emit_exception_terminal(exc, close_active_spans=_close_active_spans)
+        ) as error_events:
+            async for event in error_events:
+                yield event
     except Exception as exc:
-        async for event in _runtime.emit_exception_terminal(
-            exc, close_active_spans=_close_active_spans
-        ):
-            yield event
+        async with aclosing(
+            _runtime.emit_exception_terminal(exc, close_active_spans=_close_active_spans)
+        ) as error_events:
+            async for event in error_events:
+                yield event
     finally:
         await _runtime.unbind_run()
         try:
@@ -1060,8 +1117,9 @@ async def _run_loop_impl(  # pyright: ignore[reportGeneralTypeIssues]
                     await _flush_events(session)
         except LeaseLostError as exc:
             _runtime.lease_lost = exc
-            async for _ in _runtime.emit_exception_terminal(exc):
-                pass
+            async with aclosing(_runtime.emit_exception_terminal(exc)) as error_events:
+                async for _ in error_events:
+                    pass
         except Exception:
             pass
         session._event_journal = None

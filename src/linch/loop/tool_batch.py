@@ -9,6 +9,7 @@ runner remains responsible for the turn boundary around the batch.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import aclosing
 from dataclasses import dataclass
 from typing import Any
 
@@ -124,81 +125,85 @@ async def run_tool_batch(ctx: ToolBatchContext) -> AsyncIterator[Event]:
             completed_tool_results=completed_tool_results,
         )
 
-    async for event in execute_tool_calls(
-        missing_tool_blocks,
-        ctx.agent,
-        session,
-        ctx.signal,
-        run_config=ctx.config,
-        turn_index=ctx.turn_index,
-        on_permissions_resolved=checkpoint_tool_executing,
-    ):
-        # Progress is intentionally transient.  Recovery-critical start/end
-        # events are persisted and flushed before crossing the yield boundary.
-        if not isinstance(event, ToolProgressEvent):
-            await ctx.persist_event(event)
-        if isinstance(event, (ToolCallStartEvent, ToolCallEndEvent)):
-            await ctx.flush_events()
-        if isinstance(event, PermissionRequestEvent):
-            await ctx.save_checkpoint(
-                "permission_pending",
-                turn_index=ctx.turn_index,
-                assistant_message=ctx.assembly.message,
-                assistant_stop_reason=ctx.assembly.stop_reason,
-                pending_tool_blocks=tool_blocks,
-                completed_tool_results=completed_tool_results,
-                status="waiting_permission",
-            )
-        elif isinstance(event, ToolCallStartEvent):
-            if background_calls is not None and event.input.get("run_in_background"):
-                background_calls.add((event.tool_use_id, event.tool_name))
-            # A started-but-unfinished tool is recovered as interrupted from
-            # the durable event log if a consumer crashes at the yield below.
-            completed_tool_results.setdefault(
-                event.tool_use_id,
-                _interrupted_tool_result_block(event),
-            )
-        elif isinstance(event, ToolCallEndEvent):
-            block = _tool_result_block_from_end(event)
-            completed_tool_results[event.tool_use_id] = block
-            if event.is_error and event.tool_result is not None and event.tool_result.recovery_hint:
-                recovery_hints[event.tool_use_id] = event.tool_result.recovery_hint
-        yield event
-        if isinstance(event, ToolCallStartEvent):
-            await ctx.dispatch_lifecycle(
-                lifecycle.TOOL_USE_START,
-                ToolUseStartContext(
-                    session=session,
-                    run_id=ctx.run_id,
+    async with aclosing(
+        execute_tool_calls(
+            missing_tool_blocks,
+            ctx.agent,
+            session,
+            ctx.signal,
+            run_config=ctx.config,
+            turn_index=ctx.turn_index,
+            on_permissions_resolved=checkpoint_tool_executing,
+        )
+    ) as tool_events:
+        async for event in tool_events:
+            # Progress is intentionally transient.  Recovery-critical start/end
+            # events are persisted and flushed before crossing the yield boundary.
+            if not isinstance(event, ToolProgressEvent):
+                await ctx.persist_event(event)
+            if isinstance(event, (ToolCallStartEvent, ToolCallEndEvent)):
+                await ctx.flush_events()
+            if isinstance(event, PermissionRequestEvent):
+                await ctx.save_checkpoint(
+                    "permission_pending",
                     turn_index=ctx.turn_index,
-                    deps=getattr(session, "run_deps", None),
-                    tool_use_id=event.tool_use_id,
-                    tool_name=event.tool_name,
-                    input=event.input,
-                    summary=event.summary,
-                ),
-            )
-        elif isinstance(event, ToolCallEndEvent):
-            await ctx.dispatch_lifecycle(
-                lifecycle.TOOL_USE_STOP,
-                ToolUseStopContext(
-                    session=session,
-                    run_id=ctx.run_id,
-                    turn_index=ctx.turn_index,
-                    deps=getattr(session, "run_deps", None),
-                    tool_use_id=event.tool_use_id,
-                    tool_name=event.tool_name,
-                    is_error=event.is_error,
-                    duration_ms=event.duration_ms,
-                    result=event.result,
-                    tool_result=event.tool_result,
-                ),
-            )
+                    assistant_message=ctx.assembly.message,
+                    assistant_stop_reason=ctx.assembly.stop_reason,
+                    pending_tool_blocks=tool_blocks,
+                    completed_tool_results=completed_tool_results,
+                    status="waiting_permission",
+                )
+            elif isinstance(event, ToolCallStartEvent):
+                if background_calls is not None and event.input.get("run_in_background"):
+                    background_calls.add((event.tool_use_id, event.tool_name))
+                # A started-but-unfinished tool is recovered as interrupted from
+                # the durable event log if a consumer crashes at the yield below.
+                completed_tool_results.setdefault(
+                    event.tool_use_id,
+                    _interrupted_tool_result_block(event),
+                )
+            elif isinstance(event, ToolCallEndEvent):
+                block = _tool_result_block_from_end(event)
+                completed_tool_results[event.tool_use_id] = block
+                if (
+                    event.is_error
+                    and event.tool_result is not None
+                    and event.tool_result.recovery_hint
+                ):
+                    recovery_hints[event.tool_use_id] = event.tool_result.recovery_hint
+            yield event
+            if isinstance(event, ToolCallStartEvent):
+                await ctx.dispatch_lifecycle(
+                    lifecycle.TOOL_USE_START,
+                    ToolUseStartContext(
+                        session=session,
+                        run_id=ctx.run_id,
+                        turn_index=ctx.turn_index,
+                        deps=getattr(session, "run_deps", None),
+                        tool_use_id=event.tool_use_id,
+                        tool_name=event.tool_name,
+                        input=event.input,
+                        summary=event.summary,
+                    ),
+                )
+            elif isinstance(event, ToolCallEndEvent):
+                await ctx.dispatch_lifecycle(
+                    lifecycle.TOOL_USE_STOP,
+                    ToolUseStopContext(
+                        session=session,
+                        run_id=ctx.run_id,
+                        turn_index=ctx.turn_index,
+                        deps=getattr(session, "run_deps", None),
+                        tool_use_id=event.tool_use_id,
+                        tool_name=event.tool_name,
+                        is_error=event.is_error,
+                        duration_ms=event.duration_ms,
+                        result=event.result,
+                        tool_result=event.tool_result,
+                    ),
+                )
 
     result_blocks: list[ContentBlock] = [completed_tool_results[block.id] for block in tool_blocks]
-    hint_event = await _append_recovery_hint(ctx, result_blocks, recovery_hints)
-    if hint_event is not None:
-        yield hint_event
     result_message = Message(role="user", content=result_blocks)
     already_appended = resuming_turn and (
         replaying_results_checkpoint or _last_message_has_tool_results(session, tool_blocks)
@@ -223,6 +228,10 @@ async def run_tool_batch(ctx: ToolBatchContext) -> AsyncIterator[Event]:
     await ctx.persist_event(event)
     yield event
 
+    hint_event = await _append_recovery_hint(ctx, result_blocks, recovery_hints)
+    if hint_event is not None:
+        yield hint_event
+
     guard_decision = None
     if _loop_guard_is_active(ctx.guard) and ctx.guard_state is not None:
         guard_decision = evaluate_loop_guard(ctx.guard, ctx.guard_state, tool_blocks, result_blocks)
@@ -239,8 +248,9 @@ async def run_tool_batch(ctx: ToolBatchContext) -> AsyncIterator[Event]:
             reminder_event = await _inject_force_final_reminder(ctx)
             yield reminder_event
         else:
-            async for error_event in ctx.emit_error_terminal():
-                yield error_event
+            async with aclosing(ctx.emit_error_terminal()) as error_events:
+                async for error_event in error_events:
+                    yield error_event
             ctx.terminal = True
 
 
@@ -249,7 +259,7 @@ async def _append_recovery_hint(
     result_blocks: list[ContentBlock],
     recovery_hints: dict[str, str],
 ) -> Event | None:
-    """Append the all-tools-failed recovery hint before the result message."""
+    """Append the all-tools-failed recovery hint after the result message."""
     if not (
         result_blocks
         and all(
