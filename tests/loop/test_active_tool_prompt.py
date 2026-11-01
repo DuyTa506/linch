@@ -4,13 +4,15 @@ from __future__ import annotations
 
 from typing import Any
 
+from tests.support.agents import make_agent
+from tests.support.providers import ScriptedProvider, TextTurn
+from tests.support.stores import memory_session_store
+
 
 async def test_same_name_session_override_uses_override_prompt_contribution() -> None:
-    from linch import Agent, RunOptions
+    from linch import RunOptions
     from linch.config import FeatureFlags, SystemPromptSection
-    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.loop.request import _build_turn_request
-    from linch.sessions import InMemorySessionStore
     from linch.tools import ToolContext, ToolRegistry, ToolResult
 
     class ContributingTool:
@@ -39,12 +41,11 @@ async def test_same_name_session_override_uses_override_prompt_contribution() ->
     parent.register(ContributingTool("PARENT"))
     override = ToolRegistry()
     override.register(ContributingTool("OVERRIDE"))
-    agent = Agent(
-        model="test-model",
-        provider=ScriptedProvider([TextTurn("done")]),
+    agent = make_agent(
+        ScriptedProvider([TextTurn("done")]),
         tools=parent,
-        permissions={"mode": "skip-dangerous"},
-        session_store=InMemorySessionStore(),
+        session_store=memory_session_store(),
+        run_store=None,
         features=FeatureFlags(),
         result_offload=None,
     )

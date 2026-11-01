@@ -4,6 +4,14 @@ from typing import Any
 
 import pytest
 
+from linch import Principal, RunOptions
+from linch.run_store import InMemoryRunStore, RunCheckpoint, run_meta_with_contract
+from linch.sessions import InMemorySessionStore
+from tests.support.agents import make_agent
+from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
+from tests.support.stores import memory_run_store, memory_session_store
+from tests.support.tools import tool_registry
+
 
 class _PrincipalTool:
     name = "PrincipalTool"
@@ -31,28 +39,29 @@ class _PrincipalTool:
 def _agent(
     provider: Any,
     tool: Any,
-    run_store: Any,
-    session_store: Any,
+    run_store: Any = None,
+    session_store: Any = None,
     *,
     permissions: Any = None,
     enable_background_tools: bool = False,
 ) -> Any:
-    from linch import Agent
-    from linch.config import FeatureFlags
-    from linch.tools import ToolRegistry
-
-    tools = ToolRegistry()
-    tools.register(tool)
-    return Agent(
-        model="test-model",
-        provider=provider,
-        tools=tools,
-        permissions=permissions or {"mode": "skip-dangerous"},
-        session_store=session_store,
-        run_store=run_store,
-        features=FeatureFlags(),
-        result_offload=None,
-        enable_background_tools=enable_background_tools,
+    options: dict[str, Any] = {
+        "tools": tool_registry(tool),
+        "permissions": permissions or {"mode": "skip-dangerous"},
+        "result_offload": None,
+        "enable_background_tools": enable_background_tools,
+    }
+    if run_store is not None:
+        options["run_store"] = run_store
+    else:
+        options["run_store"] = memory_run_store()
+    if session_store is not None:
+        options["session_store"] = session_store
+    else:
+        options["session_store"] = memory_session_store()
+    return make_agent(
+        provider,
+        **options,
     )
 
 
@@ -65,11 +74,6 @@ async def _interrupt(session: Any, opts: Any) -> str:
 
 @pytest.mark.asyncio
 async def test_omitted_resume_principal_hydrates_from_durable_contract() -> None:
-    from linch import Principal, RunOptions
-    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
-    from linch.run_store import InMemoryRunStore
-    from linch.sessions import InMemorySessionStore
-
     run_store = InMemoryRunStore()
     session_store = InMemorySessionStore()
     principal = Principal("tenant-a", "alice", {"reader", "operator"})
@@ -106,11 +110,7 @@ async def test_omitted_resume_principal_hydrates_from_durable_contract() -> None
 
 @pytest.mark.asyncio
 async def test_resume_rejects_tenant_user_or_role_change_before_provider_dispatch() -> None:
-    from linch import Principal, RunOptions
     from linch.errors import ConfigError
-    from linch.ext.evals import ScriptedProvider, TextTurn
-    from linch.run_store import InMemoryRunStore
-    from linch.sessions import InMemorySessionStore
 
     run_store = InMemoryRunStore()
     session_store = InMemorySessionStore()
@@ -133,16 +133,11 @@ async def test_resume_rejects_tenant_user_or_role_change_before_provider_dispatc
                     run_id, RunOptions(principal=replacement)
                 )
             ]
-    assert provider._index == 0
+    assert provider.requests == []
 
 
 @pytest.mark.asyncio
 async def test_run_options_principal_is_snapshotted_before_caller_mutation() -> None:
-    from linch import Principal, RunOptions
-    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
-    from linch.run_store import InMemoryRunStore
-    from linch.sessions import InMemorySessionStore
-
     for initial, replacement, expected in (
         (
             Principal("tenant-a", "alice", {"reader"}),
@@ -156,8 +151,6 @@ async def test_run_options_principal_is_snapshotted_before_caller_mutation() -> 
         agent = _agent(
             ScriptedProvider([ToolUseTurn("PrincipalTool", {}), TextTurn("done")]),
             tool,
-            InMemoryRunStore(),
-            InMemorySessionStore(),
         )
         iterator = (await agent.session()).run("go", opts).__aiter__()
         await iterator.__anext__()
@@ -179,11 +172,7 @@ def test_role_guards_are_optional_contract_fields() -> None:
 
 @pytest.mark.asyncio
 async def test_pending_run_adoption_hydrates_omitted_principal() -> None:
-    from linch import Principal, RunOptions
-    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.loop.contracts import _build_run_contract
-    from linch.run_store import InMemoryRunStore, run_meta_with_contract
-    from linch.sessions import InMemorySessionStore
 
     run_store = InMemoryRunStore()
     session_store = InMemorySessionStore()
@@ -204,12 +193,8 @@ async def test_pending_run_adoption_hydrates_omitted_principal() -> None:
     [("role", "operator"), ("unless_role", "operator")],
 )
 async def test_changed_role_policy_rejects_resume(original_guard: str, changed_guard: str) -> None:
-    from linch import Principal, RunOptions
     from linch.errors import ConfigError
-    from linch.ext.evals import ScriptedProvider, TextTurn
     from linch.permissions import ToolRule
-    from linch.run_store import InMemoryRunStore
-    from linch.sessions import InMemorySessionStore
 
     run_store = InMemoryRunStore()
     session_store = InMemorySessionStore()
@@ -245,16 +230,11 @@ async def test_changed_role_policy_rejects_resume(original_guard: str, changed_g
                 run_id, RunOptions(principal=principal)
             )
         ]
-    assert provider._index == 0
+    assert provider.requests == []
 
 
 @pytest.mark.asyncio
 async def test_explicit_same_principal_resume_succeeds() -> None:
-    from linch import Principal, RunOptions
-    from linch.ext.evals import ScriptedProvider, TextTurn
-    from linch.run_store import InMemoryRunStore
-    from linch.sessions import InMemorySessionStore
-
     run_store = InMemoryRunStore()
     session_store = InMemorySessionStore()
     principal = Principal("tenant-a", "alice", {"reader"})
@@ -281,16 +261,13 @@ async def test_explicit_same_principal_resume_succeeds() -> None:
         )
     ]
     assert events[-1].subtype == "success"
-    assert provider._index > 0
+    assert provider.requests
 
 
 @pytest.mark.asyncio
 async def test_malformed_stored_principal_is_rejected_after_valid_contract_recompute() -> None:
-    from linch import Principal, RunOptions
     from linch.errors import ConfigError
-    from linch.ext.evals import ScriptedProvider, TextTurn
-    from linch.run_store import InMemoryRunStore, _run_contract_fingerprint, run_contract_from_meta
-    from linch.sessions import InMemorySessionStore
+    from linch.run_store import _run_contract_fingerprint, run_contract_from_meta
 
     run_store = InMemoryRunStore()
     session_store = InMemorySessionStore()
@@ -318,7 +295,7 @@ async def test_malformed_stored_principal_is_rejected_after_valid_contract_recom
     resumed = _agent(provider, _PrincipalTool(), run_store, session_store)
     with pytest.raises(ConfigError, match="invalid principal shape"):
         _ = [event async for event in (await resumed.session(id="s")).resume(run_id, RunOptions())]
-    assert provider._index == 0
+    assert provider.requests == []
 
 
 @pytest.mark.asyncio
@@ -326,12 +303,8 @@ async def test_cold_resume_after_lease_takeover_preserves_principal_for_role_rul
     import asyncio
     import copy
 
-    from linch import Principal, RunOptions
-    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
     from linch.loop.contracts import _build_run_contract
     from linch.permissions import ToolRule
-    from linch.run_store import InMemoryRunStore, RunCheckpoint, run_meta_with_contract
-    from linch.sessions import InMemorySessionStore
     from linch.types import Usage
 
     first_store = InMemoryRunStore()
@@ -383,9 +356,6 @@ async def test_cold_resume_after_lease_takeover_preserves_principal_for_role_rul
 async def test_same_run_resume_preserves_pending_background_principal() -> None:
     import asyncio
 
-    from linch import Principal, RunOptions
-    from linch.run_store import InMemoryRunStore
-    from linch.sessions import InMemorySessionStore
     from linch.types import Usage
 
     entered = asyncio.Event()

@@ -6,10 +6,10 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
-from test_run_resume import _pin_run_contract
 
 from tests.support.agents import make_agent
 from tests.support.providers import ScriptedProvider, TextTurn
+from tests.support.runs import pin_run_contract
 
 
 class _DurableStateHook:
@@ -31,6 +31,17 @@ class _DurableStateHook:
         self.restored.append((state, session.id, run_id))
 
 
+def _hook_agent(session_store: Any, run_store: Any, hook: Any) -> Any:
+    return make_agent(
+        ScriptedProvider([TextTurn("done")], context_window=100_000),
+        session_store=session_store,
+        run_store=run_store,
+        hooks=[hook],
+        result_offload=None,
+        read_before_write=False,
+    )
+
+
 async def _collect(events: AsyncIterator[Any]) -> list[Any]:
     return [event async for event in events]
 
@@ -45,14 +56,7 @@ async def test_checkpointable_hook_snapshots_session_scoped_json_state() -> None
     hook = _DurableStateHook({"profile": "hash-1", "repair": {"used": 1}})
     assert isinstance(hook, CheckpointableHook)
 
-    agent = make_agent(
-        ScriptedProvider([TextTurn("done")], context_window=100_000),
-        session_store=session_store,
-        run_store=run_store,
-        hooks=[hook],
-        result_offload=None,
-        read_before_write=False,
-    )
+    agent = _hook_agent(session_store, run_store, hook)
     session = await agent.session(id="session-1")
     events = await _collect(session.run("hello"))
     run_id = next(event.run_id for event in events if event.type == "system")
@@ -95,17 +99,10 @@ async def test_checkpointable_hook_restores_matching_state_and_preserves_other_e
         ),
     )
     hook = _DurableStateHook({"profile": "pinned", "repair": {"used": 2}})
-    agent = make_agent(
-        ScriptedProvider([TextTurn("done")], context_window=100_000),
-        session_store=session_store,
-        run_store=run_store,
-        hooks=[hook],
-        result_offload=None,
-        read_before_write=False,
-    )
+    agent = _hook_agent(session_store, run_store, hook)
     session = await agent.session(id="session-restore")
 
-    await _pin_run_contract(session, run.id)
+    await pin_run_contract(session, run.id)
     events = await _collect(session.resume(run.id))
 
     assert events[-1].type == "result"
@@ -141,17 +138,10 @@ async def test_empty_hook_snapshot_clears_stale_active_namespace_only() -> None:
         ),
     )
     hook = _DurableStateHook({})
-    agent = make_agent(
-        ScriptedProvider([TextTurn("done")], context_window=100_000),
-        session_store=session_store,
-        run_store=run_store,
-        hooks=[hook],
-        result_offload=None,
-        read_before_write=False,
-    )
+    agent = _hook_agent(session_store, run_store, hook)
     session = await agent.session(id="session-clear")
 
-    await _pin_run_contract(session, run.id)
+    await pin_run_contract(session, run.id)
     events = await _collect(session.resume(run.id))
 
     assert events[-1].type == "result"
@@ -174,14 +164,7 @@ async def test_incomplete_checkpointable_hook_fails_closed_with_configuration_er
         def checkpoint_state(self, session: Any, run_id: str) -> dict[str, Any]:
             return {}
 
-    agent = make_agent(
-        ScriptedProvider([TextTurn("done")], context_window=100_000),
-        session_store=InMemorySessionStore(),
-        run_store=InMemoryRunStore(),
-        hooks=[_IncompleteHook()],
-        result_offload=None,
-        read_before_write=False,
-    )
+    agent = _hook_agent(InMemorySessionStore(), InMemoryRunStore(), _IncompleteHook())
     session = await agent.session()
 
     with pytest.raises(ConfigError, match="restore_checkpoint_state"):

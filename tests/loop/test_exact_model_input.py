@@ -3,11 +3,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import replace
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
-from linch import Agent
 from linch.context import ContextBuildResult
 from linch.durability import DurabilityOptions, InboxDelivery
 from linch.errors import ProviderError
@@ -15,6 +14,8 @@ from linch.hooks import HookResult
 from linch.run_store import InMemoryRunStore, decode_model_input_snapshot
 from linch.sessions import InMemorySessionStore
 from linch.types import Message, SystemBlock, TextBlock, Usage
+from tests.support.agents import make_agent
+from tests.support.providers import ScriptedProvider, TextTurn
 
 
 class _DynamicRequestHook:
@@ -58,20 +59,29 @@ class _BlockingProvider:
         yield {}  # pragma: no cover
 
 
-class _CaptureProvider:
-    id = "capture"
+def _exact_agent(
+    provider: Any,
+    *,
+    run_store: Any = None,
+    session_store: Any = None,
+    durability: DurabilityOptions | None = None,
+    hooks: Any = None,
+    fallback_models: list[str] | None = None,
+) -> Any:
+    """Build an agent configured for exact model-input persistence tests."""
 
-    def __init__(self) -> None:
-        self.requests: list[Any] = []
-
-    def context_window(self, model: str) -> int:
-        return 100_000
-
-    async def stream(self, req: Any) -> AsyncIterator[dict[str, object]]:
-        self.requests.append(req)
-        yield {"type": "message_start", "model": req.model}
-        yield {"type": "text_delta", "text": "done"}
-        yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
+    options: dict[str, Any] = {
+        "model": "model-a",
+        "durability": durability or DurabilityOptions(exact_model_input=True),
+        "hooks": hooks,
+    }
+    if run_store is not None:
+        options["run_store"] = run_store
+    if session_store is not None:
+        options["session_store"] = session_store
+    if fallback_models is not None:
+        options["fallback_models"] = fallback_models
+    return make_agent(provider, **options)
 
 
 async def _leave_provider_pending(
@@ -82,12 +92,11 @@ async def _leave_provider_pending(
 ) -> tuple[str, _DynamicRequestHook]:
     hook = _DynamicRequestHook("frozen")
     provider = _BlockingProvider()
-    agent = Agent(
-        model="model-a",
-        provider=cast(Any, provider),
+    agent = _exact_agent(
+        provider,
         session_store=session_store,
         run_store=run_store,
-        durability=durability or DurabilityOptions(exact_model_input=True),
+        durability=durability,
         hooks=[hook],
     )
     session = await agent.session(id="session-1")
@@ -125,13 +134,11 @@ async def test_resume_replays_frozen_request_without_rerunning_dynamic_hooks() -
     frozen = decode_model_input_snapshot(snapshot)
 
     changed_hook = _DynamicRequestHook("changed-after-crash")
-    provider = _CaptureProvider()
-    restarted = Agent(
-        model="model-a",
-        provider=cast(Any, provider),
+    provider = ScriptedProvider([TextTurn("done")])
+    restarted = _exact_agent(
+        provider,
         session_store=session_store,
         run_store=run_store,
-        durability=DurabilityOptions(exact_model_input=True),
         hooks=[changed_hook],
     )
     session = await restarted.session(id="session-1")
@@ -160,10 +167,9 @@ async def test_frozen_resume_defers_new_durable_inbox_delivery_to_next_turn() ->
         "session-1", InboxDelivery("late", notification, source="host")
     )
 
-    provider = _CaptureProvider()
-    restarted = Agent(
-        model="model-a",
-        provider=cast(Any, provider),
+    provider = ScriptedProvider([TextTurn("done")])
+    restarted = _exact_agent(
+        provider,
         session_store=session_store,
         run_store=run_store,
         durability=strict,
@@ -208,13 +214,11 @@ async def test_missing_pending_snapshot_fails_closed_before_provider_call() -> N
     assert snapshot_id is not None
     await run_store.delete(snapshot_id, run_id=run_id)
 
-    provider = _CaptureProvider()
-    restarted = Agent(
-        model="model-a",
-        provider=cast(Any, provider),
+    provider = ScriptedProvider([TextTurn("done")])
+    restarted = _exact_agent(
+        provider,
         session_store=session_store,
         run_store=run_store,
-        durability=DurabilityOptions(exact_model_input=True),
         hooks=[_DynamicRequestHook("changed")],
     )
     session = await restarted.session(id="session-1")
@@ -238,13 +242,11 @@ async def test_corrupt_pending_snapshot_fails_closed_before_provider_call() -> N
     assert snapshot is not None
     run_store._model_input_snapshots[snapshot_id] = replace(snapshot, request_json="{}")
 
-    provider = _CaptureProvider()
-    restarted = Agent(
-        model="model-a",
-        provider=cast(Any, provider),
+    provider = ScriptedProvider([TextTurn("done")])
+    restarted = _exact_agent(
+        provider,
         session_store=session_store,
         run_store=run_store,
-        durability=DurabilityOptions(exact_model_input=True),
         hooks=[_DynamicRequestHook("changed")],
     )
     session = await restarted.session(id="session-1")
@@ -260,13 +262,8 @@ async def test_exact_mode_requires_snapshot_store_capabilities() -> None:
     class _LegacyRunStore:
         pass
 
-    provider = _CaptureProvider()
-    agent = Agent(
-        model="model-a",
-        provider=cast(Any, provider),
-        run_store=_LegacyRunStore(),  # type: ignore[arg-type]
-        durability=DurabilityOptions(exact_model_input=True),
-    )
+    provider = ScriptedProvider([TextTurn("done")])
+    agent = _exact_agent(provider, run_store=_LegacyRunStore())
     session = await agent.session()
 
     with pytest.raises(Exception, match="snapshot capabilities"):
@@ -281,13 +278,8 @@ async def test_snapshot_write_failure_makes_zero_provider_calls() -> None:
             raise ValueError("snapshot disk unavailable")
 
     store = _FailingStore()
-    provider = _CaptureProvider()
-    agent = Agent(
-        model="model-a",
-        provider=cast(Any, provider),
-        run_store=store,
-        durability=DurabilityOptions(exact_model_input=True),
-    )
+    provider = ScriptedProvider([TextTurn("done")])
+    agent = _exact_agent(provider, run_store=store)
     session = await agent.session()
     events = [event async for event in session.run("hello")]
 
@@ -307,7 +299,10 @@ async def test_fallback_freezes_a_new_incremented_provider_attempt() -> None:
             self.attempts.append((provider_attempt, request.model))
             return await super().save(run_id, provider_attempt, request)
 
-    class _FallbackProvider(_CaptureProvider):
+    class _FallbackProvider(ScriptedProvider):
+        def __init__(self) -> None:
+            super().__init__([TextTurn("done")])
+
         async def stream(self, req: Any) -> AsyncIterator[dict[str, object]]:
             self.requests.append(req)
             if len(self.requests) == 1:
@@ -318,13 +313,7 @@ async def test_fallback_freezes_a_new_incremented_provider_attempt() -> None:
 
     store = _RecordingStore()
     provider = _FallbackProvider()
-    agent = Agent(
-        model="model-a",
-        fallback_models=["model-b"],
-        provider=cast(Any, provider),
-        run_store=store,
-        durability=DurabilityOptions(exact_model_input=True),
-    )
+    agent = _exact_agent(provider, fallback_models=["model-b"], run_store=store)
     session = await agent.session()
     events = [event async for event in session.run("hello")]
 
