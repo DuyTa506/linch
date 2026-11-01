@@ -805,7 +805,7 @@ def test_stream_cache_tokens_not_double_counted():
     from types import SimpleNamespace
 
     from linch.providers.anthropic import AnthropicProvider
-    from linch.types import Message, ProviderRequest, TextBlock
+    from linch.types import Message, ProviderRequest, TextBlock, Usage
 
     cache_read = 4096
     cache_creation = 1024
@@ -868,6 +868,14 @@ def test_stream_cache_tokens_not_double_counted():
     out = asyncio.run(_run())
     end = next(e for e in out if e["type"] == "message_end")
     usage = end["usage"]
+    # The three input buckets are disjoint: uncached input, cache reads, and
+    # cache writes are all reported separately by Anthropic.
+    assert usage == Usage(
+        input_tokens=100,
+        output_tokens=42,
+        cache_read_tokens=cache_read,
+        cache_creation_tokens=cache_creation,
+    )
     assert usage.cache_read_tokens == cache_read
     assert usage.cache_creation_tokens == cache_creation
     assert usage.input_tokens == 100

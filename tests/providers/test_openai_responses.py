@@ -157,11 +157,13 @@ def test_build_usage_surfaces_cache_read_tokens() -> None:
         "input_tokens_details": {"cached_tokens": 768},
     }
     usage = build_usage(raw)
-    assert usage.input_tokens == 1000
+    assert usage.input_tokens == 232
     assert usage.cache_read_tokens == 768
 
     # No cache details / no usage → 0, never raises.
-    assert build_usage({"input_tokens": 10, "output_tokens": 2}).cache_read_tokens == 0
+    uncached = build_usage({"input_tokens": 10, "output_tokens": 2})
+    assert uncached.input_tokens == 10
+    assert uncached.cache_read_tokens == 0
     assert build_usage(None).cache_read_tokens == 0
 
 

@@ -256,10 +256,20 @@ def derive_stop_reason(
 
 
 def build_usage(raw: dict[str, Any] | None) -> Usage:
+    """Normalize one OpenAI Responses usage payload.
+
+    Args:
+        raw: Provider usage mapping, or ``None`` when the response omitted it.
+
+    Returns:
+        Usage with cached input separated from uncached input tokens.
+    """
+    input_tokens = int((raw or {}).get("input_tokens") or 0)
+    cache_read_tokens = openai_responses_cached_tokens(raw)
     return Usage(
-        input_tokens=int((raw or {}).get("input_tokens") or 0),
+        input_tokens=max(0, input_tokens - cache_read_tokens),
         output_tokens=int((raw or {}).get("output_tokens") or 0),
-        cache_read_tokens=openai_responses_cached_tokens(raw),
+        cache_read_tokens=cache_read_tokens,
     )
 
 

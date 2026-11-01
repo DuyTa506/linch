@@ -210,7 +210,7 @@ async def test_llamacpp_stream_emits_text_reasoning_and_usage() -> None:
     assert events[-1]["type"] == "message_end"
     assert events[-1]["stop_reason"] == "end_turn"
     assert events[-1]["usage"] == Usage(
-        input_tokens=3,
+        input_tokens=1,
         output_tokens=5,
         cache_read_tokens=2,
     )
@@ -245,7 +245,7 @@ async def test_llamacpp_stream_reads_cache_read_tokens_from_timings() -> None:
     ]
 
     assert events[-1]["usage"] == Usage(
-        input_tokens=6318,
+        input_tokens=512,
         output_tokens=2,
         cache_read_tokens=5806,
     )
@@ -276,7 +276,34 @@ async def test_llamacpp_stream_reads_cache_read_tokens_from_model_extra() -> Non
         )
     ]
 
-    assert events[-1]["usage"].cache_read_tokens == 80
+    assert events[-1]["usage"] == Usage(input_tokens=20, output_tokens=4, cache_read_tokens=80)
+
+
+async def test_llamacpp_reported_cache_count_wins_over_timings_fallback() -> None:
+    """Prefer the standard usage field when a server reports both fields."""
+    final = _chunk(
+        delta=SimpleNamespace(content=None, reasoning_content=None, tool_calls=[]),
+        finish_reason="stop",
+        usage=SimpleNamespace(
+            prompt_tokens=100,
+            completion_tokens=4,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=80),
+        ),
+        timings={"cache_n": 60, "prompt_n": 40},
+    )
+    provider = LlamaCppProvider()
+    provider._client = OpenAICompatibleFakeClient(
+        [_chunk(delta=SimpleNamespace(content="ok", reasoning_content=None, tool_calls=[])), final]
+    )
+
+    events = [
+        event
+        async for event in provider.stream(
+            ProviderRequest(model="local-tool-model", system=[], tools=[], messages=[])
+        )
+    ]
+
+    assert events[-1]["usage"] == Usage(input_tokens=20, output_tokens=4, cache_read_tokens=80)
 
 
 async def test_llamacpp_stream_emits_tool_call_events() -> None:
