@@ -6,6 +6,19 @@ from typing import Any
 
 import pytest
 
+from linch import (
+    FeatureFlags,
+    RunOptions,
+    ScopedFileBackend,
+    StateFileBackend,
+    TextBlock,
+    ToolRegistry,
+    Usage,
+)
+from linch.filesystem.tools import filesystem_tools
+from tests.support.agents import make_agent
+from tests.support.tools import StubTool
+
 
 @pytest.mark.parametrize("storage", ["state", "disk"])
 async def test_scoped_backend_maps_paths_and_lists_scope_relative(storage, tmp_path):
@@ -77,40 +90,6 @@ async def test_scoped_backend_filters_overbroad_inner_listings():
 
 
 async def test_concurrent_runs_one_agent_cannot_access_other_file_scopes():
-    from linch import (
-        Agent,
-        FeatureFlags,
-        InMemorySessionStore,
-        RunOptions,
-        ScopedFileBackend,
-        StateFileBackend,
-        TextBlock,
-        ToolRegistry,
-        Usage,
-    )
-    from linch.filesystem.tools import filesystem_tools
-
-    # Deletion is a backend capability; this test-only tool exercises it through
-    # the same run dependency channel as the four existing file tools.
-    class DeleteTool:
-        name = "DeleteForTest"
-        description = "Delete a virtual file."
-        input_schema = {"type": "object", "properties": {"path": {"type": "string"}}}
-        scope = "write"
-        parallel = False
-
-        def validate(self, raw):
-            return raw
-
-        async def execute(self, input, ctx):
-            from linch import ToolResult
-
-            await ctx.deps["filesystem"].delete(input["path"])
-            return ToolResult(content="deleted")
-
-        def summarize(self, input):
-            return "delete"
-
     class ProbeProvider:
         id = "scope-probe"
 
@@ -134,30 +113,27 @@ async def test_concurrent_runs_one_agent_cannot_access_other_file_scopes():
                 yield {"type": "text_delta", "text": "done"}
                 yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
                 return
-            attempts = [
+            attempts = (
                 f"/tenants/{other}/{other}.md",
                 f"../{other}/{other}.md",
                 f"/../../tenants/{other}/{other}.md",
                 rf"..\{other}\{other}.md",
-            ]
+            )
             calls: list[tuple[str, dict[str, Any]]] = [
                 ("read_file", {"path": f"/{who}.md"}),
                 ("ls", {}),
                 ("write_file", {"path": "/own.md", "content": who}),
-            ]
-            for path in attempts:
-                calls.extend(
-                    [
-                        ("read_file", {"path": path}),
-                        ("ls", {"prefix": path}),
-                        (
-                            "edit_file",
-                            {"path": path, "old_string": "secret", "new_string": "changed"},
-                        ),
-                        ("DeleteForTest", {"path": path}),
-                        ("write_file", {"path": path, "content": "overwrite"}),
-                    ]
+            ] + [
+                item
+                for path in attempts
+                for item in (
+                    ("read_file", {"path": path}),
+                    ("ls", {"prefix": path}),
+                    ("edit_file", {"path": path, "old_string": "secret", "new_string": "changed"}),
+                    ("DeleteForTest", {"path": path}),
+                    ("write_file", {"path": path, "content": "overwrite"}),
                 )
+            ]
             await asyncio.sleep(0)
             for index, (name, raw) in enumerate(calls):
                 call_id = f"{who}-{index}"
@@ -172,17 +148,22 @@ async def test_concurrent_runs_one_agent_cannot_access_other_file_scopes():
             "/tenants/bob/bob.md": "bob secret",
         }
     )
+
+    async def delete(_input: dict[str, str], ctx: Any) -> None:
+        await ctx.deps["filesystem"].delete(_input["path"])
+
     registry = ToolRegistry()
-    for tool in (*filesystem_tools(), DeleteTool()):
-        registry.register(tool)
-    agent = Agent(
+    for tool in (
+        *filesystem_tools(),
+        StubTool("DeleteForTest", scope="write", on_execute=delete, output="deleted"),
+    ):
+        registry.register(tool)  # type: ignore[arg-type]
+    agent = make_agent(
+        ProbeProvider(),
         model="fake",
-        provider=ProbeProvider(),
-        session_store=InMemorySessionStore(),
         tools=registry,
         filesystem=inner,
         features=FeatureFlags(filesystem=True),
-        permissions={"mode": "skip-dangerous"},
         max_turns=3,
     )
     try:

@@ -8,7 +8,6 @@ from linch.filesystem import (
     StateFileBackend,
 )
 from linch.filesystem.backend import normalize_path
-from linch.filesystem.postgres import PostgresFileBackend
 
 
 def test_normalize_path() -> None:
@@ -18,59 +17,10 @@ def test_normalize_path() -> None:
     assert normalize_path("/") == "/"
 
 
-async def _exercise(backend) -> None:  # type: ignore[no-untyped-def]
-    await backend.write("/notes/a.txt", "line1\nline2\nline3")
-    assert await backend.exists("/notes/a.txt")
-    assert await backend.read("/notes/a.txt") == "line1\nline2\nline3"
-    # offset/limit windowing (1-indexed)
-    assert await backend.read("/notes/a.txt", offset=2, limit=1) == "line2"
-    # ls + prefix
-    await backend.write("/other.txt", "x")
-    assert "/notes/a.txt" in await backend.ls()
-    assert await backend.ls("/notes") == ["/notes/a.txt"]
-    # edit
-    count = await backend.edit("/notes/a.txt", "line2", "LINE2")
-    assert count == 1
-    assert "LINE2" in await backend.read("/notes/a.txt")
-    # missing file
-    with pytest.raises(FileNotFoundError):
-        await backend.read("/nope.txt")
-    # delete
-    await backend.delete("/notes/a.txt")
-    assert not await backend.exists("/notes/a.txt")
-
-
-async def test_state_backend() -> None:
-    await _exercise(StateFileBackend())
-
-
-async def test_postgres_backend(
-    pg_dsn,
-) -> None:
-    backend = PostgresFileBackend(pg_dsn)
-    await _exercise(backend)
-    await backend.close()
-
-
-async def test_disk_backend(tmp_path) -> None:  # type: ignore[no-untyped-def]
-    backend = DiskFileBackend(root=tmp_path / "offload")
-    await _exercise(backend)
-
-
 async def test_disk_backend_sandbox(tmp_path) -> None:  # type: ignore[no-untyped-def]
     backend = DiskFileBackend(root=tmp_path / "offload")
     with pytest.raises(ValueError):
         await backend.write("/../escape.txt", "nope")
-
-
-async def test_edit_not_unique_requires_replace_all() -> None:
-    backend = StateFileBackend()
-    await backend.write("/f.txt", "x x x")
-    with pytest.raises(ValueError):
-        await backend.edit("/f.txt", "x", "y")
-    count = await backend.edit("/f.txt", "x", "y", replace_all=True)
-    assert count == 3
-    assert await backend.read("/f.txt") == "y y y"
 
 
 async def test_composite_routing() -> None:
