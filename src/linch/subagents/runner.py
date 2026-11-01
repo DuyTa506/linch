@@ -38,6 +38,8 @@ class RunSubagentArgs:
     prompt: str
     display_name: str
     subagent_run_id: str
+    mailbox_address: str | None = None
+    """Unique peer address assigned when mailbox delivery is enabled."""
     config_binding: Any = None
     """Originating configuration binding captured before scheduling child work."""
     parent_run_id: str | None = None
@@ -319,10 +321,9 @@ async def _run_subagent_owned(
             child_session.file_read_tracker.add(path)
     child_session.tools_override = child_tools
     child_session.system_blocks_override = child_system
-    # Give the worker a peer-mailbox address (its display_name) so siblings can
-    # message it; no-op when the agent has no mailbox configured.
+    # Labels are display-only; direct runner calls default to the unique child id.
     if config.context.get("mailbox") is not None:
-        child_session.mailbox_address = args.display_name
+        child_session.mailbox_address = args.mailbox_address or child_record.id
     # Child joins the parent's spending cap: same RunBudget object, so child
     # turns are visible to the parent's next pre-call budget check.
     child_session.inherited_budget = (

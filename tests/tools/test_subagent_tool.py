@@ -210,6 +210,30 @@ async def test_subagent_tool_stores_worker_handle(tmp_path: Any) -> None:
     assert next(iter(session.workers)) in result.content
 
 
+@pytest.mark.parametrize("background", [False, True])
+async def test_subagent_result_exposes_unique_mailbox_address(
+    tmp_path: Any, background: bool
+) -> None:
+    from linch import InMemoryMailbox, MailboxPlugin
+
+    agent, session = await _make_agent_and_session(tmp_path)
+    await agent.use(MailboxPlugin(), InMemoryMailbox())
+    try:
+        result = await _spawn(
+            agent, session, description="worker", prompt="go", run_in_background=background
+        )
+        handle = next(iter(session.workers.values()))
+        if background:
+            await handle.task
+        child = agent._sessions[handle.child_session_id]
+        assert child.mailbox_address == handle.worker_id
+        assert child.mailbox_address in result.content
+        assert child.mailbox_address != handle.display_name
+    finally:
+        await agent.close()
+
+
+
 async def test_subagent_tool_returns_structured_output_as_json_text(tmp_path: Any) -> None:
     from linch.ext.deep_agent import create_deep_agent
 
