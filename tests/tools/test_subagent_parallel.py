@@ -4,20 +4,7 @@ import asyncio
 import json
 from typing import Any, cast
 
-
-class _ReadTool:
-    name = "Read"
-    scope = "read"
-
-
-class _WriteTool:
-    name = "Write"
-    scope = "write"
-
-
-class _WildcardReadTool:
-    name = "*"
-    scope = "read"
+from tests.support.tools import StubTool
 
 
 class _Catalog:
@@ -105,19 +92,19 @@ class _SubagentParallelProvider:
 async def _run_real_subagent_pair(
     tmp_path: Any, mode: str, *, session_write_override: bool = False
 ) -> tuple[Any, _SubagentParallelProvider]:
-    from linch import Agent, workspace_tools
+    from linch import workspace_tools
     from linch.config import FeatureFlags
-    from linch.sessions import InMemorySessionStore
+    from tests.support.agents import make_agent
+    from tests.support.stores import memory_session_store
 
     definition_tools = ["Read"] if mode == "reader" else ["Read", "Write"]
     definition = _definition(mode, definition_tools)
     provider = _SubagentParallelProvider(mode)
-    agent = Agent(
+    agent = make_agent(
+        provider,
         model="test-model",
-        provider=cast(Any, provider),
         tools=workspace_tools(),
-        session_store=InMemorySessionStore(),
-        permissions={"mode": "skip-dangerous"},
+        session_store=memory_session_store(),
         cwd=str(tmp_path),
         features=FeatureFlags(subagents=True),
         extra_subagents=[definition],
@@ -126,13 +113,8 @@ async def _run_real_subagent_pair(
     try:
         session = await agent.session(id="parent")
         if session_write_override:
-            from linch.tools.builtin import WriteTool
-
-            class SameNameWriteTool(WriteTool):
-                name = "Read"
-
             session.tools_override = agent.tools.copy()
-            session.tools_override.replace(SameNameWriteTool())
+            session.tools_override.replace(StubTool("Read", scope="write"))
         events = [event async for event in session.run("delegate two tasks")]
         return events, provider
     finally:
@@ -188,17 +170,17 @@ async def test_session_write_override_prevents_read_typed_subagent_parallelism(
 
 
 async def test_parallel_resolves_catalog_installed_after_subagent_connect(tmp_path: Any) -> None:
-    from linch import Agent, empty_tools, workspace_tools
+    from linch import empty_tools, workspace_tools
     from linch.config import FeatureFlags
-    from linch.sessions import InMemorySessionStore
+    from tests.support.agents import make_agent
+    from tests.support.stores import memory_session_store
 
     definition = _definition("reader", ["Read"])
-    agent = Agent(
+    agent = make_agent(
+        _SubagentParallelProvider("reader"),
         model="test-model",
-        provider=cast(Any, _SubagentParallelProvider("reader")),
         tools=empty_tools(),
-        session_store=InMemorySessionStore(),
-        permissions={"mode": "skip-dangerous"},
+        session_store=memory_session_store(),
         cwd=str(tmp_path),
         features=FeatureFlags(subagents=True),
         extra_subagents=[definition],
@@ -286,7 +268,7 @@ def test_typed_read_only_subagents_are_parallel_safe() -> None:
     from linch.permissions.engine import PermissionDecision
     from linch.scheduler import _partition_batches
 
-    tool = _subagent_tool(_definition("researcher", ["Read"]), tools=[_ReadTool()])
+    tool = _subagent_tool(_definition("researcher", ["Read"]), tools=[StubTool("Read")])
 
     assert tool.parallel({"subagent_type": "researcher"}) is True
     resolved = [
@@ -304,7 +286,7 @@ def test_general_purpose_subagents_serialize() -> None:
     from linch.permissions.engine import PermissionDecision
     from linch.scheduler import _partition_batches
 
-    tool = _subagent_tool(_definition("researcher", ["Read"]), tools=[_ReadTool()])
+    tool = _subagent_tool(_definition("researcher", ["Read"]), tools=[StubTool("Read")])
 
     assert tool.parallel({}) is False
     assert tool.parallel({"subagent_type": "general-purpose"}) is False
@@ -325,7 +307,7 @@ def test_write_capable_typed_subagents_serialize() -> None:
 
     tool = _subagent_tool(
         _definition("implementer", ["Read", "Write"]),
-        tools=[_ReadTool(), _WriteTool()],
+        tools=[StubTool("Read"), StubTool("Write", scope="write")],
     )
 
     assert tool.parallel({"subagent_type": "implementer"}) is False
@@ -345,8 +327,8 @@ def test_parallel_fails_closed_for_unknown_inherited_or_unresolvable_tools() -> 
     from linch.subagents.registry import AgentRegistry
     from linch.tools.subagent import SubagentTool
 
-    inherited = _subagent_tool(_definition("inherited", None), tools=[_ReadTool()])
-    unknown = _subagent_tool(_definition("known", ["Missing"]), tools=[_ReadTool()])
+    inherited = _subagent_tool(_definition("inherited", None), tools=[StubTool("Read")])
+    unknown = _subagent_tool(_definition("known", ["Missing"]), tools=[StubTool("Read")])
     missing_registry = SubagentTool(
         registry=AgentRegistry([_definition("known", ["Read"])]),
         get_session=lambda _sid: None,
@@ -361,11 +343,11 @@ def test_parallel_fails_closed_for_unknown_inherited_or_unresolvable_tools() -> 
 
 
 def test_parallel_fails_closed_for_wildcard_empty_and_malformed_lists() -> None:
-    wildcard = _subagent_tool(_definition("wildcard", ["*"]), tools=[_WildcardReadTool()])
-    empty = _subagent_tool(_definition("empty", []), tools=[_ReadTool()])
+    wildcard = _subagent_tool(_definition("wildcard", ["*"]), tools=[StubTool("*")])
+    empty = _subagent_tool(_definition("empty", []), tools=[StubTool("Read")])
     malformed_tools = cast(Any, ["Read", None])
-    malformed = _subagent_tool(_definition("malformed", malformed_tools), tools=[_ReadTool()])
-    reader = _subagent_tool(_definition("reader", ["Read"]), tools=[_ReadTool()])
+    malformed = _subagent_tool(_definition("malformed", malformed_tools), tools=[StubTool("Read")])
+    reader = _subagent_tool(_definition("reader", ["Read"]), tools=[StubTool("Read")])
 
     assert wildcard.parallel({"subagent_type": "wildcard"}) is False
     assert empty.parallel({"subagent_type": "empty"}) is True
