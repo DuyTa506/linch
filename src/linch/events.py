@@ -1280,7 +1280,12 @@ def usage_from_dict(raw: dict[str, Any]) -> Usage:
 
 def _validate_nested_ignorable_event(event: Event) -> None:
     depth = 0
+    active: set[int] = set()
     while isinstance(event, SubagentEvent):
+        identity = id(event)
+        if identity in active:
+            raise ValueError("subagent event must not contain reference cycles")
+        active.add(identity)
         depth += 1
         event = event.event
     if isinstance(event, IgnorableEvent):
