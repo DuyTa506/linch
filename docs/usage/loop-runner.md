@@ -148,7 +148,9 @@ runner = LoopRunner(
 )
 ```
 
-`FileLoopLeaseStore` writes `domains/<loop_id>/.lock.json` with an expiry time.
+`FileLoopLeaseStore` atomically writes `domains/<loop_id>/.lock.json` under an
+`fcntl` lock and fails closed on platforms without `fcntl`. `LoopRunner` renews
+the lease every TTL/3 while the tick runs.
 Another process cannot acquire the same loop until the holder releases the lease
 or the TTL expires. Use the same root as `LoopSpec.root` when you override it.
 

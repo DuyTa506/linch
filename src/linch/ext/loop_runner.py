@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import math
@@ -7,12 +8,18 @@ import os
 import socket
 import threading
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol, TypeAlias
 from uuid import uuid4
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows has no fcntl.
+    fcntl = None
 
 from .._blocking import run_blocking
 from ..errors import ConfigError
@@ -270,6 +277,16 @@ class InMemoryLoopLeaseStore:
         owner: str,
         ttl_s: float,
     ) -> LoopLease | None:
+        """Acquire an in-memory lease when no live owner currently holds it.
+
+        Args:
+            loop_id: Identifier of the loop to claim.
+            owner: Stable identity of the acquiring runner.
+            ttl_s: Lease lifetime in seconds.
+
+        Returns:
+            The acquired lease, or ``None`` when a live lease exists.
+        """
         _safe_loop_id(loop_id)
         now = time.time()
         with self._guard:
@@ -286,11 +303,26 @@ class InMemoryLoopLeaseStore:
             return lease
 
     async def refresh(self, lease: LoopLease, *, ttl_s: float) -> LoopLease:
+        """Extend a lease after checking its owner and token.
+
+        Args:
+            lease: Lease previously acquired by this owner.
+            ttl_s: New lease lifetime in seconds.
+
+        Returns:
+            The refreshed lease.
+
+        Raises:
+            ConfigError: If the lease is foreign, expired, or no longer
+                registered.
+        """
         _safe_loop_id(lease.loop_id)
         with self._guard:
             current = self._leases.get(lease.loop_id)
-            if current is None or current.token != lease.token:
+            if current is None or current.token != lease.token or current.owner != lease.owner:
                 raise ConfigError(f"Loop lease for {lease.loop_id!r} is not held by this owner")
+            if current.expires_at <= time.time():
+                raise ConfigError(f"Loop lease for {lease.loop_id!r} has expired")
             refreshed = LoopLease(
                 loop_id=lease.loop_id,
                 owner=lease.owner,
@@ -301,25 +333,27 @@ class InMemoryLoopLeaseStore:
             return refreshed
 
     async def release(self, lease: LoopLease) -> None:
+        """Release a matching in-memory lease.
+
+        Args:
+            lease: Lease to release.
+        """
         _safe_loop_id(lease.loop_id)
         with self._guard:
             current = self._leases.get(lease.loop_id)
-            if current is not None and current.token == lease.token:
+            if (
+                current is not None
+                and current.token == lease.token
+                and current.owner == lease.owner
+            ):
                 self._leases.pop(lease.loop_id, None)
 
 
 class FileLoopLeaseStore:
-    """Best-effort cross-process loop lease backed by a ``.lock.json`` file.
+    """Cross-process loop lease backed by an atomically updated JSON file.
 
-    Mutual exclusion is TTL-based, not a strict distributed lock: ``try_acquire``
-    reclaims an expired lease, and ``refresh`` rejects an expired/foreign one.
-    Each op is individually atomic where it matters (``O_EXCL`` create), but the
-    read-then-write paths are *not* serialized across processes, so at the exact
-    TTL-expiry boundary two processes can still briefly race (e.g. a refresh that
-    truncates a lease another worker reclaimed microseconds earlier). This is the
-    inherent limitation of a file-TTL lease; for strict single-firing guarantees
-    use a real lock service or a transactional store. Keep ``lease_ttl_s`` well
-    above a tick's duration so the boundary is rarely reached.
+    The implementation requires ``fcntl`` for process-wide serialization;
+    unsupported platforms fail closed instead of allowing duplicate leases.
     """
 
     def __init__(self, root: str | Path = "domains") -> None:
@@ -335,75 +369,115 @@ class FileLoopLeaseStore:
         owner: str,
         ttl_s: float,
     ) -> LoopLease | None:
+        """Acquire a live lease, returning ``None`` when another owner holds it.
+
+        Args:
+            loop_id: Identifier of the loop to claim.
+            owner: Stable identity of the acquiring process.
+            ttl_s: Lease lifetime in seconds.
+
+        Returns:
+            The acquired lease, or ``None`` when a non-expired lease exists.
+
+        Raises:
+            ConfigError: If lease configuration is invalid or file locking is
+                unavailable on the current platform.
+        """
         ttl = _validate_ttl(ttl_s)
         path = self._lock_path(loop_id)
 
         def _acquire() -> LoopLease | None:
             path.parent.mkdir(parents=True, exist_ok=True)
-            now = time.time()
-            existing = _read_lease_file(path)
-            if existing is not None and existing.expires_at > now:
-                return None
-            if existing is not None or path.exists():
-                try:
+            with _lease_file_lock(path):
+                now = time.time()
+                existing = _read_lease_file(path)
+                if existing is not None and existing.expires_at > now:
+                    return None
+                if existing is None and (path.exists() or path.is_symlink()):
+                    # A zero-length file can be observed only while an older
+                    # writer is still publishing its lease. Treat it as held;
+                    # lease writes below are atomic, so this cannot persist for
+                    # a completed operation. A crashed legacy writer is
+                    # reclaimable after one requested TTL.
+                    if path.is_symlink():
+                        return None
+                    stat = path.stat()
+                    if stat.st_size == 0 and stat.st_mtime + ttl > now:
+                        return None
                     path.unlink()
-                except FileNotFoundError:
-                    pass
-            lease = LoopLease(
-                loop_id=loop_id,
-                owner=owner,
-                token=str(uuid4()),
-                expires_at=now + ttl,
-            )
-            payload = _lease_to_json(lease)
-            try:
-                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW, 0o600)
-            except FileExistsError:
-                return None
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(payload)
-            return lease
+                elif existing is not None:
+                    path.unlink()
+                lease = LoopLease(
+                    loop_id=loop_id,
+                    owner=owner,
+                    token=str(uuid4()),
+                    expires_at=now + ttl,
+                )
+                _write_lease_file(path, lease)
+                return lease
 
         return await run_blocking(_acquire)
 
     async def refresh(self, lease: LoopLease, *, ttl_s: float) -> LoopLease:
+        """Extend a lease while verifying its owner and token.
+
+        Args:
+            lease: Lease previously acquired by this owner.
+            ttl_s: New lease lifetime in seconds.
+
+        Returns:
+            The refreshed lease with its updated expiry.
+
+        Raises:
+            ConfigError: If the lease is foreign, expired, or file locking is
+                unavailable on the current platform.
+        """
         ttl = _validate_ttl(ttl_s)
         path = self._lock_path(lease.loop_id)
 
         def _refresh() -> LoopLease:
-            current = _read_lease_file(path)
-            if current is None or current.token != lease.token:
-                raise ConfigError(f"Loop lease for {lease.loop_id!r} is not held by this owner")
-            if current.expires_at <= time.time():
-                # An expired lease is reclaimable by another worker at any moment;
-                # don't resurrect it under the old token.
-                raise ConfigError(f"Loop lease for {lease.loop_id!r} has expired")
-            refreshed = LoopLease(
-                loop_id=lease.loop_id,
-                owner=lease.owner,
-                token=lease.token,
-                expires_at=time.time() + ttl,
-            )
-            # O_NOFOLLOW: refuse to write the lease through a symlink swapped in
-            # at the lock path after the read above (TOCTOU). O_EXCL only guards
-            # the initial create in try_acquire, not this rewrite.
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _O_NOFOLLOW, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(_lease_to_json(refreshed))
-            return refreshed
+            with _lease_file_lock(path):
+                current = _read_lease_file(path)
+                if current is None or current.token != lease.token or current.owner != lease.owner:
+                    raise ConfigError(f"Loop lease for {lease.loop_id!r} is not held by this owner")
+                if current.expires_at <= time.time():
+                    # An expired lease is reclaimable by another worker at any
+                    # moment; don't resurrect it under the old token.
+                    raise ConfigError(f"Loop lease for {lease.loop_id!r} has expired")
+                refreshed = LoopLease(
+                    loop_id=lease.loop_id,
+                    owner=lease.owner,
+                    token=lease.token,
+                    expires_at=time.time() + ttl,
+                )
+                _write_lease_file(path, refreshed)
+                return refreshed
 
         return await run_blocking(_refresh)
 
     async def release(self, lease: LoopLease) -> None:
+        """Release a lease when its owner and token still match.
+
+        Args:
+            lease: Lease to release.
+
+        Raises:
+            ConfigError: If file locking is unavailable on the current platform.
+        """
         path = self._lock_path(lease.loop_id)
 
         def _release() -> None:
-            current = _read_lease_file(path)
-            if current is not None and current.token == lease.token:
-                try:
-                    path.unlink()
-                except FileNotFoundError:
-                    pass
+            with _lease_file_lock(path):
+                current = _read_lease_file(path)
+                if (
+                    current is not None
+                    and current.token == lease.token
+                    and current.owner == lease.owner
+                ):
+                    try:
+                        path.unlink()
+                    except FileNotFoundError:
+                        pass
 
         await run_blocking(_release)
 
@@ -438,6 +512,18 @@ class LoopRunner:
         spec: LoopSpec,
         trigger: LoopTrigger | None = None,
     ) -> LoopTickResult:
+        """Execute one loop tick and renew its optional lease while it runs.
+
+        Args:
+            spec: Loop definition and artifact location for this tick.
+            trigger: Optional event that caused the tick.
+
+        Returns:
+            The completed tick result and persisted report metadata.
+
+        Raises:
+            ConfigError: If another runner owns the loop or lease renewal fails.
+        """
         _validate_spec(spec)
         trigger = trigger or LoopTrigger()
         with self._active_guard:
@@ -447,19 +533,60 @@ class LoopRunner:
         lease: LoopLease | None = None
         try:
             if self.leases is not None:
-                lease = await self.leases.try_acquire(
-                    spec.id,
-                    owner=self.lease_owner,
-                    ttl_s=self.lease_ttl_s,
+                acquire_task = asyncio.create_task(
+                    self.leases.try_acquire(
+                        spec.id,
+                        owner=self.lease_owner,
+                        ttl_s=self.lease_ttl_s,
+                    )
                 )
+                try:
+                    await _drain_task(acquire_task)
+                finally:
+                    if acquire_task.done() and not acquire_task.cancelled():
+                        lease = acquire_task.result()
                 if lease is None:
                     raise ConfigError(f"Loop {spec.id!r} already has an active lease")
-            return await self._run_once_locked(spec, trigger)
+            if lease is None or self.leases is None:
+                return await self._run_once_locked(spec, trigger)
+            lease_store = self.leases
+            held_lease = lease
+
+            async def _heartbeat() -> None:
+                nonlocal held_lease
+                interval = self.lease_ttl_s / 3
+                while True:
+                    await asyncio.sleep(interval)
+                    held_lease = await lease_store.refresh(held_lease, ttl_s=self.lease_ttl_s)
+
+            run_task = asyncio.create_task(self._run_once_locked(spec, trigger))
+            heartbeat_task = asyncio.create_task(_heartbeat())
+            try:
+                done, _ = await asyncio.wait(
+                    {run_task, heartbeat_task}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if heartbeat_task in done:
+                    heartbeat_task.result()
+                    raise ConfigError(f"Loop {spec.id!r} lease heartbeat stopped")
+                return await run_task
+            except BaseException:
+                if not run_task.done():
+                    run_task.cancel()
+                await _drain_task(run_task)
+                raise
+            finally:
+                lease = held_lease
+                if not heartbeat_task.done():
+                    heartbeat_task.cancel()
+                await _drain_task(heartbeat_task)
         finally:
-            if lease is not None and self.leases is not None:
-                await self.leases.release(lease)
-            with self._active_guard:
-                self._active_loop_ids.discard(spec.id)
+            try:
+                if lease is not None and self.leases is not None:
+                    release_task = asyncio.create_task(self.leases.release(lease))
+                    await _drain_task(release_task)
+            finally:
+                with self._active_guard:
+                    self._active_loop_ids.discard(spec.id)
 
     async def _run_once_locked(self, spec: LoopSpec, trigger: LoopTrigger) -> LoopTickResult:
         await self.artifacts.ensure_layout(spec)
@@ -487,16 +614,8 @@ class LoopRunner:
                 )
             )
         finally:
-            # Pop AND abort: popping alone leaves any background worker /
-            # detached background-tool tasks spawned this tick running, which
-            # could later write into a session the runner has discarded. abort()
-            # cancels them (mirrors the evals harness teardown).
-            sessions = getattr(self.agent, "_sessions", None)
-            if isinstance(sessions, dict):
-                sessions.pop(session.id, None)
-            abort = getattr(session, "abort", None)
-            if callable(abort):
-                abort()
+            release_task = asyncio.create_task(self.agent.release_session(session, force=True))
+            await _drain_task(release_task)
 
         report = build_run_report(events)
         if run_error is not None:
@@ -591,6 +710,39 @@ def _lease_to_json(lease: LoopLease) -> str:
     )
 
 
+@contextmanager
+def _lease_file_lock(path: Path) -> Iterator[None]:
+    """Serialize lease-file operations across processes."""
+    if fcntl is None:  # pragma: no cover - Windows has no fcntl.
+        raise ConfigError("FileLoopLeaseStore requires fcntl for cross-process locking")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    guard_path = path.with_name(f"{path.name}.guard")
+    fd = os.open(guard_path, os.O_RDWR | os.O_CREAT | _O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def _write_lease_file(path: Path, lease: LoopLease) -> None:
+    """Publish a lease in one atomic replacement."""
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(_lease_to_json(lease))
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def _read_lease_file(path: Path) -> LoopLease | None:
     try:
         # O_NOFOLLOW: never read the lock through a symlink a local attacker may
@@ -602,7 +754,7 @@ def _read_lease_file(path: Path) -> LoopLease | None:
     try:
         with os.fdopen(fd, "r", encoding="utf-8") as fh:
             raw = json.loads(fh.read())
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
         return None
     if not isinstance(raw, dict):
         return None
@@ -697,6 +849,21 @@ def _run_id_from_events(events: Sequence[Event]) -> str:
         if isinstance(event, SystemEvent):
             return event.run_id
     return str(uuid4())
+
+
+async def _drain_task(task: asyncio.Task[Any]) -> None:
+    """Await a cleanup task even when its caller is cancelled repeatedly."""
+    caller_cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if not task.done():
+                caller_cancelled = True
+    if not task.cancelled():
+        task.result()
+    if caller_cancelled:
+        raise asyncio.CancelledError
 
 
 def _final_text(events: Sequence[Event]) -> str | None:

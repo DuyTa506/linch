@@ -187,6 +187,560 @@ async def test_wf_agent_tool_filter_is_part_of_replay_key() -> None:
     assert provider.calls == 2
 
 
+async def test_wf_agent_explicit_key_replays_unencodable_dependencies() -> None:
+    from linch import InMemoryRunStore, RunOptions
+
+    store = InMemoryRunStore()
+    provider1 = CountingTextProvider()
+    agent1 = _make_agent(provider1, run_store=store)
+
+    async def flow(wf: Any) -> str:
+        return await wf.agent(
+            "charge",
+            key="tenant-acme-v1",
+            run_options=RunOptions(deps=object()),
+        )
+
+    assert await _run_workflow(agent1, flow, run_id="wf-explicit-key") == "result-1"
+    assert provider1.calls == 1
+
+    provider2 = CountingTextProvider()
+    agent2 = _make_agent(provider2, run_store=store)
+    seen: list[Any] = []
+    assert (
+        await _run_workflow(agent2, flow, run_id="wf-explicit-key", on_event=seen.append)
+        == "result-1"
+    )
+    assert provider2.calls == 0
+    assert [event.kind for event in seen if event.type == "workflow"] == ["agent_replayed"]
+
+    async def flow_with_changed_tools(wf: Any) -> str:
+        return await wf.agent(
+            "charge",
+            key="tenant-acme-v1",
+            tools=[],
+            run_options=RunOptions(deps=object()),
+        )
+
+    assert (
+        await _run_workflow(agent2, flow_with_changed_tools, run_id="wf-explicit-key") == "result-1"
+    )
+    assert provider2.calls == 1
+
+
+async def test_wf_agent_rejects_unencodable_dependencies_without_key() -> None:
+    from linch import InMemoryRunStore, RunOptions
+    from linch.errors import ConfigError
+
+    agent = _make_agent(CountingTextProvider(), run_store=InMemoryRunStore())
+
+    async def flow(wf: Any) -> str:
+        return await wf.agent("charge", run_options=RunOptions(deps=object()))
+
+    with pytest.raises(ConfigError, match="not JSON-serializable"):
+        await _run_workflow(agent, flow, run_id="wf-no-explicit-key")
+
+
+async def test_step_replays_when_rebuilt_set_key_has_different_insertion_order() -> None:
+    from linch import InMemoryRunStore
+
+    store = InMemoryRunStore()
+    agent = _make_agent(CountingTextProvider(), run_store=store)
+    calls: list[str] = []
+
+    def flow_for(order: tuple[int, ...]) -> Any:
+        async def flow(wf: Any) -> str:
+            return await wf.step("publish", lambda: calls.append("ran") or "ok", key=set(order))
+
+        return flow
+
+    assert await _run_workflow(agent, flow_for((0, 8, 16)), run_id="wf-set-replay") == "ok"
+    assert await _run_workflow(agent, flow_for((16, 0, 8)), run_id="wf-set-replay") == "ok"
+    assert calls == ["ran"]
+
+
+async def test_run_workflow_setup_failure_releases_host_session() -> None:
+    from linch import InMemoryRunStore
+
+    class FailingLoadStore(InMemoryRunStore):
+        fail_load_events = False
+
+        async def load_events(self, run_id: str, *, after_seq: int = 0) -> Any:
+            if self.fail_load_events:
+                raise ConnectionResetError("journal load failed")
+            return await super().load_events(run_id, after_seq=after_seq)
+
+    store = FailingLoadStore()
+    agent = _make_agent(CountingTextProvider(), run_store=store)
+
+    async def flow(wf: Any) -> str:
+        return "done"
+
+    assert await _run_workflow(agent, flow, run_id="wf-setup-load") == "done"
+    store.fail_load_events = True
+    with pytest.raises(ConnectionResetError, match="journal load failed"):
+        await _run_workflow(agent, flow, run_id="wf-setup-load")
+    assert agent._sessions == {}
+
+
+async def test_run_workflow_create_failure_releases_host_session() -> None:
+    from linch import InMemoryRunStore
+
+    class FailingCreateStore(InMemoryRunStore):
+        async def create_run(self, *args: Any, **kwargs: Any) -> Any:
+            raise ConnectionResetError("run creation failed")
+
+    agent = _make_agent(CountingTextProvider(), run_store=FailingCreateStore())
+
+    async def flow(wf: Any) -> str:
+        return "done"
+
+    with pytest.raises(ConnectionResetError, match="run creation failed"):
+        await _run_workflow(agent, flow, run_id="wf-setup-create")
+    assert agent._sessions == {}
+
+
+async def test_partial_workflow_lease_capability_fails_closed() -> None:
+    from linch import InMemoryRunStore
+    from linch.errors import ConfigError
+
+    class ClaimOnlyStore(InMemoryRunStore):
+        renew = None
+        release = None
+
+    agent = _make_agent(CountingTextProvider(), run_store=ClaimOnlyStore())
+
+    async def flow(wf: Any) -> str:
+        return "done"
+
+    with pytest.raises(ConfigError, match="claim, renew, release"):
+        await _run_workflow(agent, flow, run_id="wf-partial-lease")
+    assert agent._sessions == {}
+
+
+async def test_cancelled_claim_releases_lease_acquired_before_return() -> None:
+    from linch import InMemoryRunStore
+
+    class GatedClaimStore(InMemoryRunStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.claimed = asyncio.Event()
+            self.allow_claim_return = asyncio.Event()
+
+        async def claim(self, *args: Any, **kwargs: Any) -> Any:
+            lease = await super().claim(*args, **kwargs)
+            self.claimed.set()
+            await self.allow_claim_return.wait()
+            return lease
+
+    store = GatedClaimStore()
+    agent = _make_agent(CountingTextProvider(), run_store=store)
+
+    async def flow(wf: Any) -> str:
+        return "done"
+
+    task = asyncio.create_task(_run_workflow(agent, flow, run_id="wf-claim-cancel"))
+    try:
+        await asyncio.wait_for(store.claimed.wait(), timeout=1)
+        task.cancel()
+        store.allow_claim_return.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert store._held_leases == {}
+        assert agent._sessions == {}
+    finally:
+        store.allow_claim_return.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await store.close()
+
+
+async def test_mark_completed_failure_marks_workflow_failed() -> None:
+    from linch import InMemoryRunStore
+    from linch.events import ErrorEvent
+
+    class FailingCompletionStore(InMemoryRunStore):
+        async def mark_completed(self, *args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("terminal failed")
+
+    store = FailingCompletionStore()
+    agent = _make_agent(CountingTextProvider(), run_store=store)
+
+    async def flow(wf: Any) -> str:
+        return "done"
+
+    with pytest.raises(RuntimeError, match="terminal failed"):
+        await _run_workflow(agent, flow, run_id="wf-terminal-fail")
+
+    record = await store.load_run("wf-terminal-fail")
+    assert record is not None
+    assert record.status == "failed"
+    assert record.meta["errors"] == [
+        {"name": "RuntimeError", "message": "terminal failed", "retryable": False}
+    ]
+    events = await store.load_events("wf-terminal-fail")
+    assert [event.event for event in events] == [
+        ErrorEvent(error={"name": "RuntimeError", "message": "terminal failed", "retryable": False})
+    ]
+
+
+@pytest.mark.parametrize("kind", ["memory", "postgres"])
+async def test_concurrent_workflow_resumes_claim_one_lease(kind: str, pg_dsn: str) -> None:
+    from linch import InMemoryRunStore
+    from linch.errors import WorkflowSuspended
+    from linch.run_store import RunLeaseConflictError
+
+    if kind == "memory":
+        store: Any = InMemoryRunStore()
+    else:
+        from linch import PostgresRunStore
+
+        store = PostgresRunStore(pg_dsn)
+    applied: list[str] = []
+
+    async def apply() -> str:
+        await asyncio.sleep(0.05)
+        applied.append("applied")
+        return "ok"
+
+    async def flow(wf: Any) -> str:
+        if await wf.interrupt("approve", {"plan": "drop column"}):
+            return await wf.step("apply", apply)
+        return "cancelled"
+
+    try:
+        first = _make_agent(CountingTextProvider(), run_store=store)
+        with pytest.raises(WorkflowSuspended):
+            await _run_workflow(first, flow, run_id="wf-concurrent-resume")
+
+        agents = [
+            _make_agent(CountingTextProvider(), run_store=store),
+            _make_agent(CountingTextProvider(), run_store=store),
+        ]
+        results = await asyncio.gather(
+            *(
+                _run_workflow(agent, flow, run_id="wf-concurrent-resume", resume={"approve": True})
+                for agent in agents
+            ),
+            return_exceptions=True,
+        )
+
+        assert applied == ["applied"]
+        assert sum(isinstance(result, RunLeaseConflictError) for result in results) == 1
+        assert sum(result == "ok" for result in results) == 1
+    finally:
+        await store.close()
+
+
+@pytest.mark.parametrize("kind", ["memory", "postgres"])
+async def test_workflow_step_end_persists_before_callback_failure(kind: str, pg_dsn: str) -> None:
+    from linch import InMemoryRunStore
+
+    if kind == "memory":
+        store: Any = InMemoryRunStore()
+    else:
+        from linch import PostgresRunStore
+
+        store = PostgresRunStore(pg_dsn)
+    agent = _make_agent(CountingTextProvider(), run_store=store)
+    side_effects: list[str] = []
+
+    async def flow(wf: Any) -> str:
+        async def charge() -> str:
+            side_effects.append("charged")
+            return "ok"
+
+        return await wf.step("charge", charge)
+
+    def callback(event: Any) -> None:
+        if event.type == "workflow" and event.kind == "step_end":
+            raise ConnectionResetError("websocket closed")
+
+    try:
+        with pytest.raises(ConnectionResetError, match="websocket closed"):
+            await _run_workflow(agent, flow, run_id="wf-step-callback", on_event=callback)
+        stored_kinds = [event.event.kind for event in await store.load_events("wf-step-callback")]
+        assert stored_kinds == ["step_start", "step_end"]
+
+        assert await _run_workflow(agent, flow, run_id="wf-step-callback") == "ok"
+        assert side_effects == ["charged"]
+    finally:
+        await store.close()
+
+
+@pytest.mark.parametrize("kind", ["memory", "postgres"])
+async def test_cancelled_step_append_is_drained_before_resume(kind: str, pg_dsn: str) -> None:
+    from linch import InMemoryRunStore
+
+    if kind == "memory":
+        inner_store: Any = InMemoryRunStore()
+    else:
+        from linch import PostgresRunStore
+
+        inner_store = PostgresRunStore(pg_dsn)
+
+    class DelayedEndStore:
+        def __init__(self, inner: Any) -> None:
+            self.inner = inner
+            self.append_started = asyncio.Event()
+            self.allow_append = asyncio.Event()
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self.inner, name)
+
+        async def append_event(self, run_id: str, event: Any) -> int:
+            if getattr(event, "kind", None) == "step_end":
+                self.append_started.set()
+                await self.allow_append.wait()
+            return await self.inner.append_event(run_id, event)
+
+    store = DelayedEndStore(inner_store)
+    agent = _make_agent(CountingTextProvider(), run_store=store)
+    side_effects: list[str] = []
+    charge_task: asyncio.Task[Any] | None = None
+
+    async def charge() -> str:
+        side_effects.append("charged")
+        return "ok"
+
+    async def fail() -> str:
+        await store.append_started.wait()
+        raise RuntimeError("reserve failed")
+
+    async def flow(wf: Any) -> list[Any]:
+        async def charge_branch() -> str:
+            nonlocal charge_task
+            charge_task = asyncio.current_task()
+            return await wf.step("charge", charge)
+
+        return await wf.parallel([charge_branch, fail])
+
+    task: asyncio.Task[Any] | None = None
+    try:
+        task = asyncio.create_task(_run_workflow(agent, flow, run_id="wf-cancelled-end"))
+        await asyncio.wait_for(store.append_started.wait(), timeout=2)
+
+        async def wait_for_charge_cancel() -> None:
+            while charge_task is None or charge_task.cancelling() == 0:
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(wait_for_charge_cancel(), timeout=2)
+        store.allow_append.set()
+        with pytest.raises(RuntimeError, match="reserve failed"):
+            await task
+
+        stored_kinds = [event.event.kind for event in await store.load_events("wf-cancelled-end")]
+        assert stored_kinds.count("step_end") == 1
+        assert side_effects == ["charged"]
+    finally:
+        store.allow_append.set()
+        if task is not None and not task.done():
+            task.cancel()
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
+        await store.close()
+
+
+async def test_cancelled_claimed_workflow_drains_workflow_task() -> None:
+    from linch import InMemoryRunStore
+
+    store = InMemoryRunStore()
+    agent = _make_agent(CountingTextProvider(), run_store=store)
+    started = asyncio.Event()
+    cleaned: list[str] = []
+
+    async def flow(wf: Any) -> str:
+        started.set()
+        try:
+            await asyncio.sleep(5)
+        finally:
+            cleaned.append("cleaned")
+        return "done"
+
+    task = asyncio.create_task(_run_workflow(agent, flow, run_id="wf-cancelled-run"))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert cleaned == ["cleaned"]
+    current = asyncio.current_task()
+    assert [
+        candidate
+        for candidate in asyncio.all_tasks()
+        if not candidate.done() and candidate is not current
+    ] == []
+
+
+async def test_lease_loss_does_not_mark_workflow_failed(monkeypatch: Any) -> None:
+    from linch import InMemoryRunStore
+    from linch.ext.workflow import engine as workflow_engine
+    from linch.run_store import LeaseLostError
+
+    class LeaseLossStore(InMemoryRunStore):
+        mark_failed_calls = 0
+
+        async def renew(self, lease: Any) -> Any:
+            raise LeaseLostError("lease expired")
+
+        async def mark_failed(self, *args: Any, **kwargs: Any) -> Any:
+            self.mark_failed_calls += 1
+            return await super().mark_failed(*args, **kwargs)
+
+    monkeypatch.setattr(workflow_engine, "_WORKFLOW_LEASE_TTL_S", 0.03)
+    store = LeaseLossStore()
+    agent = _make_agent(CountingTextProvider(), run_store=store)
+
+    async def flow(wf: Any) -> str:
+        await asyncio.sleep(1)
+        return "done"
+
+    with pytest.raises(LeaseLostError, match="lease expired"):
+        await _run_workflow(agent, flow, run_id="wf-lease-loss")
+    assert store.mark_failed_calls == 0
+    record = await store.load_run("wf-lease-loss")
+    assert record is not None
+    assert record.status == "running"
+
+
+async def test_repeated_cancellation_cannot_cancel_step_end_append() -> None:
+    from linch import InMemoryRunStore
+
+    class DelayedEndStore(InMemoryRunStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.append_started = asyncio.Event()
+            self.allow_append = asyncio.Event()
+
+        async def append_event(self, run_id: str, event: Any) -> int:
+            if getattr(event, "kind", None) == "step_end":
+                self.append_started.set()
+                await self.allow_append.wait()
+            return await super().append_event(run_id, event)
+
+    store = DelayedEndStore()
+    agent = _make_agent(CountingTextProvider(), run_store=store)
+
+    async def charge() -> str:
+        return "ok"
+
+    async def fail() -> str:
+        await asyncio.sleep(0.01)
+        raise RuntimeError("reserve failed")
+
+    async def flow(wf: Any) -> list[Any]:
+        return await wf.parallel([lambda: wf.step("charge", charge), fail])
+
+    task = asyncio.create_task(_run_workflow(agent, flow, run_id="wf-repeated-cancel"))
+    await asyncio.wait_for(store.append_started.wait(), timeout=1)
+    await asyncio.sleep(0.03)
+    task.cancel()
+    store.allow_append.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    stored_kinds = [event.event.kind for event in await store.load_events("wf-repeated-cancel")]
+    assert stored_kinds.count("step_end") == 1
+
+
+async def test_double_cancellation_drains_workflow_cleanup() -> None:
+    from linch import InMemoryRunStore
+
+    store = InMemoryRunStore()
+    agent = _make_agent(CountingTextProvider(), run_store=store)
+    started = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    cleanup_gate = asyncio.Event()
+    cleanup_finished = asyncio.Event()
+
+    async def flow(wf: Any) -> str:
+        started.set()
+        try:
+            await asyncio.sleep(5)
+        finally:
+            cleanup_started.set()
+            await cleanup_gate.wait()
+            cleanup_finished.set()
+        return "done"
+
+    task = asyncio.create_task(_run_workflow(agent, flow, run_id="wf-double-cancel"))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    task.cancel()
+    await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+
+    async def release_cleanup() -> None:
+        await asyncio.sleep(0.03)
+        cleanup_gate.set()
+
+    await asyncio.sleep(0)
+    task.cancel()
+    release_task = asyncio.create_task(release_cleanup())
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await release_task
+
+    assert cleanup_finished.is_set()
+    assert agent._sessions == {}
+    await asyncio.sleep(0)
+    current = asyncio.current_task()
+    assert [
+        candidate
+        for candidate in asyncio.all_tasks()
+        if not candidate.done() and candidate is not current
+    ] == []
+
+
+async def test_release_failure_still_cleans_host_session() -> None:
+    from linch import InMemoryRunStore
+
+    class FailingReleaseStore(InMemoryRunStore):
+        async def release(self, lease: Any) -> None:
+            raise RuntimeError("release failed")
+
+    agent = _make_agent(CountingTextProvider(), run_store=FailingReleaseStore())
+
+    async def flow(wf: Any) -> str:
+        return "done"
+
+    with pytest.raises(RuntimeError, match="release failed"):
+        await _run_workflow(agent, flow, run_id="wf-release-failure")
+    assert agent._sessions == {}
+
+
+async def test_lease_heartbeat_covers_slow_terminal_status_write(monkeypatch: Any) -> None:
+    from linch import InMemoryRunStore
+    from linch.ext.workflow import engine as workflow_engine
+
+    class SlowTerminalStore(InMemoryRunStore):
+        renew_calls = 0
+        terminal_started: asyncio.Event
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.terminal_started = asyncio.Event()
+
+        async def renew(self, lease: Any) -> Any:
+            self.renew_calls += 1
+            return await super().renew(lease)
+
+        async def mark_completed(self, *args: Any, **kwargs: Any) -> Any:
+            self.terminal_started.set()
+            await asyncio.sleep(0.05)
+            return await super().mark_completed(*args, **kwargs)
+
+    monkeypatch.setattr(workflow_engine, "_WORKFLOW_LEASE_TTL_S", 0.03)
+    store = SlowTerminalStore()
+    agent = _make_agent(CountingTextProvider(), run_store=store)
+
+    async def flow(wf: Any) -> str:
+        return "done"
+
+    assert await _run_workflow(agent, flow, run_id="wf-slow-terminal") == "done"
+    assert store.terminal_started.is_set()
+    assert store.renew_calls >= 1
+
+
 async def test_wf_agent_inherited_subagent_tool_filter_is_part_of_replay_key() -> None:
     from linch import InMemoryRunStore
     from linch.subagents.registry import AgentRegistry

@@ -6,7 +6,8 @@ import asyncio
 import dataclasses
 import inspect
 import json
-from collections.abc import Awaitable, Callable, Sequence
+import math
+from collections.abc import Awaitable, Callable, Mapping, Sequence, Set
 from contextlib import AbstractAsyncContextManager, nullcontext
 from contextvars import ContextVar
 from typing import Any, cast
@@ -119,13 +120,22 @@ class WorkflowContext:
 
     async def _emit(self, event: Event) -> None:
         """Forward to the host callback and persist when the run is durable."""
-        self._emit_sync(event)
         if self._store is not None and self._run_id is not None:
-            seq = await self._store.append_event(self._run_id, event)
+            append_task = asyncio.create_task(self._store.append_event(self._run_id, event))
+            cancelled = False
+            while not append_task.done():
+                try:
+                    await asyncio.shield(append_task)
+                except asyncio.CancelledError:
+                    cancelled = True
+            seq = append_task.result()
             # Watermark for the journal snapshot; parallel branches append
             # concurrently, so take the highest seq seen rather than the last.
             if isinstance(seq, int) and seq > self._last_event_seq:
                 self._last_event_seq = seq
+            if cancelled:
+                raise asyncio.CancelledError
+        self._emit_sync(event)
 
     # ── journal snapshot (opt-in resume accelerator) ─────────────────────
 
@@ -175,6 +185,7 @@ class WorkflowContext:
         label: str | None = None,
         tools: list[str] | None = None,
         run_options: RunOptions | None = None,
+        key: Any = None,
         output_schema: Any = None,
         final_tool_name: str | None = None,
         fork: bool = False,
@@ -195,6 +206,9 @@ class WorkflowContext:
             label: Display name for progress/events; defaults to name or "agent".
             tools: Tool names available to the subagent; None uses its default set.
             run_options: Run options forwarded to the subagent call.
+            key: Explicit stable identity for run options that cannot be encoded.
+                When set, it replaces automatic run-option identity; include any
+                policy or dependency version that should invalidate replay.
             output_schema: Structured-output schema, merged into run_options.
             final_tool_name: Final-tool name override, merged into run_options.
             fork: Whether to run as a continuation of the workflow host's context
@@ -217,6 +231,8 @@ class WorkflowContext:
             The subagent's final text.
 
         Raises:
+            ConfigError: If replay arguments cannot be canonically encoded and
+                no explicit ``key`` is supplied.
             WorkflowError: If the child run failed or was aborted.
             WorkflowTimeoutError: If the child exceeded its timeout.
         """
@@ -240,10 +256,25 @@ class WorkflowContext:
             final_tool_name=final_tool_name,
         )
         effective_tools_filter = tools if tools is not None else definition.frontmatter.tools
-        options_fingerprint = _call_options_fingerprint(
-            tools=effective_tools_filter,
-            run_options=effective_run_options,
-        )
+        explicit_key = None if key is None else _fingerprint_value(key)
+        if explicit_key is None:
+            try:
+                options_fingerprint = _call_options_fingerprint(
+                    tools=effective_tools_filter,
+                    run_options=effective_run_options,
+                )
+            except ConfigError as exc:
+                raise ConfigError(
+                    "wf.agent run_options are not JSON-serializable; pass key= for "
+                    "a caller-owned replay identity"
+                ) from exc
+        else:
+            explicit_payload: dict[str, Any] = {"key": explicit_key}
+            if effective_tools_filter is not None:
+                explicit_payload["tools"] = _fingerprint_value(effective_tools_filter)
+            options_fingerprint = json.dumps(
+                explicit_payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+            )
         key = call_key(subagent_type, prompt, options_fingerprint)
         display_name = label or name or "agent"
 
@@ -315,8 +346,10 @@ class WorkflowContext:
             fn: A zero-argument callable, sync or async. A sync *fn* must not
                 block the event loop.
             key: Optional fingerprint of the step's inputs, so the same *name*
-                over different inputs journals separately. Without it, repeated
-                calls are told apart only by their order.
+                over different inputs journals separately. Lists, tuples, mappings,
+                and sets use canonical JSON; unsupported values raise
+                ``ConfigError``. Without it, repeated calls are told apart only
+                by their order.
             timeout_ms: Wall-clock budget for *fn*; ``None`` uses the workflow's
                 ``step_timeout_ms`` default and ``0`` opts out of it.
             retry: Re-run *fn* on failure with exponential backoff. Only the
@@ -737,7 +770,7 @@ def _run_options_fingerprint(run_options: RunOptions | None) -> str:
             payload[field.name] = _fingerprint_value(value)
     if not payload:
         return ""
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
 def _call_options_fingerprint(
@@ -748,24 +781,59 @@ def _call_options_fingerprint(
     run_options_fingerprint = _run_options_fingerprint(run_options)
     if tools is None:
         return run_options_fingerprint
-    payload: dict[str, Any] = {"tools": tools}
+    payload: dict[str, Any] = {"tools": _fingerprint_value(tools)}
     if run_options_fingerprint:
         payload["run_options"] = json.loads(run_options_fingerprint)
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
 def _fingerprint_value(value: Any) -> Any:
-    if dataclasses.is_dataclass(value):
-        return {
-            field.name: _fingerprint_value(getattr(value, field.name))
-            for field in dataclasses.fields(value)
-        }
-    if isinstance(value, dict):
-        return {str(k): _fingerprint_value(v) for k, v in sorted(value.items(), key=str)}
-    if isinstance(value, (list, tuple)):
-        return [_fingerprint_value(v) for v in value]
-    if isinstance(value, frozenset) and all(isinstance(item, str) for item in value):
-        return sorted(value)
-    if isinstance(value, (str, int, float, bool)) or value is None:
-        return value
-    return f"{value.__class__.__module__}.{value.__class__.__qualname__}:{value!r}"
+    """Return a strict, deterministic JSON-compatible fingerprint value."""
+
+    active: set[int] = set()
+
+    def normalize(current: Any) -> Any:
+        if current is None or isinstance(current, (str, bool, int)):
+            return current
+        if isinstance(current, float):
+            if not math.isfinite(current):
+                raise ConfigError("value is not JSON-serializable: non-finite float")
+            return current
+
+        compound = isinstance(current, (Mapping, Set, list, tuple))
+        if dataclasses.is_dataclass(current) and not isinstance(current, type):
+            compound = True
+        if not compound:
+            raise ConfigError(f"value of type {type(current).__name__} is not JSON-serializable")
+
+        marker = id(current)
+        if marker in active:
+            raise ConfigError("cyclic value is not JSON-serializable")
+        active.add(marker)
+        try:
+            if dataclasses.is_dataclass(current):
+                return {
+                    field.name: normalize(getattr(current, field.name))
+                    for field in dataclasses.fields(current)
+                }
+            if isinstance(current, Mapping):
+                for key in current:
+                    if not isinstance(key, str):
+                        raise ConfigError("mapping keys must be strings")
+                return {key: normalize(current[key]) for key in sorted(current)}
+            if isinstance(current, Set):
+                values = [normalize(item) for item in current]
+                return sorted(
+                    values,
+                    key=lambda item: json.dumps(
+                        item, sort_keys=True, separators=(",", ":"), allow_nan=False
+                    ),
+                )
+            return [normalize(item) for item in current]
+        finally:
+            active.remove(marker)
+
+    try:
+        return normalize(value)
+    except RecursionError as exc:
+        raise ConfigError("value is not JSON-serializable: recursion depth exceeded") from exc
