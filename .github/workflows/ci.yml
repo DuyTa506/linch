@@ -99,7 +99,7 @@ jobs:
       - name: Install package and all extras
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[dev,mcp,anthropic,gemini,postgres,otel]"
+          python -m pip install -e ".[dev,mcp,anthropic,gemini,postgres,otel,worker]"
 
       # Postgres tests self-skip without AGENT_KIT_TEST_PG_DSN; the extra just
       # exercises the adapter imports and the OpenTelemetry observer path.

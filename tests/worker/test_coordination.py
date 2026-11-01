@@ -97,6 +97,7 @@ async def test_unlimited_completions_do_not_trigger_fleet_dequeues(pool, monkeyp
 
 @pytest.mark.parametrize("queues", [{"default": 0}, {"default": 0, "limited": 1}])
 async def test_driver_filters_only_valid_unlimited_completion_hints_and_removes_listener(queues):
+    pytest.importorskip("pgqueuer")
     from pgqueuer import QueueManager
 
     from linch.worker import Worker

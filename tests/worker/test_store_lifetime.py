@@ -13,7 +13,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from test_dispatch import make_agent
+
+pytest.importorskip("pgqueuer")
+
+from test_dispatch import make_agent  # noqa: E402
 
 from linch.storage._pg import _reset_connection, close_pool, ensure_pool
 from linch.worker.dispatch import _BorrowedPool

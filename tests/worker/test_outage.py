@@ -9,9 +9,10 @@ from datetime import timedelta
 from types import SimpleNamespace
 from uuid import uuid4
 
-import asyncpg
 import pytest
-from test_dispatch import make_agent, wait_for
+
+asyncpg = pytest.importorskip("asyncpg")
+from test_dispatch import make_agent, wait_for  # noqa: E402
 
 
 class CyclePool:
