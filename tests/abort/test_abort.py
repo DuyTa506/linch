@@ -18,58 +18,36 @@ async def _wait_for(predicate, timeout: float = 1.0) -> bool:
 
 
 @pytest.mark.asyncio
-async def test_merged_aborts_when_input_aborts_and_watcher_terminates() -> None:
+@pytest.mark.parametrize("trigger", ["abort", "close"])
+async def test_any_signal_watcher_lifecycle(trigger: str) -> None:
     a = AbortContext()
     b = AbortContext()
     merged = any_signal(a, b)
 
     assert not merged.aborted
-
-    a.abort()
-
-    # merged should become aborted shortly after an input aborts
-    assert await _wait_for(lambda: merged.aborted)
-
-    # the internal watcher must terminate (not park forever / leak)
-    assert merged._watch_task is not None
-    assert await _wait_for(lambda: merged._watch_task.done())
-
-
-@pytest.mark.asyncio
-async def test_close_cancels_watcher_when_no_abort_fires() -> None:
-    a = AbortContext()
-    b = AbortContext()
-    merged = any_signal(a, b)
-
     task = merged._watch_task
     assert task is not None
 
-    # let the watcher start parking on the input events
-    await asyncio.sleep(0)
-    assert not task.done()
-
-    # cleanup path must release the watcher
-    merged.close()
+    if trigger == "abort":
+        a.abort()
+        assert await _wait_for(lambda: merged.aborted)
+    else:
+        await asyncio.sleep(0)
+        assert not task.done()
+        merged.close()
 
     assert await _wait_for(lambda: task.done())
-
-    # no pending Event.wait futures should dangle: the input events have no
-    # remaining waiters once the watcher is cleaned up.
     assert not a._event._waiters
     assert not b._event._waiters
 
 
 @pytest.mark.asyncio
 async def test_abort_during_foreground_tool_emits_aborted_result() -> None:
-    """Embedding gate: aborting while a foreground tool is mid-execution ends the
-    run with an ``aborted`` result. The tool observes ``ctx.signal`` (the merged
-    signal really is wired to ``session.abort()``), and the generator finishes
-    cleanly rather than hanging."""
-    from linch import Agent, ResultEvent, ToolResult
+    from linch import ResultEvent, ToolResult
     from linch.abort import throw_if_aborted
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
-    from linch.sessions import InMemorySessionStore
-    from linch.tools import ToolRegistry
+    from tests.support.agents import make_agent
+    from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
+    from tests.support.tools import tool_registry
 
     started = asyncio.Event()
     saw_abort = asyncio.Event()
@@ -94,19 +72,8 @@ async def test_abort_during_foreground_tool_emits_aborted_result() -> None:
             throw_if_aborted(ctx.signal)  # raises AbortError → aborted terminal
             return ToolResult(content="never")
 
-    tools = ToolRegistry()
-    tools.add(HangUntilAbort())
-    provider = ScriptedProvider(
-        [ToolUseTurn(tool_name="hang", tool_input={}), TextTurn(text="unreached")]
-    )
-    agent = Agent(
-        model="m",
-        provider=provider,
-        session_store=InMemorySessionStore(),
-        permissions={"mode": "skip-dangerous"},
-        cwd=".",
-        tools=tools,
-    )
+    provider = ScriptedProvider([ToolUseTurn("hang", {}), TextTurn("unreached")])
+    agent = make_agent(provider, tools=tool_registry(HangUntilAbort()), model="m", run_store=None)
     session = await agent.session()
 
     async def _abort_when_started() -> None:
@@ -129,25 +96,16 @@ async def test_abort_during_foreground_tool_emits_aborted_result() -> None:
     assert isinstance(result, ResultEvent)
     assert result.subtype == "aborted"
     assert saw_abort.is_set()  # tool actually saw the abort, then unwound
-    assert provider._index == 1  # the second turn never ran
+    assert len(provider.requests) == 1  # the second turn never ran
 
 
 @pytest.mark.asyncio
 async def test_external_cancel_of_session_run_propagates_as_timeout() -> None:
-    """An external asyncio.wait_for(session.run(...), timeout=N) firing must raise
-    TimeoutError, not get absorbed as a graceful ``aborted`` ResultEvent.
-
-    session.abort() was never called and no signal was ever set — this is a plain
-    external cancellation of the enclosing task, which must propagate as
-    CancelledError all the way out through the provider, the loop, and
-    session.run()'s async generator so wait_for sees it and raises TimeoutError.
-    """
     from collections.abc import AsyncIterator
     from typing import Any
 
-    from linch import Agent
     from linch.providers.base import BaseProvider
-    from linch.sessions import InMemorySessionStore
+    from tests.support.agents import make_agent
 
     class HangingProvider(BaseProvider):
         id = "hanging"
@@ -160,13 +118,7 @@ async def test_external_cancel_of_session_run_propagates_as_timeout() -> None:
             await asyncio.sleep(10)
             yield {"type": "text_delta", "text": "never"}  # pragma: no cover
 
-    agent = Agent(
-        model="m",
-        provider=HangingProvider(),
-        session_store=InMemorySessionStore(),
-        permissions={"mode": "skip-dangerous"},
-        cwd=".",
-    )
+    agent = make_agent(HangingProvider(), model="m", run_store=None)
     session = await agent.session()
 
     async def _drive() -> list:

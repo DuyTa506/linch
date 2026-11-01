@@ -1,9 +1,4 @@
-"""Session lifecycle: public release/aclose API and drain-before-close ordering.
-
-Covers Phase 1.3 (finalizers run before resources close) and Phase 2.1 (public
-per-session release, idempotency, active-run rejection, forced drain, retained
-child recursion, and registry churn returning to baseline).
-"""
+"""Exercise session release, agent teardown, and lifecycle race behavior."""
 
 from __future__ import annotations
 
@@ -13,37 +8,53 @@ from typing import Any
 
 import pytest
 
+from tests.support.providers import ScriptedProvider, TextTurn
 
-class _Provider:
+
+class _Provider(ScriptedProvider):
     id = "p"
 
     def __init__(self, order: list[str] | None = None) -> None:
+        super().__init__([], context_window=100_000)
         self._order = order
 
-    def context_window(self, model: str) -> int:
-        return 100_000
-
-    async def stream(self, req: Any) -> AsyncIterator[dict[str, object]]:
-        from linch.types import Usage
-
-        yield {"type": "message_start", "model": req.model}
-        yield {"type": "text_delta", "text": "done"}
-        yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
+    async def stream(self, req: Any) -> AsyncIterator[dict[str, Any]]:
+        async for event in ScriptedProvider([TextTurn("done")]).stream(req):
+            yield event
 
     async def aclose(self) -> None:
         if self._order is not None:
             self._order.append("provider_closed")
 
 
-def _agent(**kwargs: Any):
-    from linch import Agent
-    from linch.sessions import InMemorySessionStore
+class _CloseGateProvider(_Provider):
+    """Gate provider teardown so close races can observe the in-flight state."""
 
+    def __init__(self, order: list[str] | None = None) -> None:
+        super().__init__(order)
+        self.calls = 0
+        self.entered = asyncio.Event()
+        self.gate = asyncio.Event()
+        self.closed = asyncio.Event()
+
+    async def aclose(self) -> None:
+        self.calls += 1
+        self.entered.set()
+        await self.gate.wait()
+        if self._order is not None:
+            self._order.append("provider_closed")
+        self.closed.set()
+
+
+def _agent(**kwargs: Any):
+    from tests.support.agents import make_agent
+    from tests.support.stores import memory_session_store
+
+    provider = kwargs.pop("provider", _Provider())
     kwargs.setdefault("model", "gpt-5")
-    kwargs.setdefault("provider", _Provider())
-    kwargs.setdefault("session_store", InMemorySessionStore())
-    kwargs.setdefault("cwd", ".")
-    return Agent(**kwargs)
+    kwargs.setdefault("session_store", memory_session_store())
+    kwargs.setdefault("run_store", None)
+    return make_agent(provider, **kwargs)
 
 
 async def test_release_unknown_session_is_noop() -> None:
@@ -148,6 +159,43 @@ async def test_force_release_drains_owned_background_task() -> None:
     assert session.background_tasks == []
 
 
+async def test_completed_background_tasks_unregister_themselves() -> None:
+    agent = _agent()
+    session = await agent.session()
+    tasks = [asyncio.create_task(asyncio.sleep(0)) for _ in range(100)]
+    for task in tasks:
+        session.background_tasks.append(task)
+
+    await asyncio.gather(*tasks)
+
+    assert session.background_tasks == []
+    await agent.close()
+
+
+async def test_close_cancels_and_drains_registered_inflight_task() -> None:
+    agent = _agent()
+    session = await agent.session()
+    started = asyncio.Event()
+    finalized = asyncio.Event()
+
+    async def background() -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            finalized.set()
+
+    task = asyncio.create_task(background())
+    session.background_tasks.append(task)
+    await started.wait()
+
+    await agent.close()
+
+    assert task.cancelled()
+    assert finalized.is_set()
+    assert session.background_tasks == []
+
+
 async def test_agent_close_runs_task_finalizers_before_closing_provider() -> None:
     order: list[str] = []
     agent = _agent(provider=_Provider(order))
@@ -216,9 +264,6 @@ async def test_session_churn_returns_registry_and_tasks_to_baseline() -> None:
     assert len(asyncio.all_tasks()) <= baseline_tasks
 
 
-# ── Phase 1.4: provider.prepare() is coalesced and awaited before the first run ──
-
-
 async def test_agent_awaits_provider_prepare_once_before_first_run() -> None:
     from linch.filesystem.offload import OffloadConfig
 
@@ -257,19 +302,6 @@ async def agent_run(agent, sid, prompt):
     session = await agent.session(id=sid)
     async for event in session.run(prompt):
         yield event
-
-
-# ── Ownership & lifecycle hardening ──
-
-
-async def test_session_same_id_returns_same_live_instance() -> None:
-    agent = _agent()
-    first = await agent.session(id="dup")
-    second = await agent.session(id="dup")
-    # Re-attaching a live id returns the registered instance instead of
-    # overwriting it (which would orphan the first Session and its work).
-    assert second is first
-    assert agent._sessions["dup"] is first
 
 
 async def test_agent_close_is_idempotent() -> None:
@@ -333,22 +365,7 @@ async def test_provider_reassignment_reruns_prepare() -> None:
 
 async def test_close_cancelled_mid_teardown_still_releases_provider() -> None:
     order: list[str] = []
-
-    class _SlowCloseProvider(_Provider):
-        def __init__(self, order: list[str]) -> None:
-            super().__init__(order)
-            self.entered = asyncio.Event()
-            self.gate = asyncio.Event()
-            self.closed = asyncio.Event()
-
-        async def aclose(self) -> None:
-            self.entered.set()
-            await self.gate.wait()
-            assert self._order is not None
-            self._order.append("provider_closed")
-            self.closed.set()
-
-    provider = _SlowCloseProvider(order)
+    provider = _CloseGateProvider(order)
     agent = _agent(provider=provider)
     await agent.session(id="s1")
 
@@ -363,34 +380,40 @@ async def test_close_cancelled_mid_teardown_still_releases_provider() -> None:
     assert order.count("provider_closed") == 1
 
 
-async def test_run_after_close_raises() -> None:
+async def test_cancelled_agent_close_drains_default_plugin_before_returning() -> None:
+    provider = _CloseGateProvider()
+    agent = _agent(provider=provider)
+    session = await agent.session(id="never-started-close")
+    session.run("never consumed")
+    closing = asyncio.create_task(agent.close())
+    await asyncio.wait_for(provider.entered.wait(), 1)
+    closing.cancel()
+    provider.gate.set()
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await closing
+        assert agent._closed
+        assert agent.context._scope.disposed
+        assert agent.context.get("request_catalog") is None
+        assert not agent.context.events.has_listeners("tools/resolve")
+    finally:
+        await agent.close()
+
+
+@pytest.mark.parametrize("operation", ["run", "append"])
+async def test_closed_session_rejects_operations(operation: str) -> None:
     from linch.errors import ConfigError
 
     agent = _agent()
     session = await agent.session(id="s1")
     await session.aclose()
-    try:
-        session.run("hi")
-        raise AssertionError("expected ConfigError running a closed session")
-    except ConfigError:
-        pass
+    with pytest.raises(ConfigError):
+        if operation == "run":
+            session.run("hi")
+        else:
+            from linch.types import Message, TextBlock
 
-
-async def test_append_after_close_raises() -> None:
-    from linch.errors import ConfigError
-    from linch.types import Message, TextBlock
-
-    agent = _agent()
-    session = await agent.session(id="s1")
-    await session.aclose()
-    try:
-        await session.append([Message(role="user", content=[TextBlock(text="x")])])
-        raise AssertionError("expected ConfigError appending to a closed session")
-    except ConfigError:
-        pass
-
-
-# ── Transactional quiescence races ──
+            await session.append([Message(role="user", content=[TextBlock(text="x")])])
 
 
 async def test_never_started_run_releases_admission_and_idle_barrier() -> None:
@@ -454,6 +477,7 @@ async def test_concurrent_same_id_creation_is_reserved_once() -> None:
     first, second = await asyncio.gather(first_task, second_task)
 
     assert first is second
+    assert agent._sessions["same"] is first
     assert store.create_calls == 1
 
 
@@ -518,7 +542,7 @@ async def test_agent_close_waits_for_actively_iterated_provider_finalizer() -> N
                 order.append("provider_stream_finalized")
 
     provider = PausingProvider()
-    agent = _agent(provider=provider)
+    agent = _agent(provider=provider, reliability=None)
     session = await agent.session(id="active")
 
     async def consume() -> None:
@@ -539,19 +563,7 @@ async def test_agent_close_waits_for_actively_iterated_provider_finalizer() -> N
 
 
 async def test_concurrent_agent_close_callers_share_one_teardown() -> None:
-    class SlowProvider(_Provider):
-        def __init__(self) -> None:
-            super().__init__()
-            self.calls = 0
-            self.entered = asyncio.Event()
-            self.gate = asyncio.Event()
-
-        async def aclose(self) -> None:
-            self.calls += 1
-            self.entered.set()
-            await self.gate.wait()
-
-    provider = SlowProvider()
+    provider = _CloseGateProvider()
     agent = _agent(provider=provider)
     first = asyncio.create_task(agent.close())
     second = asyncio.create_task(agent.close())
@@ -612,17 +624,7 @@ async def test_agent_close_failure_retries_only_unfinished_resources() -> None:
 async def test_new_admission_is_rejected_while_agent_quiesces() -> None:
     from linch.errors import ConfigError
 
-    class SlowProvider(_Provider):
-        def __init__(self) -> None:
-            super().__init__()
-            self.entered = asyncio.Event()
-            self.gate = asyncio.Event()
-
-        async def aclose(self) -> None:
-            self.entered.set()
-            await self.gate.wait()
-
-    provider = SlowProvider()
+    provider = _CloseGateProvider()
     agent = _agent(provider=provider)
     session = await agent.session(id="existing")
     close_task = asyncio.create_task(agent.close())

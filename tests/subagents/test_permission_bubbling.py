@@ -1,51 +1,16 @@
-"""Subagent permission bubbling (ROADMAP Phase 4.2).
-
-A child session's events — including a ``PermissionRequestEvent`` raised when one
-of its tools needs approval — must surface to the *parent caller's* event stream
-rather than sitting in a buffer only host UIs can poll. The loop drains
-``session.pending_child_events`` at the top-of-turn chokepoint.
-
-Verify: a subagent permission request surfaces to the parent caller.
-
-linch imports happen inside the test because sibling tests pop ``linch*`` modules
-from ``sys.modules``.
-"""
-
 from __future__ import annotations
 
-from typing import Any
-
-
-class WriteThing:
-    name = "WriteThing"
-    description = "A write-scoped tool that needs approval."
-    scope = "write"
-    parallel = False
-    input_schema = {"type": "object", "properties": {}}
-
-    def validate(self, raw: dict[str, Any]) -> dict[str, Any]:
-        return dict(raw)
-
-    def summarize(self, inp: dict[str, Any]) -> str:
-        return "WriteThing()"
-
-    async def execute(self, inp: dict[str, Any], ctx: Any) -> Any:
-        from linch import ToolResult
-
-        return ToolResult(content="wrote")
+from tests.support.agents import make_agent
+from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
+from tests.support.tools import StubTool, tool_registry
 
 
 async def test_subagent_permission_request_surfaces_to_parent() -> None:
-    from linch import Agent, PermissionRequestEvent, SubagentEvent, ToolRegistry
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
-    from linch.sessions import InMemorySessionStore
+    from linch import PermissionRequestEvent, SubagentEvent
     from linch.subagents.default_agent import DEFAULT_AGENT
     from linch.subagents.runner import RunSubagentArgs, run_subagent
 
-    registry = ToolRegistry()
-    registry.add(WriteThing())
-    # Child consumes turns 0-1 (write call → permission ask → denied → text),
-    # the parent consumes turn 2.
+    registry = tool_registry(StubTool("WriteThing", scope="write"))
     provider = ScriptedProvider(
         [
             ToolUseTurn(tool_name="WriteThing", tool_input={}),
@@ -53,17 +18,14 @@ async def test_subagent_permission_request_surfaces_to_parent() -> None:
             TextTurn(text="parent done"),
         ]
     )
-    agent = Agent(
+    agent = make_agent(
+        provider,
         model="m",
-        provider=provider,
         tools=registry,
-        permissions={"mode": "default"},  # write tools must ask
-        session_store=InMemorySessionStore(),
-        cwd=".",
+        permissions={"mode": "default"},
     )
     parent = await agent.session()
 
-    # Run the child as the SubagentTool would: emit into the parent's buffer.
     result = await run_subagent(
         RunSubagentArgs(
             parent_session=parent,
@@ -77,7 +39,6 @@ async def test_subagent_permission_request_surfaces_to_parent() -> None:
     )
     assert not result.errored
 
-    # The next parent turn drains the buffered child events into its own stream.
     events = [event async for event in parent.run("go")]
     bubbled = [
         event.event
@@ -86,4 +47,4 @@ async def test_subagent_permission_request_surfaces_to_parent() -> None:
     ]
     assert bubbled, "child PermissionRequestEvent did not surface to the parent caller"
     assert bubbled[0].requests[0].tool_name == "WriteThing"
-    assert parent.pending_child_events == []  # buffer drained
+    assert parent.pending_child_events == []

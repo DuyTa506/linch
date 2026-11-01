@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import json
 import re
+from contextlib import aclosing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import yaml  # type: ignore[reportMissingModuleSource]
 
+from .._telemetry import ChatCall, in_span
 from ..errors import ConfigError, ProviderError
-from ..types import Message, OutputSchema, ProviderRequest, SystemBlock, TextBlock
+from ..types import Message, OutputSchema, ProviderRequest, SystemBlock, TextBlock, Usage
 from .loader import AGENT_NAME_RE, load_agents_from_dir, normalize_tools
 from .registry import AgentRegistry
 from .types import AgentDefinition
@@ -20,6 +22,19 @@ if TYPE_CHECKING:
 
 @dataclass(slots=True)
 class GeneratedSubagentDefinition:
+    """Hold a generated subagent's prompt and optional tool allowlist.
+
+    Args:
+        name: Lowercase identifier used for the subagent file and registry.
+        description: Catalog description explaining when to use the subagent.
+        body: Complete system prompt written to the subagent definition.
+        tools: Optional parent-tool allowlist; ``None`` inherits parent access.
+
+    Attributes:
+        tools: An empty list explicitly gives the generated subagent no tools;
+            ``None`` has the distinct meaning of inherited access.
+    """
+
     name: str
     description: str
     body: str
@@ -28,6 +43,19 @@ class GeneratedSubagentDefinition:
 
 @dataclass(slots=True)
 class CreatedSubagentDefinition:
+    """Describe a generated definition after it has been written and loaded.
+
+    Args:
+        definition: Normalized generated content used for the file.
+        file_path: Path of the written Markdown definition.
+        agent_definition: Parsed registry definition returned by the loader.
+
+    Attributes:
+        definition: Normalized values used to render the file.
+        agent_definition: Loader representation, which may include source and
+            frontmatter details not present in ``definition``.
+    """
+
     definition: GeneratedSubagentDefinition
     file_path: str
     agent_definition: AgentDefinition
@@ -90,7 +118,17 @@ Design rules:
 
 
 def render_subagent_markdown(definition: GeneratedSubagentDefinition) -> str:
-    """Render a generated subagent as Linch's disk-backed Markdown format."""
+    """Render a generated subagent as Linch's disk-backed Markdown format.
+
+    Args:
+        definition: Generated content to normalize and render.
+
+    Returns:
+        Markdown with YAML frontmatter and the normalized prompt body.
+
+    Raises:
+        ConfigError: If the definition has an invalid name or empty content.
+    """
 
     normalized = _normalize_generated_definition(definition)
     frontmatter: dict[str, object] = {
@@ -113,7 +151,23 @@ async def generate_subagent_definition(
     existing_names: list[str] | None = None,
     signal: Any = None,
 ) -> GeneratedSubagentDefinition:
-    """Generate a Linch subagent definition from a natural-language request."""
+    """Generate a Linch subagent definition from a natural-language request.
+
+    Args:
+        agent: Agent whose provider, tools, and existing subagents guide generation.
+        request: Natural-language role or behavior requested for the new subagent.
+        tools: Optional fixed tool allowlist to impose on the generated definition.
+        existing_names: Optional names to reject before writing a definition.
+        signal: Optional abort signal passed to the provider call.
+
+    Returns:
+        A normalized generated subagent definition.
+
+    Raises:
+        ConfigError: If the request, tool allowlist, or generated definition is invalid.
+        ProviderError: If the provider response is empty or malformed; other typed
+            provider errors propagate unchanged.
+    """
 
     if not isinstance(request, str) or request.strip() == "":
         raise ConfigError("request must be a non-empty string")
@@ -153,7 +207,20 @@ async def write_subagent_definition(
     *,
     overwrite: bool = False,
 ) -> AgentDefinition:
-    """Write a generated subagent definition under ``config_dir/agents``."""
+    """Write a generated subagent definition under ``config_dir/agents``.
+
+    Args:
+        definition: Generated content to normalize and persist.
+        config_dir: Linch configuration directory containing the ``agents`` folder.
+        overwrite: Whether an existing definition with the same name may be replaced.
+
+    Returns:
+        The parsed agent definition loaded from disk after writing.
+
+    Raises:
+        ConfigError: If validation fails, the file exists without overwrite, or
+            the written definition cannot be loaded.
+    """
 
     normalized = _normalize_generated_definition(definition)
     agents_dir = Path(config_dir) / "agents"
@@ -185,7 +252,24 @@ async def create_subagent_definition(
     reload: bool = True,
     signal: Any = None,
 ) -> CreatedSubagentDefinition:
-    """Generate, write, and optionally hot-reload a disk-backed subagent."""
+    """Generate, write, and optionally hot-reload a disk-backed subagent.
+
+    Args:
+        agent: Agent whose provider and registry receive the generated definition.
+        request: Natural-language role or behavior requested for the subagent.
+        tools: Optional fixed tool allowlist for the generated definition.
+        overwrite: Whether an existing definition with the same name may be replaced.
+        reload: Whether to refresh the agent's live subagent registry after writing.
+        signal: Optional abort signal passed to generation.
+
+    Returns:
+        The generated definition, file path, and loaded registry definition.
+
+    Raises:
+        ConfigError: If generation, writing, or reloading validation fails.
+        ProviderError: If the generation response is empty or malformed; other typed
+            provider errors propagate unchanged.
+    """
 
     config_dir = Path(str(getattr(agent, "_config_dir", Path(agent.cwd) / ".linch")))
     existing_names = sorted(await _existing_subagent_names(agent))
@@ -260,28 +344,45 @@ async def _query_definition(agent: Agent, user_text: str, *, signal: Any = None)
     text_parts: list[str] = []
     tool_inputs: dict[str, list[str]] = {}
     tool_names: dict[str, str] = {}
-    async for event in agent.provider.stream(req):
-        typ = event.get("type")
-        if typ == "text_delta":
-            text_parts.append(str(event.get("text", "")))
-        elif typ == "tool_use_start":
-            tool_id = str(event["id"])
-            tool_names[tool_id] = str(event.get("name", ""))
-            tool_inputs[tool_id] = []
-        elif typ == "tool_use_input_delta":
-            tool_id = str(event["id"])
-            tool_inputs.setdefault(tool_id, []).append(str(event.get("json_delta", "")))
-        elif typ == "tool_use_end":
-            tool_id = str(event["id"])
-            if tool_names.get(tool_id) == _GENERATOR_SCHEMA.name:
-                raw = "".join(tool_inputs.get(tool_id, []))
-                try:
-                    parsed = json.loads(raw) if raw else {}
-                except json.JSONDecodeError as exc:
-                    raise ProviderError(f"generated subagent tool JSON was invalid: {exc}") from exc
-                if not isinstance(parsed, dict):
-                    raise ProviderError("generated subagent tool output must be a JSON object")
-                return parsed
+    with ChatCall(None, req, agent=agent) as chat:
+        async with aclosing(
+            in_span(agent.provider.stream(req), chat.span, end_on_exit=False)
+        ) as stream:
+            async for event in stream:
+                typ = event.get("type")
+                if typ == "text_delta":
+                    text_parts.append(str(event.get("text", "")))
+                elif typ == "message_start":
+                    chat.actual_model = event.get("model", req.model)
+                elif typ == "message_end":
+                    usage = event.get("usage")
+                    chat.usage = usage if isinstance(usage, Usage) else None
+                    chat.stop_reason = event.get("stop_reason")
+                elif typ == "tool_use_start":
+                    tool_id = str(event["id"])
+                    tool_names[tool_id] = str(event.get("name", ""))
+                    tool_inputs[tool_id] = []
+                elif typ == "tool_use_input_delta":
+                    tool_id = str(event["id"])
+                    tool_inputs.setdefault(tool_id, []).append(str(event.get("json_delta", "")))
+                elif typ == "tool_use_end":
+                    tool_id = str(event["id"])
+                    if tool_names.get(tool_id) == _GENERATOR_SCHEMA.name:
+                        raw = "".join(tool_inputs.get(tool_id, []))
+                        try:
+                            parsed = json.loads(raw) if raw else {}
+                        except json.JSONDecodeError as exc:
+                            raise ProviderError(
+                                f"generated subagent tool JSON was invalid: {exc}"
+                            ) from exc
+                        if not isinstance(parsed, dict):
+                            raise ProviderError(
+                                "generated subagent tool output must be a JSON object"
+                            )
+                        chat.message = parsed
+                        return parsed
+
+        chat.message = "".join(text_parts)
 
     raw_text = "".join(text_parts).strip()
     if raw_text == "":

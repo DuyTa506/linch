@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import warnings
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
@@ -10,6 +9,7 @@ from uuid import uuid4
 from .abort import AbortContext
 from .errors import ConfigError
 from .events import Event
+from .run_store import durable_call
 from .session_log import SessionLog
 from .sessions import SessionStore
 from .tools import FileReadTracker
@@ -17,6 +17,8 @@ from .types import InvokedSkillRecord, Message, SkillOverlay, Usage
 
 if TYPE_CHECKING:
     from .agent import Agent
+    from .permissions import Principal
+    from .profiles import Profile
     from .tools import ToolRegistry
 
 
@@ -31,8 +33,54 @@ def _set_event() -> asyncio.Event:
     return event
 
 
+class _BackgroundTasks(list[Any]):
+    """Keep the scheduler's append API while retaining only outstanding tasks."""
+
+    def append(self, task: Any) -> None:
+        super().append(task)
+        if isinstance(task, asyncio.Task):
+            task.add_done_callback(self._discard_done)
+
+    def _discard_done(self, task: asyncio.Task[Any]) -> None:
+        try:
+            self.remove(task)
+        except ValueError:
+            # Teardown or an explicit owner may already have cleared the list.
+            pass
+
+
 @dataclass(slots=True)
 class RunOptions:
+    """Override agent defaults for one run or resume operation.
+
+    Attributes:
+        stream_partials: Tri-state override where ``None`` preserves the agent default.
+        output_schema: Structured-output schema replacing the agent default when set.
+        tool_choice: Tool-choice policy replacing the agent default when set.
+        final_tool_name: Terminal tool whose input becomes the structured answer.
+        deps: Application dependency object visible to this run's tools.
+        budget: Spending cap shared with child runs in the subagent tree.
+        principal: Immutable identity used by permission evaluation.
+        profile: Versioned declarative defaults pinned by the run contract.
+
+    Args:
+        signal: Abort signal forwarded to the run loop.
+        max_output_tokens: Per-run output token cap.
+        temperature: Provider sampling temperature override.
+        stream_partials: Whether to emit partial assistant events.
+        images: Image blocks attached to the user prompt.
+        thinking: Provider thinking configuration override.
+        effort: Provider reasoning effort override.
+        output_schema: Structured-output schema override.
+        tool_choice: Tool-choice policy override.
+        final_tool_name: Tool whose call supplies the final structured answer.
+        deps: Per-run dependency object for tools.
+        budget: Per-run spending budget.
+        run_id: Pending run identifier to adopt when starting a queued run.
+        principal: Tenant, user, and role identity for authorization.
+        profile: Versioned profile supplying run-scoped defaults.
+    """
+
     signal: Any = None
     max_output_tokens: int | None = None
     temperature: float | None = None
@@ -61,13 +109,15 @@ class RunOptions:
     budget: Any = None  # RunBudget | None
     """Spending cap for this run (and its subagent tree).  Overrides
     ``Agent.budget`` when set.  See :class:`~linch.budget.RunBudget`."""
-    allow_legacy_resume: bool = False
-    """Explicitly allow resuming a pre-2.0 run with no persisted run contract.
 
-    This is an unsafe migration escape hatch: compatibility cannot be proven
-    for a legacy row.  It has no effect on newly created runs and is not part
-    of the run fingerprint.
-    """
+    run_id: str | None = None
+    """Adopt this pending run ID when starting a queued run."""
+
+    principal: Principal | None = None
+    """Immutable tenant/user/role identity for this run's authorization."""
+
+    profile: Profile | None = None
+    """Versioned run defaults; pass the same definition again when resuming."""
 
 
 @dataclass(slots=True)
@@ -79,6 +129,68 @@ class AlignmentEntry:
 
 @dataclass(slots=True)
 class Session:
+    """Hold one conversation and its durable append-only message log.
+
+    Args:
+        id: Stable session identifier.
+        created_at: Store-provided creation timestamp.
+        meta: JSON-compatible session metadata.
+        agent: Agent that owns this session's runtime services.
+        store: Session store used for durable message and metadata writes.
+        session_log: Append-only in-memory log backing the provider and audit views.
+        _extensions: Checkpointed JSON-only extension state.
+        _active: Whether a run is currently admitted.
+        _closed: Whether this session has completed teardown.
+        _lifecycle_state: Internal lifecycle state.
+        _close_task: In-flight session teardown task.
+        _idle: Event set after run and finalizer cleanup complete.
+        _telemetry_run: Run telemetry handle, when active.
+        active_run_id: Identifier of the currently admitted run.
+        _active_principal: Principal captured for the active run.
+        _profile_cleanup: Cleanup callback for the active profile scope.
+        _active_gen: Outer async generator driving the active run.
+        _active_inner: Underlying loop async iterator.
+        _active_started: Whether the outer run generator has started.
+        _event_journal: Buffered durable event journal for the active run.
+        _model_call_ledger: Receipt ledger for model calls in the active run.
+        _last_seq: Highest stored-message sequence observed.
+        _seq_cacheable: Whether sequence order permits snapshot caching.
+        _last_prompt_cache_model: Model used for the previous provider call.
+        _last_prompt_cache_tool_sig: Tool signature from the previous provider call.
+        alignment_queue: Steering messages waiting for a turn boundary.
+        interrupt_requested: Whether cooperative interruption was requested.
+        last_usage: Most recent provider usage record.
+        last_compaction_info: Metadata from the most recent compaction.
+        active_budget: Budget resolved for the active run.
+        inherited_budget: Budget inherited from a parent run.
+        compaction_retry_used_this_turn: Whether this turn consumed its compaction retry.
+        active_model: Model override selected during the active run.
+        fallback_index: Number of fallback models consumed.
+        pending_skill_overlay: Skill prompt overlay waiting to apply.
+        current_turn_allowed_tools: Tools allowed in the current turn.
+        current_turn_permission_decisions: Permission decisions for the current turn.
+        invoked_skills: Skills invoked in this session.
+        skills_loaded_emitted: Whether the skills-loaded event was emitted.
+        tools_override: Session-specific tool registry override.
+        system_blocks_override: Session-specific system blocks.
+        file_read_tracker: Files read by tools in this session.
+        _abort_controller: Abort controller for the active run.
+        run_deps: Dependencies resolved for the active run.
+        filesystem: Session virtual filesystem backend.
+        workers: Retained child-worker handles.
+        pending_child_events: Child events waiting for host delivery.
+        pending_notifications: Background-worker notifications waiting for delivery.
+        background_tasks: Detached tasks owned by the session.
+        mailbox_address: Optional inbox address for peer messages.
+        cwd_override: Session working-directory override.
+
+    Attributes:
+        active_run_id: Identifier of the currently admitted run, when any.
+        pending_notifications: In-process user messages waiting for the next turn.
+        background_tasks: Detached tool tasks owned by the session.
+        workers: Retained child-worker handles keyed by worker id.
+    """
+
     id: str
     created_at: str
     meta: dict[str, object]
@@ -88,13 +200,18 @@ class Session:
     """The single append-only log behind the session-owned provider view and
     audit history. Ephemeral per-request context is assembled outside this log.
     Compaction is recorded as a projection, never an untracked mutation."""
+    _extensions: dict[str, Any] = field(default_factory=dict, repr=False)
+    """JSON-only extension state captured in the run checkpoint."""
     _active: bool = False
     _closed: bool = False
     _lifecycle_state: str = _OPEN
     _close_task: asyncio.Task[None] | None = None
     _idle: asyncio.Event = field(default_factory=_set_event)
     """Set only when the run iterator and all of its finalizers are finished."""
+    _telemetry_run: Any = field(default=None, repr=False)
     active_run_id: str | None = None
+    _active_principal: Principal | None = field(default=None, repr=False)
+    _profile_cleanup: Callable[[], Awaitable[None] | None] | None = field(default=None, repr=False)
     _active_gen: Any = None
     """The async generator driving the in-flight ``run``/``resume`` iterator.
     Captured so a forced ``aclose`` can finalize an abandoned run generator
@@ -107,6 +224,8 @@ class Session:
     """Per-run ``RunEventBuffer`` (loop/checkpoint.py) that batches observational
     events between flush points. Set by the runner at run start, cleared in its
     finally. ``None`` outside an active durable run."""
+    _model_call_ledger: Any = None
+    """Run-bound receipt ledger, installed by the loop and cleared on exit."""
     _last_seq: int = 0
     """Highest stored-message ``seq`` observed (the provider-view snapshot
     watermark). Tracks the real seq returned by the store, so gaps are tolerated."""
@@ -164,9 +283,9 @@ class Session:
     """SubagentEvents accumulated by in-flight child sessions; available to host UIs."""
     pending_notifications: list[Message] = field(default_factory=list)
     """In-process background-worker <task-notification> messages, drained next turn."""
-    background_tasks: list[Any] = field(default_factory=list)
+    background_tasks: list[Any] = field(default_factory=_BackgroundTasks)
     """Detached asyncio.Tasks for backgrounded tool calls (run_in_background hint).
-    Cancelled on abort so they never write into a dead session."""
+    Removed on completion and cancelled/drained on abort or close."""
     mailbox_address: str | None = None
     """This session's inbox address on ``agent.mailbox``; drained into provider_view
     each turn when set. Workers default to their display_name; the root is set by
@@ -178,16 +297,29 @@ class Session:
 
     @property
     def provider_view(self) -> Sequence[Message]:
-        """A read-only snapshot of the session-owned provider projection."""
+        """Return a read-only snapshot of the session-owned provider projection.
+
+        Returns:
+            Detached model-visible messages in provider order.
+        """
         return self.session_log.provider_view
 
     @property
     def full_history(self) -> Sequence[Message]:
-        """A read-only snapshot of the session's full audit history."""
+        """Return a read-only snapshot of the session's full audit history.
+
+        Returns:
+            Detached historical messages in append order.
+        """
         return self.session_log.full_history
 
     @property
     def message_count(self) -> int:
+        """Return the number of messages in the model-visible projection.
+
+        Returns:
+            Number of messages currently visible to the model.
+        """
         return self.session_log.visible_count
 
     def last_provider_message(self) -> Message | None:
@@ -195,10 +327,25 @@ class Session:
 
         Prefer this over ``session.provider_view[-1]``: it copies one message
         instead of snapshotting the whole conversation.
+
+        Returns:
+            The newest model-visible message, or ``None`` when the view is empty.
         """
         return self.session_log.last_visible()
 
     def run(self, prompt: str, opts: RunOptions | None = None) -> AsyncIterator[Event]:
+        """Start a new run and return its event stream.
+
+        Args:
+            prompt: User text that starts the run.
+            opts: Optional per-run overrides.
+
+        Returns:
+            An asynchronous iterator yielding typed run events.
+
+        Raises:
+            ConfigError: If the session or owning agent is closed, or a run is active.
+        """
         if self._lifecycle_state != _OPEN or self._closed:
             raise ConfigError("session is closed")
         if getattr(self.agent, "_lifecycle_state", _OPEN) != _OPEN:
@@ -213,13 +360,26 @@ class Session:
 
         from .loop import run_loop
 
-        inner = run_loop(self, prompt, opts or RunOptions())
+        options = opts or RunOptions()
+        inner = run_loop(self, prompt, options)
         self._active_inner = inner
-        it = self._iterate(inner, "")
+        it = self._iterate(inner, "", options)
         self._active_gen = it
         return it
 
     def resume(self, run_id: str, opts: RunOptions | None = None) -> AsyncIterator[Event]:
+        """Resume a durable run and return its event stream.
+
+        Args:
+            run_id: Durable run identifier to resume.
+            opts: Optional per-run overrides, including a pinned profile.
+
+        Returns:
+            An asynchronous iterator yielding resumed run events.
+
+        Raises:
+            ConfigError: If the session is unavailable, already running, or has no run store.
+        """
         if self._lifecycle_state != _OPEN or self._closed:
             raise ConfigError("session is closed")
         if getattr(self.agent, "_lifecycle_state", _OPEN) != _OPEN:
@@ -236,9 +396,10 @@ class Session:
 
         from .loop import resume_loop
 
-        inner = resume_loop(self, run_id, opts or RunOptions())
+        options = opts or RunOptions()
+        inner = resume_loop(self, run_id, options)
         self._active_inner = inner
-        it = self._iterate(inner, run_id)
+        it = self._iterate(inner, run_id, options)
         self._active_gen = it
         return it
 
@@ -246,17 +407,26 @@ class Session:
         self,
         inner: AsyncIterator[Event],
         run_id_fallback: str,
+        opts: RunOptions,
     ) -> AsyncIterator[Event]:
-        from .hooks import EventEmitContext, HookDispatcher, HookEvent
+        from .hooks import EventEmitContext, HookDispatcher
+        from .lifecycle import EVENT_EMIT
 
         self._active_started = True
-        hooks = HookDispatcher(getattr(self.agent, "hooks", None))
+        scope = None
         try:
+            if opts.profile is not None:
+                from .profiles import _profile_scope
+
+                pending_scope = _profile_scope(self, opts.profile)
+                await pending_scope.__aenter__()
+                scope = pending_scope
+            hooks = HookDispatcher(getattr(self.agent, "hooks", None))
             async for event in inner:
                 yield event
                 if hooks.active:
                     await hooks.dispatch(
-                        HookEvent.EVENT_EMIT,
+                        EVENT_EMIT,
                         EventEmitContext(
                             session=self,
                             run_id=self.active_run_id or run_id_fallback,
@@ -269,16 +439,24 @@ class Session:
             try:
                 await _aclose_generator(inner)
             finally:
-                self._finish_run()
+                try:
+                    if scope is not None:
+                        await scope.__aexit__(None, None, None)
+                finally:
+                    self._finish_run()
+                    if self.agent.max_idle_sessions is not None:
+                        await self.agent._session_became_idle(self)
 
     def _finish_run(self) -> None:
         """Release the single-run admission token and publish true idleness."""
+        self._active_principal = None
         self._active_gen = None
         self._active_inner = None
         self._active_started = False
         self._reject_pending_alignment(ConfigError("run ended before alignment was applied"))
         self._active = False
         self.active_run_id = None
+        self._model_call_ledger = None
         self._idle.set()
 
     async def align(
@@ -288,6 +466,17 @@ class Session:
         images: list[dict[str, str]] | None = None,
         timeout_s: float | None = None,
     ) -> None:
+        """Queue steering text for the next boundary of an active run.
+
+        Args:
+            prompt: Non-empty user message to inject before the next provider call.
+            images: Optional image blocks to attach to the injected message.
+            timeout_s: Maximum wait for delivery; ``None`` waits without a deadline.
+
+        Raises:
+            ConfigError: If no run is active, the session is closed, the prompt is empty,
+                or delivery misses the deadline.
+        """
         if self._lifecycle_state != _OPEN:
             raise ConfigError("session is closed")
         if not self._active:
@@ -303,7 +492,7 @@ class Session:
             return
         try:
             await asyncio.wait_for(future, timeout_s)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             # The run never reached a alignment boundary in time. Drop the still
             # -pending entry so it cannot inject into a later turn, and surface
             # the timeout instead of blocking the caller indefinitely. (If the
@@ -314,9 +503,11 @@ class Session:
             raise ConfigError("alignment timed out before it was applied") from None
 
     def interrupt(self) -> None:
+        """Request a cooperative stop at the next loop boundary."""
         self.interrupt_requested = True
 
     def abort(self) -> None:
+        """Abort the active run and cancel owned worker and background tasks."""
         self._abort_controller.abort()
         # Cancel any running background worker tasks so they don't write into
         # a dead session after the run ends.
@@ -408,6 +599,10 @@ class Session:
         self._lifecycle_state = _CLOSED
         self._closed = True
         self.agent._unregister_session(self.id, self)
+        if self._profile_cleanup is not None:
+            cleanup, self._profile_cleanup = self._profile_cleanup, None
+            if pending := cleanup():
+                await pending
 
     async def _finalize_active_run(self) -> None:
         """Abort an admitted run and wait until its complete unwind is observable.
@@ -450,12 +645,23 @@ class Session:
         await self._idle.wait()
 
     async def __aenter__(self) -> Session:
+        """Return this session for use in an async context manager.
+
+        Returns:
+            This live session.
+        """
         return self
 
     async def __aexit__(self, *exc: object) -> None:
+        """Force-release the session when leaving an async context manager.
+
+        Args:
+            exc: Exception details supplied by the context-manager protocol.
+        """
         await self.aclose(force=True)
 
     def mark_compaction_used(self) -> None:
+        """Mark the current turn as having consumed its compaction retry."""
         self.compaction_retry_used_this_turn = True
 
     async def notify(
@@ -470,6 +676,19 @@ class Session:
         The default path preserves the legacy in-process notification queue.
         With durable inbox enabled, the delivery is written to the optional
         session-store capability and deduplicated by its stable delivery id.
+
+        Args:
+            message: User-authored message to deliver at a turn boundary.
+            delivery_id: Stable id used for durable deduplication; generated when omitted.
+            source: Host-defined origin label for durable delivery metadata.
+            metadata: JSON-compatible delivery metadata.
+
+        Returns:
+            The stable delivery id assigned to the queued message.
+
+        Raises:
+            ConfigError: If the session is closed, the message is not a user message,
+                or durable inbox support is unavailable.
         """
         if self._lifecycle_state == _CLOSED or self._closed:
             raise ConfigError("session is closed")
@@ -490,24 +709,40 @@ class Session:
             )
         from .durability import InboxDelivery
 
-        await cast(Any, enqueue)(
-            self.id,
-            InboxDelivery(
-                delivery_id=stable_id,
-                message=message,
-                source=source,
-                metadata=dict(metadata or {}),
+        await durable_call(
+            self,
+            "session.enqueue_inbox",
+            cast(Any, enqueue)(
+                self.id,
+                InboxDelivery(
+                    delivery_id=stable_id,
+                    message=message,
+                    source=source,
+                    metadata=dict(metadata or {}),
+                ),
             ),
         )
         return stable_id
 
     async def append(self, messages: list[Message]) -> None:
+        """Durably append messages, then update the in-memory session log.
+
+        Args:
+            messages: Ordered messages to append to both the store and log.
+
+        Raises:
+            ConfigError: If the session has been closed.
+        """
         # An admitted run may still need to durably append its terminal state
         # while the session is quiescing. Only the final CLOSED transition makes
         # history immutable through this live object.
         if self._lifecycle_state == _CLOSED or self._closed:
             raise ConfigError("session is closed")
-        stored = await self.store.append_messages(self.id, messages)
+        stored = await durable_call(
+            self,
+            "session.append",
+            self.store.append_messages(self.id, messages),
+        )
         self._track_seqs(stored)
         self.session_log.append_many(messages)
 
@@ -524,9 +759,21 @@ class Session:
                     self._last_seq = max(self._last_seq, seq)
 
     async def update_meta(self, patch: dict[str, object]) -> None:
+        """Persist and merge a metadata patch.
+
+        Args:
+            patch: JSON-compatible metadata fields to update.
+
+        Raises:
+            ConfigError: If the session has been closed.
+        """
         if self._lifecycle_state == _CLOSED or self._closed:
             raise ConfigError("session is closed")
-        updated = await self.store.update_meta(self.id, patch)
+        updated = await durable_call(
+            self,
+            "session.update_meta",
+            self.store.update_meta(self.id, patch),
+        )
         self.meta.update(updated.meta)
 
 
@@ -536,48 +783,6 @@ async def _aclose_generator(gen: Any) -> None:
     if aclose is None:
         return
     await aclose()
-
-
-# ``provider_view=`` and ``full_history=`` were public Session constructor
-# keywords before SessionLog became canonical. Keep a keyword-only compatibility
-# seam without restoring either value as mutable Session state. The generated
-# dataclass initializer remains the implementation for the standard path.
-_SESSION_INIT = Session.__init__
-_LEGACY_VIEW_MISSING = object()
-
-
-def _session_init_compat(
-    self: Session,
-    *args: Any,
-    provider_view: Sequence[Message] | object = _LEGACY_VIEW_MISSING,
-    full_history: Sequence[Message] | object = _LEGACY_VIEW_MISSING,
-    **kwargs: Any,
-) -> None:
-    legacy_supplied = (
-        provider_view is not _LEGACY_VIEW_MISSING or full_history is not _LEGACY_VIEW_MISSING
-    )
-    if legacy_supplied:
-        if len(args) >= 6 or "session_log" in kwargs:
-            raise TypeError(
-                "Session() cannot combine legacy provider_view/full_history with session_log"
-            )
-        warnings.warn(
-            "Session(provider_view=..., full_history=...) is deprecated; "
-            "pass session_log=SessionLog.seed(historical=..., visible=...) instead",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        historical = (
-            () if full_history is _LEGACY_VIEW_MISSING else cast(Sequence[Message], full_history)
-        )
-        visible = (
-            () if provider_view is _LEGACY_VIEW_MISSING else cast(Sequence[Message], provider_view)
-        )
-        kwargs["session_log"] = SessionLog.seed(historical=historical, visible=visible)
-    _SESSION_INIT(self, *args, **kwargs)
-
-
-Session.__init__ = _session_init_compat  # type: ignore[method-assign]
 
 
 def _consume_task_exception(task: asyncio.Task[None]) -> None:

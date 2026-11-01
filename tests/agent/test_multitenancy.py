@@ -16,20 +16,14 @@ import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
+from tests.support.agents import make_agent
+from tests.support.tools import tool_registry
+
 
 def _agent(provider: Any, tools: Any = None, **kwargs: Any) -> Any:
-    from linch import Agent
-    from linch.sessions import InMemorySessionStore
-
-    return Agent(
-        model="m",
-        provider=provider,
-        session_store=InMemorySessionStore(),
-        permissions={"mode": "skip-dangerous"},
-        cwd=".",
-        tools=tools,
-        **kwargs,
-    )
+    kwargs.setdefault("model", "m")
+    kwargs.setdefault("run_store", None)
+    return make_agent(provider, tools=tools, **kwargs)
 
 
 def _texts(message: Any) -> str:
@@ -37,7 +31,7 @@ def _texts(message: Any) -> str:
 
 
 async def test_concurrent_agents_do_not_cross_talk() -> None:
-    from linch.evals import ScriptedProvider, TextTurn
+    from tests.support.providers import ScriptedProvider, TextTurn
 
     # Three agents, each scripted to emit a distinct final answer.
     agents = []
@@ -63,8 +57,8 @@ async def test_concurrent_agents_do_not_cross_talk() -> None:
 
 
 async def test_close_drains_own_workers_without_touching_other_agent() -> None:
-    from linch.evals import ScriptedProvider, TextTurn, ToolUseTurn
-    from linch.tools import ToolRegistry, tool
+    from linch.tools import tool
+    from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
 
     def _hanging_agent() -> tuple[Any, asyncio.Event]:
         started = asyncio.Event()
@@ -76,8 +70,7 @@ async def test_close_drains_own_workers_without_touching_other_agent() -> None:
             await asyncio.Event().wait()
             return "never"
 
-        tools = ToolRegistry()
-        tools.register(hang)
+        tools = tool_registry(hang)
         provider = ScriptedProvider(
             [
                 ToolUseTurn(tool_name="hang", tool_input={"run_in_background": True}),
