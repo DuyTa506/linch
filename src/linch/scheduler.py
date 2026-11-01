@@ -5,11 +5,14 @@ import copy
 import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal, cast
 from uuid import uuid4
 from xml.sax.saxutils import escape
 
+from . import lifecycle
+from ._telemetry import trace_tool
+from ._wire import UnsupportedWireVersionError
 from .abort import AbortContext, throw_if_aborted
 from .errors import AbortError, ToolExecutionError, ToolTimeoutError
 from .events import (
@@ -25,12 +28,11 @@ from .events import (
 )
 from .hooks import (
     HookDispatcher,
-    HookEvent,
     PostToolUseContext,
     PostToolUseFailureContext,
     PreToolUseContext,
 )
-from .permissions import PendingToolCall, PermissionDecision
+from .permissions import PendingToolCall, PermissionDecision, Principal
 from .permissions.keys import permission_decision_key as _permission_key
 from .providers.retry import RetryOptions, _delay_for_error
 from .tools import (
@@ -66,6 +68,7 @@ class ResolvedCall:
     summary: str
     is_immediate_error: bool
     immediate_error_reason: str | None = None
+    principal: Principal | None = field(default=None, repr=False)
 
 
 @dataclass(slots=True)
@@ -74,6 +77,7 @@ class ToolExecutionOutcome:
     tool_result: ToolResult
     duration_ms: int
     tool_output: CanonicalToolOutput | None = None
+    error_type: str | None = None
 
 
 @dataclass(slots=True)
@@ -112,9 +116,15 @@ async def _maybe_offload_block(
 
     Returns *result* unchanged when offload is disabled or not applicable
     (``maybe_offload`` is a no-op on error / filesystem-tool results)."""
-    _fs = getattr(session, "filesystem", None)
     _offload_cfg = getattr(agent, "result_offload", None)
-    if _fs is None or _offload_cfg is None:
+    if _offload_cfg is None:
+        return result
+    from .filesystem.backend import resolve_filesystem_backend
+
+    _fs = resolve_filesystem_backend(getattr(session, "run_deps", None))
+    if _fs is None:
+        _fs = getattr(session, "filesystem", None)
+    if _fs is None:
         return result
     from .filesystem.offload import maybe_offload
 
@@ -141,6 +151,7 @@ def _execution_outcome(
     block_result: ToolResult | None = None,
     *,
     tool_output: CanonicalToolOutput | None = None,
+    error_type: str | None = None,
 ) -> ToolExecutionOutcome:
     provider_result = block_result or tool_result
     return ToolExecutionOutcome(
@@ -152,6 +163,7 @@ def _execution_outcome(
         tool_result=tool_result,
         duration_ms=tool_result.duration_ms,
         tool_output=tool_output,
+        error_type=error_type,
     )
 
 
@@ -211,10 +223,17 @@ def _v2_contract_error(
     return _execution_outcome(
         call.id,
         _tool_result_error(f"Tool output invalid: {exc}", duration_ms),
+        error_type=type(exc).__name__,
     )
 
 
-def _resolve_call(block: ToolUseBlock, tools: Any, cwd: str) -> ResolvedCall:
+def _resolve_call(
+    block: ToolUseBlock, tools: Any, cwd: str, error_reason: str | None = None
+) -> ResolvedCall:
+    if error_reason:
+        return ResolvedCall(
+            block.id, block, None, block.input, f"{block.name}(unavailable)", True, error_reason
+        )
     if block.input.get("__invalid_json"):
         raw = str(block.input.get("raw", ""))
         return ResolvedCall(
@@ -353,25 +372,12 @@ async def _run_background_tool(
     from .types import Message, TextBlock
 
     notification_message = Message(role="user", content=[TextBlock(text=notification)])
-    notify = getattr(session, "notify", None)
-    if callable(notify):
-        await cast(
-            Awaitable[Any],
-            notify(
-                notification_message,
-                delivery_id=f"background-tool:{bg_id}",
-                source="background-tool",
-                metadata={"task_id": bg_id, "tool_name": tool_name, "status": status_str},
-            ),
-        )
-    else:
-        # Compatibility for lightweight Session duck types used by legacy
-        # embedders/tests. Real Session instances always route through notify(),
-        # which enforces the durable-inbox contract when enabled.
-        notifications = getattr(session, "pending_notifications", None)
-        if notifications is None:
-            return
-        notifications.append(notification_message)
+    await session.notify(
+        notification_message,
+        delivery_id=f"background-tool:{bg_id}",
+        source="background-tool",
+        metadata={"task_id": bg_id, "tool_name": tool_name, "status": status_str},
+    )
     completion_event = BackgroundWorkerEvent(
         worker_id=bg_id,
         status=status_str,
@@ -424,6 +430,7 @@ def _skill_name_from_input(call: ResolvedCall, input: dict[str, Any]) -> str | N
     return raw[1:] if raw.startswith("/") else raw
 
 
+@trace_tool
 async def _execute_one(
     call: ResolvedCall,
     decision: PermissionDecision,
@@ -518,6 +525,7 @@ async def _execute_one(
         # Stable across resume: run_id is reused by resume_loop and call.id comes
         # from the persisted provider_view, so a re-executed tool sees the same key.
         idempotency_key=f"{execution_run_id}:{call.id}",
+        _principal=call.principal,
     )
     try:
         return await _execute_tool_attempts(
@@ -574,6 +582,7 @@ def _dispatch_execute(
             # permission would redirect the approved call to another workspace.
             "execution",
             "idempotency_key",
+            "principal",
         )
     }
     execution = ToolExecution(
@@ -655,7 +664,7 @@ async def _execute_tool_attempts(
             return _execution_outcome(call.id, result, block_result=block_result)
         except AbortError:
             raise
-        except asyncio.TimeoutError:
+        except TimeoutError:
             # result_timeout_ms may be None if the tool raised asyncio.TimeoutError
             # internally (its own deadline) with no agent-wide timeout set.
             ms: int | str = int(result_timeout_ms) if result_timeout_ms is not None else "unknown"
@@ -673,6 +682,7 @@ async def _execute_tool_attempts(
                     ),
                     duration_ms,
                 ),
+                error_type="ToolTimeoutError",
             )
         except ToolOutputContractError as exc:
             duration_ms = int((time.perf_counter() - started) * 1000)
@@ -685,6 +695,7 @@ async def _execute_tool_attempts(
             return _execution_outcome(
                 call.id,
                 _tool_result_error(f"Tool failed: {exc}", duration_ms),
+                error_type=type(exc).__name__,
             )
 
     # Defensive fallback — all attempts exhausted (should be unreachable because
@@ -719,9 +730,7 @@ def _tool_parallel(call: ResolvedCall, input: dict[str, Any] | None = None) -> b
             return False
     if _tool_scope(call) != "read":
         return False
-    if parallel is not None:
-        return bool(parallel)
-    return bool(getattr(call.tool, "parallel_safe", False))
+    return bool(parallel)
 
 
 def _resource_accesses(
@@ -846,7 +855,7 @@ async def _dispatch_pre_tool_use(
     turn_index: int | None,
 ) -> tuple[dict[str, Any], str | None, Any, list[Event]]:
     outcome = await dispatcher.dispatch(
-        HookEvent.PRE_TOOL_USE,
+        lifecycle.PRE_TOOL_USE,
         PreToolUseContext(
             session=session,
             run_id=session.active_run_id or "unknown",
@@ -924,7 +933,7 @@ async def _dispatch_post_tool_use(
     turn_index: int | None,
 ) -> tuple[ToolExecutionOutcome, list[Event]]:
     dispatched = await dispatcher.dispatch(
-        HookEvent.POST_TOOL_USE,
+        lifecycle.POST_TOOL_USE,
         PostToolUseContext(
             session=session,
             run_id=session.active_run_id or "unknown",
@@ -1007,7 +1016,7 @@ async def _dispatch_post_tool_use_failure(
     if not dispatcher.active or tool_result is None or not getattr(tool_result, "is_error", False):
         return []
     dispatched = await dispatcher.dispatch(
-        HookEvent.POST_TOOL_USE_FAILURE,
+        lifecycle.POST_TOOL_USE_FAILURE,
         PostToolUseFailureContext(
             session=session,
             run_id=session.active_run_id or "unknown",
@@ -1215,6 +1224,7 @@ def _evaluate_permissions(
                 tool=tool_obj,
                 input=call.input,
                 cwd=_effective_cwd(session, agent),
+                principal=call.principal,
             )
         )
         if initial.decision != "ask":
@@ -1229,6 +1239,8 @@ def _evaluate_permissions(
 
             try:
                 decisions.append(_pd_from_dict(_stored_decisions[_key]))
+            except UnsupportedWireVersionError:
+                raise
             except (AttributeError, TypeError, ValueError):
                 ask_indices.append(i)
                 decisions.append(initial)
@@ -1264,6 +1276,7 @@ async def _resolve_ask_decisions(
                     tool=call.tool,
                     input=call.input,
                     cwd=_effective_cwd(session, agent),
+                    principal=call.principal,
                 ),
                 signal,
             )
@@ -1584,13 +1597,37 @@ async def execute_tool_calls(
     turn_index: int | None = None,
     on_permissions_resolved: Callable[[], Awaitable[None]] | None = None,
 ) -> AsyncIterator[Event]:
+    """Execute a provider batch and yield its lifecycle events.
+
+    Args:
+        blocks: Provider-emitted tool calls to validate and execute.
+        agent: Agent configuration and tool registry owner.
+        session: Session carrying run-scoped state and notifications.
+        signal: Abort signal checked during permission and tool execution.
+        turn_index: Optional provider-turn index for hooks and telemetry.
+        on_permissions_resolved: Optional durability callback before execution.
+
+    Yields:
+        Tool lifecycle, permission, progress, and skill events.
+    """
     if not blocks:
         return
 
     blocks, bg_ids = _strip_background_hints(blocks, agent)
 
     effective_tools = getattr(session, "tools_override", None) or agent.tools
-    resolved = [_resolve_call(b, effective_tools, agent.cwd) for b in blocks]
+    bus = getattr(getattr(agent, "context", None), "events", None)
+    if bus is not None and bus.has_listeners(lifecycle.TOOL_RESOLVE):
+        resolved = []
+        for block in blocks:
+            reason = await bus.serial(lifecycle.TOOL_RESOLVE, block.name, block.input, session)
+            resolved.append(_resolve_call(block, effective_tools, agent.cwd, reason))
+    else:
+        resolved = [_resolve_call(b, effective_tools, agent.cwd) for b in blocks]
+    principal = getattr(session, "_active_principal", None)
+    if principal is not None:
+        for call in resolved:
+            call.principal = principal
     _enforce_turn_tool_availability(resolved, session)
     hook_dispatcher = HookDispatcher(_scheduler_hooks(agent))
 

@@ -78,25 +78,45 @@ def _check_tool_shape(tool: Any) -> None:
 
 
 class ToolRegistry:
+    """Own named tool registrations and reversible replacements.
+
+    Registrations preserve insertion order for list and schema output; prompt
+    contributions are ordered by tool name and declaration order. Registration
+    and replacement operations return disposable ownership handles.
+    """
+
     def __init__(self) -> None:
+        """Create an empty registry."""
+
         self._tools: dict[str, Tool] = {}
         self._registrations: dict[str, _Registration] = {}
         self._generation = 0
 
-    def add(self, tool: Tool) -> Disposable:
-        return self.register(tool)
-
     @property
     def generation(self) -> int:
-        """Monotonic structural revision used by prompt/request caches."""
+        """Return the monotonic structural revision used by caches.
+
+        Returns:
+            Revision incremented whenever the registry structure changes.
+        """
         return self._generation
 
     def register(self, tool: Tool) -> Disposable:
         """Register a new tool; returns a disposer that unregisters it.
 
-        Raises :exc:`ConfigError` if the name is taken.  The returned
-        :class:`~linch.kernel.Disposable` removes only this registration. A later
-        registration owns the slot even when it reuses the same tool object.
+        Args:
+            tool: Tool to add under its model-visible name.
+
+        Returns:
+            Disposable that removes this registration while it still owns the slot.
+
+        Raises:
+            ConfigError: If the tool shape is invalid or its name is already
+                registered.
+
+        The returned :class:`~linch.kernel.Disposable` removes only this
+        registration. A later registration owns the slot even when it reuses
+        the same tool object.
         """
         _check_tool_shape(tool)
         if tool.name in self._tools:
@@ -106,15 +126,18 @@ class ToolRegistry:
         self._generation += 1
         return self._disposer(tool.name, registration)
 
-    def remove(self, name: str) -> Tool | None:
-        return self.unregister(name)
-
     def unregister(self, name: str) -> Tool | None:
         """Remove the tool with *name* and return it, or ``None`` if not found.
 
+        Args:
+            name: Model-visible name of the tool to remove.
+
+        Returns:
+            The removed tool, or ``None`` when no registration has that name.
+
         Example — strip Bash from the default toolset::
 
-            registry = default_tools()
+            registry = workspace_tools()
             registry.unregister("Bash")
         """
         removed = self._tools.pop(name, None)
@@ -126,10 +149,20 @@ class ToolRegistry:
     def replace(self, tool: Tool) -> Disposable:
         """Register *tool*, overwriting any existing tool with the same name.
 
+        Args:
+            tool: Replacement tool to install under its model-visible name.
+
+        Returns:
+            Disposable that restores the preceding registration while this
+                replacement still owns the slot.
+
         Unlike :meth:`register` this does **not** raise if the name exists;
         use it to hot-swap a built-in with a custom implementation.  Returns a
         disposer that restores the preceding registration if this replacement
         still owns the slot.
+
+        Raises:
+            ConfigError: If the replacement tool shape is invalid.
         """
         _check_tool_shape(tool)
         registration = _Registration(
@@ -176,6 +209,9 @@ class ToolRegistry:
 
         The new registry contains the same tool instances; mutations to the
         copy (register / unregister) do not affect the original.
+
+        Returns:
+            Independent registry containing the same tool instances.
         """
         new = ToolRegistry()
         for name, tool in self._tools.items():
@@ -196,10 +232,13 @@ class ToolRegistry:
             exclude: Tool names to drop from the result.  Applied after
                 *include*.
 
+        Returns:
+            Independent registry containing the filtered tool registrations.
+
         Example — RAG agent with only a custom ``RetrieveDocs`` tool plus
         tasks::
 
-            registry = default_tools().subset(
+            registry = workspace_tools().subset(
                 include={"RetrieveDocs", "TaskCreate", "TaskGet"}
             )
         """
@@ -222,6 +261,13 @@ class ToolRegistry:
 
         With no filters this returns a shallow copy.  Tool tags are read from a
         ``tags`` attribute when present.
+
+        Args:
+            names: Optional names to include.
+            tags: Optional tags whose intersection selects a tool.
+
+        Returns:
+            New registry containing selected tools.
         """
         if names is None and tags is None:
             return self.copy()
@@ -236,12 +282,33 @@ class ToolRegistry:
         return selected
 
     def get(self, name: str) -> Tool | None:
+        """Look up a registered tool by name.
+
+        Args:
+            name: Registered tool name.
+
+        Returns:
+            Tool instance, or ``None`` when no tool has that name.
+        """
+
         return self._tools.get(name)
 
     def list(self) -> list[Tool]:
+        """Return registered tools in insertion order.
+
+        Returns:
+            Shallow list of registered tool instances.
+        """
+
         return list(self._tools.values())
 
     def schemas(self) -> list[dict[str, Any]]:
+        """Return model-facing schemas for all registered tools.
+
+        Returns:
+            Tool name, description, and input-schema mappings.
+        """
+
         return [
             {
                 "name": tool.name,
@@ -264,6 +331,17 @@ class ToolRegistry:
         when a tool is registered.  An inactive tool therefore cannot break a
         filtered request, while an active malformed contribution fails before
         the provider is called.
+
+        Args:
+            active_names: Optional tool names to include; ``None`` includes all
+                registered tools.
+
+        Returns:
+            Validated prompt sections in deterministic tool-name and declaration
+            order.
+
+        Raises:
+            ConfigError: If an active tool contributes malformed sections.
         """
         from ..config import SystemPromptSection
 
@@ -333,6 +411,17 @@ class ToolRegistry:
         This is separate from provider tool schemas: changing contribution text
         invalidates the Agent's system-block cache even when the tool schema is
         unchanged.
+
+        Args:
+            active_names: Optional tool names whose prompt contributions are
+                included; ``None`` includes all registered tools.
+
+        Returns:
+            Stable tuples containing section name, text, cacheability, and
+            placement.
+
+        Raises:
+            ConfigError: If an active tool contributes malformed sections.
         """
         return tuple(
             (section.name, section.text, section.cacheable, section.placement)
@@ -340,62 +429,42 @@ class ToolRegistry:
         )
 
 
-def workspace_tools() -> ToolRegistry:
+def workspace_tools(
+    *,
+    exclude: set[str] | None = None,
+    extra: Iterable[Tool] | None = None,
+) -> ToolRegistry:
     """Return Linch's explicit software-workspace tool preset.
 
     ``Agent`` no longer installs this registry implicitly.  Coding harnesses
     should pass ``tools=workspace_tools()`` (or use a higher-level coding/deep
     agent preset), making filesystem and shell authority visible at the call
     site.
-    """
-    registry = ToolRegistry()
-    registry.register(ReadTool())
-    registry.register(WriteTool())
-    registry.register(EditTool())
-    registry.register(BashTool())
-    registry.register(GlobTool())
-    registry.register(GrepTool())
-    registry.register(TaskCreateTool())
-    registry.register(TaskListTool())
-    registry.register(TaskGetTool())
-    registry.register(TaskUpdateTool())
-    return registry
-
-
-def coding_tools() -> ToolRegistry:
-    """Alias for :func:`workspace_tools` with a coding-oriented name."""
-    return workspace_tools()
-
-
-def default_tools() -> ToolRegistry:
-    """Deprecated compatibility alias for :func:`workspace_tools`.
-
-    The name is retained for source compatibility, but these are no longer the
-    defaults of :class:`linch.Agent` in Linch 2.0.
-    """
-    return workspace_tools()
-
-
-def tools_from_defaults(
-    *,
-    exclude: set[str] | None = None,
-    extra: list[Tool] | None = None,
-) -> ToolRegistry:
-    """Return a modified copy of the default toolset.
 
     Args:
-        exclude: Tool names to remove from the defaults.
-        extra: Additional tools to register (after removing *exclude*).
+        exclude: Built-in tool names to omit.
+        extra: Additional tools to register after the preset.
 
-    Example::
-
-        registry = tools_from_defaults(
-            exclude={"Bash", "Write"},
-            extra=[MySearchTool()],
-        )
+    Returns:
+        Registry containing the workspace preset and requested extras.
     """
-    registry = workspace_tools().subset(exclude=exclude)
-    for tool in extra or []:
+    registry = ToolRegistry()
+    for tool in (
+        ReadTool(),
+        WriteTool(),
+        EditTool(),
+        BashTool(),
+        GlobTool(),
+        GrepTool(),
+        TaskCreateTool(),
+        TaskListTool(),
+        TaskGetTool(),
+        TaskUpdateTool(),
+    ):
+        registry.register(tool)
+    if exclude:
+        registry = registry.subset(exclude=exclude)
+    for tool in extra or ():
         registry.register(tool)
     return registry
 
@@ -406,6 +475,12 @@ def empty_tools(*extra: Tool) -> ToolRegistry:
     Example::
 
         registry = empty_tools(RetrieveDocs(store=my_store), RunSQL(db=conn))
+
+    Args:
+        *extra: Tools to register in the otherwise empty registry.
+
+    Returns:
+        Registry containing only the supplied tools.
     """
     registry = ToolRegistry()
     for tool in extra:
