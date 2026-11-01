@@ -117,12 +117,8 @@ def _permission_policy_contract(agent: Any) -> dict[str, Any]:
     callback = getattr(engine, "can_use_tool", None)
     callback_identity = None
     if callback is not None:
-        policy_id = getattr(callback, "resume_policy_id", getattr(callback, "policy_id", None))
-        policy_version = getattr(
-            callback,
-            "resume_policy_version",
-            getattr(callback, "policy_version", None),
-        )
+        policy_id = getattr(callback, "resume_policy_id", None)
+        policy_version = getattr(callback, "resume_policy_version", None)
         if not isinstance(policy_id, str) or not policy_id:
             raise ConfigError(
                 "durable runs with can_use_tool require callback.resume_policy_id "
@@ -158,12 +154,8 @@ def _hook_policy_contract(agent: Any) -> list[dict[str, Any]]:
     for hook in getattr(agent, "hooks", ()) or ():
         module = hook.__class__.__module__
         class_name = hook.__class__.__name__
-        policy_id = getattr(hook, "resume_policy_id", getattr(hook, "policy_id", None))
-        policy_version = getattr(
-            hook,
-            "resume_policy_version",
-            getattr(hook, "policy_version", None),
-        )
+        policy_id = getattr(hook, "resume_policy_id", None)
+        policy_version = getattr(hook, "resume_policy_version", None)
         checkpoint_key = getattr(hook, "checkpoint_key", None)
         custom_or_adapter_policy = not module.startswith("linch.") or class_name in adapter_policies
         if custom_or_adapter_policy and not (isinstance(policy_id, str) and policy_id):

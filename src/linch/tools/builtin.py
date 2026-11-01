@@ -76,9 +76,6 @@ class ReadTool:
         """
 
         file_path = raw.get("file_path")
-        if file_path is None:
-            # Legacy alias.
-            file_path = raw.get("path")
         if not isinstance(file_path, str) or file_path == "":
             raise ValueError("file_path must be a non-empty string")
         result: dict[str, object] = {"file_path": file_path}
@@ -184,8 +181,6 @@ class WriteTool:
         """
 
         file_path = raw.get("file_path")
-        if file_path is None:
-            file_path = raw.get("path")
         if not isinstance(file_path, str) or file_path == "":
             raise ValueError("file_path must be a non-empty string")
         content = raw.get("content")
@@ -277,14 +272,8 @@ class EditTool:
         """
 
         file_path = raw.get("file_path")
-        if file_path is None:
-            file_path = raw.get("path")
         old_string = raw.get("old_string")
-        if old_string is None:
-            old_string = raw.get("old")
         new_string = raw.get("new_string")
-        if new_string is None:
-            new_string = raw.get("new")
         if not isinstance(file_path, str) or file_path == "":
             raise ValueError("file_path must be a non-empty string")
         if not isinstance(old_string, str):
@@ -1054,16 +1043,10 @@ class GlobTool:
         """
 
         pattern = raw.get("glob_pattern")
-        if pattern is None:
-            pattern = raw.get("pattern")
         if not isinstance(pattern, str) or pattern == "":
             raise ToolExecutionError("glob_pattern must be non-empty")
-        if not pattern:
-            raise ToolExecutionError("pattern must be non-empty")
         result: dict[str, object] = {"glob_pattern": pattern}
         target = raw.get("target_directory")
-        if target is None:
-            target = raw.get("path")
         if target is not None:
             result["target_directory"] = str(target)
         return result

@@ -337,6 +337,21 @@ def test_listener_requires_json_safe_semantic_config_or_fingerprint() -> None:
         _ = pipe.resume_policy_config
 
 
+def test_listener_legacy_policy_attributes_are_not_resume_identity() -> None:
+    pipe = ToolPipeline()
+
+    async def legacy(execution: ToolExecution, next) -> object:
+        return await next()
+
+    legacy.policy_id = "legacy.policy"  # type: ignore[attr-defined]
+    legacy.policy_version = "1"  # type: ignore[attr-defined]
+    legacy.resume_policy_config = {}  # type: ignore[attr-defined]
+    pipe.on_execute(legacy)
+
+    with pytest.raises(ValueError, match="resume_policy_id"):
+        _ = pipe.resume_policy_config
+
+
 # ── Scheduler integration: the tools/execute seam is actually invoked ──────────
 
 

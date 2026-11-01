@@ -154,13 +154,13 @@ async def test_callback_policy_version_change_denies_resume() -> None:
     first = _agent(
         run_store=run_store,
         session_store=session_store,
-        permissions={"mode": "default", "canUseTool": Callback("1")},
+        permissions={"mode": "default", "can_use_tool": Callback("1")},
     )
     run_id = await _interrupt_after_first_event(await first.session(id="s1"))
     changed = _agent(
         run_store=run_store,
         session_store=session_store,
-        permissions={"mode": "default", "canUseTool": Callback("2")},
+        permissions={"mode": "default", "can_use_tool": Callback("2")},
     )
     with pytest.raises(ConfigError, match="policy_version"):
         _ = [event async for event in (await changed.session(id="s1")).resume(run_id)]
@@ -180,7 +180,40 @@ async def test_opaque_custom_policy_rejected_for_durable_run(kind: str) -> None:
         run_store=InMemoryRunStore(),
         session_store=InMemorySessionStore(),
         permissions=(
-            {"mode": "default", "canUseTool": Callback()}
+            {"mode": "default", "can_use_tool": Callback()}
+            if kind == "callback"
+            else {"mode": "skip-dangerous"}
+        ),
+        hooks=[Hook()] if kind == "hook" else None,
+    )
+    session = await agent.session()
+    with pytest.raises(ConfigError, match="resume_policy_id"):
+        _ = [event async for event in session.run("go")]
+
+
+@pytest.mark.parametrize("kind", ["callback", "hook"])
+async def test_legacy_policy_attributes_do_not_identify_durable_policy(kind: str) -> None:
+    class Callback:
+        policy_id = "legacy-policy"
+        policy_version = "1"
+        resume_policy_config: dict[str, Any] = {}
+
+        async def __call__(self, request: Any) -> dict[str, str]:
+            return {"behavior": "allow"}
+
+    class Hook:
+        policy_id = "legacy-policy"
+        policy_version = "1"
+        resume_policy_config: dict[str, Any] = {}
+
+        def on_pre_tool_use(self, ctx: Any) -> None:
+            return None
+
+    agent = _agent(
+        run_store=InMemoryRunStore(),
+        session_store=InMemorySessionStore(),
+        permissions=(
+            {"mode": "default", "can_use_tool": Callback()}
             if kind == "callback"
             else {"mode": "skip-dangerous"}
         ),

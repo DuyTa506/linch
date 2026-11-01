@@ -1293,7 +1293,7 @@ async def test_permission_pending_resume_reemits_before_tool_execution() -> None
     agent = _agent(
         provider=ScriptProvider(tool_names=["WriteThing"]),
         tools=_registry(counts, "WriteThing", scope="write"),
-        permissions={"mode": "default", "canUseTool": allow},
+        permissions={"mode": "default", "can_use_tool": allow},
         session_store=session_store,
         run_store=run_store,
     )
@@ -1309,7 +1309,7 @@ async def test_permission_pending_resume_reemits_before_tool_execution() -> None
         model="gpt-5",
         provider=ScriptProvider(tool_names=["WriteThing"]),
         tools=_registry(counts, "WriteThing", scope="write"),
-        permissions={"mode": "default", "canUseTool": allow},
+        permissions={"mode": "default", "can_use_tool": allow},
         session_store=session_store,
         run_store=run_store,
         cwd=".",
@@ -1959,7 +1959,7 @@ async def test_crash_between_permission_checkpoint_and_start_event_reruns_tool()
     agent = _agent(
         provider=ScriptProvider(tool_names=["WriteThing"]),
         tools=_registry(counts, "WriteThing", scope="write"),
-        permissions={"mode": "default", "canUseTool": allow_callback},
+        permissions={"mode": "default", "can_use_tool": allow_callback},
         session_store=session_store,
         run_store=run_store,
     )
@@ -1979,7 +1979,7 @@ async def test_crash_between_permission_checkpoint_and_start_event_reruns_tool()
     restarted = _agent(
         provider=ScriptProvider(tool_names=["WriteThing"]),
         tools=_registry(counts, "WriteThing", scope="write"),
-        permissions={"mode": "default", "canUseTool": allow_callback},
+        permissions={"mode": "default", "can_use_tool": allow_callback},
         session_store=session_store,
         run_store=run_store,
     )
@@ -2326,7 +2326,7 @@ async def test_permission_decision_persists_and_resume_skips_callback() -> None:
     agent = _agent(
         provider=ScriptProvider(tool_names=["WriteThing"]),
         tools=_registry(counts, "WriteThing", scope="write"),
-        permissions={"mode": "default", "canUseTool": allow_callback},
+        permissions={"mode": "default", "can_use_tool": allow_callback},
         session_store=session_store,
         run_store=run_store,
     )
@@ -2340,7 +2340,7 @@ async def test_permission_decision_persists_and_resume_skips_callback() -> None:
     restarted = _agent(
         provider=ScriptProvider(tool_names=["WriteThing"]),
         tools=_registry(counts, "WriteThing", scope="write"),
-        permissions={"mode": "default", "canUseTool": allow_callback},
+        permissions={"mode": "default", "can_use_tool": allow_callback},
         session_store=session_store,
         run_store=run_store,
     )
@@ -2379,7 +2379,7 @@ async def test_persisted_deny_decision_replays_on_resume() -> None:
     agent = _agent(
         provider=ScriptProvider(tool_names=["WriteThing"]),
         tools=_registry(counts, "WriteThing", scope="write"),
-        permissions={"mode": "default", "canUseTool": deny_callback},
+        permissions={"mode": "default", "can_use_tool": deny_callback},
         session_store=session_store,
         run_store=run_store,
     )
@@ -2392,7 +2392,7 @@ async def test_persisted_deny_decision_replays_on_resume() -> None:
     restarted = _agent(
         provider=ScriptProvider(tool_names=["WriteThing"]),
         tools=_registry(counts, "WriteThing", scope="write"),
-        permissions={"mode": "default", "canUseTool": deny_callback},
+        permissions={"mode": "default", "can_use_tool": deny_callback},
         session_store=session_store,
         run_store=run_store,
     )
@@ -2454,7 +2454,7 @@ async def test_permission_decision_cleared_each_turn() -> None:
     agent = _agent(
         provider=TwoTurnProvider(),
         tools=_registry(counts, "WriteThing", scope="write"),
-        permissions={"mode": "default", "canUseTool": allow_callback},
+        permissions={"mode": "default", "can_use_tool": allow_callback},
         session_store=_memory_session_store(),
     )
     session = await agent.session(id="s1")
