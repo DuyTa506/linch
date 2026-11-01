@@ -138,11 +138,12 @@ async def test_mem0_hook_skips_non_successful_agent_run() -> None:
             yield  # pragma: no cover
 
     client = FakeAsyncMemory()
+    hook = Mem0RecallHook()
     agent = make_agent(
         FailingProvider(),
         model="gpt-5",
         run_store=None,
-        hooks=[Mem0RecallHook()],
+        hooks=[hook],
         features=FeatureFlags(skills=False, subagents=False, mcp=False),
         result_offload=None,
     )
@@ -153,3 +154,40 @@ async def test_mem0_hook_skips_non_successful_agent_run() -> None:
         pass
 
     assert client.add_calls == []
+    assert hook._history_starts == {}
+
+
+async def test_mem0_hook_adds_only_new_messages_across_session_runs() -> None:
+    client = FakeAsyncMemory()
+    hook = Mem0RecallHook()
+    agent = make_agent(
+        ScriptedProvider([TextTurn("first answer"), TextTurn("second answer")]),
+        run_store=None,
+        hooks=[hook],
+        features=FeatureFlags(skills=False, subagents=False, mcp=False),
+        result_offload=None,
+    )
+    session = await agent.session()
+    options = RunOptions(deps={"mem0": client, "user_id": "user-a"})
+
+    for prompt in ("first question", "second question"):
+        async for _event in session.run(prompt, options):
+            pass
+        assert hook._history_starts == {}
+
+    assert client.add_calls == [
+        (
+            [
+                {"role": "user", "content": "first question"},
+                {"role": "assistant", "content": "first answer"},
+            ],
+            "user-a",
+        ),
+        (
+            [
+                {"role": "user", "content": "second question"},
+                {"role": "assistant", "content": "second answer"},
+            ],
+            "user-a",
+        ),
+    ]
