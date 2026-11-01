@@ -128,6 +128,7 @@ class SubagentContinueTool:
                 signal=ctx.signal,
                 emit=emit_fn,
                 run_options=RunOptions(principal=ctx.principal, deps=ctx.deps),
+                _deps_captured=True,
             )
         )
         result_text = result_text_for_caller(result)

@@ -50,6 +50,8 @@ class RunSubagentArgs:
     run_options: RunOptions | None = None
     """Per-child run options. The runner always overrides ``signal`` with the
     merged parent/child abort signal before calling ``Session.run``."""
+    _deps_captured: bool = False
+    """Whether options capture the invoking tool deps, including None."""
     signal: AbortContext | None = None
     emit: Any = None
     retain: bool = False
@@ -88,6 +90,8 @@ class ContinueSubagentArgs:
     run_options: RunOptions | None = None
     """Per-continuation run options. The runner always overrides ``signal`` with
     the merged parent/child abort signal before calling ``Session.run``."""
+    _deps_captured: bool = False
+    """Whether options capture the invoking tool deps, including None."""
     signal: AbortContext | None = None
     emit: Any = None
 
@@ -117,6 +121,28 @@ def build_child_tools(parent_tools: Any, filter: list[str] | None) -> Any:
         if wanted is None or t.name in wanted:
             child.register(t)
     return child
+
+
+def _child_run_options(parent_session: Session, options: RunOptions | None) -> RunOptions | None:
+    """Fill direct runner calls with the parent's current dependency object."""
+    if options is not None and options.deps is not None:
+        return options
+    deps = getattr(parent_session, "run_deps", None)
+    return replace(options, deps=deps) if options is not None else RunOptions(deps=deps)
+
+
+
+def _effective_child_deps(parent_session: Session, options: RunOptions | None) -> Any:
+    """Resolve the dependency object the child run will actually receive."""
+    if options is not None:
+        if options.deps is not None:
+            return options.deps
+        return getattr(getattr(parent_session, "agent", None), "deps", None)
+    deps = getattr(parent_session, "run_deps", None)
+    return (
+        deps if deps is not None else getattr(getattr(parent_session, "agent", None), "deps", None)
+    )
+
 
 
 def _last_assistant_text(message: Any) -> str:
@@ -221,6 +247,12 @@ async def run_subagent(args: RunSubagentArgs) -> RunSubagentResult:
     Returns:
         The child's answer, completion status, and durable session identity.
     """
+    if not args._deps_captured:
+        args = replace(
+            args,
+            run_options=_child_run_options(args.parent_session, args.run_options),
+            _deps_captured=True,
+        )
     binding = args.config_binding
     if binding is None and args.parent_session.active_run_id is not None:
         binding = args.parent_session._run_bindings.get(args.parent_session.active_run_id)
@@ -247,6 +279,8 @@ async def run_subagent(args: RunSubagentArgs) -> RunSubagentResult:
 async def _run_subagent_owned(
     args: RunSubagentArgs, binding: Any, on_registered: Any
 ) -> RunSubagentResult:
+    child_run_options = args.run_options
+    hook_deps = _effective_child_deps(args.parent_session, child_run_options)
     agent = args.parent_agent
     store = agent._get_store()
     config = binding.config if binding is not None else _base_run_config(args.parent_session)
@@ -357,7 +391,7 @@ async def _run_subagent_owned(
                     run_id=args.parent_run_id
                     or (binding.run_id if binding is not None else "unknown"),
                     turn_index=None,
-                    deps=getattr(args.parent_session, "run_deps", None),
+                    deps=hook_deps,
                     child_session_id=child_record.id,
                     subagent_run_id=args.subagent_run_id,
                     subagent_type=args.definition.frontmatter.name,
@@ -375,7 +409,7 @@ async def _run_subagent_owned(
             display_name=args.display_name,
             parent_session_id=args.parent_session.id,
             signal=merged_signal,
-            run_options=args.run_options,
+            run_options=child_run_options,
         )
     finally:
         # Release the isolation cwd (unless kept) before other cleanup.
@@ -392,7 +426,7 @@ async def _run_subagent_owned(
                     run_id=args.parent_run_id
                     or (binding.run_id if binding is not None else "unknown"),
                     turn_index=None,
-                    deps=getattr(args.parent_session, "run_deps", None),
+                    deps=hook_deps,
                     child_session_id=child_record.id,
                     subagent_run_id=args.subagent_run_id,
                     subagent_type=args.definition.frontmatter.name,
@@ -438,6 +472,13 @@ async def continue_subagent(args: ContinueSubagentArgs) -> RunSubagentResult:
     if args.signal is not None and args.signal.aborted:
         throw_if_aborted(args.signal)
 
+    child_run_options = (
+        args.run_options
+        if args._deps_captured
+        else _child_run_options(args.parent_session, args.run_options)
+    )
+    hook_deps = _effective_child_deps(args.parent_session, child_run_options)
+
     # Re-establish the abort link for this continuation.
     merged_signal = any_signal(child_session._abort_controller, args.signal)
 
@@ -459,7 +500,7 @@ async def continue_subagent(args: ContinueSubagentArgs) -> RunSubagentResult:
                     session=args.parent_session,
                     run_id=args.parent_run_id or "unknown",
                     turn_index=None,
-                    deps=getattr(args.parent_session, "run_deps", None),
+                    deps=hook_deps,
                     child_session_id=child_session.id,
                     subagent_run_id=subagent_run_id,
                     subagent_type=handle.definition.frontmatter.name,
@@ -476,7 +517,7 @@ async def continue_subagent(args: ContinueSubagentArgs) -> RunSubagentResult:
             display_name=handle.display_name,
             parent_session_id=args.parent_session.id,
             signal=merged_signal,
-            run_options=args.run_options,
+            run_options=child_run_options,
         )
     finally:
         # Always release the merged-signal watcher task and dispatch
@@ -489,7 +530,7 @@ async def continue_subagent(args: ContinueSubagentArgs) -> RunSubagentResult:
                     session=args.parent_session,
                     run_id=args.parent_run_id or "unknown",
                     turn_index=None,
-                    deps=getattr(args.parent_session, "run_deps", None),
+                    deps=hook_deps,
                     child_session_id=child_session.id,
                     subagent_run_id=subagent_run_id,
                     subagent_type=handle.definition.frontmatter.name,

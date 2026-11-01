@@ -198,6 +198,27 @@ async def test_subagent_continue_inherits_current_run_deps(tmp_path: Any) -> Non
         await agent.close()
 
 
+async def test_subagent_preserves_captured_none_deps_after_parent_changes(tmp_path: Any) -> None:
+    from linch.config import FeatureFlags
+    from tests.support.agents import make_agent
+    from tests.support.tools import StubTool, tool_registry
+
+    seen = []
+    agent = make_agent(
+        ScriptedProvider([ToolUseTurn("inspect", {}), TextTurn("done")]),
+        tools=tool_registry(StubTool("inspect", on_execute=lambda raw, ctx: seen.append(ctx.deps))),
+        features=FeatureFlags(subagents=True),
+        run_store=None,
+    )
+    session = await agent.session()
+    session.run_deps = {"tenant": "later run"}
+    try:
+        await _spawn(agent, session, description="worker", prompt="go")
+        assert seen == [None]
+    finally:
+        await agent.close()
+
+
 async def test_subagent_tool_stores_worker_handle(tmp_path: Any) -> None:
     """Subagent execution stores a WorkerHandle in session.workers."""
     agent, session = await _make_agent_and_session(tmp_path)
