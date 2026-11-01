@@ -314,6 +314,19 @@ def test_subagent_event_revalidates_mutated_opaque_payload_depth() -> None:
         event_to_dict(event)
 
 
+@pytest.mark.parametrize("boundary", ["construction", "serialization"])
+def test_subagent_event_rejects_mutated_wrapper_cycles(boundary: str) -> None:
+    leaf = AssistantEvent(message=Message(role="assistant", content=[]), stop_reason="end_turn")
+    event = SubagentEvent("parent", "child", "worker", "Worker", leaf)
+    event.event = event
+
+    with pytest.raises(ValueError, match="subagent event.*reference cycles"):
+        if boundary == "construction":
+            SubagentEvent("parent", "child", "worker", "Worker", event)
+        else:
+            event_to_dict(event)
+
+
 def test_ignorable_depth_limit_matches_the_durable_codec() -> None:
     """The two limits must not drift; that drift is the bug being prevented."""
     from linch.events import IGNORABLE_MAX_DEPTH
