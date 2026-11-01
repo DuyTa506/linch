@@ -502,7 +502,6 @@ async def test_thinking_usage_and_signature_replay(fake_client: FakeClient, sdk:
         ("STOP", "end_turn"),
         ("SAFETY", "refusal"),
         ("RECITATION", "refusal"),
-        ("MALFORMED_FUNCTION_CALL", "error"),
     ],
 )
 async def test_finish_reasons(
@@ -513,6 +512,29 @@ async def test_finish_reasons(
     fake_client.chunks = [chunk(sdk, [], finish)]
     events = [e async for e in GeminiProvider().stream(request())]
     assert events[-1]["stop_reason"] == expected
+
+
+@pytest.mark.parametrize(
+    "parts",
+    [[], [{"text": "partial"}], [{"function_call": {"name": "Read", "args": {}}}]],
+)
+async def test_malformed_function_call_is_retryable_error(
+    fake_client: FakeClient, sdk: Any, parts: list[dict[str, Any]]
+) -> None:
+    from linch.errors import ProviderError
+    from linch.providers.gemini import GeminiProvider
+
+    fake_client.chunks = [
+        chunk(sdk, [{"text": "earlier partial output"}]),
+        chunk(sdk, parts, "MALFORMED_FUNCTION_CALL"),
+    ]
+    events = []
+    with pytest.raises(ProviderError, match="malformed function call") as info:
+        async for event in GeminiProvider().stream(request()):
+            events.append(event)
+    assert info.value.retryable
+    assert not any(event["type"] == "message_end" for event in events)
+    assert fake_client.stream_closed
 
 
 async def test_tool_calls_override_later_token_limit(fake_client: FakeClient, sdk: Any) -> None:

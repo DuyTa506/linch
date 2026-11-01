@@ -203,7 +203,7 @@ class AnthropicProvider(BaseProvider):
         # start frame and sends no input_json_delta. Keep that actual wire
         # object so the normalized stream still has explicit JSON input.
         tool_initial_inputs: dict[int, dict[str, Any]] = {}
-        tool_input_delta_seen: set[int] = set()
+        tool_nonempty_input_seen: set[int] = set()
 
         try:
             raw_stream = await client.messages.create(**payload)
@@ -236,7 +236,8 @@ class AnthropicProvider(BaseProvider):
                         yield {"type": "text_delta", "text": delta.text}
                     elif dtype == "input_json_delta":
                         tid = tool_idx.get(event.index, "")
-                        tool_input_delta_seen.add(event.index)
+                        if delta.partial_json.strip():
+                            tool_nonempty_input_seen.add(event.index)
                         yield {
                             "type": "tool_use_input_delta",
                             "id": tid,
@@ -256,15 +257,15 @@ class AnthropicProvider(BaseProvider):
                 elif etype == "content_block_stop":
                     tid = tool_idx.pop(event.index, None)
                     initial_input = tool_initial_inputs.pop(event.index, None)
-                    had_input_delta = event.index in tool_input_delta_seen
-                    tool_input_delta_seen.discard(event.index)
+                    had_input_delta = event.index in tool_nonempty_input_seen
+                    tool_nonempty_input_seen.discard(event.index)
                     if tid is not None:
-                        if initial_input is not None and not had_input_delta:
+                        if not had_input_delta:
                             yield {
                                 "type": "tool_use_input_delta",
                                 "id": tid,
                                 "json_delta": json.dumps(
-                                    initial_input,
+                                    initial_input or {},
                                     ensure_ascii=False,
                                     separators=(",", ":"),
                                 ),
