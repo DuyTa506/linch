@@ -90,9 +90,9 @@ class _PluginMount:
         if changed_key is not None and not self._change_relevant(changed or self.host, changed_key):
             return
         if self._busy:
+            self._pending = True
             if self._pending_cleanup is not None:
                 await self._finish_deactivation(self._pending_cleanup)
-            self._pending = self._pending_cleanup is None
             return
         self._busy = True
         try:
