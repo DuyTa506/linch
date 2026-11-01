@@ -259,6 +259,7 @@ class SubagentTool:
             emit=emit_fn,
             retain=self._retain_subagents,
             run_options=RunOptions(principal=ctx.principal, deps=ctx.deps),
+            _deps_captured=True,
         )
 
         if run_in_background:
