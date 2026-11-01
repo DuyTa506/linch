@@ -1,5 +1,3 @@
-"""Phase 3: the unified ExecutionBackend seam (shell + filesystem as one world)."""
-
 from __future__ import annotations
 
 from typing import Any, get_type_hints
@@ -12,12 +10,13 @@ from linch.execution import (
     RemoteExecutionBackend,
     ShellBackend,
 )
+from linch.filesystem import StateFileBackend
 from linch.providers.base import BaseProvider
 from linch.tools.base import ToolContext, ToolResult
 from linch.tools.builtin import BashTool
+from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
+from tests.support.tools import StubTool, tool_registry
 
-# The three Bash-posture prompt branches are mutually exclusive, so each
-# posture test pins the other two as absent rather than asserting one string.
 _HOST_POSTURE_LINE = "Bash runs in the user's environment with full permissions"
 
 
@@ -38,11 +37,44 @@ class _Provider(BaseProvider):
         self.close_calls += 1
 
 
-def test_local_backend_satisfies_protocol() -> None:
-    backend = LocalExecutionBackend()
+def _agent(tmp_path: Any = ".", *, provider: Any = None, **kwargs: Any) -> Any:
+    from tests.support.agents import make_agent
+
+    options = {
+        "model": "test",
+        "provider": provider or _Provider(),
+        "cwd": str(tmp_path),
+        "result_offload": None,
+        "run_store": None,
+        "permissions": None,
+    }
+    options.update(kwargs)
+    return make_agent(options.pop("provider"), **options)
+
+
+@pytest.mark.parametrize("kind", ["local", "remote", "confined"])
+def test_execution_backend_transports(kind: str) -> None:
+    if kind == "local":
+        backend = LocalExecutionBackend()
+        assert isinstance(backend, ExecutionBackend)
+        assert isinstance(backend.shell, ShellBackend)
+        assert backend.fs is not None
+        return
+    shell = _FakeShell()
+    fs = StateFileBackend()
+    backend = RemoteExecutionBackend(
+        shell=shell,
+        fs=fs,
+        confinement=(
+            {"boundary": "remote-sandbox", "network": "none"} if kind == "confined" else None
+        ),
+    )
     assert isinstance(backend, ExecutionBackend)
-    assert isinstance(backend.shell, ShellBackend)
-    assert backend.fs is not None
+    assert backend.shell is shell
+    assert backend.fs is fs
+    assert backend.sandboxed is (kind == "confined")
+    if kind == "remote":
+        assert getattr(backend, "security_posture", None) in (None, "unverified")
 
 
 def test_public_execution_annotations_resolve_at_runtime() -> None:
@@ -84,82 +116,24 @@ class _FakeShell:
         return ExecResult(stdout=f"remote:{command}", stderr="", returncode=0, timed_out=False)
 
 
-class _FakeFs:
-    def __init__(self) -> None:
-        self._store: dict[str, str] = {}
-
-    async def read(self, path: str, *, offset: int = 0, limit: int | None = None) -> str:
-        return self._store[path]
-
-    async def write(self, path: str, content: str) -> None:
-        self._store[path] = content
-
-    async def ls(self, prefix: str = "") -> list[str]:
-        return sorted(p for p in self._store if p.startswith(prefix))
-
-    async def edit(self, path: str, old: str, new: str, *, replace_all: bool = False) -> int:
-        self._store[path] = self._store[path].replace(old, new)
-        return 1
-
-    async def exists(self, path: str) -> bool:
-        return path in self._store
-
-    async def delete(self, path: str) -> None:
-        self._store.pop(path, None)
-
-
-def test_remote_backend_bundles_supplied_transports() -> None:
-    shell = _FakeShell()
-    fs = _FakeFs()
-    backend = RemoteExecutionBackend(shell=shell, fs=fs)
-    assert isinstance(backend, ExecutionBackend)
-    assert backend.shell is shell
-    assert backend.fs is fs
-    assert backend.sandboxed is False
-
-
-def test_remote_backend_requires_confinement_metadata_to_claim_sandbox() -> None:
-    backend = RemoteExecutionBackend(
-        shell=_FakeShell(),
-        fs=_FakeFs(),
-        confinement={"boundary": "remote-sandbox", "network": "none"},
-    )
-    assert backend.sandboxed is True
-
-
+@pytest.mark.parametrize("remote", [True, False])
 @pytest.mark.asyncio
-async def test_bash_tool_sources_shell_from_execution_backend() -> None:
-    backend = RemoteExecutionBackend(shell=_FakeShell(), fs=_FakeFs())
+async def test_bash_tool_backend_selection(remote: bool) -> None:
+    backend = RemoteExecutionBackend(shell=_FakeShell(), fs=StateFileBackend()) if remote else None
     tool = BashTool(execution=backend)
     ctx = ToolContext(cwd=".", session_id="s", run_id="r", session_store=None)
-    result = await tool.execute({"command": "ls", "timeout_ms": 1000}, ctx)
-    assert "remote:ls" in result.content
-
-
-@pytest.mark.asyncio
-async def test_bash_tool_default_backend_unchanged() -> None:
-    tool = BashTool()
-    ctx = ToolContext(cwd=".", session_id="s", run_id="r", session_store=None)
-    result = await tool.execute({"command": "echo hi", "timeout_ms": 5000}, ctx)
-    assert "hi" in result.content
+    command = "ls" if remote else "echo hi"
+    result = await tool.execute({"command": command, "timeout_ms": 5000}, ctx)
+    assert ("remote:ls" if remote else "hi") in result.content
 
 
 async def test_agent_owns_context_and_registers_pipeline(tmp_path: Any) -> None:
-    from linch import Agent, Context
-    from linch.sessions import InMemorySessionStore
+    from linch import Context
     from linch.tools.pipeline import ToolPipeline
 
     context = Context(label="injected")
     pipeline = ToolPipeline()
-    agent = Agent(
-        model="test",
-        provider=_Provider(),
-        session_store=InMemorySessionStore(),
-        cwd=str(tmp_path),
-        context=context,
-        tool_pipeline=pipeline,
-        result_offload=None,
-    )
+    agent = _agent(tmp_path, context=context, tool_pipeline=pipeline)
 
     assert agent.context is not context
     assert agent.context.events is context.events
@@ -171,19 +145,11 @@ async def test_agent_owns_context_and_registers_pipeline(tmp_path: Any) -> None:
 
 
 async def test_context_disposal_is_retryable_agent_teardown(tmp_path: Any) -> None:
-    from linch import Agent, Context
-    from linch.sessions import InMemorySessionStore
+    from linch import Context
 
     parent_context = Context(label="parent")
     provider = _Provider()
-    agent = Agent(
-        model="test",
-        provider=provider,
-        session_store=InMemorySessionStore(),
-        cwd=str(tmp_path),
-        context=parent_context,
-        result_offload=None,
-    )
+    agent = _agent(tmp_path, provider=provider, context=parent_context)
     dispose_calls = 0
     real_dispose = agent.context.dispose
 
@@ -208,20 +174,15 @@ async def test_context_disposal_is_retryable_agent_teardown(tmp_path: Any) -> No
 
 
 async def test_agent_unified_world_wires_bash_context_and_session_fs(tmp_path: Any) -> None:
-    from linch import Agent, FeatureFlags, workspace_tools
-    from linch.sessions import InMemorySessionStore
+    from linch import FeatureFlags, workspace_tools
 
-    fs = _FakeFs()
+    fs = StateFileBackend()
     world = RemoteExecutionBackend(shell=_FakeShell(), fs=fs)
-    agent = Agent(
-        model="test",
-        provider=_Provider(),
-        session_store=InMemorySessionStore(),
-        cwd=str(tmp_path),
+    agent = _agent(
+        tmp_path,
         tools=workspace_tools(),
         features=FeatureFlags(filesystem=True),
         execution_backend=world,
-        result_offload=None,
     )
     session = await agent.session()
 
@@ -245,118 +206,83 @@ async def test_agent_unified_world_wires_bash_context_and_session_fs(tmp_path: A
 
 
 async def test_explicit_filesystem_conflict_with_world_fails_closed(tmp_path: Any) -> None:
-    from linch import Agent, ConfigError, FeatureFlags
-    from linch.sessions import InMemorySessionStore
+    from linch import ConfigError, FeatureFlags
 
-    world_fs = _FakeFs()
-    explicit_fs = _FakeFs()
+    world_fs = StateFileBackend()
+    explicit_fs = StateFileBackend()
     world = RemoteExecutionBackend(shell=_FakeShell(), fs=world_fs)
     with pytest.raises(ConfigError, match=r"filesystem=.*conflicts.*execution_backend.fs"):
-        Agent(
-            model="test",
-            provider=_Provider(),
-            session_store=InMemorySessionStore(),
-            cwd=str(tmp_path),
+        _agent(
+            tmp_path,
             features=FeatureFlags(filesystem=True),
             execution_backend=world,
             filesystem=explicit_fs,
-            result_offload=None,
         )
     assert world.fs is world_fs
 
 
-def test_remote_prompt_does_not_claim_sandbox_without_metadata(tmp_path: Any) -> None:
-    from linch import Agent, workspace_tools
-
-    world = RemoteExecutionBackend(shell=_FakeShell(), fs=_FakeFs())
-    agent = Agent(
-        model="test",
-        provider=_Provider(),
-        cwd=str(tmp_path),
-        tools=workspace_tools(),
-        execution_backend=world,
-        result_offload=None,
-    )
-    combined = "\n".join(block.text for block in agent.system_blocks)
-    assert "has not declared sandbox confinement" in combined
-    # Pin the branch: neither of the other two postures may also be described.
-    assert "declares sandbox confinement" not in combined
-    assert _HOST_POSTURE_LINE not in combined
-
-
-def test_docker_backend_declares_its_own_confinement() -> None:
-    """Linch's own Docker sandbox must declare confinement, not read as unverified."""
+@pytest.mark.parametrize("posture", ["unverified", "docker", "explicit", "local"])
+def test_remote_prompt_postures(tmp_path: Any, posture: str) -> None:
+    from linch import workspace_tools
     from linch.tools.execution import DockerBackend
 
-    backend = DockerBackend(image="alpine", network="none")
-    confinement = backend.confinement
-    assert confinement, "DockerBackend must declare non-empty confinement metadata"
-    assert confinement["kind"] == "docker"
-    assert confinement["image"] == "alpine"
-    assert confinement["network"] == "none"
-
-
-def test_docker_backend_prompt_reports_sandbox_confinement(tmp_path: Any) -> None:
-    from linch import Agent, workspace_tools
-    from linch.tools.execution import DockerBackend
-
-    shell = DockerBackend(image="alpine")
-    world = RemoteExecutionBackend(shell=shell, fs=_FakeFs(), confinement=shell.confinement)
-    agent = Agent(
-        model="test",
-        provider=_Provider(),
-        cwd=str(tmp_path),
-        tools=workspace_tools(),
-        execution_backend=world,
-        result_offload=None,
+    if posture == "local":
+        world = LocalExecutionBackend(cwd=str(tmp_path))
+        assert world.security_posture == "host"
+        agent = _agent(tmp_path, tools=workspace_tools(), execution_backend=world)
+        assert agent._bash_security_mode() == "host"
+        combined = "\n".join(block.text for block in agent.system_blocks)
+        assert _HOST_POSTURE_LINE in combined
+        assert "has not declared sandbox confinement" not in combined
+        assert "declares sandbox confinement" not in combined
+        return
+    if posture == "unverified":
+        world = RemoteExecutionBackend(shell=_FakeShell(), fs=StateFileBackend())
+        expected = ("has not declared sandbox confinement",)
+        absent = ("declares sandbox confinement", _HOST_POSTURE_LINE)
+    elif posture == "docker":
+        shell = DockerBackend(image="alpine", network="none")
+        assert shell.confinement
+        assert shell.confinement["kind"] == "docker"
+        assert shell.confinement["image"] == "alpine"
+        assert shell.confinement["network"] == "none"
+        world = RemoteExecutionBackend(
+            shell=shell, fs=StateFileBackend(), confinement=shell.confinement
+        )
+        expected = ("declares sandbox confinement",)
+        absent = ("has not declared sandbox confinement", _HOST_POSTURE_LINE)
+    else:
+        world = RemoteExecutionBackend(
+            shell=_FakeShell(), fs=StateFileBackend(), confinement={"boundary": "remote-sandbox"}
+        )
+        expected = (
+            "declares sandbox confinement",
+            "not an independently verified security boundary",
+        )
+        absent = ("has not declared sandbox confinement", _HOST_POSTURE_LINE)
+    combined = "\n".join(
+        block.text
+        for block in _agent(
+            tmp_path, tools=workspace_tools(), execution_backend=world
+        ).system_blocks
     )
-    combined = "\n".join(block.text for block in agent.system_blocks)
-    assert "declares sandbox confinement" in combined
-    assert "has not declared sandbox confinement" not in combined
-    assert _HOST_POSTURE_LINE not in combined
-
-
-def test_remote_prompt_uses_explicit_confinement_metadata(tmp_path: Any) -> None:
-    from linch import Agent, workspace_tools
-
-    world = RemoteExecutionBackend(
-        shell=_FakeShell(),
-        fs=_FakeFs(),
-        confinement={"boundary": "remote-sandbox"},
-    )
-    agent = Agent(
-        model="test",
-        provider=_Provider(),
-        cwd=str(tmp_path),
-        tools=workspace_tools(),
-        execution_backend=world,
-        result_offload=None,
-    )
-    combined = "\n".join(block.text for block in agent.system_blocks)
-    assert "declares sandbox confinement" in combined
-    assert "not an independently verified security boundary" in combined
-    assert "has not declared sandbox confinement" not in combined
-    assert _HOST_POSTURE_LINE not in combined
+    assert all(text in combined for text in expected)
+    assert all(text not in combined for text in absent)
 
 
 async def test_subagent_inherits_parent_execution_filesystem(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from linch import Agent, FeatureFlags
-    from linch.sessions import InMemorySessionStore
+    from linch import FeatureFlags
     from linch.subagents import runner
     from linch.subagents.runner import RunSubagentArgs, RunSubagentResult
     from linch.subagents.types import AgentDefinition, AgentFrontmatter
 
-    fs = _FakeFs()
-    agent = Agent(
-        model="test",
-        provider=_Provider(),
-        session_store=InMemorySessionStore(),
-        cwd=str(tmp_path),
+    fs = StateFileBackend()
+    agent = _agent(
+        tmp_path,
         features=FeatureFlags(filesystem=True),
         execution_backend=RemoteExecutionBackend(shell=_FakeShell(), fs=fs),
-        result_offload=None,
     )
     parent = await agent.session(id="parent")
     seen: dict[str, Any] = {}
@@ -393,63 +319,18 @@ async def test_subagent_inherits_parent_execution_filesystem(
 
 
 async def test_scheduler_injects_execution_world_into_custom_tool(tmp_path: Any) -> None:
-    from linch import Agent, ToolRegistry
-    from linch.sessions import InMemorySessionStore
-
     seen: list[Any] = []
 
-    class _CaptureTool:
-        name = "capture_execution"
-        description = "capture execution"
-        input_schema = {"type": "object", "properties": {}}
-        scope = "read"
-        parallel = True
+    async def capture(_input: dict[str, object], ctx: ToolContext) -> None:
+        seen.append(ctx.execution)
 
-        def validate(self, raw: dict[str, object]) -> dict[str, object]:
-            return raw
-
-        async def execute(self, input: dict[str, object], ctx: ToolContext) -> ToolResult:
-            seen.append(ctx.execution)
-            return ToolResult(content="captured")
-
-        def summarize(self, input: dict[str, object]) -> str:
-            return "capture"
-
-    class _ToolProvider(BaseProvider):
-        id = "tool-provider"
-
-        def __init__(self) -> None:
-            self.calls = 0
-
-        def context_window(self, model: str) -> int:
-            return 100_000
-
-        async def stream(self, req: Any):
-            from linch.types import Usage
-
-            self.calls += 1
-            yield {"type": "message_start", "model": req.model}
-            if self.calls == 1:
-                yield {"type": "tool_use_start", "id": "t1", "name": "capture_execution"}
-                yield {"type": "tool_use_input_delta", "id": "t1", "json_delta": "{}"}
-                yield {"type": "tool_use_end", "id": "t1"}
-                stop_reason = "tool_use"
-            else:
-                yield {"type": "text_delta", "text": "done"}
-                stop_reason = "end_turn"
-            yield {"type": "message_end", "stop_reason": stop_reason, "usage": Usage()}
-
-    registry = ToolRegistry()
-    registry.register(_CaptureTool())  # type: ignore[arg-type]
-    world = RemoteExecutionBackend(shell=_FakeShell(), fs=_FakeFs())
-    agent = Agent(
-        model="test",
-        provider=_ToolProvider(),
-        session_store=InMemorySessionStore(),
-        cwd=str(tmp_path),
+    registry = tool_registry(StubTool("capture_execution", on_execute=capture, parallel=True))
+    world = RemoteExecutionBackend(shell=_FakeShell(), fs=StateFileBackend())
+    agent = _agent(
+        tmp_path,
+        provider=ScriptedProvider([ToolUseTurn("capture_execution", {}), TextTurn("done")]),
         tools=registry,
         execution_backend=world,
-        result_offload=None,
     )
 
     _ = [event async for event in (await agent.session()).run("capture")]
@@ -457,17 +338,11 @@ async def test_scheduler_injects_execution_world_into_custom_tool(tmp_path: Any)
 
 
 def test_local_world_must_match_agent_cwd(tmp_path: Any) -> None:
-    from linch import Agent, ConfigError
+    from linch import ConfigError
 
     world = LocalExecutionBackend(cwd=tmp_path / "world-a")
     with pytest.raises(ConfigError, match=r"LocalExecutionBackend cwd.*Agent cwd"):
-        Agent(
-            model="test",
-            provider=_Provider(),
-            cwd=str(tmp_path / "world-b"),
-            execution_backend=world,
-            result_offload=None,
-        )
+        _agent(tmp_path / "world-b", execution_backend=world)
 
 
 def test_local_world_rejects_unrelated_in_memory_filesystem(tmp_path: Any) -> None:
@@ -478,9 +353,7 @@ def test_local_world_rejects_unrelated_in_memory_filesystem(tmp_path: Any) -> No
 
 
 async def test_owned_world_close_retries_and_deduplicates_hook_fs(tmp_path: Any) -> None:
-    from linch import Agent
-
-    class _CloseableFs(_FakeFs):
+    class _CloseableFs(StateFileBackend):
         def __init__(self) -> None:
             super().__init__()
             self.close_calls = 0
@@ -502,13 +375,11 @@ async def test_owned_world_close_retries_and_deduplicates_hook_fs(tmp_path: Any)
 
     world = _FlakyWorld()
     provider = _Provider()
-    agent = Agent(
-        model="test",
+    agent = _agent(
+        tmp_path,
         provider=provider,
-        cwd=str(tmp_path),
         execution_backend=world,
         hooks=[world.fs],
-        result_offload=None,
     )
 
     with pytest.raises(RuntimeError, match="world close failed"):
@@ -527,7 +398,7 @@ async def test_owned_world_close_retries_and_deduplicates_hook_fs(tmp_path: Any)
 def test_shell_only_execution_world_rejected_even_with_explicit_filesystem(
     tmp_path: Any, inherited: bool
 ) -> None:
-    from linch import Agent, Context
+    from linch import Context
     from linch.errors import ConfigError
 
     shell = _FakeShell()
@@ -535,26 +406,23 @@ def test_shell_only_execution_world_rejected_even_with_explicit_filesystem(
     if inherited:
         parent.register("execution", shell)
     with pytest.raises(ConfigError, match="shell.*fs"):
-        Agent(
-            model="test",
-            provider=_Provider(),
-            cwd=str(tmp_path),
+        _agent(
+            tmp_path,
             context=parent if inherited else None,
             execution_backend=None if inherited else shell,
-            filesystem=_FakeFs(),
-            result_offload=None,
+            filesystem=StateFileBackend(),
         )
 
 
 async def test_agents_share_parent_context_without_transferring_world_ownership(
     tmp_path: Any,
 ) -> None:
-    from linch import Agent, Context
+    from linch import Context
 
     class _SharedWorld:
         def __init__(self) -> None:
             self.shell = _FakeShell()
-            self.fs = _FakeFs()
+            self.fs = StateFileBackend()
             self.close_calls = 0
 
         async def aclose(self) -> None:
@@ -563,20 +431,8 @@ async def test_agents_share_parent_context_without_transferring_world_ownership(
     parent = Context(label="host")
     world = _SharedWorld()
     parent.register("execution", world)
-    first = Agent(
-        model="first",
-        provider=_Provider(),
-        cwd=str(tmp_path),
-        context=parent,
-        result_offload=None,
-    )
-    second = Agent(
-        model="second",
-        provider=_Provider(),
-        cwd=str(tmp_path),
-        context=parent,
-        result_offload=None,
-    )
+    first = _agent(tmp_path, context=parent, model="first")
+    second = _agent(tmp_path, context=parent, model="second")
 
     assert first.context is not second.context
     assert first.context.execution is world
@@ -591,94 +447,34 @@ async def test_agents_share_parent_context_without_transferring_world_ownership(
 
 
 def test_inherited_world_error_names_the_context_not_the_kwarg(tmp_path: Any) -> None:
-    """An inherited world was never passed as ``execution_backend=``.
-
-    Blaming that kwarg sends the caller to a construction site that does not
-    exist; the message must point at the Context the world came from.
-    """
-    from linch import Agent, ConfigError, Context
+    from linch import ConfigError, Context
 
     parent = Context(label="host")
     parent.register("execution", object())  # neither {shell, fs} nor a shell backend
     with pytest.raises(ConfigError, match=r"inherited from the supplied Context"):
-        Agent(
-            model="test",
-            provider=_Provider(),
-            cwd=str(tmp_path),
-            context=parent,
-            result_offload=None,
-        )
+        _agent(tmp_path, context=parent)
 
 
 def test_directly_passed_world_error_does_not_claim_inheritance(tmp_path: Any) -> None:
-    from linch import Agent, ConfigError
+    from linch import ConfigError
 
     with pytest.raises(ConfigError) as excinfo:
-        Agent(
-            model="test",
-            provider=_Provider(),
-            cwd=str(tmp_path),
-            execution_backend=object(),  # type: ignore[arg-type]
-            result_offload=None,
-        )
+        _agent(tmp_path, execution_backend=object())  # type: ignore[arg-type]
     assert "inherited from the supplied Context" not in str(excinfo.value)
 
 
-def test_local_world_reports_host_posture_not_unverified(tmp_path: Any) -> None:
-    """An explicitly local world runs on the host; that is known, not unverified.
-
-    "unverified" means a backend is configured whose boundary Linch cannot
-    describe. ``LocalExecutionBackend`` declares it runs on the host, so the
-    prompt should say so rather than implying an undeclared boundary.
-    """
-    from linch import Agent, LocalExecutionBackend, workspace_tools
-
-    world = LocalExecutionBackend(cwd=str(tmp_path))
-    assert world.security_posture == "host"
-
-    agent = Agent(
-        model="test",
-        provider=_Provider(),
-        cwd=str(tmp_path),
-        tools=workspace_tools(),
-        execution_backend=world,
-        result_offload=None,
-    )
-    assert agent._bash_security_mode() == "host"
-    combined = "\n".join(block.text for block in agent.system_blocks)
-    assert _HOST_POSTURE_LINE in combined
-    assert "has not declared sandbox confinement" not in combined
-    assert "declares sandbox confinement" not in combined
-
-
-def test_undeclared_custom_world_still_reports_unverified() -> None:
-    """A world that declares no posture and no confinement stays "unverified"."""
-    world = RemoteExecutionBackend(shell=_FakeShell(), fs=_FakeFs())
-    assert getattr(world, "security_posture", None) in (None, "unverified")
-    assert world.sandboxed is False
-
-
-def test_remote_backend_rejects_reserved_confinement_resume_key() -> None:
-    """``confinement`` is owned by the seam; a caller key would be overwritten.
-
-    ``resume_policy_config`` merges the world's confinement in under that name,
-    so accepting a caller-supplied one would silently drop it from the resume
-    fingerprint instead of failing.
-    """
+def test_remote_backend_resume_confinement() -> None:
     with pytest.raises(ValueError, match="confinement"):
         RemoteExecutionBackend(
             shell=_FakeShell(),
-            fs=_FakeFs(),
+            fs=StateFileBackend(),
             confinement={"boundary": "sandbox"},
             resume_policy_id="custom",
             resume_policy_config={"confinement": "caller-value", "other": 1},
         )
-
-
-def test_remote_backend_resume_config_still_merges_confinement() -> None:
     world = RemoteExecutionBackend(
         shell=_FakeShell(),
-        fs=_FakeFs(),
+        fs=StateFileBackend(),
         confinement={"boundary": "sandbox"},
         resume_policy_id="custom",
         resume_policy_config={"other": 1},
@@ -686,13 +482,7 @@ def test_remote_backend_resume_config_still_merges_confinement() -> None:
     assert world.resume_policy_config == {"other": 1, "confinement": {"boundary": "sandbox"}}
 
 
-def test_resume_descriptor_propagates_a_config_error_instead_of_erasing_identity() -> None:
-    """A component that opted into durable identity must not fail silently.
-
-    Swallowing the error degrades the transport to "opaque", so the durable
-    fingerprint quietly loses its contribution and a resume that should be
-    denied is allowed. The misconfiguration is the actionable signal.
-    """
+def test_resume_policy_descriptor() -> None:
     from linch.execution.backend import resume_policy_descriptor
 
     class _Misconfigured:
@@ -705,10 +495,6 @@ def test_resume_descriptor_propagates_a_config_error_instead_of_erasing_identity
 
     with pytest.raises(ValueError, match="requires resume_fingerprint_key"):
         resume_policy_descriptor(_Misconfigured())
-
-
-def test_resume_descriptor_still_returns_none_for_an_opaque_component() -> None:
-    from linch.execution.backend import resume_policy_descriptor
 
     class _NoIdentity:
         pass
