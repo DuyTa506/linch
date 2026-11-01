@@ -174,6 +174,12 @@ async def test_user_prompt_redaction_cases(
             "PASSWORD and password",
             "[PW] and [PW]",
         ),
+        ((RedactionRule(r"(secret)", r"[\1]"),), "secret", "[secret]"),
+        (
+            (RedactionRule(r"(?P<token>secret)", r"[\g<token>]"),),
+            "secret",
+            "[secret]",
+        ),
     ],
 )
 async def test_rule_replacement_cases(rules: tuple[Any, ...], text: str, expected: str) -> None:
@@ -189,6 +195,14 @@ async def test_invalid_pattern_raises_at_construction() -> None:
 
     with pytest.raises(re.error):
         RedactionHook(RedactionConfig(rules=(RedactionRule(r"(unclosed", "x"),)))
+
+
+@pytest.mark.parametrize("replacement", [r"\1-XX-XXXX", r"\g<missing>", r"\x"])
+def test_invalid_replacement_raises_config_error_at_construction(replacement: str) -> None:
+    from linch import ConfigError, RedactionConfig, RedactionHook, RedactionRule
+
+    with pytest.raises(ConfigError, match="replacement"):
+        RedactionHook(RedactionConfig(rules=(RedactionRule(r"\d{3}-\d{2}-\d{4}", replacement),)))
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
