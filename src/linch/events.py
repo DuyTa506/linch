@@ -1276,14 +1276,23 @@ def usage_from_dict(raw: dict[str, Any]) -> Usage:
     )
 
 
-def _json_safe(value: Any) -> Any:
+def _json_safe(value: Any, *, active: set[int] | None = None) -> Any:
     if value is None or isinstance(value, str | int | float | bool):
         return value
-    if isinstance(value, list | tuple):
-        return [_json_safe(item) for item in value]
-    if isinstance(value, dict):
-        return {str(key): _json_safe(item) for key, item in value.items()}
-    return str(value)
+    if not isinstance(value, list | tuple | dict):
+        return str(value)
+    if active is None:
+        active = set()
+    identity = id(value)
+    if identity in active:
+        return "<recursion>"
+    active.add(identity)
+    try:
+        if isinstance(value, dict):
+            return {str(key): _json_safe(item, active=active) for key, item in value.items()}
+        return [_json_safe(item, active=active) for item in value]
+    finally:
+        active.remove(identity)
 
 
 def _is_json_serializable(value: Any) -> bool:
