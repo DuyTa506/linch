@@ -1321,7 +1321,7 @@ def _json_safe(value: Any, *, active: set[int] | None = None, depth: int = 0) ->
 def _is_json_serializable(value: Any) -> bool:
     try:
         json.dumps(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, RecursionError):
         return False
     return True
 

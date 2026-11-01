@@ -171,6 +171,32 @@ async def test_run_store_bounds_deep_acyclic_tool_metadata(store_case: _StoreCas
     assert node == "<max-depth>"
 
 
+async def test_run_store_omits_attachments_beyond_json_encoder_recursion_limit(
+    store_case: _StoreCase,
+) -> None:
+    from typing import Any
+
+    from linch.events import ToolCallEndEvent
+    from linch.tools.base import ToolResult
+
+    payload: Any = "leaf"
+    for _ in range(1100):
+        payload = [payload]
+    event = ToolCallEndEvent(
+        tool_use_id="tool-1",
+        tool_name="Lookup",
+        tool_result=ToolResult(content="done", attachments=[payload]),
+    )
+    store = store_case.store
+    run_id = f"conformance-{uuid4()}"
+    await store.create_run("session-1", id=run_id)
+
+    await store.append_event(run_id, event)
+    rows = await store.load_events(run_id)
+
+    assert rows[0].event.tool_result.attachments == []
+
+
 @pytest.mark.parametrize("kind", ["dict", "list", "mixed"])
 @pytest.mark.parametrize("wrappers", [0, 1, 2])
 async def test_run_store_preserves_opaque_event_at_exact_depth_boundary(
