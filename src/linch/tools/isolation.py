@@ -16,12 +16,32 @@ Two tiers of conflict control, smallest first:
 
 from __future__ import annotations
 
+import asyncio
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Protocol, TypeVar, runtime_checkable
 
 from .._blocking import run_blocking
+
+_T = TypeVar("_T")
+
+
+async def _drain_task(task: asyncio.Task[_T]) -> tuple[_T | None, BaseException | None]:
+    """Wait for a task despite repeated cancellation of the current task."""
+
+    while True:
+        try:
+            return await asyncio.shield(task), None
+        except asyncio.CancelledError:
+            if not task.done():
+                continue
+            try:
+                return task.result(), None
+            except BaseException as exc:  # noqa: BLE001 - report the drained task error
+                return None, exc
+        except BaseException as exc:  # noqa: BLE001 - report the drained task error
+            return None, exc
 
 
 @runtime_checkable
@@ -74,25 +94,54 @@ class TempDirIsolation:
             root: Optional parent directory for acquired directories.
         """
 
-        self._source = str(Path(source).resolve()) if source else None
-        self._root = str(Path(root).resolve()) if root else None
+        source_path = Path(source).resolve() if source else None
+        root_path = Path(root).resolve() if root else None
+        self._source = str(source_path) if source_path else None
+        self._root = str(root_path) if root_path else None
 
     async def acquire(self) -> str:
         """Create and optionally seed a scratch directory.
 
         Returns:
             Path to a fresh isolated directory.
+
+        Raises:
+            ValueError: If the temporary root is inside the source directory.
         """
 
-        return await run_blocking(self._acquire_sync)
+        if self._source and self._root and Path(self._root).is_relative_to(Path(self._source)):
+            raise ValueError("root must not be inside source")
+        task = asyncio.create_task(run_blocking(self._acquire_sync))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError as cancellation:
+            cwd, acquire_error = await _drain_task(task)
+            release_error: BaseException | None = None
+            if cwd is not None:
+                release_task = asyncio.create_task(self.release(cwd))
+                _, release_error = await _drain_task(release_task)
+            if acquire_error is not None:
+                raise cancellation from acquire_error
+            if release_error is not None:
+                raise cancellation from release_error
+            raise cancellation
 
     def _acquire_sync(self) -> str:
         if self._root:
             Path(self._root).mkdir(parents=True, exist_ok=True)
-        path = tempfile.mkdtemp(prefix="linch-iso-", dir=self._root)
-        if self._source:
-            shutil.copytree(self._source, path, dirs_exist_ok=True)
-        return path
+        path = Path(tempfile.mkdtemp(prefix="linch-iso-", dir=self._root)).resolve()
+        source_path = Path(self._source) if self._source else None
+        if source_path is not None and path.is_relative_to(source_path):
+            if path != source_path:
+                shutil.rmtree(path, ignore_errors=True)
+            raise ValueError("root must not be inside source")
+        try:
+            if self._source:
+                shutil.copytree(self._source, path, dirs_exist_ok=True)
+        except BaseException:
+            shutil.rmtree(path, ignore_errors=True)
+            raise
+        return str(path)
 
     async def release(self, cwd: str, *, keep: bool = False) -> None:
         """Remove an acquired scratch directory unless retention is requested.
