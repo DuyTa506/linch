@@ -1,17 +1,87 @@
+import errno
 import json
+from types import SimpleNamespace
 
 import pytest
 
 from linch.events import ToolCallEndEvent
+from linch.kernel import Context
 from linch.run_store import (
     InMemoryRunStore,
     RunCheckpoint,
     _json_safe,
+    _StoreUnavailableError,
     canonical_json,
+    durable_call,
 )
 from linch.run_stores.postgres import PostgresRunStore
 from linch.tools import Citation, ToolResult
 from linch.types import ToolResultBlock, ToolUseBlock, Usage
+
+
+@pytest.mark.parametrize(
+    ("error", "transient"),
+    [
+        (PermissionError("certificate denied"), False),
+        (FileNotFoundError("certificate missing"), False),
+        (OSError("permanent failure"), False),
+        (OSError(errno.EIO, "device failure"), False),
+        (OSError(errno.ENETUNREACH, "network unreachable"), True),
+        (OSError(errno.EHOSTUNREACH, "host unreachable"), True),
+        (ConnectionError("connection lost"), True),
+        (TimeoutError("query timed out"), True),
+    ],
+)
+async def test_durable_call_classifies_os_failures(error, transient):
+    await _assert_durable_error(error, transient)
+
+
+@pytest.mark.parametrize(
+    ("name", "message", "transient"),
+    [
+        ("DataError", "invalid argument", False),
+        ("_base.DataError", "invalid client argument", False),
+        ("ClientConfigurationError", "invalid SSL configuration", False),
+        ("UnsupportedServerFeatureError", "unsupported server", False),
+        ("InterfaceError", "another operation is in progress", False),
+        ("InterfaceError", "connection is closed", True),
+        ("InterfaceError", "pool is closed", True),
+        ("InterfaceError", "pool is closing", True),
+        ("PostgresConnectionError", "connection lost", True),
+        ("AdminShutdownError", "server shutting down", True),
+        ("CrashShutdownError", "server crashed", True),
+        ("CannotConnectNowError", "server starting up", True),
+        ("TooManyConnectionsError", "server full", True),
+    ],
+)
+@pytest.mark.parametrize("wrapped", [False, True])
+async def test_durable_call_classifies_postgres_failures(name, message, transient, wrapped):
+    asyncpg = pytest.importorskip("asyncpg")
+    if name.startswith("_base."):
+        error = getattr(asyncpg.exceptions._base, name.removeprefix("_base."))(message)
+    else:
+        error = getattr(asyncpg, name)(message)
+    if wrapped:
+        wrapper = RuntimeError("store operation failed")
+        wrapper.__cause__ = error
+        error = wrapper
+    await _assert_durable_error(error, transient)
+
+
+async def _assert_durable_error(error, transient):
+    session = SimpleNamespace(
+        agent=SimpleNamespace(context=Context(), run_store=InMemoryRunStore()), active_run_id="run"
+    )
+
+    async def fail():
+        raise error
+
+    with pytest.raises(_StoreUnavailableError if transient else type(error)) as raised:
+        await durable_call(session, "write", fail())
+    if transient:
+        assert raised.value.__cause__ is error
+    else:
+        assert raised.value is error
 
 
 @pytest.mark.parametrize("kind", ["memory", "postgres"])

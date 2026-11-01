@@ -163,9 +163,11 @@ database I/O asynchronously.
 During an active resumable run, transient connection failures reaching the loop's
 recovery boundary interrupt the attempt without terminal events or a failed status. The loop stops
 background work and skips buffered writes and snapshot cleanup, preserving the
-last durable checkpoint for worker retry or lease takeover. This covers asyncpg
-connection/interface and availability errors, `OSError` (including connection
-and timeout errors), and explicit causes wrapped by a store. Provider/tool
+last durable checkpoint for worker retry or lease takeover. This covers connection
+and timeout errors, network-unreachable/down errors, asyncpg connection and server
+availability errors, closed/closing asyncpg connection or pool errors, and explicit
+causes wrapped by a store. Permanent OS, configuration, and query-argument errors
+keep their ordinary failure behavior. Provider/tool
 errors and agents without a run store keep their ordinary failure behavior.
 
 The store calls inside `Session.notify` (durable inbox), `Session.append`, and
