@@ -3,8 +3,7 @@
 Linch 3.0 is a headless agent kernel. Python 3.11+ is required. There are no
 compatibility shims or readers for pre-3.0 persisted data. Start new runs and
 use fresh Postgres schemas; built-in stores reject incompatible existing
-schemas rather than upgrading them. The package version remains `3.0.0a1`
-during development; pin the exact prerelease and lock its dependencies.
+schemas rather than upgrading them.
 
 Kernel exports are listed in `linch.__all__`. Extensions are imported
 explicitly from `linch.ext.*` and are absent from the kernel's top-level API.

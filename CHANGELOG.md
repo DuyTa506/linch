@@ -5,7 +5,7 @@ Notable changes to `linch`. Versioning follows the contract in
 and persisted formats share a wire generation separate from the package version,
 reflected by `linch.RUN_SCHEMA_VERSION`.
 
-## 3.0.0 (unreleased)
+## 3.0.0 — 2026-11-01
 
 ### Breaking and new features
 

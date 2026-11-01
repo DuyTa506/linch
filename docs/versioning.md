@@ -1,8 +1,7 @@
 # Versioning & public API
 
-Linch 3.0 is under development. During this transition, incompatible changes
-may remove APIs, aliases, shims, and legacy persisted-data readers without a
-warning or deprecation window. Compatibility with 2.x is not a requirement.
+Linch 3.0 removed APIs, aliases, shims, and legacy persisted-data readers
+without a deprecation window. Compatibility with 2.x is not provided.
 Pre-3.0 runs are rejected; start fresh runs and use fresh databases for 3.0.
 See [Migrating to Linch 3.0](migration-3.0.md) for the removals.
 
@@ -38,7 +37,7 @@ Once 3.0 stable ships, Linch follows normal Semantic Versioning:
 - **PATCH**: backward-compatible bug fixes and internal changes.
 
 Public additions belong in MINOR releases; PATCH is not an exception for
-additive API changes. The unrestricted 3.0 transition above does not grant
+additive API changes. The 3.0 break above does not grant
 future stable releases permission to break compatibility within a MAJOR.
 
 ## Dependencies and reproducible builds
@@ -50,9 +49,7 @@ the changelog. A dependency or interpreter requirement change that breaks a
 supported installation follows the stable compatibility policy above.
 
 For a stable 3.x application, a range such as `linch>=3.0,<4.0` accepts
-compatible releases after 3.0 stable is available. During prerelease
-integration, pin the exact version you have reviewed; `3.0.0a1` remains the
-current package version while development continues. An exact Linch pin does
+compatible releases. An exact Linch pin does
 not pin transitive dependencies: use a lockfile for reproducible environments,
 including extras. Review the changelog before updating the lock.
 

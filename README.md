@@ -4,8 +4,7 @@ Linch 3.0 is a headless Python agent kernel. Applications embed its async agent
 loop, provide tools and permissions, and consume streamed events. The host owns
 the HTTP API and deployment.
 
-Python 3.11+ is required. The current package version is `3.0.0a1`; 3.0 is under
-development and breaks compatibility with 2.x. See the
+Python 3.11+ is required. Linch 3.0 breaks compatibility with 2.x. See the
 [3.0 migration guide](docs/migration-3.0.md).
 
 ## Features
