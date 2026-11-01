@@ -485,7 +485,7 @@ async def test_transient_checkpoint_store_error_stops_without_terminal_and_resum
     error_kind: str, fail_after_commit: bool
 ) -> None:
     """A lost checkpoint connection leaves the run takeover-resumable."""
-    import asyncpg
+    asyncpg = pytest.importorskip("asyncpg")
 
     from linch import ErrorEvent, ResultEvent
 
@@ -564,6 +564,8 @@ async def test_transient_checkpoint_failure_ignores_telemetry_operation_name(
     from linch import ErrorEvent, ResultEvent
     from linch.loop import checkpoint
     from linch.run_store import durable_call
+
+    pytest.importorskip("asyncpg")
 
     async def opaque_durable_call(session: Any, op: str, awaitable: Any) -> Any:
         return await durable_call(session, "checkpoint-write", awaitable)

@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip("asyncpg")
+
 
 def test_fractional_rtt_is_rejected_before_starting_processes():
     script = Path(__file__).resolve().parents[2] / "scripts/load_test.py"
