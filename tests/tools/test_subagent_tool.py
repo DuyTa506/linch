@@ -385,3 +385,34 @@ async def test_stopped_background_worker_remains_addressable(tmp_path: Any) -> N
         assert "WorkerNotLive" not in (r.content or "")
     finally:
         release.set()
+
+
+async def test_running_coordinator_preserves_full_worker_catalog(tmp_path):
+    from linch.ext.deep_agent import create_deep_agent
+
+    provider = ScriptedProvider(
+        [
+            ToolUseTurn(
+                "Subagent",
+                {"description": "implement", "prompt": "work", "subagent_type": "implementer"},
+            ),
+            TextTurn("child"),
+            TextTurn("parent"),
+        ]
+    )
+    agent = create_deep_agent(
+        model="test",
+        provider=provider,
+        coordinator=True,
+        cwd=str(tmp_path),
+        session_store=memory_session_store(),
+        permissions={"mode": "skip-dangerous"},
+        durable=False,
+    )
+    session = await agent.session()
+    events = [event async for event in session.run("delegate")]
+    assert not any(event.type == "tool_call_end" and event.is_error for event in events)
+    assert {"Read", "Write", "Edit", "Bash", "Glob", "Grep"} <= {
+        tool["name"] for tool in provider.requests[1].tools
+    }
+    await agent.close()

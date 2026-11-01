@@ -43,6 +43,7 @@ from ..model_calls import (
     _ModelCallLedger,
     _primary_active_binding,
 )
+from ..profiles import _effective_run_config
 from ..run_store import (
     LeaseLostError,
     ModelInputSnapshotError,
@@ -240,9 +241,11 @@ async def drain_pending_notifications(session: Session, run_id: str) -> AsyncIte
         yield event
 
 
-async def drain_inbox(session: Session, run_id: str) -> AsyncIterator[Event]:
+async def drain_inbox(session: Session, run_id: str, *, config: Any = None) -> AsyncIterator[Event]:
     """Consume context inbox producers at the top of a turn."""
     producers = tuple(session.agent.context._inbox or ())
+    if config is not None and config.context is not session.agent.context:
+        producers += tuple(config.context._inbox or ())
     for _token, producer in producers:
         iterator = producer(session, run_id)
         try:
@@ -275,6 +278,8 @@ async def drain_alignment(
     entries = list(queue)
     queue.clear()
     for entry in entries:
+        if entry.cancelled:
+            continue
         try:
             try:
                 prompt, images, hook_events, block_reason = await dispatch_user_prompt_fn(
@@ -296,13 +301,19 @@ async def drain_alignment(
                 if not entry.future.done():
                     entry.future.set_exception(ConfigError(block_reason))
                 continue
+            if entry.cancelled:
+                continue
             user_message = build_user_message(prompt, images)
-            await session.append([user_message])
-            event: Event = UserEvent(message=user_message, subtype="alignment")
-            await _persist_event(session, run_id, event)
-            if not entry.future.done():
-                entry.future.set_result(None)
-            yield event
+            entry.applying = True
+            try:
+                await session.append([user_message])
+                event: Event = UserEvent(message=user_message, subtype="alignment")
+                await _persist_event(session, run_id, event)
+                if not entry.future.done():
+                    entry.future.set_result(None)
+                yield event
+            finally:
+                entry.applying = False
         except BaseException as exc:
             if not entry.future.done():
                 entry.future.set_exception(exc)
@@ -467,6 +478,7 @@ class RunRuntime:
     ) -> None:
         self.session = session
         self.agent = session.agent
+        self.config = _effective_run_config(session, run_id)
         self.prompt = prompt
         self.opts = opts
         self.run_id = run_id
@@ -513,7 +525,7 @@ class RunRuntime:
         )
         self.run_registration = None
         self.replayed_feedback: tuple[Message, ...] = ()
-        listeners = list(self.agent._turn_stopping_dispatcher.snapshot())
+        listeners = list(self.config._turn_stopping_dispatcher.snapshot())
         if self.reliability is not None:
             listeners.insert(0, self.reliability.listener)
         self.turn_stopping = TurnStoppingDispatcher(tuple(listeners))
@@ -575,10 +587,10 @@ class RunRuntime:
             resume_checkpoint=resume_checkpoint,
         )
         agent = runtime.agent
-        runtime.effective_final_tool = effective_final_tool_name(agent, opts)
+        runtime.effective_final_tool = effective_final_tool_name(agent, opts, config=runtime.config)
         if (policy := getattr(agent, "reliability", None)) is not None:
             policy.validate(
-                (tool.name for tool in (session.tools_override or agent.tools).list()),
+                (tool.name for tool in runtime.config.tools.list()),
                 final_tool_name=runtime.effective_final_tool,
             )
         runtime.exact_model_input = exact_model_input_enabled(agent)
@@ -614,7 +626,7 @@ class RunRuntime:
         runtime.total = Usage()
         runtime.running_cost = None
 
-        hooks = list(getattr(agent, "hooks", None) or [])
+        hooks = list(runtime.config.hooks or [])
         runtime.checkpointable_hooks = checkpointable_hooks(hooks)
         runtime.hook_dispatcher = HookDispatcher(hooks)
         runtime.dispatch_user_prompt = partial(
@@ -652,11 +664,10 @@ class RunRuntime:
                 run_id,
             )
         runtime.budget = (
-            opts.budget
-            or getattr(session, "inherited_budget", None)
-            or getattr(agent, "budget", None)
+            opts.budget or getattr(session, "inherited_budget", None) or runtime.config.budget
         )
         session.active_budget = runtime.budget
+        session._run_bindings[run_id].budget = runtime.budget
         runtime.guard = getattr(agent, "loop_guard", None)
         runtime.guard_state = (
             loop_guard_state_factory() if _loop_guard_is_active(runtime.guard) else None

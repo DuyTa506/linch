@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
-from dataclasses import dataclass, field
+from collections.abc import AsyncIterator, Sequence
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 from .abort import AbortContext
 from .errors import ConfigError
-from .events import Event
+from .events import Event, ResultEvent
 from .run_store import durable_call
 from .session_log import SessionLog
 from .sessions import SessionStore
@@ -125,6 +125,8 @@ class AlignmentEntry:
     prompt: str
     images: list[dict[str, str]] | None
     future: asyncio.Future[None]
+    cancelled: bool = False
+    applying: bool = False
 
 
 @dataclass(slots=True)
@@ -211,7 +213,8 @@ class Session:
     _telemetry_run: Any = field(default=None, repr=False)
     active_run_id: str | None = None
     _active_principal: Principal | None = field(default=None, repr=False)
-    _profile_cleanup: Callable[[], Awaitable[None] | None] | None = field(default=None, repr=False)
+    _run_bindings: dict[str, Any] = field(default_factory=dict, repr=False)
+    _config_seed: Any = field(default=None, repr=False)
     _active_gen: Any = None
     """The async generator driving the in-flight ``run``/``resume`` iterator.
     Captured so a forced ``aclose`` can finalize an abandoned run generator
@@ -360,8 +363,10 @@ class Session:
 
         from .loop import run_loop
 
-        options = opts or RunOptions()
-        inner = run_loop(self, prompt, options)
+        options = replace(
+            opts or RunOptions(), run_id=(opts.run_id if opts else None) or str(uuid4())
+        )
+        inner = run_loop(self, prompt, options, _adopt_run_id=bool(opts and opts.run_id))
         self._active_inner = inner
         it = self._iterate(inner, "", options)
         self._active_gen = it
@@ -396,7 +401,7 @@ class Session:
 
         from .loop import resume_loop
 
-        options = opts or RunOptions()
+        options = replace(opts or RunOptions(), run_id=run_id)
         inner = resume_loop(self, run_id, options)
         self._active_inner = inner
         it = self._iterate(inner, run_id, options)
@@ -413,16 +418,64 @@ class Session:
         from .lifecycle import EVENT_EMIT
 
         self._active_started = True
+        finished = False
+
+        async def finish() -> None:
+            nonlocal finished
+            if finished:
+                return
+            finished = True
+            # Resume once past the terminal event so the loop wrapper can run
+            # its own ``async with aclosing(...)`` exit path synchronously. A
+            # direct ``aclose`` here schedules nested async-generator finalizers
+            # that can otherwise linger as pending tasks during rapid churn.
+            try:
+                await anext(inner)
+            except StopAsyncIteration:
+                pass
+            else:
+                await _aclose_generator(inner)
+            finally:
+                try:
+                    if scope is not None:
+                        await scope.__aexit__(None, None, None)
+                finally:
+                    self._finish_run()
+                    if self.agent.max_idle_sessions is not None:
+                        await self.agent._session_became_idle(self)
+
         scope = None
         try:
-            if opts.profile is not None:
-                from .profiles import _profile_scope
+            from .profiles import _profile_scope
 
-                pending_scope = _profile_scope(self, opts.profile)
-                await pending_scope.__aenter__()
-                scope = pending_scope
-            hooks = HookDispatcher(getattr(self.agent, "hooks", None))
+            assert opts.run_id is not None
+            pending_scope = _profile_scope(self, opts.profile, opts.run_id)
+            config = await pending_scope.__aenter__()
+            scope = pending_scope
+            hooks = HookDispatcher(config.hooks)
             async for event in inner:
+                if isinstance(event, ResultEvent):
+                    # Async generators are not automatically closed when a
+                    # consumer breaks from ``async for``. Complete the inner
+                    # loop and release admission before handing the terminal
+                    # event to the caller, so the session cannot remain parked
+                    # while the caller retains the stream object.
+                    event_run_id = self.active_run_id or run_id_fallback
+                    event_deps = getattr(self, "run_deps", None)
+                    if hooks.active:
+                        await hooks.dispatch(
+                            EVENT_EMIT,
+                            EventEmitContext(
+                                session=self,
+                                run_id=event_run_id,
+                                turn_index=None,
+                                deps=event_deps,
+                                event=event,
+                            ),
+                        )
+                    await finish()
+                    yield event
+                    continue
                 yield event
                 if hooks.active:
                     await hooks.dispatch(
@@ -437,15 +490,17 @@ class Session:
                     )
         finally:
             try:
-                await _aclose_generator(inner)
+                if not finished:
+                    await _aclose_generator(inner)
             finally:
                 try:
-                    if scope is not None:
+                    if scope is not None and not finished:
                         await scope.__aexit__(None, None, None)
                 finally:
-                    self._finish_run()
-                    if self.agent.max_idle_sessions is not None:
-                        await self.agent._session_became_idle(self)
+                    if not finished:
+                        self._finish_run()
+                        if self.agent.max_idle_sessions is not None:
+                            await self.agent._session_became_idle(self)
 
     def _finish_run(self) -> None:
         """Release the single-run admission token and publish true idleness."""
@@ -491,15 +546,22 @@ class Session:
             await future
             return
         try:
-            await asyncio.wait_for(future, timeout_s)
+            await asyncio.wait_for(asyncio.shield(future), timeout_s)
         except TimeoutError:
-            # The run never reached a alignment boundary in time. Drop the still
-            # -pending entry so it cannot inject into a later turn, and surface
-            # the timeout instead of blocking the caller indefinitely. (If the
-            # drain already removed it, the future is now cancelled and the
-            # drain's `future.done()` guard makes its set_result a no-op.)
+            # Mark the entry before removing it from the pending queue. The
+            # drain may already be running a slow hook; it checks this marker
+            # before appending so a timed-out alignment cannot be applied after
+            # the caller has been told it was rejected. If durable append has
+            # begun, wait for its truthful completion instead of reporting a
+            # timeout for a message that is already being committed.
+            entry.cancelled = True
+            if entry.applying:
+                await future
+                return
             if entry in self.alignment_queue:
                 self.alignment_queue.remove(entry)
+            if not future.done():
+                future.cancel()
             raise ConfigError("alignment timed out before it was applied") from None
 
     def interrupt(self) -> None:
@@ -596,13 +658,18 @@ class Session:
             # and retryable on the next parent aclose().
             self.workers.pop(worker_id, None)
         self.workers.clear()
+        # Keep the Session seed alive until nested run cleanup has removed its
+        # parent-owned effect; its final seed release must not await itself.
+        for binding in tuple(self._run_bindings.values()):
+            if binding.retains == 0:
+                await binding.release()
+        if self._config_seed is not None:
+            seed = self._config_seed
+            await seed.release()
+            self._config_seed = None
         self._lifecycle_state = _CLOSED
         self._closed = True
         self.agent._unregister_session(self.id, self)
-        if self._profile_cleanup is not None:
-            cleanup, self._profile_cleanup = self._profile_cleanup, None
-            if pending := cleanup():
-                await pending
 
     async def _finalize_active_run(self) -> None:
         """Abort an admitted run and wait until its complete unwind is observable.

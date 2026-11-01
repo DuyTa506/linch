@@ -45,12 +45,15 @@ class ContextInjectionHook:
 
         self.builder = normalize_context_builder(builder)
 
-    async def build_context(self, session: Any, turn_index: int) -> ContextBuildResult | None:
+    async def build_context(
+        self, session: Any, turn_index: int, *, _run_config: Any = None
+    ) -> ContextBuildResult | None:
         """Build bounded context for a session turn.
 
         Args:
             session: Session whose provider context is being assembled.
             turn_index: Turn number being assembled.
+            _run_config: Private captured configuration supplying this request's tools and services.
 
         Returns:
             Context build result, or ``None`` when no builder is configured.
@@ -65,7 +68,12 @@ class ContextInjectionHook:
             turn_index=turn_index,
             deps=getattr(session, "run_deps", None),
             model=agent.model,
-            tools=getattr(session, "tools_override", None) or agent.tools,
+            tools=(
+                _run_config.tools
+                if _run_config is not None
+                else (getattr(session, "tools_override", None) or agent.tools)
+            ),
+            _run_config=_run_config,
             token_estimator=getattr(agent, "token_estimator", None),
         )
         result = await self.builder.build(turn)

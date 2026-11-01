@@ -11,6 +11,57 @@ import pytest
 from tests.support.providers import ScriptedProvider, TextTurn
 
 
+async def test_break_after_result_event_releases_session() -> None:
+    """Breaking from the terminal event stream must release run admission."""
+    from linch.events import ResultEvent
+
+    agent = _agent(provider=ScriptedProvider([TextTurn("first"), TextTurn("second")]))
+    session = await agent.session(id="break-result")
+
+    stream = session.run("first")
+    async for event in stream:
+        if isinstance(event, ResultEvent):
+            assert not session._active
+            break
+
+    again = await agent.session(id="break-result")
+    assert again is session
+    await agent.close()
+
+
+async def test_close_during_terminal_break_completes() -> None:
+    """Agent shutdown must not wait forever on a parked terminal iterator."""
+    from linch.events import ResultEvent
+    from linch.types import Usage
+
+    entered = asyncio.Event()
+    gate = asyncio.Event()
+
+    class Paused(_Provider):
+        async def stream(self, req: Any) -> AsyncIterator[dict[str, Any]]:
+            entered.set()
+            await gate.wait()
+            yield {"type": "message_start", "model": req.model}
+            yield {"type": "text_delta", "text": "done"}
+            yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
+
+    agent = _agent(provider=Paused())
+    session = await agent.session(id="break-close")
+
+    async def consume() -> None:
+        async for event in session.run("first"):
+            if isinstance(event, ResultEvent):
+                break
+
+    consumer = asyncio.create_task(consume())
+    await asyncio.wait_for(entered.wait(), 1.0)
+    closer = asyncio.create_task(agent.close())
+    await asyncio.sleep(0)
+    assert not closer.done()
+    gate.set()
+    await asyncio.wait_for(asyncio.gather(consumer, closer), 2.0)
+
+
 class _Provider(ScriptedProvider):
     id = "p"
 
@@ -637,3 +688,55 @@ async def test_new_admission_is_rejected_while_agent_quiesces() -> None:
 
     provider.gate.set()
     await close_task
+
+
+async def test_profile_subagent_close_race_uses_one_agent_lifecycle() -> None:
+    from linch import Profile, RunOptions
+    from linch.config import FeatureFlags
+    from tests.support.agents import make_agent
+    from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
+    from tests.support.tools import tool_registry
+
+    started, release = asyncio.Event(), asyncio.Event()
+
+    class HeldChild(ScriptedProvider):
+        async def stream(self, req):
+            if self.requests:
+                started.set()
+                await release.wait()
+            async for event in super().stream(req):
+                yield event
+
+    provider = HeldChild(
+        [
+            ToolUseTurn("Subagent", {"description": "child", "prompt": "child"}),
+            TextTurn("child"),
+            TextTurn("done"),
+        ]
+    )
+    agent = make_agent(
+        provider,
+        tools=tool_registry(),
+        run_store=None,
+        max_idle_sessions=10,
+        features=FeatureFlags(subagents=True),
+    )
+    parent = await agent.session()
+
+    async def consume():
+        return [
+            event async for event in parent.run("go", RunOptions(profile=Profile("empty", "1")))
+        ]
+
+    running = asyncio.create_task(consume())
+    await asyncio.wait_for(started.wait(), 1)
+    closing = asyncio.create_task(agent.close())
+    await asyncio.sleep(0)
+    release.set()
+    try:
+        await asyncio.wait_for(asyncio.gather(running, closing), 1)
+    finally:
+        running.cancel()
+        closing.cancel()
+    assert parent._closed
+    assert agent._sessions == {}

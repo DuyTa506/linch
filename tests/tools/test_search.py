@@ -648,3 +648,144 @@ async def test_resume_keeps_pre_search_snapshot_for_the_unfinished_batch():
     assert _names(_request(resumed)) == ["lookup_2", "tool_search"]
     await agent.close()
     await restarted.close()
+
+
+async def test_empty_profile_blocks_deferred_call_before_selection():
+    from linch import Profile, RunOptions
+    from tests.support.tools import StubTool
+
+    seen, before_selection = [], []
+
+    class Probe(StubTool):
+        def validate(self, raw):
+            seen.append("validate")
+            return super().validate(raw)
+
+    class Hook:
+        def on_pre_tool_use(self, ctx):
+            if ctx.tool_name == "lookup_2":
+                seen.append("hook")
+
+    class CaptureBoundary(ScriptedProvider):
+        async def stream(self, req):
+            if len(self.requests) == 1:
+                before_selection.append(list(seen))
+            async for event in super().stream(req):
+                yield event
+
+    registry = _tools()
+    registry.replace(Probe("lookup_2", on_execute=lambda raw, ctx: seen.append("execute")))
+    agent = _agent(registry, hooks=[Hook()])
+    agent.provider = CaptureBoundary(
+        [
+            ToolUseTurn("lookup_2", {"value": "x"}, tool_id="blocked"),
+            ToolUseTurn("tool_search", {"query": "select:lookup_2"}, tool_id="search"),
+            ToolUseTurn("lookup_2", {"value": "x"}, tool_id="selected"),
+            TextTurn("done"),
+        ]
+    )
+    evaluate = agent.permission_engine.evaluate
+
+    def record_permission(call):
+        if call.tool.name == "lookup_2":
+            seen.append("permission")
+        return evaluate(call)
+
+    agent.permission_engine.evaluate = record_permission
+    session = await agent.session()
+    events = [event async for event in session.run("go", RunOptions(profile=Profile("empty", "1")))]
+    result = next(event for event in events if event.type == "tool_call_end")
+    assert _names(agent.provider.requests[0]) == ["tool_search"]
+    assert result.is_error
+    assert (
+        result.result == "Tool 'lookup_2' is deferred; call tool_search with select:lookup_2 first"
+    )
+    assert before_selection == [[]]
+    selected = next(
+        event
+        for event in events
+        if event.type == "tool_call_end" and event.tool_use_id == "selected"
+    )
+    assert not selected.is_error
+    assert {"validate", "hook", "permission", "execute"} <= set(seen)
+    await agent.close()
+
+
+async def test_profile_local_catalog_shadows_host_guard_and_selects_tool():
+    from linch import Profile, RunOptions, ToolSearchPlugin
+
+    agent = _agent(
+        _tools(1),
+        [
+            ToolUseTurn("lookup_0", {"value": "blocked"}, tool_id="blocked"),
+            ToolUseTurn("tool_search", {"query": "select:lookup_0"}, tool_id="search"),
+            ToolUseTurn("lookup_0", {"value": "selected"}, tool_id="selected"),
+            TextTurn("done"),
+        ],
+    )
+    session = await agent.session()
+    profile = Profile("search", "1", plugins={"search": (ToolSearchPlugin(max_tools=0), {})})
+    host = agent.context.get("request_catalog")
+    events = [event async for event in session.run("go", RunOptions(profile=profile))]
+    results = [event for event in events if event.type == "tool_call_end"]
+    assert _names(agent.provider.requests[0]) == ["tool_search"]
+    assert results[0].is_error and "deferred" in results[0].result
+    assert not results[1].is_error
+    assert results[2].result == "selected"
+    assert agent.context.get("request_catalog") is host
+    assert agent.tools.get("tool_search") is None
+    await agent.close()
+
+
+async def test_empty_profile_terminal_guard_requires_selection():
+    from linch import Profile, RunOptions
+
+    agent = _agent(
+        _tools(),
+        [
+            ToolUseTurn("lookup_2", {"value": "blocked"}, tool_id="blocked"),
+            ToolUseTurn("tool_search", {"query": "select:lookup_2"}, tool_id="search"),
+            ToolUseTurn("lookup_2", {"value": "selected"}, tool_id="selected"),
+        ],
+        final_tool_name="lookup_2",
+    )
+    session = await agent.session()
+    events = [event async for event in session.run("go", RunOptions(profile=Profile("empty", "1")))]
+    assert events[-1].structured_output == {"value": "selected"}
+    assert len(agent.provider.requests) == 3
+    assert any(
+        event.type == "tool_call_end" and event.tool_use_id == "blocked" and event.is_error
+        for event in events
+    )
+    await agent.close()
+
+
+async def test_host_catalog_persists_selected_profile_plugin_tool():
+    from linch import Profile, RunOptions
+    from tests.support.tools import StubTool
+
+    class LocalTool:
+        name, version = "local-tool", "1"
+        provides = ()
+        requires = ("run_config",)
+
+        def setup(self, ctx, config=None):
+            return ctx.run_config.tools.register(StubTool("profile_only"))
+
+    agent = _agent(
+        _tools(),
+        [
+            ToolUseTurn("tool_search", {"query": "select:profile_only"}, tool_id="search"),
+            ToolUseTurn("profile_only", {}, tool_id="local"),
+            TextTurn("done"),
+        ],
+    )
+    session = await agent.session()
+    profile = Profile("local", "1", plugins={"tool": (LocalTool(), {})})
+    events = [event async for event in session.run("go", RunOptions(profile=profile))]
+    local = next(
+        event for event in events if event.type == "tool_call_end" and event.tool_use_id == "local"
+    )
+    assert not local.is_error
+    assert "profile_only" in session.meta["linch.tool_search"]["tools"]
+    await agent.close()

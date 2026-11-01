@@ -232,6 +232,10 @@ class SubagentTool:
         runner_args = RunSubagentArgs(
             parent_session=session,
             parent_agent=session.agent,
+            config_binding=(
+                session._run_bindings.get(ctx.run_id) if ctx._run_config is not None else None
+            ),
+            parent_run_id=ctx.run_id,
             definition=definition,
             prompt=str(input["prompt"]),
             display_name=display_name,
@@ -244,6 +248,7 @@ class SubagentTool:
 
         if run_in_background:
             runner_args.retain = True
+            runner_args.detached = True
             # Spawn detached; return immediately with an ack.
             handle = WorkerHandle(
                 worker_id=worker_id,
@@ -261,6 +266,8 @@ class SubagentTool:
                 handle.child_session_id = child_session_id
 
             runner_args.on_child_registered = _record_child_id
+
+            binding = runner_args.config_binding
 
             async def _bg_run() -> None:
                 try:
@@ -326,7 +333,9 @@ class SubagentTool:
                     except Exception:
                         pass
 
-            handle.task = asyncio.create_task(_bg_run())
+            from ..profiles import _schedule_with_binding
+
+            handle.task = _schedule_with_binding(binding, _bg_run())
             return ToolResult(
                 content=(
                     f"Worker '{worker_id}' started in background."

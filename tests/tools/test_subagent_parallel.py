@@ -353,3 +353,35 @@ def test_parallel_fails_closed_for_wildcard_empty_and_malformed_lists() -> None:
     assert empty.parallel({"subagent_type": "empty"}) is True
     assert malformed.parallel({"subagent_type": "malformed"}) is False
     assert reader.parallel({"subagent_type": "reader", "run_in_background": True}) is False
+
+
+async def test_profile_restricted_catalog_disables_input_only_parallel_resolver(tmp_path):
+    from linch import Profile
+    from linch.config import FeatureFlags
+    from linch.profiles import _profile_scope
+    from tests.support.agents import make_agent
+    from tests.support.providers import ScriptedProvider
+    from tests.support.tools import tool_registry
+
+    agent = make_agent(
+        ScriptedProvider([]),
+        tools=tool_registry(StubTool("Read")),
+        cwd=str(tmp_path),
+        features=FeatureFlags(subagents=True),
+        extra_subagents=[_definition("reader", ["Read"])],
+        run_store=None,
+    )
+    session = await agent.session()
+    tool = agent.tools.get("Subagent")
+    input = {"subagent_type": "reader", "description": "read", "prompt": "read"}
+    assert tool.parallel(input)
+    async with _profile_scope(session, Profile("restricted", "1"), "profile"):
+        session._active = True
+        session.active_run_id = "profile"
+        try:
+            assert session.tools_override is None
+            assert not tool.parallel(input)
+        finally:
+            session._active = False
+            session.active_run_id = None
+    await agent.close()

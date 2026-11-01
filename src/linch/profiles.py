@@ -14,7 +14,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from .errors import ConfigError
-from .kernel import Plugin
+from .kernel import Disposable, Plugin
 from .run_store import _decode_output_schema, _json_safe, canonical_json
 
 if TYPE_CHECKING:
@@ -162,104 +162,381 @@ class Profile:
         return {"id": self.id, "version": self.version, "content_hash": f"sha256:{digest}"}
 
 
+@dataclass(slots=True)
+class _RunConfig:
+    """Narrow configuration capability with a live base and bounded overlays."""
+
+    _owner: Any
+    _values: dict[str, Any] | None = None
+    _session: Any = None
+
+    def _read(self, name: str) -> Any:
+        if self._values is not None:
+            return self._values[name]
+        return getattr(self._owner, name)
+
+    def _snapshot(self) -> dict[str, Any]:
+        return {
+            name: getattr(self, name)
+            for name in (
+                "context",
+                "tools",
+                "hooks",
+                "permission_engine",
+                "tool_pipeline",
+                "_turn_stopping_dispatcher",
+                "system_prompt",
+                "_system_prompt_config",
+                "_cached_system_blocks",
+                "_cached_system_blocks_signature",
+                "max_turns",
+                "output_schema",
+                "budget",
+            )
+        }
+
+    @property
+    def context(self) -> Any:
+        return self._read("context")
+
+    @property
+    def tools(self) -> Any:
+        if self._values is None and self._session is not None:
+            override = self._session.tools_override
+            if override is not None:
+                return override
+        return self._read("tools")
+
+    @property
+    def hooks(self) -> Any:
+        return self._read("hooks")
+
+    @property
+    def permission_engine(self) -> Any:
+        return self._read("permission_engine")
+
+    @property
+    def tool_pipeline(self) -> Any:
+        return self._read("tool_pipeline")
+
+    @property
+    def _turn_stopping_dispatcher(self) -> Any:
+        return self._read("_turn_stopping_dispatcher")
+
+    @property
+    def system_prompt(self) -> Any:
+        return self._read("system_prompt")
+
+    @property
+    def _system_prompt_config(self) -> Any:
+        return self._read("_system_prompt_config")
+
+    @property
+    def _cached_system_blocks(self) -> Any:
+        return self._read("_cached_system_blocks")
+
+    @property
+    def _cached_system_blocks_signature(self) -> Any:
+        return self._read("_cached_system_blocks_signature")
+
+    @property
+    def max_turns(self) -> Any:
+        return self._read("max_turns")
+
+    @property
+    def output_schema(self) -> Any:
+        return self._read("output_schema")
+
+    @property
+    def budget(self) -> Any:
+        return self._read("budget")
+
+    @property
+    def system_blocks_override(self) -> Any:
+        if self._values is not None:
+            return self._values.get("system_blocks_override")
+        return self._session.system_blocks_override if self._session is not None else None
+
+    def inbox(self, producer: Any) -> Disposable:
+        """Register a producer in this run configuration's delivery bucket.
+
+        Args:
+            producer: Async iterator factory called with the session and run id.
+
+        Returns:
+            A disposer to be owned by the plugin's activation ``ctx.effect``.
+        """
+        self.context._scope.ensure_active()
+        bucket = self.context._inbox
+        if bucket is None:
+            bucket = self.context._inbox = []
+        entry = (object(), producer)
+        bucket.append(entry)
+        return Disposable(lambda: bucket.remove(entry))
+
+    def build_system_blocks_for_tool_names(self, tool_names: list[str]) -> list[Any]:
+        """Build prompt blocks from this configuration's admitted tool catalog.
+
+        Args:
+            tool_names: Admitted names whose protocol and contributions are included.
+
+        Returns:
+            Fresh prompt blocks without changing the owning Agent cache.
+        """
+        registry = self.tools
+        if self._values is None and not set(tool_names).issubset(
+            {tool.name for tool in registry.list()}
+        ):
+            worker_registry = self._owner._subagent_tool_registry
+            if worker_registry is not None:
+                registry = worker_registry
+        return self._build_system_blocks(
+            tool_names, tool_sections=registry.system_prompt_sections(active_names=tool_names)
+        )
+
+    def _build_system_blocks(
+        self, tool_names: list[str], *, tool_sections: list[Any] | None = None
+    ) -> list[Any]:
+        from .agent import _build_system_blocks_for
+
+        return _build_system_blocks_for(
+            tool_names=tool_names,
+            tool_sections=tool_sections,
+            cwd=self._owner.cwd,
+            bash_security=self._owner._bash_security_mode(),
+            permission_mode=self.permission_engine.mode,
+            system_prompt=self.system_prompt,
+            system_prompt_config=self._system_prompt_config,
+        )
+
+    @property
+    def system_blocks(self) -> list[Any]:
+        from .agent import _system_blocks_signature_for
+
+        if self._values is None:
+            if self._session is not None and self._session.tools_override is not None:
+                return self.build_system_blocks_for_tool_names(
+                    sorted(tool.name for tool in self.tools.list())
+                )
+            return self._owner.system_blocks
+        names = sorted(tool.name for tool in self.tools.list())
+        signature = _system_blocks_signature_for(
+            tools=self.tools,
+            tool_names=names,
+            tool_sections=self.tools.system_prompt_sections(active_names=names),
+            system_prompt=self.system_prompt,
+            system_prompt_config=self._system_prompt_config,
+            permission_mode=self.permission_engine.mode,
+            bash_security=self._owner._bash_security_mode(),
+        )
+        if self._cached_system_blocks_signature != signature:
+            self._values["_cached_system_blocks"] = self.build_system_blocks_for_tool_names(names)
+            self._values["_cached_system_blocks_signature"] = signature
+        return self._cached_system_blocks
+
+
+@dataclass(slots=True)
+class _RunBinding:
+    session: Any
+    run_id: str
+    config: _RunConfig
+    parent: _RunBinding | None = None
+    context: Any = None
+    retains: int = 1
+    cleanup: Disposable | None = None
+    profile: Profile | None = None
+    budget: Any = None
+
+    def retain(self) -> _RunBinding:
+        if self.retains < 1:
+            raise ConfigError("run configuration is already released")
+        self.retains += 1
+        return self
+
+    async def release(self) -> None:
+        if self.retains:
+            self.retains -= 1
+        if self.retains:
+            return
+        if self.cleanup is not None:
+            await self.cleanup.dispose()
+        else:
+            self.session._run_bindings.pop(self.run_id, None)
+
+
+def _base_run_config(session: Session) -> _RunConfig:
+    """Resolve live owner fields and Session overrides without an admitted run."""
+    return _RunConfig(session.agent, _session=session)
+
+
+def _effective_run_config(session: Session, run_id: str) -> _RunConfig:
+    binding = session._run_bindings.get(run_id)
+    if binding is None or binding.config._owner is not session.agent:
+        raise ConfigError(f"missing or foreign run configuration binding: {run_id!r}")
+    return binding.config
+
+
 @asynccontextmanager
-async def _profile_scope(session: Session, profile: Profile) -> AsyncIterator[None]:
+async def _profile_scope(
+    session: Session, profile: Profile | None, run_id: str
+) -> AsyncIterator[_RunConfig]:
     from .budget import RunBudget
+    from .kernel.plugins import _PluginMount
     from .loop.turn_stopping import TurnStoppingDispatcher
     from .permissions import PermissionLayer, PermissionRuleSet, ToolRule
-    from .types import OutputSchema, SystemBlock
+    from .types import OutputSchema
 
-    if not isinstance(profile, Profile):
-        raise ConfigError("run profile must be a Profile")
+    existing = session._run_bindings.get(run_id)
+    if existing is not None and existing.retains == 0:
+        await existing.release()
+        existing = None
+    if existing is not None:
+        existing.retain()
+        try:
+            yield existing.config
+        finally:
+            await existing.release()
+        return
     parent = session.agent
-    await parent._ensure_provider_prepared()
-    agent = copy(parent)
-    context = parent.context.scope(f"profile:{profile.id}@{profile.version}", isolate_events=True)
-    agent.context = context
-    original_tools, original_system = session.tools_override, session.system_blocks_override
-    try:
-        # Copy configuration surfaces; provider, stores and host services retain
-        # their existing ownership. This is the same Agent and loop implementation.
-        agent.tools = (original_tools if original_tools is not None else parent.tools).copy()
-        agent._hooks = list(parent.hooks or ())
-        agent._replaced_hooks = []
-        agent.permission_engine = copy(parent.permission_engine)
-        agent.permission_engine.rules = deepcopy(parent.permission_engine.rules)
-        agent.permission_engine.rule_set = deepcopy(parent.permission_engine.rule_set)
-        agent.tool_pipeline = parent.tool_pipeline.fork()
-        agent._turn_stopping_dispatcher = TurnStoppingDispatcher(
-            parent._turn_stopping_dispatcher.snapshot()
+    seed = session._config_seed
+    base = seed.config if seed is not None else parent._run_config
+    context = None
+    if profile is not None:
+        if not isinstance(profile, Profile):
+            raise ConfigError("run profile must be a Profile")
+        await parent._ensure_provider_prepared()
+        context = base.context.scope(f"profile:{profile.id}@{profile.version}", isolate_events=True)
+        values = base._snapshot()
+        values.update(
+            context=context,
+            tools=(
+                session.tools_override if session.tools_override is not None else base.tools
+            ).copy(),
+            hooks=list(base.hooks or ()),
+            permission_engine=copy(base.permission_engine),
+            tool_pipeline=base.tool_pipeline.fork(),
+            _turn_stopping_dispatcher=TurnStoppingDispatcher(
+                base._turn_stopping_dispatcher.snapshot()
+            ),
+            _cached_system_blocks=None,
+            _cached_system_blocks_signature=None,
+            system_blocks_override=session.system_blocks_override,
         )
-        context.register("agent", agent)
-        context.register("tool_pipeline", agent.tool_pipeline)
-        session.agent = agent
-        for plugin, config in profile.plugins.values():
-            await agent.use(plugin, json.loads(canonical_json(config)))
-        eligible = set(profile.tool_allow) if profile.tool_allow is not None else None
-        if original_tools is not None:
-            inherited = {tool.name for tool in original_tools.list()}
-            eligible = inherited if eligible is None else inherited & eligible
-        restricted = agent.tools.subset(include=eligible, exclude=set(profile.tool_deny or ()))
-        denied = {tool.name for tool in agent.tools.list()} - {t.name for t in restricted.list()}
-        if denied:
-            engine = agent.permission_engine
-            inherited_rules = engine.rule_set
-            agent.permission_engine.rule_set = PermissionRuleSet(
-                [
-                    *getattr(inherited_rules, "layers", ()),
-                    PermissionLayer("profile", [ToolRule(name, "deny") for name in sorted(denied)]),
-                ],
-                project_root=getattr(inherited_rules, "project_root", engine.project_root),
+        values["permission_engine"].rules = deepcopy(base.permission_engine.rules)
+        values["permission_engine"].rule_set = deepcopy(base.permission_engine.rule_set)
+        config = _RunConfig(parent, values)
+        context.register("run_config", config)
+        context.register("tool_pipeline", config.tool_pipeline)
+    else:
+        config = base if seed is not None else _base_run_config(session)
+        if seed is not None and session.tools_override is not None:
+            config = _RunConfig(
+                parent,
+                {
+                    **base._snapshot(),
+                    "tools": session.tools_override,
+                    "system_blocks_override": session.system_blocks_override,
+                },
             )
-        session.tools_override = agent.tools = restricted
-        if profile.system_prompt is not None:
-            cfg = agent._system_prompt_config
-            base = cfg.append if cfg is not None and cfg.append is not None else agent.system_prompt
-            prompt = "\n\n".join(part for part in (base, profile.system_prompt) if part)
-            agent.system_prompt = prompt
-            if cfg is not None:
-                agent._system_prompt_config = replace(cfg, append=prompt)
-            if original_system is not None:
-                session.system_blocks_override = [
-                    *original_system,
-                    SystemBlock(text=profile.system_prompt, cacheable=True),
-                ]
-        agent._cached_system_blocks = agent._cached_system_blocks_signature = None
-        if profile.max_turns is not None:
-            agent.max_turns = profile.max_turns
-        resolved = profile.resolve()
-        if profile.output_schema is not None:
-            agent.output_schema = OutputSchema(**resolved["output_schema"])
-        if profile.budget is not None:
-            agent.budget = RunBudget(**resolved["budget"])
-        yield
-    finally:
-        session.agent = parent
-        session.tools_override, session.system_blocks_override = original_tools, original_system
-        pending = [
-            *session.background_tasks,
-            *(getattr(h, "task", None) for h in session.workers.values()),
-        ]
-        cleanup: asyncio.Task[None] | None = None
+    binding = _RunBinding(session, run_id, config, parent=seed, context=context, profile=profile)
+    if seed is not None:
+        seed.retain()
+    session._run_bindings[run_id] = binding
 
-        def release(_task: Any = None) -> asyncio.Task[None] | None:
-            nonlocal cleanup
-            children = [child for child in parent._sessions.values() if child.agent is agent]
-            for child in children:
-                child._profile_cleanup = release
-            if cleanup is None and not children and all(t is None or t.done() for t in pending):
-                from .session import _consume_task_exception
-
-                cleanup = asyncio.create_task(context.dispose())
-                cleanup.add_done_callback(_consume_task_exception)
-            return cleanup
-
-        children = [child for child in parent._sessions.values() if child.agent is agent]
-        if children or any(task is not None and not task.done() for task in pending):
-            for task in pending:
-                if task is not None:
-                    task.add_done_callback(release)
-            for child in children:
-                child._profile_cleanup = release
-        else:
+    async def cleanup() -> None:
+        if context is not None:
             await context.dispose()
+        if seed is not None:
+            await seed.release()
+        session._run_bindings.pop(run_id, None)
+
+    binding.cleanup = base.context.effect(lambda: Disposable(cleanup))
+    try:
+        if profile is not None:
+            assert context is not None
+            assert config._values is not None
+            for plugin, plugin_config in profile.plugins.values():
+                await _PluginMount(
+                    context, plugin, json.loads(canonical_json(plugin_config))
+                ).start()
+            eligible = set(profile.tool_allow) if profile.tool_allow is not None else None
+            if session.tools_override is not None:
+                inherited = {tool.name for tool in session.tools_override.list()}
+                eligible = inherited if eligible is None else inherited & eligible
+            restricted = config.tools.subset(include=eligible, exclude=set(profile.tool_deny or ()))
+            denied = {tool.name for tool in config.tools.list()} - {
+                t.name for t in restricted.list()
+            }
+            if denied:
+                engine = config.permission_engine
+                inherited_rules = engine.rule_set
+                engine.rule_set = PermissionRuleSet(
+                    [
+                        *getattr(inherited_rules, "layers", ()),
+                        PermissionLayer(
+                            "profile", [ToolRule(name, "deny") for name in sorted(denied)]
+                        ),
+                    ],
+                    project_root=getattr(inherited_rules, "project_root", engine.project_root),
+                )
+            config._values["tools"] = restricted
+            if profile.system_prompt is not None:
+                if session.system_blocks_override is not None:
+                    from .types import SystemBlock
+
+                    config._values["system_blocks_override"] = [
+                        *session.system_blocks_override,
+                        SystemBlock(text=profile.system_prompt, cacheable=True),
+                    ]
+                cfg = config._system_prompt_config
+                prompt = (
+                    cfg.append
+                    if cfg is not None and cfg.append is not None
+                    else config.system_prompt
+                )
+                prompt = "\n\n".join(part for part in (prompt, profile.system_prompt) if part)
+                config._values["system_prompt"] = prompt
+                if cfg is not None:
+                    config._values["_system_prompt_config"] = replace(cfg, append=prompt)
+            if profile.max_turns is not None:
+                config._values["max_turns"] = profile.max_turns
+            resolved = profile.resolve()
+            if profile.output_schema is not None:
+                config._values["output_schema"] = OutputSchema(**resolved["output_schema"])
+            if profile.budget is not None:
+                config._values["budget"] = RunBudget(**resolved["budget"])
+        yield config
+    finally:
+        await binding.release()
+
+
+def _schedule_with_binding(binding: _RunBinding | None, work: Any) -> asyncio.Task[Any]:
+    """Retain before scheduling, including cancellation before the first step."""
+    from .session import _consume_task_exception
+
+    if binding is not None:
+        binding.retain()
+    started = False
+
+    async def run() -> Any:
+        nonlocal started
+        started = True
+        try:
+            return await work
+        finally:
+            if binding is not None:
+                await binding.release()
+
+    def completed(task: asyncio.Task[Any]) -> None:
+        if started:
+            return
+        work.close()
+        if binding is not None:
+            binding.retains -= 1
+            if binding.retains == 0:
+                cleanup = asyncio.create_task(binding.release())
+                cleanup.add_done_callback(_consume_task_exception)
+
+    task = asyncio.create_task(run())
+    task.add_done_callback(completed)
+    return task

@@ -752,3 +752,39 @@ async def test_same_agent_concurrent_runs_keep_prerequisites_isolated():
     assert any(event.type == "tool_call_end" and event.is_error for event in two)
     assert one[-1].subtype == two[-1].subtype == "success"
     assert agent.context.get("reliability_runs") == {}
+
+
+async def test_empty_profile_enforces_deploy_prerequisite():
+    from tests.support.tools import StubTool
+
+    deployed = []
+    provider = ScriptedProvider(
+        [
+            ToolUseTurn("deploy", {}),
+            ToolUseTurn("run_tests", {}),
+            ToolUseTurn("deploy", {}),
+            TextTurn("done"),
+        ]
+    )
+    agent = make_agent(
+        provider,
+        tools=tool_registry(
+            StubTool("deploy", on_execute=lambda raw, ctx: deployed.append("deploy")),
+            StubTool("run_tests"),
+        ),
+        run_store=None,
+        reliability=linch.ReliabilityPolicy(
+            prerequisites=(linch.ToolPrerequisite("deploy", ("run_tests",)),),
+        ),
+    )
+    session = await agent.session()
+    events = [
+        event
+        async for event in session.run("go", linch.RunOptions(profile=linch.Profile("empty", "1")))
+    ]
+    results = [event for event in events if event.type == "tool_call_end"]
+    assert results[0].is_error
+    assert "Prerequisite not satisfied: run_tests. The tool was not executed." in results[0].result
+    assert deployed == ["deploy"]
+    assert not results[2].is_error
+    await agent.close()

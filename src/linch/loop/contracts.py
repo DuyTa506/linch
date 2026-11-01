@@ -23,19 +23,19 @@ def _exact_model_input_enabled(agent: Any) -> bool:
     return bool(getattr(getattr(agent, "durability", None), "exact_model_input", False))
 
 
-def _effective_final_tool_name(agent: Any, opts: RunOptions) -> str | None:
+def _effective_final_tool_name(agent: Any, opts: RunOptions, *, config: Any = None) -> str | None:
     """Resolve the terminal structured-output tool for this run."""
     explicit = opts.final_tool_name or getattr(agent, "final_tool_name", None)
     if explicit is not None:
         return explicit
-    schema = opts.output_schema or getattr(agent, "output_schema", None)
+    schema = opts.output_schema or (config or agent).output_schema
     if schema is None or not hasattr(agent.provider, "capabilities"):
         return None
     caps = agent.provider.capabilities(agent.model)
     return schema.name if getattr(caps, "structured_output_terminal_tool", False) else None
 
 
-def _contract_registry(session: Session) -> Any:
+def _contract_registry(session: Session, config: Any = None) -> Any:
     """Return the intended baseline tool surface for a durable run.
 
     A pending skill overlay is already known at run creation and therefore
@@ -43,7 +43,9 @@ def _contract_registry(session: Session) -> Any:
     captured in the checkpointed request phase rather than by eagerly running
     context hooks here.
     """
-    registry = session.tools_override or session.agent.tools
+    registry = (
+        config.tools if config is not None else (session.tools_override or session.agent.tools)
+    )
     pending = getattr(session, "pending_skill_overlay", None)
     allowed = getattr(pending, "allowed_tools", None)
     if allowed is not None:
@@ -315,7 +317,14 @@ def _execution_backend_contract(tools: list[Any], configured_backend: Any) -> di
 def _build_run_contract(session: Session, prompt: str, opts: RunOptions) -> Any:
     """Build the normalized, resume-safe identity for one run."""
     agent = session.agent
-    registry = _contract_registry(session)
+    from ..profiles import _base_run_config, _effective_run_config
+
+    config = (
+        _effective_run_config(session, opts.run_id)
+        if opts.run_id in session._run_bindings
+        else _base_run_config(session)
+    )
+    registry = _contract_registry(session, config)
     tools = list(registry.list())
     tool_schemas: list[dict[str, Any]] = []
     for tool, schema in zip(tools, registry.schemas(), strict=True):
@@ -337,25 +346,26 @@ def _build_run_contract(session: Session, prompt: str, opts: RunOptions) -> Any:
                 ),
             }
         )
-    if session.system_blocks_override is not None:
-        system_blocks = list(session.system_blocks_override)
+    effective_system = config.system_blocks_override
+    if effective_system is None:
+        effective_system = session.system_blocks_override
+    if effective_system is not None:
+        system_blocks = list(effective_system)
     else:
         active_names = [tool.name for tool in tools]
         tool_sections = registry.system_prompt_sections(active_names=active_names)
-        private_builder = getattr(agent, "_build_system_blocks", None)
-        builder = getattr(agent, "build_system_blocks_for_tool_names", None)
+        private_builder = getattr(config, "_build_system_blocks", None)
+        builder = getattr(config, "build_system_blocks_for_tool_names", None)
         system_blocks = (
             list(cast(Any, private_builder)(active_names, tool_sections=tool_sections))
             if callable(private_builder)
             else (
                 list(cast(Any, builder)(active_names))
                 if callable(builder)
-                else list(agent.system_blocks)
+                else list(config.system_blocks)
             )
         )
-    budget = (
-        opts.budget or getattr(session, "inherited_budget", None) or getattr(agent, "budget", None)
-    )
+    budget = opts.budget or getattr(session, "inherited_budget", None) or config.budget
     loop_guard = getattr(agent, "loop_guard", None)
     ladder = getattr(agent, "compaction_ladder", None)
     truncation = getattr(agent, "truncation_recovery", None)
@@ -370,12 +380,12 @@ def _build_run_contract(session: Session, prompt: str, opts: RunOptions) -> Any:
             getattr(agent, "skill_listing_text", None)
         ),
         "compaction_replay_config": _builtin_compaction_config(getattr(agent, "compaction", None)),
-        "permissions": _permission_policy_contract(agent),
-        "hooks": _hook_policy_contract(agent),
-        "tool_pipeline": _tool_pipeline_contract(agent),
+        "permissions": _permission_policy_contract(config),
+        "hooks": _hook_policy_contract(config),
+        "tool_pipeline": _tool_pipeline_contract(config),
         "features": getattr(agent, "features", None),
         "execution_backend": backend_identity,
-        "max_turns": None if agent.max_turns == float("inf") else agent.max_turns,
+        "max_turns": None if config.max_turns == float("inf") else config.max_turns,
         "structured_output_retries": agent.structured_output_retries,
         "loop_guard": loop_guard,
         "compaction": getattr(getattr(agent, "compaction", None), "id", None),
@@ -417,8 +427,8 @@ def _build_run_contract(session: Session, prompt: str, opts: RunOptions) -> Any:
         system_blocks=system_blocks,
         tool_schemas=tool_schemas,
         input_payload={"prompt": prompt, "images": opts.images},
-        output_schema=opts.output_schema or getattr(agent, "output_schema", None),
-        final_tool_name=_effective_final_tool_name(agent, opts),
+        output_schema=opts.output_schema or config.output_schema,
+        final_tool_name=_effective_final_tool_name(agent, opts, config=config),
         run_options=run_options,
         budget=budget,
         policies=policies,
