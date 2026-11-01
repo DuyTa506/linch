@@ -12,7 +12,10 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Any
 
-from linch.sessions import InMemorySessionStore, SqliteSessionStore
+import pytest
+
+from linch.sessions import InMemorySessionStore
+from linch.sessions.postgres import PostgresSessionStore
 from linch.sessions.store import (
     SNAPSHOT_SCHEMA_VERSION,
     ProviderViewSnapshot,
@@ -22,6 +25,8 @@ from linch.sessions.store import (
     snapshot_to_dict,
 )
 from linch.types import Message, TextBlock, message_to_dict
+from tests.support.agents import make_agent
+from tests.support.providers import ScriptedProvider, TextTurn
 
 
 def _msg(text: str) -> Message:
@@ -30,6 +35,17 @@ def _msg(text: str) -> Message:
 
 def _texts(messages: list[Message]) -> list[str]:
     return [b.text for m in messages for b in m.content if isinstance(b, TextBlock)]
+
+
+def _snapshot_agent(store: Any) -> Any:
+    """Build the inert agent used by store-backed snapshot tests."""
+    return make_agent(
+        ScriptedProvider([TextTurn("ok")], context_window=100_000),
+        session_store=store,
+        run_store=None,
+        model="gpt-5",
+        result_offload=None,
+    )
 
 
 # ── store-level snapshot round-trip ──────────────────────────────────────────
@@ -52,9 +68,10 @@ async def test_inmemory_snapshot_roundtrip_and_delete() -> None:
     assert await store.load_provider_snapshot("s1") is None
 
 
-async def test_sqlite_snapshot_roundtrip_persists_across_reopen(tmp_path: Any) -> None:
-    path = tmp_path / "sessions.db"
-    store = SqliteSessionStore(path)
+async def test_postgres_snapshot_roundtrip_persists_across_reopen(
+    pg_dsn,
+) -> None:
+    store = PostgresSessionStore(pg_dsn)
     try:
         await store.create(id="s1")
         await store.save_provider_snapshot(
@@ -67,7 +84,7 @@ async def test_sqlite_snapshot_roundtrip_persists_across_reopen(tmp_path: Any) -
     finally:
         await store.close()
 
-    reopened = SqliteSessionStore(path)
+    reopened = PostgresSessionStore(pg_dsn)
     try:
         got = await reopened.load_provider_snapshot("s1")
         assert got is not None
@@ -78,7 +95,7 @@ async def test_sqlite_snapshot_roundtrip_persists_across_reopen(tmp_path: Any) -
         await reopened.close()
 
 
-# ── wire-format tolerance (forward-compatible) ───────────────────────────────
+# ── wire-format contract ─────────────────────────────────────────────────────
 
 
 def test_snapshot_to_dict_stamps_schema_version() -> None:
@@ -88,58 +105,30 @@ def test_snapshot_to_dict_stamps_schema_version() -> None:
     assert raw["provider_view"] == [message_to_dict(_msg("a"))]
 
 
-def test_snapshot_from_dict_tolerates_future_version_and_unknown_keys() -> None:
+def test_snapshot_from_dict_rejects_future_version_before_defaults() -> None:
+    from linch._wire import UnsupportedWireVersionError
+
     raw = snapshot_to_dict(ProviderViewSnapshot(provider_view=[_msg("a")], covers_seq=2))
     raw["schema_version"] = SNAPSHOT_SCHEMA_VERSION + 99
     raw["some_future_field"] = {"nested": True}
-    restored = snapshot_from_dict(raw)
-    assert restored.covers_seq == 2
-    assert _texts(restored.provider_view) == ["a"]
+
+    with pytest.raises(UnsupportedWireVersionError, match="start a new run"):
+        snapshot_from_dict(raw)
 
 
 def test_snapshot_from_dict_defaults_missing_keys() -> None:
-    restored = snapshot_from_dict({})
-    assert restored.covers_seq == 0
-    assert restored.provider_view == []
+    from linch._wire import UnsupportedWireVersionError
+
+    with pytest.raises(UnsupportedWireVersionError, match="start a new run"):
+        snapshot_from_dict({})
 
 
 # ── load-path reconstruction (the acceptance criterion) ──────────────────────
 
 
-def _agent(store: Any, provider: Any):
-    from linch import Agent
-    from linch.config import FeatureFlags
-    from linch.tools.registry import empty_tools
-
-    return Agent(
-        model="gpt-5",
-        provider=provider,
-        session_store=store,
-        permissions={"mode": "skip-dangerous"},
-        features=FeatureFlags(skills=False, subagents=False, mcp=False),
-        result_offload=None,
-        cwd=".",
-        tools=empty_tools(),
-    )
-
-
-class _Provider:
-    id = "p"
-
-    def context_window(self, model: str) -> int:
-        return 100_000
-
-    async def stream(self, req: Any) -> AsyncIterator[dict[str, object]]:
-        from linch.types import Usage
-
-        yield {"type": "message_start", "model": req.model}
-        yield {"type": "text_delta", "text": "ok"}
-        yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
-
-
 async def test_reload_restores_compacted_view_plus_newer_messages() -> None:
     store = InMemorySessionStore()
-    agent = _agent(store, _Provider())
+    agent = _snapshot_agent(store)
     session = await agent.session(id="s1")
     await session.append([_msg("m1"), _msg("m2"), _msg("m3")])  # seq 1..3
 
@@ -150,7 +139,7 @@ async def test_reload_restores_compacted_view_plus_newer_messages() -> None:
     )
     await session.append([_msg("m4")])  # seq 4, newer than the snapshot watermark
 
-    reloaded = await _agent(store, _Provider()).session(id="s1")
+    reloaded = await _snapshot_agent(store).session(id="s1")
 
     assert _texts(reloaded.full_history) == ["m1", "m2", "m3", "m4"]  # audit log intact
     assert _texts(reloaded.provider_view) == ["SUMMARY", "m3", "m4"]  # view + newer msgs
@@ -159,11 +148,11 @@ async def test_reload_restores_compacted_view_plus_newer_messages() -> None:
 
 async def test_reload_without_snapshot_rebuilds_from_full_history() -> None:
     store = InMemorySessionStore()
-    agent = _agent(store, _Provider())
+    agent = _snapshot_agent(store)
     session = await agent.session(id="s1")
     await session.append([_msg("m1"), _msg("m2")])
 
-    reloaded = await _agent(store, _Provider()).session(id="s1")
+    reloaded = await _snapshot_agent(store).session(id="s1")
     assert _texts(reloaded.provider_view) == ["m1", "m2"]
     assert reloaded.provider_view is not reloaded.full_history
     assert _texts(reloaded.provider_view) == _texts(reloaded.full_history)
@@ -198,7 +187,7 @@ async def test_custom_store_without_snapshot_methods_falls_back() -> None:
     store._seed("s1", [_msg("m1"), _msg("m2")])
     assert not hasattr(store, "load_provider_snapshot")
 
-    reloaded = await _agent(store, _Provider()).session(id="s1")
+    reloaded = await _snapshot_agent(store).session(id="s1")
     assert _texts(reloaded.provider_view) == ["m1", "m2"]  # rebuilt from full history
 
 
@@ -209,7 +198,7 @@ async def test_maybe_save_provider_snapshot_persists_current_view() -> None:
     from linch.loop.runner import _maybe_save_provider_snapshot
 
     store = InMemorySessionStore()
-    session = await _agent(store, _Provider()).session(id="s1")
+    session = await _snapshot_agent(store).session(id="s1")
     await session.append([_msg("a"), _msg("b")])  # full_history == 2
     session.session_log.record_projection([_msg("SUM")], reason="test-compaction")
 
@@ -230,40 +219,48 @@ async def test_reload_falls_back_when_snapshot_loader_raises() -> None:
             raise RuntimeError("corrupt snapshot blob")
 
     store = _RaisingStore()
-    agent = _agent(store, _Provider())
+    agent = _snapshot_agent(store)
     session = await agent.session(id="s1")
     await session.append([_msg("m1"), _msg("m2")])
 
-    reloaded = await _agent(store, _Provider()).session(id="s1")
+    reloaded = await _snapshot_agent(store).session(id="s1")
     # A raising loader must not abort the reload — rebuild from full history.
     assert _texts(reloaded.provider_view) == ["m1", "m2"]
 
 
-async def test_reload_falls_back_on_out_of_range_watermark() -> None:
+async def test_reload_propagates_incompatible_snapshot_version() -> None:
+    from linch._wire import UnsupportedWireVersionError
+
+    class _IncompatibleStore(InMemorySessionStore):
+        raise_incompatible = False
+
+        async def load_provider_snapshot(self, id: str) -> Any:
+            if not self.raise_incompatible:
+                return await super().load_provider_snapshot(id)
+            raise UnsupportedWireVersionError("state was written by Linch < 3.0; start a new run")
+
+    store = _IncompatibleStore()
+    agent = _snapshot_agent(store)
+    session = await agent.session(id="s1")
+    await session.append([_msg("m1")])
+    store.raise_incompatible = True
+
+    with pytest.raises(UnsupportedWireVersionError, match="start a new run"):
+        await _snapshot_agent(store).session(id="s1")
+
+
+@pytest.mark.parametrize("watermark", [999, -5], ids=["too-large", "negative"])
+async def test_reload_falls_back_on_invalid_watermark(watermark: int) -> None:
     store = InMemorySessionStore()
-    agent = _agent(store, _Provider())
+    agent = _snapshot_agent(store)
     session = await agent.session(id="s1")
     await session.append([_msg("m1"), _msg("m2"), _msg("m3")])  # seq 1..3
-    # A watermark past the last stored seq would drop real messages from the view.
     await store.save_provider_snapshot(
-        "s1", ProviderViewSnapshot(provider_view=[_msg("SUMMARY")], covers_seq=999)
+        "s1", ProviderViewSnapshot(provider_view=[_msg("SUMMARY")], covers_seq=watermark)
     )
 
-    reloaded = await _agent(store, _Provider()).session(id="s1")
-    assert _texts(reloaded.provider_view) == ["m1", "m2", "m3"]  # fell back to full history
-
-
-async def test_reload_falls_back_on_negative_watermark() -> None:
-    store = InMemorySessionStore()
-    agent = _agent(store, _Provider())
-    session = await agent.session(id="s1")
-    await session.append([_msg("m1"), _msg("m2")])
-    await store.save_provider_snapshot(
-        "s1", ProviderViewSnapshot(provider_view=[_msg("SUMMARY")], covers_seq=-5)
-    )
-
-    reloaded = await _agent(store, _Provider()).session(id="s1")
-    assert _texts(reloaded.provider_view) == ["m1", "m2"]
+    reloaded = await _snapshot_agent(store).session(id="s1")
+    assert _texts(reloaded.provider_view) == ["m1", "m2", "m3"]
 
 
 async def test_snapshot_caching_disabled_when_store_seqs_non_monotonic() -> None:
@@ -275,7 +272,7 @@ async def test_snapshot_caching_disabled_when_store_seqs_non_monotonic() -> None
             return [StoredMessage(seq=1, appended_at="t", message=m) for m in messages]
 
     store = _NonMonotonicStore()
-    session = await _agent(store, _Provider()).session(id="s1")
+    session = await _snapshot_agent(store).session(id="s1")
     await session.append([_msg("a")])
     await session.append([_msg("b")])  # seq 1 again → non-increasing
     assert session._seq_cacheable is False
@@ -302,7 +299,7 @@ async def test_snapshot_watermark_tolerates_gapped_seqs() -> None:
             return out
 
     store = _GappedStore()
-    session = await _agent(store, _Provider()).session(id="s1")
+    session = await _snapshot_agent(store).session(id="s1")
     await session.append([_msg("a"), _msg("b")])  # seq 10, 20
     assert session._seq_cacheable is True
     assert session._last_seq == 20
