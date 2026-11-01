@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Sequence
+from contextlib import nullcontext
 from typing import Any, NoReturn
 from uuid import uuid4
 
@@ -22,6 +23,7 @@ from ..run_store import (
     RunLeaseConflictError,
     RunRecord,
     StoredRunEvent,
+    _append_run_error,
     _json_safe,
     _json_safe_stored_event,
     _safe_meta,
@@ -425,6 +427,7 @@ class PostgresRunStore:
         fence: str,
         returning: str,
         result: str,
+        connection: Any = None,
     ) -> tuple[Any, list[int]]:
         sql = f"""
             WITH updated AS (
@@ -441,8 +444,10 @@ class PostgresRunStore:
                                     ARRAY[]::BIGINT[]) AS allocated_seqs
             FROM updated
         """
-        pool = await self._ensure()
-        async with pool.acquire() as conn:
+        manager = (
+            (await self._ensure()).acquire() if connection is None else nullcontext(connection)
+        )
+        async with manager as conn:
             row = await conn.fetchrow(sql, *args)
             if row is None:
                 await self._classify_write_failure(conn, run_id)
@@ -618,35 +623,48 @@ class PostgresRunStore:
         )
         encoded = [json.dumps(_json_safe_stored_event(event), allow_nan=False) for event in events]
         owner, epoch = self._fence_values(run_id)
-        row, seqs = await self._write_event_rows(
-            run_id,
-            (run_id, now_iso(), checkpoint_json, error_json, len(encoded), encoded, owner, epoch),
-            update="""
-                updated_at = $2, status = 'failed', checkpoint = COALESCE($3, checkpoint),
-                last_event_seq = last_event_seq + $5,
-                meta = CASE
-                    WHEN $4::jsonb IS NULL THEN meta
-                    WHEN jsonb_typeof(meta::jsonb -> 'errors') = 'array'
-                     AND NOT EXISTS (
-                         SELECT 1 FROM jsonb_array_elements(meta::jsonb -> 'errors') AS error_item
-                         WHERE jsonb_typeof(error_item) <> 'object'
-                     )
-                    THEN jsonb_set(meta::jsonb, '{errors}',
-                        (meta::jsonb -> 'errors') || jsonb_build_array($4::jsonb))::text
-                    ELSE jsonb_set(meta::jsonb, '{errors}', jsonb_build_array($4::jsonb))::text
-                END
-            """,
-            event_arg="$6",
-            fence="$7::text IS NULL OR (lease_owner = $7 AND COALESCE(lease_epoch, 0) = $8)",
-            returning=(
-                "session_id, status, created_at, updated_at, checkpoint, meta, "
-                "last_event_seq - $5 AS first_seq"
-            ),
-            result=(
-                "updated.id, updated.session_id, updated.status, updated.created_at, "
-                "updated.updated_at, updated.checkpoint, updated.meta,"
-            ),
-        )
+        pool = await self._ensure()
+        async with pool.acquire() as conn, conn.transaction():
+            meta_json = None
+            if error_json is not None:
+                # PostgreSQL JSON field access decodes escapes and rejects NUL,
+                # even in unrelated keys. Merge the locked TEXT value in Python.
+                stored_meta = await conn.fetchval(
+                    "SELECT meta FROM runs WHERE id = $1 FOR UPDATE", run_id
+                )
+                if stored_meta is None:
+                    await self._classify_write_failure(conn, run_id)
+                meta = _safe_meta(json.loads(stored_meta))
+                _append_run_error(meta, json.loads(error_json))
+                meta_json = json.dumps(meta, allow_nan=False)
+            row, seqs = await self._write_event_rows(
+                run_id,
+                (
+                    run_id,
+                    now_iso(),
+                    checkpoint_json,
+                    meta_json,
+                    len(encoded),
+                    encoded,
+                    owner,
+                    epoch,
+                ),
+                update="""
+                    updated_at = $2, status = 'failed', checkpoint = COALESCE($3, checkpoint),
+                    last_event_seq = last_event_seq + $5, meta = COALESCE($4, meta)
+                """,
+                event_arg="$6",
+                fence="$7::text IS NULL OR (lease_owner = $7 AND COALESCE(lease_epoch, 0) = $8)",
+                returning=(
+                    "session_id, status, created_at, updated_at, checkpoint, meta, "
+                    "last_event_seq - $5 AS first_seq"
+                ),
+                result=(
+                    "updated.id, updated.session_id, updated.status, updated.created_at, "
+                    "updated.updated_at, updated.checkpoint, updated.meta,"
+                ),
+                connection=conn,
+            )
         return _row_record(row), seqs
 
     async def claim(self, run_id: str, owner: str, ttl_s: float) -> RunLease:
