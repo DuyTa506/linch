@@ -8,6 +8,7 @@ turn choreographer.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import aclosing
 from dataclasses import dataclass
 from typing import Any
 
@@ -133,13 +134,7 @@ class ProviderPreparationContext:
 async def prepare_provider_turn(ctx: ProviderPreparationContext) -> AsyncIterator[Event]:
     """Prepare compaction, context, request, and BeforeProviderCall hooks."""
     pending = ctx.session.pending_skill_overlay
-    ctx.session.pending_skill_overlay = None
     model_override = None
-    if pending is not None:
-        ctx.session.current_turn_allowed_tools = pending.allowed_tools
-        model_override = pending.model_override
-    else:
-        ctx.session.current_turn_allowed_tools = None
     if ctx.resume_checkpoint is None or ctx.turn_index != ctx.checkpoint.turn_index:
         ctx.session.current_turn_permission_decisions = {}
 
@@ -157,7 +152,18 @@ async def prepare_provider_turn(ctx: ProviderPreparationContext) -> AsyncIterato
         and ctx.checkpoint.assistant_message is not None
     )
     if ctx.resumed_assistant:
+        # A skill invoked in the preceding tool batch is staged in the
+        # checkpoint for the *next* provider turn.  Keep it staged while this
+        # resumed turn replays its already-accepted assistant/tool results;
+        # consuming it here would silently widen the following turn.
         ctx.session.current_turn_allowed_tools = ctx.checkpoint.current_turn_allowed_tools
+    else:
+        ctx.session.pending_skill_overlay = None
+        if pending is not None:
+            ctx.session.current_turn_allowed_tools = pending.allowed_tools
+            model_override = pending.model_override
+        else:
+            ctx.session.current_turn_allowed_tools = None
     ctx.frozen_pending_resume = (
         ctx.exact_model_input
         and ctx.resume_checkpoint is not None
@@ -165,6 +171,11 @@ async def prepare_provider_turn(ctx: ProviderPreparationContext) -> AsyncIterato
         and ctx.checkpoint.phase == "provider_pending"
     )
     ctx.exact_pending_replay = ctx.frozen_pending_resume and not ctx.resumed_assistant
+    if ctx.force_final_pending:
+        # The provider request is not the execution boundary: a provider may
+        # still emit an unoffered tool call.  Keep the scheduler's availability
+        # guard narrowed for this entire turn, including recovery rebuilds.
+        ctx.session.current_turn_allowed_tools = []
 
     compacted = False
     if (
@@ -183,16 +194,19 @@ async def prepare_provider_turn(ctx: ProviderPreparationContext) -> AsyncIterato
                 logical_call_id=ctx.proactive_compaction_logical_call_id,
             )
         except _ModelCallError as exc:
-            async for event in ctx.drain_auxiliary_usage():
-                yield event
+            async with aclosing(ctx.drain_auxiliary_usage()) as usage_events:
+                async for event in usage_events:
+                    yield event
             if exc.code == "budget_exceeded" and ctx.budget is not None:
                 ctx.terminal = True
-                async for event in ctx.emit_budget_exhausted():
-                    yield event
+                async with aclosing(ctx.emit_budget_exhausted()) as budget_events:
+                    async for event in budget_events:
+                        yield event
                 return
             raise
-        async for event in ctx.drain_auxiliary_usage():
-            yield event
+        async with aclosing(ctx.drain_auxiliary_usage()) as usage_events:
+            async for event in usage_events:
+                yield event
     if compacted:
         reset_read_tracker_after_compaction(ctx.session, ctx.agent)
         # Skill context reinjection is kept in the request helper to preserve
@@ -211,8 +225,9 @@ async def prepare_provider_turn(ctx: ProviderPreparationContext) -> AsyncIterato
         except _ModelCallError as exc:
             if exc.code == "budget_exceeded" and ctx.budget is not None:
                 ctx.terminal = True
-                async for event in ctx.emit_budget_exhausted():
-                    yield event
+                async with aclosing(ctx.emit_budget_exhausted()) as budget_events:
+                    async for event in budget_events:
+                        yield event
                 return
             raise
 
@@ -322,32 +337,39 @@ async def run_provider_turn(ctx: ProviderTurnContext) -> AsyncIterator[Event]:
             config=ctx.config,
         )
         try:
-            async for item in _provider_stream:
-                if isinstance(item, _PrimaryPartial):
-                    if item.delivery_attempt_id is not None:
-                        staged_partials.setdefault(item.delivery_attempt_id, []).append(item.event)
-                    yield item.event
-                elif isinstance(item, _AccountedPrimaryAssembly):
-                    assembly = item.assembly
-                    primary_receipt = item.receipt
-                    primary_rejected_native = item.rejected_native
-                    accepted_partials = staged_partials.pop(item.receipt.delivery_attempt_id, [])
-                elif isinstance(item, AssistantAssembly):
-                    assembly = item
-                else:
-                    if isinstance(item, CompactionEvent):
-                        async for usage_event in ctx.drain_auxiliary_usage():
-                            yield usage_event
-                        await ctx.save_checkpoint(checkpoint.phase, turn_index=turn_index)
-                        ledger.assert_may_start()
-                        await ctx.maybe_save_provider_snapshot(session)
-                    await ctx.persist_event(item)
-                    yield item
+            async with aclosing(_provider_stream) as provider_stream:
+                async for item in provider_stream:
+                    if isinstance(item, _PrimaryPartial):
+                        if item.delivery_attempt_id is not None:
+                            staged_partials.setdefault(item.delivery_attempt_id, []).append(
+                                item.event
+                            )
+                        yield item.event
+                    elif isinstance(item, _AccountedPrimaryAssembly):
+                        assembly = item.assembly
+                        primary_receipt = item.receipt
+                        primary_rejected_native = item.rejected_native
+                        accepted_partials = staged_partials.pop(
+                            item.receipt.delivery_attempt_id, []
+                        )
+                    elif isinstance(item, AssistantAssembly):
+                        assembly = item
+                    else:
+                        if isinstance(item, CompactionEvent):
+                            async with aclosing(ctx.drain_auxiliary_usage()) as usage_events:
+                                async for usage_event in usage_events:
+                                    yield usage_event
+                            await ctx.save_checkpoint(checkpoint.phase, turn_index=turn_index)
+                            ledger.assert_may_start()
+                            await ctx.maybe_save_provider_snapshot(session)
+                        await ctx.persist_event(item)
+                        yield item
         except LeaseLostError:
             raise
         except Exception as exc:
-            async for usage_event in ctx.drain_auxiliary_usage():
-                yield usage_event
+            async with aclosing(ctx.drain_auxiliary_usage()) as usage_events:
+                async for usage_event in usage_events:
+                    yield usage_event
             if (
                 isinstance(exc, _ModelCallError)
                 and exc.code == "budget_exceeded"
@@ -355,8 +377,9 @@ async def run_provider_turn(ctx: ProviderTurnContext) -> AsyncIterator[Event]:
             ):
                 ctx.terminal = True
                 await ctx.close_active_spans(stop_reason="error")
-                async for event in ctx.emit_budget_exhausted():
-                    yield event
+                async with aclosing(ctx.emit_budget_exhausted()) as budget_events:
+                    async for event in budget_events:
+                        yield event
                 return
             raise
 
@@ -369,17 +392,19 @@ async def run_provider_turn(ctx: ProviderTurnContext) -> AsyncIterator[Event]:
         _provider_usage = primary_receipt.usage
         ctx.sync_ledger_totals()
         if ctx.turn_stopping.active:
-            async for event in correct_invalid_response(
-                ctx, assembly, primary_receipt, primary_rejected_native
-            ):
-                yield event
+            async with aclosing(
+                correct_invalid_response(ctx, assembly, primary_receipt, primary_rejected_native)
+            ) as correction_events:
+                async for event in correction_events:
+                    yield event
             if ctx.continued:
                 return
         if primary_rejected_native:
             ctx.terminal = True
             await ctx.save_checkpoint("provider_pending", turn_index=turn_index)
-            async for event in ctx.emit_primary_usage(primary_receipt):
-                yield event
+            async with aclosing(ctx.emit_primary_usage(primary_receipt)) as usage_events:
+                async for event in usage_events:
+                    yield event
             event = ErrorEvent(
                 error={
                     "name": "ProviderError",
@@ -389,8 +414,11 @@ async def run_provider_turn(ctx: ProviderTurnContext) -> AsyncIterator[Event]:
             )
             await ctx.persist_event(event)
             yield event
-            async for event in ctx.emit_error_terminal(end_provider_call_usage=_provider_usage):
-                yield event
+            async with aclosing(
+                ctx.emit_error_terminal(end_provider_call_usage=_provider_usage)
+            ) as terminal_events:
+                async for event in terminal_events:
+                    yield event
             return
         for partial_event in accepted_partials:
             await ctx.persist_event(partial_event)
@@ -427,13 +455,17 @@ async def run_provider_turn(ctx: ProviderTurnContext) -> AsyncIterator[Event]:
             ctx.assembly = assembly
             ctx.projection = projection
             ctx.terminal = True
-            async for event in ctx.emit_primary_usage(primary_receipt):
-                yield event
-            async for event in ctx.emit_error_terminal(
-                final_text_value=after_feedback,
-                end_provider_call_usage=_provider_usage,
-            ):
-                yield event
+            async with aclosing(ctx.emit_primary_usage(primary_receipt)) as usage_events:
+                async for event in usage_events:
+                    yield event
+            async with aclosing(
+                ctx.emit_error_terminal(
+                    final_text_value=after_feedback,
+                    end_provider_call_usage=_provider_usage,
+                )
+            ) as terminal_events:
+                async for event in terminal_events:
+                    yield event
             return
         await ctx.end_provider_call(stop_reason=assembly.stop_reason, usage=_provider_usage)
         await session.append([assembly.message])
@@ -447,8 +479,9 @@ async def run_provider_turn(ctx: ProviderTurnContext) -> AsyncIterator[Event]:
         event = AssistantEvent(message=assembly.message, stop_reason=assembly.stop_reason)
         await ctx.persist_event(event)
         yield event
-        async for event in ctx.emit_primary_usage(primary_receipt):
-            yield event
+        async with aclosing(ctx.emit_primary_usage(primary_receipt)) as usage_events:
+            async for event in usage_events:
+                yield event
 
     ctx.assembly = assembly
     ctx.projection = projection if not resumed_assistant else None
