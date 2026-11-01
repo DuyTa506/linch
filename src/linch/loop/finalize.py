@@ -20,7 +20,7 @@ from contextlib import aclosing
 from dataclasses import dataclass
 from typing import Any
 
-from ..errors import ProviderError
+from ..errors import ConfigError, ProviderError
 from ..events import Event, ResultEvent
 from ..hooks.contexts import _AgentResult
 from ..session import Session
@@ -91,6 +91,25 @@ class RunFinalization:
     runtime: Any
     result: _AgentResult | None = None
 
+    def _feedback_base_count(self) -> int:
+        """Return the original history boundary for this turn's feedback."""
+        base_count = self.ctx.session.session_log.history_count
+        resume_state = self.ctx.checkpoint.extension_state.get("linch.resume", {})
+        assistant = self.ctx.checkpoint.assistant_message
+        if not (
+            isinstance(resume_state, dict)
+            and resume_state.get("feedback_origin") in {"turn_stopping", "assistant_boundary"}
+            and assistant is not None
+        ):
+            return base_count
+        history = list(self.ctx.session.full_history)
+        existing = resume_state.get("feedback_base_count")
+        if type(existing) is not int or existing <= 0 or existing > len(history):
+            raise ConfigError("invalid turn-stopping feedback boundary")
+        if _message_digest(history[existing - 1]) != _message_digest(assistant):
+            raise ConfigError("turn-stopping feedback boundary differs from its assistant")
+        return existing
+
     async def emit_error(
         self,
         *,
@@ -131,9 +150,10 @@ class RunFinalization:
             final_block,
             forced,
         )
+        feedback_base_count = self._feedback_base_count()
         self.ctx.checkpoint.extension_state["linch.resume"] = {
             "feedback_origin": "turn_stopping",
-            "feedback_base_count": len(self.ctx.session.full_history),
+            "feedback_base_count": feedback_base_count,
         }
         await self.ctx.save_checkpoint("assistant_appended", turn_index=turn_index)
         decision = await self.ctx.turn_stopping.dispatch(candidate)
@@ -167,7 +187,10 @@ class RunFinalization:
             await self.ctx.end_active_turn()
             await self.ctx.save_checkpoint("turn_complete", turn_index=turn_index)
             return
-        self.ctx.checkpoint.extension_state.pop("linch.resume", None)
+        self.ctx.checkpoint.extension_state["linch.resume"] = {
+            "feedback_origin": "assistant_boundary",
+            "feedback_base_count": feedback_base_count,
+        }
         await self.ctx.save_checkpoint("assistant_appended", turn_index=turn_index)
         self.runtime.sync_checkpoint_accounting()
         outcome = TerminalOutcome()
@@ -425,6 +448,7 @@ async def finalize_final_tool_answer(
             ) as retry_events:
                 async for event in retry_events:
                     yield event
+            ctx.checkpoint.extension_state.pop("linch.resume", None)
             await ctx.end_active_turn()
             await ctx.save_checkpoint("turn_complete", turn_index=turn_index)
             return
@@ -456,6 +480,7 @@ async def finalize_final_tool_answer(
         ) as retry_events:
             async for event in retry_events:
                 yield event
+        ctx.checkpoint.extension_state.pop("linch.resume", None)
         await ctx.end_active_turn()
         await ctx.save_checkpoint("turn_complete", turn_index=turn_index)
         return
@@ -494,6 +519,7 @@ async def finalize_final_tool_answer(
         ) as retry_events:
             async for event in retry_events:
                 yield event
+        ctx.checkpoint.extension_state.pop("linch.resume", None)
         await ctx.end_active_turn()
         await ctx.save_checkpoint("turn_complete", turn_index=turn_index)
         return
@@ -580,6 +606,7 @@ async def finalize_text_answer(
             ) as retry_events:
                 async for event in retry_events:
                     yield event
+            ctx.checkpoint.extension_state.pop("linch.resume", None)
             await ctx.end_active_turn()
             await ctx.save_checkpoint("turn_complete", turn_index=turn_index)
             return
@@ -609,6 +636,7 @@ async def finalize_text_answer(
         ) as retry_events:
             async for event in retry_events:
                 yield event
+        ctx.checkpoint.extension_state.pop("linch.resume", None)
         await ctx.end_active_turn()
         await ctx.save_checkpoint("turn_complete", turn_index=turn_index)
         return
@@ -648,6 +676,7 @@ async def finalize_text_answer(
         ) as retry_events:
             async for event in retry_events:
                 yield event
+        ctx.checkpoint.extension_state.pop("linch.resume", None)
         await ctx.end_active_turn()
         await ctx.save_checkpoint("turn_complete", turn_index=turn_index)
         return
