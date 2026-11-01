@@ -211,6 +211,52 @@ class _TransientCheckpointStore:
         return await self.store.mark_failed(run_id, *args, **kwargs)
 
 
+class _CrashAfterFinalToolAckStore:
+    """Persist the terminal-tool acknowledgement, then simulate process loss."""
+
+    def __init__(self, store: Any) -> None:
+        self.store = store
+        self.crashed = False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.store, name)
+
+    async def append_messages(self, session_id: str, messages: list[Any]) -> Any:
+        result = await self.store.append_messages(session_id, messages)
+        if not self.crashed and any(
+            any(
+                getattr(block, "content", None) == "Final answer captured by the host."
+                for block in message.content
+            )
+            for message in messages
+        ):
+            self.crashed = True
+            raise _Crash("after-final-tool-ack")
+        return result
+
+
+class _CrashAfterSessionMessageStore:
+    """Persist one matching text message, then simulate process loss."""
+
+    def __init__(self, store: Any, marker: str) -> None:
+        self.store = store
+        self.marker = marker
+        self.crashed = False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.store, name)
+
+    async def append_messages(self, session_id: str, messages: list[Any]) -> Any:
+        result = await self.store.append_messages(session_id, messages)
+        if not self.crashed and any(
+            any(self.marker in getattr(block, "text", "") for block in message.content)
+            for message in messages
+        ):
+            self.crashed = True
+            raise _Crash(f"after-message:{self.marker}")
+        return result
+
+
 def _agent(**kwargs):
     options: dict[str, Any] = {"model": "gpt-5", "cwd": "."}
     options.update(kwargs)
@@ -351,6 +397,127 @@ async def test_resume_after_assistant_tool_use_skips_provider() -> None:
 
     assert counts == {"A": 1}
     assert [event.type for event in events] == ["tool_call_start", "tool_call_end"]
+
+
+async def test_resume_after_final_tool_ack_does_not_treat_ack_as_feedback() -> None:
+    """A crash after final-tool acknowledgement still resumes successfully."""
+    from tests.support.providers import ScriptedProvider, ToolUseTurn
+
+    session_store = _CrashAfterFinalToolAckStore(_memory_session_store())
+    run_store = _memory_run_store()
+    provider = ScriptedProvider(
+        [ToolUseTurn(tool_name="answer", tool_input={"value": 1}, tool_id="final-1")]
+    )
+    agent = _agent(
+        provider=provider,
+        final_tool_name="answer",
+        session_store=session_store,
+        run_store=run_store,
+    )
+    session = await agent.session(id="s1")
+    run_id = ""
+    with pytest.raises(_Crash, match="after-final-tool-ack"):
+        async for event in session.run("hello"):
+            if event.type == "system":
+                run_id = event.run_id
+    assert run_id
+    await agent.close()
+
+    restarted = _agent(
+        provider=ScriptedProvider([]),
+        final_tool_name="answer",
+        session_store=session_store.store,
+        run_store=run_store,
+    )
+    resumed = await restarted.session(id="s1")
+    events = await _collect(resumed.resume(run_id))
+
+    assert events[-1].type == "result"
+    assert events[-1].subtype == "success"
+    assert events[-1].structured_output == {"value": 1}
+
+
+async def test_resume_after_before_final_answer_retry_does_not_replay_as_turn_feedback() -> None:
+    """A hook retry persisted after the assistant checkpoint is not turn feedback."""
+    from linch import HookResult
+
+    class RetryOnce:
+        resume_policy_id = "test.resume-retry-once"
+        resume_policy_version = "1"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def on_before_final_answer(self, _ctx: Any) -> Any:
+            self.calls += 1
+            if self.calls == 1:
+                return HookResult.retry("please revise")
+            return None
+
+    hook = RetryOnce()
+    session_store = _CrashAfterSessionMessageStore(_memory_session_store(), "please revise")
+    run_store = _memory_run_store()
+    agent = _agent(
+        provider=ScriptProvider(),
+        hooks=[hook],
+        session_store=session_store,
+        run_store=run_store,
+    )
+    session = await agent.session(id="s1")
+    run_id = ""
+    with pytest.raises(_Crash, match="after-message:please revise"):
+        async for event in session.run("hello"):
+            if event.type == "system":
+                run_id = event.run_id
+    assert run_id
+    await agent.close()
+
+    restarted = _agent(
+        provider=ScriptProvider(),
+        hooks=[hook],
+        session_store=session_store.store,
+        run_store=run_store,
+    )
+    resumed = await restarted.session(id="s1")
+    events = await _collect(resumed.resume(run_id))
+
+    assert events[-1].type == "result"
+    assert events[-1].subtype == "success"
+
+
+async def test_resume_after_truncation_nudge_clears_replayed_feedback() -> None:
+    """A persisted truncation nudge must not poison the following turn."""
+    from linch import TruncationRecovery
+    from tests.support.providers import ScriptedProvider, TextTurn
+
+    session_store = _CrashAfterSessionMessageStore(_memory_session_store(), "cut off")
+    run_store = _memory_run_store()
+    agent = _agent(
+        provider=ScriptedProvider([TextTurn("part", stop_reason="max_tokens")]),
+        truncation_recovery=TruncationRecovery(max_attempts=1, feedback="cut off; continue"),
+        session_store=session_store,
+        run_store=run_store,
+    )
+    session = await agent.session(id="s1")
+    run_id = ""
+    with pytest.raises(_Crash, match="after-message:cut off"):
+        async for event in session.run("hello"):
+            if event.type == "system":
+                run_id = event.run_id
+    assert run_id
+    await agent.close()
+
+    restarted = _agent(
+        provider=ScriptedProvider([TextTurn("done")]),
+        truncation_recovery=TruncationRecovery(max_attempts=1, feedback="cut off; continue"),
+        session_store=session_store.store,
+        run_store=run_store,
+    )
+    resumed = await restarted.session(id="s1")
+    events = await _collect(resumed.resume(run_id))
+
+    assert events[-1].type == "result"
+    assert events[-1].subtype == "success"
 
 
 async def test_resume_after_one_tool_completed_runs_only_missing_tool() -> None:
