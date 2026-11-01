@@ -77,7 +77,7 @@ async def save_note(title: str, content: str, ctx: ToolContext) -> str:
 #
 # Good for: running CLI commands, spawning sub-processes.
 # scope="exec" signals to the permission engine that this is dangerous.
-# Pair with a permission rule or canUseTool callback in production.
+# Pair with a permission rule or can_use_tool callback in production.
 
 
 @tool(

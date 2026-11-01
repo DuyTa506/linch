@@ -60,6 +60,16 @@ class TaskStopTool:
         return f"Stop worker: {input.get('task_id', '?')}"
 
     async def execute(self, input: dict[str, object], ctx: ToolContext) -> ToolResult:
+        """Stop a retained worker and leave it available for continuation.
+
+        Args:
+            input: Validated worker id or display-name target and optional reason.
+            ctx: Runtime context identifying the parent session.
+
+        Returns:
+            A result describing the stop, or an error when the target is missing
+            or ambiguous.
+        """
         import asyncio
 
         target = str(input["task_id"]).strip()
@@ -74,7 +84,14 @@ class TaskStopTool:
 
         from ._worker_utils import resolve_worker
 
-        handle = resolve_worker(session, target)
+        try:
+            handle = resolve_worker(session, target)
+        except ValueError as exc:
+            return ToolResult(
+                content=str(exc),
+                summary=self.summarize(input),
+                is_error=True,
+            )
         if handle is None:
             known = list(session.workers.keys())
             msg = f"No worker '{target}' found." + (

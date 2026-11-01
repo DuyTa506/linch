@@ -93,7 +93,14 @@ class SubagentContinueTool:
 
         from ._worker_utils import resolve_worker
 
-        handle = resolve_worker(session, target)
+        try:
+            handle = resolve_worker(session, target)
+        except ValueError as exc:
+            return ToolResult(
+                content=str(exc),
+                summary=self.summarize(input),
+                is_error=True,
+            )
         if handle is None:
             known = list(session.workers.keys())
             if known:
