@@ -386,7 +386,11 @@ async def test_deferred_background_tool_retains_origin_principal(
     gate.set()
     await asyncio.gather(*tasks)
 
-    assert seen == [initial]
+    if initial_kind == "principal":
+        assert seen == [old]
+        assert seen[0] is old
+    else:
+        assert seen == [None]
     session._finish_run()
 
 

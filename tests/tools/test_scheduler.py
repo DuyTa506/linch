@@ -278,7 +278,7 @@ async def test_immediate_validation_and_permission_errors_have_tool_result() -> 
         async for event in execute_tool_calls(
             [ToolUseBlock(id="denied", name="Denied", input={})],
             scheduler_agent(registry, permission_engine=PermissionEngine(mode="default")),
-            scheduler_session(),
+            scheduler_session(current_turn_permission_decisions=None),
             AbortContext(),
         )
     ]
