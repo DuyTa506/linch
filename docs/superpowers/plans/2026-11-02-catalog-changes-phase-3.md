@@ -2,7 +2,7 @@
 
 > **For agentic workers:** Use superpowers:subagent-driven-development. The user has authorized implementation and local commits in the existing worktree.
 
-**Status:** Implementation and documentation complete. Independent final whole-phase review is pending. Full-suite gate has two execution timeout failures; focused regressions, Ruff, and Pyright pass.
+**Status:** Implementation, documentation, and final whole-phase review complete. Latest full-suite gate has one unchanged execution timeout failure; focused regressions, Ruff, and Pyright pass.
 
 **Goal:** Add opt-in native catalog changes while preserving phase-2 payload bytes when disabled.
 
@@ -90,10 +90,10 @@
   case-insensitive beta merge, environment endpoint gating, model-overlay sync,
   and exact crash/reload/compaction regressions. The durable fixture now explicitly
   enables exact model-input replay on both agents.
-- Focused final regression command: **159 passed, 3 skipped**. Source review and
+- Focused final regression command: **161 passed, 3 skipped**. Source review and
   scoped model-overlay/contract re-review: **PASS**, original Important issue
   addressed; no outstanding Important/Critical findings.
-- Source growth: **290 net lines**. This exceeds the about-200 estimate because
+- Source growth: **293 net lines**. This exceeds the about-200 estimate because
   durable eligibility/codec, deferred context selection, frozen same-call fallback,
   and model-overlay/history/compaction resume integration are necessary for the
   stated contract. No new dependency, public export, or phase-4 work.
@@ -102,11 +102,10 @@
   native tool message after abort/new prompt, as mandated by buffering; completed
   historical messages keep their placement. By-value removal remains text-only
   while historical by-value provenance is present, including after promotion.
-- Final `pytest -q`: **2 failed, 3228 passed, 408 skipped** in 159.25s. The two
-  remaining failures are unchanged execution timeouts in
-  `tests/execution/test_execution_backend.py::test_bash_tool_backend_selection[False]`
-  and `tests/tools/test_execution_backend.py::test_bash_tool_negative_timeout_runs_command`.
-  No phase-3 failure remains. Ruff check/format pass (**500 files**); Pyright:
+- Final post-review `pytest -q`: **1 failed, 3231 passed, 408 skipped** in 38.38s.
+  The remaining failure is an unchanged execution timeout in
+  `tests/execution/test_execution_backend.py::test_bash_tool_backend_selection[False]`.
+  The negative-timeout test passed this run. No phase-3 failure remains. Ruff check/format pass (**500 files**); Pyright:
   **0 errors, 5 existing warnings**. Details and earlier RED evidence are in
   `.superpowers/sdd/2026-11-02-catalog-changes-phase-3/task-2-report.md`.
 
@@ -117,7 +116,7 @@
 
 - [x] Document capability gating, prefix lifetime, positional rendering, narrowing/fallback, and limitations.
 - [x] Add an Unreleased changelog entry for target 3.0.1.
-- [ ] Independently review the complete change against section 6 and address actionable findings with RED-first regressions.
+- [x] Independently review the complete change against section 6 and address actionable findings with RED-first regressions.
 - [x] Run `pytest -q`, `ruff check . && ruff format --check .`, and `pyright`; record counts and failures plainly.
 - [x] Report commits, gates, changed tests, source growth, and unfinished items. Do not push.
 
@@ -125,12 +124,12 @@
 
 - Tests-first commit: `17b5c01`; native implementation commit: `51f6937`.
   Documentation commit is recorded in the task-3 report after commit creation.
-- The two new native test files contain **87 cases** (75 initial cases plus
+- The two new native test files contain **89 cases** (75 initial cases plus
   RED-first safety regressions). Tests changed:
   `tests/providers/test_native_catalog_wire.py`,
   `tests/loop/test_native_catalog_changes.py`, and
   `tests/storage/test_model_input_snapshots.py` (two internal golden hashes).
-- Source growth is **290 net lines**, versus the about-200 estimate, for necessary
+- Source growth is **293 net lines**, versus the about-200 estimate, for necessary
   durability/codec, context narrowing, safe fallback, effective-model admission,
   and historical provenance integration. No new dependency or public export.
 - Usage and architecture docs cover off-by-default options, exact gating,
@@ -138,24 +137,25 @@
   restoration/deduplication, phase-2 boundaries, fallback, context timing,
   Responses suffix/active-name semantics, and Anthropic beta/size checks.
 - Independent source review and scoped re-review passed after RED-first fixes.
-  The final independent whole-phase review remains pending; its checklist above
-  is deliberately unchecked.
+  Final whole-phase review and scoped option-off fix re-review pass; no
+  outstanding Important/Critical findings remain.
 
 ### Gates on the implemented source and test tree
 
 All gates used `/home/duy/Downloads/duy_dev/agent_kit/.venv/bin` first on PATH and
 `PYTHONPATH=src`. Source was unchanged for the documentation task.
 
-- Final recorded `pytest -q`: **2 failed, 3228 passed, 408 skipped in 159.25s**,
-  exit 1. Failures:
-  `tests/execution/test_execution_backend.py::test_bash_tool_backend_selection[False]`
-  and `tests/tools/test_execution_backend.py::test_bash_tool_negative_timeout_runs_command`.
-  Both report command timeouts in unchanged local execution code. Similar timeout
-  failures were observed before source implementation. A parent-run targeted
-  rerun of these two cases passed: **2 passed in 0.14s**. This does not replace
-  the failed full-suite result.
+- Final post-review `pytest -q`: **1 failed, 3231 passed, 408 skipped in 38.38s**,
+  exit 1. The remaining failure is
+  `tests/execution/test_execution_backend.py::test_bash_tool_backend_selection[False]`,
+  a command timeout in unchanged local execution code. The negative-timeout case
+  passed. This does not claim a passing full suite.
+- Gate history: the first completed implementation gate had **2 failed, 3228 passed,
+  408 skipped** in 159.25s; those two unchanged execution cases passed a targeted
+  parent rerun (**2 passed in 0.14s**). A later parent whole-tree pre-fix run had
+  **1 failed, 3229 passed, 408 skipped** in 39.62s, the same backend-selection timeout.
 - Focused final native/catalog/fallback/history/snapshot regression set:
-  **159 passed, 3 skipped in 4.75s**, exit 0.
+  **161 passed, 3 skipped in 5.23s**, exit 0.
 - `ruff check .`: passed; `ruff format --check .`: **500 files already formatted**.
 - `pyright`: **0 errors, 5 existing warnings**, exit 0; missing-source imports
   for `jsonschema` and `croniter`.
@@ -164,9 +164,24 @@ Full implementation evidence and RED/GREEN details are recorded in
 `.superpowers/sdd/2026-11-02-catalog-changes-phase-3/task-2-report.md`.
 Documentation verification is recorded in the adjacent `task-3-report.md`.
 
+### Final option-off request review fix
+
+- Final whole-phase review found one Important issue: a context hook registering
+  a tool after synchronization could introduce its schema immediately with native
+  changes off, before its durable snapshot/notification. Both Anthropic and
+  Responses lifecycle regressions were RED on the extra wire schema.
+- Request construction now expands live schemas only for non-positional requests
+  with prior historical native definitions. Ordinary phase-2 requests use the
+  synchronized snapshot; the following sync introduces the late tool once.
+- Both added regressions and existing same-call/later native fallback cases pass.
+  Final source growth is **293 net lines**; native test cases total **89**.
+- Scoped fix review **PASS**: the original option-off finding is addressed, with
+  no new Important/Critical findings. Final whole-phase review is complete.
+
 ### Remaining items
 
-- Final independent whole-phase review and any resulting gate refresh are pending.
+- No unresolved contract/protocol items remain. Latest full gate has the one
+  unchanged execution timeout failure recorded above.
 - Native Anthropic and OpenAI wire behavior is **UNVERIFIED against live endpoints**;
   no live provider was called, as required.
 - Phase 4 was not started. Release target remains 3.0.1, branch remains

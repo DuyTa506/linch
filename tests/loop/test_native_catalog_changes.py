@@ -759,3 +759,60 @@ async def test_exact_resume_native_addition_from_skill_model_after_tool_batch(co
     assert json.dumps(resumed_transport.calls[0], separators=(",", ":")).encode() == expected
     await resumed_agent.close()
     await agent.close()
+
+
+@pytest.mark.parametrize("adapter", ["anthropic", "responses"])
+async def test_option_off_context_registration_waits_for_next_catalog_sync(adapter):
+    from linch.context import ContextBuildResult
+    from linch.hooks import ContextInjectionHook
+
+    class Builder:
+        calls = 0
+
+        async def build(self, _turn):
+            self.calls += 1
+            if self.calls == 2:
+                agent.tools.register(StubTool("late"))
+            return ContextBuildResult()
+
+    if adapter == "anthropic":
+        transport = WireTransport(text_turn(), text_turn(), text_turn())
+        provider = native_provider(transport, enabled=False)
+        model = "claude-opus-5"
+    else:
+        from linch.providers.openai_responses import (
+            OpenAIResponsesProvider,
+            OpenAIResponsesProviderOptions,
+        )
+
+        completed = [
+            {"type": "response.output_text.delta", "delta": "done"},
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": None,
+                    "status": "completed",
+                    "output": [],
+                    "usage": {"input_tokens": 10, "output_tokens": 1},
+                },
+            },
+        ]
+        transport = WireTransport(completed, completed, completed)
+        provider = OpenAIResponsesProvider(OpenAIResponsesProviderOptions())
+        provider._client._get_client = AsyncMock(return_value=SimpleNamespace(responses=transport))
+        model = "gpt-5.4"
+    agent = inert_agent(provider, model=model, hooks=[ContextInjectionHook(Builder())])
+    session = await agent.session()
+    await run(session, "baseline")
+    tools_before = json.dumps(transport.calls[0]["tools"], separators=(",", ":")).encode()
+
+    await run(session, "context registers tool after sync")
+
+    assert json.dumps(transport.calls[1]["tools"], separators=(",", ":")).encode() == tools_before
+    assert [tool["name"] for tool in session.meta["linch.prefix"]["tools"]] == ["base"]
+    assert notices(session) == []
+    await run(session, "next sync introduces tool")
+    assert [tool["name"] for tool in transport.calls[2]["tools"]] == ["base", "late"]
+    assert len(notices(session)) == 1
+    assert notices(session)[0].added_tools == ("late",)
+    await agent.close()
