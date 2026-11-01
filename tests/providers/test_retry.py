@@ -150,6 +150,22 @@ def test_server_retry_delay_exceeds_exponential_cap(delay: float) -> None:
     )
 
 
+async def test_server_retry_delay_above_cap_fails_without_sleeping() -> None:
+    from linch.errors import RateLimitError
+    from linch.providers.retry import with_retry
+
+    calls = 0
+
+    async def fn(_attempt: int) -> str:
+        nonlocal calls
+        calls += 1
+        raise RateLimitError("quota", retry_after_seconds=3600.0)
+
+    with pytest.raises(RateLimitError):
+        await with_retry(fn, signal=None, options=RetryOptions(max_delay_ms=30000))
+    assert calls == 1
+
+
 def test_exponential_retry_delay_remains_capped() -> None:
     from linch.providers.retry import _delay_for_error
 

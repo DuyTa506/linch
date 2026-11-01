@@ -18,8 +18,8 @@ class RetryOptions:
     Args:
         max_attempts: Maximum number of calls, including the first attempt.
         base_delay_ms: Initial exponential-backoff delay in milliseconds.
-        max_delay_ms: Upper bound for exponential backoff in milliseconds. Server
-            retry-after hints take precedence and may exceed this bound.
+        max_delay_ms: Upper bound for any retry delay in milliseconds. A server
+            retry-after hint longer than this ends retrying with the original error.
         jitter: Fractional randomization applied to exponential delays.
 
     Attributes:
@@ -85,6 +85,10 @@ async def with_retry(
             if not retryable or attempt == opts.max_attempts - 1:
                 raise
             delay_ms = _delay_for_error(exc, attempt, opts)
+            if delay_ms > opts.max_delay_ms:
+                # Never shorten a server-requested wait, and never hold the run
+                # (and its lease) for an unbounded server-chosen time.
+                raise
             await asyncio.sleep(delay_ms / 1000.0)
     if last_error is not None:
         raise last_error

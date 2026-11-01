@@ -835,7 +835,7 @@ worker = [
 requires-dist = [
     { name = "anthropic", marker = "extra == 'anthropic'", specifier = ">=0.30.0" },
     { name = "asyncpg", marker = "extra == 'postgres'", specifier = ">=0.32" },
-    { name = "google-genai", marker = "extra == 'gemini'", specifier = ">=1.0" },
+    { name = "google-genai", marker = "extra == 'gemini'", specifier = ">=1.39.0" },
     { name = "jsonschema", specifier = ">=4,<5" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=2.0.0" },
     { name = "openai", specifier = ">=1.0.0" },
