@@ -12,9 +12,6 @@ async def pin_run_contract(session: Any, run_id: str, opts: Any = None) -> None:
         session: Session whose agent and run store own the run.
         run_id: Identifier of the hand-built run record to update.
         opts: Optional run options used to build the contract.
-
-    Returns:
-        No value; the run record is updated in place.
     """
 
     from linch import RunOptions
