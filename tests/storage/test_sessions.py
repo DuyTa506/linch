@@ -160,8 +160,9 @@ async def test_session_store_detaches_write_inputs(store_case, boundary) -> None
         assert (await store.load(session.id)).meta == {"nested": ["before"]}
 
 
-async def test_memory_store_round_trip() -> None:
-    store = InMemorySessionStore()
+@pytest.mark.parametrize("kind", ["memory", "postgres"])
+async def test_store_round_trip(kind: str, pg_dsn: str) -> None:
+    store = InMemorySessionStore() if kind == "memory" else PostgresSessionStore(pg_dsn)
     rec = await store.create(meta={"title": "x"})
     await store.append_messages(rec.id, [Message(role="user", content=[TextBlock(text="hi")])])
 
@@ -170,6 +171,9 @@ async def test_memory_store_round_trip() -> None:
     assert rows[0].seq == 1
     assert isinstance(rows[0].message.content[0], TextBlock)
     assert rows[0].message.content[0].text == "hi"
+    await store.delete(rec.id)
+    assert await store.load(rec.id) is None
+    await store.close()
 
 
 @pytest.mark.parametrize("kind", ["memory", "postgres"])
@@ -182,19 +186,58 @@ async def test_multiple_sessions_concurrent_writes(kind: str, pg_dsn: str) -> No
 
         async def write_session(session_id: str) -> None:
             message = Message(role="user", content=[TextBlock(text=session_id)])
-            for _ in range(5):
+            for _ in range(50):
                 await store.append_messages(session_id, [message])
 
         await asyncio.gather(*(write_session(record.id) for record in records))
 
         for record in records:
             rows = await store.load_messages(record.id)
-            assert len(rows) == 5, f"session {record.id} expected 5 messages, got {len(rows)}"
-            assert [row.seq for row in rows] == [1, 2, 3, 4, 5]
+            assert len(rows) == 50, f"session {record.id} expected 50 messages, got {len(rows)}"
+            assert [row.seq for row in rows] == list(range(1, 51))
             for row in rows:
                 block = row.message.content[0]
                 assert isinstance(block, TextBlock)
                 assert block.text == record.id
+    finally:
+        await store.close()
+
+
+@pytest.mark.parametrize("kind", ["memory", "postgres"])
+async def test_concurrent_task_ids_are_unique(kind: str, pg_dsn: str) -> None:
+    store = InMemorySessionStore() if kind == "memory" else PostgresSessionStore(pg_dsn)
+    try:
+        session = await store.create()
+        tasks = await asyncio.gather(
+            *(
+                store.create_task(
+                    session.id,
+                    CreateTaskInput(subject=f"task-{index}", description="concurrent"),
+                )
+                for index in range(50)
+            )
+        )
+        assert sorted(int(task.id) for task in tasks) == list(range(1, 51))
+        assert len({task.id for task in tasks}) == 50
+    finally:
+        await store.close()
+
+
+@pytest.mark.parametrize("kind", ["memory", "postgres"])
+async def test_create_if_absent_has_one_concurrent_owner(kind: str, pg_dsn: str) -> None:
+    store = InMemorySessionStore() if kind == "memory" else PostgresSessionStore(pg_dsn)
+    session_id = "create-if-absent-concurrent"
+    try:
+        records = await asyncio.gather(
+            *(
+                store.create_if_absent(id=session_id, meta={"contender": index})
+                for index in range(50)
+            )
+        )
+        winners = [record for record in records if record is not None]
+        assert len(winners) == 1
+        loaded = await store.load(session_id)
+        assert loaded is not None and loaded.meta == winners[0].meta
     finally:
         await store.close()
 
@@ -248,21 +291,6 @@ async def test_memory_store_deeply_isolates_ordinary_message_graph_at_every_boun
     reloaded_tool = reloaded.content[0]
     assert isinstance(reloaded_tool, ToolUseBlock)
     assert reloaded_tool.input == {"nested": {"image": {"data": "before"}}}
-
-
-async def test_postgres_store_round_trip(
-    pg_dsn,
-) -> None:
-    store = PostgresSessionStore(pg_dsn)
-    rec = await store.create(meta={"title": "x"})
-    await store.append_messages(rec.id, [Message(role="user", content=[TextBlock(text="hi")])])
-
-    rows = await store.load_messages(rec.id)
-
-    assert rows[0].seq == 1
-    assert isinstance(rows[0].message.content[0], TextBlock)
-    assert rows[0].message.content[0].text == "hi"
-    await store.close()
 
 
 async def test_memory_missing_task_counter_continues_after_highest_numeric_id() -> None:

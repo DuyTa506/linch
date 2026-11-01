@@ -19,55 +19,6 @@ def _msg(sender: str, recipient: str, content: str = "hi", **kw: Any) -> Mailbox
     return MailboxMessage(sender=sender, recipient=recipient, content=content, **kw)
 
 
-@pytest.mark.asyncio
-async def test_send_then_drain_delivers_message() -> None:
-    box = InMemoryMailbox()
-    await box.send(_msg("a", "b", "ping"))
-
-    drained = await box.drain("b")
-
-    assert [m.content for m in drained] == ["ping"]
-    # Draining again yields nothing — drain is destructive/atomic.
-    assert await box.drain("b") == []
-
-
-@pytest.mark.asyncio
-async def test_drain_is_isolated_per_recipient() -> None:
-    box = InMemoryMailbox()
-    await box.send(_msg("a", "b", "for-b"))
-
-    assert await box.drain("c") == []
-    assert [m.content for m in await box.drain("b")] == ["for-b"]
-
-
-@pytest.mark.asyncio
-async def test_drain_unknown_recipient_returns_empty() -> None:
-    box = InMemoryMailbox()
-    assert await box.drain("nobody") == []
-
-
-@pytest.mark.asyncio
-async def test_concurrent_sends_dont_drop_messages() -> None:
-    box = InMemoryMailbox()
-    n = 200
-    await asyncio.gather(*(box.send(_msg("a", "b", str(i))) for i in range(n)))
-
-    drained = await box.drain("b")
-
-    assert sorted(int(m.content) for m in drained) == list(range(n))
-
-
-@pytest.mark.asyncio
-async def test_send_preserves_fifo_order() -> None:
-    box = InMemoryMailbox()
-    for i in range(5):
-        await box.send(_msg("a", "b", str(i)))
-
-    drained = await box.drain("b")
-
-    assert [m.content for m in drained] == ["0", "1", "2", "3", "4"]
-
-
 def test_message_assigns_id_when_absent() -> None:
     m1 = MailboxMessage(sender="a", recipient="b", content="x")
     m2 = MailboxMessage(sender="a", recipient="b", content="x")
@@ -142,6 +93,8 @@ async def test_memory_mailbox_drain_is_destructive(tmp_path) -> None:
     box = InMemoryMailbox()
     await box.send(_msg("a", "b", "one"))
 
+    assert await box.drain("c") == []
+    assert await box.drain("nobody") == []
     first = await box.drain("b")
     second = await box.drain("b")
 
@@ -163,7 +116,7 @@ async def test_memory_mailbox_preserves_fifo_order(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_memory_mailbox_concurrent_sends_dont_drop_messages(tmp_path) -> None:
     box = InMemoryMailbox()
-    n = 100
+    n = 200
 
     await asyncio.gather(*(box.send(_msg("a", "b", str(i))) for i in range(n)))
 
