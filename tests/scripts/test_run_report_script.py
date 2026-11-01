@@ -1,20 +1,16 @@
 from __future__ import annotations
 
-import importlib.util
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
+from tests.support.modules import load_module
+
 
 def _load_script():
     path = Path(__file__).resolve().parents[2] / "scripts" / "run_report.py"
-    spec = importlib.util.spec_from_file_location("run_report_script", path)
-    assert spec is not None
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
+    return load_module(path, "run_report_script")
 
 
 def test_run_report_summary_format_is_scannable():
