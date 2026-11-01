@@ -8,6 +8,7 @@ boundaries; it does not buffer or reorder them.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import aclosing
 from dataclasses import dataclass
 from typing import Any
 
@@ -87,14 +88,17 @@ async def recover_resume(ctx: ResumeContext) -> AsyncIterator[Event]:
             decision = await ctx.turn_stopping.dispatch(
                 TurnStopping(ctx.session, ctx.run_id, ctx.checkpoint.turn_index, "invalid_response")
             )
-            async for event in append_feedback(
-                ctx.session,
-                ctx.run_id,
-                ctx.state.invalid_feedback or decision.feedback,
-                boundary=ctx.active_primary,
-                decision=decision,
-            ):
-                yield event
+            async with aclosing(
+                append_feedback(
+                    ctx.session,
+                    ctx.run_id,
+                    ctx.state.invalid_feedback or decision.feedback,
+                    boundary=ctx.active_primary,
+                    decision=decision,
+                )
+            ) as feedback_events:
+                async for event in feedback_events:
+                    yield event
             if decision.action == "continue":
                 await ctx.save_checkpoint("turn_complete", turn_index=ctx.checkpoint.turn_index)
                 ctx.state.start_turn = ctx.checkpoint.turn_index + 1
@@ -102,22 +106,25 @@ async def recover_resume(ctx: ResumeContext) -> AsyncIterator[Event]:
             assert ctx.state.terminal_event is not None
             await ctx.persist_event(ctx.state.terminal_event)
             yield ctx.state.terminal_event
-            async for event in ctx.emit_error_terminal():
-                yield event
+            async with aclosing(ctx.emit_error_terminal()) as error_events:
+                async for event in error_events:
+                    yield event
             ctx.state.terminal = True
             return
         if ctx.state.terminal_kind == "stopped":
-            async for event in ctx.emit_error_terminal(
-                final_text_value=ctx.state.terminal_feedback
-            ):
-                yield event
+            async with aclosing(
+                ctx.emit_error_terminal(final_text_value=ctx.state.terminal_feedback)
+            ) as error_events:
+                async for event in error_events:
+                    yield event
             ctx.state.terminal = True
             return
         if ctx.state.terminal:
             return
 
-    async for usage_event in ctx.drain_auxiliary_usage():
-        yield usage_event
+    async with aclosing(ctx.drain_auxiliary_usage()) as usage_events:
+        async for usage_event in usage_events:
+            yield usage_event
 
     # Keep this yield inside the caller's try/finally.  A consumer can close
     # exactly at a worker notification and still get lifecycle cleanup.

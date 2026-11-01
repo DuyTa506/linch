@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import aclosing
 from dataclasses import dataclass
 from typing import Any
 
@@ -99,16 +100,19 @@ class RunFinalization:
     ) -> AsyncIterator[Event]:
         self.runtime.sync_checkpoint_accounting()
         outcome = TerminalOutcome()
-        async for event in emit_error_terminal(
-            self.ctx,
-            total=self.runtime.total,
-            running_cost=self.runtime.running_cost,
-            outcome=outcome,
-            final_text_value=final_text_value,
-            duration_ms=duration_ms,
-            end_provider_call_usage=end_provider_call_usage,
-        ):
-            yield event
+        async with aclosing(
+            emit_error_terminal(
+                self.ctx,
+                total=self.runtime.total,
+                running_cost=self.runtime.running_cost,
+                outcome=outcome,
+                final_text_value=final_text_value,
+                duration_ms=duration_ms,
+                end_provider_call_usage=end_provider_call_usage,
+            )
+        ) as error_events:
+            async for event in error_events:
+                yield event
         self.result = outcome.result
 
     async def finalize(
@@ -137,37 +141,44 @@ class RunFinalization:
             )
             messages = (paired, *messages)
         replayed = self.runtime.replayed_feedback
-        if replayed and (
-            decision.action == "accept"
-            or list(map(_message_digest, replayed)) != list(map(_message_digest, messages))
+        if (
+            replayed
+            and decision.action != "accept"
+            and list(map(_message_digest, replayed)) != list(map(_message_digest, messages))
         ):
             raise ValueError("replayed turn feedback differs from its decision")
         self.runtime.replayed_feedback = ()
         if decision.action != "accept":
-            async for event in append_feedback(
-                self.ctx.session,
-                self.ctx.run_id,
-                messages,
-                paired=bool(tool_blocks),
-                decision=decision,
-            ):
-                yield event
+            async with aclosing(
+                append_feedback(
+                    self.ctx.session,
+                    self.ctx.run_id,
+                    messages,
+                    paired=bool(tool_blocks),
+                    decision=decision,
+                )
+            ) as feedback_events:
+                async for event in feedback_events:
+                    yield event
             await self.ctx.end_active_turn()
             await self.ctx.save_checkpoint("turn_complete", turn_index=turn_index)
             return
         self.runtime.sync_checkpoint_accounting()
         outcome = TerminalOutcome()
         finalize = finalize_final_tool_answer if final_block else finalize_text_answer
-        async for event in finalize(
-            self.ctx,
-            turn_index=turn_index,
-            **answer,
-            total=self.runtime.total,
-            running_cost=self.runtime.running_cost,
-            forced_final_turn=forced,
-            outcome=outcome,
-        ):
-            yield event
+        async with aclosing(
+            finalize(
+                self.ctx,
+                turn_index=turn_index,
+                **answer,
+                total=self.runtime.total,
+                running_cost=self.runtime.running_cost,
+                forced_final_turn=forced,
+                outcome=outcome,
+            )
+        ) as final_events:
+            async for event in final_events:
+                yield event
         self.result = outcome.result
 
 
@@ -249,17 +260,20 @@ async def emit_error_terminal(
     if end_provider_call_usage is not None:
         await ctx.end_active_provider_call(stop_reason="error", usage=end_provider_call_usage)
     await ctx.end_active_turn()
-    async for event in _error_result_tail(
-        ctx.session,
-        runtime=ctx.runtime,
-        run_id=ctx.run_id,
-        total=total,
-        duration_ms=dur,
-        running_cost=running_cost,
-        final_text_value=final_text_value,
-        usage_complete=ctx.usage_complete(),
-    ):
-        yield event
+    async with aclosing(
+        _error_result_tail(
+            ctx.session,
+            runtime=ctx.runtime,
+            run_id=ctx.run_id,
+            total=total,
+            duration_ms=dur,
+            running_cost=running_cost,
+            final_text_value=final_text_value,
+            usage_complete=ctx.usage_complete(),
+        )
+    ) as error_events:
+        async for event in error_events:
+            yield event
 
 
 async def emit_success_terminal(
@@ -282,22 +296,25 @@ async def emit_success_terminal(
         duration_ms=duration_ms,
     )
     await ctx.end_active_turn()
-    async for event in _success_result_tail(
-        ctx.session,
-        ctx.agent,
-        run_id=ctx.run_id,
-        run_record=ctx.run_record,
-        checkpoint=ctx.checkpoint,
-        total=total,
-        duration_ms=duration_ms,
-        running_cost=running_cost,
-        stop_reason=proposed.stop_reason,
-        final_text_value=proposed.final_text,
-        structured_output=proposed.structured_output,
-        structured_error=proposed.structured_error,
-        usage_complete=ctx.usage_complete(),
-    ):
-        yield event
+    async with aclosing(
+        _success_result_tail(
+            ctx.session,
+            ctx.agent,
+            run_id=ctx.run_id,
+            run_record=ctx.run_record,
+            checkpoint=ctx.checkpoint,
+            total=total,
+            duration_ms=duration_ms,
+            running_cost=running_cost,
+            stop_reason=proposed.stop_reason,
+            final_text_value=proposed.final_text,
+            structured_output=proposed.structured_output,
+            structured_error=proposed.structured_error,
+            usage_complete=ctx.usage_complete(),
+        )
+    ) as success_events:
+        async for event in success_events:
+            yield event
 
 
 async def finalize_final_tool_answer(
@@ -318,29 +335,35 @@ async def finalize_final_tool_answer(
             "Invalid terminal tool batch: the final-answer tool must be the only "
             "tool call in its assistant message; no calls were executed."
         )
-        async for event in _final_tool_retry_tail(
-            ctx.session,
-            run_id=ctx.run_id,
-            tool_blocks=tool_blocks,
-            final_id=final_block.id,
-            feedback=feedback,
-        ):
-            yield event
+        async with aclosing(
+            _final_tool_retry_tail(
+                ctx.session,
+                run_id=ctx.run_id,
+                tool_blocks=tool_blocks,
+                final_id=final_block.id,
+                feedback=feedback,
+            )
+        ) as retry_events:
+            async for event in retry_events:
+                yield event
         raise ProviderError(feedback)
 
     # A terminal tool is intercepted rather than scheduled, but provider
     # histories still require every assistant tool_use to have a matching
     # user tool_result.  Persist the acknowledgement before any terminal gate
     # so success, stop, and crash paths all leave a reusable session.
-    async for event in _final_tool_retry_tail(
-        ctx.session,
-        run_id=ctx.run_id,
-        tool_blocks=tool_blocks,
-        final_id=final_block.id,
-        feedback="Final answer captured by the host.",
-        final_is_error=False,
-    ):
-        yield event
+    async with aclosing(
+        _final_tool_retry_tail(
+            ctx.session,
+            run_id=ctx.run_id,
+            tool_blocks=tool_blocks,
+            final_id=final_block.id,
+            feedback="Final answer captured by the host.",
+            final_is_error=False,
+        )
+    ) as ack_events:
+        async for event in ack_events:
+            yield event
 
     raw_structured_output = dict(final_block.input)
     structured_output: dict[str, Any] | None = raw_structured_output
@@ -362,16 +385,18 @@ async def finalize_final_tool_answer(
         for event in _gate.events:
             yield event
         if _gate.decision == "stop":
-            async for event in emit_error_terminal(
-                ctx, total=total, running_cost=running_cost, outcome=outcome
-            ):
-                yield event
+            async with aclosing(
+                emit_error_terminal(ctx, total=total, running_cost=running_cost, outcome=outcome)
+            ) as error_events:
+                async for event in error_events:
+                    yield event
             return
         if _gate.decision == "retry":
-            async for event in _gate_retry_tail(
-                ctx.session, run_id=ctx.run_id, feedback=_gate.feedback or ""
-            ):
-                yield event
+            async with aclosing(
+                _gate_retry_tail(ctx.session, run_id=ctx.run_id, feedback=_gate.feedback or "")
+            ) as retry_events:
+                async for event in retry_events:
+                    yield event
             await ctx.end_active_turn()
             await ctx.save_checkpoint("turn_complete", turn_index=turn_index)
             return
@@ -398,18 +423,26 @@ async def finalize_final_tool_answer(
         yield hook_event
     if hook_action == "retry" and ctx.final_answer_reentries[0] < ctx.max_final_answer_reentries:
         ctx.final_answer_reentries[0] += 1
-        async for event in _gate_retry_tail(
-            ctx.session, run_id=ctx.run_id, feedback=feedback or ""
-        ):
-            yield event
+        async with aclosing(
+            _gate_retry_tail(ctx.session, run_id=ctx.run_id, feedback=feedback or "")
+        ) as retry_events:
+            async for event in retry_events:
+                yield event
         await ctx.end_active_turn()
         await ctx.save_checkpoint("turn_complete", turn_index=turn_index)
         return
     if hook_action == "stop":
-        async for event in emit_error_terminal(
-            ctx, total=total, running_cost=running_cost, outcome=outcome, final_text_value=feedback
-        ):
-            yield event
+        async with aclosing(
+            emit_error_terminal(
+                ctx,
+                total=total,
+                running_cost=running_cost,
+                outcome=outcome,
+                final_text_value=feedback,
+            )
+        ) as error_events:
+            async for event in error_events:
+                yield event
         return
     dur = int((time.time() - ctx.started) * 1000)
     proposed = ResultEvent(
@@ -428,28 +461,40 @@ async def finalize_final_tool_answer(
         await _persist_event(ctx.session, ctx.run_id, hook_event)
         yield hook_event
     if stop_action == "continue":
-        async for event in _gate_retry_tail(
-            ctx.session, run_id=ctx.run_id, feedback=feedback or ""
-        ):
-            yield event
+        async with aclosing(
+            _gate_retry_tail(ctx.session, run_id=ctx.run_id, feedback=feedback or "")
+        ) as retry_events:
+            async for event in retry_events:
+                yield event
         await ctx.end_active_turn()
         await ctx.save_checkpoint("turn_complete", turn_index=turn_index)
         return
     if stop_action == "stop":
-        async for event in emit_error_terminal(
+        async with aclosing(
+            emit_error_terminal(
+                ctx,
+                total=total,
+                running_cost=running_cost,
+                outcome=outcome,
+                final_text_value=feedback,
+                duration_ms=dur,
+            )
+        ) as error_events:
+            async for event in error_events:
+                yield event
+        return
+    async with aclosing(
+        emit_success_terminal(
             ctx,
+            proposed,
             total=total,
             running_cost=running_cost,
             outcome=outcome,
-            final_text_value=feedback,
             duration_ms=dur,
-        ):
+        )
+    ) as success_events:
+        async for event in success_events:
             yield event
-        return
-    async for event in emit_success_terminal(
-        ctx, proposed, total=total, running_cost=running_cost, outcome=outcome, duration_ms=dur
-    ):
-        yield event
 
 
 async def finalize_text_answer(
@@ -489,20 +534,24 @@ async def finalize_text_answer(
         for event in _gate.events:
             yield event
         if _gate.decision == "stop":
-            async for event in emit_error_terminal(
-                ctx,
-                total=total,
-                running_cost=running_cost,
-                outcome=outcome,
-                final_text_value=ft,
-            ):
-                yield event
+            async with aclosing(
+                emit_error_terminal(
+                    ctx,
+                    total=total,
+                    running_cost=running_cost,
+                    outcome=outcome,
+                    final_text_value=ft,
+                )
+            ) as error_events:
+                async for event in error_events:
+                    yield event
             return
         if _gate.decision == "retry":
-            async for event in _gate_retry_tail(
-                ctx.session, run_id=ctx.run_id, feedback=_gate.feedback or ""
-            ):
-                yield event
+            async with aclosing(
+                _gate_retry_tail(ctx.session, run_id=ctx.run_id, feedback=_gate.feedback or "")
+            ) as retry_events:
+                async for event in retry_events:
+                    yield event
             await ctx.end_active_turn()
             await ctx.save_checkpoint("turn_complete", turn_index=turn_index)
             return
@@ -527,18 +576,26 @@ async def finalize_text_answer(
         yield hook_event
     if hook_action == "retry" and ctx.final_answer_reentries[0] < ctx.max_final_answer_reentries:
         ctx.final_answer_reentries[0] += 1
-        async for event in _gate_retry_tail(
-            ctx.session, run_id=ctx.run_id, feedback=feedback or ""
-        ):
-            yield event
+        async with aclosing(
+            _gate_retry_tail(ctx.session, run_id=ctx.run_id, feedback=feedback or "")
+        ) as retry_events:
+            async for event in retry_events:
+                yield event
         await ctx.end_active_turn()
         await ctx.save_checkpoint("turn_complete", turn_index=turn_index)
         return
     if hook_action == "stop":
-        async for event in emit_error_terminal(
-            ctx, total=total, running_cost=running_cost, outcome=outcome, final_text_value=feedback
-        ):
-            yield event
+        async with aclosing(
+            emit_error_terminal(
+                ctx,
+                total=total,
+                running_cost=running_cost,
+                outcome=outcome,
+                final_text_value=feedback,
+            )
+        ) as error_events:
+            async for event in error_events:
+                yield event
         return
 
     dur = int((time.time() - ctx.started) * 1000)
@@ -558,25 +615,37 @@ async def finalize_text_answer(
         await _persist_event(ctx.session, ctx.run_id, hook_event)
         yield hook_event
     if stop_action == "continue":
-        async for event in _gate_retry_tail(
-            ctx.session, run_id=ctx.run_id, feedback=feedback or ""
-        ):
-            yield event
+        async with aclosing(
+            _gate_retry_tail(ctx.session, run_id=ctx.run_id, feedback=feedback or "")
+        ) as retry_events:
+            async for event in retry_events:
+                yield event
         await ctx.end_active_turn()
         await ctx.save_checkpoint("turn_complete", turn_index=turn_index)
         return
     if stop_action == "stop":
-        async for event in emit_error_terminal(
+        async with aclosing(
+            emit_error_terminal(
+                ctx,
+                total=total,
+                running_cost=running_cost,
+                outcome=outcome,
+                final_text_value=feedback,
+                duration_ms=dur,
+            )
+        ) as error_events:
+            async for event in error_events:
+                yield event
+        return
+    async with aclosing(
+        emit_success_terminal(
             ctx,
+            proposed,
             total=total,
             running_cost=running_cost,
             outcome=outcome,
-            final_text_value=feedback,
             duration_ms=dur,
-        ):
+        )
+    ) as success_events:
+        async for event in success_events:
             yield event
-        return
-    async for event in emit_success_terminal(
-        ctx, proposed, total=total, running_cost=running_cost, outcome=outcome, duration_ms=dur
-    ):
-        yield event

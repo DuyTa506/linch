@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from typing import Any
 
 from ..events import AssistantEvent, Event, UserEvent
@@ -85,8 +86,9 @@ async def correct_invalid_response(
     )
     if decision.action == "accept":
         return
-    async for event in ctx.emit_primary_usage(receipt):
-        yield event
+    async with aclosing(ctx.emit_primary_usage(receipt)) as usage_events:
+        async for event in usage_events:
+            yield event
     messages = decision.feedback
     if decision.action == "continue" and not rejected_native:
         diagnostic = Message(
@@ -110,15 +112,18 @@ async def correct_invalid_response(
                 )
             )
         messages = (diagnostic, *messages)
-    async for event in append_feedback(
-        ctx.session,
-        ctx.run_id,
-        messages,
-        stop_reason=assembly.stop_reason,
-        decision=decision,
-        boundary=ctx.active_primary,
-    ):
-        yield event
+    async with aclosing(
+        append_feedback(
+            ctx.session,
+            ctx.run_id,
+            messages,
+            stop_reason=assembly.stop_reason,
+            decision=decision,
+            boundary=ctx.active_primary,
+        )
+    ) as feedback_events:
+        async for event in feedback_events:
+            yield event
     await ctx.end_provider_call(stop_reason=assembly.stop_reason, usage=receipt.usage)
     await ctx.save_checkpoint("turn_complete", turn_index=ctx.turn_index)
     ctx.continued = True
