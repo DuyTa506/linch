@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from .abort import AbortContext
 from .errors import ConfigError
-from .events import Event
+from .events import Event, ResultEvent
 from .run_store import durable_call
 from .session_log import SessionLog
 from .sessions import SessionStore
@@ -125,6 +125,8 @@ class AlignmentEntry:
     prompt: str
     images: list[dict[str, str]] | None
     future: asyncio.Future[None]
+    cancelled: bool = False
+    applying: bool = False
 
 
 @dataclass(slots=True)
@@ -413,6 +415,32 @@ class Session:
         from .lifecycle import EVENT_EMIT
 
         self._active_started = True
+        finished = False
+
+        async def finish() -> None:
+            nonlocal finished
+            if finished:
+                return
+            finished = True
+            # Resume once past the terminal event so the loop wrapper can run
+            # its own ``async with aclosing(...)`` exit path synchronously. A
+            # direct ``aclose`` here schedules nested async-generator finalizers
+            # that can otherwise linger as pending tasks during rapid churn.
+            try:
+                await anext(inner)
+            except StopAsyncIteration:
+                pass
+            else:
+                await _aclose_generator(inner)
+            finally:
+                try:
+                    if scope is not None:
+                        await scope.__aexit__(None, None, None)
+                finally:
+                    self._finish_run()
+                    if self.agent.max_idle_sessions is not None:
+                        await self.agent._session_became_idle(self)
+
         scope = None
         try:
             if opts.profile is not None:
@@ -423,6 +451,28 @@ class Session:
                 scope = pending_scope
             hooks = HookDispatcher(getattr(self.agent, "hooks", None))
             async for event in inner:
+                if isinstance(event, ResultEvent):
+                    # Async generators are not automatically closed when a
+                    # consumer breaks from ``async for``. Complete the inner
+                    # loop and release admission before handing the terminal
+                    # event to the caller, so the session cannot remain parked
+                    # while the caller retains the stream object.
+                    event_run_id = self.active_run_id or run_id_fallback
+                    event_deps = getattr(self, "run_deps", None)
+                    if hooks.active:
+                        await hooks.dispatch(
+                            EVENT_EMIT,
+                            EventEmitContext(
+                                session=self,
+                                run_id=event_run_id,
+                                turn_index=None,
+                                deps=event_deps,
+                                event=event,
+                            ),
+                        )
+                    await finish()
+                    yield event
+                    continue
                 yield event
                 if hooks.active:
                     await hooks.dispatch(
@@ -437,15 +487,17 @@ class Session:
                     )
         finally:
             try:
-                await _aclose_generator(inner)
+                if not finished:
+                    await _aclose_generator(inner)
             finally:
                 try:
-                    if scope is not None:
+                    if scope is not None and not finished:
                         await scope.__aexit__(None, None, None)
                 finally:
-                    self._finish_run()
-                    if self.agent.max_idle_sessions is not None:
-                        await self.agent._session_became_idle(self)
+                    if not finished:
+                        self._finish_run()
+                        if self.agent.max_idle_sessions is not None:
+                            await self.agent._session_became_idle(self)
 
     def _finish_run(self) -> None:
         """Release the single-run admission token and publish true idleness."""
@@ -491,15 +543,22 @@ class Session:
             await future
             return
         try:
-            await asyncio.wait_for(future, timeout_s)
+            await asyncio.wait_for(asyncio.shield(future), timeout_s)
         except TimeoutError:
-            # The run never reached a alignment boundary in time. Drop the still
-            # -pending entry so it cannot inject into a later turn, and surface
-            # the timeout instead of blocking the caller indefinitely. (If the
-            # drain already removed it, the future is now cancelled and the
-            # drain's `future.done()` guard makes its set_result a no-op.)
+            # Mark the entry before removing it from the pending queue. The
+            # drain may already be running a slow hook; it checks this marker
+            # before appending so a timed-out alignment cannot be applied after
+            # the caller has been told it was rejected. If durable append has
+            # begun, wait for its truthful completion instead of reporting a
+            # timeout for a message that is already being committed.
+            entry.cancelled = True
+            if entry.applying:
+                await future
+                return
             if entry in self.alignment_queue:
                 self.alignment_queue.remove(entry)
+            if not future.done():
+                future.cancel()
             raise ConfigError("alignment timed out before it was applied") from None
 
     def interrupt(self) -> None:

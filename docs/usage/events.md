@@ -271,11 +271,12 @@ async for event in session.run(prompt):
 
 Consequences to design for:
 
-- **Always drain the iterator.** Abandoning it mid-stream leaves the run parked.
-  Either consume to the terminal `ResultEvent`, or call `session.abort()` (which
-  cancels in-flight provider/tool work and any background tasks) and then let the
-  generator finish. Breaking out of the `async for` triggers the generator's
-  `aclose()`, running the `finally` that clears the active-run flag.
+- **Always drain the iterator.** Abandoning it before a terminal `ResultEvent`
+  leaves the run parked. Either consume to the terminal result, call
+  `session.abort()` (which cancels in-flight provider/tool work and any
+  background tasks), or explicitly close the iterator with `aclosing`. Once a
+  terminal `ResultEvent` is ready, the session finalizes before yielding it, so
+  breaking on that event is safe.
 - **One active run per session.** A second `session.run()` while one is live
   raises `ConfigError` — fan out with separate sessions (or subagents) instead.
 - **Background work is the explicit exception.** A `run_in_background=True` tool or
