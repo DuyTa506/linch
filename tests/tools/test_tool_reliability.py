@@ -1,30 +1,18 @@
-"""Tests for Phase-11 tool execution reliability: per-tool timeout + opt-in retry.
-
-Harness mirrors test_scheduler_v2.py: SimpleNamespace agent/session, ToolRegistry,
-AbortContext, and `async for event in execute_tool_calls(...)`.  All delays are
-ms-scale so the suite stays fast.
-"""
-
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from linch import RetryOptions, ToolTimeoutError
+from linch import RetryOptions
 from linch.abort import AbortContext
 from linch.errors import AbortError
 from linch.events import ToolCallEndEvent
-from linch.permissions import PermissionEngine
 from linch.scheduler import execute_tool_calls
 from linch.tools import ToolContext, ToolRegistry, ToolResult
 from linch.types import ToolUseBlock
-
-# ---------------------------------------------------------------------------
-# Test tools
-# ---------------------------------------------------------------------------
+from tests.support.scheduler import scheduler_agent, scheduler_session
 
 
 class SleepyTool:
@@ -112,41 +100,6 @@ class FlakyTool:
         return ToolResult(content=f"{self.name}-ok")
 
 
-# ---------------------------------------------------------------------------
-# Harness helpers
-# ---------------------------------------------------------------------------
-
-
-def make_agent(
-    registry: ToolRegistry,
-    *,
-    tool_timeout_ms: float | None = None,
-    tool_retry: RetryOptions | None = None,
-) -> SimpleNamespace:
-    from linch import Context
-
-    return SimpleNamespace(
-        cwd=".",
-        tools=registry,
-        permission_engine=PermissionEngine(mode="skip-dangerous"),
-        max_tool_concurrency=8,
-        tool_concurrency=8,
-        tool_timeout_ms=tool_timeout_ms,
-        tool_retry=tool_retry,
-        context=Context(),
-    )
-
-
-def make_session() -> SimpleNamespace:
-    return SimpleNamespace(
-        id="s1",
-        store=None,
-        active_run_id="run-1",
-        tools_override=None,
-        current_turn_allowed_tools=None,
-    )
-
-
 def _block(tool_name: str, bid: str = "b1") -> ToolUseBlock:
     return ToolUseBlock(id=bid, name=tool_name, input={})
 
@@ -163,8 +116,8 @@ async def collect_events(
         e
         async for e in execute_tool_calls(
             blocks,
-            make_agent(registry, tool_timeout_ms=tool_timeout_ms, tool_retry=tool_retry),
-            make_session(),
+            scheduler_agent(registry, tool_timeout_ms=tool_timeout_ms, tool_retry=tool_retry),
+            scheduler_session(),
             signal or AbortContext(),
         )
     ]
@@ -172,11 +125,6 @@ async def collect_events(
 
 def end_events(events: list[Any]) -> list[ToolCallEndEvent]:
     return [e for e in events if isinstance(e, ToolCallEndEvent)]
-
-
-# ---------------------------------------------------------------------------
-# Timeout tests
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -250,70 +198,36 @@ async def test_abort_not_masked_by_timeout() -> None:
 
 
 @pytest.mark.asyncio
-async def test_per_tool_attribute_loosens_agent_default() -> None:
-    """Per-tool execution_timeout_ms > agent default → tool succeeds."""
+@pytest.mark.parametrize(
+    ("agent_timeout", "tool_timeout", "delay", "timed_out"),
+    [
+        (10, 500, 0.05, False),  # the tool-specific limit wins
+        (None, 10, 0.2, True),  # a tool-specific limit applies without a default
+        (None, None, 0.05, False),  # no configured limit preserves old behavior
+        (10, 0, 0.05, False),  # zero explicitly opts out of the agent default
+    ],
+    ids=["tool-loosens-default", "tool-tightens-none", "none-backcompat", "zero-opt-out"],
+)
+async def test_tool_timeout_configuration(
+    agent_timeout: float | None,
+    tool_timeout: float | None,
+    delay: float,
+    timed_out: bool,
+) -> None:
+    """Resolve the effective timeout from agent and per-tool settings."""
     registry = ToolRegistry()
-    # Tool has its own 500ms limit; agent default is 10ms — tool's value wins
-    registry.register(SleepyTool("T", delay=0.05, scope="read", execution_timeout_ms=500))
-
+    registry.register(SleepyTool("T", delay=delay, scope="read", execution_timeout_ms=tool_timeout))
     events = await collect_events(
         registry,
         [_block("T", "b1")],
-        tool_timeout_ms=10,
+        tool_timeout_ms=agent_timeout,
     )
-
-    ends = end_events(events)
-    assert ends[0].is_error is False
-
-
-@pytest.mark.asyncio
-async def test_per_tool_attribute_tightens_when_agent_default_is_none() -> None:
-    """Per-tool execution_timeout_ms with no agent default → tool can time out."""
-    registry = ToolRegistry()
-    registry.register(SleepyTool("T", delay=0.2, scope="read", execution_timeout_ms=10))
-
-    events = await collect_events(
-        registry,
-        [_block("T", "b1")],
-        tool_timeout_ms=None,
-    )
-
-    ends = end_events(events)
-    assert ends[0].is_error is True
-    assert "timed out" in ends[0].result
-
-
-@pytest.mark.asyncio
-async def test_none_default_no_timeout_backcompat() -> None:
-    """No tool_timeout_ms → slow tool completes normally (zero-overhead backcompat)."""
-    registry = ToolRegistry()
-    registry.register(SleepyTool("T", delay=0.05, scope="read"))
-
-    events = await collect_events(
-        registry,
-        [_block("T", "b1")],
-        tool_timeout_ms=None,
-    )
-
-    ends = end_events(events)
-    assert ends[0].is_error is False
-    assert "T-ok" in ends[0].result
-
-
-@pytest.mark.asyncio
-async def test_per_tool_opt_out_zero_bypasses_agent_default() -> None:
-    """execution_timeout_ms=0 on a tool opts out even when agent default is set."""
-    registry = ToolRegistry()
-    registry.register(SleepyTool("T", delay=0.05, scope="read", execution_timeout_ms=0))
-
-    events = await collect_events(
-        registry,
-        [_block("T", "b1")],
-        tool_timeout_ms=10,  # agent default is tight, but tool opted out
-    )
-
-    ends = end_events(events)
-    assert ends[0].is_error is False  # completes because tool's 0 = no timeout
+    end = end_events(events)[0]
+    assert end.is_error is timed_out
+    if timed_out:
+        assert "timed out" in end.result
+    else:
+        assert "T-ok" in end.result
 
 
 @pytest.mark.asyncio
@@ -332,15 +246,15 @@ async def test_cleanup_runs_on_timeout_cancellation() -> None:
     assert flag == [True], "finally block did not run — cleanup not guaranteed"
 
 
-# ---------------------------------------------------------------------------
-# Retry tests
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
-async def test_transient_failure_retried_then_succeeds() -> None:
-    """read-scope tool, fail_times=2, max_attempts=3 → succeeds on 3rd attempt."""
-    tool = FlakyTool("F", fail_times=2, retryable=True)
+@pytest.mark.parametrize(
+    ("fail_times", "is_error"),
+    [(2, False), (5, True)],
+    ids=["eventual-success", "exhausted"],
+)
+async def test_retry_outcomes(fail_times: int, is_error: bool) -> None:
+    """Retry a transient read failure until success or the attempt limit."""
+    tool = FlakyTool("F", fail_times=fail_times, retryable=True)
     registry = ToolRegistry()
     registry.register(tool)
 
@@ -351,28 +265,11 @@ async def test_transient_failure_retried_then_succeeds() -> None:
     )
 
     ends = end_events(events)
-    assert ends[0].is_error is False
-    assert tool.call_count == 3
-
-
-@pytest.mark.asyncio
-async def test_retry_exhausted_then_errors() -> None:
-    """fail_times=5, max_attempts=3 → is_error after 3 attempts."""
-    tool = FlakyTool("F", fail_times=5, retryable=True)
-    registry = ToolRegistry()
-    registry.register(tool)
-
-    events = await collect_events(
-        registry,
-        [_block("F", "b1")],
-        tool_retry=RetryOptions(max_attempts=3, base_delay_ms=1),
-    )
-
-    ends = end_events(events)
-    assert ends[0].is_error is True
-    assert ends[0].tool_result is not None
-    assert ends[0].tool_result.is_error is True
-    assert ends[0].tool_result.content == ends[0].result
+    assert ends[0].is_error is is_error
+    if is_error:
+        assert ends[0].tool_result is not None
+        assert ends[0].tool_result.is_error is True
+        assert ends[0].tool_result.content == ends[0].result
     assert tool.call_count == 3
 
 
@@ -457,66 +354,47 @@ async def test_abort_error_not_retried() -> None:
 
 
 @pytest.mark.asyncio
-async def test_write_tool_not_retried_by_default() -> None:
-    """Write-scope tool with no retryable opt-in: call_count stays 1."""
-    tool = FlakyTool("W", fail_times=2, scope="write", parallel=False)
+@pytest.mark.parametrize(
+    ("name", "scope", "fail_times", "retryable", "retry", "expected_calls", "is_error"),
+    [
+        ("W", "write", 2, False, True, 1, True),
+        ("W", "write", 1, True, True, 2, False),
+        ("F", "read", 1, True, False, 1, True),
+    ],
+    ids=["write-default", "write-opt-in", "retry-disabled"],
+)
+async def test_retry_policy(
+    name: str,
+    scope: str,
+    fail_times: int,
+    retryable: bool,
+    retry: bool,
+    expected_calls: int,
+    is_error: bool,
+) -> None:
+    """Apply retry opt-ins by scope and preserve the no-retry default."""
+    tool = FlakyTool(
+        name,
+        fail_times=fail_times,
+        scope=scope,
+        parallel=scope == "read",
+        retryable=retryable,
+    )
     registry = ToolRegistry()
     registry.register(tool)
-
     events = await collect_events(
         registry,
-        [_block("W", "b1")],
-        tool_retry=RetryOptions(max_attempts=3, base_delay_ms=1),
+        [_block(name, "b1")],
+        tool_retry=RetryOptions(max_attempts=3, base_delay_ms=1) if retry else None,
     )
-
-    ends = end_events(events)
-    assert ends[0].is_error is True
-    assert tool.call_count == 1, "write-scope tools must not be retried by default"
-
-
-@pytest.mark.asyncio
-async def test_write_tool_retried_when_opted_in() -> None:
-    """Write-scope tool with retryable=True IS retried."""
-    tool = FlakyTool("W", fail_times=1, scope="write", parallel=False, retryable=True)
-    registry = ToolRegistry()
-    registry.register(tool)
-
-    events = await collect_events(
-        registry,
-        [_block("W", "b1")],
-        tool_retry=RetryOptions(max_attempts=3, base_delay_ms=1),
-    )
-
-    ends = end_events(events)
-    assert ends[0].is_error is False
-    assert tool.call_count == 2
-
-
-@pytest.mark.asyncio
-async def test_no_retry_by_default() -> None:
-    """tool_retry=None (default) means a single attempt — no retry."""
-    tool = FlakyTool("F", fail_times=1, retryable=True)
-    registry = ToolRegistry()
-    registry.register(tool)
-
-    events = await collect_events(
-        registry,
-        [_block("F", "b1")],
-        tool_retry=None,
-    )
-
-    ends = end_events(events)
-    assert ends[0].is_error is True
-    assert tool.call_count == 1
-
-
-# ---------------------------------------------------------------------------
-# ToolTimeoutError export test
-# ---------------------------------------------------------------------------
+    end = end_events(events)[0]
+    assert end.is_error is is_error
+    assert tool.call_count == expected_calls
 
 
 def test_tool_timeout_error_is_retryable() -> None:
-    """ToolTimeoutError.retryable is True so the retry predicate sees it as transient."""
+    from linch import ToolTimeoutError
+
     exc = ToolTimeoutError("timed out")
     assert exc.retryable is True
     assert exc.kind == "tool_timeout"

@@ -16,15 +16,10 @@ async def _settle() -> None:
 
 
 def _agent(*, context: Context | None = None) -> Any:
-    from linch import Agent
-    from linch.ext.evals import ScriptedProvider
+    from tests.support.agents import make_agent
+    from tests.support.providers import ScriptedProvider
 
-    return Agent(
-        model="m",
-        provider=ScriptedProvider([]),
-        context=context,
-        result_offload=None,
-    )
+    return make_agent(ScriptedProvider([]), context=context, result_offload=None)
 
 
 @dataclass
@@ -52,7 +47,43 @@ class _Plugin:
         return Disposable(teardown)
 
 
-@pytest.mark.asyncio
+class _RegistrationPlugin:
+    def __init__(
+        self,
+        name: str,
+        key: str,
+        requires: tuple[str, ...] = (),
+        *,
+        return_registration: bool = False,
+    ) -> None:
+        self.name = name
+        self.version = "1"
+        self.provides = (key,)
+        self.requires = requires
+        self.registration: Disposable | None = None
+        self.source: Context | None = None
+        self._key = key
+        self._return_registration = return_registration
+
+    def setup(self, ctx: Context, config: Any) -> Disposable:
+        self.source = ctx
+        self.registration = ctx.register(self._key, object())
+        return self.registration if self._return_registration else Disposable()
+
+
+class _ActionPlugin:
+    def __init__(self, name: str, action: Any) -> None:
+        self.name = name
+        self.version = "1"
+        self.provides: tuple[str, ...] = ()
+        self.requires: tuple[str, ...] = ()
+        self._action = action
+
+    def setup(self, ctx: Context, config: Any) -> Disposable:
+        self._action()
+        return Disposable()
+
+
 async def test_plugin_dormant_activation_removal_and_reactivation() -> None:
     agent = _agent()
     plugin = _Plugin(provides=("out",), requires=("dep",))
@@ -77,7 +108,6 @@ async def test_plugin_dormant_activation_removal_and_reactivation() -> None:
     assert agent.context.get("out") is None
 
 
-@pytest.mark.asyncio
 async def test_dependency_removal_rebinds_to_inherited_fallback() -> None:
     parent = Context()
     inherited = object()
@@ -85,18 +115,13 @@ async def test_dependency_removal_rebinds_to_inherited_fallback() -> None:
     agent = _agent(context=parent)
     shadow = agent.context.register("dep", object())
     seen: list[object] = []
-
-    class BindingPlugin:
-        name = "binding"
-        version = "1"
-        provides = ("out",)
-        requires = ("dep",)
-
-        def setup(self, ctx: Context, config: Any) -> Disposable:
-            seen.append(ctx.get("dep"))
-            return ctx.register("out", object())
-
-    mounted = await agent.use(BindingPlugin())
+    plugin = _Plugin(
+        name="binding",
+        provides=("out",),
+        requires=("dep",),
+        service_factory=lambda _config, ctx: seen.append(ctx.get("dep")) or object(),
+    )
+    mounted = await agent.use(plugin)
     await shadow.dispose()
     await _settle()
     assert seen[0] is not inherited
@@ -105,7 +130,6 @@ async def test_dependency_removal_rebinds_to_inherited_fallback() -> None:
     await mounted.dispose()
 
 
-@pytest.mark.asyncio
 async def test_plugin_dependencies_chain_and_unmount_cascade() -> None:
     agent = _agent()
     first = _Plugin(name="first", provides=("first",))
@@ -128,22 +152,10 @@ async def test_plugin_dependencies_chain_and_unmount_cascade() -> None:
     await second_mount.dispose()
 
 
-@pytest.mark.asyncio
 async def test_disposing_plugin_service_registration_withdraws_export_and_dependents() -> None:
     agent = _agent()
 
-    class ManualPlugin:
-        name = "manual"
-        version = "1"
-        provides = ("manual",)
-        requires: tuple[str, ...] = ()
-        registration: Disposable | None = None
-
-        def setup(self, ctx: Context, config: Any) -> Disposable:
-            self.registration = ctx.register("manual", object())
-            return Disposable()
-
-    manual = ManualPlugin()
+    manual = _RegistrationPlugin("manual", "manual")
     dependent = _Plugin(name="dependent", requires=("manual",), provides=("dependent",))
     await agent.use(manual)
     await agent.use(dependent)
@@ -157,7 +169,6 @@ async def test_disposing_plugin_service_registration_withdraws_export_and_depend
     assert dependent.cleanups == 1
 
 
-@pytest.mark.asyncio
 async def test_stale_plugin_export_does_not_hide_inherited_dependency_change() -> None:
     parent = Context()
     inherited = object()
@@ -165,30 +176,15 @@ async def test_stale_plugin_export_does_not_hide_inherited_dependency_change() -
     agent = _agent(context=parent)
     seen: list[object] = []
 
-    class ManualPlugin:
-        name = "manual-dep"
-        version = "1"
-        provides = ("dep",)
-        requires: tuple[str, ...] = ()
-        registration: Disposable | None = None
-
-        def setup(self, ctx: Context, config: Any) -> Disposable:
-            self.registration = ctx.register("dep", object())
-            return Disposable()
-
-    class Dependent:
-        name = "fallback-dependent"
-        version = "1"
-        provides = ("dependent",)
-        requires = ("dep",)
-
-        def setup(self, ctx: Context, config: Any) -> Disposable:
-            seen.append(ctx.get("dep"))
-            return ctx.register("dependent", object())
-
-    manual = ManualPlugin()
+    manual = _RegistrationPlugin("manual-dep", "dep")
+    dependent = _Plugin(
+        name="fallback-dependent",
+        provides=("dependent",),
+        requires=("dep",),
+        service_factory=lambda _config, ctx: seen.append(ctx.get("dep")) or object(),
+    )
     manual_mount = await agent.use(manual)
-    dependent_mount = await agent.use(Dependent())
+    dependent_mount = await agent.use(dependent)
     assert manual.registration is not None
     await manual.registration.dispose()
     await _settle()
@@ -203,7 +199,6 @@ async def test_stale_plugin_export_does_not_hide_inherited_dependency_change() -
     await agent.close()
 
 
-@pytest.mark.asyncio
 async def test_plugin_audit_rejects_undeclared_service_and_rolls_back() -> None:
     agent = _agent()
     cleaned = False
@@ -229,7 +224,6 @@ async def test_plugin_audit_rejects_undeclared_service_and_rolls_back() -> None:
     assert cleaned
 
 
-@pytest.mark.asyncio
 async def test_setup_failure_rolls_back_owned_async_cleanup_before_use_raises() -> None:
     agent = _agent()
     cleaned = False
@@ -262,50 +256,15 @@ async def test_setup_failure_rolls_back_owned_async_cleanup_before_use_raises() 
     assert plugin.scope is not None and plugin.scope._scope.disposed
 
 
-@pytest.mark.asyncio
 async def test_closed_plugin_source_is_not_returned_from_stale_export() -> None:
     agent = _agent()
-    source: Context | None = None
-
-    class SourcePlugin:
-        name = "source"
-        version = "1"
-        provides = ("out",)
-        requires: tuple[str, ...] = ()
-
-        def setup(self, ctx: Context, config: Any) -> Disposable:
-            nonlocal source
-            source = ctx
-            return ctx.register("out", object())
-
-    await agent.use(SourcePlugin())
-    assert source is not None
-    await source.dispose()
+    source = _RegistrationPlugin("source", "out", return_registration=True)
+    await agent.use(source)
+    assert source.source is not None
+    await source.source.dispose()
     assert agent.context.get("out") is None
 
 
-@pytest.mark.asyncio
-@pytest.mark.asyncio
-async def test_plugin_rejects_setup_escape_to_captured_parent() -> None:
-    parent = Context()
-    agent = _agent(context=parent)
-
-    class EscapePlugin:
-        name = "escape"
-        version = "1"
-        provides: tuple[str, ...] = ()
-        requires: tuple[str, ...] = ()
-
-        def setup(self, ctx: Context, config: Any) -> Disposable:
-            parent.register("outside", object())
-            return Disposable()
-
-    with pytest.raises(ConfigError, match="activation scope"):
-        await agent.use(EscapePlugin())
-    assert parent.get("outside") is None
-
-
-@pytest.mark.asyncio
 async def test_plugin_setup_cannot_mutate_captured_parent_through_any_context_surface() -> None:
     parent = Context()
     agent = _agent(context=parent)
@@ -315,31 +274,15 @@ async def test_plugin_setup_cannot_mutate_captured_parent_through_any_context_su
         "on": lambda: parent.on("outside", lambda: None),
         "effect": lambda: parent.effect(lambda: None),
         "scope": lambda: parent.scope("outside"),
-        "inbox": lambda: parent.inbox(lambda: None),
+        "inbox": lambda: parent.inbox(lambda _session, _run_id: None),
     }
 
     for name, operation in operations.items():
-        plugin_name = f"escape-{name}"
-
-        class EscapePlugin:
-            name = plugin_name
-            version = "1"
-            provides: tuple[str, ...] = ()
-            requires: tuple[str, ...] = ()
-
-            def __init__(self, action: Any) -> None:
-                self.action = action
-
-            def setup(self, ctx: Context, config: Any) -> Disposable:
-                self.action()
-                return Disposable()
-
         with pytest.raises(ConfigError, match="activation scope"):
-            await agent.use(EscapePlugin(operation))
+            await agent.use(_ActionPlugin(f"escape-{name}", operation))
     assert parent.get("outside") is None
 
 
-@pytest.mark.asyncio
 async def test_plugin_rejects_a_key_declared_as_both_requirement_and_provision() -> None:
     agent = _agent()
     dependency = agent.context.register("loop", object())
@@ -363,7 +306,6 @@ async def test_plugin_rejects_a_key_declared_as_both_requirement_and_provision()
     assert agent.context.get("loop") is None
 
 
-@pytest.mark.asyncio
 async def test_plugin_unmount_withdraws_exports_before_async_cleanup() -> None:
     agent = _agent()
     started = asyncio.Event()
@@ -395,28 +337,20 @@ async def test_plugin_unmount_withdraws_exports_before_async_cleanup() -> None:
     await disposing
 
 
-@pytest.mark.asyncio
 async def test_plugin_rejects_setup_escape_to_unrelated_agent_context() -> None:
     parent = Context()
     agent = _agent(context=parent)
     unrelated = _agent(context=parent)
 
-    class EscapePlugin:
-        name = "unrelated-escape"
-        version = "1"
-        provides: tuple[str, ...] = ()
-        requires: tuple[str, ...] = ()
-
-        def setup(self, ctx: Context, config: Any) -> Disposable:
-            unrelated.context.register("outside", object())
-            return Disposable()
-
     with pytest.raises(ConfigError, match="activation scope"):
-        await agent.use(EscapePlugin())
+        await agent.use(
+            _ActionPlugin(
+                "unrelated-escape", lambda: unrelated.context.register("outside", object())
+            )
+        )
     assert unrelated.context.get("outside") is None
 
 
-@pytest.mark.asyncio
 async def test_plugin_cleanup_retry_withdraws_services_before_cleanup() -> None:
     agent = _agent()
     attempts = 0
@@ -438,7 +372,6 @@ async def test_plugin_cleanup_retry_withdraws_services_before_cleanup() -> None:
     assert attempts == 2
 
 
-@pytest.mark.asyncio
 async def test_closed_mount_never_reactivates_after_blocked_cleanup() -> None:
     agent = _agent()
     started = asyncio.Event()
@@ -466,7 +399,6 @@ async def test_closed_mount_never_reactivates_after_blocked_cleanup() -> None:
     await replacement.dispose()
 
 
-@pytest.mark.asyncio
 async def test_plugins_are_isolated_between_agents_sharing_parent() -> None:
     parent = Context()
     first = _agent(context=parent)
@@ -484,7 +416,6 @@ async def test_plugins_are_isolated_between_agents_sharing_parent() -> None:
     await second_mount.dispose()
 
 
-@pytest.mark.asyncio
 async def test_duplicate_plugin_provision_rolls_back_second_mount() -> None:
     agent = _agent()
     first = _Plugin(name="first", provides=("same",))
@@ -497,7 +428,6 @@ async def test_duplicate_plugin_provision_rolls_back_second_mount() -> None:
     await first_mount.dispose()
 
 
-@pytest.mark.asyncio
 async def test_indirect_dependency_cycle_is_rejected_before_setup_repeats() -> None:
     parent = Context()
     parent.register("a", object())
@@ -517,40 +447,25 @@ async def test_indirect_dependency_cycle_is_rejected_before_setup_repeats() -> N
     assert agent.context.get("b") is not None
 
 
-@pytest.mark.asyncio
 async def test_closed_dependent_retries_before_provider_cleanup_finishes() -> None:
     agent = _agent()
     attempts = 0
     order: list[str] = []
 
-    class Provider:
-        name = "provider"
-        version = "1"
-        provides = ("a",)
-        requires: tuple[str, ...] = ()
+    async def dependent_cleanup() -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise RuntimeError("dependent cleanup failed")
+        order.append("dependent")
 
-        def setup(self, ctx: Context, config: Any) -> Disposable:
-            ctx.register("a", object())
-            return Disposable(lambda: order.append("provider"))
+    async def provider_cleanup() -> None:
+        order.append("provider")
 
-    class Dependent:
-        name = "dependent-retry"
-        version = "1"
-        provides: tuple[str, ...] = ()
-        requires = ("a",)
-
-        def setup(self, ctx: Context, config: Any) -> Disposable:
-            async def cleanup() -> None:
-                nonlocal attempts
-                attempts += 1
-                if attempts < 3:
-                    raise RuntimeError("dependent cleanup failed")
-                order.append("dependent")
-
-            return Disposable(cleanup)
-
-    provider_mount = await agent.use(Provider())
-    dependent_mount = await agent.use(Dependent())
+    provider = _Plugin(name="provider", provides=("a",), cleanup=provider_cleanup)
+    dependent = _Plugin(name="dependent-retry", requires=("a",), cleanup=dependent_cleanup)
+    provider_mount = await agent.use(provider)
+    dependent_mount = await agent.use(dependent)
 
     with pytest.raises(RuntimeError, match="dependent cleanup failed"):
         await provider_mount.dispose()
@@ -568,7 +483,6 @@ async def test_closed_dependent_retries_before_provider_cleanup_finishes() -> No
     await dependent_mount.dispose()
 
 
-@pytest.mark.asyncio
 async def test_cancelled_setup_failure_keeps_cleanup_running_until_release() -> None:
     agent = _agent()
     started = asyncio.Event()
@@ -610,7 +524,6 @@ async def test_cancelled_setup_failure_keeps_cleanup_running_until_release() -> 
     assert plugin.scope is not None and plugin.scope._scope.disposed
 
 
-@pytest.mark.asyncio
 async def test_sibling_service_events_do_not_retry_other_agent_cleanup() -> None:
     parent = Context()
     parent_dependency = parent.register("dep", object())
@@ -620,22 +533,15 @@ async def test_sibling_service_events_do_not_retry_other_agent_cleanup() -> None
     unrelated = first.context.register("unrelated", object())
     attempts = 0
 
-    class Dependent:
-        name = "sibling-dependent"
-        version = "1"
-        provides: tuple[str, ...] = ()
-        requires = ("dep",)
+    async def cleanup() -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("dependent cleanup failed")
 
-        def setup(self, ctx: Context, config: Any) -> Disposable:
-            async def cleanup() -> None:
-                nonlocal attempts
-                attempts += 1
-                if attempts == 1:
-                    raise RuntimeError("dependent cleanup failed")
-
-            return Disposable(cleanup)
-
-    mounted = await second.use(Dependent())
+    mounted = await second.use(
+        _Plugin(name="sibling-dependent", requires=("dep",), cleanup=cleanup)
+    )
     await same_key.dispose()
     assert attempts == 0
 
@@ -651,7 +557,6 @@ async def test_sibling_service_events_do_not_retry_other_agent_cleanup() -> None
     await second.close()
 
 
-@pytest.mark.asyncio
 async def test_relevant_withdrawal_joins_a_busy_dependent_cleanup() -> None:
     agent = _agent()
     trigger = agent.context.register("trigger", object())
@@ -659,32 +564,20 @@ async def test_relevant_withdrawal_joins_a_busy_dependent_cleanup() -> None:
     release = asyncio.Event()
     order: list[str] = []
 
-    class Provider:
-        name = "busy-provider"
-        version = "1"
-        provides = ("dep",)
-        requires: tuple[str, ...] = ()
+    async def cleanup() -> None:
+        started.set()
+        await release.wait()
+        order.append("dependent")
 
-        def setup(self, ctx: Context, config: Any) -> Disposable:
-            ctx.register("dep", object())
-            return Disposable(lambda: order.append("provider"))
+    async def provider_cleanup() -> None:
+        order.append("provider")
 
-    class Dependent:
-        name = "busy-dependent"
-        version = "1"
-        provides: tuple[str, ...] = ()
-        requires = ("dep", "trigger")
-
-        def setup(self, ctx: Context, config: Any) -> Disposable:
-            async def cleanup() -> None:
-                started.set()
-                await release.wait()
-                order.append("dependent")
-
-            return Disposable(cleanup)
-
-    provider = await agent.use(Provider())
-    dependent = await agent.use(Dependent())
+    provider = await agent.use(
+        _Plugin(name="busy-provider", provides=("dep",), cleanup=provider_cleanup)
+    )
+    dependent = await agent.use(
+        _Plugin(name="busy-dependent", requires=("dep", "trigger"), cleanup=cleanup)
+    )
     trigger_removal = asyncio.create_task(trigger.dispose())
     await started.wait()
     provider_removal = asyncio.create_task(provider.dispose())

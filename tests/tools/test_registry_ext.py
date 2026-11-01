@@ -4,33 +4,22 @@ from __future__ import annotations
 
 import pytest
 
-from linch.tools.base import ToolContext, ToolResult, ToolScope
+from linch.kernel import Disposable
 from linch.tools.registry import (
     ToolRegistry,
     empty_tools,
     workspace_tools,
 )
+from tests.support.tools import StubTool
 
 # ── Minimal fake tool ───────────────────────────────────────────────────────
 
 
-class FakeTool:
+class FakeTool(StubTool):
     def __init__(self, name: str, *, tags: tuple[str, ...] = ()) -> None:
-        self.name = name
+        super().__init__(name, parallel=True)
         self.description = f"Fake {name}"
-        self.input_schema: dict = {"type": "object", "properties": {}}
         self.tags = tags
-        self.scope: ToolScope = "read"
-        self.parallel = True
-
-    def validate(self, raw: dict) -> dict:
-        return raw
-
-    async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
-        return ToolResult(content="ok", summary=self.name)
-
-    def summarize(self, input: dict) -> str:
-        return self.name
 
 
 # ── Tests ───────────────────────────────────────────────────────────────────
@@ -135,22 +124,11 @@ def test_register_duplicate_raises():
         r.register(FakeTool("X"))
 
 
-def test_register_rejects_tool_missing_summarize():
-    class NoSummarizeTool(FakeTool):
-        summarize = None  # type: ignore[assignment]
-
-    r = ToolRegistry()
-    with pytest.raises(Exception, match="summarize"):
-        r.register(NoSummarizeTool("Incomplete"))
-
-
-def test_register_rejects_tool_missing_validate():
-    class NoValidateTool(FakeTool):
-        validate = None  # type: ignore[assignment]
-
-    r = ToolRegistry()
-    with pytest.raises(Exception, match="validate"):
-        r.register(NoValidateTool("Incomplete"))
+@pytest.mark.parametrize("missing", ["summarize", "validate"])
+def test_register_rejects_incomplete_tool(missing):
+    incomplete = type("IncompleteTool", (FakeTool,), {missing: None})
+    with pytest.raises(Exception, match=missing):
+        ToolRegistry().register(incomplete("Incomplete"))
 
 
 def test_replace_rejects_malformed_tool():
@@ -191,3 +169,116 @@ def test_schemas_accept_v2_schema_attribute():
             "input_schema": SchemaTool.schema,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_register_returns_disposer_that_removes_tool() -> None:
+    reg = ToolRegistry()
+    tool = StubTool("alpha")
+    handle = reg.register(tool)
+    assert isinstance(handle, Disposable)
+    gen_after_register = reg.generation
+    assert reg.get("alpha") is tool
+
+    await handle.dispose()
+    assert reg.get("alpha") is None
+    assert reg.generation > gen_after_register
+
+
+@pytest.mark.asyncio
+async def test_dispose_is_idempotent() -> None:
+    reg = ToolRegistry()
+    handle = reg.register(StubTool("alpha"))
+    await handle.dispose()
+    gen = reg.generation
+    await handle.dispose()
+    assert reg.generation == gen
+    assert reg.get("alpha") is None
+
+
+@pytest.mark.asyncio
+async def test_disposer_only_removes_its_own_instance() -> None:
+    reg = ToolRegistry()
+    handle = reg.register(StubTool("alpha"))
+    replacement = StubTool("alpha")
+    reg.replace(replacement)
+    await handle.dispose()
+    assert reg.get("alpha") is replacement
+
+
+@pytest.mark.asyncio
+async def test_stale_disposer_does_not_remove_reused_tool_instance() -> None:
+    reg = ToolRegistry()
+    tool = StubTool("alpha")
+    stale = reg.register(tool)
+    replacement = reg.replace(tool)
+
+    await stale.dispose()
+    assert reg.get("alpha") is tool
+    await replacement.dispose()
+    assert reg.get("alpha") is None
+
+
+@pytest.mark.asyncio
+async def test_replace_disposer_restores_previous_registration() -> None:
+    reg = ToolRegistry()
+    original = StubTool("alpha")
+    reg.register(original)
+    replacement = StubTool("alpha")
+    handle = reg.replace(replacement)
+    assert isinstance(handle, Disposable)
+
+    await handle.dispose()
+    assert reg.get("alpha") is original
+
+
+@pytest.mark.asyncio
+async def test_nested_replacements_unwind_in_lifo_order() -> None:
+    reg = ToolRegistry()
+    original = StubTool("alpha")
+    first = StubTool("alpha")
+    second = StubTool("alpha")
+    original_handle = reg.register(original)
+    first_handle = reg.replace(first)
+    second_handle = reg.replace(second)
+
+    await second_handle.dispose()
+    assert reg.get("alpha") is first
+    await first_handle.dispose()
+    assert reg.get("alpha") is original
+    await original_handle.dispose()
+    assert reg.get("alpha") is None
+
+
+@pytest.mark.asyncio
+async def test_out_of_order_disposal_skips_disposed_predecessor() -> None:
+    reg = ToolRegistry()
+    original = StubTool("alpha")
+    first = StubTool("alpha")
+    second = StubTool("alpha")
+    reg.register(original)
+    first_handle = reg.replace(first)
+    second_handle = reg.replace(second)
+
+    generation = reg.generation
+    await first_handle.dispose()
+    assert reg.get("alpha") is second
+    assert reg.generation == generation
+    await second_handle.dispose()
+    assert reg.get("alpha") is original
+    assert reg.generation > generation
+
+
+@pytest.mark.asyncio
+async def test_unregister_breaks_replacement_restoration_chain() -> None:
+    reg = ToolRegistry()
+    original = StubTool("alpha")
+    replacement = StubTool("alpha")
+    reg.register(original)
+    replacement_handle = reg.replace(replacement)
+
+    assert reg.unregister("alpha") is replacement
+    generation = reg.generation
+    await replacement_handle.dispose()
+    assert reg.get("alpha") is None
+    assert reg.generation == generation

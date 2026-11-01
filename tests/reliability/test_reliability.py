@@ -6,6 +6,17 @@ import linch
 from linch.events import event_from_dict, event_to_dict
 from linch.loop.reliability import ReliabilityRuntime
 from linch.loop.turn_stopping import TurnStoppingDecision, TurnStoppingDispatcher
+from tests.support.agents import make_agent
+from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
+from tests.support.stores import memory_run_store, memory_session_store
+from tests.support.tools import tool_registry
+
+
+async def _events(owner: object, prompt: str = "go") -> list[object]:
+    session = (
+        owner if hasattr(owner, "run") else await owner.session()  # type: ignore[attr-defined]
+    )
+    return [event async for event in session.run(prompt)]
 
 
 def test_default_policy_and_opt_out_are_distinct() -> None:
@@ -18,7 +29,7 @@ async def test_prerequisite_hook_registration_and_run_disposal() -> None:
     from types import SimpleNamespace
 
     policy = linch.ReliabilityPolicy(prerequisites=(linch.ToolPrerequisite("b", ("a",)),))
-    agent = linch.Agent(model="test", reliability=policy, hooks=[object()])
+    agent = make_agent(None, model="test", reliability=policy, hooks=[object()], run_store=None)
     hook = agent.hooks[0]
     one, two = ReliabilityRuntime(policy), ReliabilityRuntime(policy)
     first, second = one.bind(agent, "one"), two.bind(agent, "two")
@@ -40,6 +51,8 @@ async def test_prerequisite_hook_registration_and_run_disposal() -> None:
 
 
 def test_policy_validation_rejects_bad_graph_and_terminal_evidence() -> None:
+    from linch.reliability import canonical_reliability_policy
+
     with pytest.raises(ValueError, match="duplicate"):
         linch.ReliabilityPolicy(prerequisites=(linch.ToolPrerequisite("b", ("a", "a")),)).validate(
             ("a", "b")
@@ -56,16 +69,22 @@ def test_policy_validation_rejects_bad_graph_and_terminal_evidence() -> None:
             completion=linch.CompletionGate(("final",)),
         ).validate(("final",), final_tool_name="final")
 
+    first = linch.ReliabilityPolicy(prerequisites=(linch.ToolPrerequisite("b", ("a", "c")),))
+    second = linch.ReliabilityPolicy(
+        prerequisites=(linch.ToolPrerequisite("b", ("c",)), linch.ToolPrerequisite("b", ("a",)))
+    )
+    assert canonical_reliability_policy(first) == canonical_reliability_policy(second)
+    with pytest.raises(ValueError, match="duplicate"):
+        linch.ReliabilityPolicy(prerequisites=first.prerequisites * 2).validate(("a", "b", "c"))
 
-@pytest.mark.asyncio
+
 async def test_agent_validates_after_tools_are_loaded() -> None:
-    from linch.sessions import InMemorySessionStore
     from linch.tools.registry import empty_tools
 
     agent = linch.Agent(
         model="test",
         tools=empty_tools(),
-        session_store=InMemorySessionStore(),
+        session_store=memory_session_store(),
         reliability=linch.ReliabilityPolicy(prerequisites=(linch.ToolPrerequisite("missing", ()),)),
     )
     with pytest.raises(ValueError, match="unknown"):
@@ -104,11 +123,6 @@ async def test_turn_stopping_registration_is_identity_safe_and_serial() -> None:
     await second.dispose()
     assert not dispatcher.active
 
-
-@pytest.mark.asyncio
-async def test_turn_stopping_accept_is_non_vetoing() -> None:
-    dispatcher = TurnStoppingDispatcher()
-
     async def accept(_event: object) -> TurnStoppingDecision:
         return TurnStoppingDecision("accept")
 
@@ -137,15 +151,12 @@ async def test_batch_success_and_checkpoint_state() -> None:
 
 @pytest.mark.asyncio
 async def test_invalid_text_feedback_is_canonical_and_hides_rejected_text() -> None:
-    from linch.ext.evals import ScriptedProvider, TextTurn
-    from linch.sessions import InMemorySessionStore
-
-    agent = linch.Agent(
-        model="test",
-        provider=ScriptedProvider(
+    agent = make_agent(
+        ScriptedProvider(
             [TextTurn(text='<tool_call>{"secret": "raw"}</tool_call>'), TextTurn(text="done")]
         ),
-        session_store=InMemorySessionStore(),
+        session_store=memory_session_store(),
+        run_store=None,
     )
     session = await agent.session()
     events = [event async for event in session.run("hello")]
@@ -167,8 +178,6 @@ async def test_native_rejection_retries_once_and_never_runs_sibling_tools() -> N
 
     from linch.events import ModelCallEvent, ReliabilityEvent, ResultEvent, event_to_dict
     from linch.providers import BaseProvider
-    from linch.run_store import InMemoryRunStore
-    from linch.sessions import InMemorySessionStore
     from linch.types import Usage
 
     class Provider(BaseProvider):
@@ -205,11 +214,10 @@ async def test_native_rejection_retries_once_and_never_runs_sibling_tools() -> N
             yield {"type": "message_end", "stop_reason": stop_reason, "usage": Usage()}
 
     provider = Provider()
-    run_store = InMemoryRunStore()
-    agent = linch.Agent(
-        model="test",
-        provider=provider,
-        session_store=InMemorySessionStore(),
+    run_store = memory_run_store()
+    agent = make_agent(
+        provider,
+        session_store=memory_session_store(),
         run_store=run_store,
         reliability=linch.ReliabilityPolicy(max_correction_turns=1),
         include_partial_messages=True,
@@ -239,9 +247,7 @@ async def test_native_rejection_retries_once_and_never_runs_sibling_tools() -> N
 @pytest.mark.asyncio
 async def test_completion_gate_retries_after_real_tool_success() -> None:
     from linch.events import ReliabilityEvent, ResultEvent
-    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
-    from linch.sessions import InMemorySessionStore
-    from linch.tools import ToolRegistry, tool
+    from linch.tools import tool
 
     calls = 0
 
@@ -251,9 +257,7 @@ async def test_completion_gate_retries_after_real_tool_success() -> None:
         calls += 1
         return "prepared"
 
-    tools = ToolRegistry()
-    tools.register(prepare)
-    agent = linch.Agent(
+    agent = make_agent(
         model="test",
         provider=ScriptedProvider(
             [
@@ -262,14 +266,14 @@ async def test_completion_gate_retries_after_real_tool_success() -> None:
                 TextTurn(text="final"),
             ]
         ),
-        tools=tools,
+        tools=tool_registry(prepare),
         permissions={"mode": "skip-dangerous"},
-        session_store=InMemorySessionStore(),
+        session_store=memory_session_store(),
+        run_store=None,
         reliability=linch.ReliabilityPolicy(completion=linch.CompletionGate(("prepare",))),
     )
     agent.on_turn_stopping(lambda _event: TurnStoppingDecision("accept"))
-    session = await agent.session()
-    events = [event async for event in session.run("hello")]
+    events = await _events(agent, "hello")
 
     assert calls == 1
     assert sum(isinstance(event, ReliabilityEvent) for event in events) == 1
@@ -286,8 +290,7 @@ async def test_prerequisite_blocks_same_batch_and_failed_predecessor() -> None:
 
     from linch.events import ToolCallEndEvent
     from linch.providers import BaseProvider
-    from linch.sessions import InMemorySessionStore
-    from linch.tools import ToolRegistry, ToolResult, tool
+    from linch.tools import ToolResult, tool
     from linch.types import Usage
 
     calls: list[str] = []
@@ -325,21 +328,18 @@ async def test_prerequisite_blocks_same_batch_and_failed_predecessor() -> None:
                 stop_reason = "end_turn"
             yield {"type": "message_end", "stop_reason": stop_reason, "usage": Usage()}
 
-    tools = ToolRegistry()
-    tools.register(first)
-    tools.register(second)
-    agent = linch.Agent(
+    agent = make_agent(
         model="test",
         provider=Provider(),
-        tools=tools,
+        tools=tool_registry(first, second),
         permissions={"mode": "skip-dangerous"},
-        session_store=InMemorySessionStore(),
+        session_store=memory_session_store(),
+        run_store=None,
         reliability=linch.ReliabilityPolicy(
             prerequisites=(linch.ToolPrerequisite("second", ("first",)),)
         ),
     )
-    session = await agent.session()
-    events = [event async for event in session.run("hello")]
+    events = await _events(agent, "hello")
     ends = [event for event in events if isinstance(event, ToolCallEndEvent)]
 
     assert calls == ["first"]
@@ -350,9 +350,7 @@ async def test_prerequisite_blocks_same_batch_and_failed_predecessor() -> None:
 @pytest.mark.asyncio
 async def test_completion_gate_vetoes_final_tool_before_terminal_ack() -> None:
     from linch.events import ReliabilityEvent, ResultEvent, ToolCallEndEvent
-    from linch.ext.evals import ScriptedProvider, ToolUseTurn
-    from linch.sessions import InMemorySessionStore
-    from linch.tools import ToolRegistry, tool
+    from linch.tools import tool
 
     calls: list[str] = []
 
@@ -366,10 +364,7 @@ async def test_completion_gate_vetoes_final_tool_before_terminal_ack() -> None:
         calls.append("emit")
         return "never executes"
 
-    tools = ToolRegistry()
-    tools.register(prepare)
-    tools.register(emit_answer)
-    agent = linch.Agent(
+    agent = make_agent(
         model="test",
         provider=ScriptedProvider(
             [
@@ -378,9 +373,10 @@ async def test_completion_gate_vetoes_final_tool_before_terminal_ack() -> None:
                 ToolUseTurn(tool_name="emit_answer", tool_input={}),
             ]
         ),
-        tools=tools,
+        tools=tool_registry(prepare, emit_answer),
         permissions={"mode": "skip-dangerous"},
-        session_store=InMemorySessionStore(),
+        session_store=memory_session_store(),
+        run_store=None,
         final_tool_name="emit_answer",
         reliability=linch.ReliabilityPolicy(completion=linch.CompletionGate(("prepare",))),
     )
@@ -400,9 +396,7 @@ async def test_background_ack_does_not_unlock_prerequisite() -> None:
     import asyncio
 
     from linch.events import ToolCallEndEvent
-    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
-    from linch.sessions import InMemorySessionStore
-    from linch.tools import ToolRegistry, tool
+    from linch.tools import tool
 
     finished = asyncio.Event()
     calls: list[str] = []
@@ -418,10 +412,7 @@ async def test_background_ack_does_not_unlock_prerequisite() -> None:
         calls.append("dependent")
         return "should not run"
 
-    tools = ToolRegistry()
-    tools.register(background)
-    tools.register(dependent)
-    agent = linch.Agent(
+    agent = make_agent(
         model="test",
         provider=ScriptedProvider(
             [
@@ -430,9 +421,10 @@ async def test_background_ack_does_not_unlock_prerequisite() -> None:
                 TextTurn(text="done"),
             ]
         ),
-        tools=tools,
+        tools=tool_registry(background, dependent),
         permissions={"mode": "skip-dangerous"},
-        session_store=InMemorySessionStore(),
+        session_store=memory_session_store(),
+        run_store=None,
         enable_background_tools=True,
         reliability=linch.ReliabilityPolicy(
             prerequisites=(linch.ToolPrerequisite("dependent", ("background",)),)
@@ -456,27 +448,23 @@ async def test_two_agents_keep_reliability_counters_isolated() -> None:
     import asyncio
 
     from linch.events import ReliabilityEvent
-    from linch.ext.evals import ScriptedProvider, TextTurn
-    from linch.sessions import InMemorySessionStore
 
     policy = linch.ReliabilityPolicy(max_correction_turns=1)
     agents = [
-        linch.Agent(
+        make_agent(
             model="test",
             provider=ScriptedProvider(
                 [TextTurn(text="<tool_call>bad</tool_call>"), TextTurn(text=tag)]
             ),
-            session_store=InMemorySessionStore(),
+            session_store=memory_session_store(),
+            run_store=None,
             reliability=policy,
         )
         for tag in ("a", "b")
     ]
     sessions = [await agent.session() for agent in agents]
 
-    async def collect(session: object) -> list[object]:
-        return [event async for event in session.run("hello")]  # type: ignore[attr-defined]
-
-    traces = await asyncio.gather(*(collect(session) for session in sessions))
+    traces = await asyncio.gather(*(_events(session) for session in sessions))
 
     assert [sum(isinstance(event, ReliabilityEvent) for event in trace) for trace in traces] == [
         1,
@@ -486,15 +474,11 @@ async def test_two_agents_keep_reliability_counters_isolated() -> None:
 
 @pytest.mark.parametrize("policy", [None, linch.ReliabilityPolicy(retry_invalid_responses=False)])
 async def test_disabled_invalid_listener_preserves_partial_events(policy):
-    from linch.ext.evals import ScriptedProvider, TextTurn
-    from linch.run_store import InMemoryRunStore
-    from linch.sessions import InMemorySessionStore
-
-    runs = InMemoryRunStore()
-    agent = linch.Agent(
+    runs = memory_run_store()
+    agent = make_agent(
         model="test",
         provider=ScriptedProvider([TextTurn(text="<tool_call>x</tool_call>")]),
-        session_store=InMemorySessionStore(),
+        session_store=memory_session_store(),
         run_store=runs,
         reliability=policy,
         include_partial_messages=True,
@@ -510,21 +494,20 @@ async def test_disabled_invalid_listener_preserves_partial_events(policy):
 
 @pytest.mark.parametrize("invalid", [False, True])
 async def test_generic_continue_preserves_message_tuple(invalid):
-    from linch.ext.evals import ScriptedProvider, TextTurn
-    from linch.sessions import InMemorySessionStore
     from linch.types import Message, TextBlock
 
     messages = (
         Message(role="user", content=[TextBlock(text="first"), TextBlock(text="second")]),
         Message(role="user", content=[TextBlock(text="third")]),
     )
-    agent = linch.Agent(
+    agent = make_agent(
         model="test",
         reliability=None,
         provider=ScriptedProvider(
             [TextTurn(text="" if invalid else "candidate"), TextTurn(text="done")]
         ),
-        session_store=InMemorySessionStore(),
+        session_store=memory_session_store(),
+        run_store=None,
     )
 
     def listener(event):
@@ -539,14 +522,12 @@ async def test_generic_continue_preserves_message_tuple(invalid):
 
 
 async def test_invalid_fail_surfaces_listener_error():
-    from linch.ext.evals import ScriptedProvider, TextTurn
-    from linch.sessions import InMemorySessionStore
-
-    agent = linch.Agent(
+    agent = make_agent(
         model="test",
         reliability=None,
         provider=ScriptedProvider([TextTurn(text="")]),
-        session_store=InMemorySessionStore(),
+        session_store=memory_session_store(),
+        run_store=None,
     )
     agent.on_turn_stopping(
         lambda event: TurnStoppingDecision("fail", error=LookupError("specific failure"))
@@ -559,20 +540,18 @@ async def test_invalid_fail_surfaces_listener_error():
 
 @pytest.mark.parametrize("invalid", [True, False])
 async def test_shared_budget_stops_after_two_corrections(invalid):
-    from linch.ext.evals import ScriptedProvider, TextTurn
-    from linch.sessions import InMemorySessionStore
     from linch.tools import tool
-    from linch.tools.registry import empty_tools
 
     @tool
     async def required() -> str:
         return "ready"
 
-    agent = linch.Agent(
+    agent = make_agent(
         model="test",
-        tools=empty_tools(required),
+        tools=tool_registry(required),
         provider=ScriptedProvider([TextTurn(text="" if invalid else "early")] * 3),
-        session_store=InMemorySessionStore(),
+        session_store=memory_session_store(),
+        run_store=None,
         reliability=linch.ReliabilityPolicy(completion=linch.CompletionGate(("required",))),
     )
     events = [event async for event in (await agent.session()).run("go")]
@@ -596,15 +575,11 @@ async def test_shared_budget_stops_after_two_corrections(invalid):
     ],
 )
 async def test_valid_non_envelope_routes_have_no_reliability_effect(text, stop):
-    from linch.ext.evals import ScriptedProvider, TextTurn
-    from linch.run_store import InMemoryRunStore
-    from linch.sessions import InMemorySessionStore
-
-    runs = InMemoryRunStore()
-    agent = linch.Agent(
+    runs = memory_run_store()
+    agent = make_agent(
         model="test",
         provider=ScriptedProvider([TextTurn(text=text, stop_reason=stop)]),
-        session_store=InMemorySessionStore(),
+        session_store=memory_session_store(),
         run_store=runs,
     )
     events = [event async for event in (await agent.session()).run("go")]
@@ -634,30 +609,15 @@ def test_checkpoint_state_rejects_corruption(raw):
         ReliabilityRuntime(policy).restore(raw)
 
 
-def test_canonical_policy_ignores_edge_order_and_rejects_duplicate_rules():
-    from linch.reliability import canonical_reliability_policy
-
-    first = linch.ReliabilityPolicy(prerequisites=(linch.ToolPrerequisite("b", ("a", "c")),))
-    second = linch.ReliabilityPolicy(
-        prerequisites=(linch.ToolPrerequisite("b", ("c",)), linch.ToolPrerequisite("b", ("a",)))
-    )
-    assert canonical_reliability_policy(first) == canonical_reliability_policy(second)
-    with pytest.raises(ValueError, match="duplicate"):
-        linch.ReliabilityPolicy(prerequisites=first.prerequisites * 2).validate(("a", "b", "c"))
-
-
 async def test_unused_evidence_and_disabled_listener_stay_empty():
     runtime = ReliabilityRuntime(linch.ReliabilityPolicy(retry_invalid_responses=False))
     runtime.observe_results([], {})
     assert runtime.checkpoint_state() == {}
-    assert linch.Agent(model="test", reliability=runtime.policy).hooks == []
+    assert make_agent(None, model="test", reliability=runtime.policy, run_store=None).hooks == []
 
 
 async def test_force_final_cannot_bypass_completion():
-    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
-    from linch.sessions import InMemorySessionStore
     from linch.tools import tool
-    from linch.tools.registry import empty_tools
 
     @tool
     async def repeat() -> str:
@@ -667,13 +627,14 @@ async def test_force_final_cannot_bypass_completion():
     async def required() -> str:
         return "ready"
 
-    agent = linch.Agent(
+    agent = make_agent(
         model="test",
-        tools=empty_tools(repeat, required),
+        tools=tool_registry(repeat, required),
         provider=ScriptedProvider(
             [ToolUseTurn(tool_name="repeat", tool_input={})] + [TextTurn(text="early")] * 3
         ),
-        session_store=InMemorySessionStore(),
+        session_store=memory_session_store(),
+        run_store=None,
         permissions={"mode": "skip-dangerous"},
         loop_guard={"max_identical_tool_calls": 1, "force_final_answer": True},
         reliability=linch.ReliabilityPolicy(completion=linch.CompletionGate(("required",))),
@@ -695,10 +656,7 @@ def test_host_control_message_keeps_system_reminder_wrapping():
 
 
 async def test_inferred_terminal_tool_cannot_be_completion_evidence():
-    from linch.ext.evals import ScriptedProvider, ToolUseTurn
-    from linch.sessions import InMemorySessionStore
     from linch.tools import tool
-    from linch.tools.registry import empty_tools
     from linch.types import OutputSchema
 
     @tool
@@ -707,11 +665,12 @@ async def test_inferred_terminal_tool_cannot_be_completion_evidence():
 
     provider = ScriptedProvider([ToolUseTurn("answer", {})])
     assert provider.capabilities("test").structured_output_terminal_tool
-    agent = linch.Agent(
+    agent = make_agent(
         model="test",
         provider=provider,
-        tools=empty_tools(answer),
-        session_store=InMemorySessionStore(),
+        tools=tool_registry(answer),
+        session_store=memory_session_store(),
+        run_store=None,
         output_schema=OutputSchema("answer", {"type": "object"}),
         reliability=linch.ReliabilityPolicy(completion=linch.CompletionGate(("answer",))),
     )
@@ -723,10 +682,7 @@ async def test_inferred_terminal_tool_cannot_be_completion_evidence():
 async def test_same_agent_concurrent_runs_keep_prerequisites_isolated():
     import asyncio
 
-    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
-    from linch.sessions import InMemorySessionStore
     from linch.tools import tool
-    from linch.tools.registry import empty_tools
 
     barrier, prepared = asyncio.Barrier(2), asyncio.Event()
     calls = []
@@ -771,12 +727,13 @@ async def test_same_agent_concurrent_runs_keep_prerequisites_isolated():
             async for event in self.streams[tag].stream(request):
                 yield event
 
-    agent = linch.Agent(
+    agent = make_agent(
         model="test",
         provider=Provider(),
-        tools=empty_tools(prepare, dependent),
+        tools=tool_registry(prepare, dependent),
         permissions={"mode": "skip-dangerous"},
-        session_store=InMemorySessionStore(),
+        session_store=memory_session_store(),
+        run_store=None,
         reliability=linch.ReliabilityPolicy(
             prerequisites=(linch.ToolPrerequisite("dependent", ("prepare",)),)
         ),

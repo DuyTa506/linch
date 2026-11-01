@@ -21,6 +21,7 @@ from linch.scheduler import ResolvedCall, _execute_one, execute_tool_calls
 from linch.tools import ToolContext, ToolRegistry, ToolResult, ToolScope
 from linch.tools.builtin import BashTool
 from linch.types import ToolUseBlock
+from tests.support.scheduler import scheduler_agent, scheduler_session
 
 
 class _RecordingTool:
@@ -54,42 +55,20 @@ def _agent(
     run_store: Any = None,
     enable_background_tools: bool = False,
 ) -> SimpleNamespace:
-    from linch import Context
-
     registry = ToolRegistry()
     registry.register(tool)
-    return SimpleNamespace(
-        cwd="/project",
-        tools=registry,
+    return scheduler_agent(
+        registry,
         permission_engine=permission_engine,
-        max_tool_concurrency=4,
-        tool_concurrency=4,
         hooks=hooks or [],
         run_store=run_store,
         enable_background_tools=enable_background_tools,
-        context=Context(),
+        cwd="/project",
     )
 
 
 def _session(**overrides: Any) -> SimpleNamespace:
-    values = {
-        "id": "s1",
-        "store": None,
-        "active_run_id": "run-origin",
-        "tools_override": None,
-        "current_turn_allowed_tools": None,
-        "current_turn_permission_decisions": {},
-        "background_tasks": [],
-        "pending_notifications": [],
-        "pending_child_events": [],
-    }
-
-    async def notify(message: Any, **kwargs: Any) -> None:
-        values["pending_notifications"].append(message)
-
-    values["notify"] = notify
-    values.update(overrides)
-    return SimpleNamespace(**values)
+    return scheduler_session(run_id="run-origin", **overrides)
 
 
 async def _events(agent: Any, session: Any, block: ToolUseBlock) -> list[Any]:

@@ -2,16 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import time
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from linch import Agent
 from linch.abort import AbortContext
 from linch.events import ToolCallEndEvent
 from linch.permissions import PermissionEngine
-from linch.providers import BaseProvider
 from linch.scheduler import execute_tool_calls
 from linch.tools import (
     Citation,
@@ -22,6 +19,7 @@ from linch.tools import (
     ToolScope,
 )
 from linch.types import ToolUseBlock
+from tests.support.scheduler import scheduler_agent, scheduler_session
 
 
 class Recorder:
@@ -145,149 +143,67 @@ class InvalidTool:
         return ToolResult(content="should not run")
 
 
-class DummyProvider(BaseProvider):
-    async def stream(self, request):  # pragma: no cover - not used by this test module
-        if False:
-            yield {}
-
-    def context_window(self, model: str) -> int:
-        return 1000
-
-
-def make_agent(
-    registry: ToolRegistry,
-    *,
-    max_tool_concurrency: int = 8,
-    permission_engine: PermissionEngine | None = None,
-) -> SimpleNamespace:
-    from linch import Context
-
-    return SimpleNamespace(
-        cwd=".",
-        tools=registry,
-        permission_engine=permission_engine or PermissionEngine(mode="skip-dangerous"),
-        max_tool_concurrency=max_tool_concurrency,
-        tool_concurrency=max_tool_concurrency,
-        context=Context(),
-    )
-
-
-def make_session() -> SimpleNamespace:
-    return SimpleNamespace(
-        id="s1",
-        store=None,
-        active_run_id="run-1",
-        tools_override=None,
-        current_turn_allowed_tools=None,
-    )
-
-
 async def run_calls(registry: ToolRegistry, blocks: list[ToolUseBlock], *, limit: int = 8):
     events = [
         event
         async for event in execute_tool_calls(
             blocks,
-            make_agent(registry, max_tool_concurrency=limit),
-            make_session(),
+            scheduler_agent(registry, max_tool_concurrency=limit),
+            scheduler_session(),
             AbortContext(),
         )
     ]
     return events
 
 
-async def run_calls_with_permissions(
-    registry: ToolRegistry,
-    blocks: list[ToolUseBlock],
-    permission_engine: PermissionEngine,
-):
-    return [
-        event
-        async for event in execute_tool_calls(
-            blocks,
-            make_agent(registry, permission_engine=permission_engine),
-            make_session(),
-            AbortContext(),
-        )
-    ]
-
-
 @pytest.mark.asyncio
-async def test_read_tools_run_in_parallel() -> None:
+@pytest.mark.parametrize(
+    ("names", "scopes", "resources", "limit", "expected_max"),
+    [
+        (("ReadA", "ReadB"), ("read", "read"), ("file:a", "file:b"), 8, 2),
+        (("WriteA", "WriteB"), ("write", "write"), ("file:a", "file:b"), 8, 1),
+        (("ReadA", "WriteA"), ("read", "write"), ("file:a", "file:a"), 8, 1),
+        (
+            ("ReadA", "ReadB", "ReadC"),
+            ("read", "read", "read"),
+            ("file:a", "file:b", "file:c"),
+            2,
+            2,
+        ),
+    ],
+    ids=["read-parallel", "write-serial", "shared-resource", "concurrency-cap"],
+)
+async def test_tool_batching_respects_scope_resource_and_limit(
+    names: tuple[str, ...],
+    scopes: tuple[ToolScope, ...],
+    resources: tuple[str, ...],
+    limit: int,
+    expected_max: int,
+) -> None:
     recorder = Recorder()
     registry = ToolRegistry()
-    registry.register(TimedTool("ReadA", recorder, scope="read", parallel=True))
-    registry.register(TimedTool("ReadB", recorder, scope="read", parallel=True))
+    for name, scope in zip(names, scopes, strict=True):
+        registry.register(TimedTool(name, recorder, scope=scope, parallel=True))
 
     await run_calls(
         registry,
         [
-            ToolUseBlock(id="a", name="ReadA", input={"resource": "file:a"}),
-            ToolUseBlock(id="b", name="ReadB", input={"resource": "file:b"}),
+            ToolUseBlock(id=str(i), name=name, input={"resource": resource})
+            for i, (name, resource) in enumerate(zip(names, resources, strict=True))
         ],
+        limit=limit,
     )
 
-    assert recorder.max_running == 2
-    assert recorder.started_before_end("ReadB", "ReadA")
-
-
-@pytest.mark.asyncio
-async def test_write_tools_serialize_even_when_marked_parallel() -> None:
-    recorder = Recorder()
-    registry = ToolRegistry()
-    registry.register(TimedTool("WriteA", recorder, scope="write", parallel=True))
-    registry.register(TimedTool("WriteB", recorder, scope="write", parallel=True))
-
-    await run_calls(
-        registry,
-        [
-            ToolUseBlock(id="a", name="WriteA", input={"resource": "file:a"}),
-            ToolUseBlock(id="b", name="WriteB", input={"resource": "file:b"}),
-        ],
-    )
-
-    assert recorder.max_running == 1
-
-
-@pytest.mark.asyncio
-async def test_read_write_same_resource_do_not_overlap() -> None:
-    recorder = Recorder()
-    registry = ToolRegistry()
-    registry.register(TimedTool("ReadA", recorder, scope="read", parallel=True))
-    registry.register(TimedTool("WriteA", recorder, scope="write", parallel=True))
-
-    await run_calls(
-        registry,
-        [
-            ToolUseBlock(id="read", name="ReadA", input={"resource": "file:a"}),
-            ToolUseBlock(id="write", name="WriteA", input={"resource": "file:a"}),
-        ],
-    )
-
-    assert recorder.max_running == 1
-
-
-@pytest.mark.asyncio
-async def test_max_tool_concurrency_is_enforced() -> None:
-    recorder = Recorder()
-    registry = ToolRegistry()
-    for name in ("ReadA", "ReadB", "ReadC"):
-        registry.register(TimedTool(name, recorder, scope="read", parallel=True))
-
-    await run_calls(
-        registry,
-        [
-            ToolUseBlock(id="a", name="ReadA", input={"resource": "file:a"}),
-            ToolUseBlock(id="b", name="ReadB", input={"resource": "file:b"}),
-            ToolUseBlock(id="c", name="ReadC", input={"resource": "file:c"}),
-        ],
-        limit=2,
-    )
-
-    assert recorder.max_running == 2
+    assert recorder.max_running == expected_max
+    if names == ("ReadA", "ReadB"):
+        assert recorder.started_before_end("ReadB", "ReadA")
 
 
 def test_agent_accepts_max_tool_concurrency_option() -> None:
-    agent = Agent(model="dummy", provider=DummyProvider(), max_tool_concurrency=3)
+    from linch import Agent
+    from tests.support.providers import ScriptedProvider
+
+    agent = Agent(model="dummy", provider=ScriptedProvider([]), max_tool_concurrency=3)
 
     assert agent.max_tool_concurrency == 3
     assert agent.tool_concurrency == 3
@@ -357,11 +273,15 @@ async def test_immediate_validation_and_permission_errors_have_tool_result() -> 
     assert unknown_end.tool_result.is_error is True
     assert "not registered" in unknown_end.tool_result.content
 
-    denied_events = await run_calls_with_permissions(
-        registry,
-        [ToolUseBlock(id="denied", name="Denied", input={})],
-        PermissionEngine(mode="default"),
-    )
+    denied_events = [
+        event
+        async for event in execute_tool_calls(
+            [ToolUseBlock(id="denied", name="Denied", input={})],
+            scheduler_agent(registry, permission_engine=PermissionEngine(mode="default")),
+            scheduler_session(current_turn_permission_decisions=None),
+            AbortContext(),
+        )
+    ]
     denied_end = next(e for e in denied_events if isinstance(e, ToolCallEndEvent))
     assert denied_end.tool_result is not None
     assert denied_end.tool_result.is_error is True
@@ -407,8 +327,8 @@ async def test_fast_first_tool_end_emits_before_slow_second_completes() -> None:
             ToolUseBlock(id="fast", name="Fast", input={}),
             ToolUseBlock(id="slow", name="Slow", input={}),
         ],
-        make_agent(registry),
-        make_session(),
+        scheduler_agent(registry),
+        scheduler_session(),
         AbortContext(),
     ).__aiter__()
 
