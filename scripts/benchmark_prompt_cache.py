@@ -100,6 +100,7 @@ class PrefixCacheProbeProvider(BaseProvider):
         prompt_tokens = _estimate_tokens(wire)
         cache_read_tokens = _estimate_tokens(wire[:read_chars]) if read_chars else 0
         cache_creation_tokens = max(0, prompt_tokens - cache_read_tokens)
+        input_tokens = max(0, prompt_tokens - cache_read_tokens - cache_creation_tokens)
         self._written_prefixes.append(wire)
         self.calls.append(
             CacheCall(
@@ -127,7 +128,7 @@ class PrefixCacheProbeProvider(BaseProvider):
                 "type": "message_end",
                 "stop_reason": "tool_use",
                 "usage": Usage(
-                    input_tokens=prompt_tokens,
+                    input_tokens=input_tokens,
                     cache_read_tokens=cache_read_tokens,
                     cache_creation_tokens=cache_creation_tokens,
                 ),
@@ -140,7 +141,7 @@ class PrefixCacheProbeProvider(BaseProvider):
             "type": "message_end",
             "stop_reason": "end_turn",
             "usage": Usage(
-                input_tokens=prompt_tokens,
+                input_tokens=input_tokens,
                 output_tokens=1,
                 cache_read_tokens=cache_read_tokens,
                 cache_creation_tokens=cache_creation_tokens,
