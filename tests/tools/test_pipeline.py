@@ -355,18 +355,8 @@ class _FakeCall:
 
 
 @pytest.mark.asyncio
-async def test_dispatch_execute_passthrough_without_pipeline() -> None:
-    from linch.scheduler import _dispatch_execute
-
-    tool = _FakeTool()
-    call = _FakeCall(tool)
-    agent = type("A", (), {"tool_pipeline": None})()
-    coro = _dispatch_execute(agent, call, tool, {"v": 1}, ctx=None, signal=None)  # type: ignore[arg-type]
-    assert await coro == "ran:1"
-
-
-@pytest.mark.asyncio
-async def test_dispatch_execute_runs_pipeline_wrapper() -> None:
+@pytest.mark.parametrize("with_pipeline", [False, True], ids=["passthrough", "wrapped"])
+async def test_dispatch_execute_uses_optional_pipeline(with_pipeline: bool) -> None:
     from linch.scheduler import _dispatch_execute
 
     seen: list[str] = []
@@ -376,13 +366,14 @@ async def test_dispatch_execute_runs_pipeline_wrapper() -> None:
         seen.append(execution.tool_name)
         return await next()
 
-    pipe.on_execute(wrapper)
+    if with_pipeline:
+        pipe.on_execute(wrapper)
     tool = _FakeTool()
     call = _FakeCall(tool)
-    agent = type("A", (), {"tool_pipeline": pipe})()
-    coro = _dispatch_execute(agent, call, tool, {"v": 2}, ctx=None, signal=None)  # type: ignore[arg-type]
-    assert await coro == "ran:2"
-    assert seen == ["Echo"]
+    agent = type("A", (), {"tool_pipeline": pipe if with_pipeline else None})()
+    coro = _dispatch_execute(agent, call, tool, {"v": 1}, ctx=None, signal=None)  # type: ignore[arg-type]
+    assert await coro == "ran:1"
+    assert seen == (["Echo"] if with_pipeline else [])
 
 
 @pytest.mark.asyncio
