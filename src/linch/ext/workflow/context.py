@@ -120,13 +120,22 @@ class WorkflowContext:
 
     async def _emit(self, event: Event) -> None:
         """Forward to the host callback and persist when the run is durable."""
-        self._emit_sync(event)
         if self._store is not None and self._run_id is not None:
-            seq = await self._store.append_event(self._run_id, event)
+            append_task = asyncio.create_task(self._store.append_event(self._run_id, event))
+            cancelled = False
+            while not append_task.done():
+                try:
+                    await asyncio.shield(append_task)
+                except asyncio.CancelledError:
+                    cancelled = True
+            seq = append_task.result()
             # Watermark for the journal snapshot; parallel branches append
             # concurrently, so take the highest seq seen rather than the last.
             if isinstance(seq, int) and seq > self._last_event_seq:
                 self._last_event_seq = seq
+            if cancelled:
+                raise asyncio.CancelledError
+        self._emit_sync(event)
 
     # ── journal snapshot (opt-in resume accelerator) ─────────────────────
 
