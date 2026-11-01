@@ -1008,7 +1008,7 @@ async def _dispatch_post_tool_use(
             block_result=block_result,
             tool_output=outcome.tool_output,
         )
-    record_tool_result(session, call.id, final.tool_result.content)
+    record_tool_result(session, call.id, final.tool_result.content, run_id=run_id)
     # PostToolUseFailure: an observational notification fired only when the final
     # (post-mutation) result is an error, so a failure-watcher hook need not
     # re-derive "did this fail?" from every PostToolUse.
@@ -1563,17 +1563,16 @@ async def _drain_tool_execution(running: _RunningTool) -> AsyncIterator[ToolProg
                 yield running.progress.get_nowait()
             return
         progress_wait = asyncio.ensure_future(running.progress.get())
-        done, _ = await asyncio.wait(
-            [running.task, progress_wait], return_when=asyncio.FIRST_COMPLETED
-        )
-        if progress_wait in done:
-            yield progress_wait.result()
-        else:
-            progress_wait.cancel()
-            try:
-                await progress_wait
-            except asyncio.CancelledError:
-                pass
+        try:
+            done, _ = await asyncio.wait(
+                [running.task, progress_wait], return_when=asyncio.FIRST_COMPLETED
+            )
+            if progress_wait in done:
+                yield progress_wait.result()
+        finally:
+            if not progress_wait.done():
+                progress_wait.cancel()
+            await asyncio.gather(progress_wait, return_exceptions=True)
 
 
 async def _drain_parallel_progress_until(

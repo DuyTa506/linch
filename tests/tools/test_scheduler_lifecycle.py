@@ -3,11 +3,18 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import pytest
+
 from linch.abort import AbortContext
 from linch.events import ToolProgressEvent
 from linch.hooks import HookDispatcher
 from linch.permissions import PermissionDecision, PermissionEngine
-from linch.scheduler import ResolvedCall, _run_parallel_batch
+from linch.scheduler import (
+    ResolvedCall,
+    _drain_tool_execution,
+    _run_parallel_batch,
+    _RunningTool,
+)
 from linch.tools import ToolContext, ToolRegistry, ToolResult
 from linch.types import ToolUseBlock
 from tests.support.scheduler import scheduler_agent, scheduler_session
@@ -107,3 +114,31 @@ async def test_parallel_lane_closes_progress_generator_on_close(monkeypatch: Any
     await lane.aclose()
 
     assert closed.is_set()
+
+
+async def test_serial_progress_waiter_is_cancelled_when_wait_is_cancelled(
+    monkeypatch: Any,
+) -> None:
+    captured: list[asyncio.Future[Any]] = []
+
+    async def cancelled_wait(fs: Any, **_: Any) -> Any:
+        captured.extend(fs)
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(asyncio, "wait", cancelled_wait)
+    tool_task = asyncio.create_task(asyncio.Event().wait())
+    running = _RunningTool(task=tool_task, progress=asyncio.Queue())
+    stream = _drain_tool_execution(running)
+
+    with pytest.raises(asyncio.CancelledError):
+        await stream.__anext__()
+
+    progress_wait = next(task for task in captured if task is not tool_task)
+    try:
+        assert progress_wait.done()
+    finally:
+        if not progress_wait.done():
+            progress_wait.cancel()
+        await asyncio.gather(progress_wait, return_exceptions=True)
+        tool_task.cancel()
+        await asyncio.gather(tool_task, return_exceptions=True)
