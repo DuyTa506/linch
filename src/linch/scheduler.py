@@ -12,7 +12,7 @@ from uuid import uuid4
 from xml.sax.saxutils import escape
 
 from . import lifecycle
-from ._telemetry import record_tool_result, trace_tool
+from ._telemetry import record_tool_result, register_background_task, trace_tool
 from ._wire import UnsupportedWireVersionError
 from .abort import AbortContext, throw_if_aborted
 from .errors import AbortError, ToolExecutionError, ToolTimeoutError
@@ -1778,6 +1778,7 @@ async def execute_tool_calls(
                 ),
             )
             session.background_tasks.append(task)
+            register_background_task(session, task, run_id=origin_run_id)
             ack = _background_ack(tool_name, bg_id)
             yield ToolCallEndEvent(
                 tool_use_id=call.id,
