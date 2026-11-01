@@ -32,6 +32,7 @@ Known limitations:
 from __future__ import annotations
 
 from collections import OrderedDict
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -164,7 +165,7 @@ class ToolCacheHook:
         if hit is not None:
             bucket.entries.move_to_end(key)
             return HookResult.resolve(
-                tool_result=hit.result, tool_output=hit.tool_output
+                tool_result=deepcopy(hit.result), tool_output=deepcopy(hit.tool_output)
             ).with_events([_cache_event("cache_hit", ctx.tool_name)])
         # Miss on a cacheable call: record so on_post_tool_use stores the result.
         _bounded_set(
@@ -218,7 +219,7 @@ class ToolCacheHook:
         _bounded_set(
             bucket.entries,
             pending.key,
-            _CacheEntry(result=result, tool_output=tool_output),
+            _CacheEntry(result=deepcopy(result), tool_output=deepcopy(tool_output)),
             self._cfg.max_entries,
         )
         return None
