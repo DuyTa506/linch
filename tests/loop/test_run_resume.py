@@ -508,6 +508,106 @@ async def test_resume_final_tool_ack_and_hook_retry_are_history_idempotent() -> 
     )
 
 
+async def test_resume_repeated_final_tool_hook_crashes_keep_ack_boundary() -> None:
+    """Repeated final-tool hook crashes preserve the original ACK boundary."""
+    from linch import HookResult
+    from linch.types import ToolResultBlock
+    from tests.support.providers import ScriptedProvider, ToolUseTurn
+
+    class RetryThreeTimes:
+        resume_policy_id = "test.resume-final-tool-retry-three"
+        resume_policy_version = "1"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def on_before_final_answer(self, _ctx: Any) -> Any:
+            self.calls += 1
+            return HookResult.retry("please revise") if self.calls <= 3 else None
+
+    base_session_store = _memory_session_store()
+    first_session_store = _CrashAfterSessionMessageStore(base_session_store, "please revise")
+    run_store = _memory_run_store()
+    hook = RetryThreeTimes()
+    agent = _agent(
+        provider=ScriptedProvider(
+            [ToolUseTurn(tool_name="answer", tool_input={"value": 1}, tool_id="final-1")]
+        ),
+        final_tool_name="answer",
+        hooks=[hook],
+        session_store=first_session_store,
+        run_store=run_store,
+    )
+    session = await agent.session(id="s1")
+    run_id = ""
+    with pytest.raises(_Crash, match="after-message:please revise"):
+        async for event in session.run("hello"):
+            if event.type == "system":
+                run_id = event.run_id
+    assert run_id
+    await agent.close()
+
+    second_run_store = _CheckpointCrashStore(run_store)
+    second_run_store.reset("checkpoint:turn_complete")
+    second = _agent(
+        provider=ScriptedProvider([]),
+        final_tool_name="answer",
+        hooks=[hook],
+        session_store=base_session_store,
+        run_store=second_run_store,
+    )
+    second_session = await second.session(id="s1")
+    with pytest.raises(_Crash, match="checkpoint:turn_complete"):
+        async for _event in second_session.resume(run_id):
+            pass
+    await second.close()
+    stored_messages = await base_session_store.load_messages("s1")
+    assistant_base_count = next(
+        index + 1
+        for index, row in enumerate(stored_messages)
+        if any(getattr(block, "id", None) == "final-1" for block in row.message.content)
+    )
+    record = await run_store.load_run(run_id)
+    assert record is not None
+    assert record.checkpoint.extension_state["linch.resume"] == {
+        "feedback_origin": "assistant_boundary",
+        "feedback_base_count": assistant_base_count,
+    }
+
+    resumed_provider = ScriptedProvider(
+        [ToolUseTurn(tool_name="answer", tool_input={"value": 2}, tool_id="final-2")]
+    )
+    restarted = _agent(
+        provider=resumed_provider,
+        final_tool_name="answer",
+        hooks=[hook],
+        session_store=base_session_store,
+        run_store=run_store,
+    )
+    resumed = await restarted.session(id="s1")
+    events = await _collect(resumed.resume(run_id))
+
+    assert events[-1].type == "result"
+    assert events[-1].subtype == "success"
+    assert events[-1].structured_output == {"value": 2}
+    assert len(resumed_provider.requests) == 1
+    assert (
+        sum(
+            isinstance(block, ToolResultBlock) and block.tool_use_id == "final-1"
+            for message in resumed.full_history
+            for block in message.content
+        )
+        == 1
+    )
+    assert (
+        sum(
+            any("please revise" in getattr(block, "text", "") for block in message.content)
+            for message in resumed.full_history
+        )
+        == 1
+    )
+
+
 async def test_resume_after_before_final_answer_retry_does_not_replay_as_turn_feedback() -> None:
     """A hook retry persisted after the assistant checkpoint is not turn feedback."""
     from linch import HookResult
@@ -780,6 +880,75 @@ async def test_resume_turn_stopping_feedback_keeps_equal_assistant_message() -> 
     assert events[-1].subtype == "success"
     assert events[-1].final_text == "final"
     assert len(restarted_provider.requests) == 1
+
+
+async def test_resume_repeated_turn_stopping_crashes_keep_original_boundary() -> None:
+    """Repeated crashes do not move the persisted feedback boundary forward."""
+    from linch.loop.turn_stopping import TurnStoppingDecision
+    from linch.types import Message, TextBlock
+    from tests.support.providers import ScriptedProvider, TextTurn
+
+    feedback = (Message(role="user", content=[TextBlock(text="retry")]),)
+
+    class ContinueThreeTimes:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __call__(self, _event: Any) -> TurnStoppingDecision:
+            self.calls += 1
+            return (
+                TurnStoppingDecision("continue", feedback=feedback)
+                if self.calls <= 3
+                else TurnStoppingDecision("accept")
+            )
+
+    listener = ContinueThreeTimes()
+    base_session_store = _memory_session_store()
+    first_session_store = _CrashAfterSessionMessageStore(base_session_store, "retry")
+    run_store = _memory_run_store()
+    agent = _agent(
+        provider=ScriptedProvider([TextTurn("draft")]),
+        session_store=first_session_store,
+        run_store=run_store,
+    )
+    agent.on_turn_stopping(listener)
+    session = await agent.session(id="s1")
+    run_id = ""
+    with pytest.raises(_Crash, match="after-message:retry"):
+        async for event in session.run("hello"):
+            if event.type == "system":
+                run_id = event.run_id
+    assert run_id
+    await agent.close()
+
+    second_run_store = _CheckpointCrashStore(run_store)
+    second_run_store.reset("checkpoint:turn_complete")
+    second = _agent(
+        provider=ScriptedProvider([]),
+        session_store=base_session_store,
+        run_store=second_run_store,
+    )
+    second.on_turn_stopping(listener)
+    second_session = await second.session(id="s1")
+    with pytest.raises(_Crash, match="checkpoint:turn_complete"):
+        async for _event in second_session.resume(run_id):
+            pass
+    await second.close()
+
+    resumed_provider = ScriptedProvider([TextTurn("final")])
+    restarted = _agent(
+        provider=resumed_provider,
+        session_store=base_session_store,
+        run_store=run_store,
+    )
+    restarted.on_turn_stopping(listener)
+    resumed = await restarted.session(id="s1")
+    events = await _collect(resumed.resume(run_id))
+
+    assert events[-1].type == "result"
+    assert events[-1].subtype == "success"
+    assert events[-1].final_text == "final"
+    assert len(resumed_provider.requests) == 1
 
 
 async def test_resume_after_one_tool_completed_runs_only_missing_tool() -> None:
