@@ -1,22 +1,16 @@
 from __future__ import annotations
 
-import importlib.util
 import json
-import sys
 from pathlib import Path
 
 import pytest
 
+from tests.support.modules import load_module
+
 
 def _load_script():
-    path = Path(__file__).resolve().parents[1] / "scripts" / "benchmark_runtime.py"
-    spec = importlib.util.spec_from_file_location("benchmark_runtime_script", path)
-    assert spec is not None
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    path = Path(__file__).resolve().parents[2] / "scripts" / "benchmark_runtime.py"
+    return load_module(path, "benchmark_runtime_script")
 
 
 def test_percentile_uses_nearest_rank():
@@ -64,7 +58,6 @@ def test_json_output_is_versioned_and_contains_distributions():
 
     payload = json.loads(benchmark.format_json([result], warmups=2, samples=2))
 
-    # Schema v2: metrics are a name-keyed map, not a positional array.
     assert payload["schema_version"] == 2
     assert payload["warmups"] == 2
     assert payload["samples"] == 2
@@ -86,9 +79,9 @@ async def test_no_tool_case_runs_offline_and_validates_events(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_trivial_sqlite_case_runs_offline(tmp_path):
+async def test_trivial_memory_case_runs_offline(tmp_path):
     benchmark = _load_script()
-    case = benchmark.build_cases(tmp_path)["sqlite_trivial_operation"]
+    case = benchmark.build_cases(tmp_path)["memory_trivial_operation"]
 
     try:
         result = await benchmark.run_case(case, warmups=1, samples=2, threshold_ms=None)
@@ -110,7 +103,7 @@ async def test_run_store_50_event_writes_validates_persisted_order(tmp_path):
     finally:
         await case.close()
 
-    assert benchmark.DEFAULT_THRESHOLDS_MS[case.name] == 250.0
+    assert case.name not in benchmark.DEFAULT_THRESHOLDS_MS
     assert result.correct is True
     assert result.event_counts == [50]
     assert len(result.samples_ms) == 1
@@ -120,15 +113,11 @@ def test_new_cases_registered(tmp_path):
     benchmark = _load_script()
     cases = benchmark.build_cases(tmp_path)
 
-    assert "memory_100k_search" in cases
     assert "scheduler_maximal_16_read_tools" in cases
     assert "session_churn_25" in cases
-    # The 100k memory scan is observational (no absolute gate); it validates
-    # ranking correctness, not a sub-20ms latency the scan can't hit in CPython.
-    assert "memory_100k_search" not in benchmark.DEFAULT_THRESHOLDS_MS
-    # Existing SQLite gates are retained.
-    assert benchmark.DEFAULT_THRESHOLDS_MS["durable_sqlite_8_read_tools"] == 25.0
-    assert benchmark.DEFAULT_THRESHOLDS_MS["durable_sqlite_32_read_tools"] == 70.0
+    assert "checkpoint_memory_8_read_tools" in cases
+    assert "checkpoint_memory_32_read_tools" in cases
+    assert benchmark.DEFAULT_THRESHOLDS_MS == {}
 
 
 def test_parser_accepts_threshold_override():
