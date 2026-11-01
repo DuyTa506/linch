@@ -183,6 +183,16 @@ PermissionRule = ToolRule | PathRule | BashRule
 
 
 def match_tool_rule(rule: ToolRule, call_name: str, call_input: dict[str, Any]) -> bool:
+    """Match a tool rule against a call, including normalized Skill names.
+
+    Args:
+        rule: Tool rule to evaluate.
+        call_name: Name of the tool being called.
+        call_input: Validated tool arguments.
+
+    Returns:
+        Whether the rule applies to the call.
+    """
     if rule.tool != "*" and rule.tool != call_name:
         return False
     if rule.arg is None:
@@ -192,7 +202,11 @@ def match_tool_rule(rule: ToolRule, call_name: str, call_input: dict[str, Any]) 
     if rule.arg == "*":
         return True
     skill_name = call_input.get("skill")
-    return isinstance(skill_name, str) and skill_name == rule.arg
+    if not isinstance(skill_name, str):
+        return False
+    if skill_name.startswith("/"):
+        skill_name = skill_name[1:]
+    return skill_name == rule.arg
 
 
 def match_path_rule(
@@ -202,6 +216,18 @@ def match_path_rule(
     project_root: str,
     cwd: str | None = None,
 ) -> bool:
+    """Match a path rule against a canonicalized tool target.
+
+    Args:
+        rule: Path rule to evaluate.
+        call_name: Name of the file-oriented tool being called.
+        call_input: Validated tool arguments containing the target path.
+        project_root: Root used for relative rule patterns.
+        cwd: Effective working directory for the call.
+
+    Returns:
+        Whether the resolved target matches one of the rule patterns.
+    """
     tools = rule.tools or ["Write", "Edit"]
     if call_name not in tools:
         return False
@@ -209,7 +235,7 @@ def match_path_rule(
     raw_path = _path_input_for_tool(call_name, call_input, work_dir)
     if raw_path is None:
         return False
-    target = _normalize_for_glob(str(Path(work_dir).resolve() / raw_path))
+    target = _normalize_for_glob(str(Path(work_dir, raw_path).resolve()))
     pattern_root = str(Path(project_root).resolve())
     return any(_matches_path_pattern(p, target, pattern_root) for p in rule.paths)
 
@@ -240,6 +266,26 @@ def evaluate_bash_rules(
     rules: list[BashRule],
     command: str,
 ) -> RuleDecision | None:
+    """Evaluate Bash rules while asking for unsupported shell constructs.
+
+    Args:
+        rules: Applicable Bash rules in first-match order.
+        command: Shell command to classify and evaluate.
+
+    Returns:
+        The matched decision, an ask floor for unparsed commands, or ``None``
+        when the rules abstain.
+    """
+    if _contains_unparsed_shell_construct(command):
+        stripped = command.strip()
+        if any(
+            rule.decision == "deny" and _match_unparsed_bash_rule(rule, stripped) for rule in rules
+        ):
+            return "deny"
+        if any(rule.decision in {"allow", "ask", "deny"} for rule in rules):
+            return "ask"
+        return None
+
     segments = [s for s in split_composite_command(command) if s.strip() != ""]
     if not segments:
         return None
@@ -359,8 +405,8 @@ def _matches_path_pattern(pattern: str, target: str, project_root: str) -> bool:
     body = pattern[1:] if inverted else pattern
     if body == "":
         return False
-    absolute_pattern = body if Path(body).is_absolute() else str(Path(project_root) / body)
-    glob_pattern = _normalize_for_glob(absolute_pattern)
+    absolute_pattern = Path(body) if Path(body).is_absolute() else Path(project_root) / body
+    glob_pattern = _normalize_for_glob(str(absolute_pattern.resolve()))
     matched = re.fullmatch(_glob_to_regex(glob_pattern), target) is not None
     return not matched if inverted else matched
 
@@ -398,6 +444,69 @@ def _glob_to_regex(pattern: str) -> str:
 
 def _normalize_for_glob(value: str) -> str:
     return value.replace("\\", "/")
+
+
+def _match_unparsed_bash_rule(rule: BashRule, command: str) -> bool:
+    if isinstance(rule.pattern, list):
+        return any(_match_bash_pattern(pattern, command) for pattern in rule.pattern)
+    return _match_bash_pattern(rule.pattern, command)
+
+
+def _contains_unparsed_shell_construct(command: str) -> bool:
+    """Return whether a command contains shell syntax this parser cannot model."""
+    quote: str | None = None
+    escaped = False
+    i = 0
+    while i < len(command):
+        char = command[i]
+        if escaped:
+            if char in "\r\n":
+                return True
+            escaped = False
+            i += 1
+            continue
+        if quote != "'" and char == "\\":
+            escaped = True
+            i += 1
+            continue
+        if quote == "'":
+            if char == "'":
+                quote = None
+            i += 1
+            continue
+        if quote == '"':
+            if char == '"':
+                quote = None
+                i += 1
+                continue
+            if char == "`" or command[i : i + 2] == "$(":
+                return True
+            i += 1
+            continue
+        if char == "'" or char == '"':
+            quote = char
+            i += 1
+            continue
+        if char in "\r\n" or char == "`":
+            return True
+        if command[i : i + 2] == "$(":
+            return True
+        if command[i : i + 2] in {"<(", ">("}:
+            return True
+        if char in "()":
+            return True
+        if char == "&":
+            next_char = command[i + 1 : i + 2]
+            previous_char = command[i - 1 : i]
+            if next_char == ">" or previous_char in {"<", ">"}:
+                i += 1
+                continue
+            if next_char == "&":
+                i += 2
+                continue
+            return True
+        i += 1
+    return escaped or quote is not None
 
 
 def _tokens_start_with(tokens: list[str], prefix: list[str]) -> bool:

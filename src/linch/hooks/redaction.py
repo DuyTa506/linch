@@ -34,6 +34,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field, replace
 
+from ..errors import ConfigError
 from ..tools import ToolResult
 from .contexts import BeforeFinalAnswerContext, PostToolUseContext, UserPromptSubmitContext
 from .types import HookResult
@@ -102,14 +103,26 @@ class RedactionHook:
 
         Raises:
             re.error: If a configured regular-expression pattern is invalid.
+            ConfigError: If a configured replacement template is invalid.
         """
 
         self.config = config or RedactionConfig()
         # Compile eagerly so a bad pattern fails fast at construction and each
         # call avoids recompiling.
-        self._compiled: tuple[tuple[re.Pattern[str], str], ...] = tuple(
-            (re.compile(rule.pattern, rule.flags), rule.replacement) for rule in self.config.rules
-        )
+        compiled: list[tuple[re.Pattern[str], str]] = []
+        for rule in self.config.rules:
+            pattern = re.compile(rule.pattern, rule.flags)
+            try:
+                # ``Pattern.sub`` parses the replacement before searching, so
+                # an empty input validates even when the pattern cannot match
+                # an empty string.
+                pattern.sub(rule.replacement, "")
+            except (IndexError, re.error) as exc:
+                raise ConfigError(
+                    f"Invalid redaction replacement for pattern {rule.pattern!r}: {exc}"
+                ) from exc
+            compiled.append((pattern, rule.replacement))
+        self._compiled = tuple(compiled)
 
     def redact(self, text: str) -> str:
         """Apply every configured rule in order.

@@ -344,21 +344,23 @@ async def _run_background_tool(
     except (AbortError, asyncio.CancelledError):
         raise
     except Exception as exc:  # defensive: _execute_one normally returns error results
-        result_text = f"{type(exc).__name__}: {exc}"
-        is_error = True
-    else:
-        if _is_v2_tool(call):
-            outcome, _ = await _dispatch_post_tool_use(
-                HookDispatcher(_scheduler_hooks(agent)),
-                call,
-                _effective_input(call, decision),
-                outcome,
-                session,
-                agent=agent,
-                turn_index=turn_index,
-            )
-        result_text = str(outcome.block.content)
-        is_error = outcome.block.is_error
+        outcome = _execution_outcome(
+            call.id,
+            _tool_result_error(f"{type(exc).__name__}: {exc}"),
+        )
+
+    outcome, _ = await _dispatch_post_tool_use(
+        HookDispatcher(_scheduler_hooks(agent)),
+        call,
+        _effective_input(call, decision),
+        outcome,
+        session,
+        agent=agent,
+        turn_index=turn_index,
+        run_id=origin_run_id,
+    )
+    result_text = str(outcome.block.content)
+    is_error = outcome.block.is_error
 
     status_str = "failed" if is_error else "completed"
     notification = (
@@ -485,10 +487,7 @@ async def _execute_one(
                 call.id,
                 _tool_result_error("Legacy PreToolUse resolve must supply tool_result"),
             )
-        block_result = await _maybe_offload_block(
-            precomputed, call=call, agent=agent, session=session
-        )
-        return _execution_outcome(call.id, precomputed, block_result=block_result)
+        return _execution_outcome(call.id, precomputed)
 
     tool = call.tool
     result_timeout_ms = _tool_timeout_ms(agent, tool)
@@ -657,11 +656,7 @@ async def _execute_tool_attempts(
             result = raw_result
             if result.duration_ms <= 0:
                 result.duration_ms = elapsed
-            # ── Auto-offload oversized results ────────────────────────────────
-            block_result = await _maybe_offload_block(
-                result, call=call, agent=agent, session=session
-            )
-            return _execution_outcome(call.id, result, block_result=block_result)
+            return _execution_outcome(call.id, result)
         except AbortError:
             raise
         except TimeoutError:
@@ -670,7 +665,7 @@ async def _execute_tool_attempts(
             ms: int | str = int(result_timeout_ms) if result_timeout_ms is not None else "unknown"
             te: Exception = ToolTimeoutError(f"Tool '{_tool_name(call)}' timed out after {ms}ms")
             last_exc = te
-            if _tool_retryable(call, te) and attempt < max_attempts - 1:
+            if _tool_retryable(call) and attempt < max_attempts - 1:
                 continue
             duration_ms = int((time.perf_counter() - started) * 1000)
             return _execution_outcome(
@@ -689,7 +684,7 @@ async def _execute_tool_attempts(
             return _v2_contract_error(call, exc, duration_ms)
         except Exception as exc:
             last_exc = exc
-            if _tool_retryable(call, exc) and attempt < max_attempts - 1:
+            if _tool_retryable(call) and attempt < max_attempts - 1:
                 continue
             duration_ms = int((time.perf_counter() - started) * 1000)
             return _execution_outcome(
@@ -822,15 +817,15 @@ def _retry_options(agent: Any) -> RetryOptions | None:
     return None
 
 
-def _tool_retryable(call: ResolvedCall, exc: Exception) -> bool:
-    """True when the exception is safe to retry for this call.
+def _tool_retryable(call: ResolvedCall) -> bool:
+    """Return whether retrying this call is safe.
 
     Read-scope tools are always retried on any exception — they are idempotent
     by design, so any failure is safe to retry.
 
     Write / exec tools are never retried by default (side-effect risk); a tool
-    may opt in by setting a class-level ``retryable = True`` attribute, or an
-    exception may carry ``retryable = True`` (e.g. ``ToolTimeoutError``).
+    may opt in by setting a class-level ``retryable = True`` attribute. Exception
+    metadata never overrides the tool's side-effect policy.
 
     ``AbortError`` is never seen here — it is re-raised before the retry
     predicate is consulted.
@@ -839,7 +834,7 @@ def _tool_retryable(call: ResolvedCall, exc: Exception) -> bool:
     opt_in = bool(getattr(tool, "retryable", False)) if tool is not None else False
     if opt_in or _tool_scope(call) == "read":
         return True
-    return bool(getattr(exc, "retryable", False))
+    return False
 
 
 def _scheduler_hooks(agent: Any) -> list[Any]:
@@ -931,12 +926,13 @@ async def _dispatch_post_tool_use(
     *,
     agent: Any,
     turn_index: int | None,
+    run_id: str | None = None,
 ) -> tuple[ToolExecutionOutcome, list[Event]]:
     dispatched = await dispatcher.dispatch(
         lifecycle.POST_TOOL_USE,
         PostToolUseContext(
             session=session,
-            run_id=session.active_run_id or "unknown",
+            run_id=run_id or session.active_run_id or "unknown",
             turn_index=turn_index,
             deps=getattr(session, "run_deps", None),
             tool_use_id=call.id,
@@ -991,7 +987,15 @@ async def _dispatch_post_tool_use(
             tool_output=outcome.tool_output,
         )
     else:
-        final = outcome
+        block_result = await _maybe_offload_block(
+            outcome.tool_result, call=call, agent=agent, session=session
+        )
+        final = _execution_outcome(
+            call.id,
+            outcome.tool_result,
+            block_result=block_result,
+            tool_output=outcome.tool_output,
+        )
     # PostToolUseFailure: an observational notification fired only when the final
     # (post-mutation) result is an error, so a failure-watcher hook need not
     # re-derive "did this fail?" from every PostToolUse.
