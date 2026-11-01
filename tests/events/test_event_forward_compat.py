@@ -10,6 +10,7 @@ import pytest
 from linch.events import (
     AssistantEvent,
     IgnorableEvent,
+    SubagentEvent,
     event_from_dict,
     event_to_dict,
     is_ignorable_event,
@@ -251,8 +252,8 @@ def test_ignorable_event_accepts_nesting_at_the_persistence_limit() -> None:
     from linch.events import IGNORABLE_MAX_DEPTH
 
     payload: Any = "leaf"
-    # The envelope itself contributes two levels (raw dict -> payload value).
-    for _ in range(IGNORABLE_MAX_DEPTH - 4):
+    # The event envelope consumes one level; the scalar leaf needs no budget.
+    for _ in range(IGNORABLE_MAX_DEPTH - 1):
         payload = [payload]
 
     event = IgnorableEvent(
@@ -260,6 +261,57 @@ def test_ignorable_event_accepts_nesting_at_the_persistence_limit() -> None:
         raw={"type": "future_event", "ignorable": True, "payload": payload},
     )
     assert event_to_dict(event)["payload"] == payload
+
+
+@pytest.mark.parametrize("kind", ["dict", "list", "mixed"])
+def test_ignorable_event_counts_every_container_toward_depth(kind: str) -> None:
+    from linch.events import IGNORABLE_MAX_DEPTH
+
+    payload: Any = "leaf"
+    for index in range(IGNORABLE_MAX_DEPTH):
+        payload = (
+            {"next": payload} if kind == "dict" or (kind == "mixed" and index % 2) else [payload]
+        )
+
+    with pytest.raises(ValueError, match="nesting depth"):
+        IgnorableEvent(
+            original_type="future_event",
+            raw={"type": "future_event", "ignorable": True, "payload": payload},
+        )
+
+
+@pytest.mark.parametrize("wrappers", [1, 2])
+def test_subagent_event_rejects_opaque_payload_overflow_at_construction(wrappers: int) -> None:
+    from linch.events import IGNORABLE_MAX_DEPTH
+
+    payload: Any = "leaf"
+    for _ in range(IGNORABLE_MAX_DEPTH - wrappers):
+        payload = [payload]
+    event = IgnorableEvent(
+        original_type="future_event",
+        raw={"type": "future_event", "ignorable": True, "payload": payload},
+    )
+    for _ in range(wrappers - 1):
+        event = SubagentEvent("parent", "child", "worker", "Worker", event)
+
+    with pytest.raises(ValueError, match="nesting depth"):
+        SubagentEvent("parent", "child", "worker", "Worker", event)
+
+
+def test_subagent_event_revalidates_mutated_opaque_payload_depth() -> None:
+    from linch.events import IGNORABLE_MAX_DEPTH
+
+    opaque = IgnorableEvent(
+        original_type="future_event", raw={"type": "future_event", "ignorable": True}
+    )
+    event = SubagentEvent("parent", "child", "worker", "Worker", opaque)
+    payload: Any = "leaf"
+    for _ in range(IGNORABLE_MAX_DEPTH - 1):
+        payload = [payload]
+    opaque.raw["payload"] = payload
+
+    with pytest.raises(ValueError, match="nesting depth"):
+        event_to_dict(event)
 
 
 def test_ignorable_depth_limit_matches_the_durable_codec() -> None:

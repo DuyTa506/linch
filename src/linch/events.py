@@ -506,6 +506,9 @@ class SubagentEvent:
     event: Event
     type: Literal["subagent_event"] = "subagent_event"
 
+    def __post_init__(self) -> None:
+        _validate_nested_ignorable_event(self)
+
 
 @dataclass(slots=True)
 class BackgroundWorkerEvent:
@@ -775,9 +778,9 @@ _KNOWN_EVENT_TYPES = frozenset(
 
 
 def _validate_ignorable_event_envelope(
-    raw: dict[str, Any], *, original_type: str | None = None
+    raw: dict[str, Any], *, original_type: str | None = None, depth: int = 0
 ) -> str:
-    _validate_ignorable_json_value(raw, path="event")
+    _validate_ignorable_json_value(raw, path="event", depth=depth)
     typ = raw.get("type")
     if not isinstance(typ, str) or not typ:
         raise ValueError("ignorable event type must be a non-empty string")
@@ -833,8 +836,7 @@ def _check_ignorable_json_node(value: Any, path: str, active: set[int], depth: i
         raise ValueError(
             f"ignorable event {path} exceeds maximum nesting depth {IGNORABLE_MAX_DEPTH}"
         )
-    # Preserve the envelope validator's existing object-child depth policy.
-    return depth + 1 if isinstance(value, list) else 0
+    return depth + 1
 
 
 def _check_ignorable_json_key(key: Any, path: str) -> None:
@@ -1276,6 +1278,17 @@ def usage_from_dict(raw: dict[str, Any]) -> Usage:
     )
 
 
+def _validate_nested_ignorable_event(event: Event) -> None:
+    depth = 0
+    while isinstance(event, SubagentEvent):
+        depth += 1
+        event = event.event
+    if isinstance(event, IgnorableEvent):
+        _validate_ignorable_event_envelope(
+            event.raw, original_type=event.original_type, depth=depth
+        )
+
+
 def _json_safe(value: Any, *, active: set[int] | None = None) -> Any:
     if value is None or isinstance(value, str | int | float | bool):
         return value
@@ -1704,6 +1717,7 @@ def event_to_dict(event: Event) -> dict[str, Any]:
     if isinstance(event, SkillCompletedEvent):
         return {"type": event.type, "name": event.name, "is_error": event.is_error}
     if isinstance(event, SubagentEvent):
+        _validate_nested_ignorable_event(event)
         return {
             "type": event.type,
             "parent_session_id": event.parent_session_id,
