@@ -1,15 +1,6 @@
-"""Budget primitive tests.
-
-linch imports happen inside test functions / provider methods (not at module
-level) because tests/loop/test_hardening.py pops all ``linch*`` modules from
-``sys.modules`` — stale class references would fail ``isinstance`` checks in
-the reloaded loop (e.g. the ``Usage`` guard in ``stream_turn``).
-"""
-
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from typing import Any
+import pytest
 
 # ── RunBudget unit tests ──────────────────────────────────────────────────────
 
@@ -30,48 +21,33 @@ def test_charge_accumulates_tokens_and_cost() -> None:
     assert budget.spent_usd == 0.01  # None cost charges 0
 
 
-def test_remaining_and_exceeded_token_limit() -> None:
+@pytest.mark.parametrize("case", ["tokens", "usd", "unlimited"])
+def test_budget_limits(case: str) -> None:
     from linch import RunBudget
     from linch.types import Usage
 
-    budget = RunBudget(max_tokens=1000)
-
-    assert budget.remaining_tokens == 1000
-    assert budget.remaining_usd is None
-    assert not budget.exceeded
-
-    budget.charge(Usage(input_tokens=1200), None)
-
-    assert budget.remaining_tokens == 0
-    assert budget.exceeded
-
-
-def test_exceeded_usd_limit() -> None:
-    from linch import RunBudget
-    from linch.types import Usage
-
-    budget = RunBudget(max_cost_usd=1.0)
-
-    budget.charge(Usage(input_tokens=10), 0.4)
-    assert not budget.exceeded
-    assert budget.remaining_usd == 0.6
-
-    budget.charge(Usage(input_tokens=10), 0.7)
-    assert budget.exceeded
-    assert budget.remaining_usd == 0.0
-
-
-def test_no_limits_never_exceeds() -> None:
-    from linch import RunBudget
-    from linch.types import Usage
-
-    budget = RunBudget()
-
-    budget.charge(Usage(input_tokens=10**9), 10**6)
-
-    assert not budget.exceeded
-    assert budget.remaining_tokens is None
-    assert budget.remaining_usd is None
+    if case == "tokens":
+        budget = RunBudget(max_tokens=1000)
+        assert budget.remaining_tokens == 1000
+        assert budget.remaining_usd is None
+        assert not budget.exceeded
+        budget.charge(Usage(input_tokens=1200), None)
+        assert budget.remaining_tokens == 0
+        assert budget.exceeded
+    elif case == "usd":
+        budget = RunBudget(max_cost_usd=1.0)
+        budget.charge(Usage(input_tokens=10), 0.4)
+        assert not budget.exceeded
+        assert budget.remaining_usd == 0.6
+        budget.charge(Usage(input_tokens=10), 0.7)
+        assert budget.exceeded
+        assert budget.remaining_usd == 0.0
+    else:
+        budget = RunBudget()
+        budget.charge(Usage(input_tokens=10**9), 10**6)
+        assert not budget.exceeded
+        assert budget.remaining_tokens is None
+        assert budget.remaining_usd is None
 
 
 def test_take_warning_fires_once_at_ratio() -> None:
@@ -91,91 +67,22 @@ def test_take_warning_fires_once_at_ratio() -> None:
 # ── Loop integration ──────────────────────────────────────────────────────────
 
 
-class ToolLoopProvider:
-    """Always requests a tool call, reporting fixed usage per turn."""
-
-    id = "fake"
-
-    def __init__(self, tokens_per_turn: int = 600) -> None:
-        self.calls = 0
-        self.tokens_per_turn = tokens_per_turn
-
-    def context_window(self, model: str) -> int:
-        return 10_000_000
-
-    async def stream(self, req: Any) -> AsyncIterator[dict[str, object]]:
-        from linch.types import Usage
-
-        self.calls += 1
-        yield {"type": "message_start", "model": req.model}
-        yield {"type": "tool_use_start", "id": f"call_{self.calls}", "name": "Glob"}
-        yield {
-            "type": "tool_use_input_delta",
-            "id": f"call_{self.calls}",
-            "json_delta": f'{{"pattern":"*.txt{self.calls}"}}',
-        }
-        yield {"type": "tool_use_end", "id": f"call_{self.calls}"}
-        yield {
-            "type": "message_end",
-            "stop_reason": "tool_use",
-            "usage": Usage(input_tokens=self.tokens_per_turn),
-        }
-
-
-class UsageScriptProvider:
-    """Scripted (stop_reason, usage) turns; tool_use turns call Glob."""
-
-    id = "fake"
-
-    def __init__(self, turns: list[tuple[str, int]]) -> None:
-        self.calls = 0
-        self.turns = turns
-
-    def context_window(self, model: str) -> int:
-        return 10_000_000
-
-    async def stream(self, req: Any) -> AsyncIterator[dict[str, object]]:
-        from linch.types import Usage
-
-        stop_reason, tokens = self.turns[self.calls]
-        self.calls += 1
-        yield {"type": "message_start", "model": req.model}
-        if stop_reason == "tool_use":
-            yield {"type": "tool_use_start", "id": f"call_{self.calls}", "name": "Glob"}
-            yield {
-                "type": "tool_use_input_delta",
-                "id": f"call_{self.calls}",
-                "json_delta": f'{{"pattern":"*.txt{self.calls}"}}',
-            }
-            yield {"type": "tool_use_end", "id": f"call_{self.calls}"}
-        else:
-            yield {"type": "text_delta", "text": "done"}
-        yield {
-            "type": "message_end",
-            "stop_reason": stop_reason,
-            "usage": Usage(input_tokens=tokens),
-        }
-
-
-def _make_agent(provider: Any, **kwargs: Any) -> Any:
-    from linch import Agent
-    from linch.sessions import InMemorySessionStore
-
-    return Agent(
-        model="gpt-5",
-        provider=provider,
-        session_store=InMemorySessionStore(),
-        permissions={"mode": "skip-dangerous"},
-        cwd=".",
-        **kwargs,
-    )
-
-
 async def test_loop_stops_when_token_budget_exhausted() -> None:
     from linch import RunBudget, RunOptions
+    from linch.types import Usage
+    from tests.support.agents import make_agent
+    from tests.support.providers import ScriptedProvider, ToolUseTurn
+    from tests.support.tools import StubTool, tool_registry
 
-    provider = ToolLoopProvider(tokens_per_turn=600)
-    agent = _make_agent(provider)
+    provider = ScriptedProvider(
+        [
+            ToolUseTurn("Glob", {"pattern": "*.txt1"}, usage=Usage(input_tokens=600)),
+            ToolUseTurn("Glob", {"pattern": "*.txt2"}, usage=Usage(input_tokens=600)),
+        ]
+    )
+    agent = make_agent(
+        provider, model="gpt-5", tools=tool_registry(StubTool("Glob")), run_store=None
+    )
     session = await agent.session()
     budget = RunBudget(max_tokens=1000)
 
@@ -188,16 +95,27 @@ async def test_loop_stops_when_token_budget_exhausted() -> None:
     assert events[-1].type == "result"
     assert events[-1].subtype == "error"
     # Turn 1 charges 600, turn 2 charges 1200 (exceeded), turn 3 never calls the provider.
-    assert provider.calls == 2
+    assert len(provider.requests) == 2
     assert budget.exceeded
     assert budget.spent_tokens == 1200
 
 
 async def test_warning_event_emitted_once_at_90_percent() -> None:
     from linch import RunBudget, RunOptions
+    from linch.types import Usage
+    from tests.support.agents import make_agent
+    from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
+    from tests.support.tools import StubTool, tool_registry
 
-    provider = UsageScriptProvider([("tool_use", 9500), ("end_turn", 400)])
-    agent = _make_agent(provider)
+    provider = ScriptedProvider(
+        [
+            ToolUseTurn("Glob", {"pattern": "*.txt"}, usage=Usage(input_tokens=9500)),
+            TextTurn("done", usage=Usage(input_tokens=400)),
+        ]
+    )
+    agent = make_agent(
+        provider, model="gpt-5", tools=tool_registry(StubTool("Glob")), run_store=None
+    )
     session = await agent.session()
     budget = RunBudget(max_tokens=10_000)
 
@@ -213,10 +131,13 @@ async def test_warning_event_emitted_once_at_90_percent() -> None:
 
 async def test_agent_level_budget_fallback_and_runoptions_precedence() -> None:
     from linch import RunBudget, RunOptions
+    from linch.types import Usage
+    from tests.support.agents import make_agent
+    from tests.support.providers import ScriptedProvider, TextTurn
 
     agent_budget = RunBudget(max_tokens=10_000)
-    provider = UsageScriptProvider([("end_turn", 100), ("end_turn", 100)])
-    agent = _make_agent(provider, budget=agent_budget)
+    provider = ScriptedProvider([TextTurn("done", usage=Usage(input_tokens=100))] * 2)
+    agent = make_agent(provider, model="gpt-5", budget=agent_budget, run_store=None)
 
     session = await agent.session()
     async for _ in session.run("go"):
@@ -233,9 +154,12 @@ async def test_agent_level_budget_fallback_and_runoptions_precedence() -> None:
 
 async def test_budget_queryable_after_run() -> None:
     from linch import RunBudget, RunOptions
+    from linch.types import Usage
+    from tests.support.agents import make_agent
+    from tests.support.providers import ScriptedProvider, TextTurn
 
-    provider = UsageScriptProvider([("end_turn", 250)])
-    agent = _make_agent(provider)
+    provider = ScriptedProvider([TextTurn("done", usage=Usage(input_tokens=250))])
+    agent = make_agent(provider, model="gpt-5", run_store=None)
     session = await agent.session()
     budget = RunBudget(max_tokens=1000)
 
