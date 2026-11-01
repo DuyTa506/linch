@@ -153,9 +153,15 @@ def apply_micro_compaction(
 ) -> bool:
     """Elide old tool results in ``session.provider_view`` via a logged projection.
 
-    Returns ``True`` and sets ``session.last_compaction_info`` (strategy
-    ``"micro"``) when anything was elided; ``False`` leaves the session
-    untouched.
+    Args:
+        session: Session whose provider view is being compacted.
+        agent: Agent supplying the model and token estimator.
+        keep_recent_turns: Number of recent assistant turns protected from elision.
+        model: Optional model override for token estimation.
+
+    Returns:
+        Whether any results were elided. On success, sets ``last_compaction_info``
+        with strategy ``"micro"`` and clears provider continuation IDs.
     """
     resolved_model = _resolve_compaction_model(session, agent, model)
     # One snapshot for the whole pre-compaction pass: each read is a detached
@@ -166,6 +172,7 @@ def apply_micro_compaction(
     if n_elided == 0:
         return False
     messages_count = len(current_view)
+    new_view = strip_response_chaining(new_view)
     session.session_log.record_projection(new_view, reason="micro-compaction")
     session.last_compaction_info = {
         "type": "compaction",
@@ -1110,15 +1117,30 @@ def _estimate_tokens(
     if estimate is not None:
         return estimate
 
-    # Provider-neutral fallback heuristic for compaction decisions and
-    # telemetry.  Serialising the normalized message shape counts tool results,
-    # tool inputs, thinking, image metadata, and provider metadata too; counting
-    # TextBlocks alone badly underestimates tool-heavy sessions.
-    chars = sum(
-        len(json.dumps(message_to_dict(message), ensure_ascii=False, default=str))
-        for message in messages
-    )
-    return max(0, chars // 4)
+    # Count text, tool inputs/results, and metadata, but never tokenize encoded
+    # images or opaque reasoning signatures as prose. A fixed per-image cost is
+    # a bounded fallback; hosts can supply a model-aware estimator above.
+    chars = images = 0
+    for message in messages:
+        raw = message_to_dict(message)
+        images += sum(_strip_estimation_payloads(block) for block in raw["content"])
+        chars += len(json.dumps(raw, ensure_ascii=False, default=str))
+    return chars // 4 + images * 1000
+
+
+def _strip_estimation_payloads(block: dict[str, Any]) -> int:
+    """Remove opaque payloads from a freshly serialized block and count images."""
+    kind = block["type"]
+    if kind == "image":
+        block.pop("source", None)
+        return 1
+    if kind == "thinking":
+        block.pop("signature", None)
+    elif kind == "redacted_thinking":
+        block.pop("data", None)
+    elif kind == "tool_result" and isinstance(block["content"], list):
+        return sum(_strip_estimation_payloads(item) for item in block["content"])
+    return 0
 
 
 async def run_forced_compaction(
