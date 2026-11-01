@@ -212,10 +212,12 @@ class OpenAIChatCompletionsProvider(BaseProvider):
                 # empty-choices gate, otherwise every streamed turn reports zero.
                 cu = getattr(chunk, "usage", None)
                 if cu is not None:
+                    prompt_tokens = int(getattr(cu, "prompt_tokens", 0) or 0)
+                    cache_read_tokens = openai_cached_tokens(cu)
                     usage = Usage(
-                        input_tokens=int(getattr(cu, "prompt_tokens", 0) or 0),
+                        input_tokens=max(0, prompt_tokens - cache_read_tokens),
                         output_tokens=int(getattr(cu, "completion_tokens", 0) or 0),
-                        cache_read_tokens=openai_cached_tokens(cu),
+                        cache_read_tokens=cache_read_tokens,
                     )
                 chunk_cache = self._chunk_cache_read_tokens(chunk)
                 if chunk_cache is not None:
@@ -280,8 +282,14 @@ class OpenAIChatCompletionsProvider(BaseProvider):
                 yield {"type": "tool_use_end", "id": tid}
         if tool_meta:
             stop_reason = "tool_use"
-        if extra_cache_read and not usage.cache_read_tokens:
-            usage = replace(usage, cache_read_tokens=extra_cache_read)
+        if extra_cache_read is not None and not usage.cache_read_tokens:
+            total_prompt_tokens = usage.input_tokens + usage.cache_read_tokens
+            cache_read_tokens = max(0, extra_cache_read)
+            usage = replace(
+                usage,
+                input_tokens=max(0, total_prompt_tokens - cache_read_tokens),
+                cache_read_tokens=cache_read_tokens,
+            )
         yield {"type": "message_end", "stop_reason": stop_reason, "usage": usage}
 
 

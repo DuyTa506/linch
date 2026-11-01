@@ -275,9 +275,35 @@ async def test_stream_text_response(fake_client: FakeClient, sdk: Any) -> None:
     assert events[0] == {"type": "message_start", "model": "gemini-2.5-flash"}
     assert [e["text"] for e in events if e["type"] == "text_delta"] == ["Paris ", "is the capital."]
     assert events[-1]["stop_reason"] == "end_turn"
-    assert events[-1]["usage"] == Usage(input_tokens=10, output_tokens=5, cache_read_tokens=4)
+    assert events[-1]["usage"] == Usage(input_tokens=6, output_tokens=5, cache_read_tokens=4)
     assert events[-1]["provider_metadata"] is None
     assert fake_client.stream_closed
+
+
+async def test_stream_usage_excludes_cached_prompt_tokens(
+    fake_client: FakeClient, sdk: Any
+) -> None:
+    from linch.providers.gemini import GeminiProvider
+    from linch.types import Usage
+
+    fake_client.chunks = [
+        chunk(
+            sdk,
+            [{"text": "done"}],
+            "STOP",
+            prompt_token_count=1000,
+            candidates_token_count=10,
+            cached_content_token_count=900,
+        )
+    ]
+
+    events = [e async for e in GeminiProvider().stream(request())]
+
+    assert events[-1]["usage"] == Usage(
+        input_tokens=100,
+        output_tokens=10,
+        cache_read_tokens=900,
+    )
 
 
 @pytest.mark.parametrize(
@@ -541,7 +567,7 @@ async def test_usage_only_chunks_preserve_omitted_fields(fake_client: FakeClient
         ),
     ]
     events = [e async for e in GeminiProvider().stream(request())]
-    assert events[-1]["usage"] == Usage(input_tokens=10, output_tokens=2, cache_read_tokens=4)
+    assert events[-1]["usage"] == Usage(input_tokens=6, output_tokens=2, cache_read_tokens=4)
 
 
 @pytest.mark.parametrize("stage", ["open", "stream"])

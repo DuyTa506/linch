@@ -357,7 +357,10 @@ class GeminiProvider(BaseProvider):
             "type": "message_end",
             "stop_reason": "tool_use" if seen_tool_calls else stop_reason,
             "usage": Usage(
-                input_tokens=counts["prompt_token_count"],
+                input_tokens=max(
+                    0,
+                    counts["prompt_token_count"] - counts["cached_content_token_count"],
+                ),
                 output_tokens=counts["candidates_token_count"] + counts["thoughts_token_count"],
                 cache_read_tokens=counts["cached_content_token_count"],
             ),

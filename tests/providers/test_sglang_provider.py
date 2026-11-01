@@ -123,7 +123,7 @@ async def test_sglang_stream_text_tool_reasoning_and_cache_usage() -> None:
     assert {"type": "tool_use_end", "id": "call_1"} in events
     assert events[-1]["stop_reason"] == "tool_use"
     assert events[-1]["usage"] == Usage(
-        input_tokens=8,
+        input_tokens=3,
         output_tokens=13,
         cache_read_tokens=5,
     )
