@@ -1778,7 +1778,7 @@ async def execute_tool_calls(
                 ),
             )
             session.background_tasks.append(task)
-            register_background_task(session, task, run_id=origin_run_id)
+            register_background_task(session, task, run_id=origin_run_id, tool_use_id=call.id)
             ack = _background_ack(tool_name, bg_id)
             yield ToolCallEndEvent(
                 tool_use_id=call.id,
