@@ -141,3 +141,92 @@ async def test_abort_cancels_background_tool() -> None:
     except asyncio.CancelledError:
         pass
     assert tasks[0].cancelled() or tasks[0].done()
+
+
+async def test_background_tool_completion_runs_post_tool_use_hooks() -> None:
+    from linch import RedactionConfig, RedactionHook, RedactionRule
+    from linch.abort import AbortContext
+    from linch.scheduler import execute_tool_calls
+    from linch.tools import ToolRegistry, tool
+    from linch.types import ToolUseBlock
+    from tests.support.scheduler import scheduler_agent, scheduler_session
+
+    @tool
+    async def secret() -> str:
+        """Return a secret for the redaction regression."""
+        return "SECRET_VALUE"
+
+    registry = ToolRegistry()
+    registry.register(secret)
+    hook = RedactionHook(RedactionConfig(rules=(RedactionRule(r"SECRET_VALUE", "[REDACTED]"),)))
+    agent = scheduler_agent(
+        registry,
+        hooks=[hook],
+        enable_background_tools=True,
+    )
+    session = scheduler_session()
+
+    events = [
+        event
+        async for event in execute_tool_calls(
+            [
+                ToolUseBlock(
+                    id="call",
+                    name="secret",
+                    input={"run_in_background": True},
+                )
+            ],
+            agent,
+            session,
+            AbortContext(),
+        )
+    ]
+    assert events[-1].type == "tool_call_end"
+    await asyncio.gather(*session.background_tasks)
+
+    notification = session.pending_notifications[0]
+    text = notification.content[0].text
+    assert "[REDACTED]" in text
+    assert "SECRET_VALUE" not in text
+
+
+async def test_background_post_tool_use_keeps_origin_run_id_after_run_settles() -> None:
+    from linch.abort import AbortContext
+    from linch.scheduler import execute_tool_calls
+    from linch.tools import ToolRegistry, tool
+    from linch.types import ToolUseBlock
+    from tests.support.scheduler import scheduler_agent, scheduler_session
+
+    seen_run_ids: list[str] = []
+
+    @tool
+    async def quick() -> str:
+        """Return a completed background result."""
+        return "done"
+
+    class CaptureRunId:
+        def on_post_tool_use(self, ctx: Any) -> None:
+            seen_run_ids.append(ctx.run_id)
+
+    registry = ToolRegistry()
+    registry.register(quick)
+    agent = scheduler_agent(
+        registry,
+        hooks=[CaptureRunId()],
+        enable_background_tools=True,
+    )
+    session = scheduler_session(run_id="origin-run")
+
+    [
+        event
+        async for event in execute_tool_calls(
+            [ToolUseBlock(id="call", name="quick", input={"run_in_background": True})],
+            agent,
+            session,
+            AbortContext(),
+        )
+    ]
+    session.active_run_id = None
+    await asyncio.gather(*session.background_tasks)
+
+    assert seen_run_ids == ["origin-run"]

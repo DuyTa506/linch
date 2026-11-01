@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from linch.abort import AbortContext
 from linch.events import ToolCallEndEvent
 from linch.hooks import HookResult
@@ -327,3 +329,56 @@ async def test_v2_hooks_see_full_projection_before_final_offload() -> None:
     assert "offloaded to" in end.result
     assert end.tool_result is not None and end.tool_result.content == full
     assert end.tool_output == ToolOutput(full)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expect_offloaded"),
+    [
+        ("SECRET_VALUE", False),
+        ("SECRET_VALUE\n" + ("visible line\n" * 20), True),
+    ],
+    ids=["redaction-shrinks-under-threshold", "redaction-remains-oversized"],
+)
+async def test_legacy_offload_does_not_store_pre_hook_output_after_mutation(
+    raw: str, expect_offloaded: bool
+) -> None:
+    from linch.filesystem import OffloadConfig, StateFileBackend
+    from linch.hooks import RedactionConfig, RedactionHook, RedactionRule
+
+    @tool
+    def legacy():
+        return raw
+
+    hook = RedactionHook(RedactionConfig(rules=(RedactionRule("SECRET_VALUE", "[REDACTED]"),)))
+    backend = StateFileBackend()
+    registry = ToolRegistry()
+    registry.register(legacy)
+    agent = _agent(registry, hooks=[hook])
+    agent.result_offload = OffloadConfig(threshold_tokens=2, preview_lines=1)
+    session = _session()
+    session.filesystem = backend
+
+    events = [
+        event
+        async for event in execute_tool_calls(
+            [ToolUseBlock(id="call", name="legacy", input={})],
+            agent,
+            session,
+            AbortContext(),
+        )
+    ]
+    end = next(event for event in events if isinstance(event, ToolCallEndEvent))
+
+    redacted = raw.replace("SECRET_VALUE", "[REDACTED]")
+    paths = await backend.ls()
+    if not expect_offloaded:
+        assert end.result == redacted
+        # The raw result is never written before PostToolUse. Once redaction
+        # makes the value small enough to stay inline, no stale file remains.
+        assert paths == []
+    else:
+        assert "offloaded to" in end.result
+        assert len(paths) == 1
+        stored = await backend.read(paths[0])
+        assert stored == redacted
+        assert "SECRET_VALUE" not in stored
