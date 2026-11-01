@@ -1,29 +1,17 @@
-"""Smoke test for the non-coding research-desk recipe (ROADMAP Phase 5.5).
-
-Drives `examples/recipes/research_desk.py` with a deterministic ScriptedProvider
-(no live key) to prove the recipe wires up: domain tools touch `ctx.deps`, the
-closed-loop citation verifier bounces an uncited brief, and a later turn that
-records a citation is accepted with a structured Brief.
-"""
-
 from __future__ import annotations
 
-import importlib.util
 import json
 from pathlib import Path
 
 from linch import RunOptions
-from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
+from tests.support.modules import load_module
+from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
 
 _RECIPE = Path(__file__).resolve().parents[2] / "examples" / "recipes" / "research_desk.py"
 
 
 def _load_recipe():
-    spec = importlib.util.spec_from_file_location("research_desk_example", _RECIPE)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return load_module(_RECIPE, "research_desk_example")
 
 
 async def test_research_desk_verifier_enforces_citation() -> None:

@@ -1,20 +1,16 @@
 from __future__ import annotations
 
-import importlib.util
 import json
 from pathlib import Path
 
 import pytest
 
+from tests.support.modules import load_module
+
 
 def _load_script():
     path = Path(__file__).resolve().parents[2] / "scripts" / "eval_benchmark.py"
-    spec = importlib.util.spec_from_file_location("eval_benchmark_script", path)
-    assert spec is not None
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
+    return load_module(path, "eval_benchmark_script")
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -23,16 +19,13 @@ def _write_json(path: Path, payload: object) -> None:
 
 @pytest.mark.asyncio
 async def test_eval_benchmark_compares_scripted_targets(tmp_path):
-    from linch import Agent
     from linch.ext.evals import (
         EvalBenchmarkTarget,
-        ScriptedProvider,
-        TextTurn,
         load_eval_suite,
         run_eval_benchmark,
     )
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import empty_tools
+    from tests.support.agents import make_agent
+    from tests.support.providers import ScriptedProvider, TextTurn
 
     suite_path = tmp_path / "suite.json"
     _write_json(
@@ -48,20 +41,10 @@ async def test_eval_benchmark_compares_scripted_targets(tmp_path):
     )
     suite = load_eval_suite(suite_path)
 
-    passing = Agent(
-        model="scripted",
-        provider=ScriptedProvider([TextTurn("Paris"), TextTurn("Berlin")]),
-        tools=empty_tools(),
-        session_store=InMemorySessionStore(),
-        permissions={"mode": "skip-dangerous"},
+    passing = make_agent(
+        ScriptedProvider([TextTurn("Paris"), TextTurn("Berlin")]), model="scripted"
     )
-    failing = Agent(
-        model="scripted",
-        provider=ScriptedProvider([TextTurn("Paris"), TextTurn("Paris")]),
-        tools=empty_tools(),
-        session_store=InMemorySessionStore(),
-        permissions={"mode": "skip-dangerous"},
-    )
+    failing = make_agent(ScriptedProvider([TextTurn("Paris"), TextTurn("Paris")]), model="scripted")
 
     result = await run_eval_benchmark(
         suite,
@@ -82,57 +65,34 @@ async def test_eval_benchmark_compares_scripted_targets(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_eval_benchmark_script_loads_files_and_renders_json(tmp_path, capsys):
+@pytest.mark.parametrize("failing", [False, True], ids=["success", "fail-under"])
+async def test_eval_benchmark_script_loads_files_and_renders_json(tmp_path, capsys, failing):
     suite_path = tmp_path / "suite.json"
     turns_path = tmp_path / "turns.json"
     _write_json(
         suite_path,
         {
-            "name": "smoke",
+            **({"name": "smoke"} if not failing else {}),
             "cases": [{"prompt": "Say ok", "expected": "ok"}],
             "scorers": [{"type": "text_contains"}],
         },
     )
-    _write_json(turns_path, {"turns": [{"type": "text", "text": "ok"}]})
-
-    code = await _load_script()._main(
-        [
-            str(suite_path),
-            "--scripted",
-            f"candidate={turns_path}",
-            "--format",
-            "json",
-        ]
-    )
-
-    assert code == 0
-    rendered = json.loads(capsys.readouterr().out)
-    assert rendered["suite"] == "smoke"
-    assert rendered["targets"][0]["name"] == "candidate"
-    assert rendered["targets"][0]["pass_rate"] == 1.0
-
-
-@pytest.mark.asyncio
-async def test_eval_benchmark_script_fails_under_threshold(tmp_path):
-    suite_path = tmp_path / "suite.json"
-    turns_path = tmp_path / "turns.json"
     _write_json(
-        suite_path,
-        {
-            "cases": [{"prompt": "Say ok", "expected": "ok"}],
-            "scorers": [{"type": "text_contains"}],
-        },
+        turns_path,
+        {"turns": [{"type": "text", "text": "ok"}]}
+        if not failing
+        else [{"type": "text", "text": "nope"}],
     )
-    _write_json(turns_path, [{"type": "text", "text": "nope"}])
-
-    code = await _load_script()._main(
-        [
-            str(suite_path),
-            "--scripted",
-            str(turns_path),
-            "--fail-under",
-            "1.0",
-        ]
+    args = (
+        [str(suite_path), "--scripted", f"candidate={turns_path}", "--format", "json"]
+        if not failing
+        else [str(suite_path), "--scripted", str(turns_path), "--fail-under", "1.0"]
     )
 
-    assert code == 1
+    code = await _load_script()._main(args)
+    assert code == (1 if failing else 0)
+    if not failing:
+        rendered = json.loads(capsys.readouterr().out)
+        assert rendered["suite"] == "smoke"
+        assert rendered["targets"][0]["name"] == "candidate"
+        assert rendered["targets"][0]["pass_rate"] == 1.0

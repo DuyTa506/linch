@@ -1,18 +1,4 @@
-"""Public-surface contract guard (ROADMAP Phase 5.1).
-
-`linch.__all__` is the supported, semver-governed public API. This test pins the
-contract so an accidental rename/removal or an undeclared public leak is caught
-in CI rather than in an embedder's pinned import:
-
-- every name in `__all__` resolves on the package,
-- `__all__` has no duplicate entries,
-- every public (non-underscore) *attribute* of the package — submodules aside —
-  is declared in `__all__`, so nothing leaks into the surface undeclared.
-
-Core submodule names (`linch.agent`, `linch.tools`, …) are import artifacts, not
-part of the contract; optional features are imported explicitly from
-`linch.ext.*`.
-"""
+"""Guard Linch's supported public API and extension boundaries."""
 
 from __future__ import annotations
 
@@ -22,40 +8,22 @@ import subprocess
 import sys
 import types
 from collections import Counter
+from collections.abc import Collection
 from pathlib import Path
 
 import pytest
 
 import linch
 
+ROOT = Path(__file__).resolve().parents[2]
 PROMOTED_EVAL_NAMES = frozenset(
-    {
-        "CaseResult",
-        "EvalBenchmarkResult",
-        "EvalBenchmarkTarget",
-        "EvalCase",
-        "EvalResult",
-        "EvalSuite",
-        "EvalTargetResult",
-        "ScriptedProvider",
-        "TextTurn",
-        "ToolUseTurn",
-        "context_metadata_contains",
-        "context_not_trimmed",
-        "context_selected_tool",
-        "cost_under",
-        "load_eval_suite",
-        "load_scripted_turns",
-        "recovery_succeeded",
-        "run_completed",
-        "run_eval",
-        "run_eval_benchmark",
-        "schema_valid",
-        "text_contains",
-        "tool_called",
-    }
+    "CaseResult EvalBenchmarkResult EvalBenchmarkTarget EvalCase EvalResult EvalSuite "
+    "EvalTargetResult ScriptedProvider TextTurn ToolUseTurn context_metadata_contains "
+    "context_not_trimmed context_selected_tool cost_under load_eval_suite "
+    "load_scripted_turns recovery_succeeded run_completed run_eval run_eval_benchmark "
+    "schema_valid text_contains tool_called".split()
 )
-PROMOTED_PERMISSION_NAMES = frozenset({"BashRule", "PathRule", "Principal", "ToolRule"})
+PROMOTED_PERMISSION_NAMES = frozenset("BashRule PathRule Principal ToolRule".split())
 
 
 def _imported_modules(path: Path, node: ast.Import | ast.ImportFrom, source_root: Path) -> set[str]:
@@ -63,85 +31,81 @@ def _imported_modules(path: Path, node: ast.Import | ast.ImportFrom, source_root
         return {alias.name for alias in node.names}
     if not isinstance(node, ast.ImportFrom):
         return set()
-    package_parts = ("linch",) + path.relative_to(source_root).parent.parts
-    package = ".".join(package_parts)
+    package = ".".join(("linch", *path.relative_to(source_root).parent.parts))
     if node.level:
-        prefix = "." * node.level + (node.module or "")
         try:
-            module = importlib.util.resolve_name(prefix, package)
+            module = importlib.util.resolve_name("." * node.level + (node.module or ""), package)
         except ImportError:
             return set()
     else:
         module = node.module
-    if module is None:
-        return set()
-    return {module, *(f"{module}.{alias.name}" for alias in node.names)}
+    return set() if module is None else {module, *(f"{module}.{a.name}" for a in node.names)}
+
+
+def _run_script(script: str, *, cwd: Path = ROOT) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-c", script], cwd=cwd, capture_output=True, text=True, check=False
+    )
+
+
+def _assert_script_ok(script: str, *, cwd: Path = ROOT) -> None:
+    completed = _run_script(script, cwd=cwd)
+    assert completed.returncode == 0, completed.stderr
+
+
+def _assert_setup_public(name: str, value: object) -> None:
+    assert name in linch.__all__
+    assert hasattr(value, "setup")
+
+
+def _assert_removed_public(names: Collection[str]) -> None:
+    assert not set(names).intersection(linch.__all__)
+    assert not any(hasattr(linch, name) for name in names)
 
 
 def test_plugin_is_public() -> None:
-    from linch import Plugin
-
-    assert "Plugin" in linch.__all__
-    assert hasattr(Plugin, "setup")
+    _assert_setup_public("Plugin", linch.Plugin)
 
 
 def test_tool_search_plugin_is_public() -> None:
-    from linch import ToolSearchPlugin
-
-    assert "ToolSearchPlugin" in linch.__all__
-    assert hasattr(ToolSearchPlugin, "setup")
+    _assert_setup_public("ToolSearchPlugin", linch.ToolSearchPlugin)
 
 
 def test_profile_is_public() -> None:
-    from linch import Profile, RunOptions
-
-    profile = Profile(id="support", version="1")
+    profile = linch.Profile(id="support", version="1")
     assert "Profile" in linch.__all__
-    assert RunOptions(profile=profile).profile is profile
+    assert linch.RunOptions(profile=profile).profile is profile
 
 
 def test_builtin_plugins_are_public_and_catalog_is_removed() -> None:
-    from linch import AskUserPlugin, MailboxPlugin
-
     assert {"AskUserPlugin", "MailboxPlugin"} <= set(linch.__all__)
-    assert hasattr(AskUserPlugin, "setup")
-    assert hasattr(MailboxPlugin, "setup")
+    _assert_setup_public("AskUserPlugin", linch.AskUserPlugin)
+    _assert_setup_public("MailboxPlugin", linch.MailboxPlugin)
     assert "plugins" not in linch.__all__
     assert not hasattr(linch, "plugins")
 
 
 def test_resume_rejection_error_is_public() -> None:
-    from linch import LinchError, RunNotResumableError
-
     assert "RunNotResumableError" in linch.__all__
-    assert issubclass(RunNotResumableError, LinchError)
+    assert issubclass(linch.RunNotResumableError, linch.LinchError)
 
 
 def test_durable_run_store_names_are_public_and_lazy() -> None:
-    expected = {
-        "RunLease",
-        "RunLeaseStore",
-        "RunLeaseConflictError",
-        "LeaseLostError",
-        "PostgresRunStore",
-    }
+    expected = set(
+        "RunLease RunLeaseStore RunLeaseConflictError LeaseLostError PostgresRunStore".split()
+    )
     assert expected <= set(linch.__all__)
-    root = Path(__file__).resolve().parents[2]
     script = f"""
 import sys
-sys.path.insert(0, {str(root / "src")!r})
+sys.path.insert(0, {str(ROOT / "src")!r})
 import linch
 assert 'asyncpg' not in sys.modules
 assert 'linch.run_stores.postgres' not in sys.modules
-from linch import PostgresRunStore, RunLease, RunLeaseStore
-from linch import RunLeaseConflictError, LeaseLostError
+from linch import PostgresRunStore, RunLease, RunLeaseStore, RunLeaseConflictError, LeaseLostError
 assert 'asyncpg' not in sys.modules
 assert 'linch.run_stores.postgres' in sys.modules
 """
-    completed = subprocess.run(
-        [sys.executable, "-c", script], cwd=root, capture_output=True, text=True, check=False
-    )
-    assert completed.returncode == 0, completed.stderr
+    _assert_script_ok(script)
 
 
 def test_extension_names_are_explicit() -> None:
@@ -162,25 +126,18 @@ def test_extensions_are_explicit_and_removed_from_kernel_surface() -> None:
     from linch.ext.scaffold import main as scaffold_main
     from linch.ext.workflow import run_workflow
 
-    assert all(callable(value) for value in (create_deep_agent, ScriptedProvider, LoopRunner))
+    assert all(callable(v) for v in (create_deep_agent, ScriptedProvider, LoopRunner))
     assert EvalCase.__module__.startswith("linch.ext.evals")
     assert RunReport.__module__ == "linch.ext.reports"
     assert callable(scaffold_main)
     assert callable(run_workflow)
-    removed = {
-        "create_deep_agent",
-        "EvalCase",
-        "ScriptedProvider",
-        "LoopRunner",
-        "RunReport",
-        "run_workflow",
-    }
-    assert removed.isdisjoint(linch.__all__)
-    assert all(not hasattr(linch, name) for name in removed)
+    _assert_removed_public(
+        "create_deep_agent EvalCase ScriptedProvider LoopRunner RunReport run_workflow".split()
+    )
 
 
 def test_kernel_has_no_imports_from_extensions() -> None:
-    source_root = Path(__file__).resolve().parents[2] / "src" / "linch"
+    source_root = ROOT / "src" / "linch"
     violations: list[str] = []
     for path in source_root.rglob("*.py"):
         if "ext" in path.relative_to(source_root).parts:
@@ -212,10 +169,9 @@ def test_imported_modules_resolve_extension_boundaries(
 
 
 def test_extension_modules_are_explicit() -> None:
-    root = Path(__file__).resolve().parents[2]
     script = f"""
 import sys
-sys.path.insert(0, {str(root / "src")!r})
+sys.path.insert(0, {str(ROOT / "src")!r})
 import linch
 assert "linch.ext.evals" not in sys.modules
 assert "linch.permissions" not in sys.modules
@@ -225,14 +181,7 @@ assert "linch.permissions" not in sys.modules
 _ = linch.ToolRule
 assert "linch.permissions" in sys.modules
 """
-    completed = subprocess.run(
-        [sys.executable, "-c", script],
-        cwd=root,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert completed.returncode == 0, completed.stderr
+    _assert_script_ok(script)
 
 
 def test_all_names_resolve() -> None:
@@ -251,33 +200,20 @@ def test_removed_legacy_names_are_not_public() -> None:
     from linch.tools.base import ToolContext
     from linch.tools.registry import ToolRegistry
 
-    removed = {
-        "AgentOptions",
-        "AgentMiddleware",
-        "coding_tools",
-        "defaultTools",
-        "default_tools",
-        "tools_from_defaults",
-    }
-    assert removed.isdisjoint(linch.__all__)
-    assert all(not hasattr(linch, name) for name in removed)
+    _assert_removed_public(
+        "AgentOptions AgentMiddleware coding_tools defaultTools "
+        "default_tools tools_from_defaults".split()
+    )
     assert not hasattr(Agent, "openai")
     assert not hasattr(ToolRegistry, "add")
     assert not hasattr(ToolRegistry, "remove")
     for cls, names in (
         (
             ToolContext,
-            (
-                "sessionId",
-                "runId",
-                "sessionStore",
-                "fileReadTracker",
-                "idempotencyKey",
-                "reportProgress",
-            ),
+            "sessionId runId sessionStore fileReadTracker idempotencyKey reportProgress".split(),
         ),
-        (MiddlewareContext, ("sessionId", "runId", "turnIndex", "toolUseId", "toolName")),
-        (ToolCallMiddlewareInput, ("toolUseId", "toolName")),
+        (MiddlewareContext, "sessionId runId turnIndex toolUseId toolName".split()),
+        (ToolCallMiddlewareInput, "toolUseId toolName".split()),
     ):
         assert all(not hasattr(cls, name) for name in names)
 
@@ -295,13 +231,11 @@ def test_no_undeclared_public_attributes() -> None:
 
 
 def test_external_consumer_fixture_uses_core_and_extension_api() -> None:
-    """A consumer module uses core and extension public paths explicitly."""
-
     fixture = Path(__file__).resolve().parents[1] / "fixtures" / "public_consumer.py"
     script = f"""
 import importlib.util
 import sys
-sys.path.insert(0, {str(Path(__file__).resolve().parents[2] / "src")!r})
+sys.path.insert(0, {str(ROOT / "src")!r})
 spec = importlib.util.spec_from_file_location("external_consumer", {str(fixture)!r})
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
@@ -309,14 +243,7 @@ assert module.make_agent().tools.list()
 assert module.make_contract().fingerprint.startswith("sha256:")
 assert module.DeepAgentProfile is not None
 """
-    completed = subprocess.run(
-        [sys.executable, "-c", script],
-        cwd=Path(__file__).resolve().parents[2],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert completed.returncode == 0, completed.stderr
+    _assert_script_ok(script)
 
 
 def test_model_call_public_surface_is_limited_to_journal_event() -> None:
@@ -324,53 +251,28 @@ def test_model_call_public_surface_is_limited_to_journal_event() -> None:
     assert {"ModelCallEvent", "is_model_call_event"} <= set(linch.__all__)
     assert linch.ModelCallEvent is events.ModelCallEvent
     assert linch.is_model_call_event is events.is_model_call_event
-    assert not {
-        "ModelCallIntent",
-        "ModelCallReceipt",
-        "AuxiliaryTextResult",
-        "_ModelCallLedger",
-    } & set(linch.__all__)
+    _assert_removed_public(
+        {"ModelCallIntent", "ModelCallReceipt", "AuxiliaryTextResult", "_ModelCallLedger"}
+    )
 
 
 def test_custom_observer_surface_is_removed() -> None:
-    removed = {
-        "BaseObserver",
-        "LoggingObserver",
-        "ObserverDispatcher",
-        "OpenTelemetryObserver",
-        "ProviderCallInfo",
-        "ProviderCallResult",
-        "RunInfo",
-        "RunObserver",
-        "RunResultInfo",
-        "Span",
-        "SpanCollector",
-        "ToolInfo",
-        "ToolResultInfo",
-        "TurnInfo",
-        "normalize_observers",
-        "RunTelemetryHook",
-    }
-    assert not removed.intersection(linch.__all__)
-    assert not any(hasattr(linch, name) for name in removed)
+    _assert_removed_public(
+        "BaseObserver LoggingObserver ObserverDispatcher OpenTelemetryObserver ProviderCallInfo "
+        "ProviderCallResult RunInfo RunObserver RunResultInfo Span SpanCollector ToolInfo "
+        "ToolResultInfo TurnInfo normalize_observers RunTelemetryHook".split()
+    )
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("linch.observability")
 
 
 def test_rag_names_are_public() -> None:
-    from linch import (
-        RagConnector,
-        RetrievedChunk,
-        register_grounding_check,
-        register_rag_connector,
-    )
+    from linch import RagConnector, RetrievedChunk, register_grounding_check, register_rag_connector
 
-    assert {
-        "RagConnector",
-        "RetrievedChunk",
-        "register_grounding_check",
-        "register_rag_connector",
-    } <= set(linch.__all__)
+    names = set(
+        "RagConnector RetrievedChunk register_grounding_check register_rag_connector".split()
+    )
+    assert names <= set(linch.__all__)
     assert all(
         callable(value)
         for value in (

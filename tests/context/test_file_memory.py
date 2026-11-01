@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.support.agents import make_agent
+
 
 def _turn(backend, run_id="run-1"):
     from linch import ContextBuildTurn
@@ -106,12 +108,10 @@ async def test_file_memory_uses_same_backend_precedence_as_file_tools(fallback):
 
 async def test_file_memory_concurrent_runs_keep_prefix_stable_and_release_cache():
     from linch import (
-        Agent,
         ContextBuildResult,
         ContextInjectionHook,
         FeatureFlags,
         FileMemoryContextBuilder,
-        InMemorySessionStore,
         RunOptions,
         ScopedFileBackend,
         StateFileBackend,
@@ -174,14 +174,13 @@ async def test_file_memory_concurrent_runs_keep_prefix_stable_and_release_cache(
         await backend.write(f"/tenants/{who}/memories/MEMORY.md", f"{who}-original.md")
     builder = FileMemoryContextBuilder()
     provider = Provider()
-    agent = Agent(
+    agent = make_agent(
+        provider,
         model="fake",
-        provider=provider,
-        session_store=InMemorySessionStore(),
         features=FeatureFlags(filesystem=True),
-        permissions={"mode": "skip-dangerous"},
         hooks=[ContextInjectionHook([OtherBuilder(), builder])],
         max_turns=3,
+        run_store=None,
     )
     try:
         sessions = [await agent.session() for _ in range(2)]

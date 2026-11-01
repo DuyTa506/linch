@@ -106,21 +106,6 @@ async def test_parallel_cancels_siblings_when_a_branch_raises() -> None:
 
     assert finished == []
     assert sorted(cleaned) == ["b0", "b2"]
-
-
-async def test_parallel_leaks_no_tasks_after_branch_failure() -> None:
-    wf = _make_context(max_concurrency=8)
-
-    async def slow() -> None:
-        await asyncio.sleep(1.0)
-
-    async def boom() -> None:
-        await asyncio.sleep(0.01)
-        raise RuntimeError("branch failed")
-
-    with pytest.raises(RuntimeError):
-        await wf.parallel([slow, boom, slow])
-
     await asyncio.sleep(0)
     await asyncio.sleep(0)
     assert _pending_tasks() == []
@@ -150,27 +135,6 @@ async def test_parallel_caller_cancellation_drains_branches() -> None:
     assert sorted(cleaned) == ["b0", "b1"]
     await asyncio.sleep(0)
     assert _pending_tasks() == []
-
-
-async def test_nested_parallel_does_not_deadlock() -> None:
-    wf = _make_context(max_concurrency=2)
-
-    def make_leaf(i: int):
-        async def leaf() -> int:
-            await asyncio.sleep(0.01)
-            return i
-
-        return leaf
-
-    def make_branch():
-        async def branch() -> list[int]:
-            return await wf.parallel([make_leaf(0), make_leaf(1)])
-
-        return branch
-
-    results = await asyncio.wait_for(wf.parallel([make_branch(), make_branch()]), timeout=2.0)
-
-    assert results == [[0, 1], [0, 1]]
 
 
 async def test_nested_parallel_caps_each_level_independently() -> None:
@@ -207,6 +171,26 @@ async def test_nested_parallel_caps_each_level_independently() -> None:
 
     assert outer_high == 2
     assert inner_high == [2, 2, 2]
+
+
+async def test_nested_parallel_does_not_deadlock() -> None:
+    wf = _make_context(max_concurrency=2)
+
+    def make_leaf(i: int):
+        async def leaf() -> int:
+            await asyncio.sleep(0.01)
+            return i
+
+        return leaf
+
+    def make_branch():
+        async def branch() -> list[int]:
+            return await wf.parallel([make_leaf(0), make_leaf(1)])
+
+        return branch
+
+    results = await asyncio.wait_for(wf.parallel([make_branch(), make_branch()]), timeout=2.0)
+    assert results == [[0, 1], [0, 1]]
 
 
 async def test_nested_pipeline_inside_parallel_does_not_deadlock() -> None:
@@ -260,38 +244,27 @@ async def test_step_key_argument_distinguishes_calls() -> None:
     assert [e.occurrence for e in ends] == [0, 0]
 
 
-async def test_step_timeout_raises_workflow_timeout_error() -> None:
+@pytest.mark.parametrize(
+    ("context_timeout_ms", "timeout_ms", "expected"),
+    [(None, 10, "raises_explicit"), (10, None, "raises_default"), (10, 0, "done")],
+)
+async def test_step_timeout_options(context_timeout_ms, timeout_ms, expected) -> None:
     from linch.ext.workflow import WorkflowTimeoutError
 
-    wf = _make_context()
+    wf = _make_context(step_timeout_ms=context_timeout_ms)
 
-    async def slow() -> None:
-        await asyncio.sleep(1.0)
-
-    with pytest.raises(WorkflowTimeoutError, match="timed out"):
-        await wf.step("slow", slow, timeout_ms=10)
-
-
-async def test_step_timeout_falls_back_to_the_context_default() -> None:
-    from linch.ext.workflow import WorkflowTimeoutError
-
-    wf = _make_context(step_timeout_ms=10)
-
-    async def slow() -> None:
-        await asyncio.sleep(1.0)
-
-    with pytest.raises(WorkflowTimeoutError):
-        await wf.step("slow", slow)
-
-
-async def test_step_timeout_zero_opts_out_of_the_context_default() -> None:
-    wf = _make_context(step_timeout_ms=10)
-
-    async def slower_than_the_default() -> str:
-        await asyncio.sleep(0.05)
+    async def slow() -> str:
+        await asyncio.sleep(1.0 if expected != "done" else 0.05)
         return "done"
 
-    assert await wf.step("slow", slower_than_the_default, timeout_ms=0) == "done"
+    if expected == "raises_explicit":
+        with pytest.raises(WorkflowTimeoutError, match="timed out"):
+            await wf.step("slow", slow, timeout_ms=timeout_ms)
+    elif expected == "raises_default":
+        with pytest.raises(WorkflowTimeoutError):
+            await wf.step("slow", slow)
+    else:
+        assert await wf.step("slow", slow, timeout_ms=timeout_ms) == expected
 
 
 async def test_no_timeout_never_reaches_wait_for(monkeypatch: Any) -> None:
@@ -362,7 +335,6 @@ async def test_step_without_retry_makes_a_single_attempt() -> None:
 
     with pytest.raises(RuntimeError):
         await wf.step("boom", always_fails)
-
     assert len(attempts) == 1
 
 

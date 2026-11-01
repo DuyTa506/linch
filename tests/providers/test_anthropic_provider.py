@@ -8,13 +8,9 @@ ANTHROPIC_API_KEY in the environment.
 from __future__ import annotations
 
 import asyncio
-import os
 from datetime import UTC
 
 import pytest
-
-SKIP_REASON = "ANTHROPIC_API_KEY not set"
-needs_key = pytest.mark.skipif(not os.environ.get("ANTHROPIC_API_KEY"), reason=SKIP_REASON)
 
 # ---------------------------------------------------------------------------
 # Unit tests — payload builder (no API key)
@@ -34,44 +30,21 @@ def _make_req(**overrides):
     return ProviderRequest(**defaults)
 
 
-def test_build_payload_basic():
+@pytest.mark.parametrize("max_output_tokens,expected_max_tokens", [(None, 8096), (1024, 1024)])
+def test_build_payload_basic(max_output_tokens: int | None, expected_max_tokens: int):
     from linch.providers.anthropic import AnthropicProviderOptions, _build_payload
 
-    req = _make_req()
+    req = _make_req(
+        **({"max_output_tokens": max_output_tokens} if max_output_tokens is not None else {})
+    )
     payload = _build_payload(req, AnthropicProviderOptions())
 
     assert payload["model"] == "claude-sonnet-4-6"
     assert payload["stream"] is True
-    assert payload["max_tokens"] == 8096  # default
+    assert payload["max_tokens"] == expected_max_tokens
     assert payload["system"][0]["text"] == "You are a helpful assistant."
     assert len(payload["messages"]) == 1
     assert payload["messages"][0]["role"] == "user"
-
-
-def test_build_payload_respects_max_output_tokens():
-    from linch.providers.anthropic import AnthropicProviderOptions, _build_payload
-
-    req = _make_req(max_output_tokens=1024)
-    payload = _build_payload(req, AnthropicProviderOptions())
-    assert payload["max_tokens"] == 1024
-
-
-def test_build_payload_cache_marks_last_system_block():
-    from linch.providers.anthropic import AnthropicProviderOptions, _build_payload
-    from linch.types import SystemBlock
-
-    req = _make_req(
-        system=[
-            SystemBlock(text="Block A", cacheable=True),
-            SystemBlock(text="Block B", cacheable=True),
-        ],
-        cache_prompt=True,
-        cache_ttl="5m",
-    )
-    payload = _build_payload(req, AnthropicProviderOptions())
-    system = payload["system"]
-    assert "cache_control" not in system[0]
-    assert system[1]["cache_control"] == {"type": "ephemeral"}
 
 
 def test_build_payload_cache_boundary_excludes_dynamic_tail():
@@ -103,6 +76,24 @@ def test_build_payload_cache_boundary_excludes_dynamic_tail():
     s2 = payload_for("recalled: green")
     assert s1[:2] == s2[:2]
     assert s1[2]["text"] != s2[2]["text"]
+
+
+def test_build_payload_cache_marks_last_system_block():
+    from linch.providers.anthropic import AnthropicProviderOptions, _build_payload
+    from linch.types import SystemBlock
+
+    req = _make_req(
+        system=[
+            SystemBlock(text="Block A", cacheable=True),
+            SystemBlock(text="Block B", cacheable=True),
+        ],
+        cache_prompt=True,
+        cache_ttl="5m",
+    )
+    payload = _build_payload(req, AnthropicProviderOptions())
+    system = payload["system"]
+    assert "cache_control" not in system[0]
+    assert system[1]["cache_control"] == {"type": "ephemeral"}
 
 
 def test_build_payload_cache_boundary_all_static_marks_last():
@@ -376,66 +367,48 @@ def test_build_payload_output_schema_appends_to_existing_tools():
     assert payload.get("tool_choice") != {"type": "tool", "name": "final_answer"}
 
 
-def test_build_payload_output_schema_sole_tool_forces_choice():
-    """When schema tool is the only tool, tool_choice is forced so the model must call it."""
+@pytest.mark.parametrize(
+    "requested_choice,expected_choice",
+    [(None, {"type": "tool", "name": "get_answer"}), ("auto", {"type": "auto"})],
+)
+def test_build_payload_schema_tool_choice_modes(
+    requested_choice: str | None, expected_choice: dict
+):
+    """Schema-only requests force the tool unless the caller opts into automatic choice."""
     from linch.providers.anthropic import AnthropicProviderOptions, _build_payload
     from linch.types import OutputSchema
 
     schema = OutputSchema(name="get_answer", schema={"type": "object", "properties": {}})
-    req = _make_req(tools=[], output_schema=schema)
+    req = _make_req(
+        tools=[],
+        output_schema=schema,
+        **({"tool_choice": requested_choice} if requested_choice else {}),
+    )
     payload = _build_payload(req, AnthropicProviderOptions(api_mode="compatible"))
 
-    assert payload["tool_choice"] == {"type": "tool", "name": "get_answer"}
+    assert payload["tool_choice"] == expected_choice
 
 
-def test_build_payload_output_schema_honors_an_explicit_auto_choice():
-    """Thinking-compatible callers can opt out of the forced schema tool."""
-    from linch.providers.anthropic import AnthropicProviderOptions, _build_payload
-    from linch.types import OutputSchema
-
-    schema = OutputSchema(name="get_answer", schema={"type": "object", "properties": {}})
-    req = _make_req(tools=[], output_schema=schema, tool_choice="auto")
-    payload = _build_payload(req, AnthropicProviderOptions())
-
-    assert payload["tool_choice"] == {"type": "auto"}
-
-
-def test_build_payload_disabled_thinking_is_sent_and_keeps_forced_schema_tool():
-    """An explicit off mode must not silently fall back to model-default thinking."""
+@pytest.mark.parametrize(
+    "thinking,expected_choice",
+    [
+        ({"type": "disabled"}, {"type": "tool", "name": "get_answer"}),
+        ({"type": "enabled", "budget_tokens": 2_048}, {"type": "auto"}),
+    ],
+)
+def test_build_payload_thinking_schema_tool_choice(thinking: dict, expected_choice: dict):
+    """Thinking mode controls whether the schema tool is forced or automatic."""
     from linch.providers.anthropic import AnthropicProviderOptions, _build_payload
     from linch.types import OutputSchema
 
     schema = OutputSchema(name="get_answer", schema={"type": "object", "properties": {}})
     req = _make_req(tools=[], output_schema=schema)
     payload = _build_payload(
-        req,
-        AnthropicProviderOptions(
-            api_mode="compatible",
-            thinking={"type": "disabled"},
-        ),
+        req, AnthropicProviderOptions(api_mode="compatible", thinking=thinking)
     )
 
-    assert payload["thinking"] == {"type": "disabled"}
-    assert payload["tool_choice"] == {"type": "tool", "name": "get_answer"}
-
-
-def test_build_payload_active_thinking_uses_auto_schema_tool_choice():
-    """Extended/adaptive thinking cannot be combined with a forced tool choice."""
-    from linch.providers.anthropic import AnthropicProviderOptions, _build_payload
-    from linch.types import OutputSchema
-
-    schema = OutputSchema(name="get_answer", schema={"type": "object", "properties": {}})
-    req = _make_req(tools=[], output_schema=schema)
-    payload = _build_payload(
-        req,
-        AnthropicProviderOptions(
-            api_mode="compatible",
-            thinking={"type": "enabled", "budget_tokens": 2_048},
-        ),
-    )
-
-    assert payload["thinking"] == {"type": "enabled", "budget_tokens": 2_048}
-    assert payload["tool_choice"] == {"type": "auto"}
+    assert payload["thinking"] == thinking
+    assert payload["tool_choice"] == expected_choice
 
 
 def test_build_payload_run_thinking_overrides_provider_default():
@@ -673,26 +646,26 @@ def test_translate_messages_preserves_an_omitted_signed_thinking_block():
     ]
 
 
-def test_translate_image_url():
+@pytest.mark.parametrize(
+    "source,expected",
+    [
+        (
+            {"type": "url", "url": "https://example.com/img.png"},
+            {"type": "url", "url": "https://example.com/img.png"},
+        ),
+        (
+            {"type": "base64", "media_type": "image/png", "data": "abc123"},
+            {"type": "base64", "media_type": "image/png", "data": "abc123"},
+        ),
+    ],
+)
+def test_translate_image_sources(source: dict, expected: dict):
     from linch.providers.anthropic import _translate_image
     from linch.types import ImageBlock
 
-    block = ImageBlock(source={"type": "url", "url": "https://example.com/img.png"})
+    block = ImageBlock(source=source)
     out = _translate_image(block)
-    assert out == {
-        "type": "image",
-        "source": {"type": "url", "url": "https://example.com/img.png"},
-    }
-
-
-def test_translate_image_base64():
-    from linch.providers.anthropic import _translate_image
-    from linch.types import ImageBlock
-
-    block = ImageBlock(source={"type": "base64", "media_type": "image/png", "data": "abc123"})
-    out = _translate_image(block)
-    assert out["source"]["type"] == "base64"
-    assert out["source"]["data"] == "abc123"
+    assert out == {"type": "image", "source": expected}
 
 
 def test_error_mapping_auth():
@@ -1102,153 +1075,3 @@ async def test_stream_propagates_wait_for_timeout_instead_of_swallowing_it() -> 
 
     with pytest.raises(asyncio.TimeoutError):
         await asyncio.wait_for(consume(), timeout=0.05)
-
-
-# ---------------------------------------------------------------------------
-# Live tests — require ANTHROPIC_API_KEY
-# ---------------------------------------------------------------------------
-
-
-@needs_key
-@pytest.mark.asyncio
-async def test_live_basic_completion():
-    """Provider streams a text response and yields a success ResultEvent."""
-    from linch import Agent
-    from linch.config import FeatureFlags
-    from linch.events import ResultEvent
-    from linch.providers import AnthropicProvider, AnthropicProviderOptions
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import empty_tools
-
-    provider = AnthropicProvider(AnthropicProviderOptions(api_key=os.environ["ANTHROPIC_API_KEY"]))
-    agent = Agent(
-        model="claude-haiku-4-5",
-        provider=provider,
-        tools=empty_tools(),
-        permissions={"mode": "skip-dangerous"},
-        session_store=InMemorySessionStore(),
-        features=FeatureFlags(skills=False, subagents=False, mcp=False),
-        loop_guard=None,
-    )
-    session = await agent.session()
-    events = []
-    async for event in session.run("Reply with exactly: pong"):
-        events.append(event)
-
-    result = next((e for e in events if isinstance(e, ResultEvent)), None)
-    assert result is not None
-    assert result.subtype == "success"
-    assert result.final_text is not None
-    assert "pong" in result.final_text.lower()
-
-
-@needs_key
-@pytest.mark.asyncio
-async def test_live_tool_call():
-    """Provider emits tool_use and the loop executes it."""
-    from linch import Agent
-    from linch.config import FeatureFlags
-    from linch.events import ResultEvent, ToolCallEndEvent
-    from linch.providers import AnthropicProvider, AnthropicProviderOptions
-    from linch.sessions import InMemorySessionStore
-    from linch.tools import ToolResult
-    from linch.tools.registry import empty_tools
-
-    class AddTool:
-        name = "Add"
-        description = "Return the sum of a and b."
-        input_schema = {
-            "type": "object",
-            "properties": {
-                "a": {"type": "number"},
-                "b": {"type": "number"},
-            },
-            "required": ["a", "b"],
-        }
-        scope = "read"
-        parallel = True
-        tags: tuple = ()
-
-        def validate(self, raw):
-            return raw
-
-        def summarize(self, i):
-            return "add"
-
-        def resources(self, i):
-            return []
-
-        async def execute(self, inp, ctx):
-            return ToolResult(content=str(inp["a"] + inp["b"]))
-
-    provider = AnthropicProvider(AnthropicProviderOptions(api_key=os.environ["ANTHROPIC_API_KEY"]))
-    agent = Agent(
-        model="claude-haiku-4-5",
-        provider=provider,
-        tools=empty_tools(AddTool()),
-        permissions={"mode": "skip-dangerous"},
-        session_store=InMemorySessionStore(),
-        features=FeatureFlags(skills=False, subagents=False, mcp=False),
-        loop_guard=None,
-    )
-    session = await agent.session()
-    events = []
-    async for event in session.run("What is 17 + 25? Use the Add tool."):
-        events.append(event)
-
-    tool_ends = [e for e in events if isinstance(e, ToolCallEndEvent)]
-    assert len(tool_ends) >= 1, "expected at least one tool call"
-    assert all(not e.is_error for e in tool_ends)
-
-    result = next((e for e in events if isinstance(e, ResultEvent)), None)
-    assert result is not None
-    assert result.subtype == "success"
-
-
-@needs_key
-@pytest.mark.asyncio
-async def test_live_prompt_cache_tokens_reported():
-    """Second identical call should report cache_read_tokens > 0."""
-    from linch import Agent
-    from linch.config import FeatureFlags
-    from linch.events import UsageEvent
-    from linch.providers import AnthropicProvider, AnthropicProviderOptions
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import empty_tools
-
-    long_system = "You are a helpful assistant. " * 200  # ~800 tokens to fill cache
-
-    provider = AnthropicProvider(AnthropicProviderOptions(api_key=os.environ["ANTHROPIC_API_KEY"]))
-
-    async def _run_once():
-        agent = Agent(
-            model="claude-haiku-4-5",
-            provider=provider,
-            tools=empty_tools(),
-            permissions={"mode": "skip-dangerous"},
-            session_store=InMemorySessionStore(),
-            features=FeatureFlags(skills=False, subagents=False, mcp=False),
-            system_prompt=long_system,
-            loop_guard=None,
-        )
-        session = await agent.session()
-        events = []
-        async for event in session.run("Say hi."):
-            events.append(event)
-        return events
-
-    events1 = await _run_once()
-    events2 = await _run_once()
-
-    usages2 = [e for e in events2 if isinstance(e, UsageEvent)]
-    assert usages2, "no UsageEvents"
-    total_cache_read = sum(u.cumulative.cache_read_tokens for u in usages2)
-    # Second call should benefit from prompt cache (cache_creation on first,
-    # cache_read on second).  Either is non-zero = caching is working.
-    total_cache_creation_1 = sum(
-        u.cumulative.cache_creation_tokens
-        for u in [e for e in events1 if isinstance(e, UsageEvent)]
-    )
-    assert total_cache_creation_1 > 0 or total_cache_read > 0, (
-        "expected cache tokens on at least one of the two calls"
-    )

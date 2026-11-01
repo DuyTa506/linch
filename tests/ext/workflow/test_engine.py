@@ -49,6 +49,18 @@ async def _run_workflow(agent: Any, fn: Any, **kwargs: Any) -> Any:
     return await run_workflow(agent, fn, **kwargs)
 
 
+async def test_run_workflow_returns_function_value() -> None:
+    agent = _make_agent(CountingTextProvider())
+
+    async def flow(wf: Any) -> dict[str, int]:
+        await wf.phase("noop")
+        return {"answer": 42}
+
+    result = await _run_workflow(agent, flow)
+
+    assert result == {"answer": 42}
+
+
 class SchemaNameProvider:
     """Returns JSON derived from the requested output schema name."""
 
@@ -77,29 +89,10 @@ class SchemaNameProvider:
 
 
 def _make_agent(provider: Any, **kwargs: Any) -> Any:
-    from linch import Agent
-    from linch.sessions import InMemorySessionStore
+    from tests.support.agents import make_agent
 
-    return Agent(
-        model="gpt-5",
-        provider=provider,
-        session_store=InMemorySessionStore(),
-        permissions={"mode": "skip-dangerous"},
-        cwd=".",
-        **kwargs,
-    )
-
-
-async def test_run_workflow_returns_function_value() -> None:
-    agent = _make_agent(CountingTextProvider())
-
-    async def flow(wf: Any) -> dict[str, int]:
-        await wf.phase("noop")
-        return {"answer": 42}
-
-    result = await _run_workflow(agent, flow)
-
-    assert result == {"answer": 42}
+    kwargs.setdefault("run_store", None)
+    return make_agent(provider, model="gpt-5", cwd=".", **kwargs)
 
 
 async def test_wf_agent_runs_subagent_and_returns_final_text() -> None:
@@ -119,32 +112,6 @@ async def test_wf_agent_runs_subagent_and_returns_final_text() -> None:
     end = [e for e in seen if e.type == "workflow" and e.kind == "agent_end"][0]
     assert end.result_text == "result-1"
     assert end.title == "summarizer"
-
-
-async def test_wf_agent_returns_json_string_for_structured_output() -> None:
-    from linch import OutputSchema
-
-    provider = SchemaNameProvider()
-    agent = _make_agent(provider)
-    seen: list[Any] = []
-    schema = OutputSchema(
-        name="alpha",
-        schema={
-            "type": "object",
-            "properties": {"schema": {"type": "string"}},
-            "required": ["schema"],
-        },
-    )
-
-    async def flow(wf: Any) -> str:
-        return await wf.agent("extract", output_schema=schema)
-
-    result = await _run_workflow(agent, flow, on_event=seen.append)
-
-    assert json.loads(result) == {"schema": "alpha"}
-    end = [e for e in seen if e.type == "workflow" and e.kind == "agent_end"][0]
-    assert end.result_text == '{"schema":"alpha"}'
-    assert end.structured_output == {"schema": "alpha"}
 
 
 async def test_wf_agent_structured_output_replays_from_journal() -> None:
@@ -170,6 +137,8 @@ async def test_wf_agent_structured_output_replays_from_journal() -> None:
 
     assert first == second == '{"schema":"alpha"}'
     assert provider.calls == 1
+    first_end = [e for e in seen if e.type == "workflow" and e.kind == "agent_end"][0]
+    assert first_end.structured_output == {"schema": "alpha"}
     replay = [e for e in seen if e.type == "workflow" and e.kind == "agent_replayed"][0]
     assert replay.result_text == '{"schema":"alpha"}'
     assert replay.structured_output == {"schema": "alpha"}
@@ -378,19 +347,16 @@ async def test_changed_prompt_invalidates_cache(
     await _run_workflow(agent1, flow_v1, run_id="wf-edit-1")
     assert provider1.calls == 2
 
-    # Edited workflow: step one unchanged (replays), step two reworded (runs).
     async def flow_v2(wf: Any) -> list[str]:
         return [await wf.agent("step one"), await wf.agent("step two, reworded")]
 
     await agent1.close()
-
     provider2 = CountingTextProvider()
     agent2 = _make_agent(provider2, run_store=PostgresRunStore(pg_dsn))
     result = await _run_workflow(agent2, flow_v2, run_id="wf-edit-1")
 
     assert provider2.calls == 1
     assert result == ["result-1", "result-1"]
-
     await agent2.close()
 
 
@@ -519,12 +485,11 @@ async def test_wf_agent_retry_reruns_a_failed_subagent_and_journals_once() -> No
         )
 
     result = await _run_workflow(agent, flow, run_id="wf-retry-1")
-
     assert result == "result-2"
     assert provider.calls == 2
     stored = await store.load_events("wf-retry-1")
     ends = [s.event for s in stored if getattr(s.event, "kind", None) == "agent_end"]
-    assert len(ends) == 1  # invariant 18: only the winning attempt is journaled
+    assert len(ends) == 1
     assert ends[0].occurrence == 0
 
 
@@ -560,6 +525,25 @@ async def test_wf_agent_retry_exhaustion_journals_nothing_and_reruns_on_resume()
     assert await _run_workflow(agent2, flow, run_id="wf-retry-2") == "result-1"
 
 
+async def test_workflow_suspended_escapes_a_user_except_exception() -> None:
+    from linch.ext.workflow import WorkflowSuspended
+    from linch.run_store import InMemoryRunStore
+
+    agent = _make_agent(CountingTextProvider(), run_store=InMemoryRunStore())
+    swallowed: list[str] = []
+
+    async def flow(wf: Any) -> str:
+        try:
+            return await wf.interrupt("approve")
+        except Exception:
+            swallowed.append("caught")
+            return "swallowed"
+
+    with pytest.raises(WorkflowSuspended):
+        await _run_workflow(agent, flow, run_id="wf-hitl-2")
+    assert swallowed == []
+
+
 async def test_interrupt_suspends_without_marking_the_run_failed() -> None:
     from linch.ext.workflow import WorkflowSuspended
     from linch.run_store import InMemoryRunStore
@@ -573,39 +557,15 @@ async def test_interrupt_suspends_without_marking_the_run_failed() -> None:
 
     with pytest.raises(WorkflowSuspended) as excinfo:
         await _run_workflow(agent, flow, run_id="wf-hitl-1", on_event=seen.append)
-
     assert excinfo.value.key == "approve"
     assert excinfo.value.payload == {"diff": "one line"}
-
     record = await store.load_run("wf-hitl-1")
     assert record is not None
-    assert record.status == "suspended"  # not "failed"
-
+    assert record.status == "suspended"
     requests = [e for e in seen if e.type == "workflow" and e.kind == "interrupt_requested"]
     assert len(requests) == 1
     assert requests[0].structured_output == {"payload": {"diff": "one line"}}
-
-    # The host session must still be released on the suspend path.
     assert agent._sessions == {}
-
-
-async def test_workflow_suspended_escapes_a_user_except_exception() -> None:
-    from linch.ext.workflow import WorkflowSuspended
-    from linch.run_store import InMemoryRunStore
-
-    agent = _make_agent(CountingTextProvider(), run_store=InMemoryRunStore())
-    swallowed: list[str] = []
-
-    async def flow(wf: Any) -> str:
-        try:
-            return await wf.interrupt("approve")
-        except Exception:  # must NOT catch a suspend
-            swallowed.append("caught")
-            return "swallowed"
-
-    with pytest.raises(WorkflowSuspended):
-        await _run_workflow(agent, flow, run_id="wf-hitl-2")
-    assert swallowed == []
 
 
 async def test_resume_supplies_the_interrupt_value_and_completes() -> None:
@@ -644,7 +604,7 @@ async def test_resume_supplies_the_interrupt_value_and_completes() -> None:
 
 
 async def test_interrupt_inside_parallel_cancels_siblings_and_suspends() -> None:
-    """Documented limitation: a fan-out cannot collect several interrupts."""
+    """A fan-out cannot collect several interrupts; siblings still clean up."""
     from linch.ext.workflow import WorkflowSuspended
     from linch.run_store import InMemoryRunStore
 
@@ -688,7 +648,7 @@ async def test_deadline_stops_the_workflow_and_marks_the_run_failed() -> None:
     with pytest.raises(WorkflowTimeoutError, match="deadline"):
         await _run_workflow(agent, flow, run_id="wf-deadline-1", deadline_ms=20)
 
-    assert cleaned == ["slow"]  # the in-flight step was cancelled, not orphaned
+    assert cleaned == ["slow"]
     record = await store.load_run("wf-deadline-1")
     assert record is not None
     assert record.status == "failed"
@@ -756,29 +716,21 @@ class ConcurrencyTrackingProvider(CountingTextProvider):
             self.active -= 1
 
 
-async def test_max_agent_concurrency_caps_live_subagent_runs() -> None:
+@pytest.mark.parametrize(("limit", "expected_high_water"), [(2, 2), (None, 6)])
+async def test_max_agent_concurrency_option(limit: int | None, expected_high_water: int) -> None:
     provider = ConcurrencyTrackingProvider()
     agent = _make_agent(provider)
 
     async def flow(wf: Any) -> list[str]:
         return await wf.parallel([lambda i=i: wf.agent(f"task {i}") for i in range(6)])
 
-    results = await _run_workflow(agent, flow, max_concurrency=8, max_agent_concurrency=2)
+    options = {"max_concurrency": 8 if limit is not None else 6}
+    if limit is not None:
+        options["max_agent_concurrency"] = limit
+    results = await _run_workflow(agent, flow, **options)
 
     assert len(results) == 6
-    assert provider.high_water == 2
-
-
-async def test_max_agent_concurrency_unset_leaves_the_fan_out_uncapped() -> None:
-    provider = ConcurrencyTrackingProvider()
-    agent = _make_agent(provider)
-
-    async def flow(wf: Any) -> list[str]:
-        return await wf.parallel([lambda i=i: wf.agent(f"task {i}") for i in range(6)])
-
-    await _run_workflow(agent, flow, max_concurrency=6)
-
-    assert provider.high_water == 6
+    assert provider.high_water == expected_high_water
 
 
 async def test_max_agent_concurrency_does_not_gate_the_replay_path() -> None:
@@ -823,7 +775,6 @@ async def test_snapshot_is_off_by_default() -> None:
         return [await wf.step(f"s{i}", lambda i=i: i) for i in range(4)]
 
     assert await _run_workflow(agent, flow, run_id="wf-snap-0") == [0, 1, 2, 3]
-
     record = await store.load_run("wf-snap-0")
     assert record is not None
     assert record.checkpoint is not None
@@ -883,7 +834,6 @@ async def test_snapshot_survives_a_suspend() -> None:
     assert saved is not None
     assert saved.status == "suspended"
     assert saved.checkpoint is not None
-    # The suspend checkpoint must carry the snapshot forward, not wipe it.
     assert len(saved.checkpoint.extension_state["linch.workflow"]["records"]) == 2
 
     assert await _run_workflow(agent, flow, run_id="wf-snap-2", resume={"approve": "yes"}) == "yes"
@@ -939,31 +889,6 @@ def test_workflow_event_round_trips_every_kind() -> None:
         assert event_from_dict(event_to_dict(event)) == event
 
 
-async def test_step_replays_on_resume_without_reexecuting() -> None:
-    from linch.run_store import InMemoryRunStore
-
-    calls: list[int] = []
-
-    async def flow(wf: Any) -> int:
-        async def work() -> int:
-            calls.append(1)
-            return 42
-
-        return await wf.step("work", work)
-
-    agent = _make_agent(CountingTextProvider(), run_store=InMemoryRunStore())
-
-    assert await _run_workflow(agent, flow, run_id="wf-step-1") == 42
-    assert calls == [1]
-
-    seen: list[Any] = []
-    assert await _run_workflow(agent, flow, run_id="wf-step-1", on_event=seen.append) == 42
-
-    assert calls == [1]
-    replays = [e for e in seen if e.type == "workflow" and e.kind == "step_replayed"]
-    assert len(replays) == 1
-
-
 async def test_step_and_agent_prefix_replay_together_after_failure(
     pg_dsn,
 ) -> None:
@@ -994,11 +919,14 @@ async def test_step_and_agent_prefix_replay_together_after_failure(
 
     provider2 = CountingTextProvider()
     agent2 = _make_agent(provider2, run_store=PostgresRunStore(pg_dsn))
-    result = await _run_workflow(agent2, flow, run_id="wf-mixed-1")
+    seen: list[Any] = []
+    result = await _run_workflow(agent2, flow, run_id="wf-mixed-1", on_event=seen.append)
 
     assert side_effects == ["published"]  # ran exactly once across both attempts
     assert provider2.calls == 1
     assert result == ["result-1", "ok", "result-1"]
+    replays = [e for e in seen if e.type == "workflow" and e.kind == "step_replayed"]
+    assert len(replays) == 1
 
     await agent2.close()
 
@@ -1035,8 +963,7 @@ async def test_step_in_a_loop_replays_per_occurrence() -> None:
 async def test_adding_a_step_does_not_invalidate_the_existing_agent_journal(
     pg_dsn,
 ) -> None:
-    """Step keys live in their own hash domain, so introducing wf.step must not
-    perturb the call_keys of agent calls already journaled by an in-flight run."""
+    """Adding a step must not perturb already journaled agent call keys."""
     from linch import PostgresRunStore
 
     async def flow_v1(wf: Any) -> list[str]:

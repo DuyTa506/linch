@@ -5,35 +5,7 @@ from types import SimpleNamespace
 from linch.providers import LlamaCppProvider, LlamaCppProviderOptions
 from linch.providers.llamacpp import _build_llamacpp_payload, _extract_n_ctx, _props_urls
 from linch.types import Message, OutputSchema, ProviderRequest, TextBlock, ThinkingBlock, Usage
-
-
-class _FakeStream:
-    def __init__(self, chunks: list[object]) -> None:
-        self._chunks = chunks
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self):
-        if not self._chunks:
-            raise StopAsyncIteration
-        return self._chunks.pop(0)
-
-
-class _FakeCompletions:
-    def __init__(self, chunks: list[object]) -> None:
-        self._chunks = chunks
-        self.payload: dict | None = None
-
-    async def create(self, **payload):
-        self.payload = payload
-        return _FakeStream(list(self._chunks))
-
-
-class _FakeClient:
-    def __init__(self, chunks: list[object]) -> None:
-        self.completions = _FakeCompletions(chunks)
-        self.chat = SimpleNamespace(completions=self.completions)
+from tests.support.providers import OpenAICompatibleFakeClient
 
 
 def _chunk(*, delta, finish_reason=None, usage=None, timings=None):
@@ -201,7 +173,7 @@ async def test_llamacpp_stream_emits_text_reasoning_and_usage() -> None:
         ),
     ]
     provider = LlamaCppProvider()
-    provider._client = _FakeClient(chunks)
+    provider._client = OpenAICompatibleFakeClient(chunks)
 
     events = [
         event
@@ -241,7 +213,7 @@ async def test_llamacpp_stream_reads_cache_read_tokens_from_timings() -> None:
         ),
     ]
     provider = LlamaCppProvider()
-    provider._client = _FakeClient(chunks)
+    provider._client = OpenAICompatibleFakeClient(chunks)
 
     events = [
         event
@@ -271,7 +243,7 @@ async def test_llamacpp_stream_reads_cache_read_tokens_from_model_extra() -> Non
         model_extra={"timings": {"cache_n": 80, "prompt_n": 20}},
     )
     provider = LlamaCppProvider()
-    provider._client = _FakeClient(
+    provider._client = OpenAICompatibleFakeClient(
         [_chunk(delta=SimpleNamespace(content="ok", reasoning_content=None, tool_calls=[])), final]
     )
 
@@ -316,7 +288,7 @@ async def test_llamacpp_stream_emits_tool_call_events() -> None:
         ),
     ]
     provider = LlamaCppProvider()
-    provider._client = _FakeClient(chunks)
+    provider._client = OpenAICompatibleFakeClient(chunks)
 
     events = [
         event

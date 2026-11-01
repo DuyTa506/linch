@@ -41,9 +41,7 @@ from linch import workflow
 linch.store.duration linch.run_id linch.turn_index
 linch.run:default and a deferred `linch.schedule` job"""
 
-    names = [name for _, name in _references(text)]
-
-    assert names == ["workflow", "workflow"]
+    assert [name for _, name in _references(text)] == ["workflow", "workflow"]
 
 
 def test_documented_api_names_and_source_paths_exist() -> None:

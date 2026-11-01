@@ -7,28 +7,17 @@ from typing import Any
 
 import pytest
 
+from linch import Profile, RunOptions
+from tests.support.agents import make_agent as support_make_agent
+from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
+from tests.support.tools import StubTool, tool_registry
 
-class _EchoTool:
-    scope = "read"
-    parallel = False
-    input_schema = {"type": "object", "properties": {"value": {"type": "string"}}}
 
-    def __init__(self, name: str) -> None:
-        self.name = name
-        self.description = f"Echoes values for {name}."
-        self.seen: list[dict[str, Any]] = []
-
-    def validate(self, raw: dict[str, Any]) -> dict[str, Any]:
-        return dict(raw)
-
-    def summarize(self, raw: dict[str, Any]) -> str:
-        return f"{self.name}({raw.get('value', '')})"
-
-    async def execute(self, raw: dict[str, Any], ctx: Any) -> Any:
-        from linch import ToolResult
-
-        self.seen.append(dict(raw))
-        return ToolResult(content=f"{self.name}:{raw.get('value', '')}")
+def _echo_tool(name: str) -> StubTool:
+    seen: list[dict[str, Any]] = []
+    tool = StubTool(name, on_execute=lambda raw, _: seen.append(dict(raw)))
+    tool.seen = seen
+    return tool
 
 
 class _NamedPlugin:
@@ -47,16 +36,14 @@ class _NamedPlugin:
         return Disposable()
 
 
-class _ConfiguredTool(_EchoTool):
+class _ConfiguredTool(StubTool):
     def __init__(self, label: str) -> None:
-        super().__init__("ProfileTool")
+        seen: list[dict[str, Any]] = []
+        super().__init__(
+            "ProfileTool", output=f"tool:{label}", on_execute=lambda raw, _: seen.append(raw)
+        )
         self.label = label
-
-    async def execute(self, raw: dict[str, Any], ctx: Any) -> Any:
-        from linch import ToolResult
-
-        self.seen.append(dict(raw))
-        return ToolResult(content=f"tool:{self.label}")
+        self.seen = seen
 
 
 class _ConfiguredWrapper:
@@ -152,32 +139,26 @@ class _ScopedProfileProvider:
         yield {"type": "message_end", "stop_reason": "tool_use", "usage": Usage()}
 
 
-class _CaptureProvider:
+class _CaptureProvider(ScriptedProvider):
     """Small provider that records requests while emitting scripted turns."""
 
     id = "profile-capture"
 
     def __init__(self, turns: list[tuple[str, str]], *, barrier: bool = False) -> None:
-        self._turns = list(turns)
-        self._index = 0
-        self.requests: list[Any] = []
+        scripted = [
+            TextTurn(value) if kind == "text" else ToolUseTurn(value, {}) for kind, value in turns
+        ]
+        super().__init__(scripted)
         self.barrier = barrier
         self.both_started = asyncio.Event()
         self.release = asyncio.Event()
         self._active = 0
         self.max_active = 0
 
-    def context_window(self, model: str) -> int:
-        return 128_000
-
     async def stream(self, req: Any) -> AsyncIterator[dict[str, Any]]:
-        from linch.types import Usage
-
-        self.requests.append(req)
-        if self._index >= len(self._turns):
-            raise AssertionError("profile provider ran out of turns")
-        kind, value = self._turns[self._index]
+        turn = self._turns[self._index]
         self._index += 1
+        self.requests.append(req)
         if self.barrier:
             self._active += 1
             self.max_active = max(self.max_active, self._active)
@@ -186,49 +167,27 @@ class _CaptureProvider:
             await self.both_started.wait()
             await self.release.wait()
         try:
-            yield {"type": "message_start", "model": req.model}
-            if kind == "text":
-                yield {"type": "text_delta", "text": value}
-                yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
-                return
-            yield {
-                "type": "tool_use_start",
-                "id": f"profile-call-{self._index}",
-                "name": value,
-            }
-            yield {
-                "type": "tool_use_input_delta",
-                "id": f"profile-call-{self._index}",
-                "json_delta": '{"value":"profile"}',
-            }
-            yield {"type": "tool_use_end", "id": f"profile-call-{self._index}"}
-            yield {"type": "message_end", "stop_reason": "tool_use", "usage": Usage()}
+            async for event in ScriptedProvider([turn]).stream(req):
+                yield event
         finally:
             if self.barrier:
                 self._active -= 1
 
 
 def _agent(provider: Any, tools: Any, *, run_store: Any = None, **kwargs: Any) -> Any:
-    from linch import Agent
-    from linch.config import FeatureFlags
-    from linch.sessions import InMemorySessionStore
-
     permissions = kwargs.pop("permissions", {"mode": "skip-dangerous"})
-    return Agent(
+    return support_make_agent(
+        provider,
         model="profile-model",
-        provider=provider,
         tools=tools,
         permissions=permissions,
-        session_store=InMemorySessionStore(),
         run_store=run_store,
-        features=FeatureFlags(skills=False, subagents=False, mcp=False),
         result_offload=None,
         **kwargs,
     )
 
 
 def test_profile_layers_replace_rows_and_resolve_without_live_objects() -> None:
-    from linch import Profile
 
     search = _NamedPlugin("search", "1")
     replacement = _NamedPlugin("search", "2")
@@ -279,14 +238,9 @@ def test_profile_layers_replace_rows_and_resolve_without_live_objects() -> None:
 
 @pytest.mark.asyncio
 async def test_two_profiles_run_concurrently_on_one_agent_with_distinct_tools_and_prompts() -> None:
-    from linch import Profile, RunOptions
-    from linch.tools import ToolRegistry
-
-    support = _EchoTool("SupportSearch")
-    billing = _EchoTool("BillingLookup")
-    tools = ToolRegistry()
-    tools.register(support)
-    tools.register(billing)
+    support = _echo_tool("SupportSearch")
+    billing = _echo_tool("BillingLookup")
+    tools = tool_registry(support, billing)
     provider = _CaptureProvider(
         [("text", "support answer"), ("text", "billing answer")], barrier=True
     )
@@ -336,12 +290,8 @@ async def test_two_profiles_run_concurrently_on_one_agent_with_distinct_tools_an
 
 @pytest.mark.asyncio
 async def test_profile_filter_intersects_agent_tool_surface_and_applies_output_schema() -> None:
-    from linch import Profile, RunOptions
-    from linch.tools import ToolRegistry
-
-    support = _EchoTool("SupportSearch")
-    tools = ToolRegistry()
-    tools.register(support)
+    support = _echo_tool("SupportSearch")
+    tools = tool_registry(support)
     provider = _CaptureProvider([("text", '{"answer":"done"}')])
     agent = _agent(provider, tools)
     profile = Profile(
@@ -365,13 +315,11 @@ async def test_profile_filter_intersects_agent_tool_surface_and_applies_output_s
 
 @pytest.mark.asyncio
 async def test_profile_allowlist_cannot_bypass_agent_permission_deny() -> None:
-    from linch import Profile, RunOptions, ToolCallEndEvent
+    from linch import ToolCallEndEvent
     from linch.permissions import ToolRule
-    from linch.tools import ToolRegistry
 
-    tool = _EchoTool("SupportSearch")
-    tools = ToolRegistry()
-    tools.register(tool)
+    tool = _echo_tool("SupportSearch")
+    tools = tool_registry(tool)
     provider = _CaptureProvider([("tool", "SupportSearch"), ("text", "done")])
     agent = _agent(
         provider,
@@ -388,12 +336,10 @@ async def test_profile_allowlist_cannot_bypass_agent_permission_deny() -> None:
 
 @pytest.mark.asyncio
 async def test_profile_max_turns_is_effective_for_run_without_mutating_agent() -> None:
-    from linch import LoopGuardEvent, Profile, ResultEvent, RunOptions
-    from linch.tools import ToolRegistry
+    from linch import LoopGuardEvent, ResultEvent
 
-    tool = _EchoTool("SupportSearch")
-    tools = ToolRegistry()
-    tools.register(tool)
+    tool = _echo_tool("SupportSearch")
+    tools = tool_registry(tool)
     provider = _CaptureProvider([("tool", "SupportSearch"), ("text", "unreached")])
     agent = _agent(provider, tools, loop_guard=None)
     session = await agent.session()
@@ -413,14 +359,12 @@ async def test_profile_max_turns_is_effective_for_run_without_mutating_agent() -
 
 @pytest.mark.asyncio
 async def test_profile_contract_pins_id_version_and_content_hash_on_resume() -> None:
-    from linch import Profile, RunOptions
     from linch.errors import ConfigError
     from linch.run_store import InMemoryRunStore
-    from linch.tools import ToolRegistry
 
     store = InMemoryRunStore()
     provider = _CaptureProvider([("text", "done")])
-    agent = _agent(provider, ToolRegistry(), run_store=store)
+    agent = _agent(provider, tool_registry(), run_store=store)
     session = await agent.session(id="s")
     profile = Profile(id="support", version="1", system_prompt="support")
     iterator = session.run("go", RunOptions(profile=profile)).__aiter__()
@@ -434,7 +378,7 @@ async def test_profile_contract_pins_id_version_and_content_hash_on_resume() -> 
     assert pinned["version"] == "1"
     assert pinned["content_hash"].startswith("sha256:")
 
-    provider._turns = [("text", "must not dispatch")]
+    provider._turns = [TextTurn("must not dispatch")]
     for changed in (
         Profile(id="support", version="2", system_prompt="support"),
         Profile(id="support", version="1", system_prompt="changed definition"),
@@ -450,11 +394,10 @@ async def test_profile_contract_pins_id_version_and_content_hash_on_resume() -> 
 
 @pytest.mark.asyncio
 async def test_profile_budget_is_fresh_per_run_and_explicit_budget_wins() -> None:
-    from linch import Profile, RunBudget, RunOptions
-    from linch.tools import ToolRegistry
+    from linch import RunBudget
 
     provider = _CaptureProvider([("text", "one"), ("text", "two")])
-    agent = _agent(provider, ToolRegistry())
+    agent = _agent(provider, tool_registry())
     first, second = await agent.session(id="first"), await agent.session(id="second")
     profile = Profile(id="support", version="1", budget={"max_tokens": 123})
 
@@ -470,14 +413,12 @@ async def test_profile_budget_is_fresh_per_run_and_explicit_budget_wins() -> Non
 
 @pytest.mark.asyncio
 async def test_same_profile_resumes_on_a_cold_agent_after_lease_takeover() -> None:
-    from linch import Profile, RunOptions
     from linch.run_store import InMemoryRunStore
-    from linch.tools import ToolRegistry
 
     store = InMemoryRunStore()
     profile = Profile(id="support", version="1", system_prompt="support")
     first_provider = _CaptureProvider([("text", "interrupted")])
-    first = _agent(first_provider, ToolRegistry(), run_store=store)
+    first = _agent(first_provider, tool_registry(), run_store=store)
     session = await first.session(id="s")
     iterator = session.run("go", RunOptions(profile=profile)).__aiter__()
     first_event = await iterator.__anext__()
@@ -493,7 +434,7 @@ async def test_same_profile_resumes_on_a_cold_agent_after_lease_takeover() -> No
     await second_store.claim(run_id, "worker-b", 60.0)
 
     second_provider = _CaptureProvider([("text", "resumed")])
-    second = _agent(second_provider, ToolRegistry(), run_store=second_store)
+    second = _agent(second_provider, tool_registry(), run_store=second_store)
     resumed = await second.session(id="s")
     events = [event async for event in resumed.resume(run_id, RunOptions(profile=profile))]
     assert events[-1].final_text == "resumed"
@@ -502,9 +443,7 @@ async def test_same_profile_resumes_on_a_cold_agent_after_lease_takeover() -> No
 
 @pytest.mark.asyncio
 async def test_profile_plugins_receive_config_and_are_cleaned_up_per_run() -> None:
-    from linch import Profile, RunOptions
     from linch.kernel import Disposable
-    from linch.tools import ToolRegistry
 
     calls: list[tuple[str, Any]] = []
 
@@ -530,7 +469,7 @@ async def test_profile_plugins_receive_config_and_are_cleaned_up_per_run() -> No
         plugins={"marker": (MarkerPlugin(), {"tenant": "acme"})},
     )
     provider = _CaptureProvider([("text", "one"), ("text", "two")])
-    agent = _agent(provider, ToolRegistry())
+    agent = _agent(provider, tool_registry())
     first, second = await agent.session(id="one"), await agent.session(id="two")
     await asyncio.gather(
         *(_collect(session, RunOptions(profile=profile)) for session in (first, second))
@@ -544,9 +483,7 @@ async def test_profile_plugins_receive_config_and_are_cleaned_up_per_run() -> No
 
 @pytest.mark.asyncio
 async def test_profile_plugin_cleanup_runs_when_run_generator_closes_early() -> None:
-    from linch import Profile, RunOptions
     from linch.kernel import Disposable
-    from linch.tools import ToolRegistry
 
     cleaned: list[str] = []
 
@@ -571,7 +508,7 @@ async def test_profile_plugin_cleanup_runs_when_run_generator_closes_early() -> 
         plugins={"closing-marker": (ClosingPlugin(), {"tenant": "acme"})},
     )
     provider = _CaptureProvider([("text", "done")])
-    agent = _agent(provider, ToolRegistry())
+    agent = _agent(provider, tool_registry())
     session = await agent.session()
     iterator = session.run("go", RunOptions(profile=profile)).__aiter__()
     await iterator.__anext__()
@@ -583,8 +520,7 @@ async def test_profile_plugin_cleanup_runs_when_run_generator_closes_early() -> 
 
 @pytest.mark.asyncio
 async def test_profile_plugin_scope_adds_tool_pipeline_wrapper_and_context_listener() -> None:
-    from linch import Profile, RunOptions, ToolCallEndEvent
-    from linch.tools import ToolRegistry
+    from linch import ToolCallEndEvent
 
     service_events: list[tuple[str, str, Any]] = []
     support_plugin = _ScopedProfilePlugin("support-plugin", service_events)
@@ -604,7 +540,7 @@ async def test_profile_plugin_scope_adds_tool_pipeline_wrapper_and_context_liste
         tool_allow=("ProfileTool",),
     )
     provider = _ScopedProfileProvider()
-    agent = _agent(provider, ToolRegistry())
+    agent = _agent(provider, tool_registry())
     support_session = await agent.session(id="support")
     billing_session = await agent.session(id="billing")
 
@@ -638,12 +574,10 @@ async def test_profile_plugin_scope_adds_tool_pipeline_wrapper_and_context_liste
 
 
 def test_profile_none_is_byte_identical_to_omitted_run_options() -> None:
-    from linch import RunOptions
     from linch.loop.contracts import _build_run_contract
     from linch.run_store import run_contract_to_dict
-    from linch.tools import ToolRegistry
 
-    agent = _agent(_CaptureProvider([]), ToolRegistry())
+    agent = _agent(_CaptureProvider([]), tool_registry())
     session = agent._sessions.get("unused")
     assert session is None
 
@@ -659,7 +593,6 @@ def test_profile_none_is_byte_identical_to_omitted_run_options() -> None:
 
 
 def test_profile_resolve_preserves_plugin_execution_order() -> None:
-    from linch import Profile
 
     profile = Profile(
         id="ordered",
@@ -695,7 +628,6 @@ def test_profile_resolve_preserves_plugin_execution_order() -> None:
     ],
 )
 def test_profile_rejects_invalid_declarative_values(kwargs: dict[str, Any], message: str) -> None:
-    from linch import Profile
     from linch.errors import ConfigError
 
     with pytest.raises(ConfigError, match=message):
@@ -707,13 +639,11 @@ def test_profile_rejects_invalid_declarative_values(kwargs: dict[str, Any], mess
 async def test_retained_child_keeps_profile_service_after_parent_scope_ends(
     background: bool,
 ) -> None:
-    from linch import Profile, RunOptions
     from linch.profiles import _profile_scope
     from linch.run_store import InMemoryRunStore
     from linch.subagents.runner import RunSubagentArgs, run_subagent
     from linch.subagents.types import AgentDefinition, AgentFrontmatter
     from linch.subagents.workers import WorkerHandle
-    from linch.tools import ToolRegistry
 
     cleaned, cleanup_started, cleanup_release = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
@@ -738,7 +668,7 @@ async def test_retained_child_keeps_profile_service_after_parent_scope_ends(
     store = InMemoryRunStore()
     agent = _agent(
         _CaptureProvider([("text", "child done")]),
-        ToolRegistry(),
+        tool_registry(),
         run_store=store,
     )
     session = await agent.session(id="parent")
@@ -794,9 +724,7 @@ async def _collect(session: Any, opts: Any) -> list[Any]:
 
 @pytest.mark.asyncio
 async def test_profile_plugin_tracks_removal_of_inherited_requirement() -> None:
-    from linch import Profile
     from linch.profiles import _profile_scope
-    from linch.tools import ToolRegistry
 
     class DependentPlugin:
         name = "dependent"
@@ -807,7 +735,7 @@ async def test_profile_plugin_tracks_removal_of_inherited_requirement() -> None:
         def setup(self, ctx: Any, config: Any = None) -> Any:
             return ctx.register("dependent", "active")
 
-    agent = _agent(_CaptureProvider([]), ToolRegistry())
+    agent = _agent(_CaptureProvider([]), tool_registry())
     dependency = agent.context.register("dependency", object())
     session = await agent.session()
     profile = Profile(id="support", version="1", plugins={"dep": (DependentPlugin(), {})})
@@ -820,13 +748,13 @@ async def test_profile_plugin_tracks_removal_of_inherited_requirement() -> None:
 
 @pytest.mark.asyncio
 async def test_profile_filter_preserves_host_ruleset_path_root() -> None:
-    from linch import Profile, empty_tools
+    from linch import empty_tools
     from linch.permissions import PathRule, PermissionLayer, PermissionRuleSet
     from linch.permissions.engine import PendingToolCall
     from linch.profiles import _profile_scope
 
-    write = _EchoTool("Write")
-    agent = _agent(_CaptureProvider([]), empty_tools(write, _EchoTool("Other")))
+    write = _echo_tool("Write")
+    agent = _agent(_CaptureProvider([]), empty_tools(write, _echo_tool("Other")))
     agent.permission_engine.rule_set = PermissionRuleSet(
         [PermissionLayer("host", [PathRule(["secret/**"], "deny")])],
         project_root="/tenant-policy",
@@ -841,7 +769,7 @@ async def test_profile_filter_preserves_host_ruleset_path_root() -> None:
 
 @pytest.mark.asyncio
 async def test_profile_scope_disposes_after_last_background_task_finishes() -> None:
-    from linch import Profile, empty_tools
+    from linch import empty_tools
     from linch.kernel import Disposable
     from linch.profiles import _profile_scope
 
@@ -867,7 +795,7 @@ async def test_profile_scope_disposes_after_last_background_task_finishes() -> N
 
 @pytest.mark.asyncio
 async def test_profile_plugin_listener_does_not_affect_concurrent_plain_run() -> None:
-    from linch import Profile, RunOptions, ToolCallEndEvent, empty_tools
+    from linch import ToolCallEndEvent, empty_tools
 
     provider = _ScopedProfileProvider()
     agent = _agent(provider, empty_tools(_ConfiguredTool("plain")))

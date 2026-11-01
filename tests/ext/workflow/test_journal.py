@@ -220,7 +220,4 @@ def test_workflow_event_round_trips_structured_output() -> None:
         structured_output={"answer": 42},
         structured_error=None,
     )
-
-    restored = event_from_dict(event_to_dict(event))
-
-    assert restored == event
+    assert event_from_dict(event_to_dict(event)) == event

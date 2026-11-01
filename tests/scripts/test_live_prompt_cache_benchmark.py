@@ -1,20 +1,14 @@
 from __future__ import annotations
 
-import importlib.util
 import json
-import sys
 from pathlib import Path
+
+from tests.support.modules import load_module
 
 
 def _load_script():
     path = Path(__file__).resolve().parents[2] / "scripts" / "benchmark_live_prompt_cache.py"
-    spec = importlib.util.spec_from_file_location("live_prompt_cache_benchmark_script", path)
-    assert spec is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
+    return load_module(path, "live_prompt_cache_benchmark_script")
 
 
 def test_live_prompt_cache_result_renders_json_and_markdown():

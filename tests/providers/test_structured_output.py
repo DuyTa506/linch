@@ -10,114 +10,56 @@ import json
 
 import pytest
 
+from tests.support.agents import make_agent
+from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
+from tests.support.tools import StubTool, tool_registry
+
 # ── Provider helpers (lazy imports inside) ───────────────────────────────────
 
 
 def _text_provider(text: str):
-    from linch.providers.base import BaseProvider
-    from linch.types import Usage
+    """Return a scripted text provider with native schema output disabled."""
 
-    class _Provider(BaseProvider):
-        id = "fake"
-        captured_reqs: list = []
+    from linch.providers import ProviderCapabilities
 
-        def context_window(self, model: str) -> int:
-            return 128_000
+    class TextProvider(ScriptedProvider):
+        def capabilities(self, model: str) -> ProviderCapabilities:
+            return ProviderCapabilities(context_window=self.context_window(model))
 
-        async def stream(self, req):
-            self.captured_reqs.append(req)
-            yield {"type": "message_start", "model": req.model}
-            yield {"type": "text_delta", "text": text}
-            yield {
-                "type": "message_end",
-                "stop_reason": "end_turn",
-                "usage": Usage(),
-                "provider_metadata": None,
-            }
-
-    return _Provider()
+    return TextProvider([TextTurn(text)])
 
 
 def _tool_use_provider(tool_name: str, tool_input: dict):
-    from linch.providers.base import BaseProvider
-    from linch.types import Usage
-
-    class _Provider(BaseProvider):
-        id = "fake"
-        captured_reqs: list = []
-        _call = 0
-
-        def context_window(self, model: str) -> int:
-            return 128_000
-
-        async def stream(self, req):
-            self.captured_reqs.append(req)
-            self._call += 1
-            yield {"type": "message_start", "model": req.model}
-            if self._call == 1:
-                yield {"type": "tool_use_start", "id": "t1", "name": tool_name}
-                yield {
-                    "type": "tool_use_input_delta",
-                    "id": "t1",
-                    "json_delta": json.dumps(tool_input),
-                }
-                yield {"type": "tool_use_end", "id": "t1"}
-                yield {
-                    "type": "message_end",
-                    "stop_reason": "tool_use",
-                    "usage": Usage(),
-                    "provider_metadata": None,
-                }
-            else:
-                yield {"type": "text_delta", "text": "done"}
-                yield {
-                    "type": "message_end",
-                    "stop_reason": "end_turn",
-                    "usage": Usage(),
-                    "provider_metadata": None,
-                }
-
-    return _Provider()
+    return ScriptedProvider(
+        [ToolUseTurn(tool_name=tool_name, tool_input=tool_input, tool_id="t1"), TextTurn("done")]
+    )
 
 
 def _make_emit_tool():
-    from linch.tools.base import ToolContext, ToolResult
+    return StubTool(name="emit_answer", output="should not run")
 
-    class _EmitTool:
-        name = "emit_answer"
-        description = "Final answer tool."
-        input_schema: dict = {
-            "type": "object",
-            "properties": {"sql": {"type": "string"}},
-            "required": ["sql"],
-        }
-        scope = "read"
-        parallel = False
 
-        def validate(self, raw: dict) -> dict:
-            return raw
+def _request(**overrides):
+    from linch.types import ProviderRequest
 
-        async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
-            return ToolResult(content="should not run", summary="emit_answer")
-
-        def summarize(self, input: dict) -> str:
-            return "emit_answer"
-
-    return _EmitTool()
+    values = {"model": "gpt-5", "system": [], "tools": [], "messages": []}
+    values.update(overrides)
+    return ProviderRequest(**values)
 
 
 # ── OutputSchema ──────────────────────────────────────────────────────────────
 
 
+@pytest.mark.parametrize(
+    "prefix,suffix",
+    [("", ""), ("```json\n", "\n```"), ("**Here you go:**\n\n```json\n", "\n```")],
+)
 @pytest.mark.asyncio
-async def test_structured_output_from_json_text():
-    from linch import Agent
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import empty_tools
+async def test_structured_output_from_json_text(prefix: str, suffix: str):
     from linch.types import OutputSchema
 
     payload = {"answer": "42", "confidence": 0.9}
-    provider = _text_provider(json.dumps(payload))
+    provider = _text_provider(f"{prefix}{json.dumps(payload)}{suffix}")
 
     schema = OutputSchema(
         name="test_schema",
@@ -129,14 +71,7 @@ async def test_structured_output_from_json_text():
             },
         },
     )
-    agent = Agent(
-        model="gpt-5",
-        provider=provider,
-        tools=empty_tools(),
-        permissions={"mode": "skip-dangerous"},
-        session_store=InMemorySessionStore(),
-        output_schema=schema,
-    )
+    agent = make_agent(provider, output_schema=schema)
     session = await agent.session()
     result = None
     async for event in session.run("go"):
@@ -150,22 +85,11 @@ async def test_structured_output_from_json_text():
 
 @pytest.mark.asyncio
 async def test_empty_text_with_output_schema_reports_parse_error():
-    from linch import Agent
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import empty_tools
     from linch.types import OutputSchema
 
     provider = _text_provider("")
     schema = OutputSchema(name="answer", schema={"type": "object"})
-    agent = Agent(
-        model="gpt-5",
-        provider=provider,
-        reliability=None,
-        tools=empty_tools(),
-        permissions={"mode": "skip-dangerous"},
-        session_store=InMemorySessionStore(),
-        output_schema=schema,
-    )
+    agent = make_agent(provider, reliability=None, output_schema=schema)
     session = await agent.session()
     result = [event async for event in session.run("go")][-1]
 
@@ -175,102 +99,13 @@ async def test_empty_text_with_output_schema_reports_parse_error():
 
 
 @pytest.mark.asyncio
-async def test_structured_output_from_fenced_json_text():
-    from linch import Agent
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import empty_tools
-    from linch.types import OutputSchema
-
-    payload = {"answer": "42", "confidence": 0.9}
-    provider = _text_provider(f"```json\n{json.dumps(payload)}\n```")
-
-    schema = OutputSchema(
-        name="test_schema",
-        schema={
-            "type": "object",
-            "properties": {
-                "answer": {"type": "string"},
-                "confidence": {"type": "number"},
-            },
-        },
-    )
-    agent = Agent(
-        model="gpt-5",
-        provider=provider,
-        tools=empty_tools(),
-        permissions={"mode": "skip-dangerous"},
-        session_store=InMemorySessionStore(),
-        output_schema=schema,
-    )
-    session = await agent.session()
-    result = None
-    async for event in session.run("go"):
-        if event.type == "result":
-            result = event
-
-    assert result is not None
-    assert result.structured_output == payload
-    assert result.structured_error is None
-
-
-@pytest.mark.asyncio
-async def test_structured_output_from_prose_and_fenced_json_text():
-    from linch import Agent
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import empty_tools
-    from linch.types import OutputSchema
-
-    payload = {"answer": "42", "confidence": 0.9}
-    text = f"**Here you go:**\n\n```json\n{json.dumps(payload)}\n```"
-    provider = _text_provider(text)
-
-    schema = OutputSchema(
-        name="test_schema",
-        schema={
-            "type": "object",
-            "properties": {
-                "answer": {"type": "string"},
-                "confidence": {"type": "number"},
-            },
-        },
-    )
-    agent = Agent(
-        model="gpt-5",
-        provider=provider,
-        tools=empty_tools(),
-        permissions={"mode": "skip-dangerous"},
-        session_store=InMemorySessionStore(),
-        output_schema=schema,
-    )
-    session = await agent.session()
-    result = None
-    async for event in session.run("go"):
-        if event.type == "result":
-            result = event
-
-    assert result is not None
-    assert result.structured_output == payload
-    assert result.structured_error is None
-
-
-@pytest.mark.asyncio
 async def test_structured_output_malformed_json():
-    from linch import Agent
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import empty_tools
     from linch.types import OutputSchema
 
     provider = _text_provider("not valid json {{")
 
     schema = OutputSchema(name="s", schema={"type": "object"})
-    agent = Agent(
-        model="gpt-5",
-        provider=provider,
-        tools=empty_tools(),
-        permissions={"mode": "skip-dangerous"},
-        session_store=InMemorySessionStore(),
-        output_schema=schema,
-    )
+    agent = make_agent(provider, output_schema=schema)
     session = await agent.session()
     result = None
     async for event in session.run("go"):
@@ -288,22 +123,12 @@ async def test_structured_output_literal_null():
     """A literal JSON `null` response must be reported as a schema error, not silently
     accepted — `null` parses successfully to Python None, which must not be confused
     with the "raw text failed to parse" sentinel."""
-    from linch import Agent
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import empty_tools
     from linch.types import OutputSchema
 
     provider = _text_provider("null")
 
     schema = OutputSchema(name="s", schema={"type": "object"})
-    agent = Agent(
-        model="gpt-5",
-        provider=provider,
-        tools=empty_tools(),
-        permissions={"mode": "skip-dangerous"},
-        session_store=InMemorySessionStore(),
-        output_schema=schema,
-    )
+    agent = make_agent(provider, output_schema=schema)
     session = await agent.session()
     result = None
     async for event in session.run("go"):
@@ -318,19 +143,9 @@ async def test_structured_output_literal_null():
 
 @pytest.mark.asyncio
 async def test_no_output_schema_structured_output_is_none():
-    from linch import Agent
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import empty_tools
-
     provider = _text_provider('{"key": "value"}')
 
-    agent = Agent(
-        model="gpt-5",
-        provider=provider,
-        tools=empty_tools(),
-        permissions={"mode": "skip-dangerous"},
-        session_store=InMemorySessionStore(),
-    )
+    agent = make_agent(provider)
     session = await agent.session()
     result = None
     async for event in session.run("go"):
@@ -347,16 +162,10 @@ async def test_no_output_schema_structured_output_is_none():
 
 def test_chat_payload_response_format():
     from linch.providers.openai_chat import _build_chat_payload
-    from linch.types import OutputSchema, ProviderRequest
+    from linch.types import OutputSchema
 
     schema = OutputSchema(name="my_schema", schema={"type": "object"})
-    req = ProviderRequest(
-        model="gpt-5",
-        system=[],
-        tools=[],
-        messages=[],
-        output_schema=schema,
-    )
+    req = _request(output_schema=schema)
     payload = _build_chat_payload(req)
     assert "response_format" in payload
     assert payload["response_format"]["type"] == "json_schema"
@@ -365,9 +174,8 @@ def test_chat_payload_response_format():
 
 def test_chat_payload_no_schema_no_response_format():
     from linch.providers.openai_chat import _build_chat_payload
-    from linch.types import ProviderRequest
 
-    req = ProviderRequest(model="gpt-5", system=[], tools=[], messages=[])
+    req = _request()
     payload = _build_chat_payload(req)
     assert "response_format" not in payload
 
@@ -377,16 +185,10 @@ def test_chat_payload_no_schema_no_response_format():
 
 def test_responses_payload_text_format():
     from linch.openai_responses import build_payload
-    from linch.types import OutputSchema, ProviderRequest
+    from linch.types import OutputSchema
 
     schema = OutputSchema(name="my_schema", schema={"type": "object"}, strict=True)
-    req = ProviderRequest(
-        model="gpt-5",
-        system=[],
-        tools=[],
-        messages=[],
-        output_schema=schema,
-    )
+    req = _request(output_schema=schema)
     payload = build_payload(req)
     assert "text" in payload
     assert payload["text"]["format"]["type"] == "json_schema"
@@ -397,42 +199,29 @@ def test_responses_payload_text_format():
 # ── tool_choice payload ───────────────────────────────────────────────────────
 
 
-def test_chat_payload_tool_choice_string():
+@pytest.mark.parametrize(
+    "choice,expected",
+    [
+        ("required", "required"),
+        ({"type": "tool", "name": "emit_sql"}, {"type": "function", "name": "emit_sql"}),
+    ],
+)
+def test_chat_payload_tool_choice(choice, expected):
     from linch.providers.openai_chat import _build_chat_payload
-    from linch.types import ProviderRequest
 
-    req = ProviderRequest(model="gpt-5", system=[], tools=[], messages=[], tool_choice="required")
+    req = _request(tool_choice=choice)
     payload = _build_chat_payload(req)
-    assert payload["tool_choice"] == "required"
-
-
-def test_chat_payload_tool_choice_dict():
-    from linch.providers.openai_chat import _build_chat_payload
-    from linch.types import ProviderRequest
-
-    req = ProviderRequest(
-        model="gpt-5",
-        system=[],
-        tools=[],
-        messages=[],
-        tool_choice={"type": "tool", "name": "emit_sql"},
-    )
-    payload = _build_chat_payload(req)
-    assert payload["tool_choice"]["type"] == "function"
-    assert payload["tool_choice"]["function"]["name"] == "emit_sql"
+    if isinstance(expected, str):
+        assert payload["tool_choice"] == expected
+    else:
+        assert payload["tool_choice"]["type"] == expected["type"]
+        assert payload["tool_choice"]["function"]["name"] == expected["name"]
 
 
 def test_responses_payload_tool_choice():
     from linch.openai_responses import build_payload
-    from linch.types import ProviderRequest
 
-    req = ProviderRequest(
-        model="gpt-5",
-        system=[],
-        tools=[],
-        messages=[],
-        tool_choice={"type": "tool", "name": "my_tool"},
-    )
+    req = _request(tool_choice={"type": "tool", "name": "my_tool"})
     payload = build_payload(req)
     assert payload["tool_choice"]["type"] == "function"
     assert payload["tool_choice"]["name"] == "my_tool"
@@ -443,20 +232,11 @@ def test_responses_payload_tool_choice():
 
 @pytest.mark.asyncio
 async def test_final_tool_terminates_loop_with_structured_output():
-    from linch import Agent
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import empty_tools
-
     tool_input = {"sql": "SELECT 1"}
     provider = _tool_use_provider("emit_answer", tool_input)
 
-    agent = Agent(
-        model="gpt-5",
-        provider=provider,
-        tools=empty_tools(_make_emit_tool()),
-        permissions={"mode": "skip-dangerous"},
-        session_store=InMemorySessionStore(),
-        final_tool_name="emit_answer",
+    agent = make_agent(
+        provider, tools=tool_registry(_make_emit_tool()), final_tool_name="emit_answer"
     )
     session = await agent.session()
     result = None
@@ -482,20 +262,15 @@ async def test_final_tool_terminates_loop_with_structured_output():
 
 @pytest.mark.asyncio
 async def test_final_tool_mixed_with_ordinary_call_fails_without_executing_either():
-    from linch import Agent
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import empty_tools
     from linch.types import Usage
 
     executions = 0
 
-    class Ordinary(type(_make_emit_tool())):
-        name = "ordinary"
+    def record_execution(input, ctx):
+        nonlocal executions
+        executions += 1
 
-        async def execute(self, input, ctx):
-            nonlocal executions
-            executions += 1
-            return await super().execute(input, ctx)
+    ordinary = StubTool(name="ordinary", on_execute=record_execution)
 
     class Provider:
         id = "mixed-final"
@@ -511,12 +286,9 @@ async def test_final_tool_mixed_with_ordinary_call_fails_without_executing_eithe
                 yield {"type": "tool_use_end", "id": tool_id}
             yield {"type": "message_end", "stop_reason": "tool_use", "usage": Usage()}
 
-    agent = Agent(
-        model="gpt-5",
-        provider=Provider(),
-        tools=empty_tools(Ordinary(), _make_emit_tool()),
-        permissions={"mode": "skip-dangerous"},
-        session_store=InMemorySessionStore(),
+    agent = make_agent(
+        Provider(),
+        tools=tool_registry(ordinary, _make_emit_tool()),
         final_tool_name="emit_answer",
     )
     session = await agent.session()
@@ -530,20 +302,12 @@ async def test_final_tool_mixed_with_ordinary_call_fails_without_executing_eithe
 
 @pytest.mark.asyncio
 async def test_final_tool_via_run_options():
-    from linch import Agent, RunOptions
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import empty_tools
+    from linch import RunOptions
 
     tool_input = {"sql": "SELECT 2"}
     provider = _tool_use_provider("emit_answer", tool_input)
 
-    agent = Agent(
-        model="gpt-5",
-        provider=provider,
-        tools=empty_tools(_make_emit_tool()),
-        permissions={"mode": "skip-dangerous"},
-        session_store=InMemorySessionStore(),
-    )
+    agent = make_agent(provider, tools=tool_registry(_make_emit_tool()))
     session = await agent.session()
     result = None
     async for event in session.run("go", RunOptions(final_tool_name="emit_answer")):
@@ -557,30 +321,19 @@ async def test_final_tool_via_run_options():
 # ── per-request effort ────────────────────────────────────────────────────────
 
 
-def test_responses_per_request_effort_overrides_constructor():
+@pytest.mark.parametrize(
+    "constructor_effort,request_effort,expected",
+    [("low", "high", "high"), ("medium", None, "medium")],
+)
+def test_responses_effort_resolution(
+    constructor_effort: str, request_effort: str | None, expected: str
+):
     from linch.openai_responses import OpenAIReasoning, build_payload
-    from linch.types import ProviderRequest
 
-    constructor_reasoning = OpenAIReasoning(effort="low")
-    req = ProviderRequest(
-        model="gpt-5",
-        system=[],
-        tools=[],
-        messages=[],
-        effort="high",
-    )
+    constructor_reasoning = OpenAIReasoning(effort=constructor_effort)
+    req = _request(**({"effort": request_effort} if request_effort is not None else {}))
     payload = build_payload(req, reasoning=constructor_reasoning)
-    assert payload["reasoning"]["effort"] == "high"
-
-
-def test_responses_effort_from_reasoning_when_no_req_effort():
-    from linch.openai_responses import OpenAIReasoning, build_payload
-    from linch.types import ProviderRequest
-
-    constructor_reasoning = OpenAIReasoning(effort="medium")
-    req = ProviderRequest(model="gpt-5", system=[], tools=[], messages=[])
-    payload = build_payload(req, reasoning=constructor_reasoning)
-    assert payload["reasoning"]["effort"] == "medium"
+    assert payload["reasoning"]["effort"] == expected
 
 
 # ── Terminal-tool structured output ─────────────────────────────────────────
@@ -596,49 +349,23 @@ async def test_terminal_tool_structured_output_via_forced_tool():
     structured_output via the terminal-tool path, NOT attempt to execute the
     tool and NOT emit a tool_call_end event.
     """
-    from linch import Agent
-    from linch.providers.base import BaseProvider, ProviderCapabilities
-    from linch.sessions import InMemorySessionStore
-    from linch.tools.registry import empty_tools
-    from linch.types import OutputSchema, Usage
+    from linch.providers import ProviderCapabilities
+    from linch.types import OutputSchema
 
     payload = {"answer": "Paris", "confidence": 0.95}
     schema_name = "structured_response"
 
-    class _AnthropicLikeProvider(BaseProvider):
-        id = "fake-anthropic-so"
-        captured_reqs: list = []
-
-        def context_window(self, model: str) -> int:
-            return 200_000
-
+    class TerminalProvider(ScriptedProvider):
         def capabilities(self, model: str) -> ProviderCapabilities:
             return ProviderCapabilities(
-                context_window=200_000,
+                context_window=self.context_window(model),
                 structured_output=True,
                 structured_output_terminal_tool=True,
                 tool_choice=True,
                 prompt_cache=True,
             )
 
-        async def stream(self, req):
-            self.captured_reqs.append(req)
-            yield {"type": "message_start", "model": req.model}
-            yield {"type": "tool_use_start", "id": "t1", "name": schema_name}
-            yield {
-                "type": "tool_use_input_delta",
-                "id": "t1",
-                "json_delta": json.dumps(payload),
-            }
-            yield {"type": "tool_use_end", "id": "t1"}
-            yield {
-                "type": "message_end",
-                "stop_reason": "tool_use",
-                "usage": Usage(),
-                "provider_metadata": None,
-            }
-
-    provider = _AnthropicLikeProvider()
+    provider = TerminalProvider([ToolUseTurn(schema_name, payload, tool_id="t1")])
     schema = OutputSchema(
         name=schema_name,
         schema={
@@ -649,14 +376,7 @@ async def test_terminal_tool_structured_output_via_forced_tool():
             },
         },
     )
-    agent = Agent(
-        model="claude-sonnet-4-6",
-        provider=provider,
-        tools=empty_tools(),
-        permissions={"mode": "skip-dangerous"},
-        session_store=InMemorySessionStore(),
-        output_schema=schema,
-    )
+    agent = make_agent(provider, model="claude-sonnet-4-6", output_schema=schema)
     session = await agent.session()
 
     events = []

@@ -1,22 +1,16 @@
 from __future__ import annotations
 
-import importlib.util
 import json
-import sys
 from pathlib import Path
 
 import pytest
 
+from tests.support.modules import load_module
+
 
 def _load_script():
     path = Path(__file__).resolve().parents[2] / "scripts" / "benchmark_runtime.py"
-    spec = importlib.util.spec_from_file_location("benchmark_runtime_script", path)
-    assert spec is not None
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return load_module(path, "benchmark_runtime_script")
 
 
 def test_percentile_uses_nearest_rank():
@@ -64,7 +58,6 @@ def test_json_output_is_versioned_and_contains_distributions():
 
     payload = json.loads(benchmark.format_json([result], warmups=2, samples=2))
 
-    # Schema v2: metrics are a name-keyed map, not a positional array.
     assert payload["schema_version"] == 2
     assert payload["warmups"] == 2
     assert payload["samples"] == 2

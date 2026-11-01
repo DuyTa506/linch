@@ -12,9 +12,20 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 
 from linch._telemetry import start_run_span
 from linch._tracing import TraceIdFilter, trace_id_for
-from linch.events import ResultEvent, SystemEvent, event_from_dict, event_to_dict
 from linch.tools import ToolContext
-from linch.types import Usage
+from tests.support.agents import make_agent
+from tests.support.providers import ScriptedProvider, TextTurn, ToolUseTurn
+
+
+def _agent_for(context, provider, *, run_store=None, tools=None):
+    return make_agent(
+        provider,
+        model="test-model",
+        context=context,
+        run_store=run_store,
+        tools=tools,
+        loop_guard=None,
+    )
 
 
 def test_trace_id_falls_back_to_stable_run_id_without_active_trace() -> None:
@@ -33,6 +44,9 @@ def test_tool_context_exposes_read_only_trace_id() -> None:
 
 
 def test_boundary_event_trace_id_round_trips() -> None:
+    from linch.events import ResultEvent, SystemEvent, event_from_dict, event_to_dict
+    from linch.types import Usage
+
     system = SystemEvent(
         session_id="session",
         run_id="run-123",
@@ -101,16 +115,7 @@ def test_resumed_run_keeps_opt_in_prompt_capture(monkeypatch: pytest.MonkeyPatch
 async def test_run_trace_propagates_to_boundary_events_store_tools_and_logs(
     otel_enabled: bool,
 ) -> None:
-    from linch import (
-        Agent,
-        Context,
-        FeatureFlags,
-        InMemoryRunStore,
-        InMemorySessionStore,
-        ToolRegistry,
-        tool,
-    )
-    from linch.ext.evals import ScriptedProvider, TextTurn, ToolUseTurn
+    from linch import Context, InMemoryRunStore, ToolRegistry, tool
 
     context = Context()
     exporter = InMemorySpanExporter() if otel_enabled else None
@@ -142,16 +147,11 @@ async def test_run_trace_propagates_to_boundary_events_store_tools_and_logs(
 
     tools = ToolRegistry()
     tools.register(capture)
-    agent = Agent(
-        model="test-model",
-        provider=ScriptedProvider([ToolUseTurn("capture", {}), TextTurn("done")]),
-        context=context,
-        session_store=InMemorySessionStore(),
+    agent = _agent_for(
+        context,
+        ScriptedProvider([ToolUseTurn("capture", {}), TextTurn("done")]),
         run_store=store,
         tools=tools,
-        permissions={"mode": "skip-dangerous"},
-        features=FeatureFlags(skills=False, subagents=False, mcp=False),
-        loop_guard=None,
     )
     try:
         session = await agent.session()
@@ -182,8 +182,7 @@ async def test_run_trace_propagates_to_boundary_events_store_tools_and_logs(
 
 @pytest.mark.asyncio
 async def test_iterator_created_before_host_span_uses_host_trace_id() -> None:
-    from linch import Agent, Context, FeatureFlags, InMemoryRunStore, InMemorySessionStore
-    from linch.ext.evals import ScriptedProvider, TextTurn
+    from linch import Context, InMemoryRunStore
 
     context = Context()
     exporter = InMemorySpanExporter()
@@ -191,16 +190,7 @@ async def test_iterator_created_before_host_span_uses_host_trace_id() -> None:
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     context.register("tracer_provider", provider)
     store = InMemoryRunStore()
-    agent = Agent(
-        model="test-model",
-        provider=ScriptedProvider([TextTurn("done")]),
-        context=context,
-        session_store=InMemorySessionStore(),
-        run_store=store,
-        permissions={"mode": "skip-dangerous"},
-        features=FeatureFlags(skills=False, subagents=False, mcp=False),
-        loop_guard=None,
-    )
+    agent = _agent_for(context, ScriptedProvider([TextTurn("done")]), run_store=store)
     try:
         session = await agent.session()
         iterator = session.run("run")
@@ -220,8 +210,7 @@ async def test_iterator_created_before_host_span_uses_host_trace_id() -> None:
 
 @pytest.mark.asyncio
 async def test_run_span_closes_when_run_creation_fails() -> None:
-    from linch import Agent, Context, FeatureFlags, InMemoryRunStore, InMemorySessionStore
-    from linch.ext.evals import ScriptedProvider, TextTurn
+    from linch import Context, InMemoryRunStore
 
     context = Context()
     exporter = InMemorySpanExporter()
@@ -234,16 +223,7 @@ async def test_run_span_closes_when_run_creation_fails() -> None:
         raise RuntimeError("create failed")
 
     store.create_run = fail_create  # type: ignore[method-assign]
-    agent = Agent(
-        model="test-model",
-        provider=ScriptedProvider([TextTurn("done")]),
-        context=context,
-        session_store=InMemorySessionStore(),
-        run_store=store,
-        permissions={"mode": "skip-dangerous"},
-        features=FeatureFlags(skills=False, subagents=False, mcp=False),
-        loop_guard=None,
-    )
+    agent = _agent_for(context, ScriptedProvider([TextTurn("done")]), run_store=store)
     try:
         session = await agent.session()
         with pytest.raises(RuntimeError, match="create failed"):
